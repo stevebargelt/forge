@@ -611,6 +611,41 @@ const ALLOWLIST: Allow[] = [
       "is authoritative and idempotent); a crash after it leaves the event without consequence until the same next-pass " +
       "landing. Nothing reads this event to decide a transition, so there is no window to strand or ship through.",
   },
+  // ── reconcile.ts: FG-584's ordered-fan-out resume ──────────────────────────
+  //
+  // Worth stating plainly, because this is the one exemption here that a matrix
+  // cell could not cover even if someone wanted it to: an ordered wave exists only
+  // under workspace isolation (with isolation off the ordered plan is REFUSED
+  // pre-dispatch by the D5 guard), and the matrix runs isolation-off by
+  // construction. The worktree lane is where this shape lives. But the window is
+  // benign independently of that, which is why this is a plain entry and not a
+  // deferred gap:
+  {
+    file: "v2/reconcile.ts",
+    fn: "reconcileRun",
+    call: "setTaskStatus",
+    near: "ordered_fanout_resumable",
+    reason:
+      "puts a crash-stranded ORDERED fan-out parent back to `pending` so the controller resumes its chain instead of " +
+      "re-driving it whole. IDEMPOTENT IN BOTH DIRECTIONS. A crash before it leaves the parent `running` with terminal " +
+      "children — precisely the state this sweep re-derives, unchanged, on the next pass. A crash after it leaves a " +
+      "`pending` parent with children, which is exactly what `forge recover --re-drive` produces and what " +
+      "dispatchFanoutStep's pending-primary reuse already consumes. Nothing is lost either way because the resumed wave " +
+      "REPLAYS NOTHING: every decision it makes is recomputed from the candidate branch, each worker's captured branch, " +
+      "the gated-candidate ref and the child rows, so completed work is adopted rather than re-dispatched and a dependent " +
+      "whose prerequisite is absent from the gated ref is still refused. The write is CAS'd (setTaskStatus refuses a " +
+      "terminal row) and guarded on no live run-lock holder, so it can neither overwrite a decision nor race a live wave.",
+  },
+  {
+    file: "v2/reconcile.ts",
+    fn: "reconcileRun",
+    call: "logEvent",
+    near: "ordered_fanout_resumable",
+    reason:
+      "the task.reconciled provenance append beside the resume above — append-only evidence with no consequence. Nothing " +
+      "reads it to decide a transition; the resumable state IS the `pending` row, and a crash between the two loses one " +
+      "line of provenance about a transition that is itself re-derivable.",
+  },
   // ── reconcile.ts: FG-356's orphan workspace reaper ─────────────────────────
   {
     file: "v2/reconcile.ts",
@@ -1059,6 +1094,30 @@ const ALLOWLIST: Allow[] = [
       "it leaves the parent `running` with terminal children and gateForced set — reconcile's fanout-parent recovery lands " +
       "it fail-safe (probed), and `forge recover --re-drive` is the named verb. A crash after the CAS but before the " +
       "task.completed append loses only the audit event.",
+  },
+  // ── runNext.ts: FG-584's ordered fan-out wave ───────────────────────────────
+  // Every write inside runOrderedWave is a `logEvent` append, and that is the
+  // whole point of how the ordered wave was built: its DURABLE state lives in git
+  // — the candidate branch, each worker's captured branch, and the gated-candidate
+  // ref — and in the child task rows, none of which are in this file. Readiness is
+  // an ancestry question over those refs, recomputed from scratch at the top of
+  // every dependency group, so no event here is ever read to decide a transition
+  // and a crash on either side of one changes nothing about what the next pass
+  // does. The two writes that DO decide something sit elsewhere and are covered:
+  // the child rows (runFanoutChild, above) and the parent's terminal failure
+  // (dispatchFanoutStep/failTask, above).
+  {
+    file: "v2/runNext.ts",
+    fn: "runOrderedWave",
+    call: "logEvent",
+    reason:
+      "every write in the ordered wave is an append-only evidence event: integration.worktree_created (the candidate is " +
+      "the BRANCH, and openIntegrationWorktree adopts an existing one rather than re-cutting it, so the event describes " +
+      "state git already holds), fanout.item_blocked and fanout.item_adopted (records of a decision re-derived from the " +
+      "refs and rows on every pass, and of an action deliberately NOT taken), integration.child_merged (the merge is a " +
+      "ref move; a re-run skips it by ancestry), and integration.prerequisites_gated (the FACT is the gated-candidate " +
+      "ref written beside it — a crash between the gate passing and the ref advancing re-runs the gate next pass, which " +
+      "is a repeated proof rather than a skipped one). Nothing reads any of them to decide a transition.",
   },
   {
     file: "v2/runNext.ts",

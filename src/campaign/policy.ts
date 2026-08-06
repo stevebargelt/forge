@@ -114,6 +114,30 @@ const BLOCKER_BY_FAILURE_KIND: Record<FailureKind, BlockerKind> = {
   // (a retry enqueues a fresh attempt, AD-7). Pausing the campaign for it would
   // be a self-inflicted stall.
   lane_taken_over: "scope",
+
+  // ── FG-584 ordered fan-out. Three LOCAL, one SHARED — the split follows the
+  // same rule the publication kinds above use: is the blocker a property of this
+  // ITEM's work, or of something every remaining item shares?
+  //
+  // plan_dependency_invalid: LOCAL. The offending graph is THIS item's plan —
+  // its own tech lead wrote the edges. Another campaign item's plan says nothing
+  // about it, and the remedy (a replan) is item-scoped.
+  plan_dependency_invalid: "scope",
+  // ordered_fanout_unavailable: SHARED, and specifically git_state. Workspace
+  // isolation is a property of the HOST/environment, not of one item's plan:
+  // every remaining item whose plan declares edges refuses at exactly the same
+  // place. One operator action (arm isolation) clears it for all of them, which
+  // is the same shape as dirty_publish_target above.
+  ordered_fanout_unavailable: "git_state",
+  // integration_blocked: LOCAL, the merge_conflict bucket — it IS a merge
+  // conflict, just between an ordered worker and the run's own candidate rather
+  // than between a task branch and a target. Scoped to this item's work, and
+  // classified as the existing kind rather than a new one so campaign policy
+  // keeps treating "two changes collided" the one way it already does.
+  integration_blocked: "merge_conflict",
+  // prerequisite_blocked: LOCAL. A prerequisite inside ONE item's plan failed;
+  // no other item's work is impaired and nothing shared was touched.
+  prerequisite_blocked: "scope",
 };
 
 // Throws are classified as infrastructure (callers handle undefined/null via this function too).

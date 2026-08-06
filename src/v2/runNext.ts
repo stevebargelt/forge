@@ -98,6 +98,20 @@ import {
   createIntegrationWorktree,
   mergeChildIntoIntegration,
   cleanupIntegrationWorktree,
+  // FG-584: the ordered fan-out's candidate primitives. `openIntegrationWorktree`
+  // ADOPTS an existing candidate instead of pruning it (the branch is the wave's
+  // durable progress once items land incrementally); the other three are the
+  // readiness predicate — git ancestry of a captured commit in the candidate ref,
+  // which any process can recompute identically before and after a crash.
+  openIntegrationWorktree,
+  integrationBranchTip,
+  capturedBranchTip,
+  isCommitIntegrated,
+  gatedCandidateRef,
+  gatedCandidateTip,
+  recordGatedCandidate,
+  recordPrerequisiteCandidate,
+  rewindCandidateToPrerequisites,
 } from "./worktree-lifecycle.js";
 // FG-425: every merge→publish path in this file routes through the serialized
 // integration publisher. runIntegrationGate is deliberately NOT imported here any
@@ -108,6 +122,10 @@ import {
   finalizePublication,
   recoverUnfinishedPublications,
   recoverPublicationAttemptForOperator,
+  // FG-584 (D1): the mid-wave prerequisite gate. It lives in the publisher for the
+  // FG-425 reason — the integration gate is reachable only through that module and
+  // is only ever pointed at a candidate worktree, never at the publish target.
+  gateOrderedPrerequisites,
   type OperatorRecovery,
   type PublishOutcome,
   type ValidationResult,
@@ -2012,6 +2030,292 @@ export function mapShippingReviewerVerdict(output: unknown, doneAudit?: DoneAudi
   };
 }
 
+// ── FG-584: the fan-out's plan-item graph ─────────────────────────────────────
+//
+// A fan-out's upstream array is untyped, LLM-authored output. Before FG-584 the
+// runner checked only Array.isArray + non-empty and dispatched every element as a
+// sibling from one base. That is correct for genuinely independent work and wrong
+// the moment a plan declares that one item consumes another's output: the
+// dependent starts from a base its prerequisite's commit is absent from.
+//
+// This section is the CONTRACT over that array. It is deliberately pure — no DB,
+// no git, no I/O — so every refusal it can produce is decidable BEFORE a single
+// child row is minted and before any container, mount or task dir exists (AC1).
+// Everything downstream is gated on that refusal window: after it, the cost of a
+// bad edge is N wasted containers plus `failure_mode: fail-phase` taking the phase
+// down.
+//
+// The vocabulary mirrors the static-step refusals in schema.ts (`depends_on
+// unknown step`, `cycle in depends_on graph involving`) rather than inventing a
+// second dialect for the same idea at a different granularity.
+
+/** One work item from a fan-out's upstream array. */
+export type PlanItemNode = {
+  /** The item's DECLARED id (D6). Edges resolve against THIS, never against
+   *  `index`: a request-changes replan or a re-drive re-reads a plan result whose
+   *  array may have been reordered, and an index-bound edge would silently re-bind
+   *  to a different child. undefined when the item declares no id — such an item
+   *  may DEPEND on others but can never be the target of an edge. */
+  declaredId?: string;
+  /** Position in the upstream array. Ordering and diagnostics ONLY. */
+  index: number;
+  value: unknown;
+  dependsOn: string[];
+  /** Declared paths, used for the AC6 concurrent-overlap refusal. Absent when the
+   *  item declares none — which is every element of a fan-out whose array is
+   *  strings rather than plan items, and is why AC11's suites see no new refusal. */
+  files: string[];
+  /** How this item is named in a refusal or a block. */
+  label: string;
+};
+
+export type PlanGraph = {
+  items: PlanItemNode[];
+  /** True once ANY item declares an edge. A plan with no edges takes the
+   *  pre-FG-584 path unchanged, byte for byte (AC11). */
+  ordered: boolean;
+  /** Topological levels. Two items in the SAME group have no dependency path
+   *  between them and may be dispatched concurrently, up to max_concurrency. */
+  groups: PlanItemNode[][];
+  /** Declared ids that at least one other item depends on — D1's "has dependents"
+   *  set, and therefore exactly the items whose integration must pass the gate
+   *  before a dependent is provisioned from it. */
+  hasDependents: Set<string>;
+};
+
+export type PlanGraphRefusal = { kind: FailureKind; message: string };
+export type PlanGraphResult = { ok: true; graph: PlanGraph } | { ok: false; refusal: PlanGraphRefusal };
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+}
+
+function refuse(message: string): { ok: false; refusal: PlanGraphRefusal } {
+  return { ok: false, refusal: { kind: "plan_dependency_invalid", message } };
+}
+
+/** Read the upstream array into work items, refusing a malformed `depends_on`.
+ *
+ *  A non-object element (a bare string, the shape every pre-FG-584 fan-out fixture
+ *  uses) is a work item with no id, no edges and no declared paths — it simply
+ *  cannot participate in ordering, which is the correct reading of "this array
+ *  carries no dependency vocabulary". */
+function readPlanItems(rawArray: unknown[]): { ok: true; items: PlanItemNode[] } | { ok: false; refusal: PlanGraphRefusal } {
+  const items: PlanItemNode[] = [];
+  for (let index = 0; index < rawArray.length; index++) {
+    const value = rawArray[index];
+    const el = asRecord(value);
+    const rawId = el?.["id"];
+    const declaredId = typeof rawId === "string" && rawId.trim().length > 0 ? rawId.trim() : undefined;
+    const label = declaredId !== undefined ? `'${declaredId}' (index ${index})` : `index ${index}`;
+
+    let dependsOn: string[] = [];
+    const rawDeps = el?.["depends_on"];
+    if (rawDeps !== undefined && rawDeps !== null) {
+      if (!Array.isArray(rawDeps) || rawDeps.some((d) => typeof d !== "string" || d.trim().length === 0)) {
+        return refuse(
+          `plan item ${label} declares 'depends_on' that is not an array of non-empty work-item ids — ` +
+            `depends_on is executable controller data, not prose`,
+        );
+      }
+      dependsOn = [...new Set((rawDeps as string[]).map((d) => d.trim()))];
+    }
+
+    items.push({
+      ...(declaredId !== undefined ? { declaredId } : {}),
+      index,
+      value,
+      dependsOn,
+      files: stringList(el?.["files"]),
+      label,
+    });
+  }
+  return { ok: true, items };
+}
+
+/** Validate the declared graph and compute its concurrently-dispatchable groups.
+ *
+ *  Pure. Every refusal it returns is decided before anything is created. */
+export function analyzePlanItems(rawArray: unknown[]): PlanGraphResult {
+  const read = readPlanItems(rawArray);
+  if (!read.ok) return read;
+  const items = read.items;
+
+  // Duplicate declared ids make every edge that names them ambiguous, which is a
+  // D6 violation before it is anything else: the edge would resolve to whichever
+  // child happened to be found first.
+  const byId = new Map<string, PlanItemNode>();
+  for (const item of items) {
+    if (item.declaredId === undefined) continue;
+    if (byId.has(item.declaredId)) {
+      return refuse(`duplicate plan item id: '${item.declaredId}' (index ${byId.get(item.declaredId)!.index} and index ${item.index})`);
+    }
+    byId.set(item.declaredId, item);
+  }
+
+  const ordered = items.some((i) => i.dependsOn.length > 0);
+
+  // In an ORDERED plan every item must be identifiable, including the ones nothing
+  // depends on. The declared id is not only what edges resolve against (D6) — it is
+  // also what a resumed wave adopts completed work by. An item with no id can never
+  // be adopted, so a crash would re-dispatch work that is already captured and
+  // integrated, which is exactly the duplication AC9 forbids. Refused here, before
+  // anything is created, rather than discovered as a duplicated container later.
+  //
+  // Scoped to ordered plans on purpose: an UNORDERED fan-out over bare strings has
+  // no ids, never will, and keeps its existing behavior untouched (AC11).
+  if (ordered) {
+    const anonymous = items.find((i) => i.declaredId === undefined);
+    if (anonymous) {
+      return refuse(
+        `plan item at ${anonymous.label} declares no 'id', but this plan declares dependency edges — ` +
+          `every work item in an ordered plan needs a stable declared id, because that is what edges resolve ` +
+          `against and what recovery adopts completed work by`,
+      );
+    }
+  }
+
+  for (const item of items) {
+    for (const dep of item.dependsOn) {
+      if (item.declaredId !== undefined && dep === item.declaredId) {
+        return refuse(`plan item ${item.label} depends_on itself`);
+      }
+      if (!byId.has(dep)) {
+        return refuse(`plan item ${item.label} depends_on unknown work item '${dep}'`);
+      }
+    }
+  }
+
+  // Cycle detection — the same three-colour DFS schema.ts runs over static steps,
+  // and the same message, so an operator meets one vocabulary for one idea.
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map<string, number>();
+  for (const id of byId.keys()) color.set(id, WHITE);
+  const dfs = (id: string): string | null => {
+    color.set(id, GRAY);
+    for (const dep of byId.get(id)?.dependsOn ?? []) {
+      if (color.get(dep) === GRAY) return dep;
+      if (color.get(dep) === WHITE) {
+        const found = dfs(dep);
+        if (found) return found;
+      }
+    }
+    color.set(id, BLACK);
+    return null;
+  };
+  for (const id of byId.keys()) {
+    if (color.get(id) !== WHITE) continue;
+    const cycle = dfs(id);
+    if (cycle) return refuse(`cycle in plan item depends_on graph involving '${cycle}'`);
+  }
+
+  // Transitive prerequisites, per item. Used for two things: the level assignment
+  // below, and the "can these two run concurrently?" question AC6 turns on.
+  const ancestors = new Map<number, Set<string>>();
+  const ancestorsOf = (item: PlanItemNode): Set<string> => {
+    const cached = ancestors.get(item.index);
+    if (cached) return cached;
+    const out = new Set<string>();
+    ancestors.set(item.index, out); // acyclic by now, so this can never be re-entered
+    for (const dep of item.dependsOn) {
+      out.add(dep);
+      const parent = byId.get(dep);
+      if (parent) for (const a of ancestorsOf(parent)) out.add(a);
+    }
+    return out;
+  };
+  for (const item of items) ancestorsOf(item);
+
+  // AC6, and ONLY AC6: two items that can run CONCURRENTLY must not both claim a
+  // path. Ordered items sharing a path are legal and must not be refused — the
+  // later one starts from a candidate that already contains the earlier one's
+  // change, so there is no race and no lost write. "Concurrently runnable" is
+  // reachability, not group membership: it must stay true of the plan, not of one
+  // scheduling strategy the controller happens to use today.
+  for (let a = 0; a < items.length; a++) {
+    for (let b = a + 1; b < items.length; b++) {
+      const left = items[a]!, right = items[b]!;
+      const leftFirst = right.declaredId !== undefined && ancestorsOf(left).has(right.declaredId);
+      const rightFirst = left.declaredId !== undefined && ancestorsOf(right).has(left.declaredId);
+      if (leftFirst || rightFirst) continue; // ordered — overlap is legal (AC6)
+      const shared = left.files.find((f) => right.files.includes(f));
+      if (shared !== undefined) {
+        return refuse(
+          `plan items ${left.label} and ${right.label} can run concurrently and both declare '${shared}' — ` +
+            `order them with depends_on, or merge them into one item`,
+        );
+      }
+    }
+  }
+
+  // Levels: an item sits one past the deepest prerequisite it has. Items within a
+  // level have no path between them by construction.
+  const level = new Map<number, number>();
+  const levelOf = (item: PlanItemNode): number => {
+    const cached = level.get(item.index);
+    if (cached !== undefined) return cached;
+    let depth = 0;
+    for (const dep of item.dependsOn) {
+      const parent = byId.get(dep);
+      if (parent) depth = Math.max(depth, levelOf(parent) + 1);
+    }
+    level.set(item.index, depth);
+    return depth;
+  };
+  const groups: PlanItemNode[][] = [];
+  for (const item of items) {
+    const depth = levelOf(item);
+    while (groups.length <= depth) groups.push([]);
+    groups[depth]!.push(item);
+  }
+  for (const group of groups) group.sort((x, y) => x.index - y.index);
+
+  const hasDependents = new Set<string>();
+  for (const item of items) for (const dep of item.dependsOn) hasDependents.add(dep);
+
+  return { ok: true, graph: { items, ordered, groups, hasDependents } };
+}
+
+/** D5 — the flat-fan-out guard, as a controller CAPABILITY question.
+ *
+ *  Not a plan-quality judgement: the plan may be perfectly good and the edges may
+ *  be exactly right. The question is whether THIS controller configuration can
+ *  honor them, and there is one permanently-reachable case where it cannot.
+ *
+ *  With workspace isolation OFF, fan-out children share the operator's checkout as
+ *  a bind mount: no private clone is provisioned, no base is resolved, no branch is
+ *  captured and there is no candidate to integrate anything into. A dependent could
+ *  only ever start from whatever the shared tree happened to contain — which is
+ *  precisely the defect this ticket exists to remove, one layer down and invisible.
+ *  So the plan is REFUSED before any child is spawned, naming the dependency.
+ *
+ *  This is why AC2 and AC12 are simultaneously satisfiable, and why the guard's
+ *  regression is a permanent contract test rather than dead code the ordering path
+ *  makes unreachable. */
+function orderedPathRefusal(graph: PlanGraph): PlanGraphRefusal | undefined {
+  if (!graph.ordered) return undefined;
+  if (isWorktreeModeEnabled()) return undefined;
+  const edge = graph.items.find((i) => i.dependsOn.length > 0)!;
+  return {
+    kind: "ordered_fanout_unavailable",
+    message:
+      `fanout: plan item ${edge.label} depends_on ${edge.dependsOn.map((d) => `'${d}'`).join(", ")}, but workspace ` +
+      `isolation is OFF — children share one checkout, so there is no private workspace to integrate a prerequisite ` +
+      `into and no candidate for a dependent to start from. Forge refuses to dispatch an interdependent plan it ` +
+      `cannot order: every dependent would build against a base its prerequisite is absent from. Run with workspace ` +
+      `isolation on, or have the tech lead collapse ${edge.label} and its prerequisites into one work item.`,
+  };
+}
+
 // Defensive-failure path for a fanout parent (upstream missing / no array).
 // When the step is seen for the first time we must create the parent row so its
 // lifecycle starts with task.created, then route the failure through failTask
@@ -2024,6 +2328,10 @@ function failFanoutParent(
   step: Step,
   isNew: boolean,
   error: string,
+  // FG-584: the ordered fan-out's pre-dispatch refusals carry their OWN kinds, so
+  // an operator meets "the plan's edges are not executable" rather than the
+  // classify({}) `unknown` every defensive fan-out failure used to land as.
+  kind?: FailureKind,
 ): void {
   if (isNew) {
     insertTask({
@@ -2037,7 +2345,7 @@ function failFanoutParent(
     });
     logEvent("task.created", { runId, taskId: parentId, payload: { fanoutParent: true } });
   }
-  failTask(parentId, { runId, kind: classify({}), error });
+  failTask(parentId, { runId, kind: kind ?? classify({}), error });
 }
 
 // Fanout dispatch: read the upstream array, spawn N child tasks (max_concurrency
@@ -2073,6 +2381,7 @@ async function dispatchFanoutStep(args: {
   const parentId = existingParent?.id ?? newTaskId(step.id);
   const rc = existingParent?.taskPackage.inputs["requestedChanges"];
   const requestedChanges = typeof rc === "string" ? rc : undefined;
+  let pendingHasChildren = false;
 
   // Defense-in-depth: if a running/awaiting_red primary already has fan-out
   // children, this is a re-entrant dispatch (computeReadyQueue can be tricked by
@@ -2162,11 +2471,15 @@ async function dispatchFanoutStep(args: {
       logEvent("task.completed", { runId: args.runId, taskId: existingParent.id });
       return "complete";
     }
-    // Original pendingHasChildren guard unchanged below.
-    const pendingHasChildren = allTasks.some(
+    // Original pendingHasChildren guard unchanged below — but its DECISION now
+    // waits until the plan graph has been read (FG-584). For an unordered wave it
+    // is still the duplicate-wave guard it has always been; for an ORDERED one, a
+    // pending parent that already has children is precisely the RESUME shape
+    // reconcile produces after a crash, and refusing it there would strand the
+    // chain forever instead of converging it (AC9).
+    pendingHasChildren = allTasks.some(
       (c) => c.parentId === existingParent.id && !c.agentRole.startsWith("red-"),
     );
-    if (pendingHasChildren) return existingParent.status;
   }
 
   // Read the upstream array. The fanout source is fanout.from_upstream.step,
@@ -2188,6 +2501,30 @@ async function dispatchFanoutStep(args: {
     failFanoutParent(parentId, args.runId, step, !existingParent, noArrayMsg);
     return "failed";
   }
+
+  // FG-584 (AC1/AC6/AC12): THE REFUSAL WINDOW. Everything from here to the child
+  // inserts below is decided from the plan alone — no DB row, no clone, no mount,
+  // no container. Past this point a bad edge costs N wasted containers and, under
+  // `failure_mode: fail-phase`, the whole phase; before it, it costs one message.
+  const analysis = analyzePlanItems(rawArray);
+  if (!analysis.ok) {
+    failFanoutParent(
+      parentId,
+      args.runId,
+      step,
+      !existingParent,
+      `fanout: ${analysis.refusal.message}`,
+      analysis.refusal.kind,
+    );
+    return "failed";
+  }
+  const graph = analysis.graph;
+  const guard = orderedPathRefusal(graph);
+  if (guard) {
+    failFanoutParent(parentId, args.runId, step, !existingParent, guard.message, guard.kind);
+    return "failed";
+  }
+  if (pendingHasChildren && !graph.ordered) return existingParent!.status;
 
   // Insert parent row first time we see this step. Status starts pending and
   // becomes complete/failed once children settle.
@@ -2249,6 +2586,34 @@ async function dispatchFanoutStep(args: {
     }
   }
 
+  // FG-584: TWO LANES, and the unordered one is the pre-FG-584 code unchanged.
+  //
+  // A plan that declares no edges is not "ordered work with an empty graph" — it
+  // is the thing this runner already did correctly, and AC11 requires its
+  // parallelism, agent_map routing, max_concurrency, failure_mode and result
+  // aggregation to survive byte for byte. So the ordered path is an alternative
+  // branch, never a generalisation the old one now flows through.
+  let ordered: OrderedWaveOutcome | undefined;
+  if (graph.ordered) {
+    ordered = await runOrderedWave({
+      runId: args.runId,
+      workflow: args.workflow,
+      step,
+      fanout,
+      parentId,
+      projectDir: args.projectDir,
+      designDir: args.designDir,
+      runMetadata: args.runMetadata,
+      dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
+      requestedChanges,
+      graph,
+      maxConc,
+      waveBaseSha,
+    });
+    childOutcomes.push(...ordered.outcomes);
+  } else {
   let queue = rawArray.map((value, idx) => ({ value, idx }));
   let aborted = false;
 
@@ -2310,16 +2675,28 @@ async function dispatchFanoutStep(args: {
       }
     }
   }
+  }
 
   // Aggregate child results into the parent's result.
   const parentResult = {
-    status: childOutcomes.every((c) => c.status === "complete") ? "complete" : "partial",
+    status:
+      childOutcomes.every((c) => c.status === "complete") && (ordered?.blocked.length ?? 0) === 0
+        ? "complete"
+        : "partial",
     children: childOutcomes.map((c) => ({
       index: c.index,
       status: c.status,
       childTaskId: c.childTaskId,
       result: c.result,
     })),
+    // FG-584 (AC7/AC8): the two ordered-wave outcomes that are not a child's own
+    // status. Recorded on the parent's result so `forge show` and any downstream
+    // depends_on step read the same fact the failure message names.
+    ...(ordered && ordered.blocked.length > 0
+      ? { blocked_items: ordered.blocked.map((b) => ({ item: b.item.label, blocked_by: b.blockers })) }
+      : {}),
+    ...(ordered?.integrationBlock ? { integration_block: ordered.integrationBlock } : {}),
+    ...(ordered?.unavailable ? { verification_unavailable: ordered.unavailable } : {}),
   };
 
   // No container runs for the parent — write result.json explicitly so
@@ -2328,8 +2705,81 @@ async function dispatchFanoutStep(args: {
   mkdirSync(parentTaskDir, { recursive: true });
   writeFileSync(join(parentTaskDir, "result.json"), JSON.stringify(parentResult));
 
+  // FG-584 (AC8/D2): a merge conflict between an ordered worker and the candidate
+  // is a typed, NAMED integration block, and it is terminal for this phase. It is
+  // recorded before the blocked-dependent and failed-child branches below because
+  // it is the more specific fact: the wave stopped at a conflict, not at a failure.
+  // Nothing downstream dispatched and nothing was published — the publish target is
+  // byte-for-byte where it started, and no automated or agent-driven resolution ran.
+  if (ordered?.integrationBlock) {
+    const block = ordered.integrationBlock;
+    failTask(parentId, {
+      runId: args.runId,
+      kind: "integration_blocked",
+      error:
+        `fanout: integration blocked — work item ${block.item} (task ${block.childTaskId}, branch ${block.branch}) ` +
+        `conflicts with candidate ${block.candidateBranch}${block.candidateSha ? ` at ${block.candidateSha}` : ""}` +
+        `${block.conflictPaths.length > 0 ? ` on ${block.conflictPaths.join(", ")}` : ""}. ` +
+        `No dependent was dispatched and nothing was published. ${block.error}`,
+      result: parentResult,
+    });
+    return "failed";
+  }
+
+  // FG-584: the mid-wave D1 gate reached NO VERDICT — the environment could not be
+  // established, or the gate timed out, or it was signal-killed. Reported BEFORE the
+  // blocked-dependent branch below because it is the more accurate fact about the
+  // same dependents: they were refused because nothing could be proven, not because
+  // a prerequisite was proven bad. Independent ready work already ran to completion
+  // (D3).
+  //
+  // Not conditioned on failure_mode: `continue` is about tolerating a WORK ITEM's
+  // failure, and this is not one. The publisher would reach the same wall a moment
+  // later anyway — failing here just names the reason precisely.
+  if (ordered?.unavailable) {
+    failTask(parentId, {
+      runId: args.runId,
+      kind: ordered.unavailable.kind,
+      error:
+        `fanout: the ordered wave's prerequisite gate reached no verdict (${ordered.unavailable.reason}) — ` +
+        `${ordered.unavailable.error} This is NOT a verdict on ${ordered.unavailable.items.join(", ")}. ` +
+        `Dependents were not dispatched and nothing was published.`,
+      result: parentResult,
+    });
+    return "failed";
+  }
+
   // failure_mode determines whether a partial result fails the parent.
   const anyFailed = childOutcomes.some((c) => c.status === "failed");
+
+  // FG-584 (AC7/D3): a prerequisite failed or its integration was refused, so every
+  // TRANSITIVE dependent was blocked and never dispatched. Independent ready work
+  // already RAN TO COMPLETION above — that is the deliberate timing change versus
+  // the pre-FG-584 abort-mid-wave, and it is why this failure lands here rather than
+  // inside the dispatch loop.
+  //
+  // NOT CONDITIONED ON failure_mode, for the same reason the no-verdict branch above
+  // is not. `continue` is a policy about tolerating a WORK ITEM's failure — it says
+  // an unrelated item may fail without taking the phase with it. A blocked dependent
+  // is not that: it is work that NEVER RAN, and publishing the candidate anyway
+  // ships a phase whose declared dependents are simply missing, on a base a human
+  // asked for them to be built on. AC7/D3 is a property of the ordering, not of the
+  // failure policy.
+  if (ordered && ordered.blocked.length > 0) {
+    const named = ordered.blocked
+      .map((b) => `${b.item.label} blocked by ${b.blockers.map((x) => `'${x}'`).join(", ")}`)
+      .join("; ");
+    failTask(parentId, {
+      runId: args.runId,
+      kind: "prerequisite_blocked",
+      error:
+        `fanout: ${ordered.blocked.length} work item(s) never dispatched because a prerequisite failed or its ` +
+        `integration was refused — ${named}. Independent ready work ran to completion first; nothing was published.`,
+      result: parentResult,
+    });
+    return "failed";
+  }
+
   if (anyFailed && fanout.failure_mode === "fail-phase") {
     failTask(parentId, { runId: args.runId, kind: classify({}), error: "fanout: at least one child failed (failure_mode=fail-phase)", result: parentResult });
     return "failed";
@@ -2341,7 +2791,14 @@ async function dispatchFanoutStep(args: {
   // Wrapped in try/catch so any unexpected git error transitions the parent to failed
   // rather than leaving it running/wedged.
   let integrationWorktreePath: string | undefined;
-  if (isWorktreeModeEnabled()) {
+  if (ordered) {
+    // FG-584: the candidate was built INCREMENTALLY, one worker+integration cycle
+    // per dependency group, because a dependent had to be provisioned from it
+    // before the next group could run. There is nothing left to merge here — this
+    // is a change of WHEN, not a second artifact. The same branch is handed to the
+    // same publisher below, gated and reviewed once, at phase granularity (AC10).
+    integrationWorktreePath = ordered.integrationPath;
+  } else if (isWorktreeModeEnabled()) {
     const successfulChildren = childOutcomes
       .filter((c) => c.status === "complete")
       .sort((a, b) => a.index - b.index);
@@ -2496,6 +2953,462 @@ async function dispatchFanoutStep(args: {
   }
 
   return finalizePrimary(parentId, args.runId, step.gate, parentResult).status;
+}
+
+// ── FG-584: the ordered fan-out wave ──────────────────────────────────────────
+
+/** A work item that never dispatched because a prerequisite of it failed, or its
+ *  prerequisite's integration was refused (AC7/D3). */
+type BlockedItem = { item: PlanItemNode; blockers: string[] };
+
+/** AC8/D2 — a typed integration block. Named, not a bare error string: the
+ *  conflicting worker, the candidate it collided with, and the paths are what an
+ *  operator resolves against, so they are structured data on the parent's result
+ *  and not something to be re-parsed out of a message. */
+type IntegrationBlock = {
+  item: string;
+  childTaskId: string;
+  branch: string;
+  candidateBranch: string;
+  candidateSha?: string;
+  conflictPaths: string[];
+  error: string;
+};
+
+/** The mid-wave gate did not PRODUCE A VERDICT. Three ways that happens, and none
+ *  of them says anything about the prerequisites' code:
+ *
+ *    - readiness refused: forge could not establish an execution-ready verification
+ *      environment for the candidate (FG-566), so nothing ran;
+ *    - the gate TIMED OUT: it hit its own ceiling. FG-424 already treats this as
+ *      transient rather than a verdict, and it is the shape host contention takes —
+ *      concurrent runs each execute their own suite on one machine, and a suite
+ *      that would have passed can be starved past the ceiling;
+ *    - the gate was SIGNAL-KILLED: an abrupt death outside the timeout path, after
+ *      which FG-424 does not trust the tree enough to blame it.
+ *
+ *  Kept separate from a real gate failure for the reason the publisher keeps
+ *  `readiness_failed` separate from a failed validation. `kind` is the existing
+ *  FailureKind the caller reports; no new vocabulary. */
+type VerificationUnavailable = { kind: FailureKind; reason: string; error: string; items: string[] };
+
+type OrderedWaveOutcome = {
+  outcomes: ChildOutcome[];
+  integrationPath: string;
+  blocked: BlockedItem[];
+  integrationBlock?: IntegrationBlock;
+  unavailable?: VerificationUnavailable;
+};
+
+/** THIS PARENT's child rows that carry a DECLARED plan-item id, keyed on that id
+ *  (D6).
+ *
+ *  Keyed on the DECLARED id, never the fan-out array index — the index survives
+ *  neither a replan nor a re-drive, and rebinding an edge to whatever child now
+ *  sits at position 2 is precisely the silent re-binding D6 forbids.
+ *
+ *  SCOPED TO THE PARENT, and that scope is load-bearing in both directions:
+ *
+ *    - A CRASH RESUME keeps the same parent row. reconcile returns a stranded
+ *      ordered parent to `pending` (it does NOT fail it as fanout_wave_orphaned,
+ *      which is the only path that ever minted a fresh parent for a wave), and
+ *      dispatchFanoutStep reuses that pending primary — so every already-captured
+ *      child is still found here and ADOPTED rather than re-run. AC9 holds.
+ *
+ *    - A NEW PARENT MEANS A NEW WAVE. `gate request-changes` mints a fresh pending
+ *      primary carrying the human's rationale, and the superseded parent's children
+ *      are audit rows on a dead lineage. Phase-scoping adopted every one of them:
+ *      nothing dispatched, the rationale reached no agent, and the wave re-composed
+ *      a byte-identical candidate out of the work the human had just rejected. It
+ *      also silently crossed candidates — readiness is ancestry in THIS parent's
+ *      gated ref, and a foreign parent's captured commit is not in it, so a
+ *      prerequisite adopted across the boundary would then read as unintegrated and
+ *      block its own dependents.
+ *
+ *  A `complete` row wins over any other for the same id: a failed first attempt
+ *  followed by a successful re-dispatch is two rows and one outcome. */
+function adoptablePlanItemChildren(runId: string, phase: string, parentId: string): Map<string, Task> {
+  const out = new Map<string, Task>();
+  for (const t of tasksForRun(runId)) {
+    if (t.phase !== phase || t.parentId !== parentId) continue;
+    if (t.agentRole.startsWith("red-")) continue;
+    const id = t.taskPackage.inputs["planItemId"];
+    if (typeof id !== "string" || id.length === 0) continue;
+    const prior = out.get(id);
+    if (!prior || (prior.status !== "complete" && t.status === "complete")) out.set(id, t);
+  }
+  return out;
+}
+
+/** AC3 — is this prerequisite DURABLY INTEGRATED into the candidate the dependent
+ *  will receive, and PROVEN to build there?
+ *
+ *  Two facts, and a child's self-reported completion is only a precondition of the
+ *  second, never a substitute for it:
+ *
+ *    1. a child row exists for the DECLARED id and reached `complete`;
+ *    2. its CAPTURED commit is an ancestor of the GATED-candidate ref — which
+ *       means both halves of D1 at once, because that ref only ever advances to a
+ *       candidate the integration gate passed. The work is in the tree AND the
+ *       tree builds, so a dependent is never handed a prerequisite that is present
+ *       but broken.
+ *
+ *  Everything it reads is durable, and all of it is re-readable by a process that
+ *  did not record it: two task rows and two git refs. Nothing is carried in memory
+ *  between groups — which is what makes a resumed wave and a fresh one take
+ *  identical decisions, and is why AC9 converges rather than needing an ordering
+ *  rule of its own.
+ *
+ *  Every "I could not prove it" answers FALSE. An unresolvable branch, a missing
+ *  gated ref, a child that never completed: the failure this guards is dispatching
+ *  a dependent onto a base its prerequisite is absent from, and an unproven
+ *  prerequisite is indistinguishable from an absent one. */
+function prerequisiteIntegrated(
+  projectDir: string,
+  runId: string,
+  declaredId: string,
+  priorChildren: Map<string, Task>,
+  gatedRef: string,
+): boolean {
+  const child = priorChildren.get(declaredId);
+  if (!child || child.status !== "complete") return false;
+  const tip = capturedBranchTip(projectDir, runId, child.id);
+  if (tip === undefined) return false;
+  return isCommitIntegrated(projectDir, tip, gatedRef);
+}
+
+/** Dispatch a fan-out whose plan declares dependency edges.
+ *
+ *  ONE CLOSED LOOP per dependency group: dispatch the group's ready items
+ *  concurrently (max_concurrency is still the width limit), merge each completed
+ *  worker's CAPTURED commit into the run-scoped candidate, gate the candidate when
+ *  the group contains an item something else depends on (D1), and let the next
+ *  group's workspaces be cut from the candidate that results.
+ *
+ *  THE PUBLICATION AUTHORITY SPLIT IS UNCHANGED (D4). Workers integrate into the
+ *  run's candidate and nothing else; only Forge publishes, once, at the end of the
+ *  phase, through the serialized publisher its caller already routes through. No
+ *  ordered worker is ever pushed to the target branch as it completes —
+ *  `failure_mode: fail-phase` still means nothing partial landed.
+ *
+ *  IT NEVER ABORTS MID-WAVE (D3). A failed prerequisite blocks its transitive
+ *  dependents by NAME and independent ready work still runs to completion; the
+ *  phase fails afterwards, in the caller. That is a deliberate, observable change
+ *  in fail-phase timing versus the pre-FG-584 short-circuit. */
+async function runOrderedWave(args: {
+  runId: string;
+  workflow: Workflow;
+  step: Step;
+  fanout: FanoutDef;
+  parentId: string;
+  projectDir: string;
+  designDir?: string;
+  runMetadata: Record<string, unknown>;
+  dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
+  requestedChanges?: string;
+  graph: PlanGraph;
+  maxConc: number;
+  waveBaseSha: string;
+}): Promise<OrderedWaveOutcome> {
+  const { projectDir, runId, parentId, graph, step, fanout } = args;
+  const candidateBranch = integrationBranchName(runId, parentId);
+  const gatedRef = gatedCandidateRef(runId, parentId);
+
+  // The run-scoped candidate, at the base this wave RESOLVED. Adopted rather than
+  // pruned when it already exists — after a crash the branch IS the wave's
+  // progress, and re-cutting it would re-run every prerequisite already in it.
+  const { integrationPath, adopted } = openIntegrationWorktree(projectDir, runId, parentId, args.waveBaseSha);
+  // AC4 on the RESUME path. Mid-wave the candidate holds prerequisites only, and
+  // every decision below depends on that: the sha handed to the D1 gate and then
+  // recorded as gated, and the base the next group's dependents are cut from. The
+  // one moment it is NOT prerequisite-only is after the deferred leaves are folded
+  // in at the end of the wave — and a crash there is exactly what an adopted
+  // candidate can be carrying. Rewinding first is what makes a resumed wave derive
+  // both facts from the same view a first pass derived them from; the leaves are
+  // re-folded at the end, from the same durable captured branches.
+  const rewoundTo = adopted ? rewindCandidateToPrerequisites(projectDir, runId, parentId, integrationPath) : undefined;
+  if (rewoundTo) {
+    logEvent("integration.candidate_rewound", {
+      runId,
+      taskId: parentId,
+      payload: { branch: candidateBranch, to: rewoundTo, reason: "deferred_leaves_folded_before_crash" },
+    });
+  }
+  logEvent("integration.worktree_created", {
+    runId,
+    taskId: parentId,
+    payload: {
+      integrationPath,
+      branch: candidateBranch,
+      ordered: true,
+      adopted,
+      groups: graph.groups.length,
+      itemCount: graph.items.length,
+    },
+  });
+
+  const outcomes: ChildOutcome[] = [];
+  const blocked: BlockedItem[] = [];
+  let unavailable: VerificationUnavailable | undefined;
+  /** AC4's EXCLUSION clause. An item nothing depends on is never provisioned FROM,
+   *  so merging it mid-wave puts unrelated unpublished worker output into every
+   *  later dependent's base and into the D1 gate that decides whether they may
+   *  start at all. Both consequences are defects: the base violates AC4, and one
+   *  broken leaf then blocks the dependents of prerequisites it has nothing to do
+   *  with (AC7). So a leaf's merge is DEFERRED to the end of the wave — a change of
+   *  WHEN, not of WHETHER: the same branch, with the same items, reaches the same
+   *  publisher, gated and reviewed once at phase granularity (AC10/D4). */
+  const deferred: { item: PlanItemNode; outcome: ChildOutcome }[] = [];
+
+  const isPrerequisite = (item: PlanItemNode): boolean =>
+    item.declaredId !== undefined && graph.hasDependents.has(item.declaredId);
+
+  const dispatchItem = (item: PlanItemNode, baseSha: string): Promise<ChildOutcome> =>
+    runFanoutChild({
+      runId,
+      workflow: args.workflow,
+      step,
+      fanout,
+      parentId,
+      index: item.index,
+      value: item.value,
+      projectDir,
+      designDir: args.designDir,
+      runMetadata: args.runMetadata,
+      dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
+      requestedChanges: args.requestedChanges,
+      baseSha,
+      planItem: item,
+    });
+
+  /** Merge these workers' CAPTURED branches into the candidate, in the order given.
+   *  Returns the typed block on the first conflict (AC8/D2) and undefined otherwise.
+   *  A commit already an ancestor is skipped, which is what makes a resumed wave
+   *  cost nothing here and produce the identical candidate. */
+  const mergeIntoCandidate = (
+    entries: { item: PlanItemNode; outcome: ChildOutcome }[],
+  ): IntegrationBlock | undefined => {
+    for (const { item, outcome } of entries) {
+      const tip = capturedBranchTip(projectDir, runId, outcome.childTaskId);
+      if (tip === undefined) continue;
+      if (isCommitIntegrated(projectDir, tip, candidateBranch)) continue;
+      // FG-621: the child workspace path is deliberately NOT passed — the branch
+      // this merge resolves is final, and committing into the clone now would
+      // advance only the clone's own ref.
+      const merge = mergeChildIntoIntegration(integrationPath, runId, outcome.childTaskId);
+      logEvent("integration.child_merged", {
+        runId,
+        taskId: parentId,
+        payload: {
+          childTaskId: outcome.childTaskId,
+          childIndex: outcome.index,
+          item: item.label,
+          ok: merge.ok,
+          error: !merge.ok ? merge.error : undefined,
+        },
+      });
+      if (!merge.ok) {
+        const block: IntegrationBlock = {
+          item: item.label,
+          childTaskId: outcome.childTaskId,
+          branch: worktreeBranchName(runId, outcome.childTaskId),
+          candidateBranch,
+          ...(integrationBranchTip(projectDir, runId, parentId)
+            ? { candidateSha: integrationBranchTip(projectDir, runId, parentId) }
+            : {}),
+          conflictPaths: merge.conflictPaths ?? [],
+          error: merge.error,
+        };
+        logEvent("integration.blocked", { runId, taskId: parentId, payload: { ...block } });
+        return block;
+      }
+    }
+    return undefined;
+  };
+
+  for (const group of graph.groups) {
+    // (a) READINESS. Recomputed from durable state at the top of every group —
+    //     never carried forward from the previous iteration. A resumed wave and a
+    //     fresh one therefore take exactly the same decisions here.
+    const priorChildren = adoptablePlanItemChildren(runId, step.id, parentId);
+    const ready: PlanItemNode[] = [];
+    for (const item of group) {
+      const unmet = item.dependsOn.filter(
+        (dep) => !prerequisiteIntegrated(projectDir, runId, dep, priorChildren, gatedRef),
+      );
+      if (unmet.length > 0) {
+        blocked.push({ item, blockers: unmet });
+        logEvent("fanout.item_blocked", {
+          runId,
+          taskId: parentId,
+          payload: { item: item.label, blockedBy: unmet },
+        });
+        continue;
+      }
+      ready.push(item);
+    }
+
+    // (b) ADOPTION. An item whose child already completed AND whose work is
+    //     captured is DONE — re-dispatching it would be the duplication AC9
+    //     forbids. Its branch is still merged below, idempotently.
+    const dispatchable: PlanItemNode[] = [];
+    for (const item of ready) {
+      const prior = item.declaredId !== undefined ? priorChildren.get(item.declaredId) : undefined;
+      if (prior?.status === "complete" && capturedBranchTip(projectDir, runId, prior.id) !== undefined) {
+        outcomes.push({
+          index: item.index,
+          value: item.value,
+          childTaskId: prior.id,
+          status: "complete",
+          result: prior.result,
+          ...(prior.worktreePath ? { worktreePath: prior.worktreePath } : {}),
+        });
+        logEvent("fanout.item_adopted", {
+          runId,
+          taskId: parentId,
+          payload: { item: item.label, childTaskId: prior.id },
+        });
+        continue;
+      }
+      dispatchable.push(item);
+    }
+
+    // (c) DISPATCH. ONE base per concurrently-dispatched group — FG-621's
+    //     one-base-per-wave, narrowed exactly as far as ordering requires and no
+    //     further.
+    //
+    //     THE GATED REF, NOT THE CANDIDATE TIP. The candidate tip is every merge
+    //     made so far, gated or not; the gated ref is the last candidate the D1
+    //     gate PASSED. Cutting from the tip hands a dependent a prerequisite that
+    //     may never have been proven to build, which defeats the whole point of
+    //     gating prerequisites — and it is not the same ref the readiness predicate
+    //     tests ancestry against, so a dependent could be released against one
+    //     commit and provisioned from another. Read off the ref rather than
+    //     remembered, so a resuming process computes the same value.
+    //
+    //     Before anything is gated there is nothing to inherit and the wave's own
+    //     resolved base is correct: group 0's items have no prerequisites, which is
+    //     what put them in group 0.
+    const groupBase = gatedCandidateTip(projectDir, runId, parentId) ?? args.waveBaseSha;
+    const dispatched: ChildOutcome[] = [];
+    const queue = dispatchable.slice();
+    while (queue.length > 0) {
+      const batch = queue.splice(0, args.maxConc);
+      dispatched.push(...(await Promise.all(batch.map((item) => dispatchItem(item, groupBase)))));
+    }
+    if (fanout.failure_mode === "retry-once") {
+      const failed = dispatched.filter((c) => c.status === "failed");
+      for (const outcome of failed) {
+        const item = dispatchable.find((i) => i.index === outcome.index);
+        if (!item) continue;
+        // The retry belongs to the SAME group, so it starts from the same base.
+        const retried = await dispatchItem(item, groupBase);
+        const slot = dispatched.findIndex((c) => c.childTaskId === outcome.childTaskId);
+        if (slot >= 0) dispatched[slot] = retried;
+      }
+    }
+    outcomes.push(...dispatched);
+
+    // (d) INTEGRATE. Each completed worker's CAPTURED branch, in item index order,
+    //     into the candidate. Skipping a commit that is already an ancestor is what
+    //     makes a resumed group cost nothing and produce the same candidate.
+    //
+    //     PREREQUISITES ONLY. A leaf's merge is deferred — see `deferred` above.
+    const landed = group
+      .map((item) => ({ item, outcome: outcomes.find((o) => o.index === item.index && o.status === "complete") }))
+      .filter((x): x is { item: PlanItemNode; outcome: ChildOutcome } => x.outcome !== undefined);
+    const now = landed.filter((x) => isPrerequisite(x.item));
+    deferred.push(...landed.filter((x) => !isPrerequisite(x.item)));
+    const block = mergeIntoCandidate(now);
+    // PARK. No further group runs, no dependent dispatches, and the caller
+    // publishes nothing — D2's bounded outcome, with no resolution lane.
+    if (block) return { outcomes, integrationPath, blocked, integrationBlock: block };
+
+    // (e) GATE (D1) — only for items something else DEPENDS ON, which is exactly
+    //     what is in the candidate at this point. A leaf rides the single composed
+    //     gate at the end of the phase: nothing is provisioned from it mid-wave, so
+    //     gating it early buys nothing and costs a full unit-tier run while the
+    //     wave waits.
+    const gateItems = now.map((x) => x.item.declaredId).filter((id): id is string => id !== undefined);
+    if (gateItems.length > 0) {
+      const candidateSha = integrationBranchTip(projectDir, runId, parentId);
+      const gate = await gateOrderedPrerequisites(integrationPath, {
+        candidateSha: candidateSha ?? args.waveBaseSha,
+        runId,
+        taskId: parentId,
+      });
+      if (!gate.ok && gate.unavailable) {
+        // THE GATE DID NOT RUN. Recording this as a gate result would report a
+        // missing verification environment as a verdict on the prerequisites'
+        // code, so no `integration.prerequisites_gated` is written at all — the
+        // refusal's own `host_readiness.refused` event is the record. The gated
+        // ref does not advance, so dependents are still blocked by name, and the
+        // wave still lets independent ready work finish (D3) before the caller
+        // fails the phase as verification_environment_unavailable.
+        unavailable ??= {
+          kind: "verification_environment_unavailable",
+          reason: gate.reason,
+          error: gate.error,
+          items: gateItems,
+        };
+        continue;
+      }
+      if (!gate.ok && (gate.timedOut || gate.signal)) {
+        // IT RAN BUT REACHED NO VERDICT (FG-424's two non-verdict arms). Same
+        // channel, same reason: the gated ref must not advance, and the code must
+        // not be blamed for it. Recorded as a gate event, unlike the readiness
+        // refusal — the gate really did execute, and its exit evidence is the
+        // record an operator needs.
+        unavailable ??= {
+          kind: gate.timedOut ? "integration_gate_timeout" : "integration_gate_crashed",
+          reason: gate.timedOut ? "gate_timed_out" : `gate_killed_by_${gate.signal}`,
+          error: gate.error,
+          items: gateItems,
+        };
+      }
+      // THE REF IS THE FACT, and it is written only on a PASS. The event beside it
+      // is evidence for an operator; nothing reads it to decide a transition, so a
+      // crash on either side of the event changes nothing. A crash between the gate
+      // passing and the ref advancing costs one re-run of the gate on the next pass
+      // — a repeated proof, never a skipped one, which is the direction this has to
+      // fail in.
+      if (gate.ok && candidateSha) recordGatedCandidate(projectDir, runId, parentId, candidateSha);
+      logEvent("integration.prerequisites_gated", {
+        runId,
+        taskId: parentId,
+        payload: {
+          ok: gate.ok,
+          items: gateItems,
+          candidateSha,
+          error: gate.ok ? undefined : gate.error,
+          readiness: gate.ok ? gate.readiness.outcome : undefined,
+        },
+      });
+      // A REFUSED integration is not handled here. The gated ref simply does not
+      // advance, and the next group's readiness recomputation reads that as "not
+      // satisfied" and blocks the dependents by name — the same path a FAILED
+      // prerequisite takes, because to a dependent they are the same fact.
+    }
+  }
+
+  // The deferred leaves, folded in once no dependent can be cut from the result.
+  // The candidate handed to the publisher is the SAME set of items it always was.
+  //
+  // The prerequisite-only view is recorded FIRST, and that ordering is the whole
+  // crash-safety argument: the ref must exist before the candidate stops matching
+  // it, or a crash mid-fold leaves a resumed wave with no way back to it. Recording
+  // it and never folding costs nothing — the rewind is a no-op when the tip already
+  // is the recorded view.
+  const prereqTip = integrationBranchTip(projectDir, runId, parentId);
+  if (deferred.length > 0 && prereqTip) recordPrerequisiteCandidate(projectDir, runId, parentId, prereqTip);
+  const block = mergeIntoCandidate(deferred);
+  if (block) return { outcomes, integrationPath, blocked, integrationBlock: block };
+
+  return { outcomes, integrationPath, blocked, ...(unavailable ? { unavailable } : {}) };
 }
 
 /** FG-425: the fan-out validate-then-publish step.
@@ -3032,9 +3945,15 @@ async function runFanoutChild(args: {
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   seedGeneration?: SeedGeneration | null;
   requestedChanges?: string;
-  /** FG-621 (AC 4): the ONE base every sibling of this wave is created from,
-   *  resolved once by the caller before any child was spawned. */
+  /** FG-621 (AC 4) / FG-584: the ONE base every sibling of this concurrently-
+   *  dispatched GROUP is created from, resolved by the caller before any of them
+   *  was spawned. An unordered wave is a single group, so this is unchanged there. */
   baseSha: string;
+  /** FG-584 (D6): the plan item this child realizes. Its DECLARED id is recorded
+   *  as durable work data on the row so dependency edges resolve against it — never
+   *  against the fan-out array index, which a replan or a re-drive can re-bind to a
+   *  different child. Absent for an unordered wave. */
+  planItem?: PlanItemNode;
 }): Promise<ChildOutcome> {
   const step = args.step;
   const agentRole = resolveChildAgent(step, args.fanout, args.value);
@@ -3057,6 +3976,13 @@ async function runFanoutChild(args: {
   };
   if (args.requestedChanges) {
     childInputs["requestedChanges"] = args.requestedChanges;
+  }
+  // FG-584 (D6): the declared identity and edges, on the row, durably. `fanoutIndex`
+  // above stays what it always was — ordering and diagnostics — and is never what an
+  // edge resolves against.
+  if (args.planItem?.declaredId !== undefined) {
+    childInputs["planItemId"] = args.planItem.declaredId;
+    childInputs["planDependsOn"] = args.planItem.dependsOn;
   }
   for (const key of CONTROL_PLANE_METADATA_KEYS) delete childInputs[key];
   const composedChild = composeSystemPrompt({

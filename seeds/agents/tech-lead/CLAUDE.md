@@ -30,19 +30,56 @@ When any of these are present, mention in your output (e.g. in `notes`) what you
     "id": "1",
     "summary": "...",
     "files": ["src/..."],
+    "depends_on": [],
     "acceptance": "...",
     "discipline": "frontend" | "backend" | "infosec" | "platform" | "general"
   }]
 }
 ```
 
-## Steps must be file-independent
+## `depends_on` is executable controller data, not advisory prose
 
-Two steps that touch the same file MUST be merged into one. The build phase dispatches your plan-steps in parallel, one container per step. Overlapping `files` lists become race conditions on the working tree that no test will catch — two containers writing to the same file is corruption, not a merge.
+`depends_on` lists the `id`s of the steps this step's work is built ON. Forge READS it and
+schedules from it. It is not a note for a human reader, and nothing downstream re-interprets it:
 
-If you find yourself wanting two steps with overlapping `files`, that's one step. Independence at planning time is the runner's correctness contract.
+- A step is dispatched only once **every** id in its `depends_on` has been built, integrated into
+  the run's candidate, and proven to build there.
+- Its container's workspace is then cut from that candidate — so it can import what its
+  prerequisites created, and a composition test can verify behavior its prerequisites added.
+- Steps with no path between them still run **concurrently**, up to the configured capacity.
+  Declaring an edge you don't need serializes work for nothing.
 
-Concretely: do `grep` / `find` over `/project` and verify your steps don't double-name any path. When in doubt, merge.
+Because Forge executes it, a wrong edge is a refusal, not a typo. Before any container starts,
+Forge refuses a plan that names an unknown step id, a step that depends on itself, a cycle, or
+two steps with the same `id`. The refusal names the offending edge and the plan comes back to you.
+
+`id` is the identity edges resolve against. Give every step a stable id and don't reuse one.
+
+## The full independence rule
+
+The old rule here was "two steps that touch the same file MUST be merged into one." That was
+never the real rule — it was a proxy for it, and the proxy is wrong in both directions.
+
+**The real rule: two steps may run concurrently only if neither needs anything the other
+produces, and they do not write the same path.** So:
+
+1. **A semantic dependency is a dependency, whatever the file layout.** If step 4 imports a module
+   step 2 creates, calls a function step 3 adds, or tests behavior step 1 implements, then step 4
+   `depends_on` those steps — *even when their `files` lists are completely disjoint*. Disjoint
+   paths plus a real semantic dependency is the exact shape that keeps getting planned and keeps
+   failing: the dependent's workspace does not contain what it needs, so it cannot build.
+2. **Ordered steps MAY share a path.** If step 5 `depends_on` step 2, both may name
+   `src/thing.ts`. There is no race: step 5's workspace is cut from a candidate that already
+   contains step 2's edit, so step 5 sees it and builds on it. Do **not** merge two steps just
+   because they share a file — order them instead. Merging them makes one oversized step that a
+   single agent has to hold whole, which is the cost this exists to avoid.
+3. **Concurrently-runnable steps may NOT share a path.** Two steps with no dependency path between
+   them and an overlapping `files` list are refused before dispatch, naming the path and both
+   steps. Either order them with `depends_on`, or merge them.
+
+Concretely: for each step, ask "what does this step need to already exist?" and put those ids in
+`depends_on`. Then `grep`/`find` over `/project` and check that no two steps *without* an ordering
+between them name the same path.
 
 ## Choosing a discipline
 

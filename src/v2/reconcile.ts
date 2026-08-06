@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { classifyRunTerminalState } from "./ready-queue.js";
-import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
+import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult, setTaskStatus } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { crashPoint } from "./crash-points.js";
 import { resolveIdleTimeoutMs } from "./idle-watchdog.js";
@@ -1188,6 +1188,21 @@ export function reconcileRun(
     } catch { /* FG-459: never throw — keep reconciling the rest */ }
   }
 
+  // FG-584: was this fan-out parent's wave dispatched through the ORDERED path?
+  //
+  // Read off the parent's own durable evidence, written by runOrderedWave before
+  // any child is dispatched — never inferred from a child's inputs, because an
+  // ordered plan's FIRST group declares no edges at all and would be
+  // indistinguishable from an unordered wave by that test. A crash before this
+  // event means no child exists either, and the sweep below never reaches a
+  // childless parent.
+  const isOrderedFanoutWave = (parentTaskId: string): boolean =>
+    eventsForTask(parentTaskId).some(
+      (e) =>
+        e.eventType === "integration.worktree_created" &&
+        (e.payload as Record<string, unknown> | null)?.["ordered"] === true,
+    );
+
   // FG-455 p2: a fanout PARENT left `running` after its children finish or die
   // mid-wave. dispatchFanoutStep never gives the parent its own container (no
   // container.started for forge-<parentId>), so the per-task loop above —
@@ -1204,6 +1219,59 @@ export function reconcileRun(
     if (children.length === 0) continue; // no children — an ordinary task, not a fanout parent
     if (eventsForTask(parent.id).some((e) => e.eventType === "container.started")) continue; // real containerized task
     if (children.some((c) => !TERMINAL_TASK.has(c.status))) continue; // wave may still be in progress
+
+    // ── FG-584: an ORDERED wave is RESUMABLE, not orphaned ────────────────────
+    //
+    // The whole-wave fail-closed landing below is right for the wave it was
+    // written for: one short parallel burst, all children dispatched from one
+    // base, nothing durable between them. An ordered wave is the opposite shape —
+    // a serialized chain of worker+integration cycles, where by the time a crash
+    // lands, prerequisites are typically already captured, already merged into the
+    // run's candidate, and already gated. Failing it closed and waiting for
+    // `forge recover <parent> --re-drive` re-runs every one of those from the
+    // start, which is exactly the duplication AC9 forbids — and it needs an
+    // operator to say so, which "converges by driving reconcile + runNext to a
+    // fixpoint" does not allow.
+    //
+    // So the parent is put BACK to `pending` and the controller resumes it. Not a
+    // new status and not a new lane: `pending` is what a re-drive produces, and
+    // dispatchFanoutStep's existing pending-primary reuse is what picks it up.
+    // Resumption is safe because it is not a replay — every decision the resumed
+    // wave makes is recomputed from the refs and the child rows, so an item whose
+    // work is captured is ADOPTED rather than re-dispatched, a merge already in
+    // the candidate is skipped by ancestry, and a dependent whose prerequisite is
+    // absent from the gated ref is still refused.
+    //
+    // The liveness guard matters more here than below: an ordered wave legitimately
+    // sits with every child of a GROUP terminal while the live process merges and
+    // gates, so "all children terminal" alone does not mean the process is gone.
+    // A live foreign lock holder means the wave is in flight; leave it alone.
+    //
+    // RF-3: "leave it alone" means EXACTLY that — not "fall through to the
+    // fail-closed landing below". An ordered wave that is merely in flight was being
+    // failed as fanout_wave_orphaned on this arm, and the operator verb that failure
+    // prints (`forge recover <parent> --re-drive`) mints a FRESH parent, which cannot
+    // adopt this parent's captured children and therefore re-dispatches prerequisite
+    // work that is already complete, integrated and gated — the duplication AC9
+    // forbids, reached by following the advice the failure message itself gives. So
+    // an ordered wave has exactly two outcomes here: resumed on its own row, or left
+    // running for the process that is driving it.
+    if (isOrderedFanoutWave(parent.id)) {
+      if (liveRunLockHolder(runId) !== null) continue;
+      try {
+        const summary = { total: children.length, complete: children.filter((c) => c.status === "complete").length };
+        // reason: ordered_fanout_resumable
+        if (setTaskStatus(parent.id, "pending")) {
+          logEvent("task.reconciled", {
+            runId,
+            taskId: parent.id,
+            payload: { from: "running", to: "pending", reason: "ordered_fanout_resumable", childSummary: summary },
+          });
+          taskChanges.push({ taskId: parent.id, from: "running", to: "pending", reason: "ordered_fanout_resumable" });
+        }
+      } catch { /* FG-459: never throw — one parent's resume must not abort the rest */ }
+      continue;
+    }
 
     // FG-459: guard the parent-finalization writes (markTaskComplete/Failed +
     // events) so a DB throw here neither propagates nor aborts the run-level

@@ -1,5 +1,7 @@
 # Decision: Fail-safe recovery for lost containers — adopt vs. re-drive, gated behind an explicit operator command
 
+> **Amended by FG-584 (2026-08-06).** This decision's `fanout_wave_orphaned` / `--re-drive` mechanism is unchanged for an **unordered** fanout wave, but no longer covers an **ordered** one (dependency-aware build execution — plan items declaring `depends_on`). Reconcile now resumes a crash-stranded ordered parent in place (`pending`, reason `ordered_fanout_resumable`) instead of failing it as `fanout_wave_orphaned`, and adopts already-captured children rather than re-running them, so `forge recover <parent> --re-drive` is no longer "the single coordinated path for re-driving a wave" universally: on an ordered wave it mints a fresh parent that cannot adopt the superseded parent's captured children, so issuing it where a plain `forge next` would already have resumed the wave re-runs completed work instead of recovering it. See [Crash recovery is a RESUME, not a re-drive](../../docs/concepts.md#crash-recovery-is-a-resume-not-a-re-drive).
+
 **ID**: FORGE-DEC-028
 **Date**: 2026-07-03
 **Status**: Decided

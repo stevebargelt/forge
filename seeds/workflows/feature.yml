@@ -80,7 +80,20 @@ steps:
     gate: human
     workflow_additions: |
       Translate the architecture document into a step-by-step plan.
-      Output {steps: [{id, summary, files, acceptance}], review_contract}.
+      Output {steps: [{id, summary, files, depends_on, acceptance}], review_contract}.
+
+      depends_on is EXECUTABLE CONTROLLER DATA, not advisory prose (FG-584). It lists the ids of
+      the steps this step's work is built on. Forge dispatches a step only once every id in its
+      depends_on has been built, integrated into the run's candidate and proven to build there,
+      and then cuts that step's workspace from that candidate — so it can import what its
+      prerequisites created. Steps with no path between them still run concurrently.
+
+      A semantic dependency is a dependency whatever the file layout: if a step imports a module,
+      calls a function or tests behavior another step adds, declare the edge EVEN IF their files
+      lists are disjoint. Ordered steps MAY share a path (order them, don't merge them);
+      concurrently-runnable steps may not. An unknown id, a self-dependency, a cycle, a duplicate
+      id, or a same-path overlap between concurrently-runnable steps is REFUSED before any build
+      container starts, and the plan comes back here.
 
       review_contract is the risk surface this change must be reviewed against, and the
       human gate on THIS step is what approves it (FG-640). Shape:
@@ -106,7 +119,14 @@ steps:
     gate: verdict
     workflow_additions: |
       Implement your assigned plan-step (passed via inputs.step). Output {step_completed, diff_summary, files_modified}.
-      The tech-lead asserts your step's files are independent of every other step's files in this build; do not touch files outside your step.files list.
+      Do not touch files outside your step.files list.
+      Your workspace already contains the output of every step yours declares in depends_on — Forge
+      integrated each of them into the run's candidate and proved it builds before cutting your
+      workspace from it. It may also contain other steps that were prerequisites of something and
+      were integrated ahead of yours. It NEVER contains a step that is still running, and never
+      contains a step nothing depends on. So: do not assume the work of a step you do not depend on
+      exists. If you find you need something from a step you do not depend on, say so in notes rather
+      than reimplementing it: the missing edge is a plan defect.
     fanout:
       from_upstream:
         step: plan

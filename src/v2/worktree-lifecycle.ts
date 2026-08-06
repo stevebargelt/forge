@@ -717,7 +717,12 @@ export function removeWorktreeIfSafe(
 
 export type MergeWorktreeBranchResult =
   | { ok: true }
-  | { ok: false; error: string };
+  /** FG-584 (AC8/D2): `conflictPaths` carries the paths git left in the UNMERGED
+   *  index, read BEFORE the merge is aborted (aborting clears them). Present only
+   *  for a genuine textual conflict — an auto-commit or plumbing failure has no
+   *  conflicting paths and omits the field rather than reporting an empty set as
+   *  if it had looked and found none. */
+  | { ok: false; error: string; conflictPaths?: string[] };
 
 /** Merge the task worktree branch into run.projectDir using fast-forward-only.
  *
@@ -1572,16 +1577,74 @@ export function integrationBranchExists(
   }
 }
 
+/** The integration branch's current tip, or undefined if the branch does not
+ *  exist. FG-584: the ORDERED fan-out's candidate is this branch, built up as
+ *  items land, so its tip is the base the next dependency group is provisioned
+ *  from — and it is read back off the ref rather than carried in memory, so the
+ *  same answer is available to any process before and after a crash. */
+export function integrationBranchTip(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string
+): string | undefined {
+  return resolveCommit(projectDir, integrationBranchName(runId, parentTaskId));
+}
+
+/** A captured task branch's tip in THIS repository's ref namespace, or undefined
+ *  if it does not resolve. FG-584: this is the exact commit a prerequisite's
+ *  integration has to be proven against — never the child's self-reported
+ *  completion (AC3). */
+export function capturedBranchTip(
+  projectDir: string,
+  runId: string,
+  taskId: string
+): string | undefined {
+  return resolveCommit(projectDir, worktreeBranchName(runId, taskId));
+}
+
+/** FG-584 (AC3): is `commit` durably contained in `ref`'s history?
+ *
+ *  THE READINESS PREDICATE, and deliberately nothing more than git ancestry. It
+ *  is self-verifying (the object graph IS the evidence), needs no new table, and
+ *  gives the same answer to any process before and after a crash — which is what
+ *  lets ordered dispatch be resumed rather than replayed. A child row that says
+ *  `complete` proves only that a container exited; this proves the work is in the
+ *  tree the dependent will receive.
+ *
+ *  Unresolvable arguments answer `false`. "I could not prove it is integrated" and
+ *  "it is not integrated" must land in the same place here: the failure mode this
+ *  guards is dispatching a dependent onto a base that lacks its prerequisite. */
+export function isCommitIntegrated(projectDir: string, commit: string, ref: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, ref], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Create the integration worktree for a fan-out step.
  *
  *  Prune-then-create for retry safety: if a stale integration branch/worktree
  *  exists (from an aborted prior attempt), force-remove it unconditionally —
  *  a stale integration worktree is always from an aborted prior attempt and
- *  never has agent output to preserve (unlike child worktrees). */
+ *  never has agent output to preserve (unlike child worktrees).
+ *
+ *  FG-584: `baseSha` pins the branch's starting commit. Omitted, the branch is cut
+ *  from the repository's checked-out HEAD, which is the pre-FG-584 behavior and
+ *  stays byte-for-byte what an unordered wave gets. The ORDERED path passes the
+ *  base it RESOLVED (resolveTaskBaseSha's recorded receipt) so the candidate and
+ *  the wave's first group start from provably the same commit — a candidate cut
+ *  from HEAD while the recorded base said otherwise would silently publish work
+ *  built on a different tree than the one the workers saw. */
 export function createIntegrationWorktree(
   projectDir: string,
   runId: string,
-  parentTaskId: string
+  parentTaskId: string,
+  baseSha?: string
 ): { integrationPath: string } {
   const integrationPath = integrationWorktreeDir(runId, parentTaskId);
   const branch = integrationBranchName(runId, parentTaskId);
@@ -1598,12 +1661,159 @@ export function createIntegrationWorktree(
 
   mkdirSync(join(WORKTREES_DIR, runId, parentTaskId), { recursive: true });
 
-  execFileSync("git", ["worktree", "add", integrationPath, "-b", branch], {
+  execFileSync(
+    "git",
+    ["worktree", "add", integrationPath, "-b", branch, ...(baseSha ? [baseSha] : [])],
+    { cwd: projectDir, stdio: ["ignore", "ignore", "pipe"] }
+  );
+
+  return { integrationPath };
+}
+
+/** FG-584: the ref naming the last candidate that PASSED the D1 integration gate.
+ *
+ *  Deliberately a REF and not a table or an event. The question a dependent has to
+ *  answer before it is provisioned is "is my prerequisite's commit in a tree that
+ *  was merged AND proven to build?", and against this ref that whole question is
+ *  one ancestry check on the object graph: self-verifying, idempotent to re-ask,
+ *  identical before and after a crash, and readable by any process without a
+ *  handshake with the one that recorded it. An in-memory accumulator owned by a
+ *  single dispatchFanoutStep invocation could answer it only for that invocation. */
+export function gatedCandidateRef(runId: string, parentTaskId: string): string {
+  return `refs/forge/${runId}/${parentTaskId}/gated`;
+}
+
+/** Advance the gated-candidate ref to `sha` — the durable record that this exact
+ *  candidate passed the gate. MONOTONIC in what it contains: every sha recorded
+ *  here is a descendant of the last one, so each advance strictly contains every
+ *  prerequisite the previous one did. The candidate branch is rewound exactly once
+ *  per resume, and only back to the prerequisite-only view this ref is already an
+ *  ancestor of (see rewindCandidateToPrerequisites). */
+export function recordGatedCandidate(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string,
+  sha: string
+): void {
+  execFileSync("git", ["update-ref", gatedCandidateRef(runId, parentTaskId), sha], {
     cwd: projectDir,
     stdio: ["ignore", "ignore", "pipe"],
   });
+}
 
-  return { integrationPath };
+/** The gated-candidate ref's current commit, or undefined when nothing has been
+ *  gated yet. Undefined is a legitimate answer, not an error: before the first
+ *  prerequisite group is gated, NO edge is satisfied — which is exactly right. */
+export function gatedCandidateTip(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string
+): string | undefined {
+  return resolveCommit(projectDir, gatedCandidateRef(runId, parentTaskId));
+}
+
+/** FG-584 (AC4/AC9): the ref naming the candidate as it stood with PREREQUISITES
+ *  ONLY — recorded immediately before the wave folds in its deferred leaves.
+ *
+ *  Mid-wave the candidate deliberately holds prerequisites and nothing else: an item
+ *  nothing depends on is never provisioned FROM, so merging it early would put
+ *  unrelated unpublished worker output into every later dependent's base and into
+ *  the D1 gate that decides whether they may start. The fold at the end of the wave
+ *  is what makes that a change of WHEN rather than WHETHER — and it is the one
+ *  moment the candidate stops being prerequisite-only. A crash after it (and before
+ *  the parent finalizes) leaves a candidate a RESUMED wave would otherwise re-gate
+ *  and hand to a dependent, leaf and all. This ref is how a resuming process finds
+ *  its way back to the same view a first pass had. */
+export function prerequisiteCandidateRef(runId: string, parentTaskId: string): string {
+  return `refs/forge/${runId}/${parentTaskId}/prerequisites`;
+}
+
+/** Record the candidate's prerequisite-only tip. Written before the first deferred
+ *  leaf is folded in, so it is always a commit the gated ref is an ancestor of. */
+export function recordPrerequisiteCandidate(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string,
+  sha: string
+): void {
+  execFileSync("git", ["update-ref", prerequisiteCandidateRef(runId, parentTaskId), sha], {
+    cwd: projectDir,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+}
+
+/** FG-584 (AC4/AC9): rewind an ADOPTED candidate to its prerequisite-only view.
+ *
+ *  Called once, before a resumed wave re-enters its group loop, so that the sha it
+ *  gates and the base it cuts dependents from are derived from the same view a first
+ *  pass derived them from. Without it a resume re-gates the RAW tip — which after a
+ *  crash mid-fold contains leaves — records that as the gated candidate, and cuts a
+ *  dependent's workspace from it.
+ *
+ *  Bounded and reversible by construction: it only ever moves back to a commit the
+ *  candidate already contains, and the only commits it discards are leaf merges,
+ *  every one of which is re-derived from a durable captured branch at the end of the
+ *  wave. Refuses anything else — an unresolvable ref, a tip that already IS the
+ *  recorded view, or a recorded view that is not an ancestor of the tip (a candidate
+ *  that has been re-cut under it) — because a rewind that is not a strict undo of
+ *  the fold is not one this function can prove safe.
+ *
+ *  Returns the sha it rewound to, or undefined when it left the candidate alone. */
+export function rewindCandidateToPrerequisites(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string,
+  integrationPath: string
+): string | undefined {
+  const prereq = resolveCommit(projectDir, prerequisiteCandidateRef(runId, parentTaskId));
+  const tip = integrationBranchTip(projectDir, runId, parentTaskId);
+  if (prereq === undefined || tip === undefined || prereq === tip) return undefined;
+  if (!isCommitIntegrated(projectDir, prereq, integrationBranchName(runId, parentTaskId))) return undefined;
+  execFileSync("git", ["reset", "--hard", prereq], {
+    cwd: integrationPath,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  return prereq;
+}
+
+/** FG-584: OPEN the run's candidate, creating it only if it does not exist yet.
+ *
+ *  The ORDERED fan-out builds the FG-353 integration branch INCREMENTALLY — one
+ *  worker+integration cycle per dependency group — so between groups that branch
+ *  is not a leftover from an aborted attempt, it IS the wave's durable progress.
+ *  createIntegrationWorktree's prune-then-create posture is right for the
+ *  all-at-once wave it was written for and exactly wrong here: after a crash it
+ *  would force-delete every merge already made and re-run prerequisites whose
+ *  commits are already integrated, which is the duplication AC9 forbids.
+ *
+ *  So: an existing branch is ADOPTED, never pruned. Only its working tree is
+ *  re-materialized when it has gone missing or drifted onto another ref — the
+ *  tree is derivable from the branch, the branch is not derivable from anything.
+ *  `baseSha` applies only to the create case. */
+export function openIntegrationWorktree(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string,
+  baseSha?: string
+): { integrationPath: string; adopted: boolean } {
+  const integrationPath = integrationWorktreeDir(runId, parentTaskId);
+  const branch = integrationBranchName(runId, parentTaskId);
+
+  if (resolveCommit(projectDir, branch) === undefined) {
+    return { ...createIntegrationWorktree(projectDir, runId, parentTaskId, baseSha), adopted: false };
+  }
+
+  if (existsSync(integrationPath) && checkedOutRef(integrationPath) === `refs/heads/${branch}`) {
+    return { integrationPath, adopted: true };
+  }
+
+  forceRemoveWorktree(projectDir, integrationPath);
+  mkdirSync(join(WORKTREES_DIR, runId, parentTaskId), { recursive: true });
+  execFileSync("git", ["worktree", "add", integrationPath, branch], {
+    cwd: projectDir,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  return { integrationPath, adopted: true };
 }
 
 /** Merge a single child task branch into the integration worktree.
@@ -1681,6 +1891,11 @@ export function mergeChildIntoIntegration(
     return { ok: true };
   } catch (e) {
     const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+    // FG-584 (AC8/D2): read the conflicting paths BEFORE aborting. `merge --abort`
+    // clears the unmerged index, so a block recorded after it could only ever name
+    // the worker and the candidate — never the paths, which is the one part of the
+    // block an operator resolves against.
+    const conflictPaths = unmergedPaths(integrationWorktreePath);
     // Abort the failed merge so the integration worktree is not left in MERGING
     // state. The branch and worktree are retained for inspection via reflog.
     try {
@@ -1692,7 +1907,25 @@ export function mergeChildIntoIntegration(
     return {
       ok: false,
       error: `git merge --no-ff ${branch} into integration failed: ${stderr || String(e)}`,
+      ...(conflictPaths && conflictPaths.length > 0 ? { conflictPaths } : {}),
     };
+  }
+}
+
+/** The paths git left UNMERGED in `treePath`'s index. Best-effort and read-only:
+ *  undefined when the probe itself could not run, which is different from an empty
+ *  list (a failure that produced no conflicting paths at all — a plumbing error
+ *  rather than a textual conflict). */
+function unmergedPaths(treePath: string): string[] | undefined {
+  try {
+    const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], {
+      cwd: treePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return undefined;
   }
 }
 
@@ -1741,4 +1974,15 @@ export function cleanupIntegrationWorktree(
       stdio: ["ignore", "ignore", "ignore"],
     });
   } catch { /* best-effort */ }
+  // FG-584: the ordered wave's candidate refs go with the candidate they name.
+  // Only reached after a PROVEN publication, so nothing is still deciding readiness
+  // against the gated one or resuming against the prerequisite-only one.
+  for (const ref of [gatedCandidateRef(runId, parentTaskId), prerequisiteCandidateRef(runId, parentTaskId)]) {
+    try {
+      execFileSync("git", ["update-ref", "-d", ref], {
+        cwd: projectDir,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* best-effort */ }
+  }
 }
