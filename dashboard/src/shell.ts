@@ -1185,4 +1185,141 @@ section.current-activity { margin-top: 28px; }
   font-size: 12px;
   color: var(--warn);
 }
+
+/* FG-591: the operator work queue / Kanban board.
+ *
+ * The two wait tones that MUST stay visually distinct are .queue-wait-blocker and
+ * .queue-wait-scheduling — a genuine blocker vs. a temporary scheduling wait. They
+ * differ in hue AND carry their own label text, because colour is never the only
+ * channel: a monochrome or colour-blind reading still gets "Blocked" vs "Waiting to
+ * overlap" from the badge itself. */
+.queue-view { margin-top: 16px; }
+.queue-empty { margin: 24px 0; font-style: italic; }
+.queue-unavailable { max-width: 70ch; }
+.queue-alert { margin-top: 16px; }
+.queue-alert-err { border-left: 3px solid var(--err); }
+.queue-alert-warn { border-left: 3px solid var(--warn); }
+.queue-alert-detail { font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.queue-alert-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+.queue-controls { margin-top: 16px; }
+.queue-controls-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.queue-controls-label { font-size: 12px; color: var(--fg-dim); }
+.queue-enqueue-input { width: 160px; }
+.queue-version { font-size: 12px; margin-left: auto; }
+.queue-pending { font-size: 12px; }
+.queue-controls-note { font-size: 11px; margin: 8px 0 0; max-width: 90ch; line-height: 1.5; }
+
+.queue-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  align-items: start;
+}
+.queue-column {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  min-width: 0;
+}
+.queue-column-head { margin-bottom: 8px; }
+.queue-column-title {
+  font-size: 13px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.queue-column-count {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.queue-derived-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); font-size: 10px; }
+.queue-column-hint { font-size: 11px; margin: 4px 0 0; line-height: 1.45; }
+.queue-column-missing { font-size: 11px; margin-bottom: 6px; color: var(--warn); }
+.queue-column-empty { font-size: 12px; font-style: italic; list-style: none; padding: 8px 0; }
+.queue-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+/* .card carries cursor:pointer for the click-to-open feed cards; these are not
+ * click-to-open, so the affordance would be a lie. */
+.queue-card { margin: 0; padding: 10px; cursor: default; }
+.queue-card[draggable="true"] { cursor: grab; }
+.queue-card:focus,
+.queue-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The grabbed state is announced by aria-grabbed AND drawn — a keyboard reorder that
+ * only reads to a screen reader leaves a sighted keyboard user with no feedback. */
+.queue-card-grabbed { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.queue-card-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.queue-card-rank { font-size: 11px; color: var(--fg-faint); min-width: 2.5em; }
+.queue-card-id { font-size: 11px; color: var(--fg-faint); }
+.queue-card-title { font-size: 13px; overflow-wrap: anywhere; }
+.queue-card-facts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 11px; margin-top: 6px; }
+.queue-member-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); }
+.queue-exec-running { background: rgba(74, 222, 128, 0.14); color: var(--ok); }
+.queue-exec-launching { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+.queue-readiness-badge { background: rgba(148, 163, 184, 0.14); }
+.queue-readiness-stale { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+
+.queue-wait { margin-top: 8px; font-size: 11px; line-height: 1.5; border-left: 3px solid var(--border); padding-left: 8px; }
+.queue-wait-blocker { border-left-color: var(--err); }
+.queue-wait-scheduling { border-left-color: var(--accent); }
+.queue-wait-capacity { border-left-color: var(--warn); }
+.queue-wait-readiness { border-left-color: var(--warn); }
+.queue-wait-claimed { border-left-color: var(--magenta); }
+.queue-wait-disarmed { border-left-color: var(--fg-faint); }
+.queue-wait-badge { font-size: 10px; margin-right: 6px; }
+.queue-wait-badge-blocker { background: rgba(248, 113, 113, 0.14); color: var(--err); }
+.queue-wait-badge-scheduling { background: rgba(122, 159, 255, 0.14); color: var(--accent); }
+.queue-wait-badge-capacity { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+.queue-wait-badge-readiness { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+.queue-wait-badge-claimed { background: rgba(192, 132, 252, 0.14); color: var(--magenta); }
+/* Every tone gets a pill, including the honest-unknown ones — an unstyled label
+ * reads as body text and stops looking like a state at all. */
+.queue-wait-badge-neutral,
+.queue-wait-badge-unknown,
+.queue-wait-badge-disarmed { background: rgba(148, 163, 184, 0.14); color: var(--fg-dim); }
+.queue-wait-reason { overflow-wrap: anywhere; }
+.queue-wait-meta,
+.queue-wait-note { font-size: 10px; margin-top: 3px; line-height: 1.45; }
+.queue-reservation { font-size: 10px; margin-top: 6px; overflow-wrap: anywhere; }
+.queue-lease-expired { color: var(--err); }
+.queue-card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.queue-card-reorder-hint { font-size: 10px; }
+
+.queue-dispatcher { margin-top: 16px; cursor: default; }
+.queue-alert, .queue-controls { cursor: default; }
+.queue-dispatcher-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.queue-dispatcher-title { font-size: 14px; margin: 0; }
+.queue-dispatcher-default { font-size: 11px; }
+.queue-tone-ok { background: rgba(74, 222, 128, 0.14); color: var(--ok); }
+.queue-tone-warn { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+.queue-tone-err { background: rgba(248, 113, 113, 0.14); color: var(--err); }
+.queue-tone-capacity { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+.queue-tone-scheduling { background: rgba(122, 159, 255, 0.14); color: var(--accent); }
+.queue-tone-disarmed,
+.queue-tone-neutral,
+.queue-tone-unknown { background: rgba(148, 163, 184, 0.14); }
+.queue-armed-badge { background: rgba(148, 163, 184, 0.14); font-size: 10px; }
+.queue-armed-on { background: rgba(74, 222, 128, 0.14); color: var(--ok); }
+.queue-dispatcher-detail { font-size: 12px; margin: 8px 0 0; max-width: 90ch; line-height: 1.5; }
+.queue-dispatcher-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 4px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.queue-dispatcher-grid .muted { margin-right: 4px; }
+.queue-dispatcher-eval { font-size: 12px; margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.queue-dispatcher-eval-detail { flex-basis: 100%; font-size: 11px; }
+.queue-capacity-holders { font-size: 11px; margin-top: 10px; }
+.queue-holder-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.queue-holder { font-size: 11px; }
+.queue-capacity-policy { font-size: 11px; margin: 8px 0 0; max-width: 90ch; line-height: 1.5; }
+.queue-cli-only { font-size: 11px; margin: 12px 0 0; max-width: 90ch; line-height: 1.5; }
+.queue-cli-badge { background: rgba(192, 132, 252, 0.14); color: var(--magenta); margin-right: 6px; }
 `;
