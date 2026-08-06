@@ -16,8 +16,7 @@ FG-591. FG-496's DB-backed backlog and queue primitives are complete.
 
 ## Current objective
 
-FG-685 → FG-584 → FG-591. **FG-685 shipped 2026-08-06** (`ee303508`, PR #216);
-the sequence resumes at FG-584.
+FG-584 → FG-591
 
 **FG-584 comes before FG-591.** FG-610 demonstrated FG-584 live: the runner
 fanned both plan steps in parallel even though the plan declared step 2
@@ -72,10 +71,6 @@ it does not override ticket dependencies or authorize scope expansion.
 ## Captured follow-ups that do not preempt `Now`
 
 - **FG-652** — stage-record SHA in the crash-after-advance recovery window.
-- ~~**FG-655** — documentation-stage commit authority.~~ SHIPPED 2026-08-05
-  (`c93e13af`). The docs stage now commits its declared paths itself and advances
-  the candidate to the sha it authored, so the workaround this entry carried —
-  commit required durable docs before review — is no longer needed.
 - **FG-682** — a documentation correction discovered AFTER the docs stage has
   completed has no supported amendment path. Adjacent to FG-655 but distinct:
   FG-655 is a stage that produced edits and could not commit them; this is a
@@ -85,13 +80,12 @@ it does not override ticket dependencies or authorize scope expansion.
   the candidate; SHA-bound verification invalidated and CI required at the new
   candidate; docs closeout plus a bounded delta check, never full re-discovery).
   FG-678's two overrides are its demonstrated impact.
-- **FG-681** — five campaign integration tests (FG-475/FG-476/FG-485) fail
-  reproducibly on the host and pass in CI at the same commit, so host
-  integration runs produce false reds. Not caused by any current change:
-  identical 5/7 on `main` and on the FG-678 branch via an equivalent runner.
-  Carries a hypothesis worth checking BEFORE FG-676 is fixed — the failing
-  assertion is `expected 'awaiting_gate', actual 'failed'`, the same state pair
-  FG-676 resurrects, so these may be green in CI for the wrong reason.
+- **FG-681** — roughly 76 integration tests across at least 13 files fail on the
+  Darwin host and pass in CI at the same commits. The dominant signature is a
+  pre-container refusal, not assertion drift. Root-cause the shared harness or
+  runtime input from the smallest `fg381` and largest `fg628` reproductions;
+  do not patch, skip, or allowlist individual symptoms. FG-676 may explain only
+  the five campaign cases and is no longer the leading general hypothesis.
 - **FG-656** — fanout model resolution can drift from the held seed
   generation.
 - **FG-657** — reconcile and close the DB ticket for the already-shipped PR
