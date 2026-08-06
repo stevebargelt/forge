@@ -56,6 +56,13 @@ const ALL_FAILURE_KINDS: Record<FailureKind, true> = {
   verification_environment_unavailable: true,
   pre_container_crash: true,
   agent_reported_failure: true,
+  // FG-584 ordered fan-out — added here for the reason the header names: this map
+  // is Record<FailureKind, true>, so a kind added without a line here stops this
+  // file compiling and the sweeps below can never quietly stop covering it.
+  plan_dependency_invalid: true,
+  ordered_fanout_unavailable: true,
+  integration_blocked: true,
+  prerequisite_blocked: true,
   unknown: true,
 };
 

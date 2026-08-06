@@ -1162,6 +1162,38 @@ export function recoverUnfinishedPublications(projectDir: string, runId?: string
   }
 }
 
+/** FG-584 (D1): the ordered fan-out's MID-WAVE prerequisite gate.
+ *
+ *  A prerequisite that HAS dependents must be merged into the run's candidate AND
+ *  pass the integration gate before any dependent is provisioned from it. Merged-
+ *  only would fix the missing-import failure and leave the signature-mismatch one
+ *  a layer down — a dependent agent building against a prerequisite that is
+ *  present but broken, which is the same wasted-container class this ticket exists
+ *  to remove. Items with NO dependents ride the single composed gate at the end of
+ *  the phase: nothing is provisioned from them mid-wave, so gating them early buys
+ *  nothing and costs a full unit-tier run under a 10-minute ceiling.
+ *
+ *  IT LIVES HERE, not in runNext.ts, for the FG-425 reason: the gate is reachable
+ *  only through this module, and this module only ever points it at a candidate
+ *  worktree. Nothing about this call touches the publication lane, the mutex, the
+ *  attempt record or the publish target — it is validation of a candidate in
+ *  isolation, exactly as `validate` above runs it, and NOTHING here publishes.
+ *
+ *  This is deliberately NOT the whole validation set: the reds and the review gate
+ *  stay at PHASE granularity, once, against the fully composed candidate (AC10). */
+export function gateOrderedPrerequisites(dir: string): ValidationResult {
+  const gate = runIntegrationGate(dir);
+  if (gate.ok) return { ok: true, output: gate.output };
+  return {
+    ok: false,
+    error: `${gate.error}\n${gate.output}`,
+    output: gate.output,
+    status: gate.status,
+    signal: gate.signal,
+    timedOut: gate.timedOut,
+  };
+}
+
 /** Idempotent finalize. Reclaims the attempt's candidate worktrees ONLY once the
  *  publication is durable — a failed or PARKED attempt keeps its trees, because
  *  they are the evidence AD-1 requires be preserved. Never throws: cleanup is not

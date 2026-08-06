@@ -546,7 +546,22 @@ test("fg621 (AC 4): a sequential task's recorded base_sha IS its predecessor's r
   assert.notEqual(verify.baseSha, build.baseSha, "and the base genuinely moved between the two steps");
 });
 
-test("fg621 (AC 4): every sibling of one fan-out wave records the SAME base", async () => {
+// FG-584 renegotiated this invariant, deliberately and in the same commit that
+// made it necessary. The rule WAS "one base per wave"; it is now:
+//
+//     ONE BASE PER CONCURRENTLY-DISPATCHED GROUP.
+//
+// The reason it had to narrow: an ordered plan item cannot import a primitive a
+// prerequisite created unless its workspace is cut from a candidate containing
+// that prerequisite's commit, so a dependent's base MUST differ from its
+// prerequisite's. What the old rule was actually protecting is untouched — two
+// items that can run at the same time still start from the same commit, because
+// resolving per-child would let a concurrent publication move the base underneath
+// a live group. An UNORDERED fan-out (this fixture, and every fan-out that
+// declares no `depends_on` edges) is exactly one group, so for it the narrowed
+// rule and the old one are the same rule and the assertion below is unchanged.
+// The ordered half is asserted in fg584-ordered-fanout.worktree.test.ts.
+test("fg621 (AC 4): every sibling of one CONCURRENTLY-DISPATCHED GROUP records the SAME base (FG-584: an unordered wave is one group)", async () => {
   armWorktreeMode();
   const repo = makeRepo();
   const { runId } = startRun({ workflow: FANOUT, title: "fg621 ac4 fanout", inputs: {}, projectDir: repo });
@@ -575,7 +590,11 @@ test("fg621 (AC 4): every sibling of one fan-out wave records the SAME base", as
   const children = tasksForRun(runId).filter((t) => t.phase === "build" && t.parentId !== undefined);
   assert.equal(children.length, 3, "three siblings ran");
   const bases = new Set(children.map((c) => c.baseSha));
-  assert.equal(bases.size, 1, `siblings must share ONE recorded base, got: ${[...bases].join(", ")}`);
+  assert.equal(
+    bases.size,
+    1,
+    `concurrently-dispatched siblings must share ONE recorded base, got: ${[...bases].join(", ")}`,
+  );
   assert.ok([...bases][0], "and it is recorded, not null");
 });
 
