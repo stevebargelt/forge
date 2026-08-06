@@ -13,8 +13,14 @@
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 // - GET /api/queue                        the operator work-queue board: five projections + dispatcher panel + capacity context (?projectKey|?projectDir, FG-591)
 //
-// All reads. No writes. Mutating actions (gate/next/retry) shell to the
-// `forge` CLI binary — wired in a later iteration; the MVP is read-only.
+// - POST /api/queue/enqueue|dequeue|rank|reorder   the operator's QUEUE PLANNING writes (FG-591)
+//
+// Every GET is a read. The four POSTs above are the ONLY mutating routes on this
+// surface, and they do not write the DB either: each shells exactly one named `forge
+// queue` verb (FORGE-DEC-015), guarded same-origin and behind a non-simple content
+// type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
+// exposed here (FG-591 D2) — that is authority to run repo-writing containers
+// unattended, and it stays CLI-only. See queue-mutation.ts.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
@@ -31,6 +37,7 @@ import { isLaunchId } from "@forge/current-activity";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
+import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -45,6 +52,27 @@ export const server = createServer((req: IncomingMessage, res: ServerResponse) =
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${HOST}:${PORT}`);
   const path = url.pathname;
+
+  // FG-591 (D1, FORGE-DEC-015): the ONLY non-GET routes on this surface. Everything
+  // else — including a CORS PREFLIGHT for these very paths — still falls through to
+  // the 405 below, and no `Access-Control-Allow-*` header is emitted anywhere on this
+  // server. That absence is what makes a cross-origin preflight fail closed, so the
+  // browser never sends the real request.
+  //
+  // The project is resolved through the dashboard's OWN registry, exactly as
+  // /api/queue resolves it, and passed as a THUNK: the registry read costs a bounded
+  // `git` evidence probe, and a request refused for being cross-origin or for
+  // carrying a forgeable content type must not pay for it (nor look, from a guard's
+  // point of view, like a route that spawned something before refusing).
+  if (req.method === "POST" && isQueueMutationPath(path)) {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    await handleQueueMutation(req, res, path, {
+      resolveOwner: () => resolveOwnerProject(projectsForDashboard(), projectKey, projectDir),
+      requestedProjectDir: projectDir,
+    });
+    return;
+  }
 
   if (req.method !== "GET") {
     res.writeHead(405, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Method not allowed" }));
@@ -503,7 +531,9 @@ server.listen(PORT, HOST, () => {
   if (!/^(127\.|::1$|localhost$)/.test(HOST)) {
     console.error(
       `forge-dashboard: bound to ${HOST}, NOT loopback. This surface has no authentication and serves ` +
-        `raw, unredacted output of host commands (/api/launches/<id>/log). Any peer that can reach ${HOST}:${PORT} can read it.`,
+        `raw, unredacted output of host commands (/api/launches/<id>/log). Any peer that can reach ${HOST}:${PORT} can read it. ` +
+        `The queue-planning POST routes (/api/queue/*) FAIL CLOSED off loopback for that reason — set ` +
+        `FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS=1 only if this dashboard is fronted by your own authentication.`,
     );
   }
 });
