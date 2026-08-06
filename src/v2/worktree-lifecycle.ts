@@ -23,6 +23,7 @@ import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
 import { createDependencyMountpoints } from "./dependency-provisioning.js";
+import { provisionWorkspaceCommitMsgHook } from "../util/commit-msg-hook.js";
 import { WORKTREES_DIR, cloneDir, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 
 // ── Branch naming ─────────────────────────────────────────────────────────────
@@ -387,6 +388,25 @@ export function createTaskClone(
       stdio: ["ignore", "ignore", "pipe"],
     });
   }
+  // FG-685: the OTHER thing a fresh clone inherits none of — the source repo's
+  // hooks. Installed at the same moment, and for the same reason, as the identity
+  // above: the substrate that took it away is what has to hand it back, before
+  // the container can reach the workspace. Provisioning then PROVES the hook will
+  // run (self-contained regular file, executable, bundled bytes, at the directory
+  // git actually consults); anything else refuses the clone by a named error
+  // rather than yielding a workspace whose guard silently never fires.
+  //
+  // THREAT MODEL (FG-685 D4), so nobody later reads more into this than it is:
+  // it defends against the DEFAULT attribution behavior of a COOPERATING agent —
+  // exactly the FG-610 failure, where a Co-Authored-By trailer reached the
+  // publish HEAD and the remedy (a history rewrite) orphaned the pipeline's
+  // task-branch lineage. It defends against nothing adversarial: `git commit
+  // --no-verify` bypasses it (the hook's own text says so) and the agent is root
+  // in its own container. This is a LAYERED MITIGATION, not a kernel-enforced
+  // boundary — the read-only parent-object mount is a boundary; this is not, and
+  // must never be described or relied on as one.
+  provisionWorkspaceCommitMsgHook(clonePath);
+
   execFileSync("git", ["checkout", "--quiet", "-b", branch, baseSha], {
     cwd: clonePath,
     stdio: ["ignore", "ignore", "pipe"],
@@ -560,9 +580,16 @@ export function captureTaskClone(
     // that exists nowhere else.
     try {
       execFileSync("git", ["add", "-A"], { cwd: clonePath, stdio: "ignore" });
+      // FG-685 D2: --no-verify. Forge is a CO-TENANT of the clone it hooked in
+      // createTaskClone, and the constraint governs AGENT-authored messages;
+      // this one is a Forge-authored fixed string. Running it through a shell
+      // script would convert any hook failure — a userland regex quirk, a
+      // missing interpreter, an agent that replaced the hook — into
+      // safety_commit_failed, which aborts capture BEFORE the branch is fetched
+      // into the parent and therefore loses the agent's work outright.
       execFileSync(
         "git",
-        [...FORGE_IDENTITY, "commit", "-m", `forge: safety-commit task ${taskId} output`],
+        [...FORGE_IDENTITY, "commit", "--no-verify", "-m", `forge: safety-commit task ${taskId} output`],
         { cwd: clonePath, stdio: ["ignore", "ignore", "pipe"] }
       );
       safetyCommitted = true;

@@ -23,7 +23,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chmodSync,
   mkdirSync,
   writeFileSync,
   existsSync,
@@ -680,8 +679,15 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
 // which returned "Already up to date." — the caller then called
 // removeWorktreeIfSafe(provenMerged=true), discarding the agent's uncommitted work.
 //
-// The pre-commit hook approach induces a deterministic commit failure. Hooks are
-// stored in the main repo's .git/hooks/ and shared across all worktrees.
+// FG-685 changed the INDUCTION, not the guard. This fixture used to install an
+// always-failing pre-commit hook; Forge's safety commit is now exempt from hooks
+// entirely (`--no-verify`, so the no-AI-attribution commit-msg hook the clone is
+// provisioned with can never turn a message quirk into lost agent work), which
+// made that device stop inducing anything. A pre-existing .git/index.lock is the
+// hook-independent replacement: `git status` still reads (so this is not a
+// status_unreadable run), and the `add -A`/`commit` pair fails deterministically.
+// What is under test is unchanged — a FAILED safety commit with changes present
+// must retain the workspace and the branch and fail the task.
 
 test("fg352 (11): auto-commit fails with changes present — ok:false, task fails, worktree and branch retained", async () => {
   setPlatform("darwin");
@@ -703,17 +709,14 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
     assert.ok(worktreePath, "stub: /project mount must be in docker args");
     writeFileSync(stderrPath, "");
 
-    // Install a pre-commit hook that always exits 1, so the host-side safety
-    // commit deterministically fails with changes present.
+    // Wedge the index so the host-side safety commit deterministically fails.
     //
-    // FG-621: the hook goes in the WORKSPACE's own .git/hooks, not the project's.
-    // A linked worktree shares its parent's hooks; a private clone is a separate
-    // repository with its own, and the safety commit runs in the workspace. The
-    // hook has to live in the repository the commit is made in, or this fixture
-    // silently stops inducing the failure it exists to induce.
-    const hookPath = join(worktreePath!, ".git", "hooks", "pre-commit");
-    writeFileSync(hookPath, "#!/bin/sh\nexit 1\n");
-    chmodSync(hookPath, 0o755);
+    // FG-621: it goes in the WORKSPACE's own .git, not the project's. A linked
+    // worktree shares its parent's; a private clone is a separate repository
+    // with its own, and the safety commit runs in the workspace. The wedge has
+    // to live in the repository the commit is made in, or this fixture silently
+    // stops inducing the failure it exists to induce.
+    writeFileSync(join(worktreePath!, ".git", "index.lock"), "");
 
     // Write agent output but do NOT commit — leaves uncommitted changes in the
     // worktree for mergeWorktreeBranch's auto-commit to discover and attempt.

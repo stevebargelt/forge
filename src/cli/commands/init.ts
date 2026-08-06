@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { writeBacklogConfig } from "../../backlog/config.js";
 import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
 import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH, currentLinkIn } from "../../util/paths.js";
+// FG-685: the bundled-hook source resolution moved to src/util so the clone
+// substrate (src/v2/worktree-lifecycle.ts) and this installer answer "where are
+// the hook bytes" the same way. What the operator's primary checkout installs is
+// unchanged — still the symlink through $FORGE_HOME/current planned below.
+import { resolveHookSource, tryResolveHookSource } from "../../util/commit-msg-hook.js";
 
 // #153: Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd)
 // write heartbeat files into ~/.forge/orchestrators/<session-id>.json so forge
@@ -327,33 +332,6 @@ function describeHookPlan(plan: HookPlan): string {
     case "not-a-git-repo":   return "skipped (not a git repo)";
     case "skipped":          return "skipped (--no-install-hooks)";
   }
-}
-
-// Candidate paths for the bundled commit-msg hook script. Same fileURLToPath
-// walk-up pattern as readTemplate (works under tsx and the built dist).
-function hookSourceCandidates(): string[] {
-  const here = dirname(fileURLToPath(import.meta.url));
-  return [
-    join(here, "..", "..", "..", "scripts", "git-hooks", "commit-msg-no-ai-attribution"),
-    join(here, "..", "..", "..", "..", "scripts", "git-hooks", "commit-msg-no-ai-attribution"),
-  ];
-}
-
-// Resolve the bundled commit-msg hook script, or undefined when it isn't found.
-// Non-throwing so callers that only need the dev source as an OPTIONAL
-// owned-target / dev-fallback can tolerate its absence (FG-582 FIX 4).
-function tryResolveHookSource(): string | undefined {
-  return hookSourceCandidates().find((c) => existsSync(c));
-}
-
-// The dev-checkout hook source, required. Only a genuine dev-arm install with no
-// resolvable source reaches this throw — the promoted arm never calls it.
-function resolveHookSource(): string {
-  const source = tryResolveHookSource();
-  if (source) return source;
-  throw new Error(
-    `commit-msg hook source not found. Looked at:\n  ${hookSourceCandidates().join("\n  ")}`
-  );
 }
 
 const BACKLOG_SUBDIRS = ["stories", "epics", "ideas", "done"] as const;
