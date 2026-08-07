@@ -38,6 +38,7 @@ import {
   OrchestratorReceiptWriteError,
   OrchestratorReceiptTransitionError,
   persistPendingOrchestratorReceipt,
+  canonicalReceiptProjectDir,
   markOrchestratorReceiptRunning,
   closeOrchestratorReceipt,
   recordOrchestratorSessionIdentity,
@@ -166,7 +167,9 @@ test("AC6/AC11: every recorded field of the pre-spawn decision round-trips, and 
     {
       receiptId: "orx-claude-1",
       sessionKey: "11111111-2222-3333-4444-555555555555",
-      projectDir: "/tmp/test-project",
+      // Invariant: receipt project_dir is the canonical physical workspace so every
+      // reader finds the same receipt; its input spelling has no operational meaning.
+      projectDir: canonicalReceiptProjectDir(CLAUDE_DECISION.projectDir),
       projectName: "test-project",
       resolvedProfile: "claude-subscription",
       runtime: "claude-code",
