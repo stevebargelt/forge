@@ -30,6 +30,31 @@ import {
   rowToLaunchObservation,
   type LaunchObservationRow,
 } from "@forge/launch-observations";
+// FG-576 step 11: the two records an interactive orchestrator has — the durable
+// receipt (what was SELECTED) and the launcher-owned liveness record (whether the
+// launcher is alive NOW) — plus the ONE parser for the remote-control URL's shape.
+// All three imported rather than reimplemented; see the FG-576 section below.
+import {
+  loadHeartbeats,
+  type InteractionState,
+  type OrchestratorSession,
+  type ProcessLiveness,
+  type RecordSource,
+  type SessionHealth,
+} from "@forge/heartbeats";
+import {
+  ORCHESTRATOR_RECEIPT_COLUMNS,
+  rowToOrchestratorReceipt,
+  type CapabilityLimitation,
+  type OrchestratorReceipt,
+  type OrchestratorReceiptRow,
+} from "@forge/orchestrator-receipts";
+import { findRemoteControlUrlInText } from "@forge/orchestrator-credential";
+// The SAME loopback predicate that gates this surface's writes. Imported, never
+// re-expressed: two definitions of "is this bind loopback" is one edit away from
+// the read half and the write half disagreeing. queue-mutation.ts's only import
+// from this module is `import type`, so nothing circular exists at runtime.
+import { guardBindAddress } from "./queue-mutation.js";
 // FG-679: the ONE shared derivation and the ONE human rendering of the launch status
 // vocabulary, imported rather than reimplemented — `statusLine` is what keeps the four
 // BD-4 facts four distinct facts on this surface too.
@@ -214,6 +239,15 @@ export type InFlightEntry = {
    *  candidate instead of ordinary running. Null for healthy/non-running tasks.
    *  Read-only: derived from a docker + result.json probe, never reconciled here. */
   reconcile: { classification: ReconcileClassification; reason: ReconcileReason } | null;
+  /** FG-576 (AC7/AC11): the interactive orchestrator this task belongs to, joined
+   *  to the launcher-owned liveness record — so a session whose launcher was
+   *  SIGKILLed stops rendering as active work. Reconciliation cannot answer this:
+   *  it probes a CONTAINER, and an interactive orchestrator has none.
+   *
+   *  Null means NO RECEIPT, which is the pre-FG-576 `forge claude` row. Absence of
+   *  a receipt is not evidence the session died, so those rows keep rendering as
+   *  they do today. Never carries a credential. */
+  orchestrator: OrchestratorLiveness | null;
 };
 
 /** Tasks currently running, awaiting gate, awaiting red, or blocked by red.
@@ -261,6 +295,12 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
       .map((c) => [c.taskId, { classification: c.classification, reason: c.reason }])
   );
 
+  // FG-576 (AC7): only orchestrator rows are looked up — every other row is
+  // container work, whose liveness is the docker probe above and not this one.
+  const orchestrators = orchestratorLivenessByTask(
+    rows.filter((r) => r.agent_role === "orchestrator").map((r) => r.id),
+  );
+
   return rows.map((r) => {
     const meta = projectPresentation(r.project_dir);
     return {
@@ -279,6 +319,7 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
       status: r.status,
       startedAt: r.started_at,
       reconcile: candidates.get(r.id) ?? null,
+      orchestrator: orchestrators.get(r.id) ?? null,
     };
   });
 }
@@ -3637,4 +3678,367 @@ function formatMs(ms: number): string {
   const minutes = Math.round(seconds / 60);
   if (minutes < 90) return `${minutes}m`;
   return `${Math.round(minutes / 60)}h`;
+}
+
+// ─── FG-576 step 11 — INTERACTIVE ORCHESTRATORS, AND THE ONE CREDENTIAL ──────
+//
+// An interactive orchestrator has TWO records and they answer DIFFERENT questions:
+//
+//   the RECEIPT   (orchestrator_receipts)  what was SELECTED, and that a spawn was
+//                                          CONFIRMED at the moment it was written.
+//   the LIVENESS  (~/.forge/orchestrators) whether the owning launcher is alive NOW,
+//                 record                   by process identity (pid + start fence).
+//
+// A surface may say RUNNING only where both agree. The receipt's own `running`
+// column is a claim about a past moment, and `forge claude` marks its task complete
+// only inside the child-exit handler — so a SIGKILL or a lost terminal leaves an
+// "active" row forever. That is the phantom-orchestrator class AC7 closes, and it
+// has to be closed on the SURFACE PROJECTION, not merely in the record file.
+//
+// `projectOrchestratorLiveness` below is the dashboard's copy of the decision
+// `forge show` renders (src/cli/commands/show.ts, projectOrchestratorReceipt).
+// Copied deliberately rather than imported: importing a CLI command module into the
+// dashboard's serving path drags the whole command graph — including the WRITABLE
+// store handle, whose open execs SCHEMA_SQL and every migration, which is exactly
+// the mutation-from-a-read the dashboard's readonly handle exists to prevent.
+// fg576-orchestrator-liveness.test.ts pins the two implementations against each
+// other over the full receipt × liveness matrix, so "copied" cannot become
+// "drifted": the dashboard and the CLI cannot disagree about whether an
+// orchestrator is live.
+//
+// ─── THE REMOTE-CONTROL URL IS A LIVE CONTROL CREDENTIAL (FG-448, D13) ───────
+//
+// Anyone holding https://claude.ai/code/session_… can drive that session. This
+// dashboard has NO AUTHENTICATION and an env-overridable bind address. So the URL:
+//
+//   * is served ONLY from the project-scoped read (`scopedOrchestratorView`), never
+//     from the cross-project projection — `projectsForDashboard()` / `listProjects()`
+//     assemble one payload spanning every project on the host, and a credential for
+//     project A must never ride in a payload built for project B. That is why there
+//     is no `url` anywhere on `OrchestratorEntry`: the prohibition is structural,
+//     not a rule someone has to remember;
+//   * is withheld entirely off a loopback bind, with NO opt-in — the write surface's
+//     FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS escape hatch is deliberately not read
+//     here (D13). Reordering a queue behind the operator's own auth is a judgement
+//     they get to make; handing a network peer control of a live session is not;
+//   * is attached only where THIS HOST can prove the session is still live, so an
+//     ended or crashed session yields nothing — never a stale credential;
+//   * is never masked client-side. Masking is not a control. The value is ABSENT
+//     from the JSON payload, so there is nothing to un-hide.
+
+/** What a SURFACE may say about a receipt. Deliberately NOT the receipt's own state
+ *  vocabulary: `running` here is a joined claim about the world, while the receipt's
+ *  `running` is a claim about the moment it was written. */
+export type OrchestratorPresentation =
+  | "running"
+  | "orphaned"
+  | "unverified"
+  | "pending"
+  | "exited"
+  | "spawn_failed"
+  | "unrecognized";
+
+export type OrchestratorLiveness = {
+  presentation: OrchestratorPresentation;
+  /** True ONLY when the owning launcher is provably alive by process identity. */
+  running: boolean;
+  /** The receipt's own state, verbatim. */
+  recordedState: string;
+  processLiveness: ProcessLiveness;
+  interaction: InteractionState;
+  /** AC7: never `healthy` without POSITIVE interaction evidence. */
+  health: SessionHealth;
+  livenessRecord: boolean;
+  livenessSources: RecordSource[];
+  interactionLastSeen: string | null;
+};
+
+/** Join a receipt to its launcher-owned liveness record. PURE — the caller supplies
+ *  the session — so the whole matrix is testable without a filesystem, and so this
+ *  can be asserted identical to `forge show`'s projection. */
+export function projectOrchestratorLiveness(
+  receipt: OrchestratorReceipt,
+  session: OrchestratorSession | undefined,
+): OrchestratorLiveness {
+  const processLiveness: ProcessLiveness = session?.processLiveness ?? "unknown";
+  const base = {
+    recordedState: receipt.state,
+    processLiveness,
+    interaction: (session?.interaction ?? "unknown") as InteractionState,
+    // AC7: with no record at all there is no interaction evidence either, so the
+    // health claim is `unknown`. Nothing on this path can produce `healthy`.
+    health: (session?.health ?? "unknown") as SessionHealth,
+    livenessRecord: session !== undefined,
+    livenessSources: session?.sources ?? [],
+    interactionLastSeen: session?.interactionLastSeen ?? null,
+  };
+
+  // A state this binary does not understand is reported verbatim, never
+  // reinterpreted as one it knows — and never as running.
+  if (!receipt.stateRecognized) return { ...base, presentation: "unrecognized", running: false };
+
+  if (!receipt.claimsRunning) {
+    const presentation: OrchestratorPresentation =
+      receipt.state === "pending" ? "pending"
+      : receipt.state === "spawn_failed" ? "spawn_failed"
+      // D17: `orphaned` asserts LAUNCHER LOSS ONLY — never "the session exited".
+      : receipt.state === "orphaned" ? "orphaned"
+      : "exited";
+    return { ...base, presentation, running: false };
+  }
+
+  // The receipt CLAIMS a confirmed spawn. Only the process fence decides whether
+  // anything is behind it now.
+  if (processLiveness === "alive") return { ...base, presentation: "running", running: true };
+  if (processLiveness === "dead") return { ...base, presentation: "orphaned", running: false };
+  // No usable fence (another host, an OS that supplied no start token, or no
+  // liveness record at all). Liveness could not be PROVEN, so it is not running.
+  return { ...base, presentation: "unverified", running: false };
+}
+
+/** One interactive orchestrator, liveness-joined, with the AC11 selection fields.
+ *
+ *  THERE IS NO `url` MEMBER AND THERE MUST NEVER BE ONE. This type is what every
+ *  projection — including cross-project ones — is allowed to carry. The credential
+ *  rides on `ScopedOrchestratorEntry`, which only the project-scoped read builds. */
+export type OrchestratorEntry = OrchestratorLiveness & {
+  receiptId: string;
+  sessionKey: string;
+  projectDir: string;
+  projectLabel: string | null;
+  projectColor: string | null;
+  checkoutName: string | null;
+  // AC11: what was selected, and why.
+  resolvedProfile: string | null;
+  runtime: string;
+  provider: string;
+  model: string | null;
+  authMode: string | null;
+  adapter: string;
+  resolvedBy: string | null;
+  sessionOperation: string;
+  sessionTarget: string | null;
+  identityStrength: string;
+  identityBasis: string | null;
+  carrierAcceptance: string;
+  carrierGeneration: string | null;
+  /** AC12: recorded limitations are SHOWN, never omitted and never invented. */
+  limitations: CapabilityLimitation[];
+  taskId: string | null;
+  startedAt: string | null;
+};
+
+/** Read receipts through the dashboard's OWN read-only handle, reusing the store
+ *  module's exported column list and row decoder so the two cannot drift.
+ *
+ *  A store written by a peer that predates the table answers "no receipts" — the
+ *  TRUE answer for it. The read-only open never migrates a store into existence
+ *  (db.ts's policy), so the query names a missing table rather than creating one. */
+function readOrchestratorReceipts(where: string, params: unknown[]): OrchestratorReceipt[] {
+  try {
+    const rows = db()
+      .prepare(`SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts ${where}`)
+      .all(...params) as OrchestratorReceiptRow[];
+    return rows.map(rowToOrchestratorReceipt);
+  } catch {
+    return [];
+  }
+}
+
+// The liveness read walks ~/.forge/orchestrators and probes a process identity per
+// record. Both are cheap and the record count is the number of live sessions, but
+// this is a POLLED surface, so it is held for a beat. Deliberately far shorter than
+// PROJECT_CACHE_MS: a crashed orchestrator must stop reading as live promptly, and
+// the whole point of this projection is that it goes stale honestly and fast.
+const ORCHESTRATOR_LIVENESS_CACHE_MS = 1_500;
+let livenessCache: { at: number; sessions: Map<string, OrchestratorSession> } | null = null;
+
+function cachedOrchestratorSessions(): Map<string, OrchestratorSession> {
+  const now = Date.now();
+  if (livenessCache && now - livenessCache.at < ORCHESTRATOR_LIVENESS_CACHE_MS) return livenessCache.sessions;
+  // Never gcStale: the dashboard is a READER. Deleting a launcher record here would
+  // erase the very evidence that a launcher died.
+  const sessions = new Map(loadHeartbeats().map((session) => [session.sessionId, session] as const));
+  livenessCache = { at: now, sessions };
+  return sessions;
+}
+
+export type OrchestratorReadOptions = {
+  /** Injected by tests so the receipt × liveness matrix can be exercised without
+   *  a real ~/.forge/orchestrators. Production always reads the real records. */
+  sessions?: Map<string, OrchestratorSession> | undefined;
+};
+
+/** The interactive orchestrators that have not reached a terminal state, joined to
+ *  their liveness records. A CLOSED receipt is not here at all, which is what makes
+ *  "after a receipt closes it is absent from every subsequent response" structural.
+ *
+ *  Never carries a credential — see the type's own comment. */
+export function orchestratorEntries(scope: ProjectScope, opts: OrchestratorReadOptions = {}): OrchestratorEntry[] {
+  const project = scopeSql("project_dir", scope);
+  const receipts = readOrchestratorReceipts(
+    `WHERE state NOT IN ('exited', 'spawn_failed', 'orphaned') ${project.clause}
+      ORDER BY created_at DESC, receipt_id DESC LIMIT 200`,
+    project.params,
+  );
+  const sessions = opts.sessions ?? cachedOrchestratorSessions();
+  return receipts.map((receipt) => {
+    const meta = projectPresentation(receipt.projectDir);
+    return {
+      ...projectOrchestratorLiveness(receipt, sessions.get(receipt.sessionKey)),
+      receiptId: receipt.receiptId,
+      sessionKey: receipt.sessionKey,
+      projectDir: receipt.projectDir,
+      projectLabel: meta?.label ?? receipt.projectName ?? null,
+      projectColor: meta?.color ?? null,
+      checkoutName: receipt.projectDir ? basename(receipt.projectDir) : null,
+      resolvedProfile: receipt.resolvedProfile,
+      runtime: receipt.runtime,
+      provider: receipt.provider,
+      model: receipt.model,
+      authMode: receipt.authMode,
+      adapter: receipt.adapter,
+      resolvedBy: receipt.resolvedBy,
+      sessionOperation: receipt.sessionOperation,
+      sessionTarget: receipt.sessionTarget,
+      identityStrength: receipt.identityStrength,
+      identityBasis: receipt.identityBasis,
+      carrierAcceptance: receipt.carrier.acceptance,
+      carrierGeneration: receipt.carrier.generation,
+      limitations: receipt.limitations,
+      taskId: receipt.taskId,
+      startedAt: receipt.startedAt,
+    };
+  });
+}
+
+/** The liveness answer for each of these forge task ids, where one has an
+ *  interactive orchestrator receipt bound to it. Absent from the map means NO
+ *  receipt — a pre-FG-576 `forge claude` row — which is not evidence the session
+ *  died, so callers must leave those rows exactly as they render today. */
+export function orchestratorLivenessByTask(
+  taskIds: readonly string[],
+  opts: OrchestratorReadOptions = {},
+): Map<string, OrchestratorLiveness> {
+  const out = new Map<string, OrchestratorLiveness>();
+  if (taskIds.length === 0) return out;
+  const receipts = readOrchestratorReceipts(
+    `WHERE task_id IN (${taskIds.map(() => "?").join(",")}) ORDER BY created_at ASC, receipt_id ASC`,
+    [...taskIds],
+  );
+  const sessions = opts.sessions ?? cachedOrchestratorSessions();
+  for (const receipt of receipts) {
+    if (!receipt.taskId) continue;
+    // ASC + overwrite: the NEWEST receipt for a task wins, so a relaunch under the
+    // same task is judged by its current session, not its first one.
+    out.set(receipt.taskId, projectOrchestratorLiveness(receipt, sessions.get(receipt.sessionKey)));
+  }
+  return out;
+}
+
+// ─── the credential ─────────────────────────────────────────────────────────
+
+/** Written by the launcher (src/orchestrator/claude-session-state.ts). Matched
+ *  exactly: a file that does not declare itself one of these is not read. */
+const REMOTE_CONTROL_LINK_KIND = "forge-orchestrator-remote-control";
+
+/** Same shape src/util/paths.ts's orchestratorRemoteControlDir() derives, resolved
+ *  through the dashboard's OWN forgeHome() for the FG-616 reason every other path
+ *  here is: a module-eval snapshot binds whichever FORGE_HOME happened to be set at
+ *  import time, which for a long-running server is not necessarily its own. */
+function remoteControlDir(): string {
+  return join(forgeHome(), "orchestrators", "remote-control");
+}
+
+/** D13. Non-null is the REASON the credential is withheld; null means it may be
+ *  served. The loopback test is `guardBindAddress`'s — one definition — but the
+ *  write surface's opt-out is stripped before it is asked, because this ticket
+ *  builds no opt-in for exposing a live control credential off loopback. */
+export function remoteControlWithheldReason(env: NodeJS.ProcessEnv = process.env): string | null {
+  const withoutMutationOptOut = { ...env };
+  delete withoutMutationOptOut["FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS"];
+  if (guardBindAddress(withoutMutationOptOut) === null) return null;
+  const host = env["HOST"] ?? "127.0.0.1";
+  return (
+    `this dashboard is bound to ${host}, not loopback. The remote-control URL is a LIVE SESSION CONTROL ` +
+    `credential and this surface has no authentication, so it is never included in a response off loopback. ` +
+    `There is no opt-in: bind to 127.0.0.1 to see it.`
+  );
+}
+
+/**
+ * The credential for ONE live orchestrator, or nothing.
+ *
+ * "Or nothing" covers every doubt, and each condition is POSITIVE evidence rather
+ * than the absence of a problem:
+ *   - the session is provably live on THIS host (the fence, not the receipt column);
+ *   - the file is addressed by the receipt's own canonical session key, so it can
+ *     never be an unrelated session's credential;
+ *   - the file names THIS receipt and THIS project, so a leftover from a previous
+ *     session on the same key is refused rather than served;
+ *   - the value is a remote-control URL by the launcher's own parser, so a
+ *     hand-edited file cannot put an arbitrary link into the operator's page.
+ */
+function remoteControlUrlFor(entry: OrchestratorEntry): string | null {
+  if (!entry.running) return null;
+  // The same charset the liveness namespace enforces on a session id: this becomes
+  // a path segment, and `..` or a separator must never reach one.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.sessionKey)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(remoteControlDir(), `${entry.sessionKey}.json`), "utf8"));
+  } catch {
+    // No file, an unreadable one, malformed JSON: no link and NO failure.
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  if (record["kind"] !== REMOTE_CONTROL_LINK_KIND) return null;
+  if (record["receiptId"] !== entry.receiptId) return null;
+  if (record["projectDir"] !== entry.projectDir) return null;
+  const url = record["url"];
+  if (typeof url !== "string" || findRemoteControlUrlInText(url) !== url) return null;
+  return url;
+}
+
+/** An OrchestratorEntry that MAY carry the credential. Only `scopedOrchestratorView`
+ *  produces one, and `remoteControlUrl` is absent — not null, not masked — whenever
+ *  the credential is withheld. */
+export type ScopedOrchestratorEntry = OrchestratorEntry & { remoteControlUrl?: string };
+
+export type OrchestratorScopeView = {
+  orchestrators: ScopedOrchestratorEntry[];
+  /** AC7: only sessions whose launcher is provably alive. A crashed interactive
+   *  orchestrator is listed (its receipt is evidence) but is not counted active. */
+  activeCount: number;
+  remoteControl: { available: boolean; withheldReason: string | null };
+};
+
+/**
+ * The PROJECT-SCOPED orchestrator read — the only place a remote-control URL is
+ * ever attached to a payload.
+ *
+ * An undefined scope answers EMPTY rather than "every project": an unscoped
+ * credential read is precisely the cross-project leak FG-448 forbids, so the caller
+ * has to have resolved a project first. Off loopback the rows still render (the
+ * operator can still see WHAT is running and why) and every `remoteControlUrl` is
+ * simply absent — no link, no error, HTTP 200.
+ */
+export function scopedOrchestratorView(
+  scope: ProjectScope,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: OrchestratorReadOptions = {},
+): OrchestratorScopeView {
+  const withheldReason = remoteControlWithheldReason(env);
+  const entries = scope === undefined ? [] : orchestratorEntries(scope, opts);
+  const orchestrators: ScopedOrchestratorEntry[] = entries.map((entry) => {
+    if (withheldReason !== null) return entry;
+    const url = remoteControlUrlFor(entry);
+    return url === null ? entry : { ...entry, remoteControlUrl: url };
+  });
+  return {
+    orchestrators,
+    activeCount: orchestrators.filter((entry) => entry.running).length,
+    remoteControl: { available: withheldReason === null, withheldReason },
+  };
 }

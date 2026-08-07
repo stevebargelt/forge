@@ -19,6 +19,8 @@
       "@forge/projects": ["../src/util/projects.ts"],
       "@forge/repository-identity": ["../src/util/repository-identity.ts"],
       "@forge/heartbeats": ["../src/util/orchestrator-heartbeats.ts"],
+      "@forge/orchestrator-receipts": ["../src/store/orchestrator-receipts.ts"],
+      "@forge/orchestrator-credential": ["../src/orchestrator/claude-session-state.ts"],
       "@forge/governance": ["../src/raci/governance.ts"],
       "@forge/reconcile-candidate": ["../src/ops/reconcile-candidate.ts"],
       "@forge/backlog": ["../src/backlog/structured.ts"],

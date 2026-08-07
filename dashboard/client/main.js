@@ -93,6 +93,10 @@ function App() {
   // FG-679: the three-section Current activity projection. Read-only, and read from
   // PERSISTED state only — the server makes no outbound call to answer it.
   const [activity, setActivity] = useState(null);
+  // FG-576: the project-scoped orchestrator read. Null until a project is selected —
+  // /api/orchestrators has no cross-project form, because it is the one route that
+  // can carry a live remote-control credential.
+  const [orchestrators, setOrchestrators] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -103,16 +107,21 @@ function App() {
         fetch(`/api/verifications/in-progress${q}`),
         fetch(`/api/review-loop/phases${q}`),
         fetch(`/api/current-activity${q}`),
+        // Only asked for with a project in hand: the route refuses an unscoped
+        // request, and asking anyway would be building the cross-project habit the
+        // credential rule exists to prevent.
+        projectFilter ? fetch(`/api/orchestrators${q}`) : Promise.resolve(null),
       ];
       // Only poll /api/projects on the projects view (or first load) — saves a
       // filesystem scan every 2s once the registry is populated.
       if (view === "projects" || projects.length === 0) reqs.push(fetch("/api/projects"));
-      const [feedRes, ifRes, ivRes, phasesRes, activityRes, projRes] = await Promise.all(reqs);
+      const [feedRes, ifRes, ivRes, phasesRes, activityRes, orchRes, projRes] = await Promise.all(reqs);
       if (feedRes?.ok) setFeed(await feedRes.json());
       if (ifRes.ok) setInFlight(await ifRes.json());
       if (ivRes && ivRes.ok) setInProgressVerifications(await ivRes.json());
       if (phasesRes && phasesRes.ok) setReviewLoopPhases(await phasesRes.json());
       if (activityRes && activityRes.ok) setActivity(await activityRes.json());
+      setOrchestrators(orchRes && orchRes.ok ? await orchRes.json() : null);
       if (projRes && projRes.ok) setProjects(await projRes.json());
       setError(null);
       setNow(Date.now());
@@ -511,6 +520,8 @@ function App() {
           />`
         : html`
           <${CurrentActivitySection} activity=${activity} now=${now} onTaskClick=${(id) => setSelectedTaskId(id)} />
+
+          <${OrchestratorSection} data=${orchestrators} onTaskClick=${(id) => setSelectedTaskId(id)} />
 
           <${InFlightSection}
             inFlight=${inFlight}
@@ -1501,9 +1512,115 @@ function RequiredCiRow({ observation }) {
   `;
 }
 
+// FG-576 (AC7/AC11) — the project-scoped interactive orchestrator panel.
+//
+// Each row is a receipt JOINED to the launcher-owned liveness record, so it says
+// what policy selected AND whether that session is actually alive. The
+// remote-control link is rendered ONLY from `remoteControlUrl` on this scoped
+// payload. When the field is absent — off a loopback bind (D13), no URL captured
+// yet, or a session this host cannot prove is live — nothing is rendered. Not an
+// error, not a placeholder, not a masked value: masking is not a control, and the
+// value genuinely is not in the payload to unmask.
+function OrchestratorSection({ data, onTaskClick }) {
+  const rows = Array.isArray(data?.orchestrators) ? data.orchestrators : [];
+  if (rows.length === 0) return null;
+  const active = rows.filter((r) => r.running).length;
+  return html`
+    <section class="in-flight" aria-labelledby="orchestrator-sessions-heading">
+      <h2 id="orchestrator-sessions-heading">
+        Interactive orchestrators
+        <span class="muted mono" style="font-size: 12px; font-weight: 400;">
+          ${" "}${active} live${rows.length > active ? ` · ${rows.length - active} not live` : ""}
+        </span>
+      </h2>
+      ${rows.map((r) => html`<${OrchestratorRow} key=${r.receiptId} entry=${r} onTaskClick=${onTaskClick} />`)}
+    </section>
+  `;
+}
+
+// The presentation vocabulary is its OWN vocabulary (running / orphaned /
+// unverified / pending / …), not a task status — so it borrows the badge class
+// whose colour already means the same thing rather than inventing a status value.
+const ORCH_BADGE_CLASS = {
+  running: "status-running",
+  orphaned: "launch-state-owner_gone",
+  unverified: "launch-state-unknown",
+  pending: "status-pending",
+  exited: "launch-state-exited_ok",
+  spawn_failed: "status-failed",
+  unrecognized: "launch-state-unknown",
+};
+
+const ORCH_BADGE_TITLE = {
+  running: "the launcher is provably alive by process identity",
+  orphaned: "the launcher is provably gone — this asserts launcher loss only, not that the session exited",
+  unverified: "liveness could not be proven from this host, so it is not reported as running",
+  pending: "recorded before spawn; no session was ever confirmed under it",
+  exited: "the child exited",
+  spawn_failed: "the child never started",
+  unrecognized: "recorded by a newer forge; reported verbatim rather than reinterpreted",
+};
+
+function OrchestratorRow({ entry, onTaskClick }) {
+  const badgeClass = ORCH_BADGE_CLASS[entry.presentation] || "launch-state-unknown";
+  const onClick = entry.taskId ? () => onTaskClick(entry.taskId) : undefined;
+  return html`
+    <div class=${"item" + (entry.running ? "" : " item-muted")} onClick=${onClick}>
+      <span class=${"badge " + badgeClass} title=${ORCH_BADGE_TITLE[entry.presentation] || ""}>${entry.presentation}</span>
+      <div>
+        <div>
+          <${ProjectChip} entry=${entry} />
+          <strong>${entry.provider}</strong>
+          <span class="model-badge">${entry.model || "—"}</span>
+          ${entry.remoteControlUrl
+            // Borrowing .project-github's external-link pill so this reads like every
+            // other outbound link on the surface. The explicit margin is here rather
+            // than in the stylesheet because the pill's own margin-left:auto is a
+            // flex-container rule and this row is not one.
+            ? html`<a
+                class="orch-remote-control project-github"
+                style="margin-left: 8px;"
+                href=${entry.remoteControlUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+                title="Open this session's remote control. Anyone with this link can drive the session."
+                onClick=${(e) => e.stopPropagation()}
+              >remote control ↗</a>`
+            : null}
+        </div>
+        <div class="faint mono" style="font-size: 11px;">
+          ${entry.resolvedProfile || "—"} · ${entry.runtime} · ${entry.adapter}
+          ${entry.resolvedBy ? ` · via ${entry.resolvedBy}` : ""}
+          ${entry.authMode ? ` · auth ${entry.authMode}` : ""}
+          ${" · "}${entry.sessionOperation}${entry.sessionTarget ? ` ${entry.sessionTarget}` : ""}
+          ${" · identity "}${entry.identityStrength}
+          ${" · interaction "}${entry.interaction}
+        </div>
+        ${(entry.limitations || []).map((l) => html`
+          <div key=${l.capability} class="faint mono" style="font-size: 11px;">
+            no ${l.capability}: ${l.note}
+          </div>
+        `)}
+      </div>
+      <div class="muted mono" style="font-size: 11px;" title=${entry.receiptId}>
+        ${entry.startedAt ? formatRelativeTime(entry.startedAt) : "—"}
+      </div>
+    </div>
+  `;
+}
+
 function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
   const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
+  // FG-576 (AC7): "N orchestrators active" counts LIVENESS, not a DB row. A task
+  // row whose receipt says the launcher is gone stops being counted — that row is
+  // the phantom this ticket closes, and it is never reconciled away by the docker
+  // probe because an interactive orchestrator has no container to probe.
+  //
+  // A row with NO receipt (`task.orchestrator === null`) is a pre-FG-576 launch and
+  // still counts: absence of a receipt is not evidence the session died.
+  const activeOrchestrators = orchestrators.filter((t) => !t.orchestrator || t.orchestrator.running);
+  const notLiveOrchestrators = orchestrators.length - activeOrchestrators.length;
 
   // FG-487: /api/review-loop/phases' "reviewing"/"fixing" phase vocabulary,
   // keyed by runId, so a review-loop task row can show it explicitly instead
@@ -1519,7 +1636,7 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   const knownRunIds = new Set(inFlight.map((t) => t.runId));
   const standalone = (verifications || []).filter((v) => !v.runId || !knownRunIds.has(v.runId));
 
-  const nothingLive = work.length === 0 && orchestrators.length === 0 && standalone.length === 0;
+  const nothingLive = work.length === 0 && activeOrchestrators.length === 0 && standalone.length === 0;
 
   return html`
     <section class="in-flight" aria-labelledby=${labelledBy || undefined}>
@@ -1528,7 +1645,12 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
         <div class="orch-group">
           <div class="orch-header" onClick=${onToggleOrch}>
             <span class="orch-chevron ${orchCollapsed ? "" : "open"}">▸</span>
-            <span class="orch-summary">${orchestrators.length} orchestrator${orchestrators.length === 1 ? "" : "s"} active</span>
+            <span class="orch-summary">${activeOrchestrators.length} orchestrator${activeOrchestrators.length === 1 ? "" : "s"} active</span>
+            ${notLiveOrchestrators > 0
+              ? html`<span class="muted mono" style="font-size: 11px;" title="the launcher for these sessions is provably gone; the row is retained as evidence, not counted as active">
+                  ${" · "}${notLiveOrchestrators} not live
+                </span>`
+              : null}
           </div>
           ${!orchCollapsed ? orchestrators.map((t) => html`
             <${InFlightItem} key=${t.taskId} task=${t} muted onClick=${() => onTaskClick(t.taskId)} />
@@ -1588,7 +1710,15 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
   // generic status text ("running").
   return html`
     <div class=${"item" + (muted ? " item-muted" : "")} onClick=${onClick}>
-      ${task.reconcile
+      ${task.orchestrator && !task.orchestrator.running
+        // FG-576 (AC7): the task row still says `running`, but the launcher-owned
+        // liveness record says otherwise, and the record is what decides. Badge the
+        // joined answer rather than the stale status.
+        ? html`<span
+            class=${"badge " + (ORCH_BADGE_CLASS[task.orchestrator.presentation] || "launch-state-unknown")}
+            title=${ORCH_BADGE_TITLE[task.orchestrator.presentation] || ""}
+          >${task.orchestrator.presentation}</span>`
+        : task.reconcile
         ? html`<span class="badge status-reconcile_candidate" title=${reconcileTitle}>reconcile candidate</span>`
         : reviewLoopPhase
         ? html`<span class="badge status-${task.status}" title=${"review-loop phase: " + reviewLoopPhase}>${reviewLoopPhase}</span>`
