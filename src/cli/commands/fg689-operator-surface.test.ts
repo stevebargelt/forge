@@ -69,6 +69,7 @@ const DERIVATION: ShardDerivation = {
   renderingId: REVIEW_DIFF_RENDERING_ID,
   budget: DEFAULT_SHARD_BUDGET,
   unit: SHARD_BUDGET_UNIT,
+  envelopes: {},
   budgetValidatedRuntime: "unvalidated",
   scopesDigest: "scopes689ops",
 };
@@ -188,11 +189,18 @@ test("FG-689: `forge review show` renders the shard plan as expected-vs-delivere
   assert.match(out, /Shard plan \(expected vs delivered\):/);
   assert.match(out, new RegExp(`partition:\\s+${DIGEST}`));
   assert.match(out, new RegExp(`derivation:\\s+base689ops\\.\\.${CONF} rendered by `));
+  // FG-689 RF-1: the budget bounds the COMPOSED input, so the line says so. Reading it as a
+  // diff allowance is the misreading that shipped the defect — the dogfood's largest shard was
+  // 593,919 bytes of diff under a 600,000 budget, with the envelope on top of it, unmeasured.
   assert.match(
     out,
-    new RegExp(`shard budget:\\s+${DEFAULT_SHARD_BUDGET} ${SHARD_BUDGET_UNIT} per shard \\(validated against: unvalidated\\)`),
-    "the budget must travel with its UNIT and the runtime it was validated against (D10/D4)",
+    new RegExp(
+      `shard budget:\\s+${DEFAULT_SHARD_BUDGET} ${SHARD_BUDGET_UNIT} per COMPOSED input \\(diff \\+ dispatch envelope\\)`,
+    ),
+    "the budget must travel with its UNIT and say what it bounds (D10/D4)",
   );
+  assert.match(out, /validated against:\s+unvalidated/, "and with the runtime a real dispatch proved it against");
+  assert.match(out, /envelope reserve:\s+/, "and what was reserved out of it, per lens");
   assert.match(out, /fan-out width:\s+4/);
 
   assert.match(out, /wide: 2 shard\(s\) planned, 1 delivered/);

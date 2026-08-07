@@ -46,6 +46,7 @@ function plan(over: Partial<ShardPlan> = {}): ShardPlan {
       renderingId: "fg689-pinned-v1",
       budget: 600_000,
       unit: "characters",
+      envelopes: {},
       budgetValidatedRuntime: "claude-oauth",
       scopesDigest: "sha256:scopes",
     },

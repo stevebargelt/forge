@@ -211,7 +211,25 @@ export type ShardDerivation = {
   renderingId: string;
   budget: number;
   unit: string;
+  /** FG-689 RF-1: per lens, the host's own measurement — in `unit` — of everything the
+   *  dispatch seam composes AROUND a shard's diff (contract JSON, path list, output contract,
+   *  fixed instructions). The packer's allowance is `budget - envelopes[lens]`, because the
+   *  budget has to bound the input a reviewer RECEIVES and the diff is only part of it.
+   *
+   *  It is a recorded DERIVATION input and it is digested, for exactly the reason `renderingId`
+   *  is: it determines where the cuts fall. Editing the reviewer prompt changes this number,
+   *  which re-partitions — and a re-partition that did not move the digest would leave every
+   *  shard-scoped decision silently honored against a partition that no longer exists (D17). */
+  envelopes: Record<string, number>;
+  /** The runtime a REAL dispatch proved this budget against, or `unvalidated` until one has.
+   *  Written by OBSERVATION (`recordShardBudgetValidation`) from the manifest of a dispatch
+   *  that actually delivered a composed input at this budget and came back — never by hand,
+   *  because a runtime name nobody measured is exactly the untested number D4 forbids. */
   budgetValidatedRuntime: string;
+  /** The largest COMPOSED input, in `unit`, that validation actually delivered — diff plus
+   *  the envelope the dispatch seam wrapped around it. The runtime name alone says a dispatch
+   *  happened; this says how close to the budget it came. Absent until validated. */
+  budgetValidatedChars?: number;
   scopesDigest: string;
 };
 
@@ -756,6 +774,67 @@ export function recordShardPlan(
   });
 
   return { review: getReview(reviewId) as Review, ...result };
+}
+
+/** FG-689 D10 / RF-1: RECORD THAT A REAL DISPATCH PROVED THIS BUDGET, and against what.
+ *
+ *  A plan used to be dispatched — and rendered to the operator — carrying "validated against:
+ *  unvalidated" long after real containers had received real composed inputs at that budget.
+ *  The claim the budget is supposed to carry is empirical, so it is written from an
+ *  OBSERVATION: `runtime` is read back off the manifest of a dispatch that completed, and
+ *  `composedChars` is the host's measurement of the bytes it actually assembled for it.
+ *
+ *  It is bound to `digest`, and a plan whose digest has moved on is left alone: a validation
+ *  is evidence about the partition it was collected under, and silently stamping it onto a
+ *  re-partition would be the untested-number failure again by another route.
+ *
+ *  It is MONOTONE in `composedChars` — the largest composed input a runtime actually took is
+ *  the interesting number, so a later, smaller dispatch never walks the evidence back. And it
+ *  moves NO digest: `shardPlanDigest` deliberately excludes both fields, so recording a
+ *  validation supersedes no operator decision (D17). */
+export function recordShardBudgetValidation(
+  reviewId: string,
+  validation: { digest: string; runtime: string; composedChars: number },
+): Review {
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) throw new Error(`forge: no review ${reviewId}`);
+    const plan = fresh.shardPlan;
+    if (plan === undefined || plan.digest !== validation.digest) return;
+    if (validation.runtime === "" || !Number.isFinite(validation.composedChars)) return;
+
+    const already = plan.derivation.budgetValidatedRuntime === validation.runtime;
+    const recorded = plan.derivation.budgetValidatedChars ?? 0;
+    if (already && recorded >= validation.composedChars) return;
+
+    const next: ShardPlan = {
+      ...plan,
+      derivation: {
+        ...plan.derivation,
+        budgetValidatedRuntime: validation.runtime,
+        budgetValidatedChars: Math.max(recorded, validation.composedChars),
+      },
+    };
+    const at = nowIso();
+    getDb()
+      .prepare(`UPDATE reviews SET shard_plan_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(next), at, reviewId);
+    logEvent("review.shard_budget_validated", {
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
+      payload: {
+        reviewId,
+        digest: plan.digest,
+        budget: plan.derivation.budget,
+        unit: plan.derivation.unit,
+        runtime: validation.runtime,
+        composedChars: next.derivation.budgetValidatedChars,
+        supersedes: plan.derivation.budgetValidatedRuntime,
+      },
+    });
+  });
+
+  return getReview(reviewId) as Review;
 }
 
 // ─── lens acceptance (FG-640) ───────────────────────────────────────────────

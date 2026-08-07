@@ -165,6 +165,9 @@ function harness(opts: {
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "green" }),
     reviewDiff: () => rendering(opts.files),
     ...(opts.budget !== undefined ? { shardBudget: opts.budget } : {}),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: async (ctx) => {
       if (calls.length === 0) planAtFirst = getReview(REVIEW)?.shardPlan;
@@ -470,10 +473,57 @@ test("FG-689 D10: the recorded derivation carries the budget WITH its unit and t
   const d = getReview(REVIEW)!.shardPlan!.derivation;
   assert.equal(d.budget, DEFAULT_SHARD_BUDGET, "the configured default, not one derived from a provider cap");
   assert.equal(d.unit, "utf8_bytes", "600,000 read as tokens is a 4x overshoot straight back into the crash");
-  assert.equal(d.budgetValidatedRuntime, "unvalidated", "and it says plainly that no real dispatch has proven it yet");
+  // RF-1: this harness's seam reports no runtime, so nothing is claimed. `unvalidated` is not
+  // a placeholder waiting to be hand-edited into a runtime name — a value nobody observed is
+  // exactly the untested number D4 forbids, so the absence of evidence stays visible.
+  assert.equal(d.budgetValidatedRuntime, "unvalidated", "a dispatch that reports no runtime validates nothing");
+  assert.equal(d.budgetValidatedChars, undefined);
   assert.equal(d.baseSha, BASE);
   assert.equal(d.candidateSha, CONF);
   assert.equal(d.renderingId, REVIEW_DIFF_RENDERING_ID, "the partition names the pinned flag set it was cut under");
+});
+
+test("FG-689 D10 / RF-1: a real dispatch RECORDS the runtime that took it, and the largest composed input", async () => {
+  parkAtDiscovery();
+  const h = harness({ files: [fileOf("src/v2/review-run.ts", SMALL), fileOf("src/store/reviews.ts", SMALL)] });
+  // A seam that reports what it sent and what took it — which is what the real wiring reads
+  // off the dispatched task's manifest.
+  const seen: number[] = [];
+  const deps: CoordinatorDeps = {
+    ...h.deps,
+    dispatchLens: async (ctx) => {
+      const composedChars = 400_000 + seen.length;
+      seen.push(composedChars);
+      const base = await h.deps.dispatchLens(ctx);
+      return { ...base, runtime: "claude-oauth", composedChars };
+    },
+  };
+  assert.equal((await runNextStage(REVIEW, deps)).status, "advanced");
+
+  const d = getReview(REVIEW)!.shardPlan!.derivation;
+  assert.equal(d.budgetValidatedRuntime, "claude-oauth", "no longer shipping `unvalidated` after real containers ran");
+  assert.equal(
+    d.budgetValidatedChars,
+    Math.max(...seen),
+    "the LARGEST composed input a container actually accepted is what the budget is proven by",
+  );
+  assert.ok((d.budgetValidatedChars as number) <= d.budget, "and the proof is inside the budget it validates");
+});
+
+test("FG-689 RF-1: a dispatch that FAILED validates nothing — a crash is not evidence the input fit", async () => {
+  parkAtDiscovery();
+  const h = harness({
+    files: [fileOf("src/v2/review-run.ts", SMALL), fileOf("src/store/reviews.ts", SMALL)],
+    lens: () => ({ ok: false }),
+  });
+  const deps: CoordinatorDeps = {
+    ...h.deps,
+    dispatchLens: async (ctx) => ({ ...(await h.deps.dispatchLens(ctx)), runtime: "claude-oauth", composedChars: 1 }),
+  };
+  await runNextStage(REVIEW, deps);
+
+  const d = getReview(REVIEW)!.shardPlan!.derivation;
+  assert.equal(d.budgetValidatedRuntime, "unvalidated");
 });
 
 test("FG-689: a rendering refusal dispatches NOTHING and records no plan", async () => {

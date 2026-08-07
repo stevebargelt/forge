@@ -61,6 +61,7 @@ function planOf(...lenses: string[]): ShardPlan {
       renderingId: "review-diff-fixture",
       budget: 600_000,
       unit: "utf8_bytes",
+      envelopes: {},
       budgetValidatedRuntime: "unvalidated",
       scopesDigest: "scopes-fixture",
     },

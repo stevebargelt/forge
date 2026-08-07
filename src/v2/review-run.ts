@@ -42,6 +42,7 @@ import {
   mergeLensOutcomesByShard,
   recordLensSkipped,
   recordShardPlan,
+  recordShardBudgetValidation,
   invalidateResolutionsForCandidate,
   recordAgentProtocol,
   pendingDocsDispatch,
@@ -102,7 +103,7 @@ import {
   resolveScopes,
   scopesDigestOf,
 } from "./review-shards.js";
-import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult } from "./review-diff.js";
+import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult, ReviewDiffSizeUnit } from "./review-diff.js";
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck } from "./review-recheck.js";
@@ -127,11 +128,23 @@ export type LensContext = {
   shard: ShardIdentity;
   /** The paths this shard covers, in the plan's order. */
   paths: string[];
-  /** Those paths' rendered bodies, joined in order — the reviewer's whole input. */
+  /** Those paths' rendered bodies, joined in order. NOT the reviewer's whole input — the
+   *  seam composes an envelope around it, and `budget` bounds the two TOGETHER. */
   diff: string;
   /** The partition identity the shard was cut under. */
   derivationDigest: string;
+  /** FG-689 RF-1: the shard budget this partition was cut under, and its unit, carried to the
+   *  seam that ASSEMBLES the input so the seam can measure what it is about to send against
+   *  it. Without this the budget bounded the diff bytes and nothing bounded the prompt. */
+  budget: number;
+  unit: ReviewDiffSizeUnit;
 };
+
+/** What `measureLensEnvelope` is asked about: one lens's whole owned scope, before it has
+ *  been cut into shards. Deliberately `LensContext` minus everything that is per-SHARD — the
+ *  measurement is an upper bound over all of this lens's shards, so it cannot depend on which
+ *  one it is, and the type says so. */
+export type LensEnvelopeContext = Omit<LensContext, "diff" | "shard" | "derivationDigest" | "budget" | "unit">;
 
 // No envelope field: the envelope is rendered from the batch ROW at materialization and
 // re-derived from the row to verify the delivered bytes (renderFixBatchEnvelope). Carrying a
@@ -280,6 +293,16 @@ export type CoordinatorDeps = {
   /** The contract confirmation proposal. The default wiring confirms unchanged; a
    *  coordinator that observed drift supplies a widening claim or names the drift. */
   proposeContract: (ctx: { review: Review; candidateSha: string; changedPaths: string[] }) => Awaitable<ContractProposal>;
+  /** FG-689 RF-1: the host's own measurement, in `SHARD_BUDGET_UNIT`, of everything the
+   *  dispatch seam composes AROUND one of this lens's shards — contract JSON, path list,
+   *  output contract, fixed instructions. `planShards` reserves it out of the budget so the
+   *  budget bounds the reviewer's actual input rather than only the diff inside it.
+   *
+   *  It is a DEP rather than a constant here because the coordinator must not know the
+   *  prompt's text: the module that composes the prompt is the only one that can measure it
+   *  without a second rendering to drift from the one that ships. It must be an upper bound
+   *  over every shard the lens is cut into — the plan is packed against it. */
+  measureLensEnvelope: (ctx: LensEnvelopeContext) => number;
   dispatchLens: (ctx: LensContext) => Awaitable<LensDispatch>;
   materializeFixBatch: (ctx: FixerContext) => Awaitable<string>;
   /** LOAD-BEARING CONTRACT on taskId: the empty string means "refused BEFORE any container
@@ -805,15 +828,35 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
     };
   }
 
-  // (c) THE PARTITION'S INPUTS, recorded whole — `digest` is a sha over exactly these, so any
+  // (c) WHAT THE HOST WILL WRAP AROUND EACH LENS'S DIFF, measured by the seam that composes
+  // it. The budget bounds the input a reviewer RECEIVES; the diff is only part of that, so the
+  // envelope is reserved out of the budget before anything is packed (RF-1). Measured per lens
+  // because the path list and the whole-vs-sharded wording differ per lens, and over the lens's
+  // ENTIRE owned scope because a shard's own paths are always a subset of it.
+  const envelopes: Record<string, number> = {};
+  for (const [lens, paths] of scopes.owned) {
+    if (paths.length === 0) continue;
+    envelopes[lens] = deps.measureLensEnvelope({
+      review,
+      lens,
+      role: lensRole(lens),
+      candidateSha: confirmedSha,
+      contract: approved.contract,
+      paths: [...paths],
+    });
+  }
+
+  // (c2) THE PARTITION'S INPUTS, recorded whole — `digest` is a sha over exactly these, so any
   // change to any of them makes every shard-scoped decision detectably about a partition that
-  // no longer exists (D17).
+  // no longer exists (D17). The envelope reserve is one of them: it decides where the cuts
+  // fall, so editing the reviewer prompt re-partitions and says so.
   const derivation: ShardDerivation = {
     baseSha: rendering.baseSha,
     candidateSha: rendering.candidateSha,
     renderingId: rendering.renderingId,
     budget: deps.shardBudget ?? DEFAULT_SHARD_BUDGET,
     unit: SHARD_BUDGET_UNIT,
+    envelopes,
     budgetValidatedRuntime: UNVALIDATED_BUDGET_RUNTIME,
     scopesDigest: scopesDigestOf(approved.contract.lens_scopes),
   };
@@ -906,7 +949,7 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
   }
 
   // (e) LENS x SHARD, BOUNDED. Read-only, against ONE recorded sha.
-  const outcomes = await boundedFanout(targets, plan.fanoutWidth, async (t): Promise<LensOutcome> => {
+  const dispatched = await boundedFanout(targets, plan.fanoutWidth, async (t) => {
     const identity: ShardIdentity = { index: t.shard.index, of: t.shard.of };
     const dispatch = await deps.dispatchLens({
       review: before,
@@ -918,18 +961,44 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
       paths: [...t.shard.paths],
       diff: t.diff,
       derivationDigest: plan.digest,
+      budget: plan.derivation.budget,
+      unit: SHARD_BUDGET_UNIT,
     });
     // THE IDENTITY IS THE COORDINATOR'S, NOT THE SEAM'S. The host knows which shard it
     // dispatched; taking that fact back off the dispatch's return would let a seam — or a
     // reviewer whose output the seam echoes — claim to have reviewed a shard it did not.
-    return assessLens({
+    const outcome: LensOutcome = assessLens({
       ...dispatch,
       lens: t.lens,
       role: lensRole(t.lens),
       shard: identity,
       derivationDigest: plan.digest,
     });
+    return { dispatch, outcome };
   });
+  const outcomes = dispatched.map((d) => d.outcome);
+
+  // (e2) D10 / RF-1: THE BUDGET HAS NOW BEEN PROVEN AGAINST A REAL DISPATCH, so record it and
+  // stop shipping "validated against: unvalidated" to the operator after real containers have
+  // taken real composed inputs at this budget.
+  //
+  // The evidence is the biggest composed input that a container ACTUALLY ACCEPTED — `dispatched`
+  // means the task ran to completion, which is exactly the proposition "an input this size fits
+  // on that runtime". A refusal or a crash proves nothing and is not counted. The runtime is
+  // read off the dispatched task's manifest, never named here: the host can measure its own
+  // half of the input and nothing else, so which runtime took it is the only thing that makes
+  // the number mean anything, and it has to be observed.
+  const proven = dispatched
+    .map((d) => d.dispatch)
+    .filter((d) => d.dispatched && d.runtime !== undefined && d.composedChars !== undefined)
+    .sort((a, b) => (b.composedChars as number) - (a.composedChars as number))[0];
+  if (proven !== undefined) {
+    recordShardBudgetValidation(reviewId, {
+      digest: plan.digest,
+      runtime: proven.runtime as string,
+      composedChars: proven.composedChars as number,
+    });
+  }
 
   // (f) MERGE, not replace. The read is inside the write lock (mergeLensOutcomesByShard), which
   // is what preserves the operator acceptances, the agent_protocol receipts and the skip

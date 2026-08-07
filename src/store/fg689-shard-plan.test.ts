@@ -41,10 +41,12 @@ import {
   recordLensAcceptance,
   recordLensSkipped,
   recordShardPlan,
+  recordShardBudgetValidation,
   replaceLensOutcomes,
   updateReview,
   type ShardPlan,
 } from "./reviews.js";
+import { shardPlanDigest } from "../v2/review-shards.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -63,6 +65,7 @@ const DERIVATION = {
   renderingId: "fg689-pinned-v1",
   budget: 600_000,
   unit: "characters",
+  envelopes: {},
   budgetValidatedRuntime: "codex-subscription",
   scopesDigest: "scopes-aaa",
 };
@@ -515,4 +518,64 @@ test("the pre-FG-689 refusals are unchanged: no --operator, unnamed evidence, an
     operator: true,
   });
   assert.match(unselected.ok === false ? unselected.refusal : "", /is not a lens this review's contract selected/);
+});
+
+// ---------------------------------------------------------------------------
+// FG-689 D10 / RF-1: the budget's validation is an OBSERVATION, recorded after the fact
+// ---------------------------------------------------------------------------
+
+test("recordShardBudgetValidation replaces `unvalidated` with the runtime a real dispatch resolved", () => {
+  recordShardPlan(REVIEW, draft("digest-1"));
+  recordShardBudgetValidation(REVIEW, { digest: "digest-1", runtime: "claude-oauth", composedChars: 512_345 });
+
+  const d = (getReview(REVIEW)?.shardPlan as ShardPlan).derivation;
+  assert.equal(d.budgetValidatedRuntime, "claude-oauth");
+  assert.equal(d.budgetValidatedChars, 512_345, "and how close to the budget the proof actually ran");
+
+  const ev = eventsForRun(RUN.id).filter((e) => e.eventType === "review.shard_budget_validated");
+  assert.equal(ev.length, 1);
+  assert.deepEqual((ev[0]?.payload as { runtime: string; supersedes: string }).supersedes, "codex-subscription");
+});
+
+test("the validation is MONOTONE — a later, smaller dispatch never walks the evidence back", () => {
+  recordShardPlan(REVIEW, draft("digest-1"));
+  recordShardBudgetValidation(REVIEW, { digest: "digest-1", runtime: "claude-oauth", composedChars: 512_345 });
+  recordShardBudgetValidation(REVIEW, { digest: "digest-1", runtime: "claude-oauth", composedChars: 12 });
+
+  const d = (getReview(REVIEW)?.shardPlan as ShardPlan).derivation;
+  assert.equal(d.budgetValidatedChars, 512_345, "the LARGEST input a runtime took is the interesting number");
+  assert.equal(
+    eventsForRun(RUN.id).filter((e) => e.eventType === "review.shard_budget_validated").length,
+    1,
+    "and a validation that proves nothing new records nothing",
+  );
+});
+
+test("a validation for a partition that has moved on is DISCARDED, never stamped onto the current one", () => {
+  recordShardPlan(REVIEW, draft("digest-1"));
+  recordShardPlan(REVIEW, draft("digest-2"));
+  recordShardBudgetValidation(REVIEW, { digest: "digest-1", runtime: "claude-oauth", composedChars: 512_345 });
+
+  const d = (getReview(REVIEW)?.shardPlan as ShardPlan).derivation;
+  assert.equal(
+    d.budgetValidatedRuntime,
+    "codex-subscription",
+    "evidence is about the partition it was collected under — a re-partition is not validated by it",
+  );
+  assert.equal(d.budgetValidatedChars, undefined);
+});
+
+test("recording the validation moves NO digest — it supersedes no operator decision (D17)", () => {
+  recordShardPlan(REVIEW, draft("digest-1"));
+  const before = getReview(REVIEW)?.shardPlan as ShardPlan;
+  recordShardBudgetValidation(REVIEW, { digest: "digest-1", runtime: "claude-oauth", composedChars: 9 });
+  const after = getReview(REVIEW)?.shardPlan as ShardPlan;
+
+  assert.equal(after.digest, before.digest);
+  assert.equal(
+    shardPlanDigest(after.derivation),
+    shardPlanDigest(before.derivation),
+    "re-validating the same budget against a new runtime moves no byte between shards",
+  );
+  assert.deepEqual(after.lenses, before.lenses);
 });

@@ -350,7 +350,12 @@ export type EventType =
   // INTENTIONALLY skipped. Its own event for the same reason it is its own record kind:
   // a skip is neither a review that happened nor a review that is missing, and an
   // operator reading the timeline must be able to tell all three apart.
-  | "review.lens_skipped";
+  | "review.lens_skipped"
+  // FG-689 D10/RF-1: a real dispatch delivered a composed input at this budget and came
+  // back, so the budget is no longer an untested number. Carries the runtime that took it
+  // and the largest composed size, because "600,000 utf8_bytes" means nothing without the
+  // runtime it was proven on and how close to the line the proof actually ran.
+  | "review.shard_budget_validated";
 
 export type Event = {
   id: number;

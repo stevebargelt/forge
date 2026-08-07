@@ -142,6 +142,7 @@ function seedParkedReview(): void {
           renderingId: "review-diff-1-parked",
           budget: 600_000,
           unit: "utf8_bytes",
+          envelopes: {},
           budgetValidatedRuntime: "unvalidated",
           scopesDigest: "scopes-parked",
         },

@@ -19,10 +19,23 @@
 //
 // FAIL BY MEASUREMENT, NEVER BY FITTING (AC5/AC6). There is no truncation, no sampling, no
 // head/tail, no "summarise the rest" anywhere below. A single file whose rendered body is
-// larger than one shard's budget is UNFITTABLE and stops the review with a refusal that cites
-// the host's own measurement against the budget and names the unit. The failure this ticket
-// exists to fix is a reviewer authoring an honest pass over something that was not the diff;
-// quietly making the input fit is the most direct way to reintroduce it.
+// larger than one shard's allowance is UNFITTABLE and stops the review with a refusal that
+// cites the host's own measurement against the budget and names the unit. The failure this
+// ticket exists to fix is a reviewer authoring an honest pass over something that was not the
+// diff; quietly making the input fit is the most direct way to reintroduce it.
+//
+// AND THE BUDGET BOUNDS THE COMPOSED INPUT, NOT THE DIFF (RF-1). Packing bare
+// `ReviewDiffFile.chars` against the budget bounded the wrong quantity: the reviewer receives
+// the diff PLUS the envelope the dispatch seam composes around it — the contract JSON, the
+// shard's path list, the output contract, the fixed instructions — and none of that was
+// measured. The dogfood's largest shard was 593,919 bytes of diff against a 600,000 budget, a
+// 6,081-byte margin the ~20,000-25,000-byte envelope then blew straight through. So the
+// derivation now carries a per-lens `envelopes` measurement, `planShards` packs into
+// `budget - envelope`, and the seam that composes the prompt MEASURES the assembled string and
+// refuses before starting a container. Two guards, deliberately: the reserve is what makes a
+// normal review fit, and the measurement is what makes the guarantee about the real bytes
+// rather than about a model of them. The reserve is DIGESTED, because it decides where the
+// cuts fall — editing the reviewer prompt re-partitions, and it has to say so.
 //
 // THE UNIT TRAVELS WITH THE BUDGET (D10), and it is not a formality. `review-diff.ts`
 // establishes that FG-689's recorded measurements — 1,170,885 for the whole dogfood
@@ -69,13 +82,17 @@ export const DEFAULT_SHARD_BUDGET = 600_000;
  *  measurement in another unit is not a budget. */
 export const SHARD_BUDGET_UNIT: ReviewDiffSizeUnit = REVIEW_DIFF_SIZE_UNIT;
 
-/** The runtime `DEFAULT_SHARD_BUDGET` has been validated against by a real dispatch.
+/** The value `budgetValidatedRuntime` carries until a real dispatch has proven the budget.
  *
- *  It is deliberately this string and not a runtime name: as of step 5 no real dispatch has
- *  been made at this budget, and recording a runtime nobody measured would be the untested
- *  number D4 exists to prevent. Step 11 runs the dispatch and replaces this with the runtime
- *  it resolved. Step 8's dispatch refuses BY NAME when the runtime it resolves is not the one
- *  recorded here, so this value being honest is load-bearing. */
+ *  It is deliberately this string and not a runtime name, and it is NOT a placeholder waiting
+ *  for someone to hand-edit it into one: a runtime name written here would be a runtime nobody
+ *  measured, which is the untested number D4 exists to prevent. The honest value is recorded
+ *  by OBSERVATION — `recordShardBudgetValidation` replaces it with the runtime name read back
+ *  off the manifest of a dispatch that actually delivered a composed input at this budget and
+ *  completed. A plan that has dispatched nothing says so.
+ *
+ *  This is why `shardPlanDigest` deliberately excludes the field (see below): recording the
+ *  validation after the fan-out must not re-partition anything. */
 export const UNVALIDATED_BUDGET_RUNTIME = "unvalidated";
 
 /** D9. Discovery's fan-out is a bare `Promise.all` that does not route through the runner's
@@ -169,15 +186,21 @@ export function scopesDigestOf(scopes: LensScopes): string {
 
 /** The partition's IDENTITY (D17).
  *
- *  Over exactly the six inputs that DETERMINE the partition: the two shas and the
+ *  Over exactly the seven inputs that DETERMINE the partition: the two shas and the
  *  `renderingId` fix the bytes, `scopesDigest` fixes who owns which of them, and
- *  `budget`+`unit` fix where the cuts fall. Change any one and every recorded shard-scoped
- *  decision is detectably about a partition that no longer exists.
+ *  `budget`+`unit`+`envelopes` fix where the cuts fall. Change any one and every recorded
+ *  shard-scoped decision is detectably about a partition that no longer exists.
  *
- *  Two fields of `ShardDerivation` are deliberately NOT digested:
- *   * `budgetValidatedRuntime` — re-validating the same budget against a new runtime does not
- *     move a single byte between shards. Digesting it would supersede every operator's
- *     acceptance for a partition that is identical, which is D17 crying wolf.
+ *  `envelopes` is digested for the same reason `renderingId` is (RF-1). The allowance a lens
+ *  is packed into is `budget - envelopes[lens]`, so editing the reviewer prompt moves the
+ *  cuts; a re-partition that did not move the digest would leave every recorded shard-scoped
+ *  decision silently honored against a partition that no longer exists.
+ *
+ *  The validation fields of `ShardDerivation` are deliberately NOT digested:
+ *   * `budgetValidatedRuntime` / `budgetValidatedChars` — re-validating the same budget against
+ *     a new runtime does not move a single byte between shards, and the validation is recorded
+ *     AFTER the fan-out. Digesting either would supersede every operator's acceptance for a
+ *     partition that is identical, which is D17 crying wolf.
  *   * `fanoutWidth` (not part of the derivation at all) — how many dispatches run at once
  *     does not change what any of them reads. */
 export function shardPlanDigest(derivation: ShardDerivation): string {
@@ -187,6 +210,7 @@ export function shardPlanDigest(derivation: ShardDerivation): string {
     ["scopesDigest", derivation.scopesDigest],
     ["budget", derivation.budget],
     ["unit", derivation.unit],
+    ["envelopes", Object.entries(derivation.envelopes ?? {}).sort(([a], [b]) => byPath(a, b))],
     ["renderingId", derivation.renderingId],
   ];
   return `shard-plan-1-${createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 32)}`;
@@ -202,6 +226,9 @@ export type UnfittableFile = {
   chars: number;
   /** Every selected lens that owns it — all of them are blocked, not just the first. */
   lenses: RiskLens[];
+  /** The tightest DIFF allowance among `lenses` — the budget minus that lens's measured
+   *  dispatch envelope. The allowance, not the budget, is what the body has to fit in. */
+  allowance: number;
 };
 
 export type ShardPlanRefusalReason =
@@ -209,7 +236,9 @@ export type ShardPlanRefusalReason =
   | "budget_not_positive"
   | "fanout_width_invalid"
   | "owned_path_not_rendered"
-  | "skipped_lens_disagreement";
+  | "skipped_lens_disagreement"
+  | "envelope_exceeds_budget"
+  | "envelope_not_measured";
 
 export type PlanShardsResult =
   | { ok: true; plan: ShardPlanDraft }
@@ -220,7 +249,10 @@ export type PlanShardsArgs = {
   files: readonly ReviewDiffFile[];
   owned: ReadonlyMap<RiskLens, string[]>;
   skipped: readonly SkippedLens[];
-  /** Carries `budget` and `unit`; see the deviation note at the top of this file. */
+  /** Carries `budget`, `unit` and `envelopes`; see the deviation note at the top of this file.
+   *  The reserve rides here rather than beside it for the same reason the budget does: it
+   *  determines the partition, `digest` is computed over it, and a second copy that disagreed
+   *  would produce a plan whose recorded identity describes a partition that was not cut. */
   derivation: ShardDerivation;
   fanoutWidth?: number;
 };
@@ -291,21 +323,59 @@ export function planShards(args: PlanShardsArgs): PlanShardsResult {
     }
   }
 
+  // THE DIFF ALLOWANCE, PER LENS: what is left of the budget once the dispatch envelope the
+  // host will compose AROUND this lens's shards is paid for. Every measurement and every
+  // packing decision below is made against the allowance and never against `budget`, because
+  // `budget` bounds the input the reviewer receives and the diff is only part of it.
+  const allowanceOf = new Map<RiskLens, number>();
+  for (const lens of lenses) {
+    if ((args.owned.get(lens) ?? []).length === 0) continue;
+    const envelope = (derivation.envelopes ?? {})[lens];
+    if (envelope === undefined || !Number.isInteger(envelope) || envelope < 0) {
+      return {
+        ok: false,
+        reason: "envelope_not_measured",
+        refusal:
+          `no dispatch-envelope measurement was supplied for the ${lens} lens, so the shard budget of ` +
+          `${budget} ${unit} would bound only the diff bytes and not the input a reviewer actually receives. ` +
+          `That is the FG-689 RF-1 defect exactly, and it is not defaulted to zero here — a zero reserve is the ` +
+          `old behaviour wearing the new field's name. No shard set was planned and nothing was dispatched.`,
+      };
+    }
+    if (envelope >= budget) {
+      return {
+        ok: false,
+        reason: "envelope_exceeds_budget",
+        refusal:
+          `the ${lens} lens's dispatch envelope alone measures ${envelope} ${unit} against a shard budget of ` +
+          `${budget} ${unit}, so no diff byte fits beside it and this review CANNOT be dispatched. The envelope ` +
+          `is the contract JSON, the shard's path list and the fixed instructions — none of which is truncated ` +
+          `or summarized to make room. Shrink the confirmed contract, or raise the budget ` +
+          `(forge review continue --shard-budget <n>) only if a real dispatch validates the larger number. No ` +
+          `container was started.`,
+      };
+    }
+    allowanceOf.set(lens, budget - envelope);
+  }
+
   // MEASURE FIRST, ACROSS EVERY LENS, AND REPORT EVERY OFFENDER. Refusing on the first
   // oversize file would make an operator raise the budget, re-run, and meet the next one.
   const unfittable = new Map<string, UnfittableFile>();
   const missing: string[] = [];
   for (const lens of lenses) {
+    const allowance = allowanceOf.get(lens) as number;
     for (const path of args.owned.get(lens) ?? []) {
       const file = byPathIndex.get(path);
       if (file === undefined) {
         missing.push(`${path} (owned by ${lens})`);
         continue;
       }
-      if (file.chars > budget) {
+      if (file.chars > allowance) {
         const existing = unfittable.get(path);
-        if (existing) existing.lenses.push(lens);
-        else unfittable.set(path, { path, chars: file.chars, lenses: [lens] });
+        if (existing) {
+          existing.lenses.push(lens);
+          existing.allowance = Math.min(existing.allowance, allowance);
+        } else unfittable.set(path, { path, chars: file.chars, lenses: [lens], allowance });
       }
     }
   }
@@ -332,8 +402,9 @@ export function planShards(args: PlanShardsArgs): PlanShardsResult {
         offenders
           .map(
             (f) =>
-              `${f.path} measures ${f.chars} ${unit} against a shard budget of ${budget} ${unit} ` +
-              `(owned by ${f.lenses.join(", ")})`,
+              `${f.path} measures ${f.chars} ${unit} against a diff allowance of ${f.allowance} ${unit} ` +
+              `(the ${budget} ${unit} shard budget less the ${budget - f.allowance} ${unit} the host measures ` +
+              `for the dispatch envelope it composes around the diff; owned by ${f.lenses.join(", ")})`,
           )
           .join("; ") +
         `. The unit is UTF-8 bytes — FG-689 records these measurements as "characters" and they are byte ` +
@@ -349,11 +420,12 @@ export function planShards(args: PlanShardsArgs): PlanShardsResult {
     const paths = args.owned.get(lens) ?? [];
     if (paths.length === 0) continue;
 
+    const allowance = allowanceOf.get(lens) as number;
     const groups: { paths: string[]; chars: number }[] = [];
     let current: { paths: string[]; chars: number } | undefined;
     for (const path of [...paths].sort(byPath)) {
       const file = byPathIndex.get(path) as ReviewDiffFile;
-      if (current !== undefined && current.chars + file.chars > budget) {
+      if (current !== undefined && current.chars + file.chars > allowance) {
         groups.push(current);
         current = undefined;
       }

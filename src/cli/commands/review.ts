@@ -117,8 +117,23 @@ export function renderShardPlan(review: Review): string[] {
   lines.push(`  partition:          ${plan.digest}`);
   lines.push(`  recorded at:        ${plan.recordedAt}`);
   lines.push(`  derivation:         ${d.baseSha}..${d.candidateSha} rendered by ${d.renderingId}`);
+  // FG-689 RF-1: the budget bounds the COMPOSED input, so the line that reports it says what
+  // was reserved for the envelope and what is therefore left for diff bytes. `d.budget` alone
+  // reads as the diff allowance, which is exactly the misreading that shipped the defect.
+  // `budgetValidatedChars` is the largest composed input a real dispatch actually delivered —
+  // the evidence behind "validated against", not a restatement of the budget.
+  const reserved = Object.entries(d.envelopes ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   lines.push(
-    `  shard budget:       ${d.budget} ${d.unit} per shard (validated against: ${d.budgetValidatedRuntime})`,
+    `  shard budget:       ${d.budget} ${d.unit} per COMPOSED input (diff + dispatch envelope)` +
+      `${d.budgetValidatedChars !== undefined ? `, largest validated ${d.budgetValidatedChars} ${d.unit}` : ""}`,
+  );
+  lines.push(`  validated against:  ${d.budgetValidatedRuntime}`);
+  lines.push(
+    `  envelope reserve:   ${
+      reserved.length > 0
+        ? reserved.map(([lens, n]) => `${lens} ${n} (diff allowance ${d.budget - n})`).join(", ")
+        : "(none recorded)"
+    }`,
   );
   lines.push(`  fan-out width:      ${plan.fanoutWidth}`);
 

@@ -117,6 +117,9 @@ function deps(over: ShippingOverrides = {}): CoordinatorDeps {
     // to name `src/v2/gate.ts` while the scope named `src/v2/review-gate.ts`, which nothing
     // compared until the coverage check existed.
     reviewDiff: fakeReviewDiff(["src/v2/review-gate.ts"]),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => ({
       lens: ctx.lens,

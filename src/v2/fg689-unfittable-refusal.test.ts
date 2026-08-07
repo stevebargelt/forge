@@ -151,6 +151,9 @@ function harness(budget?: number): { deps: CoordinatorDeps; calls: Dispatched[] 
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "green" }),
     reviewDiff: () => rendering(),
     ...(budget !== undefined ? { shardBudget: budget } : {}),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx: LensContext) => {
       calls.push({

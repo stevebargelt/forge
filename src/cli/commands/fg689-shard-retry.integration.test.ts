@@ -160,6 +160,9 @@ function deps(opts: {
     reviewDiff: () => rendering(),
     shardBudget: opts.budget ?? ONE_FILE_BUDGET,
     ...(opts.retryShards !== undefined ? { retryShards: opts.retryShards } : {}),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => {
       opts.calls.push({ lens: ctx.lens, shard: ctx.shard.index, of: ctx.shard.of });

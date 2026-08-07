@@ -136,7 +136,22 @@ export type LensDispatch = {
   shard?: ShardIdentity;
   /** FG-689: the partition identity the shard was cut under. */
   derivationDigest?: string;
+  /** FG-689 RF-1: the host's measurement of the input it COMPOSED for this dispatch — the
+   *  shard's diff plus the whole envelope around it, in the shard budget's unit. The budget
+   *  bounds this number, not the diff bytes alone. */
+  composedChars?: number;
+  /** FG-689 RF-1: the runtime this dispatch actually resolved, read back off its task
+   *  manifest. It is what makes "validated against <runtime>" an observation rather than a
+   *  constant somebody wrote down. Absent when nothing was dispatched. */
+  runtime?: string;
 };
+
+/** FG-689 RF-1: the dispatch seam MEASURED the input it assembled and it did not fit.
+ *
+ *  Named like `STALE_PROTOCOL_FAILURE_KIND` and for the same reason: this is a precondition
+ *  refusal decided before any container started, not a container that died, and a reader who
+ *  cannot tell those apart will go looking for a crash that never happened. */
+export const COMPOSED_INPUT_OVER_BUDGET_FAILURE_KIND = "composed_input_exceeds_budget";
 
 /** WHICH shard of a lens's scope a dispatch and its outcome are about.
  *
@@ -209,6 +224,10 @@ function classifyFailure(failureKind: string | undefined): LensIncompleteReason 
   // FG-654: matched on the exact literal the dispatch seam emits, before the loose
   // regexes below — a refusal is a precondition failure, not a container death.
   if (failureKind === STALE_PROTOCOL_FAILURE_KIND) return "stale_protocol";
+  // FG-689 RF-1: measured over budget BEFORE anything started, so it is literally not
+  // dispatched. Letting it fall through to the /crash/ default below would report a container
+  // death for a container that was never created.
+  if (failureKind === COMPOSED_INPUT_OVER_BUDGET_FAILURE_KIND) return "not_dispatched";
   if (/timeout|idle/i.test(failureKind)) return "timed_out";
   if (/crash|oom|killed|signal/i.test(failureKind)) return "crashed";
   return "crashed";
@@ -252,6 +271,19 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
           `protocol is absent or behind this release, so it was never told the contract its findings are judged ` +
           `by. This is not a narrower review — it is no review under an unstated contract, which is why an ` +
           `operator lens acceptance cannot clear it. Remedy: run \`forge upgrade\`, then retry the lens` +
+          (dispatch.detail !== undefined ? ` (${dispatch.detail})` : ""),
+      };
+    }
+    if (dispatch.failureKind === COMPOSED_INPUT_OVER_BUDGET_FAILURE_KIND) {
+      return {
+        ...base,
+        complete: false,
+        reason,
+        detail:
+          `the ${dispatch.lens} lens was REFUSED before any container started: the host MEASURED the input it ` +
+          `composed for this shard and it exceeds the shard budget. The budget bounds the assembled input, not ` +
+          `the diff bytes it contains, and nothing is truncated to make it fit — a reviewer handed part of its ` +
+          `input authors an honest pass over a change it did not see` +
           (dispatch.detail !== undefined ? ` (${dispatch.detail})` : ""),
       };
     }

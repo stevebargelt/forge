@@ -105,6 +105,7 @@ const DERIVATION = {
   renderingId: "fg689-pinned-v1",
   budget: 600_000,
   unit: "characters",
+  envelopes: {},
   budgetValidatedRuntime: "codex-subscription",
   scopesDigest: "scopes-aaa",
 };

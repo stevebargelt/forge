@@ -231,6 +231,9 @@ function harness(reviewer: Reviewer = PASS): { deps: CoordinatorDeps; calls: Dis
     headSha: () => CONF,
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "green" }),
     reviewDiff: () => rendering(),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => {
       calls.push({

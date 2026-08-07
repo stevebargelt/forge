@@ -1591,6 +1591,9 @@ function harness(over: Partial<CoordinatorDeps> = {}): { deps: CoordinatorDeps; 
     // `src/v2/reconcile.ts` against a `src/store/` scope, which nothing compared until the
     // coverage check existed.
     reviewDiff: fakeReviewDiff(["src/store/reconcile.ts"]),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({
       candidateSha: "",
       changedPaths,

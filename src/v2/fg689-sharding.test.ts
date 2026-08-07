@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { REVIEW_DIFF_RENDERING_ID, REVIEW_DIFF_SIZE_UNIT, type ReviewDiffFile } from "./review-diff.js";
-import type { RiskLens } from "./review-contract.js";
+import { RISK_LENSES, type RiskLens } from "./review-contract.js";
 import type { PlannedLens, PlannedShard, ShardDerivation, SkippedLens } from "../store/reviews.js";
 import {
   DEFAULT_FANOUT_WIDTH,
@@ -51,7 +51,7 @@ import {
  *  A change to the canonical serialization, the hash, the prefix or the truncation breaks
  *  these, which is exactly the noise it should make. */
 const SCOPES_DIGEST_LOCK = "f76c9471f5b558ca15225b863a54599a";
-const PLAN_DIGEST_LOCK = "shard-plan-1-a9f1ecd85d5df3992fe1ec484ade1540";
+const PLAN_DIGEST_LOCK = "shard-plan-1-e6d84a14ec9fb857075b8e8abe964c77";
 /** A fixed rendering id for the lock, so these values test THIS module's canonicalization
  *  rather than re-locking `review-diff.ts`'s pinned flag list from a second place. */
 const LOCK_RENDERING_ID = "review-diff-1-0000000000000000";
@@ -115,6 +115,14 @@ function file(path: string, chars: number): ReviewDiffFile {
 const DOGFOOD: ReviewDiffFile[] = DOGFOOD_FILES.map(([p, c]) => file(p, c));
 const DOGFOOD_PATHS = DOGFOOD.map((f) => f.path);
 
+/** FG-689 RF-1: an EXPLICIT zero dispatch envelope for every lens.
+ *
+ *  Most cases below are about the packing, so they state "there is no envelope" and get the
+ *  whole budget as their diff allowance. Stating it is the point: an ABSENT measurement is a
+ *  named refusal, because defaulting an unmeasured lens to zero is the very defect the field
+ *  exists to close — the budget bounding the diff while the real input carried more. */
+const NO_ENVELOPE: Record<string, number> = Object.fromEntries(RISK_LENSES.map((l) => [l, 0]));
+
 function derivation(over: Partial<ShardDerivation> = {}): ShardDerivation {
   return {
     baseSha: "11c2b561aa00000000000000000000000000000a",
@@ -122,6 +130,7 @@ function derivation(over: Partial<ShardDerivation> = {}): ShardDerivation {
     renderingId: REVIEW_DIFF_RENDERING_ID,
     budget: DEFAULT_SHARD_BUDGET,
     unit: SHARD_BUDGET_UNIT,
+    envelopes: NO_ENVELOPE,
     budgetValidatedRuntime: UNVALIDATED_BUDGET_RUNTIME,
     scopesDigest: "0".repeat(32),
     ...over,
@@ -288,6 +297,9 @@ test("every input that determines the partition moves the digest; nothing else d
     ["scopesDigest", { scopesDigest: "f".repeat(32) }],
     ["unit", { unit: "tokens" }],
     ["renderingId", { renderingId: "review-diff-1-deadbeefdeadbeef" }],
+    // RF-1: the reserve decides where the cuts fall, so it determines the partition as surely
+    // as the budget does. Editing the reviewer prompt moves this number.
+    ["envelopes", { envelopes: { ...NO_ENVELOPE, wide: 1 } }],
   ] as [string, Partial<ShardDerivation>][]) {
     assert.notEqual(shardPlanDigest(derivation(over)), d0, `changing ${label} must change the digest`);
   }
@@ -295,6 +307,7 @@ test("every input that determines the partition moves the digest; nothing else d
   // Re-validating the same budget against a new runtime moves no byte between shards.
   // Digesting it would supersede every operator acceptance for an identical partition.
   assert.equal(shardPlanDigest(derivation({ budgetValidatedRuntime: "codex-subscription" })), d0);
+  assert.equal(shardPlanDigest(derivation({ budgetValidatedChars: 512_345 })), d0, "nor does its measurement");
 });
 
 test("fanoutWidth is recorded with the plan and does not change the partition", () => {
@@ -406,6 +419,91 @@ test("the plan and the skip list can never disagree about a lens", () => {
 // 5. fail by measurement — nothing is ever made to fit (AC5, AC6)
 // ---------------------------------------------------------------------------
 
+// FG-689 RF-1: THE BUDGET BOUNDS THE COMPOSED INPUT, NOT THE DIFF.
+//
+// Packing bare `ReviewDiffFile.chars` against the budget bounded the wrong quantity. The
+// dogfood's largest shard measured 593,919 bytes of diff against a 600,000 budget — a
+// 6,081-byte margin — and forge's own ~20,000-25,000 byte envelope then sat on top of it,
+// unmeasured and over the line. The reserve is what makes the number the plan is cut with the
+// number the reviewer actually receives.
+
+test("RF-1: the dispatch envelope is RESERVED out of the budget, so shards are cut on the composed size", () => {
+  const res = resolveScopes(contract({ backend: ["src"] }), ["src/a.ts", "src/b.ts"]);
+  const files = [file("src/a.ts", 300), file("src/b.ts", 300)];
+  const args = { files, owned: res.owned, skipped: res.skipped };
+
+  // 600 bytes of diff, 1,000 budget: one shard, and it was one shard before this change too.
+  const bare = ok(planShards({ ...args, derivation: derivation({ budget: 1_000 }) }));
+  assert.equal(bare.lenses[0]?.shards.length, 1);
+
+  // The same diff with a 500-byte envelope around each dispatch. Nothing about the diff moved;
+  // what moved is that the host now counts what it wraps around it, so 600 bytes no longer fit
+  // in one dispatch and the partition says so instead of overshooting silently.
+  const withEnvelope = ok(
+    planShards({ ...args, derivation: derivation({ budget: 1_000, envelopes: { backend: 500 } }) }),
+  );
+  assert.deepEqual(
+    withEnvelope.lenses[0]?.shards.map((s) => s.paths),
+    [["src/a.ts"], ["src/b.ts"]],
+    "the allowance is budget - envelope, and the packer respects it",
+  );
+
+  // AND THE RE-PARTITION IS DETECTABLE. The reserve decides where the cuts fall, so it is a
+  // digested derivation input: editing the reviewer prompt cannot silently move a shard
+  // boundary while every recorded shard-scoped decision keeps matching (D17).
+  assert.notEqual(withEnvelope.digest, bare.digest);
+});
+
+test("RF-1: a file that fits the BUDGET but not the ALLOWANCE refuses — it is never made to fit", () => {
+  const res = resolveScopes(contract({ backend: ["src"] }), ["src/a.ts"]);
+  const r = planShards({
+    files: [file("src/a.ts", 900)],
+    owned: res.owned,
+    skipped: res.skipped,
+    derivation: derivation({ budget: 1_000, envelopes: { backend: 200 } }),
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.reason, "file_exceeds_budget");
+  assert.deepEqual(r.unfittable, [{ path: "src/a.ts", chars: 900, lenses: ["backend"], allowance: 800 }]);
+  // The refusal states BOTH numbers and where the difference went, because an operator told
+  // only "900 against 1000" would reasonably conclude it fits.
+  assert.match(r.refusal, /diff allowance of 800 utf8_bytes/);
+  assert.match(r.refusal, /1000 utf8_bytes shard budget less the 200 utf8_bytes/);
+});
+
+test("RF-1: an UNMEASURED envelope refuses — it is never defaulted to zero", () => {
+  const res = resolveScopes(contract({ backend: ["src"], wide: ["src"] }), ["src/a.ts"]);
+  const r = planShards({
+    files: [file("src/a.ts", 10)],
+    owned: res.owned,
+    skipped: res.skipped,
+    // `wide` owns a path here and has no measurement. Defaulting it to zero is exactly the old
+    // behaviour wearing the new field's name.
+    derivation: derivation({ envelopes: { backend: 100 } }),
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.reason, "envelope_not_measured");
+  assert.match(r.refusal, /wide lens/);
+  assert.match(r.refusal, /No shard set was planned and nothing was dispatched/);
+});
+
+test("RF-1: an envelope that alone fills the budget refuses rather than dispatching a diff-free shard", () => {
+  const res = resolveScopes(contract({ backend: ["src"] }), ["src/a.ts"]);
+  const r = planShards({
+    files: [file("src/a.ts", 10)],
+    owned: res.owned,
+    skipped: res.skipped,
+    derivation: derivation({ budget: 1_000, envelopes: { backend: 1_000 } }),
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.reason, "envelope_exceeds_budget");
+  assert.match(r.refusal, /no diff byte fits beside it/);
+  assert.match(r.refusal, /No container was started/);
+});
+
 test("a single file larger than the budget refuses, naming the path, the measurement, the budget and the unit", () => {
   const res = resolveScopes(contract({ backend: ["src"] }), ["src/cli/commands/queue.ts", "src/cli/program.ts"]);
   const r = planShards({
@@ -425,7 +523,12 @@ test("a single file larger than the budget refuses, naming the path, the measure
   // The unit is spelled out against FG-689's own wording, so a reader of the refusal cannot
   // read the recorded "characters" measurements as anything but byte counts (D10).
   assert.match(r.refusal, /characters/);
-  assert.deepEqual(r.unfittable, [{ path: "src/cli/commands/queue.ts", chars: 80_462, lenses: ["backend"] }]);
+  // `allowance` is what the body actually had to fit in — the budget less this lens's measured
+  // dispatch envelope, zero here (RF-1). It is reported so an operator reading the refusal is
+  // never left to assume the budget and the allowance are the same number.
+  assert.deepEqual(r.unfittable, [
+    { path: "src/cli/commands/queue.ts", chars: 80_462, lenses: ["backend"], allowance: 60_000 },
+  ]);
   assert.match(r.refusal, /No container was started/);
 });
 

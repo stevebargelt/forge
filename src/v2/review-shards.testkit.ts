@@ -46,6 +46,7 @@ export function shardPlanFixture(fixture: ShardPlanFixture = {}): ShardPlan {
       renderingId: "review-diff-1-fixture",
       budget: 600_000,
       unit: "utf8_bytes",
+      envelopes: {},
       budgetValidatedRuntime: "unvalidated",
       scopesDigest: "scopes-fixture",
     },

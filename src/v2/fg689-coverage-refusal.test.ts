@@ -237,6 +237,9 @@ function stageDeps(over: Partial<CoordinatorDeps> = {}): CoordinatorDeps {
       throw new Error("Stage 2a must not verify");
     },
     reviewDiff: fakeReviewDiff(["src/v2/review-run.ts"]),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({
       candidateSha: "",
       changedPaths,
