@@ -34,6 +34,7 @@ import { FORGE_HOME } from "../util/paths.js";
 import {
   persistPendingOrchestratorReceipt,
   getOrchestratorReceipt,
+  canonicalReceiptProjectDir,
   markOrchestratorReceiptRunning,
   type OrchestratorLaunchDecision,
 } from "./orchestrator-receipts.js";
@@ -225,7 +226,7 @@ test("C3: a Codex receipt read through the GENERIC columns reports provider 'ope
         provider: "anthropic",
         runtime: "claude-code",
         adapter: "claude",
-        project_dir: "/tmp/proj",
+        project_dir: canonicalReceiptProjectDir(CLAUDE_DECISION.projectDir),
       },
       {
         receipt_id: "orx-compat-codex",
@@ -233,7 +234,7 @@ test("C3: a Codex receipt read through the GENERIC columns reports provider 'ope
         provider: "openai",
         runtime: "codex-cli",
         adapter: "codex",
-        project_dir: "/tmp/proj",
+        project_dir: canonicalReceiptProjectDir(CODEX_DECISION.projectDir),
       },
     ] as unknown as typeof rows,
     "provider/runtime/adapter are recorded columns — a generic reader gets the truth without knowing either adapter",
