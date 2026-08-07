@@ -193,6 +193,62 @@ test("FG-639: a RETRIED lens that later authors an outcome clears the earlier fa
   assert.equal(assessDiscoveryCompleteness(["wide"], outcomes).complete, true);
 });
 
+// ─── FG-689: shard identity travels with the outcome, on BOTH branches ──────
+
+test("FG-689: an authored outcome carries the shard identity and the partition it was cut under", () => {
+  const o = assessLens(
+    dispatch({ lens: "wide", role: "red-wide", shard: { index: 2, of: 3 }, derivationDigest: "sha256:p" }),
+  );
+  assert.equal(o.complete, true);
+  assert.deepEqual(o.shard, { index: 2, of: 3 });
+  assert.equal(o.derivationDigest, "sha256:p");
+});
+
+test("FG-689: a CRASHED shard keeps its identity — the shard that failed is the one that has to be named", () => {
+  const o = assessLens(
+    dispatch({
+      lens: "wide",
+      role: "red-wide",
+      dispatched: false,
+      failureKind: "container_crash",
+      result: undefined,
+      shard: { index: 2, of: 3 },
+      derivationDigest: "sha256:p",
+    }),
+  );
+  assert.equal(o.complete, false);
+  assert.deepEqual(o.shard, { index: 2, of: 3 }, "an identity only successful outcomes keep names nothing when it matters");
+  assert.equal(o.derivationDigest, "sha256:p");
+});
+
+test("FG-689: a dispatch with no shard records none — nothing here invents an identity", () => {
+  const o = assessLens(dispatch({ lens: "wide", role: "red-wide" }));
+  assert.equal(o.shard, undefined);
+  assert.equal(o.derivationDigest, undefined);
+  assert.equal("shard" in (o as Record<string, unknown>), false);
+});
+
+test("FG-689: `assessDiscoveryCompleteness` is UNCHANGED — it is lens-granular and knows nothing of shards", () => {
+  // The lens-granular assessor stays exactly as it was until its callers switch; this pins
+  // the fact that it does NOT quietly gain per-shard behaviour here, so the D1 fail-open is
+  // closed in one place (`assessShardCompleteness`) rather than half-closed in two.
+  const outcomes: LensOutcome[] = [
+    assessLens(dispatch({ lens: "wide", role: "red-wide", shard: { index: 1, of: 2 }, derivationDigest: "sha256:p" })),
+    assessLens(
+      dispatch({
+        lens: "wide",
+        role: "red-wide",
+        dispatched: false,
+        failureKind: "container_crash",
+        result: undefined,
+        shard: { index: 2, of: 2 },
+        derivationDigest: "sha256:p",
+      }),
+    ),
+  ];
+  assert.equal(assessDiscoveryCompleteness(["wide"], outcomes).complete, true);
+});
+
 test("FG-639 / PRD #22: an authored inconclusive normalizes into a lens_inconclusive finding", () => {
   const outcomes = [
     assessLens(dispatch({ lens: "security", role: "red-security", result: { outcome: "inconclusive", inconclusive_reason: "no reachable path" } })),
