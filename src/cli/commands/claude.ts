@@ -1,253 +1,400 @@
-// `forge claude` — launcher wrapper around `claude` that pre-fills the session
-// name (and a few other quality-of-life adjustments) for forge-init'd projects.
+// `forge claude` — THE EXPLICIT CLAUDE CODE SHORTCUT around the shared
+// interactive-orchestrator launcher (FG-576 step 6; D1, D5, D16).
 //
-// Three things happen before `claude` actually starts:
+// It keeps its name and its ergonomics, and it stops being an unresolved
+// passthrough. Before this step the command handed its whole tail to `claude`
+// verbatim, never resolved a model, and recorded no launch decision — which is
+// precisely the "manual shadow path" FG-576 exists to remove. Now it resolves the
+// SAME orchestrator profile through the SAME model-policy stack as `forge
+// orchestrator` and routes through the SAME receipt / liveness / resume / failure
+// primitive in src/orchestrator/launch.ts. Neither command owns any part of the
+// lifecycle, so the two cannot drift: a fix to one is a fix to both.
 //
-// 1. **Walk up to find the project root.** If the user is in a subdir, chdir
-//    to the directory holding CLAUDE.md with the orchestrator marker. No more
-//    "wait, am I in the right place" surprises.
+// WHAT MAKES IT A SHORTCUT RATHER THAN A SECOND LAUNCHER: one line —
+// `providerPin: "claude-code"`. The pin is evaluated against the resolution policy
+// ACTUALLY produced (D5). When policy resolves the orchestrator to Codex, this
+// command REFUSES before spawn and names the resolved profile/runtime/provider plus
+// two concrete remedies (D16). It never re-resolves to some other Claude profile the
+// operator did not choose, and it never launches Codex because policy changed
+// underneath an existing alias (AC14).
 //
-// 2. **Pre-flight init check.** Detect projects that haven't been bootstrapped
-//    on this machine (missing .claude/settings.local.json, stale forge symlinks
-//    in .claude/commands/, no orchestrator block in CLAUDE.md). Warn but don't
-//    block — the user can still launch into a half-configured session if they
-//    explicitly want.
+// WHAT IS PRESERVED, DELIBERATELY AND WITH TESTS:
 //
-// 3. **Status banner.** One line with project / branch / commits ahead / active
-//    ticket count. Cold-context orientation the agent reads as the session
-//    boots.
+//   * `-n` / `--name`            the operator's display-name override still wins.
+//   * `--model <alias>`          `--model opus` still works — validated against the
+//                                ADAPTER's vocabulary (aliases included), not the
+//                                policy's concrete-id set, and recorded verbatim
+//                                with its own `resolved_by` (AC14, AC4).
+//   * `--continue` / `--resume`  mapped onto the shared session operation.
+//   * `--bedrock` / `--aws-profile`   Forge-owned flags, extracted here and never
+//                                forwarded to `claude`.
+//   * the SSO/STS preflight      advisory only, never exit non-zero (FG-499).
+//   * provider-native passthrough    anything Forge does not own still reaches
+//                                `claude`, subject to the D6 closure.
 //
-// All args after `forge claude` are passed through to `claude` verbatim
-// (--continue, --resume, --model, --add-dir, etc.). If the user passes
-// -n / --name themselves, that wins over the auto-resolved name.
+// WHAT CHANGES, AND WHY IT SHIPS WITH ITS DOCUMENTATION (FG-689 D11): a command
+// that worked yesterday can now REFUSE — under a Codex-resolving policy, and when
+// a passthrough token would set a dimension Forge owns and records (D6). Both
+// refusals name their remedies, and docs/how-to-orchestrator-launcher.md ships in
+// this same step rather than later.
 
 import type { Command } from "commander";
-import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve as pathResolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, resolve as pathResolve } from "node:path";
 import { homedir } from "node:os";
-import { resolveProjectMeta, readProjectAuth } from "../../util/project-meta.js";
+import { readProjectAuth } from "../../util/project-meta.js";
+import { runOrchestratorLaunch } from "../../orchestrator/launch.js";
 import {
-  awsConfigDir,
-  describeExpiredSsoSession,
-  detectStaleStsCache,
-  exportCredsOverridesStaleness,
-  hasFreshProfileSsoCache,
-  resolveProfileSsoIdentity,
-} from "../../util/creds.js";
-import { startSsoWatchdog } from "../../util/sso-watchdog.js";
-import { insertRun, updateRunStatus } from "../../store/runs.js";
-import { insertTask, markTaskComplete } from "../../store/tasks.js";
-import { extractUsageFromTranscript, insertUsageRows } from "../../store/model-calls.js";
-import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
+  buildClaudeChildEnv,
+  claudeBedrockAdvisories,
+  claudeProjectPreflight,
+  createClaudeAdapter,
+  resolveClaudeBedrockProfile,
+} from "../../orchestrator/claude-adapter.js";
+import {
+  launchRefusal,
+  type AdapterLaunchContext,
+  type AdapterReadinessResult,
+  type OrchestratorAdapter,
+} from "../../orchestrator/adapter.js";
 
 const ORCHESTRATOR_MARKER = "<!-- forge:orchestrator-start -->";
 
-export function buildClaudeChildEnv(
-  parentEnv: NodeJS.ProcessEnv,
-  bedrockProfile?: string,
-): NodeJS.ProcessEnv {
+/** Re-exported from the adapter that now owns it. The Claude child environment is
+ *  composed from the parent by ONE function, so the shortcut and the generic
+ *  command cannot compose it differently (AC2). */
+export { buildClaudeChildEnv } from "../../orchestrator/claude-adapter.js";
+
+// ---------------------------------------------------------------------------
+// The shortcut's own argument surface
+// ---------------------------------------------------------------------------
+
+/** What `forge claude` owns on its command line. Everything else is passthrough.
+ *
+ *  These are parsed HERE rather than declared as commander options because the
+ *  command keeps `allowUnknownOption()` + `passThroughOptions()`: an operator's
+ *  existing `forge claude --model opus --continue` must keep working WITHOUT an
+ *  explicit `--` separator, which is the whole point of it being a shortcut. */
+export type ClaudeShortcutInvocation = {
+  profile: string | undefined;
+  model: string | undefined;
+  continueSession: boolean;
+  resume: string | undefined;
+  explain: boolean;
+  /** Operator's `-n` / `--name` display-name override. */
+  name: string | undefined;
+  /** `--bedrock`: an explicit assertion that this launch is a Bedrock launch. */
+  bedrock: boolean;
+  awsProfile: string | undefined;
+  /** Provider-native tokens forwarded to `claude`, subject to the D6 closure. */
+  passthrough: string[];
+};
+
+/** Read `--flag value` and `--flag=value` for any of `flags`.
+ *
+ *  A flag whose value is missing or looks like another flag is NOT consumed: it
+ *  falls through to passthrough, where the D6 guard refuses it by name. Guessing a
+ *  value would launch a session the operator did not ask for, which is the same
+ *  failure mode as sanitizing a resume identifier. */
+function readFlagValue(
+  flags: readonly string[],
+  args: readonly string[],
+  i: number,
+): { value: string; next: number } | undefined {
+  const token = args[i]!;
+  for (const flag of flags) {
+    if (token === flag) {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("-")) return undefined;
+      return { value, next: i + 1 };
+    }
+    if (flag.startsWith("--") && token.startsWith(`${flag}=`)) {
+      return { value: token.slice(flag.length + 1), next: i };
+    }
+  }
+  return undefined;
+}
+
+export function parseClaudeShortcutArgs(args: readonly string[]): ClaudeShortcutInvocation {
+  const invocation: ClaudeShortcutInvocation = {
+    profile: undefined,
+    model: undefined,
+    continueSession: false,
+    resume: undefined,
+    explain: false,
+    name: undefined,
+    bedrock: false,
+    awsProfile: undefined,
+    passthrough: [],
+  };
+
+  let afterSeparator = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]!;
+    if (afterSeparator) {
+      invocation.passthrough.push(token);
+      continue;
+    }
+    if (token === "--") {
+      afterSeparator = true;
+      continue;
+    }
+
+    const profile = readFlagValue(["--profile"], args, i);
+    if (profile) {
+      invocation.profile = profile.value;
+      i = profile.next;
+      continue;
+    }
+    const model = readFlagValue(["--model", "-m"], args, i);
+    if (model) {
+      invocation.model = model.value;
+      i = model.next;
+      continue;
+    }
+    const resume = readFlagValue(["--resume", "-r"], args, i);
+    if (resume) {
+      invocation.resume = resume.value;
+      i = resume.next;
+      continue;
+    }
+    const name = readFlagValue(["--name", "-n"], args, i);
+    if (name) {
+      invocation.name = name.value;
+      i = name.next;
+      continue;
+    }
+    const awsProfile = readFlagValue(["--aws-profile"], args, i);
+    if (awsProfile) {
+      invocation.awsProfile = awsProfile.value;
+      i = awsProfile.next;
+      continue;
+    }
+
+    if (token === "--continue" || token === "-c") {
+      invocation.continueSession = true;
+      continue;
+    }
+    if (token === "--explain") {
+      invocation.explain = true;
+      continue;
+    }
+    if (token === "--bedrock") {
+      invocation.bedrock = true;
+      continue;
+    }
+
+    invocation.passthrough.push(token);
+  }
+
+  return invocation;
+}
+
+// ---------------------------------------------------------------------------
+// The shortcut's adapter
+// ---------------------------------------------------------------------------
+
+export type ClaudeShortcutAdapterOptions = {
+  /** `--bedrock` was passed, or `.forge/project.json` declares `auth: bedrock`.
+   *  Either way this is an EXPLICIT assertion about the launch's auth mode. */
+  bedrockAsserted: boolean;
+  /** How the assertion was made, for the refusal text. */
+  bedrockAssertedBy: string | undefined;
+  /** `--aws-profile <p>`: highest-precedence AWS profile for a bedrock launch. */
+  awsProfile: string | undefined;
+  /** Test seam. Defaults to the shipped Claude adapter. */
+  base?: OrchestratorAdapter | undefined;
+};
+
+/**
+ * The Claude adapter, plus the two flags that belong to THIS command's surface
+ * rather than to the provider-neutral one.
+ *
+ * It is a wrapper rather than a fork on purpose: argv construction, the instruction
+ * carrier, session-operation mapping and identity all stay in the one Claude
+ * adapter, so `forge claude` and `forge orchestrator` produce receipts of the same
+ * shape by construction. Only the two members the flags actually affect are
+ * overridden — the child environment (which AWS profile) and preflight (which
+ * profile the advisory SSO/STS findings are scoped to).
+ *
+ * `--bedrock` is treated as an ASSERTION, not a hint. When the resolved profile
+ * declares a different auth mode, this refuses before spawn rather than launching
+ * one auth mode under a receipt recording another — a receipt that describes a
+ * session other than the one running is the failure class this ticket exists to
+ * close.
+ */
+export function claudeShortcutAdapter(opts: ClaudeShortcutAdapterOptions): OrchestratorAdapter {
+  const base = opts.base ?? createClaudeAdapter();
+
+  /** The AWS profile for THIS launch, in the order `forge claude` has always
+   *  resolved it: --aws-profile > project.json.awsProfile > AWS_PROFILE > default.
+   *  Undefined when the resolved auth is not bedrock, which is what keeps AWS
+   *  variables off a subscription or api-key launch (AC2). */
+  const bedrockProfileFor = (ctx: AdapterLaunchContext): string | undefined => {
+    if (ctx.decision.auth !== "bedrock") return undefined;
+    return opts.awsProfile ?? resolveClaudeBedrockProfile(ctx);
+  };
+
   return {
-    ...parentEnv,
-    // Forge-owned sessions put durable work in tmux via `forge launch`.
-    // Claude's background-task registry is vulnerable to harness-wide reaping.
-    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
-    ...(bedrockProfile
-      ? {
-          CLAUDE_CODE_USE_BEDROCK: "1",
-          AWS_PROFILE: bedrockProfile,
-        }
-      : {}),
+    ...base,
+
+    probeReadiness(ctx: AdapterLaunchContext): AdapterReadinessResult {
+      if (opts.bedrockAsserted && ctx.decision.auth !== "bedrock") {
+        return {
+          ok: false,
+          refusal: launchRefusal(
+            "adapter-not-ready",
+            `${opts.bedrockAssertedBy ?? "--bedrock"} asserts a Bedrock launch, but the orchestrator resolution ` +
+              (ctx.decision.profile ? `selects profile '${ctx.decision.profile}', which ` : `for this project `) +
+              `declares auth '${ctx.decision.auth}' (provider '${ctx.decision.provider}', runtime ` +
+              `'${ctx.decision.runtime}'). Refusing rather than launching one credential mode under a receipt ` +
+              `recording another.`,
+            [
+              `select a Bedrock profile for this launch: \`forge claude --profile <profile>\``,
+              `or point \`overrides.agents.orchestrator\` at a Bedrock profile in the effective model-policy.yml`,
+              `or drop the Bedrock assertion and launch what policy selected: \`forge claude\``,
+            ],
+          ),
+        };
+      }
+
+      const probed = base.probeReadiness(ctx);
+      if (!probed.ok) return probed;
+
+      const advisories = [...probed.readiness.advisories];
+      if (opts.awsProfile !== undefined && ctx.decision.auth !== "bedrock") {
+        advisories.push(
+          `--aws-profile '${opts.awsProfile}' was not applied: the orchestrator resolution declares auth ` +
+            `'${ctx.decision.auth}', so this launch uses no AWS credentials.`,
+        );
+      }
+      if (ctx.decision.auth !== "bedrock" && ctx.parentEnv["CLAUDE_CODE_USE_BEDROCK"] === "1") {
+        // Inherited from the operator's shell, not asserted through Forge. The
+        // child inherits it too, so say plainly that the environment and the
+        // recorded decision disagree instead of letting the receipt look settled.
+        advisories.push(
+          `CLAUDE_CODE_USE_BEDROCK=1 is set in this shell, but the orchestrator resolution declares auth ` +
+            `'${ctx.decision.auth}'. The recorded receipt says '${ctx.decision.auth}'; unset the variable, or ` +
+            `select a Bedrock profile, so the two agree.`,
+        );
+      }
+      return { ok: true, readiness: { ...probed.readiness, advisories } };
+    },
+
+    buildChildEnv(ctx: AdapterLaunchContext): NodeJS.ProcessEnv {
+      return buildClaudeChildEnv(ctx.parentEnv, bedrockProfileFor(ctx));
+    },
+
+    preflight(ctx: AdapterLaunchContext): string[] {
+      const warnings = claudeProjectPreflight(ctx.projectDir);
+      const profile = bedrockProfileFor(ctx);
+      if (profile) warnings.push(...claudeBedrockAdvisories(profile));
+      return warnings;
+    },
   };
 }
+
+// ---------------------------------------------------------------------------
+// The command
+// ---------------------------------------------------------------------------
 
 export function registerClaude(program: Command): void {
   program
     .command("claude")
-    .description("Launch `claude` with the project's display name auto-set + pre-flight checks. Passes all extra args through to claude.")
+    .description(
+      "Launch the interactive orchestrator as Claude Code explicitly. Resolves the same orchestrator profile as " +
+        "`forge orchestrator` and refuses before spawn if policy selects another provider. Extra args pass through to `claude`.",
+    )
     .allowUnknownOption()           // don't complain about claude's flags
     .passThroughOptions()           // collect them as positional args for forward
-    .argument("[args...]", "passed through to `claude`")
-    .action((args: string[]) => {
-      // 1. Find project root by walking up for the orchestrator marker in
-      //    CLAUDE.md. Falls back to cwd if no marker exists (non-forge project,
-      //    or forge project that hasn't run `forge init` yet).
+    .argument("[args...]", "forge-owned flags (--profile, --model, --continue, --resume, --explain, --bedrock, --aws-profile, -n) then passthrough to `claude`")
+    .action(async (args: string[]) => {
+      const invocation = parseClaudeShortcutArgs(args);
+
       const cwd = process.cwd();
       const projectRoot = findProjectRoot(cwd) ?? cwd;
-      if (projectRoot !== cwd) {
-        console.log(`forge claude: chdir to project root: ${projectRoot}`);
-      }
-
-      // 2. Extract forge-specific flags from args before passing through to claude.
-      const bedrockFlag = extractBedrockFromArgs(args);
-      const awsProfileFlag = extractAwsProfileFromArgs(args);
-      const argsWithoutBedrockFlags = stripBedrockFlagsFromArgs(args);
-
-      // 3. Read project auth config from .forge/project.json.
       const projectAuth = readProjectAuth(projectRoot);
 
-      // 4. Determine auth mode and build child env.
-      //    Bedrock is active when: --bedrock flag, project.json auth:bedrock, or env already arms it.
-      const envBedrock = process.env.CLAUDE_CODE_USE_BEDROCK === "1";
-      const bedrockActive = bedrockFlag || projectAuth?.auth === "bedrock" || envBedrock;
-
-      // Fail fast for apikey mode when the key is missing.
+      // Fail fast for apikey mode when the key is missing. Kept ahead of
+      // resolution because it is a statement about THIS project's declared auth,
+      // not about what policy selected — and its message is the one operators
+      // already know.
       if (projectAuth?.auth === "apikey" && !process.env.ANTHROPIC_API_KEY) {
         console.error(`forge claude: project.json auth=apikey requires ANTHROPIC_API_KEY to be set`);
         process.exit(1);
       }
 
-      let resolvedProfile: string | undefined;
-
-      if (bedrockActive) {
-        // Profile resolution order: --aws-profile flag > project.json.awsProfile > AWS_PROFILE env > "default"
-        resolvedProfile = awsProfileFlag ?? projectAuth?.awsProfile ?? process.env.AWS_PROFILE ?? "default";
-
-        // STS pre-flight: detect stale STS credentials before spending a session on
-        // them. Scoped to resolvedProfile only (FG-435) — this must never fire
-        // because some OTHER profile on the host looks fresh or stale. A stale
-        // finding here is just a coarse mtime heuristic; `aws configure
-        // export-credentials` (the same credential path forge injects into the
-        // container) is authoritative, so we confirm against it before warning.
-        //
-        // FG-499: this is advisory only. An interactive `claude` session
-        // handles its own auth failure natively, so forge must never exit
-        // non-zero here — only warn and proceed to launch. (Contrast
-        // validateCredsForNewRun in util/creds.ts, which still hard-blocks —
-        // container dispatch has no interactive fallback if creds are bad.)
-        const staleness = detectStaleStsCache({ profile: resolvedProfile });
-        if (staleness?.stale) {
-          if (exportCredsOverridesStaleness(resolvedProfile)) {
-            console.log(
-              `forge claude: ⚠ ${staleness.reason} (advisory — \`aws configure export-credentials\` succeeded for '${resolvedProfile}', continuing)`
-            );
-          } else {
-            console.error(
-              `forge claude: ⚠ ${staleness.reason}\n` +
-              `  Credential export also failed for '${resolvedProfile}' — its SSO session likely needs a fresh login.\n` +
-              `  Run: aws sso login --profile ${resolvedProfile}\n` +
-              `  (advisory only — continuing; \`claude\` will handle any auth failure itself)`
-            );
-          }
-        }
-
-        // FG-435 round 2: detectStaleStsCache only fires when this profile has
-        // its own ~/.aws/cli/cache STS entry to compare against its SSO token's
-        // mtime. A profile authenticating SSO-direct (FORGE-DEC-013 — bedrock
-        // reads ~/.aws/sso/cache directly and never populates cli/cache) has no
-        // such entry, so a genuinely expired SSO session sails through the
-        // check above as {stale: false}. Check this profile's own SSO token
-        // freshness directly; export-credentials remains authoritative over a
-        // stale/missing finding for the same reason as above.
-        //
-        // Gate on resolveProfileSsoIdentity first: it returns null when the
-        // profile has no sso_session / sso_start_url at all (e.g. a plain
-        // aws_access_key_id/aws_secret_access_key bedrock profile), which is
-        // "SSO not applicable," not "SSO expired" — hasFreshProfileSsoCache
-        // can't tell those apart on its own, so a non-SSO profile must never
-        // reach the export-credentials call or the warning below.
-        //
-        // FG-499: advisory only, same rationale as the staleness check above —
-        // warn and proceed, never exit non-zero.
-        if (
-          resolveProfileSsoIdentity(awsConfigDir(), resolvedProfile) &&
-          !hasFreshProfileSsoCache(awsConfigDir(), resolvedProfile)
-        ) {
-          if (exportCredsOverridesStaleness(resolvedProfile)) {
-            console.log(
-              `forge claude: ⚠ SSO session for '${resolvedProfile}' looks expired or missing ` +
-              `(advisory — \`aws configure export-credentials\` succeeded, continuing)`
-            );
-          } else {
-            console.error(
-              `forge claude: ⚠ ${describeExpiredSsoSession(awsConfigDir(), resolvedProfile)}\n` +
-              `  (advisory only — continuing; \`claude\` will handle any auth failure itself)`
-            );
-          }
-        }
+      // `--bedrock` and `.forge/project.json auth: bedrock` are explicit Bedrock
+      // assertions. Arming Forge's OWN auth detection with them (rather than
+      // injecting the variable into the child behind the resolver's back) is what
+      // keeps the recorded decision, the preflight and the child environment
+      // describing one launch: with no model policy in effect the resolution reads
+      // this variable and records `bedrock`. The operator's shell is a separate
+      // process and is never modified — this is forge's own environment, and forge
+      // exits with the session.
+      const bedrockAssertedBy = invocation.bedrock
+        ? "--bedrock"
+        : projectAuth?.auth === "bedrock"
+          ? ".forge/project.json auth=bedrock"
+          : undefined;
+      if (bedrockAssertedBy !== undefined && process.env.CLAUDE_CODE_USE_BEDROCK !== "1") {
+        process.env.CLAUDE_CODE_USE_BEDROCK = "1";
       }
 
-      // Disable Claude's harness-owned background tasks for every Forge
-      // orchestrator session. Long-running work must use the durable tmux
-      // launcher instead. The parent shell remains unchanged.
-      const childEnv = buildClaudeChildEnv(process.env, resolvedProfile);
+      // Cold-context orientation, plus the AWS profile a Bedrock launch will use —
+      // the two things `forge claude`'s old banner carried that the shared,
+      // decision-derived banner does not. Printed by the shortcut rather than moved
+      // into the shared launcher, because neither is part of the recorded launch
+      // decision: one is git state, the other is which credential file gets read.
+      const context = projectContextLine(
+        projectRoot,
+        bedrockAssertedBy !== undefined || process.env.CLAUDE_CODE_USE_BEDROCK === "1"
+          ? (invocation.awsProfile ?? projectAuth?.awsProfile ?? process.env["AWS_PROFILE"] ?? "default")
+          : undefined,
+      );
+      if (context) console.log(`forge claude: ${context}`);
 
-      // 5. Resolve the display name. Honor user-supplied -n / --name override.
-      const userSuppliedName = extractNameFromArgs(argsWithoutBedrockFlags);
-      const resolvedName = userSuppliedName ?? resolveProjectMeta(projectRoot)?.label ?? basename(projectRoot);
+      const outcome = await runOrchestratorLaunch({
+        commandName: "forge claude",
+        // D5/D16: the pin refuses the resolution it actually got. It never feeds
+        // into resolution, so policy still decides which profile is selected.
+        providerPin: "claude-code",
+        adapter: claudeShortcutAdapter({
+          bedrockAsserted: bedrockAssertedBy !== undefined,
+          bedrockAssertedBy,
+          awsProfile: invocation.awsProfile,
+        }),
+        cliProfile: invocation.profile,
+        cliModel: invocation.model,
+        continueSession: invocation.continueSession,
+        resumeSessionId: invocation.resume,
+        explain: invocation.explain,
+        passthrough: invocation.passthrough,
+        projectName: invocation.name,
+        cwd,
+      });
 
-      // 6. Pre-flight warnings (non-blocking).
-      const warnings = preflightChecks(projectRoot);
-      for (const w of warnings) console.log(`forge claude: ⚠ ${w}`);
-
-      // 7. Status banner.
-      console.log(statusBanner(projectRoot, resolvedName, resolvedProfile));
-      console.log("");
-
-      // 8. Create an orchestrator run + task so model_calls captured at session
-      //    end show up in the dashboard usage view with proper project grouping.
-      const runId = newRunId("orchestrator");
-      const taskId = newTaskId("session");
-      const startedAt = nowIso();
-      try {
-        insertRun({
-          id: runId,
-          workflow: "orchestrator",
-          title: `${resolvedName} orchestrator`,
-          status: "active",
-          createdAt: startedAt,
-          projectDir: projectRoot,
-        });
-        insertTask({
-          id: taskId,
-          runId,
-          phase: "session",
-          agentRole: "orchestrator",
-          status: "running",
-          taskPackage: {
-            taskId, runId, phase: "session", role: "orchestrator",
-            inputs: { projectDir: projectRoot },
-            composedSystemPrompt: "",
-          },
-          createdAt: startedAt,
-          startedAt,
-        });
-      } catch {
-        // Best-effort — don't block the session if DB writes fail.
+      // D16 completeness. A resolution refusal carries the resolved facts
+      // structurally, and its prose names the profile and the provider — but not
+      // always the RUNTIME, which is the token the operator's own model-policy.yml
+      // and `forge model resolve` use. Naming it here closes the gap for the
+      // shortcut without duplicating anything the message already said.
+      const refusal = outcome.refusal;
+      if (refusal !== null && "runtime" in refusal && refusal.runtime && !refusal.message.includes(refusal.runtime)) {
+        console.error(
+          `  Resolved runtime: '${refusal.runtime}'. Inspect the full effective choice with ` +
+            `\`forge orchestrator --explain\` or \`forge model resolve --agent orchestrator\`.`,
+        );
       }
 
-      // 9. Ensure the SSO watchdog is running when bedrock is active so the
-      //    SSO token stays fresh for the duration of the session.
-      if (bedrockActive) {
-        startSsoWatchdog(runId);
-      }
-
-      // 10. Build the final argv. Strip user-supplied -n / --name (we set ours);
-      //     insert our --name first so flags-after can still reference it.
-      const passthrough = stripNameFromArgs(argsWithoutBedrockFlags);
-      const finalArgs: string[] = ["-n", resolvedName, ...passthrough];
-
-      // 11. Exec claude with stdio inherited so the user gets a real interactive
-      //     session. Child env has background tasks disabled and bedrock vars
-      //     injected when active (parent shell is never mutated).
-      const child = spawn("claude", finalArgs, {
-        cwd: projectRoot,
-        stdio: "inherit",
-        env: childEnv,
-      });
-      child.on("exit", (code, signal) => {
-        captureOrchestratorUsage(projectRoot, taskId, runId);
-        if (signal) process.exit(128);
-        process.exit(code ?? 0);
-      });
-      child.on("error", (err) => {
-        console.error(`forge claude: failed to spawn claude — ${err.message}`);
-        console.error(`  Is the \`claude\` binary in your PATH?`);
-        process.exit(1);
-      });
+      process.exit(outcome.exitCode);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Project root + git context
+// ---------------------------------------------------------------------------
 
 // Walk up from `start` looking for CLAUDE.md with the orchestrator marker.
 // Returns the dir containing it, or null if not found before reaching the
@@ -269,120 +416,16 @@ export function findProjectRoot(start: string): string | null {
   }
 }
 
-// Extract -n / --name <value> from a passthrough arg list. Returns the value
-// if present (so we honor the user's explicit choice over our auto-resolution),
-// undefined otherwise. Doesn't mutate the array — see stripNameFromArgs.
-export function extractNameFromArgs(args: string[]): string | undefined {
-  for (let i = 0; i < args.length; i += 1) {
-    if ((args[i] === "-n" || args[i] === "--name") && i + 1 < args.length) {
-      return args[i + 1];
-    }
-    if (args[i]?.startsWith("--name=")) {
-      return args[i]!.slice("--name=".length);
-    }
-  }
-  return undefined;
-}
-
-// Remove -n / --name (and its value) from the arg list so we can re-insert our
-// own without duplicates. Handles both `-n foo` / `--name foo` (two tokens)
-// and `--name=foo` (one token).
-export function stripNameFromArgs(args: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "-n" || args[i] === "--name") {
-      i += 1;  // skip the value too
-      continue;
-    }
-    if (args[i]?.startsWith("--name=")) continue;
-    out.push(args[i]!);
-  }
-  return out;
-}
-
-// Return true when --bedrock appears anywhere in the passthrough arg list.
-export function extractBedrockFromArgs(args: string[]): boolean {
-  return args.includes("--bedrock");
-}
-
-// Extract --aws-profile <value> or --aws-profile=<value> from the arg list.
-export function extractAwsProfileFromArgs(args: string[]): string | undefined {
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--aws-profile" && i + 1 < args.length) {
-      return args[i + 1];
-    }
-    if (args[i]?.startsWith("--aws-profile=")) {
-      return args[i]!.slice("--aws-profile=".length);
-    }
-  }
-  return undefined;
-}
-
-// Remove --bedrock and --aws-profile (plus its value) from the arg list so
-// forge-specific flags don't leak through to claude.
-export function stripBedrockFlagsFromArgs(args: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--bedrock") continue;
-    if (args[i] === "--aws-profile") {
-      i += 1;  // skip the value too
-      continue;
-    }
-    if (args[i]?.startsWith("--aws-profile=")) continue;
-    out.push(args[i]!);
-  }
-  return out;
-}
-
-function preflightChecks(projectRoot: string): string[] {
-  const warnings: string[] = [];
-
-  // Is this even a forge-init'd project?
-  const claudeMd = join(projectRoot, "CLAUDE.md");
-  const hasOrchestrator =
-    existsSync(claudeMd) && readFileSync(claudeMd, "utf8").includes(ORCHESTRATOR_MARKER);
-  if (!hasOrchestrator) {
-    warnings.push(`CLAUDE.md has no forge orchestrator block. Run \`forge init\` to bootstrap.`);
-    return warnings;  // skip remaining checks; nothing else applies
-  }
-
-  // Per-developer config in place?
-  const settingsLocal = join(projectRoot, ".claude", "settings.local.json");
-  if (!existsSync(settingsLocal)) {
-    warnings.push(`.claude/settings.local.json missing (heartbeats won't fire). Run \`forge init\`.`);
-  }
-
-  // Stale forge symlinks in .claude/commands/?
-  const commandsDir = join(projectRoot, ".claude", "commands");
-  if (existsSync(commandsDir)) {
-    for (const name of ["orient.md", "handoff.md"]) {
-      const target = join(commandsDir, name);
-      try {
-        const st = lstatSync(target);
-        if (st.isSymbolicLink()) {
-          const linkTarget = readlinkSync(target);
-          // Expect: <forge-clone>/scripts/claude-commands/<name>
-          if (linkTarget.endsWith(`/scripts/claude-commands/${name}`) && !existsSync(target)) {
-            warnings.push(`.claude/commands/${name} → ${linkTarget} (target missing). Run \`forge upgrade\` to repoint.`);
-          }
-        }
-      } catch { /* skip */ }
-    }
-  } else {
-    warnings.push(`.claude/commands/ missing (/orient, /handoff unavailable). Run \`forge init\`.`);
-  }
-
-  return warnings;
-}
-
-function statusBanner(projectRoot: string, name: string, bedrockProfile?: string): string {
-  const parts: string[] = [`Launching as '${name}' orchestrator`];
+function projectContextLine(projectRoot: string, bedrockProfile?: string): string | undefined {
+  const parts: string[] = [];
   if (bedrockProfile) parts.push(`bedrock:${bedrockProfile}`);
   const branch = gitInfo(projectRoot, "rev-parse --abbrev-ref HEAD");
   if (branch) parts.push(`branch: ${branch}`);
-  const ahead = gitInfo(projectRoot, "rev-list --count origin/HEAD..HEAD") ?? gitInfo(projectRoot, "rev-list --count @{u}..HEAD");
+  const ahead =
+    gitInfo(projectRoot, "rev-list --count origin/HEAD..HEAD") ??
+    gitInfo(projectRoot, "rev-list --count @{u}..HEAD");
   if (ahead && ahead !== "0") parts.push(`${ahead} commit(s) ahead of origin`);
-  return parts.join(" · ");
+  return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
 function gitInfo(cwd: string, cmd: string): string | undefined {
@@ -391,27 +434,16 @@ function gitInfo(cwd: string, cmd: string): string | undefined {
   } catch { return undefined; }
 }
 
-// #163: after claude exits, find its transcript and extract token usage into
-// model_calls. Best-effort — never throws, never blocks exit.
-function captureOrchestratorUsage(projectRoot: string, taskId: string, runId: string): void {
-  try {
-    const transcriptPath = findSessionTranscript(projectRoot);
-    if (!transcriptPath) return;
-
-    const rows = extractUsageFromTranscript(transcriptPath, { taskId, alias: "orchestrator" });
-    if (rows.length > 0) insertUsageRows(rows);
-
-    markTaskComplete(taskId, { rowCount: rows.length });
-    updateRunStatus(runId, "complete");
-  } catch {
-    // Telemetry failure must never alter exit behavior.
-    try { updateRunStatus(runId, "complete"); } catch { /* give up */ }
-  }
-}
-
 // Claude Code transcripts live at ~/.claude/projects/<path-hash>/<session-id>.jsonl.
 // The path hash is the absolute project dir with / replaced by -.
 // We find the most recently modified .jsonl in the project's transcript dir.
+//
+// FG-576 step 6 removed this file's post-exit usage capture: the launcher now owns
+// close-out, and binding usage to the receipt's ASSERTED session id is step 8's —
+// which also replaces "newest transcript wins" (with two sessions open on one
+// project, that attributes work to whichever wrote last) and the hardcoded
+// homedir() below with an env seam. This remains only because `forge design` still
+// consumes it; nothing in the orchestrator launch path reads it.
 export function findSessionTranscript(projectRoot: string): string | undefined {
   const pathHash = projectRoot.replace(/\//g, "-");
   const transcriptDir = join(homedir(), ".claude", "projects", pathHash);
