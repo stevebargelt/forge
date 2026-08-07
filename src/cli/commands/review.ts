@@ -22,6 +22,9 @@ import {
   DISPOSITIONS,
   DISPROVING_EVIDENCE_KINDS,
   recordDisposition,
+  lensAcceptancesOf,
+  lensOutcomeRecordsOf,
+  lensSkipRecordsOf,
   lookupFinding,
   recordLensAcceptance,
   summarizeReview,
@@ -41,7 +44,15 @@ import { newReviewId } from "../../util/ids.js";
 import { nextTransition } from "../../v2/review-coordinator.js";
 import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/review-run.js";
 import { validateReviewContract } from "../../v2/review-contract.js";
-import { buildCoordinatorDeps, parseLensWidening, resolveReviewBase } from "./review-wiring.js";
+import { assessShardCompleteness, type LensOutcome } from "../../v2/review-discovery.js";
+import { DEFAULT_SHARD_BUDGET, SHARD_BUDGET_UNIT } from "../../v2/review-shards.js";
+import {
+  buildCoordinatorDeps,
+  parseLensWidening,
+  parseRetryShards,
+  parseShardBudget,
+  resolveReviewBase,
+} from "./review-wiring.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
 import { DocsCloseoutSchema, type DocsCloseout } from "../../v2/review-shipping.js";
 
@@ -64,6 +75,106 @@ function counts(record: Record<string, number>): string {
   return parts.length === 0 ? DASH : parts.map(([k, n]) => `${k} ${n}`).join(", ");
 }
 
+/** "wide shard 2 of 3", or "wide" when there is no shard identity to name. */
+function shardLabel(lens: string, shard?: number, of?: number): string {
+  if (shard === undefined) return lens;
+  return of === undefined ? `${lens} shard ${shard}` : `${lens} shard ${shard} of ${of}`;
+}
+
+/** FG-689: WHAT DISCOVERY WAS OWED, BESIDE WHAT IT DELIVERED — per lens, per shard.
+ *
+ *  THE THREE STATES A SHARD CAN BE IN ARE THREE DIFFERENT RENDERED FORMS, deliberately, because
+ *  "distinguishable at the gate" is only true operationally if it is distinguishable in what an
+ *  operator reads:
+ *
+ *    - `intentionally skipped (zero in-scope paths)` — the lens's authored scope matched no
+ *      changed path, so nothing was owed. NOT a review, and NOT an absence.
+ *    - `no outcome` — a shard that owes a reviewer-authored outcome and has none. This blocks.
+ *    - `accepted missing evidence` — an operator decided to proceed with a narrower review of
+ *      THAT shard. It clears completeness and is never evidence.
+ *
+ *  Collapsing any two of them into one line would put the distinction back where only the
+ *  assessor can see it, which is where it was before this ticket.
+ *
+ *  Computed from the durable row rather than restated from the stage record: the stage record
+ *  is written only when discovery COMPLETES, and the moment an operator most needs this is when
+ *  it did not. */
+export function renderShardPlan(review: Review): string[] {
+  const plan = review.shardPlan;
+  if (plan === undefined) return [];
+
+  const outcomes = lensOutcomeRecordsOf(review) as LensOutcome[];
+  const state = assessShardCompleteness(plan, outcomes, {
+    acceptances: lensAcceptancesOf(review),
+    skips: lensSkipRecordsOf(review),
+    ...(review.contractConfirmedSha !== undefined ? { candidateSha: review.contractConfirmedSha } : {}),
+  });
+
+  const d = plan.derivation;
+  const lines: string[] = [];
+  lines.push("");
+  lines.push("Shard plan (expected vs delivered):");
+  lines.push(`  partition:          ${plan.digest}`);
+  lines.push(`  recorded at:        ${plan.recordedAt}`);
+  lines.push(`  derivation:         ${d.baseSha}..${d.candidateSha} rendered by ${d.renderingId}`);
+  lines.push(
+    `  shard budget:       ${d.budget} ${d.unit} per shard (validated against: ${d.budgetValidatedRuntime})`,
+  );
+  lines.push(`  fan-out width:      ${plan.fanoutWidth}`);
+
+  for (const planned of plan.lenses) {
+    const current = outcomes.filter(
+      (o) => o.lens === planned.lens && o.derivationDigest === plan.digest && o.shard !== undefined,
+    );
+    const delivered = planned.shards.filter((s) =>
+      current.some((o) => o.shard?.index === s.index && o.complete),
+    ).length;
+    lines.push(
+      `  ${planned.lens}: ${planned.shards.length} shard(s) planned, ${delivered} delivered`,
+    );
+    for (const shard of planned.shards) {
+      const label = `shard ${shard.index} of ${shard.of}`;
+      const facts = `${shard.paths.length} path(s), ${shard.chars} ${d.unit}`;
+      const forShard = current.filter((o) => o.shard?.index === shard.index);
+      const authored = forShard.filter((o) => o.complete);
+      const last = authored[authored.length - 1] ?? forShard[forShard.length - 1];
+      const acceptance = state.accepted.find((a) => a.lens === planned.lens && a.shard === shard.index);
+      const miss = state.missing.find((m) => m.lens === planned.lens && m.shard === shard.index);
+
+      if (last?.complete) {
+        lines.push(`      ${label} — delivered ${last.outcome} (${facts})`);
+      } else if (acceptance !== undefined) {
+        lines.push(
+          `      ${label} — accepted missing evidence: ${acceptance.missingEvidence} ` +
+            `(by ${acceptance.acceptedBy} at ${acceptance.acceptedAt}) (${facts})`,
+        );
+      } else {
+        const why = miss !== undefined ? `${miss.reason}: ${miss.detail}` : "no reviewer-authored outcome";
+        lines.push(`      ${label} — no outcome (${why}) (${facts})`);
+      }
+      for (const p of shard.paths) lines.push(`          ${p}`);
+    }
+  }
+
+  for (const s of plan.skipped) {
+    const recorded = state.skipped.some((r) => r.lens === s.lens);
+    lines.push(
+      recorded
+        ? `  ${s.lens}: intentionally skipped (zero in-scope paths)`
+        : `  ${s.lens}: intentionally skipped (zero in-scope paths) in the plan, but NO matching skip record for ` +
+          `partition ${plan.digest} — it satisfies nothing and discovery stays incomplete`,
+    );
+  }
+
+  // D17. Named, never dropped: an operator who decided something once has to be able to read
+  // that it no longer applies, and a decision that quietly vanished reads as one never made.
+  for (const sup of state.superseded) {
+    lines.push(`  superseded ${sup.kind}: ${sup.detail}`);
+  }
+
+  return lines;
+}
+
 /** The human render, exported so the operator surface is asserted directly rather
  *  than inferred from the JSON one. */
 export function renderReview(s: ReviewSummary): string {
@@ -82,9 +193,15 @@ export function renderReview(s: ReviewSummary): string {
   lines.push(`  workspace:          ${r.workspaceDir ?? DASH}`);
   lines.push(`  risk lenses:        ${s.riskLenses.length > 0 ? s.riskLenses.join(", ") : DASH}`);
   for (const a of s.lensAcceptances) {
+    // FG-689 D16: an acceptance clears exactly the shard it names, so the render names it too.
+    // A line that said only "wide" while the ledger record cleared shard 2 of 3 would read as a
+    // decision about the whole lens — the very reading the shardless acceptance is refused for.
+    // It rides the provenance parenthetical rather than replacing the lens token, so the line
+    // keeps saying which lens first, which is what an operator scans for.
     lines.push(
       `  lens accepted:      ${a.lens} — missing evidence: ${a.missingEvidence} ` +
-        `(by ${a.acceptedBy} at ${a.acceptedAt}, candidate ${a.candidateSha})`,
+        `(by ${a.acceptedBy} at ${a.acceptedAt}, candidate ${a.candidateSha}` +
+        `${a.shard !== undefined ? `, shard ${a.shard}` : ""})`,
     );
     lines.push(`      rationale: ${a.rationale}`);
   }
@@ -92,6 +209,8 @@ export function renderReview(s: ReviewSummary): string {
   lines.push(`  resolutions:        ${counts(s.countsByResolution)}`);
   lines.push(`  unsettled findings: ${s.unsettledCount}`);
   if (r.settledAt !== undefined) lines.push(`  settled at:         ${r.settledAt}`);
+
+  lines.push(...renderShardPlan(r));
 
   lines.push("");
   if (s.findings.length === 0) {
@@ -137,6 +256,7 @@ type AcceptLensOpts = {
   missingEvidence?: string;
   rationale?: string;
   operator?: boolean;
+  shard?: string;
   json?: boolean;
 };
 
@@ -150,6 +270,7 @@ type StartOpts = {
   addLens?: string[];
   drift?: string;
   evaluatedNoDrift?: string;
+  shardBudget?: string;
   json?: boolean;
 };
 
@@ -162,6 +283,8 @@ type ContinueOpts = {
   evaluatedNoDrift?: string;
   acceptance?: string;
   docsCloseout?: string;
+  shardBudget?: string;
+  retryShard?: string[];
   all?: boolean;
   dryRun?: boolean;
   json?: boolean;
@@ -353,6 +476,8 @@ function depsFor(
     evaluatedNoDrift?: string;
     acceptance?: string;
     docsCloseout?: string;
+    shardBudget?: string;
+    retryShard?: string[];
     dryRun?: boolean;
   },
 ): { ok: true; deps: CoordinatorDeps } | { ok: false; refusal: string } {
@@ -361,6 +486,14 @@ function depsFor(
 
   const widening = parseLensWidening(opts.addLens ?? []);
   if (!widening.ok) return { ok: false, refusal: widening.refusal };
+
+  // FG-689: both shard overrides are parsed HERE, beside the widening, so `--dry-run` refuses a
+  // malformed one identically to the real run — the preview must go through the same checks the
+  // act does, or it is an answer about a different invocation.
+  const budget = opts.shardBudget !== undefined ? parseShardBudget(opts.shardBudget) : undefined;
+  if (budget !== undefined && !budget.ok) return { ok: false, refusal: budget.refusal };
+  const retry = parseRetryShards(opts.retryShard ?? []);
+  if (!retry.ok) return { ok: false, refusal: retry.refusal };
 
   // FG-649: the dispatch workspace comes from the REVIEW, never from cwd. A --dry-run
   // preview resolves and refuses identically but records nothing (RF-3) — rebinding which
@@ -402,6 +535,8 @@ function depsFor(
       ...(opts.evaluatedNoDrift !== undefined ? { evaluatedNoDrift: opts.evaluatedNoDrift } : {}),
       ...(acceptance !== undefined ? { acceptance } : {}),
       ...(docsCloseout !== undefined ? { docsCloseout } : {}),
+      ...(budget !== undefined && budget.ok ? { shardBudget: budget.budget } : {}),
+      ...(retry.shards.length > 0 ? { retryShards: retry.shards } : {}),
     }),
   };
 }
@@ -455,6 +590,11 @@ export function registerReview(program: Command): void {
       "--evaluated-no-drift <statement>",
       "record that you EXAMINED the final diff and no lens change is needed. The statement is stored with " +
         "the diff summary it was made against; the confirmation then advances",
+    )
+    .option(
+      "--shard-budget <n>",
+      `override the per-shard size budget for discovery, in ${SHARD_BUDGET_UNIT} (default ${DEFAULT_SHARD_BUDGET}). ` +
+        `The number travels with its unit into the recorded derivation, so a provider change cannot reinterpret it`,
     )
     .option("--json", "emit each stage outcome as JSON")
     .description("Open a review: verify, confirm the contract against the final diff, discover, stop at disposition")
@@ -592,6 +732,18 @@ export function registerReview(program: Command): void {
     )
     .option("--acceptance <file>", "acceptance-criterion claims for the shipping review, as JSON")
     .option("--docs-closeout <file>", "FG-640 shipping duty 6: the ticket-required docs/closeout assessment, as JSON {assessed, gaps[], detail?}. Omitting it reads as NOT assessed, which blocks")
+    .option(
+      "--retry-shard <lens:index>",
+      "re-dispatch ONLY the named shard(s) of the discovery stage (repeatable, e.g. wide:2). Every " +
+        "already-authored shard outcome is left untouched; a shard that owes nothing refuses by name",
+      (v: string, acc: string[] = []) => [...acc, v],
+    )
+    .option(
+      "--shard-budget <n>",
+      `override the per-shard size budget for discovery, in ${SHARD_BUDGET_UNIT} (default ${DEFAULT_SHARD_BUDGET}). ` +
+        `A change RE-PARTITIONS: every shard-scoped decision recorded under the old partition is named as ` +
+        `superseded rather than silently honored or dropped`,
+    )
     .option("--all", "keep driving while each transition advances, instead of one transition")
     .option("--dry-run", "report the one valid next transition and exit without running it")
     .option("--json", "emit each stage outcome as JSON")
@@ -610,6 +762,24 @@ export function registerReview(program: Command): void {
         console.error(`forge review continue: ${built.refusal}`);
         process.exitCode = 1;
         return;
+      }
+
+      // FG-689 D7: --retry-shard is a DISCOVERY instruction, and the coordinator drives the one
+      // valid next transition from durable state. Accepting the flag when discovery is not that
+      // transition would silently drive some other stage while the operator believed they had
+      // named a shard — so it refuses here, before anything dispatches, and names what is
+      // actually next. It is checked on the real path and the preview alike.
+      if ((opts.retryShard ?? []).length > 0) {
+        const pending = nextTransition(snapshotFor(reviewId));
+        if (pending.kind !== "discover") {
+          console.error(
+            `forge review continue: --retry-shard names a shard of the DISCOVERY stage, but this review's one ` +
+              `valid next transition is '${pending.kind}' — ${pending.reason}. Nothing was dispatched and nothing ` +
+              `was written. Drop the flag to drive that transition.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
       }
 
       // --dry-run answers "what would continue do?" without dispatching anything. It reads
@@ -656,6 +826,12 @@ export function registerReview(program: Command): void {
     .option("--missing-evidence <text>", "WHAT was not reviewed — required; an unnamed acceptance is a blanket override")
     .option("--rationale <text>", "why the missing evidence is acceptable for this candidate — required")
     .option("--operator", "record this as the operator's decision — required: an acceptance narrows the approved discovery coverage")
+    .option(
+      "--shard <n>",
+      "WHICH shard of the lens this acceptance clears, 1-based as `forge review show` renders it. REQUIRED " +
+        "once the review's recorded shard plan gives the lens shards — one acceptance covering every shard " +
+        "would clear shards that crashed and were never read",
+    )
     .option("--json", "emit the recorded acceptance as JSON")
     .description(
       "Accept a selected lens's MISSING evidence — the third route by which an absent lens clears " +
@@ -665,11 +841,24 @@ export function registerReview(program: Command): void {
       ensureForgeDirs();
       assertStoreForLookup(`review ${reviewId}`);
 
+      // Matched on the LITERAL, like --retry-shard's index: an acceptance that cleared a
+      // different shard than the operator typed is exactly the fail-open D16 closes, and
+      // Number("2.7") would silently produce one.
+      if (opts.shard !== undefined && !/^[1-9][0-9]*$/.test(opts.shard.trim())) {
+        console.error(
+          `forge review accept-lens: --shard expects a whole number from 1, as \`forge review show\` renders it ` +
+            `("shard 2 of 3" is --shard 2); got '${opts.shard}'. Nothing was written.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
       const outcome = recordLensAcceptance(reviewId, {
         lens,
         missingEvidence: opts.missingEvidence ?? "",
         rationale: opts.rationale ?? "",
         operator: opts.operator === true,
+        ...(opts.shard !== undefined ? { shard: Number(opts.shard.trim()) } : {}),
       });
       if (!outcome.ok) {
         console.error(`forge review accept-lens: ${outcome.refusal}`);
@@ -682,10 +871,14 @@ export function registerReview(program: Command): void {
         return;
       }
       const a = outcome.acceptance;
-      console.log(`${reviewId}: the ${a.lens} lens's missing evidence is accepted by ${a.acceptedBy} at ${a.acceptedAt}`);
+      console.log(
+        `${reviewId}: the ${a.lens} lens's ${a.shard !== undefined ? `shard ${a.shard} ` : ""}missing evidence is ` +
+          `accepted by ${a.acceptedBy} at ${a.acceptedAt}`,
+      );
       console.log(`  missing evidence: ${a.missingEvidence}`);
       console.log(`  rationale: ${a.rationale}`);
       console.log(`  candidate sha: ${a.candidateSha}`);
+      if (a.derivationDigest !== undefined) console.log(`  partition: ${a.derivationDigest}`);
     });
 
   review
