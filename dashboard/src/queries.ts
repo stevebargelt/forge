@@ -8,6 +8,7 @@
 // error). Documented in docs/SCHEMA-CONTRACT.md.
 
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -16,7 +17,7 @@ import { resolveProjectMeta } from "@forge/project-meta";
 import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
-import { LEGACY_BLOCKED_SOURCE } from "@forge/blocked-source";
+import { LEGACY_BLOCKED_SOURCE, isStatusBearingEvidenceSource } from "@forge/blocked-source";
 import {
   findReconcileCandidates,
   type LivenessProbe,
@@ -2261,4 +2262,1379 @@ export function launchLogTail(launchId: string, maxBytes = LAUNCH_LOG_TAIL_BYTES
     notice: LAUNCH_LOG_CONTENT_NOTICE,
     maxBytes,
   };
+}
+
+// ─── FG-591: the operator work queue board (GET /api/queue) ──────────────────
+//
+// THE FIVE VIEWS ARE PROJECTIONS OVER ORTHOGONAL DURABLE FIELDS, NOT FIVE
+// COMPETING STATUSES. Exactly three durable facts are read per ticket — the
+// lifecycle status (active | done | deferred), the nullable stack rank
+// (tickets.priority_rank) and queue membership (queue_membership) — and
+// everything else on a row is DERIVED on this read:
+//   in progress — dispatch evidence with a non-terminal task, OR a live claim
+//                 that has stamped its launch identity but whose first task has
+//                 not spawned yet (see LAUNCHING below).
+//   blocked     — blocker_evidence, by the SAME wide predicate the queue's own
+//                 isQueueBlocked uses: status-bearing legacy evidence OR an
+//                 enriched row whose queue_projection is 'blocked'.
+//   done        — the lifecycle status, verbatim.
+// Nothing here stores or writes any of it, and no column named in_progress or
+// blocked exists to store.
+//
+// LAUNCHING — the window this projection would otherwise render as nothing.
+// ticket_dispatch_evidence is written in exactly one place (src/v2/spawn.ts) when
+// a spawned TASK carries a ticketId, so a queue-launched run only reads as in
+// progress once its FIRST task spawns. Between the claim's launch stamp and that
+// spawn a container is starting and the board would show an idle queue entry. So
+// executionState carries `launching` beside `running`, from the RESERVATION's own
+// launch_id — and the two stay distinguishable rather than collapsed.
+//
+// RESERVATION vs EXECUTION. queue_claims is authoritative for the reservation and
+// the run/task record for the execution; they are read by SEPARATE queries and
+// never joined in one, and neither is derived from the other. The payload keeps
+// them as separate fields for the same reason.
+//
+// A SCHEDULING WAIT IS NOT A BLOCKER. "FG-123 is holding the worktree lane" is
+// per-evaluation dispatcher scan evidence that evaporates when the active set
+// changes; it lives in dispatcher_evaluations.scan_evidence and is read here as a
+// `scheduling` wait on a row that stays in the QUEUED view. It is never
+// blocker_evidence — that table is durable, per-ticket and partly container-visible,
+// and a scheduling wait written there would silently reinterpret the ticket's status
+// for every agent container.
+//
+// READ-ONLY, DIRECT SQL, NO OUTBOUND CALL. Same handle and same drift caveat as the
+// rest of this file: column names are hardcoded here and the store modules own the
+// writes. The literals that are VALUES rather than column names (the order-affecting
+// queue event types, the terminal task statuses, the policy defaults, the content
+// hash) are pinned against their single declarations by
+// fg591-queue-projection.test.ts, because each side's own tests would otherwise write
+// the string they read and drift stays green on both.
+
+/** The order-affecting queue event types — the version a reorder is submitted
+ *  against (D11). Mirrors QUEUE_ORDER_EVENT_TYPES in src/store/queue.ts, which
+ *  cannot be imported here (it reaches getDb). Pinned by test. */
+const QUEUE_ORDER_EVENT_TYPES = ["rank", "unrank", "enqueue", "dequeue", "reorder"] as const;
+
+/** Mirrors TERMINAL_TASK_STATUSES in src/store/queue.ts: everything else —
+ *  running, awaiting_gate, awaiting_red, blocked_by_red, awaiting_recovery — is
+ *  work still in flight, which is what makes a ticket read as in progress. */
+const TERMINAL_TASK_STATUSES = ["complete", "failed"] as const;
+
+/** The queue projection value that means "this evidence blocks execution". The
+ *  other value the column carries, 'not_ready', is a readiness hint and is
+ *  deliberately not blocking. Mirrors QUEUE_BLOCKING_PROJECTION in queue.ts. */
+const QUEUE_BLOCKING_PROJECTION = "blocked";
+
+/** The readiness outcomes that permit an enqueue (QUEUEABLE_OUTCOMES in queue.ts).
+ *  `exploratory` is deliberately included — a spike is queueable without ACs. */
+const QUEUEABLE_READINESS_OUTCOMES = new Set(["ready", "exploratory"]);
+
+/** dispatcher_policy defaults, mirroring src/store/dispatcher-policy.ts. `armed`
+ *  is fail-closed: an absent row, a NULL column and an explicit 0 all read as
+ *  false, so a store that has never seen an operator arm it never reads as armed. */
+const DISPATCHER_POLICY_DEFAULTS = {
+  maxActiveRuns: 1,
+  capacityScope: "host" as "host" | "project",
+  leaseTtlMs: 15 * 60_000,
+  heartbeatMs: 5 * 60_000,
+  defaultWorkflow: "feature",
+};
+
+/** The exclusive board columns. `backlog`, `queued`, `in_progress`, `blocked` and
+ *  `done` are the five the ticket names; `executing_not_queued` is the sixth state
+ *  the schema anticipated and the projection had no name for — an operator dequeue
+ *  never releases a live claim (D4), so a dequeued item whose container is still
+ *  running is a REAL, reachable state. Rendering it as a gap is how a live container
+ *  becomes a phantom on the board. */
+export const QUEUE_BOARD_VIEWS = [
+  "backlog",
+  "queued",
+  "in_progress",
+  "blocked",
+  "done",
+  "executing_not_queued",
+] as const;
+
+export type QueueBoardView = (typeof QUEUE_BOARD_VIEWS)[number];
+
+/** running — a non-terminal task exists for this ticket. launching — the claim
+ *  stamped its launch identity and no task has spawned yet. idle — neither. */
+export type QueueExecutionState = "idle" | "launching" | "running";
+
+/** WHY A QUEUED ITEM IS NOT RUNNING. The kinds are deliberately distinct: a
+ *  genuine blocker and a temporary scheduling incompatibility are different facts
+ *  with different durability, different owners and different operator actions. */
+export type QueueWaitKind =
+  /** Durable blocker evidence. The row is in the derived Blocked view. */
+  | "blocker"
+  /** TEMPORARY and self-clearing: the candidate cannot safely overlap the current
+   *  active set. Stays QUEUED with the explanation. Never Blocked. */
+  | "scheduling"
+  /** The ceiling was full. `holders` on the capacity panel names who held the slots. */
+  | "capacity"
+  /** No assessment, a stale one, or an outcome outside ready|exploratory. */
+  | "readiness"
+  /** A queue member with no rank: the queue is ordered BY rank, so it has no position. */
+  | "unranked"
+  /** Ranked and a member, execution-ineligible by lifecycle (FG-609 D5). */
+  | "deferred"
+  /** A live claim held by someone — the reservation exists, the launch has not
+   *  been stamped (or was released) yet. */
+  | "claimed"
+  /** Autonomous dispatch is disarmed. Queue membership is planning intent, and
+   *  never execution authorization. */
+  | "disarmed"
+  /** No durable evaluation covers this ticket. Reported as such rather than
+   *  guessed at — an unrecorded reason is not an answer. */
+  | "not_evaluated";
+
+export type QueueBoardWait = {
+  kind: QueueWaitKind;
+  /** Operator-readable, and concrete: the dispatcher's own reason string where
+   *  there is one ("waiting for FG-123 to finish"), never a bare boolean. */
+  reason: string;
+  /** Where the answer came from, so a reader can tell a durable per-ticket fact
+   *  from a per-evaluation observation that will evaporate. */
+  source: "blocker_evidence" | "dispatcher_evaluation" | "queue_state" | "dispatcher_policy";
+  /** When the dispatcher observed it (ISO). Null for a durable queue-state fact. */
+  observedAt: string | null;
+};
+
+export type QueueBoardBlocker = {
+  source: string;
+  kind: string | null;
+  reason: string | null;
+  detail: string | null;
+  queueProjection: string | null;
+  createdAt: string | null;
+  /** True when THIS row is what makes the queue projection blocked. */
+  blocking: boolean;
+};
+
+export type QueueBoardReadiness = {
+  outcome: string;
+  gaps: string[];
+  refinementProposal: string | null;
+  revision: number | null;
+  evaluatedAt: string;
+  /** A body-hash mismatch against the ticket's CURRENT content. There is no other
+   *  definition of stale, and a stale assessment is operator-actionable — the
+   *  dispatcher never silently re-evaluates it (D7). */
+  stale: boolean;
+  /** The assessment permits an enqueue AND still describes the current revision. */
+  queueable: boolean;
+};
+
+/** The RESERVATION half. Never joined to the execution half in one query. */
+export type QueueBoardReservation = {
+  claimId: string;
+  owner: string;
+  generation: number;
+  ticketRevision: number;
+  launchId: string | null;
+  runId: string | null;
+  leaseExpiresAtMs: number;
+  heartbeatAtMs: number;
+  /** The lease is strictly expired on the STORE clock — recoverable by takeover.
+   *  An expired lease proves the owner stopped heartbeating; it proves NOTHING
+   *  about the container, which is why the launch identity is durable. */
+  leaseExpired: boolean;
+  claimedAt: string;
+};
+
+export type QueueBoardRow = {
+  ticketId: string;
+  title: string;
+  type: string;
+  /** The lifecycle status verbatim (active | done | deferred). NOT a projection. */
+  status: string;
+  /** DURABLE FACT 1 — the one canonical stack rank. Null is a perfectly valid
+   *  backlog item, not a deprioritized one. */
+  rank: number | null;
+  /** DURABLE FACT 2 — operator queue membership, orthogonal to rank and lifecycle. */
+  queued: boolean;
+  enqueuedAt: string | null;
+  enqueuedBy: string | null;
+  note: string | null;
+  /** DERIVED. Never stored. */
+  blocked: boolean;
+  blockers: QueueBoardBlocker[];
+  /** DERIVED. Never stored. */
+  inProgress: boolean;
+  executionState: QueueExecutionState;
+  reservation: QueueBoardReservation | null;
+  readiness: QueueBoardReadiness | null;
+  /** The exclusive board column this row renders in. */
+  view: QueueBoardView;
+  /** Why it is not running, when it is not. Null for a row that IS running, is
+   *  done, or is a plain backlog item the operator has not queued. */
+  wait: QueueBoardWait | null;
+  /** The dispatcher's own per-candidate verdict from the last evaluation that
+   *  scanned this ticket — queue-claims' ScanReason vocabulary verbatim, never a
+   *  second one. Null when the last evaluation did not reach this candidate. */
+  scanReason: string | null;
+  scanDetail: string | null;
+};
+
+export type QueueCapacityHolder = {
+  claimId: string;
+  projectKey: string;
+  /** The registry label for that project, when the holder is resolvable to one.
+   *  Null rather than a guess — but projectKey is always present, which is what
+   *  makes a HOST-scoped refusal readable from a single project's board. */
+  projectLabel: string | null;
+  ticketId: string;
+  owner: string;
+  launchId: string | null;
+  runId: string | null;
+  /** False means ANOTHER project holds this slot. */
+  thisProject: boolean;
+};
+
+export type QueueCapacity = {
+  scope: "host" | "project";
+  limit: number;
+  /** REPORTED at read time from live claim rows. The ENFORCED count is taken
+   *  inside claimNextEligible's write transaction and is the only one that bounds
+   *  admission; this number is an observation of the same rows a moment later. */
+  queueOwnedActive: number;
+  holders: QueueCapacityHolder[];
+  otherProjectHolders: number;
+  /** THE STATED CAPACITY POLICY. The ceiling bounds QUEUE-OWNED runs only.
+   *  Operator-initiated runs, campaign items and review loops carry no claim row,
+   *  are structurally invisible to the enforced count, and are reported here
+   *  beside it rather than subtracted from it — a dispatcher-side subtraction
+   *  would read as a guarantee and be a guess. */
+  notCounted: {
+    /** Non-terminal tasks host-wide, counted independently of any claim row. */
+    activeTasks: number;
+    policy: string;
+  };
+  /** The last evaluation the ceiling actually refused, with the holder list AS IT
+   *  WAS at refusal time — by the time an operator looks, the holder may have
+   *  finished, and "who held the slot when I was refused" is the question. */
+  lastRefusal: {
+    evaluatedAt: string;
+    scope: string | null;
+    limit: number | null;
+    used: number | null;
+    holders: QueueCapacityHolder[];
+  } | null;
+};
+
+/** The six answers that must stay DISTINGUISHABLE rather than collapsing into
+ *  "nothing is running", plus the two honest unknowns. Every value is read from a
+ *  durable record — the policy row, the lease row, the evaluation row — and never
+ *  inferred from the absence of activity. */
+export type DispatcherPanelState =
+  | "dispatching"
+  | "disarmed"
+  | "no_capacity"
+  | "no_eligible_work"
+  | "incompatible_only"
+  | "lost"
+  | "stale_dispatcher"
+  | "no_dispatcher"
+  | "not_evaluated";
+
+export type DispatcherPanel = {
+  armed: boolean;
+  /** False when NO host policy row has ever been written: every value below is a
+   *  default rather than an operator choice, and the surface says so instead of
+   *  presenting a default as a decision. */
+  configured: boolean;
+  maxActiveRuns: number;
+  capacityScope: "host" | "project";
+  leaseTtlMs: number;
+  heartbeatMs: number;
+  defaultWorkflow: string;
+  updatedAt: string | null;
+  updatedBy: string | null;
+  lease: {
+    owner: string;
+    generation: number;
+    leaseExpiresAtMs: number;
+    heartbeatAtMs: number;
+    host: string | null;
+    pid: number | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  /** The lease has not expired on the store clock — the owner is still authorized. */
+  leaseLive: boolean;
+  leaseExpired: boolean;
+  /** How long since the owner was last actually ALIVE. "Nothing to do" and "the
+   *  dispatcher died four hours ago" must be distinguishable, and only the
+   *  heartbeat column can say so. */
+  msSinceHeartbeatMs: number | null;
+  lastEvaluation: {
+    reason: string;
+    detail: string | null;
+    evaluatedAt: string;
+    evaluatedAtMs: number;
+    wakeKind: string | null;
+    claimedTicketId: string | null;
+    capacityScope: string | null;
+    capacityLimit: number | null;
+    capacityUsed: number | null;
+    scannedCount: number | null;
+  } | null;
+  nextWatchdogAtMs: number | null;
+  pendingWakes: number;
+  state: DispatcherPanelState;
+  stateDetail: string;
+  /** Arming autonomous dispatch and setting the ceiling are CLI-only in this
+   *  story (D2): an unauthenticated localhost POST that authorizes unattended
+   *  container execution is a materially larger capability than the read surface
+   *  this route is. Stated in the payload so the board renders an affordance
+   *  rather than a disabled button. */
+  controlSurface: "cli-only";
+};
+
+export type QueueBoard = {
+  /** null = this repository has no ticket truth (never imported / not registered). */
+  projectKey: string | null;
+  storageMode: "db" | "markdown" | null;
+  /** The operator queue is a DB-store concept; a markdown-mode project has none. */
+  queueAvailable: boolean;
+  unavailableReason: string | null;
+  /** The version a reorder must carry (D11) — the id of the project's most recent
+   *  order-affecting queue event, 0 for a queue that has never moved. */
+  version: number;
+  /** THE COMPLETE BACKLOG (AC1): every non-done ticket, ranked or not, deferred
+   *  ones visible and marked execution-ineligible — plus the done tickets the
+   *  queue has actually touched (ranked, a member, or claimed at some point), so
+   *  the Done column has content without becoming the entire closed backlog. */
+  rows: QueueBoardRow[];
+  /** The exclusive partition of `rows` into board columns, in canonical order. */
+  views: Record<QueueBoardView, string[]>;
+  dispatcher: DispatcherPanel;
+  capacity: QueueCapacity;
+  nowMs: number;
+  /** Named reads that could not be answered (a store whose last writable open
+   *  predates these tables). Empty is the normal case; a non-empty entry means a
+   *  section is UNKNOWN rather than empty. */
+  degraded: string[];
+};
+
+/** A fresh, unshared empty column set. Returned by a function rather than held as
+ *  a shared constant: a spread would copy the record and alias every array. */
+function emptyBoardViews(): Record<QueueBoardView, string[]> {
+  return { backlog: [], queued: [], in_progress: [], blocked: [], done: [], executing_not_queued: [] };
+}
+
+/** THE COLUMN, decided from the orthogonal facts alone.
+ *
+ *  Precedence, and why: lifecycle `done` first (a finished ticket is not waiting
+ *  on anything); then execution, because a running container is the most urgent
+ *  true statement about a row and is what makes the not-a-member-but-executing
+ *  state visible at all; then blocked, which only applies to queue MEMBERS — a
+ *  non-member blocked ticket stays in Backlog carrying `blocked: true`, because
+ *  the Blocked column is the operator's queue seen through a blocker, not a view
+ *  of every impeded ticket in the repository. */
+export function classifyQueueBoardView(facts: {
+  status: string;
+  queued: boolean;
+  blocked: boolean;
+  executionState: QueueExecutionState;
+}): QueueBoardView {
+  if (facts.status === "done") return "done";
+  if (facts.executionState !== "idle") return facts.queued ? "in_progress" : "executing_not_queued";
+  if (facts.blocked && facts.queued) return "blocked";
+  if (facts.queued) return "queued";
+  return "backlog";
+}
+
+/** WHY THIS ITEM IS NOT RUNNING — pure over already-hydrated facts.
+ *
+ *  The ordering is durable-facts-first: what the store knows about the TICKET
+ *  (lifecycle, membership, rank, blockers, readiness) is a better answer than what
+ *  the dispatcher observed about a PASS, and it does not evaporate. Only when the
+ *  ticket itself is fine do we fall through to the per-evaluation scan evidence,
+ *  which is where a temporary scheduling incompatibility lives — and it produces a
+ *  `scheduling` wait, never a blocker. */
+export function deriveQueueWait(facts: {
+  status: string;
+  queued: boolean;
+  rank: number | null;
+  blocked: boolean;
+  blockerReason: string | null;
+  executionState: QueueExecutionState;
+  reservation: { owner: string } | null;
+  readiness: QueueBoardReadiness | null;
+  armed: boolean;
+  scan: { reason: string; detail: string | null } | null;
+  evaluation: { reason: string; evaluatedAt: string; detail: string | null } | null;
+}): QueueBoardWait | null {
+  if (facts.status === "done") return null;
+  if (facts.executionState !== "idle") return null;
+  const observedAt = facts.evaluation?.evaluatedAt ?? null;
+
+  if (facts.status === "deferred") {
+    return {
+      kind: "deferred",
+      reason: "deferred — it keeps its rank, its membership and its history, and is execution-ineligible until it is reactivated.",
+      source: "queue_state",
+      observedAt: null,
+    };
+  }
+  if (facts.blocked) {
+    return {
+      kind: "blocker",
+      reason: facts.blockerReason ?? "blocker evidence is recorded against this ticket.",
+      source: "blocker_evidence",
+      observedAt: null,
+    };
+  }
+  if (!facts.queued) return null;
+  if (facts.reservation) {
+    return {
+      kind: "claimed",
+      reason: `claimed by ${facts.reservation.owner}; the container has not stamped a launch yet.`,
+      source: "queue_state",
+      observedAt: null,
+    };
+  }
+  if (facts.rank === null) {
+    return {
+      kind: "unranked",
+      reason: "queued without a rank, so the queue has no position for it. Rank it to give it one.",
+      source: "queue_state",
+      observedAt: null,
+    };
+  }
+  if (!facts.readiness || !facts.readiness.queueable) {
+    const detail = !facts.readiness
+      ? "no readiness assessment has been recorded."
+      : facts.readiness.stale
+        ? `the '${facts.readiness.outcome}' assessment describes an older revision — the ticket was edited after it was recorded.`
+        : `it evaluates '${facts.readiness.outcome}'${facts.readiness.refinementProposal ? `: ${facts.readiness.refinementProposal}` : "."}`;
+    return { kind: "readiness", reason: detail, source: "queue_state", observedAt: null };
+  }
+
+  if (facts.scan) {
+    switch (facts.scan.reason) {
+      case "incompatible":
+        return {
+          kind: "scheduling",
+          // TEMPORARY and self-clearing. Rendered in the QUEUED column with this
+          // explanation — mislabeling it Blocked is the defect the AC names.
+          reason: facts.scan.detail ?? "it cannot safely overlap the current active set.",
+          source: "dispatcher_evaluation",
+          observedAt,
+        };
+      case "capacity":
+        return {
+          kind: "capacity",
+          reason: facts.scan.detail ?? "the capacity ceiling was full when it was scanned.",
+          source: "dispatcher_evaluation",
+          observedAt,
+        };
+      case "already_claimed":
+        return {
+          kind: "claimed",
+          reason: facts.scan.detail ?? "another dispatcher holds a live claim on it.",
+          source: "dispatcher_evaluation",
+          observedAt,
+        };
+      case "eligible":
+        // It WAS selectable. If the pass still granted nothing, the pass-level
+        // reason is the honest answer.
+        if (facts.evaluation?.reason === "no_capacity") {
+          return {
+            kind: "capacity",
+            reason: facts.evaluation.detail ?? "the capacity ceiling was full.",
+            source: "dispatcher_evaluation",
+            observedAt,
+          };
+        }
+        return null;
+      default:
+        return {
+          kind: "not_evaluated",
+          reason: `the dispatcher passed it over as '${facts.scan.reason}'${facts.scan.detail ? `: ${facts.scan.detail}` : "."}`,
+          source: "dispatcher_evaluation",
+          observedAt,
+        };
+    }
+  }
+
+  if (!facts.armed) {
+    return {
+      kind: "disarmed",
+      reason: "autonomous dispatch is disarmed — queue membership is planning intent, never execution authorization. Arm it with `forge queue dispatcher arm`.",
+      source: "dispatcher_policy",
+      observedAt: null,
+    };
+  }
+  return {
+    kind: "not_evaluated",
+    reason: facts.evaluation
+      ? `the last dispatcher evaluation (${facts.evaluation.reason}) did not reach this candidate.`
+      : "no dispatcher evaluation has been recorded for this project yet.",
+    source: "dispatcher_evaluation",
+    observedAt,
+  };
+}
+
+/** THE CONTENT BASIS, mirroring ticketContentHash in src/store/tickets.ts — the
+ *  fallback for a row written before `tickets.body_hash` existed. A stamped
+ *  body_hash is used as-is; this recomputes the identical value for one that is
+ *  NULL, exactly as queue.ts's ticketBodyHash does. Pinned by test. */
+function ticketContentHashLocal(t: {
+  type: string;
+  status: string;
+  title: string;
+  body: string;
+  created: string | null;
+  closed: string | null;
+  closedCommit: string | null;
+  epic: string | null;
+}): string {
+  const canonical = JSON.stringify([
+    t.type,
+    t.status,
+    t.title,
+    t.body,
+    t.created ?? null,
+    t.closed ?? null,
+    t.closedCommit ?? null,
+    t.epic ?? null,
+  ]);
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/** A read whose TABLE or COLUMN does not exist on this store — a legitimate state
+ *  (a read-only open never migrates one into existence), not a server fault. It is
+ *  reported by name in `degraded` rather than silently answered as empty: an empty
+ *  section and an unreadable one are different facts. Any other error propagates. */
+function tolerantRead<T>(read: () => T, fallback: T, label: string, degraded: string[]): T {
+  try {
+    return read();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(message)) {
+      const note = `${label}: ${message}`;
+      // One entry per named read: two queries over the same missing table are one
+      // unreadable section, not two.
+      if (!degraded.includes(note)) degraded.push(note);
+      return fallback;
+    }
+    throw err;
+  }
+}
+
+/** The STORE's own clock, the same expression storeNowMs (src/store/publications.ts)
+ *  evaluates. Lease expiry and heartbeat staleness are compared against it and never
+ *  against this process's clock — two processes with skewed clocks must not disagree
+ *  about whether a dispatcher is alive. */
+function storeNowMsRead(): number {
+  const row = db()
+    .prepare(`SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS ms`)
+    .get() as { ms: number };
+  return row.ms;
+}
+
+type ClaimDbRow = {
+  id: string;
+  project_key: string;
+  ticket_id: string;
+  owner: string;
+  generation: number;
+  ticket_revision: number;
+  lease_expires_at_ms: number;
+  heartbeat_at_ms: number;
+  launch_id: string | null;
+  run_id: string | null;
+  claimed_at: string;
+};
+
+const CLAIM_BOARD_COLUMNS = `id, project_key, ticket_id, owner, generation, ticket_revision,
+  lease_expires_at_ms, heartbeat_at_ms, launch_id, run_id, claimed_at`;
+
+/** THE BOARD. One project's queue as five projections over orthogonal durable
+ *  fields, plus the dispatcher panel and the host-scoped capacity context.
+ *
+ *  `projects` is the dashboard's own registry, passed in rather than re-scanned, and
+ *  used for ONE thing: naming which OTHER project holds a capacity slot. Under a
+ *  host-scoped ceiling a per-project board cannot otherwise explain its own refusal. */
+export function queueBoard(project: ProjectRecord | null, projects: readonly ProjectRecord[] = []): QueueBoard {
+  const degraded: string[] = [];
+  const nowMs = storeNowMsRead();
+
+  const identity = project
+    ? (db()
+        .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
+        .get(project.key) as { project_key: string } | undefined)
+    : undefined;
+  const projectKey = identity?.project_key ?? null;
+
+  const mode = projectKey
+    ? (db().prepare(`SELECT mode FROM ticket_storage_mode WHERE project_key = ?`).get(projectKey) as
+        | { mode: string }
+        | undefined)
+    : undefined;
+  const storageMode: "db" | "markdown" | null = projectKey ? (mode?.mode === "db" ? "db" : "markdown") : null;
+
+  // Every project's project_key ↔ repo evidence key, so a host-scope holder in
+  // ANOTHER project can be named. Read once; the list is one row per registered
+  // project.
+  const labelByProjectKey = new Map<string, string>();
+  for (const row of tolerantRead(
+    () =>
+      db().prepare(`SELECT project_key, repo_evidence_key FROM project_identity`).all() as Array<{
+        project_key: string;
+        repo_evidence_key: string;
+      }>,
+    [],
+    "project_identity",
+    degraded,
+  )) {
+    const record = projects.find((entry) => entry.key === row.repo_evidence_key);
+    if (record) labelByProjectKey.set(row.project_key, record.label);
+  }
+
+  const policy = readDispatcherPolicy(projectKey, degraded);
+  const capacity = readCapacity(projectKey, policy, labelByProjectKey, degraded);
+  const lease = projectKey ? readDispatcherLease(projectKey, degraded) : null;
+  const evaluation = projectKey ? readLatestEvaluation(projectKey, degraded) : null;
+  const pendingWakes = projectKey
+    ? tolerantRead(
+        () =>
+          (db()
+            .prepare(`SELECT COUNT(*) AS n FROM dispatcher_wakes WHERE project_key = ? AND state = 'pending'`)
+            .get(projectKey) as { n: number }).n,
+        0,
+        "dispatcher_wakes",
+        degraded,
+      )
+    : 0;
+
+  const dispatcher = dispatcherPanel(policy, lease, evaluation, pendingWakes, nowMs);
+
+  if (!projectKey || storageMode !== "db") {
+    return {
+      projectKey,
+      storageMode,
+      queueAvailable: false,
+      unavailableReason: !projectKey
+        ? "this repository has no ticket truth in the host store — it has never been imported (`forge backlog migrate`)."
+        : "the operator queue is a DB-store concept and this project's ticket truth is still Markdown. Cut it over with `forge backlog migrate`.",
+      version: 0,
+      rows: [],
+      views: emptyBoardViews(),
+      dispatcher,
+      capacity,
+      nowMs,
+      degraded,
+    };
+  }
+
+  const version = tolerantRead(
+    () =>
+      (db()
+        .prepare(
+          `SELECT MAX(id) AS version FROM queue_events
+            WHERE project_key = ? AND event_type IN (${QUEUE_ORDER_EVENT_TYPES.map(() => "?").join(", ")})`,
+        )
+        .get(projectKey, ...QUEUE_ORDER_EVENT_TYPES) as { version: number | null } | undefined)?.version ?? 0,
+    0,
+    "queue_events",
+    degraded,
+  );
+
+  const ticketRows = tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT t.ticket_id, t.type, t.status, t.title, t.body, t.created, t.closed, t.closed_commit,
+                  t.epic, t.priority_rank, t.revision, t.body_hash,
+                  m.enqueued_at, m.enqueued_by, m.note
+             FROM tickets t
+             LEFT JOIN queue_membership m
+               ON m.project_key = t.project_key AND m.ticket_id = t.ticket_id
+            WHERE t.project_key = ?`,
+        )
+        .all(projectKey) as Array<{
+        ticket_id: string;
+        type: string;
+        status: string;
+        title: string;
+        body: string;
+        created: string | null;
+        closed: string | null;
+        closed_commit: string | null;
+        epic: string | null;
+        priority_rank: number | null;
+        revision: number | null;
+        body_hash: string | null;
+        enqueued_at: string | null;
+        enqueued_by: string | null;
+        note: string | null;
+      }>,
+    [],
+    "tickets/queue_membership",
+    degraded,
+  );
+
+  // Set-wide reads rather than per-ticket ones: a board with several hundred
+  // tickets is a normal size and this route is polled.
+  const blockersByTicket = new Map<string, QueueBoardBlocker[]>();
+  for (const row of tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT ticket_id, source, kind, reason, detail, queue_projection, created_at
+             FROM blocker_evidence WHERE project_key = ?`,
+        )
+        .all(projectKey) as Array<{
+        ticket_id: string;
+        source: string;
+        kind: string | null;
+        reason: string | null;
+        detail: string | null;
+        queue_projection: string | null;
+        created_at: string | null;
+      }>,
+    [],
+    "blocker_evidence",
+    degraded,
+  )) {
+    const list = blockersByTicket.get(row.ticket_id) ?? [];
+    list.push({
+      source: row.source,
+      kind: row.kind,
+      reason: row.reason,
+      detail: row.detail,
+      queueProjection: row.queue_projection,
+      createdAt: row.created_at,
+      // The SAME wide predicate isQueueBlocked uses: status-bearing legacy
+      // evidence OR an enriched row whose stored queue_projection blocks. The
+      // narrow, container-visible ticket-status predicate is a different one and
+      // enriched evidence never moves it.
+      blocking:
+        isStatusBearingEvidenceSource(row.source) || row.queue_projection === QUEUE_BLOCKING_PROJECTION,
+    });
+    blockersByTicket.set(row.ticket_id, list);
+  }
+
+  const readinessByTicket = new Map<
+    string,
+    { bodyHash: string; outcome: string; gaps: string[]; refinementProposal: string | null; revision: number | null; evaluatedAt: string }
+  >();
+  for (const row of tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT ticket_id, body_hash, outcome, gaps_json, refinement_proposal, revision, evaluated_at
+             FROM readiness_assessments WHERE project_key = ?`,
+        )
+        .all(projectKey) as Array<{
+        ticket_id: string;
+        body_hash: string;
+        outcome: string;
+        gaps_json: string;
+        refinement_proposal: string | null;
+        revision: number | null;
+        evaluated_at: string;
+      }>,
+    [],
+    "readiness_assessments",
+    degraded,
+  )) {
+    readinessByTicket.set(row.ticket_id, {
+      bodyHash: row.body_hash,
+      outcome: row.outcome,
+      gaps: (safeJsonParse(row.gaps_json) as string[] | undefined) ?? [],
+      refinementProposal: row.refinement_proposal,
+      revision: row.revision,
+      evaluatedAt: row.evaluated_at,
+    });
+  }
+
+  // THE EXECUTION HALF — dispatch evidence with a non-terminal task. Its own
+  // query, never joined to the reservation half.
+  const running = new Set(
+    tolerantRead(
+      () =>
+        db()
+          .prepare(
+            `SELECT DISTINCT e.ticket_id
+               FROM ticket_dispatch_evidence e
+               JOIN tasks t ON t.id = e.task_id
+              WHERE e.project_key = ?
+                AND t.status NOT IN (${TERMINAL_TASK_STATUSES.map(() => "?").join(", ")})`,
+          )
+          .all(projectKey, ...TERMINAL_TASK_STATUSES) as Array<{ ticket_id: string }>,
+      [],
+      "ticket_dispatch_evidence",
+      degraded,
+    ).map((r) => r.ticket_id),
+  );
+
+  // THE RESERVATION HALF — live claims of THIS project. Its own query.
+  const reservationByTicket = new Map<string, QueueBoardReservation>();
+  for (const row of tolerantRead(
+    () =>
+      db()
+        .prepare(`SELECT ${CLAIM_BOARD_COLUMNS} FROM queue_claims WHERE project_key = ? AND state = 'live'`)
+        .all(projectKey) as ClaimDbRow[],
+    [],
+    "queue_claims",
+    degraded,
+  )) {
+    reservationByTicket.set(row.ticket_id, {
+      claimId: row.id,
+      owner: row.owner,
+      generation: row.generation,
+      ticketRevision: row.ticket_revision,
+      launchId: row.launch_id,
+      runId: row.run_id,
+      leaseExpiresAtMs: row.lease_expires_at_ms,
+      heartbeatAtMs: row.heartbeat_at_ms,
+      leaseExpired: row.lease_expires_at_ms < nowMs,
+      claimedAt: row.claimed_at,
+    });
+  }
+
+  // Every ticket the queue has EVER claimed, so a done one the queue actually ran
+  // still has a place in the Done column.
+  const everClaimed = new Set(
+    tolerantRead(
+      () =>
+        db()
+          .prepare(`SELECT DISTINCT ticket_id FROM queue_claims WHERE project_key = ?`)
+          .all(projectKey) as Array<{ ticket_id: string }>,
+      [],
+      "queue_claims",
+      degraded,
+    ).map((r) => r.ticket_id),
+  );
+
+  const scanByTicket = new Map<string, { reason: string; detail: string | null }>();
+  for (const entry of evaluation?.scanEvidence ?? []) {
+    if (typeof entry?.ticketId === "string") {
+      scanByTicket.set(entry.ticketId, { reason: String(entry.reason), detail: entry.detail ?? null });
+    }
+  }
+
+  const rows: QueueBoardRow[] = [];
+  for (const row of ticketRows) {
+    const queued = row.enqueued_at !== null;
+    const rank = row.priority_rank;
+    if (row.status === "done" && !queued && rank === null && !everClaimed.has(row.ticket_id)) continue;
+
+    const blockers = blockersByTicket.get(row.ticket_id) ?? [];
+    const blocked = blockers.some((b) => b.blocking);
+    const stored = readinessByTicket.get(row.ticket_id);
+    const currentHash =
+      row.body_hash ??
+      ticketContentHashLocal({
+        type: row.type,
+        status: row.status,
+        title: row.title,
+        body: row.body,
+        created: row.created,
+        closed: row.closed,
+        closedCommit: row.closed_commit,
+        epic: row.epic,
+      });
+    const readiness: QueueBoardReadiness | null = stored
+      ? {
+          outcome: stored.outcome,
+          gaps: stored.gaps,
+          refinementProposal: stored.refinementProposal,
+          revision: stored.revision,
+          evaluatedAt: stored.evaluatedAt,
+          stale: stored.bodyHash !== currentHash,
+          queueable: stored.bodyHash === currentHash && QUEUEABLE_READINESS_OUTCOMES.has(stored.outcome),
+        }
+      : null;
+
+    const reservation = reservationByTicket.get(row.ticket_id) ?? null;
+    const inProgress = running.has(row.ticket_id);
+    const executionState: QueueExecutionState = inProgress
+      ? "running"
+      : reservation && reservation.launchId !== null
+        ? "launching"
+        : "idle";
+    const view = classifyQueueBoardView({ status: row.status, queued, blocked, executionState });
+    const scan = scanByTicket.get(row.ticket_id) ?? null;
+    const blockingReasons = blockers.filter((b) => b.blocking).map((b) => b.reason ?? b.source);
+
+    rows.push({
+      ticketId: row.ticket_id,
+      title: row.title,
+      type: row.type,
+      status: row.status,
+      rank,
+      queued,
+      enqueuedAt: row.enqueued_at,
+      enqueuedBy: row.enqueued_by,
+      note: row.note,
+      blocked,
+      blockers,
+      inProgress,
+      executionState,
+      reservation,
+      readiness,
+      view,
+      wait: deriveQueueWait({
+        status: row.status,
+        queued,
+        rank,
+        blocked,
+        blockerReason: blockingReasons.length > 0 ? blockingReasons.join("; ") : null,
+        executionState,
+        reservation,
+        readiness,
+        armed: policy.armed,
+        scan,
+        evaluation: evaluation
+          ? { reason: evaluation.reason, evaluatedAt: evaluation.evaluatedAt, detail: evaluation.detail }
+          : null,
+      }),
+      scanReason: scan?.reason ?? null,
+      scanDetail: scan?.detail ?? null,
+    });
+  }
+
+  // CANONICAL ORDER, total: ranked first by rank then ticket id (the store's own
+  // `ORDER BY priority_rank ASC, ticket_id ASC`), unranked after, by ticket id.
+  rows.sort((a, b) => {
+    if (a.rank !== null && b.rank !== null && a.rank !== b.rank) return a.rank - b.rank;
+    if (a.rank !== null && b.rank === null) return -1;
+    if (a.rank === null && b.rank !== null) return 1;
+    return compareTicketIds(a.ticketId, b.ticketId);
+  });
+
+  const views = emptyBoardViews();
+  for (const row of rows) views[row.view].push(row.ticketId);
+
+  return {
+    projectKey,
+    storageMode,
+    queueAvailable: true,
+    unavailableReason: null,
+    version,
+    rows,
+    views,
+    dispatcher,
+    capacity,
+    nowMs,
+    degraded,
+  };
+}
+
+type BoardPolicy = {
+  armed: boolean;
+  configured: boolean;
+  maxActiveRuns: number;
+  capacityScope: "host" | "project";
+  leaseTtlMs: number;
+  heartbeatMs: number;
+  defaultWorkflow: string;
+  updatedAt: string | null;
+  updatedBy: string | null;
+};
+
+/** ONE TABLE, TWO ROW SHAPES. The `host` row is the singleton carrying the ceiling
+ *  and the cadences; an optional per-project row carries only default_workflow and
+ *  NEVER a ceiling — two dispatchers holding different ceilings while enforcing
+ *  against one shared count would make the effective ceiling whichever ran last. */
+function readDispatcherPolicy(projectKey: string | null, degraded: string[]): BoardPolicy {
+  const scopeKeys = projectKey === null ? ["host"] : ["host", projectKey];
+  const rows = tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT scope_key, armed, max_active_runs, capacity_scope, lease_ttl_ms, heartbeat_ms,
+                  default_workflow, updated_at, updated_by
+             FROM dispatcher_policy WHERE scope_key IN (${scopeKeys.map(() => "?").join(", ")})`,
+        )
+        .all(...scopeKeys) as Array<{
+        scope_key: string;
+        armed: number | null;
+        max_active_runs: number | null;
+        capacity_scope: string | null;
+        lease_ttl_ms: number | null;
+        heartbeat_ms: number | null;
+        default_workflow: string | null;
+        updated_at: string | null;
+        updated_by: string | null;
+      }>,
+    [],
+    "dispatcher_policy",
+    degraded,
+  );
+  const host = rows.find((r) => r.scope_key === "host");
+  const projectRow = projectKey ? rows.find((r) => r.scope_key === projectKey) : undefined;
+  const scope = host?.capacity_scope === "project" ? "project" : DISPATCHER_POLICY_DEFAULTS.capacityScope;
+  return {
+    armed: host?.armed === 1,
+    configured: host !== undefined,
+    maxActiveRuns: host?.max_active_runs ?? DISPATCHER_POLICY_DEFAULTS.maxActiveRuns,
+    capacityScope: scope,
+    leaseTtlMs: host?.lease_ttl_ms ?? DISPATCHER_POLICY_DEFAULTS.leaseTtlMs,
+    heartbeatMs: host?.heartbeat_ms ?? DISPATCHER_POLICY_DEFAULTS.heartbeatMs,
+    defaultWorkflow:
+      projectRow?.default_workflow ?? host?.default_workflow ?? DISPATCHER_POLICY_DEFAULTS.defaultWorkflow,
+    updatedAt: host?.updated_at ?? null,
+    updatedBy: host?.updated_by ?? null,
+  };
+}
+
+type BoardLease = {
+  owner: string;
+  generation: number;
+  leaseExpiresAtMs: number;
+  heartbeatAtMs: number;
+  host: string | null;
+  pid: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function readDispatcherLease(projectKey: string, degraded: string[]): BoardLease | null {
+  const row = tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT owner, generation, lease_expires_at_ms, heartbeat_at_ms, host, pid, created_at, updated_at
+             FROM dispatcher_leases WHERE project_key = ?`,
+        )
+        .get(projectKey) as
+        | {
+            owner: string;
+            generation: number;
+            lease_expires_at_ms: number;
+            heartbeat_at_ms: number;
+            host: string | null;
+            pid: number | null;
+            created_at: string;
+            updated_at: string;
+          }
+        | undefined,
+    undefined,
+    "dispatcher_leases",
+    degraded,
+  );
+  if (!row) return null;
+  return {
+    owner: row.owner,
+    generation: row.generation,
+    leaseExpiresAtMs: row.lease_expires_at_ms,
+    heartbeatAtMs: row.heartbeat_at_ms,
+    host: row.host,
+    pid: row.pid,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+type BoardEvaluation = {
+  reason: string;
+  detail: string | null;
+  claimedTicketId: string | null;
+  capacityScope: string | null;
+  capacityLimit: number | null;
+  capacityUsed: number | null;
+  capacityHolders: Array<{ claimId: string; projectKey: string; ticketId: string; owner: string; launchId: string | null; runId: string | null }> | null;
+  scanEvidence: Array<{ ticketId: string; rank: number | null; reason: string; detail: string | null }> | null;
+  wakeKind: string | null;
+  nextWatchdogAtMs: number | null;
+  evaluatedAtMs: number;
+  evaluatedAt: string;
+};
+
+const EVALUATION_BOARD_COLUMNS = `reason, detail, claimed_ticket_id, capacity_scope, capacity_limit,
+  capacity_used, capacity_holders, scan_evidence, wake_kind, next_watchdog_at_ms, evaluated_at_ms, evaluated_at`;
+
+type EvaluationBoardDbRow = {
+  reason: string;
+  detail: string | null;
+  claimed_ticket_id: string | null;
+  capacity_scope: string | null;
+  capacity_limit: number | null;
+  capacity_used: number | null;
+  capacity_holders: string | null;
+  scan_evidence: string | null;
+  wake_kind: string | null;
+  next_watchdog_at_ms: number | null;
+  evaluated_at_ms: number;
+  evaluated_at: string;
+};
+
+function toBoardEvaluation(row: EvaluationBoardDbRow): BoardEvaluation {
+  return {
+    reason: row.reason,
+    detail: row.detail,
+    claimedTicketId: row.claimed_ticket_id,
+    capacityScope: row.capacity_scope,
+    capacityLimit: row.capacity_limit,
+    capacityUsed: row.capacity_used,
+    capacityHolders: row.capacity_holders === null ? null : (safeJsonParse(row.capacity_holders) as BoardEvaluation["capacityHolders"]) ?? null,
+    scanEvidence: row.scan_evidence === null ? null : (safeJsonParse(row.scan_evidence) as BoardEvaluation["scanEvidence"]) ?? null,
+    wakeKind: row.wake_kind,
+    nextWatchdogAtMs: row.next_watchdog_at_ms,
+    evaluatedAtMs: row.evaluated_at_ms,
+    evaluatedAt: row.evaluated_at,
+  };
+}
+
+/** THE DURABLE ANSWER TO "WHY DID NOTHING START" — the latest evaluation pass,
+ *  including the passes that granted nothing. That is the whole point of the row:
+ *  an idle queue that leaves no record of why is the operator blindness this
+ *  surface exists to close. */
+function readLatestEvaluation(projectKey: string, degraded: string[]): BoardEvaluation | null {
+  const row = tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT ${EVALUATION_BOARD_COLUMNS} FROM dispatcher_evaluations
+            WHERE project_key = ? ORDER BY id DESC LIMIT 1`,
+        )
+        .get(projectKey) as EvaluationBoardDbRow | undefined,
+    undefined,
+    "dispatcher_evaluations",
+    degraded,
+  );
+  return row ? toBoardEvaluation(row) : null;
+}
+
+/** The latest pass the CEILING actually refused, whatever has happened since. */
+function readLatestCapacityRefusal(projectKey: string, degraded: string[]): BoardEvaluation | null {
+  const row = tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT ${EVALUATION_BOARD_COLUMNS} FROM dispatcher_evaluations
+            WHERE project_key = ? AND reason = 'no_capacity' ORDER BY id DESC LIMIT 1`,
+        )
+        .get(projectKey) as EvaluationBoardDbRow | undefined,
+    undefined,
+    "dispatcher_evaluations",
+    degraded,
+  );
+  return row ? toBoardEvaluation(row) : null;
+}
+
+/** THE CAPACITY CONTEXT. The ceiling is HOST-scoped by default, so this reads the
+ *  live claims of EVERY project and names the holder of each slot — without that,
+ *  a refusal caused by another project's work is unreadable from this board
+ *  ("my queue is stalled and nothing of mine is running"). */
+function readCapacity(
+  projectKey: string | null,
+  policy: BoardPolicy,
+  labelByProjectKey: Map<string, string>,
+  degraded: string[],
+): QueueCapacity {
+  const scoped =
+    policy.capacityScope === "host"
+      ? tolerantRead(
+          () => db().prepare(`SELECT ${CLAIM_BOARD_COLUMNS} FROM queue_claims WHERE state = 'live'`).all() as ClaimDbRow[],
+          [],
+          "queue_claims",
+          degraded,
+        )
+      : projectKey
+        ? tolerantRead(
+            () =>
+              db()
+                .prepare(`SELECT ${CLAIM_BOARD_COLUMNS} FROM queue_claims WHERE project_key = ? AND state = 'live'`)
+                .all(projectKey) as ClaimDbRow[],
+            [],
+            "queue_claims",
+            degraded,
+          )
+        : [];
+
+  const holders: QueueCapacityHolder[] = scoped.map((row) => ({
+    claimId: row.id,
+    projectKey: row.project_key,
+    projectLabel: labelByProjectKey.get(row.project_key) ?? null,
+    ticketId: row.ticket_id,
+    owner: row.owner,
+    launchId: row.launch_id,
+    runId: row.run_id,
+    thisProject: row.project_key === projectKey,
+  }));
+
+  // REPORTED, NEVER COUNTED. A separate query over the task record, deliberately
+  // not joined to the claim ledger and deliberately not subtracted from the
+  // ceiling: the only count that bounds admission is the one taken inside
+  // claimNextEligible's write transaction, and it counts claims.
+  const activeTasks = tolerantRead(
+    () =>
+      (db()
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN (${TERMINAL_TASK_STATUSES.map(() => "?").join(", ")})`,
+        )
+        .get(...TERMINAL_TASK_STATUSES) as { n: number }).n,
+    0,
+    "tasks",
+    degraded,
+  );
+
+  const refusal = projectKey ? readLatestCapacityRefusal(projectKey, degraded) : null;
+
+  return {
+    scope: policy.capacityScope,
+    limit: policy.maxActiveRuns,
+    queueOwnedActive: holders.length,
+    holders,
+    otherProjectHolders: holders.filter((h) => !h.thisProject).length,
+    notCounted: {
+      activeTasks,
+      policy:
+        "The ceiling is a hard bound on QUEUE-OWNED concurrent runs only, counted as live queue_claims " +
+        "rows inside claimNextEligible's write transaction. Operator-initiated runs (`forge new`, " +
+        "`forge invoke`), campaign items and review loops carry no claim row, are structurally invisible " +
+        "to that count, and are reported here beside the ceiling rather than subtracted from it — a " +
+        "dispatcher-side subtraction would read as a guarantee and be a guess.",
+    },
+    lastRefusal: refusal
+      ? {
+          evaluatedAt: refusal.evaluatedAt,
+          scope: refusal.capacityScope,
+          limit: refusal.capacityLimit,
+          used: refusal.capacityUsed,
+          holders: (refusal.capacityHolders ?? []).map((h) => ({
+            claimId: h.claimId,
+            projectKey: h.projectKey,
+            projectLabel: labelByProjectKey.get(h.projectKey) ?? null,
+            ticketId: h.ticketId,
+            owner: h.owner,
+            launchId: h.launchId ?? null,
+            runId: h.runId ?? null,
+            thisProject: h.projectKey === projectKey,
+          })),
+        }
+      : null,
+  };
+}
+
+/** THE PANEL, and the six distinguishable no-run answers.
+ *
+ *  A DEAD OR STALE DISPATCHER OUTRANKS THE LAST EVALUATION. An expired lease means
+ *  nobody is looking at this queue at all, and the most recent evaluation — however
+ *  reasonable it reads — describes a pass that happened before the owner stopped.
+ *  Reporting "no eligible work" in that state is exactly how a correct-looking board
+ *  hides a dead controller. */
+function dispatcherPanel(
+  policy: BoardPolicy,
+  lease: BoardLease | null,
+  evaluation: BoardEvaluation | null,
+  pendingWakes: number,
+  nowMs: number,
+): DispatcherPanel {
+  const leaseLive = lease !== null && lease.leaseExpiresAtMs >= nowMs;
+  const leaseExpired = lease !== null && lease.leaseExpiresAtMs < nowMs;
+  const msSinceHeartbeatMs = lease ? nowMs - lease.heartbeatAtMs : null;
+
+  let state: DispatcherPanelState;
+  let stateDetail: string;
+  if (!policy.armed) {
+    state = "disarmed";
+    stateDetail =
+      "autonomous dispatch is disarmed. Existing claims keep running and keep being heartbeated — " +
+      "disarming is an admission test consulted before claiming, never a reaper.";
+  } else if (lease === null) {
+    state = "no_dispatcher";
+    stateDetail =
+      "dispatch is armed but no dispatcher holds a lease on this project — nothing is looking at this " +
+      "queue. Start one with `forge queue dispatcher run`.";
+  } else if (leaseExpired) {
+    state = "stale_dispatcher";
+    stateDetail =
+      `the dispatcher lease held by ${lease.owner} expired ${formatMs(nowMs - lease.leaseExpiresAtMs)} ago ` +
+      `(last heartbeat ${formatMs(msSinceHeartbeatMs ?? 0)} ago). A successor may take it over; until one ` +
+      `does, nothing is evaluating this queue.`;
+  } else if (!evaluation) {
+    state = "not_evaluated";
+    stateDetail = `${lease.owner} holds the lease but has recorded no evaluation yet.`;
+  } else {
+    switch (evaluation.reason) {
+      case "granted":
+        state = "dispatching";
+        stateDetail = `last pass claimed ${evaluation.claimedTicketId ?? "a ticket"} at ${evaluation.evaluatedAt}.`;
+        break;
+      case "no_capacity":
+        state = "no_capacity";
+        stateDetail =
+          `the ceiling was full at ${evaluation.evaluatedAt} — ${evaluation.capacityUsed ?? "?"}/` +
+          `${evaluation.capacityLimit ?? policy.maxActiveRuns} live claims in ${evaluation.capacityScope ?? policy.capacityScope} scope` +
+          (evaluation.capacityHolders && evaluation.capacityHolders.length > 0
+            ? `, held by ${evaluation.capacityHolders.map((h) => `${h.ticketId} (${h.projectKey})`).join(", ")}.`
+            : ".");
+        break;
+      case "incompatible_only":
+        state = "incompatible_only";
+        stateDetail =
+          `every otherwise-eligible candidate was temporarily incompatible with the active set at ` +
+          `${evaluation.evaluatedAt}. This is a scheduling wait and self-clears — the items stay queued.`;
+        break;
+      case "lost":
+        state = "lost";
+        stateDetail =
+          `a claim attempt lost its re-validation at ${evaluation.evaluatedAt} — a concurrent dispatcher ` +
+          `won, or a durable fact moved under the scan. Nothing was written.`;
+        break;
+      case "disabled":
+        // The policy row says armed and the last recorded pass says disabled: the
+        // pass predates the arm. Reported as the honest ordering, not as a state.
+        state = "not_evaluated";
+        stateDetail = `the last recorded pass (${evaluation.evaluatedAt}) ran while dispatch was disarmed; no pass has been recorded since it was armed.`;
+        break;
+      default:
+        state = "no_eligible_work";
+        stateDetail =
+          `the last pass at ${evaluation.evaluatedAt} selected nothing: no queue member was ranked, ` +
+          `active, unblocked, ready and unclaimed.`;
+        break;
+    }
+  }
+
+  return {
+    armed: policy.armed,
+    configured: policy.configured,
+    maxActiveRuns: policy.maxActiveRuns,
+    capacityScope: policy.capacityScope,
+    leaseTtlMs: policy.leaseTtlMs,
+    heartbeatMs: policy.heartbeatMs,
+    defaultWorkflow: policy.defaultWorkflow,
+    updatedAt: policy.updatedAt,
+    updatedBy: policy.updatedBy,
+    lease,
+    leaseLive,
+    leaseExpired,
+    msSinceHeartbeatMs,
+    lastEvaluation: evaluation
+      ? {
+          reason: evaluation.reason,
+          detail: evaluation.detail,
+          evaluatedAt: evaluation.evaluatedAt,
+          evaluatedAtMs: evaluation.evaluatedAtMs,
+          wakeKind: evaluation.wakeKind,
+          claimedTicketId: evaluation.claimedTicketId,
+          capacityScope: evaluation.capacityScope,
+          capacityLimit: evaluation.capacityLimit,
+          capacityUsed: evaluation.capacityUsed,
+          scannedCount: evaluation.scanEvidence?.length ?? null,
+        }
+      : null,
+    nextWatchdogAtMs: evaluation?.nextWatchdogAtMs ?? null,
+    pendingWakes,
+    state,
+    stateDetail,
+    controlSurface: "cli-only",
+  };
+}
+
+function formatMs(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 90) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
 }

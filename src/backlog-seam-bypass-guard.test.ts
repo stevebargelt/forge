@@ -103,6 +103,13 @@ const ALLOWLIST: readonly AllowEntry[] = [
       "Writing backlog/*.md is its entire job; it runs before a project has any DB ticket truth.",
   },
   {
+    file: "src/queue/fg591-falsification-smoke-runner.ts",
+    pattern: /const dir = join\(project, ["']backlog["'], ["']stories["']\)/,
+    reason:
+      "FG-591's operator-run falsification constructs disposable fixture tickets, then immediately runs " +
+      "`forge backlog migrate` to cut that fixture over to db mode; it never reads this repository's ticket truth.",
+  },
+  {
     file: "dashboard/src/server.ts",
     pattern: /join\([^)]*["']backlog["'],\s*["']notes\.md["']\)/,
     reason:

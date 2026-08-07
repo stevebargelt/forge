@@ -299,3 +299,50 @@ launch-next-88ab04   unknown (no exit record, owner gone — e.g. host reboot)  
 The wrapper records the OS's verdict, so the four failure lines say four different things. `terminated by SIGTERM` means the kernel really did kill the command; nothing records *who* sent the signal, so forge names the signal and makes no claim about the sender. `exited 143` means the command returned a signal-range code with no signal evidence behind it — a command is free to return 143 on purpose, so forge reports the code rather than upgrading it to a kill. `owner gone without an exit record` means the tmux pane is dead but no exit record was ever written — the wrapper writes one even for a signaled child, so that shape proves the wrapper never finished its last act, but not *why*: it may have been killed, or it may have died on an I/O failure while writing the record. Forge names the shape and makes no claim about either the cause or a sender. `unknown` means the exit record and the tmux session are both gone (a host reboot), and forge says so rather than guessing that the command succeeded or failed. `forge launch rm` refuses a launch that is still *running* unless you pass `--force`; an owner-gone launch is terminal by evidence, so `rm` cleans it up without one, and cleanup still can't be the thing that kills a live run.
 
 Concept reference: `docs/concepts.md` → **Durable launch**.
+
+## 14. The operator work queue and autonomous dispatch (`forge queue`)
+
+Steps 5–8 drive one run at a time, by hand. The **operator queue** is the standing version of that: rank the open work, select the subset you actually want done, and let a capacity-limited dispatcher claim items in your order and launch them as ordinary single-ticket runs. It requires a **db-mode** backlog (§ `forge backlog migrate`; see `docs/how-to-backlog-db-cutover.md`) — every verb below refuses by name on a markdown-mode or unkeyed project.
+
+The queue is not a campaign. A campaign is a planned, approved, reported program of work (`forge campaign`); the queue is a continuously evaluated scheduling policy that you can leave running.
+
+**Plan the work.** Rank is nullable and orthogonal to membership, so the two steps are separate on purpose — an unranked ticket is a perfectly good backlog item, it is just not dispatchable.
+
+```bash
+forge backlog rank FG-123 --position 1        # where it sits in the stack rank
+forge queue enqueue FG-123                    # select it for execution (refused unless READY)
+forge queue rank-before FG-7 FG-3             # relative intent: put FG-7 above FG-3
+forge queue rank-after FG-9 FG-3 --expect-version 12
+forge queue reorder FG-7 --to 2 --expect-version 12
+forge queue dequeue FG-123                    # deselect. Rank is retained; running work is untouched
+forge queue list                              # the board, with the reason each item is not running
+```
+
+`enqueue` is refused unless the ticket's **current** revision evaluates ready (an `exploratory` ticket counts), and the refusal carries a concrete refinement proposal — edit the ticket and enqueue again; enqueue *is* the recheck. Prefer `rank-before` / `rank-after` over `reorder --to <n>`: they express intent that survives the queue moving underneath your submission, where a position silently means something else the moment anything is enqueued in between. `--expect-version` (the `queue version` printed by `forge queue list`) makes a move composed against a stale view refuse rather than clobber; every verb takes `--json` and `--project <dir>`.
+
+`forge queue list` renders five projections over durable fields — **Backlog**, **Queued**, **In progress**, **Blocked**, **Done**. The last three are derived on every read and are never toggled by hand. Read the per-item line carefully: a `blocked:` item needs *you* to clear something, while a `waiting (scheduling):` item is a temporary scheduling incompatibility ("waiting for FG-123 to finish") that clears itself when the active set changes. They are deliberately different words for different facts.
+
+**Authorize the dispatch.** Queueing is planning intent — it starts nothing. Arming is the separate act that authorizes unattended containers, and it is CLI-only (the dashboard board can rank and enqueue, and can do nothing else).
+
+```bash
+forge queue dispatcher set --max-active-runs 2 --workflow feature   # capacity + launch policy
+forge queue dispatcher arm --by steve                              # records who and when
+forge launch run --name dispatcher -- forge queue dispatcher run   # THE long-lived process
+forge queue dispatcher status                                      # why is nothing running?
+forge queue dispatcher disarm                                      # stop NEW claims. Kills nothing
+forge queue cancel FG-123                                          # stop the work, then retire the claim
+```
+
+Run the dispatcher **under `forge launch`** (§13), never as a background task of an interactive session: tmux owns the process, so it survives your session ending, which is the whole point. `--once` / `--max-ticks <n>` give you a bounded, one-shot evaluation when you just want to see what it would do. `--project`, `--checkout`, `--workflow`, `--watchdog-interval` and `--wake-poll` are the rest of the knobs; `forge queue dispatcher run --json` prints a summary when the loop stops.
+
+`max_active_runs` bounds **queue-owned** runs only, host-wide across every project on the machine. Runs you started yourself (`forge new`, `forge invoke`), campaign items and review loops carry no claim, so they are reported beside the ceiling and never subtracted from it — the count that admits is taken inside the claim transaction, and a dispatcher-side subtraction would read as a guarantee while being a guess. Because the ceiling is host-scoped, a refusal in this project can be caused by another one; `dispatcher status` names the holding project rather than leaving you with a stalled board.
+
+**Disarming and lowering capacity never kill work.** Both are admission tests: existing containers keep running, their claims keep being heartbeated, and the dispatcher process keeps renewing its lease. The same is true of `dequeue` — it is planning, not cancellation. To actually stop something, `forge queue cancel <id>` stops the work first and then lets the claim's own lease owner retire the reservation, in that order. A dequeued ticket whose container is still running is a real state and the board shows it as such rather than hiding it.
+
+If `cancel` stops the work but then can't remove its launch record, it refuses (`stop_failed`) and **holds the reservation** instead of retiring it — the container may still be running, so releasing would re-admit the ticket to a second dispatcher. The refusal names the launch id; run `forge launch rm --force <id>` and cancel again.
+
+`forge queue dispatcher status` is the command to reach for when nothing is happening. It keeps the answers apart instead of collapsing them into "nothing is running" — `disarmed`, `no_capacity` (naming who holds the host slots), `no_eligible_work`, `blocked`, `incompatible` (a temporary wait, not your problem to fix), `dispatcher_down` (a dead or stale lease — nobody is looking at this queue) and `lost` — and prints the current owner and lease, the last evaluation and its outcome, and the next watchdog deadline. Nothing restarts the dispatcher after a host reboot: the lease reads stale, loudly, and you re-arm.
+
+The dashboard's Queue board renders the same projections and the same dispatcher panel read-only, with rank/enqueue/dequeue/reorder controls that shell these exact CLI verbs. Arming and capacity are not on it.
+
+Concept reference: `docs/concepts.md` → **Queue dispatch**. Decisions: `learnings/decisions/2026-08-06_queue-dispatch-capacity-and-authorization.md`.

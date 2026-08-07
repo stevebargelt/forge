@@ -11,9 +11,16 @@
 // - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
+// - GET /api/queue                        the operator work-queue board: five projections + dispatcher panel + capacity context (?projectKey|?projectDir, FG-591)
 //
-// All reads. No writes. Mutating actions (gate/next/retry) shell to the
-// `forge` CLI binary — wired in a later iteration; the MVP is read-only.
+// - POST /api/queue/enqueue|dequeue|rank|reorder   the operator's QUEUE PLANNING writes (FG-591)
+//
+// Every GET is a read. The four POSTs above are the ONLY mutating routes on this
+// surface, and they do not write the DB either: each shells exactly one named `forge
+// queue` verb (FORGE-DEC-015), guarded same-origin and behind a non-simple content
+// type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
+// exposed here (FG-591 D2) — that is authority to run repo-writing containers
+// unattended, and it stays CLI-only. See queue-mutation.ts.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
@@ -23,13 +30,14 @@ import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
-  currentActivity, launchDetail, launchLogTail,
+  currentActivity, launchDetail, launchLogTail, queueBoard,
 } from "./queries.js";
-import type { BacklogTicket, GroupBy, ProjectScope } from "./queries.js";
+import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
+import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -44,6 +52,27 @@ export const server = createServer((req: IncomingMessage, res: ServerResponse) =
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${HOST}:${PORT}`);
   const path = url.pathname;
+
+  // FG-591 (D1, FORGE-DEC-015): the ONLY non-GET routes on this surface. Everything
+  // else — including a CORS PREFLIGHT for these very paths — still falls through to
+  // the 405 below, and no `Access-Control-Allow-*` header is emitted anywhere on this
+  // server. That absence is what makes a cross-origin preflight fail closed, so the
+  // browser never sends the real request.
+  //
+  // The project is resolved through the dashboard's OWN registry, exactly as
+  // /api/queue resolves it, and passed as a THUNK: the registry read costs a bounded
+  // `git` evidence probe, and a request refused for being cross-origin or for
+  // carrying a forgeable content type must not pay for it (nor look, from a guard's
+  // point of view, like a route that spawned something before refusing).
+  if (req.method === "POST" && isQueueMutationPath(path)) {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    await handleQueueMutation(req, res, path, {
+      resolveOwner: () => resolveOwnerProject(projectsForDashboard(), projectKey, projectDir),
+      requestedProjectDir: projectDir,
+    });
+    return;
+  }
 
   if (req.method !== "GET") {
     res.writeHead(405, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Method not allowed" }));
@@ -204,11 +233,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // repository evidence. The request's projectKey parameter is never used as a
     // store key: trusting it would turn a per-project board into a cross-project
     // one (FG-591), which this slice is explicitly not.
-    const owner = project ?? (projectDir
-      ? projects.find((entry) =>
-          entry.projectDirs.includes(projectDir) ||
-          entry.checkouts.some((checkout) => checkout.projectDir === projectDir))
-      : undefined);
+    const owner = resolveOwnerProject(projects, projectKey, projectDir);
     let tickets: BacklogTicket[] = [];
     // null means "this project has no ticket truth" — unregistered (never
     // imported), or not resolvable to a project at all. Distinct from a
@@ -251,6 +276,49 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         ...(ticketsError ? { ticketsError } : {}),
       }),
     );
+    return;
+  }
+
+  // FG-591: the operator work queue board. READ-ONLY, like every route here — the
+  // five board views are PROJECTIONS over orthogonal durable fields (rank,
+  // membership, lifecycle) with in progress / blocked / done DERIVED on this read
+  // and never stored. The board itself is direct SQL on the dashboard's own
+  // read-only handle — no subprocess, no outbound call, no write.
+  //
+  // The ONE binary this path reaches is the shared project registry's bounded,
+  // 30s-cached `git` evidence read, resolving WHICH project the request is about —
+  // the same resolution /api/backlog and /api/projects already perform, and the
+  // same answer they must give (a board that resolved projects differently from
+  // the backlog panel beside it would be the worse failure). That is a recorded
+  // pre-existing property of the registry, not something this route introduces, so
+  // the FG-679 BD-7 guard stays scoped to its own three paths — neither widened to
+  // cover this one nor narrowed to excuse it.
+  //
+  // Arming autonomous dispatch and setting max_active_runs are deliberately NOT
+  // here and not anywhere on this surface (D2) — they authorize unattended
+  // repo-writing containers, which is a materially larger capability than a read.
+  if (path === "/api/queue") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    // The payload is built BEFORE any byte is written: a read that throws after
+    // writeHead cannot be reported, and a recoverable "old store" would become a
+    // closed socket and a blank page (the /api/reviews precedent).
+    let payload: string;
+    try {
+      const projects = projectsForDashboard();
+      const owner = resolveOwnerProject(projects, projectKey, projectDir);
+      payload = JSON.stringify(queueBoard(owner ?? null, projects));
+    } catch (err) {
+      // A store written before FG-591 has no dispatcher tables, and a read-only
+      // open never migrates one into existence (db.ts's policy) — that case is
+      // absorbed per-read and reported in `degraded`. Anything reaching here is a
+      // whole-board failure: report it in the payload and keep the page up, but
+      // never render it as an empty board, which would read as "nothing queued".
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/queue: reading the queue board failed:", err);
+      payload = JSON.stringify({ error: message });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;
   }
 
@@ -428,6 +496,24 @@ function isMissingPath(err: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
+/** WHICH REGISTERED PROJECT OWNS THIS REQUEST — by key for a `projectKey`
+ *  request, by observed path for an exact `projectDir` one. The request's
+ *  projectKey parameter is never used as a STORE key: the store key is derived
+ *  from the resolved record's own repository evidence, because trusting the
+ *  parameter would turn a per-project board into a cross-project one. */
+function resolveOwnerProject(
+  projects: ProjectRecord[],
+  projectKey: string | undefined,
+  projectDir: string | undefined,
+): ProjectRecord | undefined {
+  const byKey = !projectDir && projectKey ? projects.find((entry) => entry.key === projectKey) : undefined;
+  if (byKey) return byKey;
+  if (!projectDir) return undefined;
+  return projects.find((entry) =>
+    entry.projectDirs.includes(projectDir) ||
+    entry.checkouts.some((checkout) => checkout.projectDir === projectDir));
+}
+
 function scopeFromUrl(url: URL): ProjectScope {
   return resolveProjectScope(
     url.searchParams.get("projectKey") ?? undefined,
@@ -445,7 +531,9 @@ server.listen(PORT, HOST, () => {
   if (!/^(127\.|::1$|localhost$)/.test(HOST)) {
     console.error(
       `forge-dashboard: bound to ${HOST}, NOT loopback. This surface has no authentication and serves ` +
-        `raw, unredacted output of host commands (/api/launches/<id>/log). Any peer that can reach ${HOST}:${PORT} can read it.`,
+        `raw, unredacted output of host commands (/api/launches/<id>/log). Any peer that can reach ${HOST}:${PORT} can read it. ` +
+        `The queue-planning POST routes (/api/queue/*) FAIL CLOSED off loopback for that reason — set ` +
+        `FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS=1 only if this dashboard is fronted by your own authentication.`,
     );
   }
 });

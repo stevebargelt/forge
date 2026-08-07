@@ -1182,6 +1182,180 @@ CREATE INDEX IF NOT EXISTS idx_launch_observations_project
   ON launch_observations(project_dir);
 CREATE INDEX IF NOT EXISTS idx_launch_observations_observed
   ON launch_observations(observed_at);
+
+-- FG-591 (the operator work queue and its dispatcher): FOUR brand-new tables, all
+-- arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
+-- additive-only BD-15 contract as every table above. user_version is NOT bumped, so
+-- an older forge binary sharing ~/.forge/forge.db opens this store unharmed.
+--
+-- NO CHECK on any vocabulary these tables own (enum-as-convention, FG-585). FG-591's
+-- release/reason/wake vocabularies are still being widened by the ticket that owns
+-- them, and SQLite cannot WIDEN a CHECK on an additive-only path.
+--
+-- NO FOREIGN KEY to tickets or queue_membership, deliberately — queue_claims' stated
+-- precedent. An operator dequeue, an unrank, or FG-608 removal reconciliation must
+-- never CASCADE away a wake or an evaluation belonging to a container that may still
+-- be executing. Losing that evidence is how "nothing started and nothing said why"
+-- happens, which is the failure FG-591 exists to close.
+
+-- THE POLICY, and the only host-wide setting store forge has. ~/.forge holds files,
+-- not settings rows, and the dispatcher, the CLI and the dashboard are three
+-- processes that must agree on ONE ceiling — enforced against a count that already
+-- lives in this DB. So the policy lives here.
+--
+-- ONE TABLE, TWO ROW SHAPES, discriminated by scope_key:
+--   scope_key = 'host'  — THE singleton: armed, max_active_runs, capacity_scope,
+--                         lease_ttl_ms, heartbeat_ms. The ceiling VALUE is host-wide
+--                         because two dispatchers holding different values while
+--                         enforcing against one shared count means the effective
+--                         ceiling is whichever ran last — an incoherence with no owner.
+--   scope_key = <project_key> — an optional per-project row carrying only
+--                         default_workflow. A project row NEVER carries a ceiling.
+-- Every setting column is NULLABLE and NULL means "not set at this scope". The armed
+-- column reads FAIL-CLOSED: a NULL/absent policy is DISARMED, so a store that has
+-- never seen an operator arm it never dispatches.
+--
+-- Policy is a FACT CONSULTED BEFORE CLAIMING (D5) — never process lifecycle. Nothing
+-- here is a reaper: disarming and lowering max_active_runs are admission tests, and a
+-- row in this table has never terminated a container.
+CREATE TABLE IF NOT EXISTS dispatcher_policy (
+  scope_key        TEXT PRIMARY KEY,
+  armed            INTEGER,
+  max_active_runs  INTEGER,
+  capacity_scope   TEXT,
+  lease_ttl_ms     INTEGER,
+  heartbeat_ms     INTEGER,
+  default_workflow TEXT,
+  updated_at       TEXT NOT NULL,
+  updated_by       TEXT
+);
+
+-- THE DISPATCHER'S DURABLE IDENTITY AND FENCED LEASE. campaign_controller_leases'
+-- shape, deliberately mirrored rather than a third lease invented: an instance-stable
+-- owner, a generation bumped on every takeover as the fencing token, and a renewable
+-- expiry. Keyed per project — the ceiling is host-wide but the scan domain, the queue
+-- and the dispatcher identity are per-project.
+--
+-- lease_expires_at_ms / heartbeat_at_ms are epoch ms on the STORE's own clock
+-- (storeNowMs, publications.ts), never a process clock — two forge processes with
+-- skewed clocks must not disagree about expiry. A takeover is permitted ONLY when the
+-- lease is STRICTLY in the past; waiting is not evidence of abandonment.
+--
+-- heartbeat_at_ms is kept beside the expiry because they answer different questions:
+-- the expiry says whether a takeover is permitted, the heartbeat says when the owner
+-- was last actually alive. "Nothing is running" and "the dispatcher died four hours
+-- ago" must be distinguishable on the operator surface, and only the second column
+-- can say so.
+--
+-- host / pid are OPERATOR OUTPUT ONLY — the "who holds this" answer. Nothing keys off
+-- them and no liveness decision consults them: physical liveness belongs to the
+-- tmux-owned ownership transfer, never to a recorded pid.
+--
+-- NO FOREIGN KEY to project_identity: a dispatcher lease must outlive a registry edit,
+-- and losing the lease row while a dispatcher still runs is how a second one starts.
+CREATE TABLE IF NOT EXISTS dispatcher_leases (
+  project_key         TEXT PRIMARY KEY,
+  owner               TEXT NOT NULL,
+  generation          INTEGER NOT NULL,
+  lease_expires_at_ms INTEGER NOT NULL,
+  heartbeat_at_ms     INTEGER NOT NULL,
+  host                TEXT,
+  pid                 INTEGER,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+);
+
+-- DURABLE WAKES. The dispatcher re-evaluates on queue changes, run terminal
+-- transitions, blocker/readiness changes, capacity changes and recovery events.
+-- A wake is a DURABLE AT-LEAST-ONCE RECORD rather than an in-process signal, so a
+-- restart cannot lose one; polling stays a fallback and never the only correctness
+-- mechanism.
+--
+-- IDEMPOTENT BY CONSTRUCTION. (project_key, kind, wake_key) is the caller's
+-- idempotency key and the partial UNIQUE index below collapses a duplicate poke onto
+-- the one PENDING record — so a signal delivered twice is harmless without the caller
+-- having to dedupe. The index is PARTIAL over 'pending' on purpose: once a wake is
+-- consumed the NEXT change to the same subject deserves its own record, and consumed
+-- rows are history.
+--
+-- state is the COMPARE-AND-SET consume column (continuations.ts's shape): a consumer
+-- writes state='consumed' WHERE id = ? AND state = 'pending', and exactly one of two
+-- concurrent consumers sees changes = 1. Free TEXT with no CHECK, and named by the
+-- partial index — an aged binary must never fight either.
+CREATE TABLE IF NOT EXISTS dispatcher_wakes (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_key    TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  wake_key       TEXT NOT NULL,
+  detail         TEXT,
+  state          TEXT NOT NULL,
+  consumed_by    TEXT,
+  consumed_at_ms INTEGER,
+  created_at     TEXT NOT NULL
+);
+-- AT MOST ONE PENDING WAKE PER (project, kind, key), enforced by the STORE rather
+-- than by call-site ordering — idx_queue_claims_live's precedent. Two processes that
+-- both observe the same run transition cannot leave two pending records.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatcher_wakes_pending
+  ON dispatcher_wakes(project_key, kind, wake_key) WHERE state = 'pending';
+-- The consume scan's index. Every column named here (project_key, state, id) is a
+-- primary key or NOT NULL with NO DEFAULT, so ADD COLUMN could not restore it anyway
+-- and indexing it cannot grow the FG-608 parity guard's UNDROPPABLE set.
+CREATE INDEX IF NOT EXISTS idx_dispatcher_wakes_scan
+  ON dispatcher_wakes(project_key, state, id);
+
+-- THE DURABLE ANSWER TO "WHY DID NOTHING START". One row per evaluation PASS,
+-- INCLUDING the passes that granted nothing — that is the whole point. An idle queue
+-- that leaves no record of why is the operator blindness this ticket is about, and
+-- queue_claims cannot carry it: a claim row exists only on a GRANT, and its
+-- scan_evidence with it.
+--
+-- reason is the TOP-LEVEL outcome from a closed vocabulary owned by FG-591 —
+-- granted | disabled | no_capacity | no_eligible_work | lost | incompatible_only —
+-- carried as free TEXT with NO CHECK for the FG-585 reason above.
+--
+-- scan_evidence is the per-candidate ScanEntry[] as claimNextEligible returns it,
+-- serialized as JSON. NOT a second vocabulary: queue-claims' ScanReason is the only
+-- one, so "passed over because blocked" and "passed over because temporarily
+-- incompatible with the active set" stay the distinct facts that table already makes
+-- them.
+--
+-- A TEMPORARY SCHEDULING INCOMPATIBILITY LIVES HERE AND NOWHERE ELSE. It is
+-- per-evaluation and evaporates when the active set changes. It must never be written
+-- to blocker_evidence, which is durable, per-ticket, partly container-visible, and
+-- drives the Blocked projection through isQueueBlocked — a scheduling wait written
+-- there would silently reinterpret the ticket's status for every agent container.
+--
+-- capacity_* records the ceiling as it was ENFORCED, not as it is re-derived at read
+-- time. capacity_holders is the JSON holder list (projectKey/ticketId/owner/runId)
+-- that lets a per-project board explain a HOST-scoped refusal by naming the other
+-- project holding the slots — without it, a host-scope refusal is unreadable from any
+-- single board.
+--
+-- next_watchdog_at_ms is the pass's own re-arm deadline, recorded rather than
+-- recomputed, so "when will this be looked at again" is a durable fact on the
+-- operator surface. It is a HEALTH bound and never an estimate of ticket duration.
+CREATE TABLE IF NOT EXISTS dispatcher_evaluations (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_key           TEXT NOT NULL,
+  dispatcher_owner      TEXT NOT NULL,
+  dispatcher_generation INTEGER,
+  reason                TEXT NOT NULL,
+  detail                TEXT,
+  claimed_ticket_id     TEXT,
+  claim_id              TEXT,
+  capacity_scope        TEXT,
+  capacity_limit        INTEGER,
+  capacity_used         INTEGER,
+  capacity_holders      TEXT,
+  scan_evidence         TEXT,
+  wake_kind             TEXT,
+  next_watchdog_at_ms   INTEGER,
+  evaluated_at_ms       INTEGER NOT NULL,
+  evaluated_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dispatcher_evaluations_project
+  ON dispatcher_evaluations(project_key, id);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -1540,4 +1714,43 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "queue_claims", column: "outcome", ddl: "ALTER TABLE queue_claims ADD COLUMN outcome TEXT" },
   { table: "queue_claims", column: "scan_evidence", ddl: "ALTER TABLE queue_claims ADD COLUMN scan_evidence TEXT" },
   { table: "queue_claims", column: "released_at", ddl: "ALTER TABLE queue_claims ADD COLUMN released_at TEXT" },
+
+  // FG-591: the four dispatcher tables. All brand-new, so a real old DB gets each of
+  // them WHOLE from CREATE TABLE IF NOT EXISTS and none of these ALTERs ever fires
+  // there. They are declared anyway for the SAME reason FG-609's, FG-610's, FG-655's
+  // and FG-679's brand-new tables are: the additive-only invariant is only CHECKABLE
+  // if this list is EXHAUSTIVE, and fg608-migration-parity.test.ts enforces
+  // exhaustiveness by stripping a fresh DB to the oldest shape SQLite permits and
+  // demanding parity. A restorable column with no entry here fails that test — the
+  // mechanism that would have caught tickets.imported_from.
+  //
+  // Only the RESTORABLE columns appear. Each table's primary key and its NOT NULL
+  // columns with NO DEFAULT are deliberately absent: ADD COLUMN could never put them
+  // back, so listing them would be a lie.
+  { table: "dispatcher_policy", column: "armed", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN armed INTEGER" },
+  { table: "dispatcher_policy", column: "max_active_runs", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN max_active_runs INTEGER" },
+  { table: "dispatcher_policy", column: "capacity_scope", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN capacity_scope TEXT" },
+  { table: "dispatcher_policy", column: "lease_ttl_ms", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN lease_ttl_ms INTEGER" },
+  { table: "dispatcher_policy", column: "heartbeat_ms", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN heartbeat_ms INTEGER" },
+  { table: "dispatcher_policy", column: "default_workflow", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN default_workflow TEXT" },
+  { table: "dispatcher_policy", column: "updated_by", ddl: "ALTER TABLE dispatcher_policy ADD COLUMN updated_by TEXT" },
+
+  { table: "dispatcher_leases", column: "host", ddl: "ALTER TABLE dispatcher_leases ADD COLUMN host TEXT" },
+  { table: "dispatcher_leases", column: "pid", ddl: "ALTER TABLE dispatcher_leases ADD COLUMN pid INTEGER" },
+
+  { table: "dispatcher_wakes", column: "detail", ddl: "ALTER TABLE dispatcher_wakes ADD COLUMN detail TEXT" },
+  { table: "dispatcher_wakes", column: "consumed_by", ddl: "ALTER TABLE dispatcher_wakes ADD COLUMN consumed_by TEXT" },
+  { table: "dispatcher_wakes", column: "consumed_at_ms", ddl: "ALTER TABLE dispatcher_wakes ADD COLUMN consumed_at_ms INTEGER" },
+
+  { table: "dispatcher_evaluations", column: "dispatcher_generation", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN dispatcher_generation INTEGER" },
+  { table: "dispatcher_evaluations", column: "detail", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN detail TEXT" },
+  { table: "dispatcher_evaluations", column: "claimed_ticket_id", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN claimed_ticket_id TEXT" },
+  { table: "dispatcher_evaluations", column: "claim_id", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN claim_id TEXT" },
+  { table: "dispatcher_evaluations", column: "capacity_scope", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN capacity_scope TEXT" },
+  { table: "dispatcher_evaluations", column: "capacity_limit", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN capacity_limit INTEGER" },
+  { table: "dispatcher_evaluations", column: "capacity_used", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN capacity_used INTEGER" },
+  { table: "dispatcher_evaluations", column: "capacity_holders", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN capacity_holders TEXT" },
+  { table: "dispatcher_evaluations", column: "scan_evidence", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN scan_evidence TEXT" },
+  { table: "dispatcher_evaluations", column: "wake_kind", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN wake_kind TEXT" },
+  { table: "dispatcher_evaluations", column: "next_watchdog_at_ms", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN next_watchdog_at_ms INTEGER" },
 ];
