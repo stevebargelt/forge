@@ -84,6 +84,100 @@ export const SEED_GENERATION_DIRS = ["workflows", "runtimes", "agent-protocols"]
  *  window). */
 export const GENERATION_ROUTING_POLICY = "routing-policy.yml";
 
+/** FG-576 (D8, AC8) — the Forge-owned Codex instruction carrier, RENDERED into the
+ *  generation like the routing policy above rather than copied like a category dir.
+ *
+ *  WHY IT IS ITS OWN ARTIFACT AND NOT THE CLAUDE ONE. Claude's
+ *  --append-system-prompt* ADDS to Claude Code's own base instructions, so the Claude
+ *  adapter can hand over seeds/orchestrator-template.md verbatim. Codex's instructions
+ *  file SUBSTITUTES the base instruction surface, so the same bytes would delete the
+ *  agent scaffolding Codex normally supplies itself. seeds/codex/orchestrator-
+ *  instructions.md is that scaffolding, and the canonical policy is spliced INTO it.
+ *
+ *  WHY IT RIDES THE GENERATION rather than a second installer. The carrier is a
+ *  forge-owned surface an interactive orchestrator EXECUTES against. Publishing it
+ *  separately would reintroduce exactly what FG-583 closed: an upgrade window in which
+ *  a launch could bind a carrier from one release while dispatch ran the workflows of
+ *  another, each internally valid, the SET one no release shipped. Rendered into
+ *  staging, manifested, and committed in the SAME rename(2), it cannot be observed
+ *  apart from the generation it belongs to.
+ *
+ *  PROVENANCE. The render is a pure function of two seed files, so the same release
+ *  always produces identical bytes (AC8 determinism). WHICH release those bytes came
+ *  from is not embedded in the carrier — it is the manifest's job: `sourceAssetRoot`
+ *  names the executing release and `files[...]` pins the carrier's sha256, so
+ *  resolveSeedGeneration reports the new provenance the moment a newer release
+ *  publishes, and generationCodexCarrierState refuses bytes that are not the ones that
+ *  release rendered. */
+export const GENERATION_CODEX_CARRIER = "codex/orchestrator-instructions.md";
+
+/** The carrier's scaffolding SOURCE, relative to a release's seeds/ dir. Same relative
+ *  path as the published artifact deliberately: the flat $FORGE_HOME/codex copy the
+ *  drift detector measures (seed-drift.ts SEED_SPECS) is the source, so `forge doctor`
+ *  names the file an operator would actually edit. */
+export const CODEX_CARRIER_SOURCE_REL = "codex/orchestrator-instructions.md";
+
+/** The ONE point in the scaffolding where the canonical policy is spliced. */
+export const CODEX_CARRIER_SPLICE_MARKER = "<!-- forge:codex-policy -->";
+
+const ORCHESTRATOR_TEMPLATE_REL = "orchestrator-template.md";
+const TEMPLATE_START_MARKER = "<!-- forge:orchestrator-start -->";
+const TEMPLATE_END_MARKER = "<!-- forge:orchestrator-end -->";
+
+/** Render the Codex carrier from the two canonical seeds. PURE — no I/O, no clock, no
+ *  paths — so `same input → identical bytes` is a property of the function rather than
+ *  of the caller's discipline (AC8).
+ *
+ *  Both gates below are publication-refusing on purpose, and the marker one is not
+ *  hypothetical: it fired during development on a header comment in the scaffolding
+ *  that quoted the marker literally, which would have shipped a carrier split at the
+ *  wrong point — scaffolding truncated mid-sentence, the policy spliced into a comment
+ *  — while still being a perfectly valid-looking markdown file. "Exactly once" is what
+ *  makes the splice point unambiguous; "at least once" would have shipped it. */
+export function renderCodexCarrier(scaffold: string, template: string): string {
+  const occurrences = scaffold.split(CODEX_CARRIER_SPLICE_MARKER).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `forge seed: the Codex carrier scaffolding must carry the splice marker EXACTLY once, found ${occurrences}.\n` +
+        `  marker: ${CODEX_CARRIER_SPLICE_MARKER}\n` +
+        `A scaffolding with no marker has nowhere to splice the canonical orchestrator policy; one with two ` +
+        `splices at whichever comes first, silently truncating the rest of the scaffolding into the policy. ` +
+        `Fix: leave the marker on the last line of seeds/${CODEX_CARRIER_SOURCE_REL} and nowhere else — not even ` +
+        `quoted in a comment.`,
+    );
+  }
+
+  const startIdx = template.indexOf(TEMPLATE_START_MARKER);
+  const endIdx = template.indexOf(TEMPLATE_END_MARKER);
+  if (startIdx < 0 || endIdx <= startIdx) {
+    throw new Error(
+      `forge seed: the canonical orchestrator policy at seeds/${ORCHESTRATOR_TEMPLATE_REL} carries no ` +
+        `${TEMPLATE_START_MARKER} … ${TEMPLATE_END_MARKER} region.\n` +
+        `The Codex carrier is DERIVED from that region — the tail after the end marker is the project's own ` +
+        `"Stack + project context", which is not Forge policy and must not reach the carrier. Fix: restore the ` +
+        `markers in the template.`,
+    );
+  }
+  const bodyStart = template.indexOf("\n", startIdx + TEMPLATE_START_MARKER.length);
+  const policy = template.slice(bodyStart < 0 ? startIdx + TEMPLATE_START_MARKER.length : bodyStart + 1, endIdx).trim();
+
+  const body = stripAuthoringHeader(scaffold.slice(0, scaffold.indexOf(CODEX_CARRIER_SPLICE_MARKER)));
+  return `${body.trimEnd()}\n\n${policy}\n`;
+}
+
+/** Drop a LEADING html comment from the scaffolding. It is the authoring note — who
+ *  owns this file, where to edit it, why the splice exists — addressed to whoever
+ *  maintains the seed, and it is wrong in the artifact: a carrier that opens by telling
+ *  the agent reading it "this file is not the artifact you read" is a false statement
+ *  shipped inside an instruction surface. Leading only, so a comment the scaffolding
+ *  deliberately puts in the instructions themselves still ships. */
+function stripAuthoringHeader(scaffold: string): string {
+  const text = scaffold.trimStart();
+  if (!text.startsWith("<!--")) return scaffold;
+  const end = text.indexOf("-->");
+  return end < 0 ? scaffold : text.slice(end + "-->".length).trimStart();
+}
+
 /** The one place the generation-relative protocol path is spelled (FG-654). It lives
  *  here, beside the category list it names, so publication and resolution cannot drift
  *  about where a role's protocol is. */
@@ -332,6 +426,11 @@ export type PublishSeedGenerationResult = {
   previous: string | null;
   files: number;
   routingPolicyCompiled: boolean;
+  /** FG-576: whether this generation carries the Forge-owned Codex instruction
+   *  carrier. False only for a release that ships no seeds/codex scaffolding at all —
+   *  a release that ships a MALFORMED one refuses to publish rather than reporting
+   *  false here. */
+  codexCarrierPublished: boolean;
 };
 
 /** PUBLISH the complete forge-owned seed surface as ONE atomic generation.
@@ -444,6 +543,40 @@ export function publishSeedGeneration(opts: PublishSeedGenerationOptions): Publi
       routingPolicyCompiled = true;
     }
 
+    // FG-576 (D8, AC8) — RENDER the Forge-owned Codex instruction carrier into the
+    // same staging dir, so it commits in the SAME rename(2) as workflows/runtimes/
+    // protocols/policy. It is written under Forge's own root and nowhere else: no byte
+    // reaches the operator's Codex config root, CODEX_HOME is never redirected, and
+    // AGENTS.md / CLAUDE.md / config.toml / plugins are never read or spliced.
+    //
+    // A release that ships no scaffolding publishes no carrier (`absent` — the same
+    // shape as a generation published with no host RACI). A release that ships a
+    // MALFORMED one is a different case entirely and REFUSES here, where nothing has
+    // been committed and the prior generation stays selectable: silently publishing a
+    // carrier split at the wrong point would bind a plausible-looking instruction
+    // surface no release meant to ship.
+    let codexCarrierPublished = false;
+    const carrierSrc = join(seedsSrc, CODEX_CARRIER_SOURCE_REL);
+    if (existsSync(carrierSrc)) {
+      const templateSrc = join(seedsSrc, ORCHESTRATOR_TEMPLATE_REL);
+      if (!existsSync(templateSrc)) {
+        throw new Error(
+          `forge seed: refusing to publish — this release carries the Codex carrier scaffolding but not the ` +
+            `canonical orchestrator policy it is rendered from.\n` +
+            `  scaffolding: ${carrierSrc}\n` +
+            `  expected:    ${templateSrc}\n` +
+            `Publishing scaffolding with no policy spliced into it would bind a Codex orchestrator that had been ` +
+            `told how to act and nothing about what Forge expects of it. Fix: reinstall the release.`,
+        );
+      }
+      const rendered = renderCodexCarrier(readFileSync(carrierSrc, "utf8"), readFileSync(templateSrc, "utf8"));
+      const carrierDst = join(staging, GENERATION_CODEX_CARRIER);
+      mkdirSync(join(carrierDst, ".."), { recursive: true });
+      writeFileSync(carrierDst, rendered);
+      files[GENERATION_CODEX_CARRIER] = sha256OfBytes(carrierDst);
+      codexCarrierPublished = true;
+    }
+
     const manifest: SeedGenerationManifest = {
       schema: 1,
       sourceAssetRoot: realTrusted,
@@ -468,6 +601,7 @@ export function publishSeedGeneration(opts: PublishSeedGenerationOptions): Publi
       previous: before,
       files: Object.keys(files).length,
       routingPolicyCompiled,
+      codexCarrierPublished,
     };
   } catch (e) {
     rmSync(staging, { recursive: true, force: true });
@@ -512,6 +646,63 @@ export type GenerationPolicyState =
   | { kind: "absent" }
   | { kind: "present"; path: string }
   | { kind: "tampered"; path: string; reason: string };
+
+/** FG-576: where the Forge-owned Codex instruction carrier lives inside a resolved
+ *  generation. The ONE place the generation-relative path is turned into an absolute
+ *  one, so the launch binding (step 7) and publication cannot drift about it. */
+export function codexCarrierPath(gen: SeedGeneration): string {
+  return join(gen.root, GENERATION_CODEX_CARRIER);
+}
+
+/** FG-576 — the integrity state of a generation's Codex instruction carrier, measured
+ *  against the generation's OWN provenance manifest. The same three-state shape as
+ *  generationPolicyState above, and for the same reason: a torn or tampered generation
+ *  could otherwise carry a perfectly readable markdown file that no release rendered,
+ *  and a Codex orchestrator would be bound to it as if it were Forge policy.
+ *
+ *  - `absent`   → not in the manifest AND not on disk: a release that ships no
+ *                 scaffolding. The launcher names the gap; it does not fake a carrier.
+ *  - `present`  → on disk and byte-identical to what the manifest pins. Bindable.
+ *  - `tampered` → unmanifested extra file, manifested-but-missing, or byte mismatch. */
+export type GenerationCarrierState =
+  | { kind: "absent" }
+  | { kind: "present"; path: string }
+  | { kind: "tampered"; path: string; reason: string };
+
+export function generationCodexCarrierState(gen: SeedGeneration): GenerationCarrierState {
+  const rel = GENERATION_CODEX_CARRIER;
+  const expected = gen.manifest.files[rel];
+  const path = join(gen.root, rel);
+  const onDisk = existsSync(path);
+  if (!expected && !onDisk) return { kind: "absent" };
+  if (!expected) {
+    return {
+      kind: "tampered",
+      path,
+      reason:
+        `the Codex instruction carrier at ${path} resolves inside the published seed generation but is not in its ` +
+        `provenance manifest (${gen.root}) — an instruction surface present under the generation but absent from ` +
+        `its manifest is one no release rendered`,
+    };
+  }
+  if (!onDisk) {
+    return {
+      kind: "tampered",
+      path,
+      reason: `the Codex instruction carrier manifested in the seed generation is missing from ${path} — the generation is torn or mid-publish`,
+    };
+  }
+  if (sha256OfBytes(path) !== expected) {
+    return {
+      kind: "tampered",
+      path,
+      reason:
+        `the Codex instruction carrier at ${path} does not match the seed generation's provenance manifest ` +
+        `(${gen.root}) — these are not the bytes this release rendered`,
+    };
+  }
+  return { kind: "present", path };
+}
 
 export function generationPolicyState(gen: SeedGeneration): GenerationPolicyState {
   const rel = GENERATION_ROUTING_POLICY;
