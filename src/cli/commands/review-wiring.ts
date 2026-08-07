@@ -27,7 +27,7 @@ import { getDocsDispatch, markDocsDispatchDelivered, openDocsDispatch } from "..
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
-import { REVIEW_DISPATCH_ROLES } from "../../v2/review-contract.js";
+import { REVIEW_DISPATCH_ROLES, RISK_LENSES } from "../../v2/review-contract.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
 import type { DocsCloseout } from "../../v2/review-shipping.js";
 import type { Review } from "../../store/reviews.js";
@@ -363,7 +363,7 @@ function unevaluatedDiffSummary(changedPaths: readonly string[]): string {
     `no drift evaluation has been recorded for the final implementation diff — ` +
     `${diffSummary(changedPaths)}. ` +
     `The coordinator will not auto-confirm the approved contract against a diff nobody evaluated. Evaluate the ` +
-    `diff and record it: --add-lens <lens>:<reason>:<diff-evidence> to widen, ` +
+    `diff and record it: --add-lens <lens>:<reason>:<diff-evidence>:<scope-paths> to widen, ` +
     `--evaluated-no-drift <statement> to record that you examined the diff and no lens change is needed, ` +
     `or --drift <text> to name drift you cannot classify`
   );
@@ -1530,23 +1530,65 @@ function spansUnmatchedFrom(
   return count !== at + 1;
 }
 
+/** Parse the `--add-lens` specs into widening claims.
+ *
+ *  FG-689 ADDS A FOURTH SEGMENT, `<scope-paths>`, and it is REQUIRED. Every widening claim
+ *  now names paths: adding a lens without saying what it owns is a reviewer with no surface,
+ *  and widening an already-selected lens IS the claim about paths. There is no spelling of
+ *  this flag that broadens the panel without saying what the new reviewer reads.
+ *
+ *  THE SEGMENT COUNT IS EXACT, and that is a deliberate tightening. The old parser destructured
+ *  three names off `split(":")` and let anything after the third colon fall on the floor, so a
+ *  `src/foo.ts:42`-shaped piece of evidence was silently truncated to `src/foo.ts` and the rest
+ *  vanished with no refusal. With a fourth meaningful segment that silence would start eating
+ *  scope paths instead — quietly narrowing what a reviewer is handed, which is the exact class
+ *  of failure FG-689 exists to close. So a spec that is not exactly four segments is refused
+ *  by name, and the refusal states the form. Reasons and evidence carry no colons; commas
+ *  separate the repeated values inside a segment. */
 export function parseLensWidening(specs: readonly string[]): { ok: true; widening: LensWidening[] } | { ok: false; refusal: string } {
   const widening: LensWidening[] = [];
   for (const spec of specs) {
-    // lens:reason:evidence[,evidence…]
-    const [lens, reason, evidence] = spec.split(":");
-    if (lens === undefined || reason === undefined || evidence === undefined || evidence.trim() === "") {
+    // lens:reason:evidence[,evidence…]:scope-path[,scope-path…]
+    const parts = spec.split(":");
+    const [lens, reason, evidence, scope] = parts;
+    if (
+      parts.length !== 4 ||
+      lens === undefined ||
+      reason === undefined ||
+      evidence === undefined ||
+      evidence.trim() === "" ||
+      scope === undefined ||
+      scope.trim() === ""
+    ) {
       return {
         ok: false,
         refusal:
-          `--add-lens expects <lens>:<reason>:<diff-evidence> (got '${spec}') — a lens may be added only with ` +
-          `the evidence and reason that made it necessary.`,
+          `--add-lens expects <lens>:<reason>:<diff-evidence>:<scope-paths> (got '${spec}') — a lens may be added ` +
+          `only with the evidence and reason that made it necessary, AND the authored paths it owns (FG-689). ` +
+          `Exactly four ':'-separated segments; use ',' to repeat evidence or scope paths, and no ':' inside them.`,
+      };
+    }
+    // THE LENS NAME IS CHECKED HERE, at the boundary the operator's string enters through.
+    // It used to be cast straight to `RiskLens` and never verified, which was survivable
+    // while a widening claim only touched `risk_lenses`: an unknown name made the confirmed
+    // contract unreadable, and `selectRedsForContract` fails closed WIDER on one of those.
+    // FG-689 makes the same string a key in `lens_scopes` on the widening-only path — the
+    // one path that builds a contract without re-parsing it — so an unchecked name now
+    // writes an unreadable contract that also owns paths. Refuse the typo where it is typed.
+    const named = lens.trim();
+    if (!(RISK_LENSES as readonly string[]).includes(named)) {
+      return {
+        ok: false,
+        refusal:
+          `--add-lens names '${named}', which is not a risk lens. The vocabulary is fixed: ` +
+          `${RISK_LENSES.join(", ")}. Forge does not invent a lens from a name.`,
       };
     }
     widening.push({
-      lens: lens.trim() as RiskLens,
+      lens: named as RiskLens,
       reason: reason.trim(),
       diffEvidence: evidence.split(",").map((e) => e.trim()).filter((e) => e !== ""),
+      scopePaths: scope.split(",").map((p) => p.trim()).filter((p) => p !== ""),
     });
   }
   return { ok: true, widening };

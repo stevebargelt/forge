@@ -85,6 +85,41 @@ test("FG-639 / PRD #27: the coordinator MAY add a lens with recorded diff eviden
     ["src/util/creds.ts"],
     "FG-689: the widened contract carries the added lens's scope, so it can be read back",
   );
+  assert.deepEqual(c.widenedScopes, [], "adding a lens is not widening an existing lens's scope");
+});
+
+// FG-689 D3, the THIRD direction of the asymmetry — stated here beside the other two because
+// this is the file that documents what the coordinator may and may not do on its own. The
+// per-scope cases live in `fg689-scope-change-control.test.ts`; these two are the anchors.
+test("FG-689 / D3: a lens's authored scope may be WIDENED with recorded evidence", () => {
+  const c = confirmContract(APPROVED, {
+    candidateSha: "cand1",
+    widening: [
+      {
+        lens: "backend",
+        reason: "the diff moved a store write path outside backend's approved scope",
+        diffEvidence: ["src/store/fix-batches.ts"],
+        scopePaths: ["src/store/fix-batches.ts"],
+      },
+    ],
+  });
+  assert.equal(c.kind, "confirmed", c.kind === "confirmed" ? "" : c.refusal);
+  if (c.kind !== "confirmed") return;
+  assert.deepEqual(c.addedLenses, [], "backend was already selected — this widened its scope, not the panel");
+  assert.deepEqual(c.widenedScopes, [{ lens: "backend", addedPatterns: ["src/store/fix-batches.ts"] }]);
+});
+
+test("FG-689 / D3: NARROWING a lens's scope returns to the approving authority, like a removal", () => {
+  const approved: ReviewContract = { ...APPROVED, lens_scopes: { wide: ["docs/", "src/"], backend: ["src/store/"] } };
+  const c = confirmContract(approved, {
+    candidateSha: "cand1",
+    contract: { ...approved, lens_scopes: { ...approved.lens_scopes, wide: ["docs/"] } },
+  });
+  assert.equal(c.kind, "needs_approving_authority");
+  if (c.kind !== "needs_approving_authority") return;
+  assert.deepEqual(c.narrowedScopes, [{ lens: "wide", removedPatterns: ["src/"] }]);
+  assert.deepEqual(c.removedLenses, [], "risk_lenses is untouched — the weakening is entirely inside the scopes");
+  assert.match(c.refusal, /Nothing was written/);
 });
 
 // FG-689. The widening-only shape exists so the common case never restates the whole
