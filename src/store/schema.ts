@@ -804,6 +804,16 @@ CREATE TABLE IF NOT EXISTS reviews (
   -- process died, and a stage recorded at a SUPERSEDED sha is correctly not complete for
   -- the candidate that exists now.
   stage_evidence_json    TEXT,
+  -- FG-689: the shard plan discovery is OWED, recorded BEFORE any lens container starts.
+  -- A SEPARATE column from lens_outcomes_json on purpose: what is owed and what was
+  -- delivered have two lifecycles and two writers, and neither is derivable from the
+  -- other -- a lens whose every shard crashed delivers nothing, and nothing in the
+  -- outcomes can then say how many shards were expected. It cannot ride
+  -- stage_evidence_json either: the discovery stage record is written only AFTER
+  -- completeness passes, i.e. it does not exist at the one moment the gate needs to read
+  -- what was expected. Nullable: a review opened before FG-689 (or one whose discovery
+  -- has not planned yet) reads back undefined.
+  shard_plan_json        TEXT,
   -- Copied from the run at creation so a read surface never has to join to answer
   -- "which authority model settles this review".
   review_mode            TEXT NOT NULL DEFAULT 'evidence_led'
@@ -1413,6 +1423,10 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // reads back NULL, which is the legacy shape `forge review continue` adopts a run's
   // project_dir for (and records) rather than guessing from cwd.
   { table: "reviews", column: "workspace_dir", ddl: "ALTER TABLE reviews ADD COLUMN workspace_dir TEXT" },
+  // FG-689: the expected shard set, recorded before dispatch. Additive and nullable — a
+  // pre-FG-689 row reads back NULL, which the gate reads as "no plan recorded" rather
+  // than as an empty plan that nothing is owed against.
+  { table: "reviews", column: "shard_plan_json", ddl: "ALTER TABLE reviews ADD COLUMN shard_plan_json TEXT" },
 
   { table: "review_findings", column: "fingerprint", ddl: "ALTER TABLE review_findings ADD COLUMN fingerprint TEXT" },
   { table: "review_findings", column: "summary", ddl: "ALTER TABLE review_findings ADD COLUMN summary TEXT NOT NULL DEFAULT ''" },
