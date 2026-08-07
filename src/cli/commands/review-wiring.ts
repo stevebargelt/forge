@@ -19,6 +19,7 @@ import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
 import { readTaskManifest } from "../../v2/task-manifest.js";
 import type { LensProtocolRecord } from "../../v2/review-discovery.js";
+import { renderReviewDiff, type ReviewDiffResult } from "../../v2/review-diff.js";
 import type { DependencyEnvironmentReceipt } from "../../v2/dependency-provisioning.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
@@ -537,13 +538,21 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       };
     },
 
-    changedPaths: (fromSha: string, toSha: string): string[] =>
-      git(["diff", "--name-only", `${fromSha}..${toSha}`])
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l !== ""),
-
-    diff: (fromSha: string, toSha: string): string => git(["diff", `${fromSha}..${toSha}`]),
+    // FG-689 D8/D14: ONE PINNED RENDERING, and the only diff seam the coordinator has.
+    //
+    // What this replaces was two: a `changedPaths` that ran `git diff --name-only` with no
+    // rename flag, and a `diff` that ran a bare `git diff` with no flags at all. Both read the
+    // same range and neither pinned anything, so the path set the coverage check was made
+    // against and the bytes a reviewer actually read could differ — rename detection folds two
+    // paths into one on one side and not the other, `core.quotepath` re-spells a path, an
+    // orderFile reorders. `renderReviewDiff` derives BOTH answers from one set of bytes, so
+    // there is no second invocation left to disagree with.
+    //
+    // It returns a named refusal rather than throwing: a git failure here used to escape the
+    // coordinator as a raw exception, and a stage that cannot render its diff has to decline in
+    // a way an operator can read.
+    reviewDiff: (baseSha: string, candidateSha: string): ReviewDiffResult =>
+      renderReviewDiff(git, { baseSha, candidateSha }),
 
     // The widening asymmetry's operator surface, and it is FAIL-CLOSED against the final
     // implementation diff. Forwarding the changed paths while always proposing the unchanged

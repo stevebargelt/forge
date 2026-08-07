@@ -60,6 +60,7 @@ import {
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime } from "./loader.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
+import { fakeReviewDiff } from "./review-diff.testkit.js";
 import { nextTransition } from "./review-coordinator.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { readTaskManifest, writeTaskManifest, type TaskManifest } from "./task-manifest.js";
@@ -1586,8 +1587,10 @@ function harness(over: Partial<CoordinatorDeps> = {}): { deps: CoordinatorDeps; 
   const deps: CoordinatorDeps = {
     headSha: () => head,
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" }),
-    changedPaths: () => ["src/v2/reconcile.ts"],
-    diff: () => "--- a/src/v2/reconcile.ts",
+    // FG-689 AC2: the rendered path is one CONTRACT's backend scope owns. The old fake named
+    // `src/v2/reconcile.ts` against a `src/store/` scope, which nothing compared until the
+    // coverage check existed.
+    reviewDiff: fakeReviewDiff(["src/store/reconcile.ts"]),
     proposeContract: ({ changedPaths }) => ({
       candidateSha: "",
       changedPaths,

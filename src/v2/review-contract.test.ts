@@ -228,7 +228,17 @@ test("FG-639 / PRD #23: unclassifiable drift wins over a widening claim in the s
 // path-based risk classifier the PRD puts out of scope: frontend- and security-shaped
 // paths in the diff must NOT produce a lens on their own.
 test("FG-639 / PRD #23: changed file paths ALONE never add a lens — there is no path classifier", () => {
-  const c = confirmContract(APPROVED, {
+  // FG-689: the approved contract here OWNS all four paths under `wide`, so the confirmation
+  // reaches the question this test asks. Coverage and classification are different questions
+  // and this one is about classification: a diff whose paths look frontend-shaped and
+  // security-shaped, every one of them explicitly assigned to `wide` by the contract's
+  // approving authority, must still not produce a frontend or a security lens. Authored
+  // ownership is the ONLY thing that moves here, and it moves nothing on its own.
+  const owningAll: ReviewContract = {
+    ...APPROVED,
+    lens_scopes: { wide: ["dashboard/", "docker/", "src/"], backend: ["src/store/"] },
+  };
+  const c = confirmContract(owningAll, {
     candidateSha: "cand1",
     changedPaths: [
       "dashboard/src/components/UsageTable.tsx",

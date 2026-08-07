@@ -86,6 +86,7 @@ import {
   type ContractProposal,
   type RiskLens,
 } from "./review-contract.js";
+import type { ReviewDiffRendering, ReviewDiffResult } from "./review-diff.js";
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck } from "./review-recheck.js";
@@ -210,8 +211,19 @@ export type DocsDelivery =
 export type CoordinatorDeps = {
   headSha: () => Awaitable<string>;
   verify: (sha: string) => Awaitable<VerificationEntry>;
-  changedPaths: (fromSha: string, toSha: string) => Awaitable<string[]>;
-  diff: (fromSha: string, toSha: string) => Awaitable<string>;
+  /** FG-689 D8/D14: THE ONE PINNED RENDERING, and the only diff seam this coordinator has.
+   *
+   *  It replaces the two it used to carry — a `changedPaths` that ran `git diff --name-only`
+   *  and a `diff` that ran a flagless `git diff`. Those were two unpinned renderings of the
+   *  same range, and two renderings can disagree: "every changed path is covered by a lens"
+   *  was then checkable against a path set that no reviewer's bytes were derived from.
+   *  Independently pinning them would not have fixed it — only deriving both answers from ONE
+   *  set of bytes does, which is what `renderReviewDiff` returns.
+   *
+   *  It answers with a NAMED REFUSAL rather than throwing or substituting. A stage handed a
+   *  refusal refuses; it never proceeds over a placeholder, because a reviewer handed anything
+   *  other than the diff can author an honest pass over it and that pass clears the gate. */
+  reviewDiff: (baseSha: string, candidateSha: string) => Awaitable<ReviewDiffResult>;
   /** The contract confirmation proposal. The default wiring confirms unchanged; a
    *  coordinator that observed drift supplies a widening claim or names the drift. */
   proposeContract: (ctx: { review: Review; candidateSha: string; changedPaths: string[] }) => Awaitable<ContractProposal>;
@@ -298,6 +310,14 @@ export type StageOutcome = {
   /** Set by the shipping-review stage so the caller can render the eight checks. */
   shipping?: ShippingAssessment;
 };
+
+/** The rendering's bytes, reassembled. `renderReviewDiff` splits the output into contiguous
+ *  per-file slices, so joining them in order reproduces what git emitted exactly — no
+ *  separator, no reordering, nothing dropped. A caller that wants the whole diff as text gets
+ *  the diff, not a rendering of a rendering. */
+function renderingText(rendering: ReviewDiffRendering): string {
+  return rendering.files.map((f) => f.body).join("");
+}
 
 function snapshot(reviewId: string) {
   const review = getReview(reviewId);
@@ -433,7 +453,26 @@ async function runContractConfirmation(reviewId: string, transition: Transition,
         `review naming its comparison base (forge review start --since <sha>). Nothing was written.`,
     };
   }
-  const paths = await deps.changedPaths(review.baseSha, candidate);
+  // FG-689 D8/D14: ONE RENDERING, and the base it resolves is the base of record for the whole
+  // review. The path set this confirmation checks coverage against and records is the path set
+  // the shards are later cut from — the same bytes, not a second git invocation that agrees
+  // today.
+  //
+  // A RENDERING REFUSAL IS A STAGE REFUSAL. Nothing is recorded and the stage re-enters; there
+  // is deliberately no arm that confirms over a diff nobody could compute. The old seam threw,
+  // and a thrown git error out of a stage is not a decision anybody made either.
+  const rendered = await deps.reviewDiff(review.baseSha, candidate);
+  if (!rendered.ok) {
+    return {
+      transition,
+      status: "refused",
+      message:
+        `the contract cannot be confirmed because the review's implementation diff could not be rendered ` +
+        `(${rendered.reason}): ${rendered.refusal} No contract confirmation was recorded and no reviewer was ` +
+        `dispatched.`,
+    };
+  }
+  const paths = rendered.rendering.paths;
   const proposal = await deps.proposeContract({ review, candidateSha: candidate, changedPaths: paths });
   const confirmation = confirmContract(approved.contract, { ...proposal, candidateSha: candidate, changedPaths: paths });
 
@@ -458,6 +497,17 @@ async function runContractConfirmation(reviewId: string, transition: Transition,
       addedLenses: confirmation.addedLenses,
       widening: confirmation.widening,
       changedPaths: paths,
+      // FG-689 D14: WHICH rendering this path set came from, recorded beside the paths so
+      // "one rendering, one set" is auditable after the fact rather than only assertable in a
+      // test. The shard plan records the same three values; a later flag change moves
+      // `renderingId` and the two stop matching, which is the point.
+      rendering: {
+        renderingId: rendered.rendering.renderingId,
+        baseSha: rendered.rendering.baseSha,
+        candidateSha: rendered.rendering.candidateSha,
+        unit: rendered.rendering.unit,
+        totalChars: rendered.rendering.totalChars,
+      },
       // The evaluation itself is the durable record — the stage evidence is where an
       // "evaluated, nothing to widen" outcome stops being indistinguishable from silence.
       ...(noDrift !== undefined ? { evaluation: "no_drift", noDrift } : {}),
@@ -1071,13 +1121,32 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
     if (f.riskLens !== undefined) lensInstructions[f.findingRef] = `source lens: ${f.riskLens} (${lensRole(f.riskLens as RiskLens)})`;
   }
 
+  // FG-689: the remediation delta comes from the SAME pinned seam, over the confirmed sha and
+  // the current candidate. Not because the rechecker needs the coverage guarantee — it does
+  // not — but because a second unpinned `git diff` in this module is the seam that grows back.
+  //
+  // A refusal REFUSES THE STAGE. The old `deps.diff` threw on a git failure and the throw
+  // escaped the coordinator; the one thing that must not happen instead is a rechecker handed a
+  // placeholder for the delta it is supposed to be verifying against.
+  const renderedDelta = await deps.reviewDiff(confirmedSha, candidate);
+  if (!renderedDelta.ok) {
+    return {
+      transition,
+      status: "refused",
+      message:
+        `the remediation delta ${confirmedSha}..${candidate} could not be rendered (${renderedDelta.reason}): ` +
+        `${renderedDelta.refusal} No rechecker was dispatched, no resolution was inferred and every finding stays ` +
+        `exactly as it was.`,
+    };
+  }
+
   const dispatch = await deps.dispatchRechecker({
     review,
     candidateSha: candidate,
     confirmedSha,
     expected,
     fixerEvidence,
-    delta: await deps.diff(confirmedSha, candidate),
+    delta: renderingText(renderedDelta.rendering),
     contract: approved.ok ? approved.contract : review.contract,
     lensInstructions,
   });

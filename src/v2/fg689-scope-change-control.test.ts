@@ -283,7 +283,20 @@ test("FG-689 / D3: a rewrite is not rescued by ANY amount of recorded evidence",
 // ─── the anti-classifier locks, restated for scopes ──────────────────────────
 
 test("FG-689: changed file paths ALONE never widen a scope — there is no path classifier", () => {
-  const c = confirmContract(APPROVED, {
+  // Step 7 added the AC2 coverage check, so the contract under test has to OWN these paths for
+  // the confirmation to reach the question this test asks. `wide` owns all four, explicitly,
+  // by authorship. That makes the case sharper rather than weaker: two of the paths are as
+  // security-shaped as a path gets and one is as frontend-shaped, every one of them is in the
+  // diff, and `security`'s authored scope still does not grow to meet them. Ownership moves
+  // only when a human moves it.
+  const owningAll: ReviewContract = {
+    ...APPROVED,
+    lens_scopes: {
+      wide: ["dashboard/", "docker/", "src/"],
+      security: APPROVED.lens_scopes.security,
+    },
+  };
+  const c = confirmContract(owningAll, {
     candidateSha: "cand1",
     changedPaths: [
       "src/util/creds.ts",
@@ -295,7 +308,7 @@ test("FG-689: changed file paths ALONE never widen a scope — there is no path 
   assert.equal(c.kind, "confirmed");
   if (c.kind !== "confirmed") return;
   assert.deepEqual(c.widenedScopes, [], "a security-shaped path in the diff must not join security's scope");
-  assert.deepEqual(c.contract.lens_scopes, APPROVED.lens_scopes, "the scopes come back exactly as authored");
+  assert.deepEqual(c.contract.lens_scopes, owningAll.lens_scopes, "the scopes come back exactly as authored");
 });
 
 // D5's grammar lives in the zod schema, which the widening-only proposal shape never reaches:

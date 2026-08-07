@@ -17,6 +17,8 @@
 //   change threat_model / protected_invariants /
 //     acceptance_refs / non_goals              → back to the approving authority
 //   drift the coordinator cannot classify      → back to plan/architecture
+//   a changed path no selected lens's scope
+//     owns (FG-689 AC2)                        → back to plan/architecture, paths named
 //
 // AND IT IS NOT A FILE-PATH CLASSIFIER. Nothing here reads a changed path and decides
 // "this looks like frontend, add the frontend lens". The coordinator (or an operator)
@@ -33,6 +35,20 @@
 // first is a contract, the second is the thing the PRD refuses.
 
 import { z } from "zod";
+// FG-689 step 7: the OWNERSHIP RULE IS NOT RESTATED HERE. `resolveScopes` is the one place
+// that decides whether an authored pattern owns a path, and the coverage check below is that
+// same decision read for its complement. A second matcher living in this module would be the
+// two-renderings defect one level up: "every path is covered" true of the matcher the
+// confirmation used and false of the matcher the shards were cut with.
+//
+// The import is a module cycle (review-shards imports RISK_LENSES and the contract types back
+// from here) and it is deliberate and safe: neither module touches the other's bindings at
+// module-evaluation time, so whichever is loaded first finishes evaluating before any
+// function here runs. Both orders are exercised: `fg689-coverage-refusal.test.ts` loads this
+// module first and `fg689-sharding.test.ts` loads `review-shards.js` first, in separate
+// processes, so a top-level reference across the cycle would fail one of them with a TDZ error
+// before a single assertion ran.
+import { resolveScopes } from "./review-shards.js";
 
 /** The fixed lens vocabulary, resolved directly by the coordinator. The PRD is explicit
  *  that shipping this lifecycle must NOT introduce a general conditional-workflow
@@ -347,8 +363,14 @@ export type ContractProposal = {
   unclassifiableDrift?: string;
   /** The sha the confirmation is about — becomes contract_confirmed_sha. */
   candidateSha: string;
-  /** Changed paths in the final implementation diff. RECORDED, never classified:
-   *  this module reads it only to put it in the confirmation record. */
+  /** Changed paths in the final implementation diff, as the ONE pinned rendering reported
+   *  them (`review-diff.ts`). Recorded with the confirmation, and — FG-689 AC2 — checked for
+   *  COVERAGE against the confirmed contract's authored `lens_scopes`.
+   *
+   *  Still never CLASSIFIED. Coverage asks "did the contract's approving authority assign an
+   *  owner to this path", which is a question about the authored scopes; it never answers
+   *  "which lens should own it", which is the classification the PRD refuses. An unowned path
+   *  returns to plan precisely because forge will not answer the second question. */
   changedPaths?: string[];
 };
 
@@ -453,6 +475,44 @@ function scopeDeltas(approved: LensScopes, proposed: LensScopes): ScopeDelta[] {
   return out;
 }
 
+/** FG-689 AC2. Every changed path must be OWNED by at least one selected lens's authored
+ *  scope before any reviewer is dispatched.
+ *
+ *  WHY `returns_to_plan` AND NOT A FOURTH DECLINE STATE. `confirmContract` already has exactly
+ *  three ways to decline, and the unclassifiable-drift arm above already says the sentence this
+ *  case needs: "Forge does not infer risk lenses from file paths." An uncovered path IS that
+ *  sentence's case — the diff grew a surface the approved contract assigned to nobody, and the
+ *  host must not guess an owner. A parallel refusal state would be a second answer to a
+ *  question that already has one, and the two would drift.
+ *
+ *  WHY HERE AND NOT AT PLAN TIME. Scopes are authored before the diff exists. Plan time can
+ *  check that the scopes are well-formed; only confirmation can check them against the paths
+ *  that actually changed.
+ *
+ *  It is checked against the CONFIRMED contract — after widening, after the change-control
+ *  arms — so a widening that adds the lens or the pattern covering a new surface covers it,
+ *  and a proposal that also narrows or rewrites a scope reports THAT rather than the uncovered
+ *  paths it happens to produce.
+ *
+ *  EVERY uncovered path is named, not a sample. An operator reading this refusal has to author
+ *  a scope for each one, and a truncated list is the same family of defect as a truncated
+ *  diff — an input trimmed to be convenient, on which a decision then gets made. */
+function uncoveredPathsDecline(contract: ReviewContract, changedPaths: string[]): ContractConfirmation | undefined {
+  if (changedPaths.length === 0) return undefined;
+  const { uncovered } = resolveScopes(contract, changedPaths);
+  if (uncovered.length === 0) return undefined;
+  return {
+    kind: "returns_to_plan",
+    refusal:
+      `${uncovered.length} changed path(s) are owned by no selected lens's authored scope: ${uncovered.join(", ")}. ` +
+      `Every changed path must be covered by at least one selected lens before any reviewer is dispatched — a ` +
+      `surface nobody was assigned is a surface nobody reviews, and a review that skipped it silently reads as ` +
+      `evidence. Forge does not infer risk lenses from file paths, so it will not pick an owner: returning to ` +
+      `plan/architecture for the contract's approving authority to extend the authored lens_scopes (or to add a ` +
+      `lens with its scope). Nothing was written.`,
+  };
+}
+
 /** Confirm the approved contract against the final implementation diff.
  *
  *  Order matters and is deliberate: unclassifiable drift short-circuits FIRST (an
@@ -497,6 +557,8 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
   }
 
   if (proposal.contract === undefined && widening.length === 0) {
+    const uncovered = uncoveredPathsDecline(approved, changedPaths);
+    if (uncovered !== undefined) return uncovered;
     return {
       kind: "confirmed",
       contract: approved,
@@ -676,6 +738,9 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
       };
     }
   }
+
+  const uncovered = uncoveredPathsDecline(proposed, changedPaths);
+  if (uncovered !== undefined) return uncovered;
 
   return {
     kind: "confirmed",
