@@ -56,6 +56,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-649 change 2"],
   risk_lenses: ["wide"],
   non_goals: ["protect the host from malicious candidate code"],
+  lens_scopes: { wide: ["src/"] },
 };
 
 let homeDir: string;

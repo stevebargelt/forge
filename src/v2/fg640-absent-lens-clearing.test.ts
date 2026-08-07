@@ -55,6 +55,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 21"],
   risk_lenses: ["backend", "security"],
   non_goals: [],
+  lens_scopes: { backend: ["src/v2/review-discovery.ts"], security: ["src/store/reviews.ts"] },
 };
 
 let db: DatabaseInstance;
@@ -287,7 +288,7 @@ test("FG-640: a retry that came back INCONCLUSIVE clears the lens but lands as a
 // ── route 2: amend the contract through its approving authority ──────────────
 
 test("FG-640: AMENDING the contract to drop the lens clears it — the panel is what the contract selects", async () => {
-  const amended = { ...CONTRACT, risk_lenses: ["backend"] };
+  const amended = { ...CONTRACT, risk_lenses: ["backend"], lens_scopes: { backend: CONTRACT.lens_scopes.backend } };
   updateReview(REVIEW, { contract: amended });
   const result = await gate(TASK, "advance", undefined, {});
   assert.equal(result.task.status, "complete");
@@ -300,7 +301,7 @@ test("FG-640: the COORDINATOR cannot make that amendment — a removal returns t
   const approved = validateReviewContract(CONTRACT);
   assert.equal(approved.ok, true);
   const confirmation = confirmContract(approved.ok ? approved.contract : (undefined as never), {
-    contract: { ...CONTRACT, risk_lenses: ["backend"] },
+    contract: { ...CONTRACT, risk_lenses: ["backend"], lens_scopes: { backend: CONTRACT.lens_scopes.backend } },
     candidateSha: SHA,
     changedPaths: ["src/v2/gate.ts"],
   });
@@ -471,7 +472,12 @@ test("FG-640: an amendment that drops the lens but also rewrites the threat mode
   const approved = validateReviewContract(CONTRACT);
   assert.equal(approved.ok, true);
   const confirmation = confirmContract(approved.ok ? approved.contract : (undefined as never), {
-    contract: { ...CONTRACT, risk_lenses: ["backend"], threat_model: "nothing much, really" },
+    contract: {
+      ...CONTRACT,
+      risk_lenses: ["backend"],
+      lens_scopes: { backend: CONTRACT.lens_scopes.backend },
+      threat_model: "nothing much, really",
+    },
     candidateSha: SHA,
   });
   assert.equal(confirmation.kind, "needs_approving_authority");

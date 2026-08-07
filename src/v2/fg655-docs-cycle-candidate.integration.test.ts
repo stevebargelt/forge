@@ -67,6 +67,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-655 AC 1"],
   risk_lenses: ["backend"],
   non_goals: ["FG-682's late-docs amendment path"],
+  lens_scopes: { backend: ["src/v2/review-run.ts", "docs/"] },
 };
 
 let db: DatabaseInstance;

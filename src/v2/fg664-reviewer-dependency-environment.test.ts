@@ -1555,6 +1555,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-664 AC2"],
   risk_lenses: ["backend"] as const,
   non_goals: ["detecting a fabricated verdict from a lane that CAN load the real driver"],
+  lens_scopes: { backend: ["src/store/"] },
 };
 const EXECUTED_OUTPUT = "ok 1 - the rechecker reuses the real driver";
 

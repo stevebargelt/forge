@@ -75,7 +75,11 @@ function newReview(id = "review-1", candidateSha: string | null = "cand111"): st
     contractConfirmedSha: "conf222",
     candidateSha: candidateSha ?? undefined,
     trustedRemoteSha: "rem333",
-    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide", "security"] },
+    contract: {
+      threat_model: "operator_trusted_candidate",
+      risk_lenses: ["wide", "security"],
+      lens_scopes: { wide: ["src/"], security: ["src/util/creds.ts"] },
+    },
     state: "awaiting_disposition",
   });
   return id;

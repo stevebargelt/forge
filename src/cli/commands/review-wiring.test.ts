@@ -44,6 +44,7 @@ const CONTRACT = validateReviewContract({
   acceptance_refs: ["FG-639 AC 1"],
   risk_lenses: ["wide"],
   non_goals: ["protect the host from malicious candidate code"],
+  lens_scopes: { wide: ["src/"] },
 });
 const APPROVED = (CONTRACT.ok ? CONTRACT.contract : undefined) as ReviewContract;
 
@@ -96,7 +97,14 @@ test("FG-639: the surfaced summary names the paths it can and says how many more
 
 test("FG-639: a RECORDED evaluation proceeds — the confirmation widens with its evidence", async () => {
   const outcome = await confirmVia(["src/store/reviews.ts"], {
-    addLenses: [{ lens: "backend", reason: "the diff moves a store write path", diffEvidence: ["src/store/reviews.ts"] }],
+    addLenses: [
+      {
+        lens: "backend",
+        reason: "the diff moves a store write path",
+        diffEvidence: ["src/store/reviews.ts"],
+        scopePaths: ["src/store/reviews.ts"],
+      },
+    ],
   });
 
   assert.equal(outcome.kind, "confirmed", outcome.kind === "confirmed" ? "" : outcome.refusal);

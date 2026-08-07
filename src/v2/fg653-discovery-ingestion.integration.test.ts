@@ -80,6 +80,13 @@ const CONTRACT = {
   acceptance_refs: ["FG-653 AC 1"],
   risk_lenses: [...RISK_LENSES],
   non_goals: ["relaxing nested validation", "changing any schema"],
+  lens_scopes: {
+    wide: ["src/"],
+    narrow: ["src/v2/review-discovery.ts"],
+    frontend: ["dashboard/"],
+    backend: ["src/store/"],
+    security: ["src/util/creds.ts"],
+  },
 };
 
 let dbFile: string;

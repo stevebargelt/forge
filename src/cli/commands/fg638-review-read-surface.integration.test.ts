@@ -93,10 +93,10 @@ before(() => {
                           trusted_remote_sha, contract_json, review_mode, state, created_at, updated_at)
      VALUES (?, 'run-read', 'task-read-subject', ?, 'basesha0000', 'confsha1111', 'candsha2222', 'remotesha33', ?, 'evidence_led', ?, ?, ?)`,
   );
-  insertReview.run("review-read-a", "FG-638", JSON.stringify({ risk_lenses: ["wide", "security"] }), "awaiting_disposition", "2026-07-30T00:00:00Z", "2026-07-30T00:00:00Z");
+  insertReview.run("review-read-a", "FG-638", JSON.stringify({ risk_lenses: ["wide", "security"], lens_scopes: { wide: ["src/"], security: ["src/util/creds.ts"] } }), "awaiting_disposition", "2026-07-30T00:00:00Z", "2026-07-30T00:00:00Z");
   // A SECOND review carrying its own RF-1 — the only way the bare-ref ambiguity
   // refusal can fire.
-  insertReview.run("review-read-b", "FG-700", JSON.stringify({ risk_lenses: ["backend"] }), "discovering", "2026-07-30T00:01:00Z", "2026-07-30T00:01:00Z");
+  insertReview.run("review-read-b", "FG-700", JSON.stringify({ risk_lenses: ["backend"], lens_scopes: { backend: ["src/store/"] } }), "discovering", "2026-07-30T00:01:00Z", "2026-07-30T00:01:00Z");
 
   const insertFinding = db.prepare(
     `INSERT INTO review_findings (id, review_id, ordinal, finding_ref, summary, severity, risk_lens, reachability,

@@ -392,6 +392,7 @@ test("integ FG-654: the disposition gate still names the remedy, and says an acc
       acceptance_refs: ["FG-654 AC 3"],
       risk_lenses: ["security"],
       non_goals: [],
+      lens_scopes: { security: ["src/v2/agent-protocol.ts"] },
     },
     contractConfirmedSha: "cafe1234",
     candidateSha: "cafe1234",

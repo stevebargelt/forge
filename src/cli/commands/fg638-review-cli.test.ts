@@ -68,7 +68,11 @@ function seedReview(): void {
     contractConfirmedSha: "conf222",
     candidateSha: "cand111",
     trustedRemoteSha: "rem333",
-    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide", "security"] },
+    contract: {
+      threat_model: "operator_trusted_candidate",
+      risk_lenses: ["wide", "security"],
+      lens_scopes: { wide: ["src/"], security: ["src/util/creds.ts"] },
+    },
     state: "awaiting_disposition",
   });
   ingestFindings("review-cli", [

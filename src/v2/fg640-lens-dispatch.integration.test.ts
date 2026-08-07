@@ -31,6 +31,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 16"],
   risk_lenses: ["backend", "security"],
   non_goals: [],
+  lens_scopes: { backend: ["src/store/"], security: ["src/util/creds.ts"] },
 };
 
 function ensureRuntime(): void {

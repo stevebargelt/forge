@@ -25,6 +25,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 18"],
   risk_lenses: ["backend", "security"],
   non_goals: ["rewriting every workflow"],
+  lens_scopes: { backend: ["src/v2/review-gate.ts"], security: ["src/v2/review-discovery.ts"] },
 };
 
 /** A completed, reviewer-authored outcome for a lens. `authored: true` is the whole point —
