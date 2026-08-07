@@ -28,6 +28,7 @@ import {
   existsSync,
   mkdtempSync,
   rmSync,
+  chmodSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -679,15 +680,13 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
 // which returned "Already up to date." — the caller then called
 // removeWorktreeIfSafe(provenMerged=true), discarding the agent's uncommitted work.
 //
-// FG-685 changed the INDUCTION, not the guard. This fixture used to install an
-// always-failing pre-commit hook; Forge's safety commit is now exempt from hooks
-// entirely (`--no-verify`, so the no-AI-attribution commit-msg hook the clone is
-// provisioned with can never turn a message quirk into lost agent work), which
-// made that device stop inducing anything. A pre-existing .git/index.lock is the
-// hook-independent replacement: `git status` still reads (so this is not a
-// status_unreadable run), and the `add -A`/`commit` pair fails deterministically.
-// What is under test is unchanged — a FAILED safety commit with changes present
-// must retain the workspace and the branch and fail the task.
+// FG-685 changed the INDUCTION, not the guard. Forge's safety commit is exempt
+// from hooks via `--no-verify`, so the fixture configures a failing signing
+// program instead. `git add -A` completes first; only `git commit` invokes the
+// signer, which proves the failure belongs to the commit step without changing
+// Forge's hook exemption. What is under test is unchanged — a FAILED safety
+// commit with changes present must retain the workspace and the branch and fail
+// the task.
 
 test("fg352 (11): auto-commit fails with changes present — ok:false, task fails, worktree and branch retained", async () => {
   setPlatform("darwin");
@@ -703,20 +702,22 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
     inputs: {},
     projectDir: repo,
   });
+  const signerDir = makeTmpDir();
+  const signerPath = join(signerDir, "fail-signer.sh");
+  const signerLog = join(signerDir, "invoked");
+  writeFileSync(signerPath, `#!/bin/sh\nprintf 'commit reached signer\\n' > "${signerLog}"\nexit 1\n`);
+  chmodSync(signerPath, 0o755);
 
   const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
     const worktreePath = findProjectMountHost(args);
     assert.ok(worktreePath, "stub: /project mount must be in docker args");
     writeFileSync(stderrPath, "");
 
-    // Wedge the index so the host-side safety commit deterministically fails.
-    //
-    // FG-621: it goes in the WORKSPACE's own .git, not the project's. A linked
-    // worktree shares its parent's; a private clone is a separate repository
-    // with its own, and the safety commit runs in the workspace. The wedge has
-    // to live in the repository the commit is made in, or this fixture silently
-    // stops inducing the failure it exists to induce.
-    writeFileSync(join(worktreePath!, ".git", "index.lock"), "");
+    // Signing is attempted by `git commit`, not `git add`. The safety commit's
+    // --no-verify remains exercised: it bypasses hooks but does not suppress
+    // signing, so this provides a deterministic commit-only failure.
+    execFileSync("git", ["config", "commit.gpgsign", "true"], { cwd: worktreePath!, stdio: "ignore" });
+    execFileSync("git", ["config", "gpg.program", signerPath], { cwd: worktreePath!, stdio: "ignore" });
 
     // Write agent output but do NOT commit — leaves uncommitted changes in the
     // worktree for mergeWorktreeBranch's auto-commit to discover and attempt.
@@ -735,6 +736,8 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
   // Task must FAIL — not complete. The auto-commit failed with changes present.
   assert.deepEqual(wave.failedSteps, ["build"], "build must fail when auto-commit fails with changes present");
   assert.deepEqual(wave.completedSteps, [], "no steps must complete");
+
+  assert.ok(existsSync(signerLog), "the failing signer proves capture reached git commit after git add -A");
 
   const tasks = tasksForRun(runId);
   const primary = tasks.find((t) => t.phase === "build" && t.parentId === undefined);
@@ -758,6 +761,11 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
   assert.ok(
     existsSync(join(worktreePath, "agent-output.ts")),
     "agent output must be present in the retained worktree",
+  );
+  assert.match(
+    execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: worktreePath, encoding: "utf8" }),
+    /agent-output\.ts/,
+    "git add -A succeeded before the commit-only signer failure",
   );
 
   // Task branch must be RETAINED for operator inspection.
