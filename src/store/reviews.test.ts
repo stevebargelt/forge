@@ -65,7 +65,7 @@ beforeEach(() => {
     baseSha: "base000",
     contractConfirmedSha: "conf222",
     candidateSha: "cand111",
-    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide"] },
+    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide"], lens_scopes: { wide: ["src/"] } },
     state: "awaiting_disposition",
   });
 });

@@ -72,7 +72,7 @@ before(() => {
     "conf222",
     "cand111",
     "rem333",
-    JSON.stringify({ risk_lenses: ["security"] }),
+    JSON.stringify({ risk_lenses: ["security"], lens_scopes: { security: ["src/util/creds.ts"] } }),
     "evidence_led",
     "awaiting_disposition",
     "2026-07-30T00:00:00Z",

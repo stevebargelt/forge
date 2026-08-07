@@ -248,6 +248,13 @@ const CONTRACT = {
   acceptance_refs: ["FG-653 AC 1"],
   risk_lenses: [...RISK_LENSES],
   non_goals: ["loosening nested validation"],
+  lens_scopes: {
+    wide: ["src/"],
+    narrow: ["src/v2/review-discovery.ts"],
+    frontend: ["dashboard/"],
+    backend: ["src/store/"],
+    security: ["src/util/creds.ts"],
+  },
 };
 
 const lineFor = (lens: string): number => (RISK_LENSES as readonly string[]).indexOf(lens) + 400;

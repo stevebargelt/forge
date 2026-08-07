@@ -64,6 +64,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 18"],
   risk_lenses: ["backend", "security"],
   non_goals: [],
+  lens_scopes: { backend: ["src/v2/review-gate.ts"], security: ["src/store/reviews.ts"] },
 };
 
 let db: DatabaseInstance;

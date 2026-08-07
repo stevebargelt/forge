@@ -76,6 +76,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-649 AC 1"],
   risk_lenses: ["backend"],
   non_goals: ["migrating the already-stuck pilot review row"],
+  lens_scopes: { backend: ["src/v2/review-run.ts", "src/store/reviews.ts"] },
 };
 
 let db: DatabaseInstance;

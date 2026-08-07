@@ -81,7 +81,7 @@ beforeEach(() => {
   const candidate = head();
   db.prepare(`INSERT INTO reviews (id, run_id, ticket_id, review_mode, base_sha, candidate_sha, contract_json, state, created_at, updated_at)
               VALUES (?, ?, 'FG-655', 'evidence_led', ?, ?, ?, 'confirming_contract', ?, ?)`)
-    .run(reviewId, runId, base, candidate, JSON.stringify({ threat_model: "path scope", protected_invariants: ["declared paths"], acceptance_refs: ["FG-655"], risk_lenses: ["backend"], non_goals: [] }), createdAt, createdAt);
+    .run(reviewId, runId, base, candidate, JSON.stringify({ threat_model: "path scope", protected_invariants: ["declared paths"], acceptance_refs: ["FG-655"], risk_lenses: ["backend"], non_goals: [], lens_scopes: { backend: ["src/", "docs/"] } }), createdAt, createdAt);
   dispatches = 0;
   renameStyle = "staged";
   phantom = null;

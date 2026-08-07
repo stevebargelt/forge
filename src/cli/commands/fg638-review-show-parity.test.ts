@@ -65,7 +65,12 @@ function fullyPopulatedReview(): ReviewSummary {
     contractConfirmedSha: "confsha1111",
     candidateSha: "candsha2222",
     trustedRemoteSha: "remotesha33",
-    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide", "security"], marker: "contract-json-only-marker" },
+    contract: {
+      threat_model: "operator_trusted_candidate",
+      risk_lenses: ["wide", "security"],
+      lens_scopes: { wide: ["src/"], security: ["src/util/creds.ts"] },
+      marker: "contract-json-only-marker",
+    },
     lensOutcomes: { security: "found", marker: "lens-outcomes-json-only-marker" },
     state: "awaiting_disposition",
   });

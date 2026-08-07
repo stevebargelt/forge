@@ -83,6 +83,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-650 AC 1"],
   risk_lenses: ["wide", "backend"],
   non_goals: ["relaxing nested strictness"],
+  lens_scopes: { wide: ["src/"], backend: ["src/v2/review-discovery.ts"] },
 };
 
 let dbFile: string;

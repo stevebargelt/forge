@@ -90,6 +90,7 @@ const CONTRACT = {
   acceptance_refs: [],
   risk_lenses: ["backend"],
   non_goals: [],
+  lens_scopes: { backend: ["src/"] },
 };
 
 /** architect (human) → plan (human) → build (the reviewed step, declaring plan as its upstream).
@@ -194,7 +195,7 @@ test("FG-640: the plan step's contract still wins when a non-plan task also carr
     runId,
     "architect",
     "architecture-advisor",
-    { review_contract: { ...CONTRACT, risk_lenses: ["frontend"] } },
+    { review_contract: { ...CONTRACT, risk_lenses: ["frontend"], lens_scopes: { frontend: ["dashboard/"] } } },
     "advance",
   );
 

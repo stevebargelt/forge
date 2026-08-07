@@ -1139,7 +1139,27 @@ forge review continue <review-id> [--project <dir>] [--dry-run] [--all] [--accep
 forge review accept-lens <review-id> <lens> --operator --missing-evidence <text> --rationale <text>
 ```
 
-**The contract is an input, never a reconstruction.** `--contract <file>` is **required** — without it `start` refuses and writes nothing, because the review contract is approved by the plan gate and is not something to infer from prompts after the fact. The JSON must carry all five fields (`threat_model`, `protected_invariants`, `acceptance_refs`, `risk_lenses`, `non_goals`); anything else is a refusal with the missing field named. `risk_lenses` draws on a **fixed five-name vocabulary** — `wide`, `narrow`, `frontend`, `backend`, `security` — each mapping to one red role (`red-wide`, `red-narrow`, `red-frontend`, `red-backend`, `red-security`). Five names and a role map are deliberately the whole mechanism: the PRD forbids shipping a general conditional-workflow language to express lens selection.
+**The contract is an input, never a reconstruction.** `--contract <file>` is **required** — without it `start` refuses and writes nothing, because the review contract is approved by the plan gate and is not something to infer from prompts after the fact. The JSON must carry all six fields (`threat_model`, `protected_invariants`, `acceptance_refs`, `risk_lenses`, `non_goals`, `lens_scopes`); anything else is a refusal with the missing field named. `risk_lenses` draws on a **fixed five-name vocabulary** — `wide`, `narrow`, `frontend`, `backend`, `security` — each mapping to one red role (`red-wide`, `red-narrow`, `red-frontend`, `red-backend`, `red-security`). Five names and a role map are deliberately the whole mechanism: the PRD forbids shipping a general conditional-workflow language to express lens selection.
+
+**`lens_scopes` says which paths each selected lens owns (FG-689).** It is a map from a selected lens to a non-empty list of **authored** path patterns — a literal repo-relative path, or a directory prefix ending in `/`:
+
+```json
+"risk_lenses": ["backend", "security"],
+"lens_scopes": {
+  "backend": ["src/store/", "src/v2/review-run.ts"],
+  "security": ["src/util/creds.ts", "src/v2/review-gate.ts"]
+}
+```
+
+It exists so a reviewer can be handed its own risk surface rather than the whole diff, which is what makes a large change reviewable at all. Every selected lens must have an entry and no entry may name a lens the contract did not select; either way round is a refusal by name. **Overlap between lenses is allowed and expected** — two reviewers looking at one file is coverage, not a conflict.
+
+Three things it deliberately is not:
+
+- **It is not a path classifier.** Forge never derives a scope from a filename, a directory name or an extension. The direction of inference is the whole point: an authored scope is a human saying "security owns these paths"; a classifier would be forge saying "this path looks like security". Only the first is a contract.
+- **There is no negation or exclusion form.** A pattern beginning `!` is refused. An exclusion list ("everything under `src/` except the generated bits") is a path classifier by another name, so generated and vendored artifacts get an owner like any other path, and the cost in reviewer attention is accepted.
+- **It is not narrowable by the coordinator.** A scope may be **widened** with recorded diff evidence, following the same rule that lets the coordinator add a lens. **Narrowing** one — removing a pattern, or dropping a lens's entry — returns to the contract's approving authority, because narrowing a scope to nothing removes a lens without saying so.
+
+**A contract approved before `lens_scopes` existed is refused BY NAME, not as a parse error.** It reports that it *predates lens scopes*, names the lenses that still need one, and states the remedy: re-approval by its approving authority. That distinction matters operationally, because the plan-step prompt that teaches agents to author the field ships in `seeds/workflows/feature.yml` and only reaches a host through `forge upgrade` — so a host can legitimately be running new code against contracts authored under the old prompt, and "invalid input" would be both true and useless.
 
 **Nine stages, and the next one is always a read.** `nextTransition` is a pure function of the persisted review, its findings, and its fix batches, so "what happens next" lives in SQLite rather than in the process that started the review — which is what makes `continue` after an orchestrator crash a lookup instead of a guess:
 
