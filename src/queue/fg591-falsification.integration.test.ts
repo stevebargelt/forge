@@ -51,7 +51,7 @@ import { authorityTestkitBinEnv } from "../backlog/container-authority.testkit-s
 import { closeDb, getDb } from "../store/db.js";
 import { completeRun } from "../store/runs.js";
 import { claimHistoryForTicket, liveClaims, type QueueClaim } from "../store/queue-claims.js";
-import { latestEvaluation, listWakes } from "../store/dispatcher-evidence.js";
+import { latestEvaluation, listWakes, nextWatchdogDeadlineMs } from "../store/dispatcher-evidence.js";
 import { getDispatcherLease } from "../store/dispatcher-policy.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -103,6 +103,9 @@ let projectKey: string;
 /** Every forge command this file runs, in order. The "no operator message" evidence. */
 let issued: string[][];
 const spawned: ChildProcess[] = [];
+/** What every process this file started actually did, recorded AS IT HAPPENS. A child
+ *  that never execs leaves no log and no launch record, so nothing else can say so. */
+let childOutcomes: string[];
 
 type ForgeResult = { status: number | null; stdout: string; stderr: string };
 
@@ -160,6 +163,7 @@ beforeEach(() => {
   project = join(root, "project");
   barrier = join(root, "barrier");
   issued = [];
+  childOutcomes = [];
   for (const d of [home, project, barrier]) mkdirSync(d, { recursive: true });
 
   git(["init", "-q"]);
@@ -245,6 +249,18 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** Register a child so its fate is EVIDENCE rather than a guess. "Nothing appeared" is
+ *  not a diagnosis; "the child never execed" and "the child exited 1" are, and only the
+ *  spawning process can observe the difference. */
+function track(label: string, child: ChildProcess): ChildProcess {
+  child.on("error", (e) => childOutcomes.push(`${label} pid=${child.pid ?? "?"} NEVER STARTED: ${e.message}`));
+  child.on("exit", (code, signal) =>
+    childOutcomes.push(`${label} pid=${child.pid ?? "?"} exited code=${String(code)} signal=${String(signal)}`),
+  );
+  spawned.push(child);
+  return child;
+}
+
 function spawnWorker(mode: string, env: Record<string, string>, logName: string): ChildProcess {
   const fd = openSync(join(root, logName), "a");
   const child = spawn(process.execPath, ["--import", join(REPO_ROOT, "bin", "forge-loader.mjs"), WORKER], {
@@ -262,8 +278,7 @@ function spawnWorker(mode: string, env: Record<string, string>, logName: string)
       ...env,
     }),
   });
-  spawned.push(child);
-  return child;
+  return track(`${logName} (MODE=${mode})`, child);
 }
 
 /** The dispatcher exactly as an operator starts it: the production CLI, in its own
@@ -291,17 +306,88 @@ function spawnDispatcherCli(dispatcherId: string, logName: string): ChildProcess
     ],
     { cwd: project, detached: true, stdio: ["ignore", fd, fd], env: childEnv() },
   );
-  spawned.push(child);
-  return child;
+  return track(`${logName} (queue dispatcher run --dispatcher-id ${dispatcherId})`, child);
 }
 
 // ─── durable reads (this process never writes except the terminal transition) ─
 
+/**
+ * EVERY process this file caused to exist, in its own words.
+ *
+ * A poll() that times out can only report that nothing appeared. WHY nothing appeared
+ * is entirely in the children — and the ones that matter most here are the ones this
+ * process did not spawn and cannot wait on: the tmux-owned `forge queue dispatcher run`
+ * and the `forge new` it launches. Their stdout, stderr, exit record and forge's own
+ * launch diagnosis are on disk under the test's home the whole time; discarding them is
+ * what made this leg fail three times without being understood.
+ */
 function logs(): string {
-  return readdirSync(root)
+  const own = readdirSync(root)
     .filter((f) => f.endsWith(".log") || f.endsWith(".json"))
-    .map((f) => `── ${f} ──\n${readFileSync(join(root, f), "utf8")}`)
-    .join("\n");
+    .map((f) => `── ${f} ──\n${readFileSync(join(root, f), "utf8")}`);
+  return [...own, childProcessEvidence(), launchEvidence()].join("\n");
+}
+
+function childProcessEvidence(): string {
+  const alive = spawned
+    .filter((c) => c.exitCode === null && c.signalCode === null)
+    .map((c) => `pid=${String(c.pid)} still running`);
+  return ["── spawned processes ──", ...childOutcomes, ...alive].join("\n");
+}
+
+function launchEvidence(): string {
+  const dir = join(home, "launches");
+  if (!existsSync(dir)) return "── launches ──\nno launches directory: nothing was ever submitted to tmux";
+  const ids = readdirSync(dir);
+  if (ids.length === 0) return "── launches ──\nthe launches directory is empty: nothing was ever submitted to tmux";
+  return ids.map(launchEvidenceFor).join("\n");
+}
+
+/** Every file forge's launcher wrote for one launch — meta.json's argv/cwd/owner, the
+ *  `exit` record, forge's own cwd-guard diagnosis, and out.log (the child's combined
+ *  stdout+stderr). Dumped whole rather than classified: readLaunch() resolves its
+ *  directory from a FORGE_HOME captured at import time, which is test-setup.ts's home,
+ *  not this case's — and re-implementing its status vocabulary here would only drift. */
+function launchEvidenceFor(id: string): string {
+  const dir = join(home, "launches", id);
+  const out: string[] = [`── launch ${id} ──`];
+  let session: string | null = null;
+  try {
+    const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8")) as {
+      command: string[];
+      cwd: string;
+      ownerPid: number | null;
+      tmuxSession: string;
+      tmuxServerCwd?: unknown;
+    };
+    session = meta.tmuxSession;
+    out.push(
+      `command: ${meta.command.join(" ")}`,
+      `cwd: ${meta.cwd}`,
+      `ownerPid: ${
+        meta.ownerPid === null
+          ? "NONE RECORDED — tmux never reported an owner, so the command may never have started"
+          : `${meta.ownerPid} (${isAlive(meta.ownerPid) ? "alive" : "gone"})`
+      }`,
+      `tmuxServerCwd: ${JSON.stringify(meta.tmuxServerCwd ?? null)}`,
+    );
+  } catch (e) {
+    out.push(`meta.json unreadable: ${(e as Error).message}`);
+  }
+  if (session !== null) {
+    const has = spawnSync("tmux", ["has-session", "-t", session], { encoding: "utf8", env: childEnv() });
+    out.push(`tmux session: ${has.status === 0 ? "live" : `absent (${(has.stderr || "").trim() || "no error text"})`}`);
+  }
+  for (const file of readdirSync(dir).filter((f) => f !== "meta.json")) {
+    let body: string;
+    try {
+      body = readFileSync(join(dir, file), "utf8").trimEnd();
+    } catch (e) {
+      body = `unreadable: ${(e as Error).message}`;
+    }
+    out.push(`  ── ${id}/${file} ──`, body.length === 0 ? "  (empty)" : body);
+  }
+  return out.join("\n");
 }
 
 async function poll<T>(label: string, fn: () => T | null | undefined, timeoutMs = 60_000): Promise<T> {
@@ -522,20 +608,23 @@ test(
 
     const operatorMessages = issued.length;
     closeDb();
-    const terminalAtMs = Date.now();
+    // THE DEADLINE THE LOOP IS ACTUALLY WAITING ON, read from the durable record the
+    // last pass wrote. The watchdog is armed PER TICK — `nextWatchdogAtMs = <that
+    // tick> + interval` — NOT from the run's terminal transition, and the refill
+    // follow-up that runs right after a launch is the tick that arms this one. So a
+    // full interval has already been burning for however long the launch, the run row
+    // and these assertions took, and "one interval after completeRun()" is a deadline
+    // this leg never had. Measuring the wait from that wrong origin is what made this
+    // case pass on a fast host and fail on a loaded CI runner with the same, correct,
+    // watchdog-driven recovery underneath.
+    const watchdogDueAtMs = nextWatchdogDeadlineMs(projectKey);
+    assert.equal(typeof watchdogDueAtMs, "number", "the last pass armed a watchdog deadline to wait for");
     completeRun(run1.id);
 
     // The slot is recovered, and the next ticket starts — with no wake to announce it.
     const claim2 = await poll("FG-2 to be claimed after a watchdog recovery", () => launchedClaimFor("FG-2"), 90_000);
-    const elapsed = Date.now() - terminalAtMs;
     assert.equal(issued.length, operatorMessages, "no operator message was sent");
 
-    // It really was the health bound, not a signal: recovery could not have happened
-    // before the watchdog interval, and no run_terminal wake exists for that run at all.
-    assert.ok(
-      elapsed >= WATCHDOG_MS - 1_000,
-      `recovery must have waited for the watchdog (${WATCHDOG_MS}ms), took ${elapsed}ms — a wake got through`,
-    );
     const wakes = listWakes(projectKey);
     assert.deepEqual(
       wakes.filter((w) => w.kind === "run_terminal").map((w) => w.wakeKey),
@@ -551,6 +640,17 @@ test(
       (recoveries[0] as { detail: string | null }).detail ?? "",
       /watchdog look found FG-1's reservation terminal with no delivered wake/,
       "the record names WHAT was lost and WHICH look recovered it",
+    );
+
+    // It really was the health bound, not a signal. Both halves are read off the store
+    // clock the loop itself paces by, so no process clock and no tolerance enters:
+    // recovery landed at or after the deadline the loop was waiting on, which no wake
+    // and no refill could have anticipated.
+    const recoveredAtMs = Date.parse((recoveries[0] as { createdAt: string }).createdAt);
+    assert.ok(
+      recoveredAtMs >= (watchdogDueAtMs as number),
+      `recovery must have waited for the armed watchdog deadline (${String(watchdogDueAtMs)}), ` +
+        `landed at ${recoveredAtMs} — ${(watchdogDueAtMs as number) - recoveredAtMs}ms early, so a wake got through`,
     );
 
     await poll("FG-2's run row", () => runsForTicket("FG-2")[0] ?? null);
