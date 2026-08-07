@@ -34,6 +34,7 @@ import {
 } from "../store/reviews.js";
 import { RISK_LENSES, lensRole } from "./review-contract.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
+import { fakeReviewDiff } from "./review-diff.testkit.js";
 import { gradeFindings } from "./review-quality.js";
 import type { Finding, Run } from "../types/index.js";
 
@@ -330,8 +331,7 @@ function harness(opts: { findingOver?: Record<string, unknown> } = {}): { deps: 
   const deps: CoordinatorDeps = {
     headSha: () => CANDIDATE,
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" }),
-    changedPaths: () => ["src/store/reviews.ts"],
-    diff: () => "--- a/src/store/reviews.ts",
+    reviewDiff: fakeReviewDiff(["src/store/reviews.ts"]),
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => {
       calls.push(ctx.lens);

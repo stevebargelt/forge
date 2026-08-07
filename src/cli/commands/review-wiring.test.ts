@@ -37,6 +37,7 @@ import {
 import { ensureFixBatch, renderFixBatchEnvelope, serializeFixBatchPayload } from "../../store/fix-batches.js";
 import { fixBatchBundleDir } from "../../util/paths.js";
 import { runNextStage, type CoordinatorDeps, type FixerContext } from "../../v2/review-run.js";
+import { renderReviewDiff } from "../../v2/review-diff.js";
 import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
 
 const CONTRACT = validateReviewContract({
@@ -186,13 +187,38 @@ function parkAtConfirmation(base: string | undefined): void {
   });
 }
 
-/** The real host wiring over a git that reports `paths` as the base..candidate diff, with
+/** One file's slice of a pinned rendering — the shape `renderReviewDiff` splits on.
+ *
+ *  FG-689: the fake git below emits BODIES, not a name list. The wiring no longer has a
+ *  `--name-only` seam to stub: the changed-path set is derived from the rendered bytes, so a
+ *  fixture that wants the stage to see N paths has to hand it a rendering that contains them.
+ *  That is the property under test as much as anything else — a fake that could still answer
+ *  the path question without producing the diff would be a fake for the seam this step
+ *  removed. */
+function pinnedFileBody(path: string): string {
+  return (
+    `diff --git a/${path} b/${path}\n` +
+    `index aaaaaaaa..bbbbbbbb 100644\n` +
+    `--- a/${path}\n` +
+    `+++ b/${path}\n` +
+    `@@ -1,1 +1,1 @@\n` +
+    `-before\n` +
+    `+after\n`
+  );
+}
+
+/** The real host wiring over a git that renders `paths` as the base..candidate diff, with
  *  the container-dispatching deps stubbed out — Stage 2a dispatches nothing, and a stage
  *  that tried to would fail loudly here rather than silently pass. */
 function stagedDeps(paths: string[], over: Partial<Parameters<typeof buildCoordinatorDeps>[0]> = {}): CoordinatorDeps {
   const git = (args: string[]): string => {
-    if (args[0] === "rev-parse") return "cand111\n";
-    if (args[0] === "diff" && args[1] === "--name-only") return paths.join("\n");
+    // `renderReviewDiff` proves COMMIT-NESS before it renders: `rev-parse --verify <rev>^{commit}`.
+    // Echoing the requested rev back is what a real repo holding both commits would do.
+    if (args[0] === "rev-parse") {
+      if (args[1] === "--verify") return `${(args[2] as string).replace("^{commit}", "")}\n`;
+      return "cand111\n";
+    }
+    if (args.includes("diff")) return paths.map(pinnedFileBody).join("");
     return "";
   };
   return {
@@ -252,6 +278,87 @@ test("FG-639: a recorded no_drift evaluation ADVANCES the confirmation and is pe
     /2 changed path\(s\): src\/store\/reviews\.ts, src\/v2\/review-run\.ts/,
     "the diff the evaluator examined is recorded beside the statement — not just that they said so",
   );
+});
+
+// FG-689 D8/D14: the wiring's one diff seam, over the REAL renderer.
+//
+// The two assertions are the two halves of "one rendering, one set". The first is that the
+// wiring stopped asking git for a path list at all — a `--name-only` invocation surviving here
+// would be a second rendering, and a second rendering is a coverage guarantee that can be true
+// of the set nobody read. The second is that the path set the stage RECORDS is the set the
+// renderer RETURNED, derived from the bytes a reviewer will be handed.
+
+test("FG-689 D8: the review diff is rendered ONCE and pinned — the wiring never asks git for a path list", async () => {
+  parkAtConfirmation("base000");
+  const seen: string[][] = [];
+  const paths = ["src/store/reviews.ts", "src/v2/review-run.ts"];
+  const spy = (args: string[]): string => {
+    seen.push(args);
+    if (args[0] === "rev-parse") {
+      if (args[1] === "--verify") return `${(args[2] as string).replace("^{commit}", "")}\n`;
+      return "cand111\n";
+    }
+    if (args.includes("diff")) return paths.map(pinnedFileBody).join("");
+    return "";
+  };
+  const deps: CoordinatorDeps = {
+    ...buildCoordinatorDeps({
+      projectDir: "/nonexistent-project",
+      ticketId: "FG-639",
+      git: spy,
+      evaluatedNoDrift: "both paths are inside the wide lens already selected",
+    }),
+    verify: () => {
+      throw new Error("Stage 2a must not verify");
+    },
+    dispatchLens: () => {
+      throw new Error("Stage 2a must not dispatch a lens");
+    },
+  };
+
+  const outcome = await runNextStage(STAGED_REVIEW, deps);
+  assert.equal(outcome.status, "advanced", outcome.message);
+
+  const diffCalls = seen.filter((a) => a.includes("diff"));
+  assert.equal(diffCalls.length, 1, "the review diff is rendered exactly once");
+  assert.ok(
+    !seen.some((a) => a.includes("--name-only")),
+    "a --name-only path read is a second rendering of the same range, and two renderings can disagree",
+  );
+  const rendered = diffCalls[0] as string[];
+  assert.ok(rendered.includes("--no-renames"), "and the one rendering carries the pinned flags");
+  assert.ok(rendered.includes("--no-ext-diff"));
+  assert.ok(rendered.includes("base000..cand111"), "over the recorded base — never a ~1 fallback");
+});
+
+test("FG-689 D14: the path set the confirmation records is the RENDERER's, from the same bytes", async () => {
+  parkAtConfirmation("base000");
+  const paths = ["src/store/reviews.ts", "src/v2/review-run.ts"];
+  const body = paths.map(pinnedFileBody).join("");
+  const git = (args: string[]): string => {
+    if (args[0] === "rev-parse") {
+      if (args[1] === "--verify") return `${(args[2] as string).replace("^{commit}", "")}\n`;
+      return "cand111\n";
+    }
+    if (args.includes("diff")) return body;
+    return "";
+  };
+  const direct = renderReviewDiff(git, { baseSha: "base000", candidateSha: "cand111" });
+  assert.equal(direct.ok, true);
+
+  const outcome = await runNextStage(
+    STAGED_REVIEW,
+    stagedDeps(paths, { evaluatedNoDrift: "both paths are inside the wide lens already selected" }),
+  );
+  assert.equal(outcome.status, "advanced", outcome.message);
+
+  const meta = getReview(STAGED_REVIEW)?.stageEvidence?.contract_confirmed?.meta as {
+    changedPaths?: string[];
+    rendering?: { renderingId: string; baseSha: string };
+  };
+  assert.deepEqual(meta.changedPaths, direct.ok ? direct.rendering.paths : []);
+  assert.equal(meta.rendering?.renderingId, direct.ok ? direct.rendering.renderingId : "");
+  assert.equal(meta.rendering?.baseSha, "base000");
 });
 
 test("FG-639: no_drift and a widening claim in the same confirmation contradict and are refused", async () => {

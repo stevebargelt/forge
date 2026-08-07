@@ -47,6 +47,7 @@ import {
 } from "../store/fix-batches.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
+import { fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -153,8 +154,7 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
       calls.verify += 1;
       return { ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" };
     },
-    changedPaths: () => ["src/store/reviews.ts"],
-    diff: () => "--- a/src/store/reviews.ts",
+    reviewDiff: fakeReviewDiff(["src/store/reviews.ts"]),
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => {
       calls.lens.push(ctx.lens);
@@ -1048,6 +1048,38 @@ test("FG-639: with no fix_now findings and an unmoved candidate the recheck is a
   assert.equal(recheck.status, "advanced");
   assert.equal(h.calls.rechecker, 0, "no rechecker is dispatched for a genuine no-op");
   assert.equal(getReview(REVIEW)?.stageEvidence?.recheck?.meta?.["noop"], true);
+});
+
+// FG-689 D15: the remediation delta comes from the SAME pinned seam as the review diff, and a
+// rendering it cannot compute refuses the stage. The rule this holds is the one the ticket
+// exists for: a reviewer — the rechecker included — is never handed a stand-in for the change
+// it is judging. The old `deps.diff` threw on a git failure and the throw escaped the
+// coordinator, which is not a decision anybody made either.
+test("FG-689: a remediation delta that cannot be rendered REFUSES the recheck — no stand-in delta", async () => {
+  const h = harness();
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  await runNextStage(REVIEW, h.deps); // batch_fix
+  await runNextStage(REVIEW, h.deps); // docs
+  await runNextStage(REVIEW, h.deps); // verify_final
+
+  const blind: CoordinatorDeps = { ...h.deps, reviewDiff: refusingReviewDiff("diff_unreadable", "git could not render it.") };
+  const recheck = await runNextStage(REVIEW, blind);
+
+  assert.equal(recheck.transition.kind, "recheck");
+  assert.equal(recheck.status, "refused");
+  assert.match(recheck.message, /remediation delta/);
+  assert.match(recheck.message, /diff_unreadable/, "the refusal names the renderer's reason");
+  assert.match(recheck.message, /No rechecker was dispatched/);
+  assert.equal(h.calls.rechecker, 0, "nothing was dispatched over a delta nobody could compute");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.recheck, undefined, "and no stage record was written");
+
+  // Re-entry with a working seam completes the stage — the refusal recorded nothing, so this
+  // is the same stage running, not a stage stepped over.
+  const retried = await runNextStage(REVIEW, h.deps);
+  assert.equal(retried.status, "advanced", retried.message);
+  assert.equal(h.calls.rechecker, 1);
 });
 
 // ─── PRD #14 — a candidate change invalidates candidate-bound evidence ──────

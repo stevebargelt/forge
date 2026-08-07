@@ -130,7 +130,15 @@ test("FG-640 / PRD #23: changed file paths cannot reach the panel — selection 
   // The frontend lens is NOT approved. A diff that is entirely frontend paths must not
   // conjure it: the only input `selectRedsForContract` takes is the contract.
   const frontendHeavy = ["dashboard/src/App.tsx", "dashboard/src/styles.css", "dashboard/src/routes.tsx"];
-  const confirmed = confirmContract(APPROVED, { candidateSha: "cand1", changedPaths: frontendHeavy });
+  // FG-689 AC2: the approving authority assigned `dashboard/` to BACKEND — an odd-looking but
+  // entirely authorable choice, and the strongest form of this test. Every changed path is
+  // covered, so the confirmation reaches the panel question, and the answer is still that a
+  // diff made of nothing but frontend-shaped paths does not conjure the frontend lens.
+  const owningDashboard: ReviewContract = {
+    ...APPROVED,
+    lens_scopes: { backend: ["src/store/", "dashboard/"], security: ["src/util/creds.ts"] },
+  };
+  const confirmed = confirmContract(owningDashboard, { candidateSha: "cand1", changedPaths: frontendHeavy });
   assert.equal(confirmed.kind, "confirmed");
   assert.deepEqual(confirmed.kind === "confirmed" ? confirmed.contract.risk_lenses : [], ["backend", "security"]);
 

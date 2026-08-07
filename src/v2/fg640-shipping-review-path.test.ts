@@ -41,6 +41,7 @@ import {
   recordDisposition,
 } from "../store/reviews.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
+import { fakeReviewDiff } from "./review-diff.testkit.js";
 import { gate } from "./gate.js";
 import type { AcClaim } from "./review-evidence.js";
 import type { TipTrustState } from "./review-shipping.js";
@@ -112,8 +113,10 @@ function deps(over: ShippingOverrides = {}): CoordinatorDeps {
   return {
     headSha: () => SHA,
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" }),
-    changedPaths: () => ["src/v2/gate.ts"],
-    diff: () => "--- a/src/v2/gate.ts",
+    // FG-689 AC2: the rendered path is the one CONTRACT's backend scope owns. The fixture used
+    // to name `src/v2/gate.ts` while the scope named `src/v2/review-gate.ts`, which nothing
+    // compared until the coverage check existed.
+    reviewDiff: fakeReviewDiff(["src/v2/review-gate.ts"]),
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => ({
       lens: ctx.lens,
