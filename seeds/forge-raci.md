@@ -295,20 +295,38 @@ user-facing/visual/high-risk changes. No reds run in the quick path. The enginee
 specialist is picked the same way as the pipeline's (frontend-specialist,
 backend-specialist, etc.).
 
-Routing guidance: Full vs quick — the discriminator is architectural novelty and
-plan-certainty, NOT file count. Use the full pipeline (`implementation_full`)
-when the work is architecturally novel, has unclear boundaries, lacks a concrete
-implementation plan, introduces a new integration shape, or carries risk that
-needs an architect + tech-lead to decompose. Use the quick chain
-(`implementation_quick`) for precedent-driven work — INCLUDING multi-file,
-cross-cutting changes — when the pattern is already established in the codebase,
-the implementation plan is concrete (a written plan doc, or a clear existing
-precedent to mirror), and the change is bounded. Multi-file or cross-cutting
-alone does NOT force the full pipeline; ceremony without risk reduction is waste.
+Routing guidance: Full vs quick — the discriminator is an UNRESOLVED need for
+architecture or decomposition, NOT file count or importance. Start by testing
+whether the quick route is available. Use the quick chain
+(`implementation_quick`) when an engineer can identify the bounded production
+seams, an established precedent, and the required tests without an unresolved
+architecture decision. This remains true for multi-file and cross-cutting work
+and for concurrency-, security-, or trust-sensitive code: those facts increase
+the verification and review depth, but do not independently require the full
+pipeline.
+
+Use the full pipeline (`implementation_full`) only when implementation cannot
+responsibly begin until an architect or tech-lead resolves a CONCRETE question
+about ownership boundaries, integration shape, invariants, or decomposition. A
+full-route rationale MUST name that unresolved question, state what artifact the
+architecture or plan phase is expected to produce, and explain why existing
+precedent cannot settle it. "The code is important", a large symbol-reference
+count, many files, or risk alone is not such a question.
+
+Competing implementation techniques do not automatically create architectural
+uncertainty. When one bounded option follows an established precedent and
+preserves the ticket contract, selecting it is an engineering decision. Measure
+blast radius against that selected mechanism, not rejected alternatives or every
+reference to a shared utility. Example: adding an explicit instant to a bounded
+set of paired lease predicates is quick even though the predicates authorize
+concurrent work; replacing the global store clock and migrating all of its
+callers is full.
+
 The mandatory `test-engineer` followup and `docs_impact` handling apply to the
-quick chain exactly as in any quick implementation — quick never means unverified
-or undocumented. When you genuinely can't tell whether the boundaries or risk
-need an architect, ask the user.
+quick chain exactly as in any quick implementation — quick never means
+unverified or undocumented. A quick implementation MUST stop and re-route full
+if source evidence disproves its assumed boundaries. When you genuinely cannot
+tell whether such an unresolved architecture question exists, ask the user.
 
 **Routing guidance: subject-matter specialist consults** (for
 `documentation_durable` and `architecture`). The specific specialist is chosen at
