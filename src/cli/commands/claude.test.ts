@@ -1,23 +1,49 @@
+// FG-576 step 6 — `forge claude`'s own surface, unit tier.
+//
+// The command is now the explicit Claude shortcut around the shared launch
+// primitive, so what is unit-testable here is exactly the part it still owns: the
+// argument surface it parses out before the shared launcher sees anything, the
+// project-root walk, and the two flags (`--bedrock` / `--aws-profile`) whose only
+// effect is on the adapter it hands the launcher.
+//
+// Everything with a durable consequence — the receipt, the liveness record, the
+// D5/D16 refusal, argv reaching the child — is proved end to end against a FAKE
+// `claude` in fg576-claude-shortcut.integration.test.ts. Nothing here spawns a
+// process, reads real auth, or touches the operator's Claude settings (AC13).
+
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  findProjectRoot,
-  extractNameFromArgs,
-  stripNameFromArgs,
-  extractBedrockFromArgs,
-  extractAwsProfileFromArgs,
-  stripBedrockFlagsFromArgs,
   buildClaudeChildEnv,
+  claudeShortcutAdapter,
+  findProjectRoot,
+  parseClaudeShortcutArgs,
 } from "./claude.js";
+import type {
+  AdapterLaunchContext,
+  AdapterReadiness,
+  OrchestratorAdapter,
+} from "../../orchestrator/adapter.js";
+import type { OrchestratorDecision } from "../../v2/orchestrator-resolve.js";
+import type { EffectiveAuth } from "../../v2/model-resolution.js";
 
 const MARKER = "<!-- forge:orchestrator-start -->";
 
 let tmp: string;
-beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), "forge-claude-test-")); });
-afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
+let savedAwsDir: string | undefined;
+
+beforeEach(() => {
+  tmp = mkdtempSync(join(tmpdir(), "forge-claude-test-"));
+  savedAwsDir = process.env["FORGE_AWS_DIR"];
+});
+afterEach(() => {
+  if (savedAwsDir === undefined) delete process.env["FORGE_AWS_DIR"];
+  else process.env["FORGE_AWS_DIR"] = savedAwsDir;
+  rmSync(tmp, { recursive: true, force: true });
+});
 
 // ----- findProjectRoot -----
 
@@ -58,147 +84,247 @@ test("findProjectRoot: ignores CLAUDE.md WITHOUT the orchestrator marker", () =>
   assert.ok(result !== tmp, `should not return tmp (no marker in its CLAUDE.md); got ${result}`);
 });
 
-// ----- extractNameFromArgs / stripNameFromArgs -----
+// ----- parseClaudeShortcutArgs: the display name (-n / --name) -----
 
-test("extractNameFromArgs: returns undefined when -n / --name not present", () => {
-  assert.equal(extractNameFromArgs([]), undefined);
-  assert.equal(extractNameFromArgs(["--continue", "--model", "sonnet"]), undefined);
+test("parse: no -n / --name leaves the name unset, so the project's own label wins", () => {
+  assert.equal(parseClaudeShortcutArgs([]).name, undefined);
+  assert.equal(parseClaudeShortcutArgs(["--continue", "--model", "sonnet"]).name, undefined);
 });
 
-test("extractNameFromArgs: extracts value from `-n foo` (two tokens)", () => {
-  assert.equal(extractNameFromArgs(["-n", "myname"]), "myname");
-  assert.equal(extractNameFromArgs(["--continue", "-n", "myname", "--model", "sonnet"]), "myname");
+test("parse: -n / --name / --name= all supply the display name, and never reach passthrough", () => {
+  for (const args of [["-n", "myname"], ["--name", "myname"], ["--name=myname"]]) {
+    const parsed = parseClaudeShortcutArgs([...args, "--add-dir", "/tmp"]);
+    assert.equal(parsed.name, "myname", args.join(" "));
+    assert.deepEqual(parsed.passthrough, ["--add-dir", "/tmp"], `${args.join(" ")} leaked the name into passthrough`);
+  }
 });
 
-test("extractNameFromArgs: extracts value from `--name foo` (two tokens)", () => {
-  assert.equal(extractNameFromArgs(["--name", "myname"]), "myname");
+// ----- parseClaudeShortcutArgs: AC14, the aliases that must keep working -----
+
+test("parse AC14: `forge claude --model opus --continue` is a Forge-owned model plus a continue, not passthrough", () => {
+  const parsed = parseClaudeShortcutArgs(["--model", "opus", "--continue"]);
+
+  assert.equal(parsed.model, "opus");
+  assert.equal(parsed.continueSession, true);
+  // Forge owns the model, so it must NOT also travel to the child as passthrough —
+  // that is how a flag ends up on argv twice and argv ordering decides the model.
+  assert.deepEqual(parsed.passthrough, []);
 });
 
-test("extractNameFromArgs: extracts value from `--name=foo` (one token)", () => {
-  assert.equal(extractNameFromArgs(["--name=myname", "--continue"]), "myname");
+test("parse AC14: every accepted form of the Forge-owned selection flags", () => {
+  for (const [args, expected] of [
+    [["--model=opus"], "opus"],
+    [["-m", "sonnet"], "sonnet"],
+    [["--model", "claude-sonnet-4-6"], "claude-sonnet-4-6"],
+  ] as const) {
+    assert.equal(parseClaudeShortcutArgs([...args]).model, expected, args.join(" "));
+  }
+
+  for (const args of [["--continue"], ["-c"]]) {
+    assert.equal(parseClaudeShortcutArgs(args).continueSession, true, args.join(" "));
+  }
+
+  for (const args of [["--resume", "abc-123"], ["-r", "abc-123"], ["--resume=abc-123"]]) {
+    assert.equal(parseClaudeShortcutArgs(args).resume, "abc-123", args.join(" "));
+  }
+
+  assert.equal(parseClaudeShortcutArgs(["--profile", "claude-bedrock"]).profile, "claude-bedrock");
+  assert.equal(parseClaudeShortcutArgs(["--profile=claude-bedrock"]).profile, "claude-bedrock");
+  assert.equal(parseClaudeShortcutArgs(["--explain"]).explain, true);
 });
 
-test("stripNameFromArgs: removes -n and its value, leaves the rest", () => {
-  assert.deepEqual(
-    stripNameFromArgs(["--continue", "-n", "foo", "--model", "sonnet"]),
-    ["--continue", "--model", "sonnet"],
-  );
+test("parse: a value-taking flag with no value is left for the D6 guard rather than guessed", () => {
+  // `--model` followed by another flag: consuming '--continue' as the model would
+  // launch a session on a model the operator never named.
+  const parsed = parseClaudeShortcutArgs(["--model", "--continue"]);
+  assert.equal(parsed.model, undefined);
+  assert.equal(parsed.continueSession, true);
+  assert.deepEqual(parsed.passthrough, ["--model"]);
+
+  const trailing = parseClaudeShortcutArgs(["--resume"]);
+  assert.equal(trailing.resume, undefined);
+  assert.deepEqual(trailing.passthrough, ["--resume"]);
 });
 
-test("stripNameFromArgs: removes --name and its value", () => {
-  assert.deepEqual(
-    stripNameFromArgs(["--name", "foo", "--continue"]),
-    ["--continue"],
-  );
+// ----- parseClaudeShortcutArgs: passthrough -----
+
+test("parse: provider-native flags Forge does not own reach passthrough verbatim", () => {
+  const parsed = parseClaudeShortcutArgs(["--add-dir", "/tmp/extra", "--permission-mode", "plan"]);
+  assert.deepEqual(parsed.passthrough, ["--add-dir", "/tmp/extra", "--permission-mode", "plan"]);
 });
 
-test("stripNameFromArgs: removes --name=foo (single-token form)", () => {
-  assert.deepEqual(
-    stripNameFromArgs(["--name=foo", "--continue", "--model=sonnet"]),
-    ["--continue", "--model=sonnet"],
-  );
+test("parse: after an explicit `--`, nothing is claimed by Forge", () => {
+  const parsed = parseClaudeShortcutArgs(["--model", "opus", "--", "--model", "not-mine"]);
+  assert.equal(parsed.model, "opus");
+  assert.deepEqual(parsed.passthrough, ["--model", "not-mine"]);
 });
 
-test("stripNameFromArgs: returns input unchanged when no -n / --name", () => {
-  const input = ["--continue", "--model", "sonnet"];
-  assert.deepEqual(stripNameFromArgs(input), input);
+// ----- parseClaudeShortcutArgs: --bedrock / --aws-profile (FG-158) -----
+
+test("parse FG-158: --bedrock is extracted and never forwarded to claude", () => {
+  assert.equal(parseClaudeShortcutArgs([]).bedrock, false);
+  assert.equal(parseClaudeShortcutArgs(["--continue", "--model", "sonnet"]).bedrock, false);
+
+  const parsed = parseClaudeShortcutArgs(["--bedrock", "--continue"]);
+  assert.equal(parsed.bedrock, true);
+  assert.deepEqual(parsed.passthrough, [], "--bedrock is forge's flag and must not reach claude");
 });
 
-test("strip + extract together: user override survives through the pipeline", () => {
-  // The action's flow: extract user name (use it), then strip from args, then
-  // re-insert our own. The result should preserve the user's name AND have it
-  // appear exactly once.
-  const args = ["--continue", "-n", "user-chose-this", "--model", "sonnet"];
-  const userName = extractNameFromArgs(args);
-  const stripped = stripNameFromArgs(args);
-  const final = ["-n", userName ?? "fallback", ...stripped];
-  assert.equal(userName, "user-chose-this");
-  assert.deepEqual(final, ["-n", "user-chose-this", "--continue", "--model", "sonnet"]);
-  // -n appears exactly once.
-  assert.equal(final.filter((a) => a === "-n" || a === "--name").length, 1);
+test("parse FG-158: --aws-profile is extracted in both forms and never forwarded to claude", () => {
+  assert.equal(parseClaudeShortcutArgs(["--bedrock"]).awsProfile, undefined);
+
+  for (const args of [
+    ["--bedrock", "--aws-profile", "adx-dev", "--continue"],
+    ["--bedrock", "--aws-profile=adx-dev", "--continue"],
+  ]) {
+    const parsed = parseClaudeShortcutArgs(args);
+    assert.equal(parsed.awsProfile, "adx-dev", args.join(" "));
+    assert.equal(parsed.bedrock, true);
+    assert.equal(parsed.continueSession, true);
+    assert.deepEqual(parsed.passthrough, [], `${args.join(" ")} leaked a forge flag to claude`);
+  }
 });
 
-// ----- extractBedrockFromArgs -----
+// ----- the shortcut adapter -----
 
-test("extractBedrockFromArgs: returns false when --bedrock not present", () => {
-  assert.equal(extractBedrockFromArgs([]), false);
-  assert.equal(extractBedrockFromArgs(["--continue", "--model", "sonnet"]), false);
+function fakeDecision(auth: EffectiveAuth, profile: string | undefined = "claude-subscription"): OrchestratorDecision {
+  return {
+    adapter: "claude-code",
+    provider: "anthropic",
+    runtime: auth === "bedrock" ? "claude-bedrock" : auth === "api" ? "claude-apikey" : "claude-oauth",
+    profile,
+    model: "claude-sonnet-4-6",
+    modelExplicit: true,
+    auth,
+    alias: "default",
+    costTier: "standard",
+    resolvedBy: "defaults.profile",
+    modelResolvedBy: "profile.map.default",
+    policySource: "host",
+    policyPath: "/fixture/model-policy.yml",
+    legacy: false,
+    operation: { kind: "new" },
+    projectDir: tmp,
+    authProbe: { provider: "anthropic", mode: auth, status: "available", detail: "fixture probe" },
+    sessionIdentityStrength: "asserted",
+    limitations: [],
+    notes: [],
+    providerPin: "claude-code",
+  };
+}
+
+const EMPTY_READINESS: AdapterReadiness = { evidence: {}, advisories: [], limitations: [] };
+
+/** A base that performs no I/O at all, so these stay unit tests: the wrapper's job
+ *  is to decide WHICH AWS profile and WHETHER to refuse, not to probe anything. */
+function stubBase(): OrchestratorAdapter {
+  return {
+    id: "claude-code",
+    displayName: "Claude Code",
+    executable: "claude",
+    forgeOwnedFlags: [],
+    reservedPassthroughFlags: [],
+    probeReadiness: () => ({ ok: true, readiness: { ...EMPTY_READINESS, advisories: ["base advisory"] } }),
+    declareInstructionCarrier: () => ({
+      path: null, content: null, generation: null, acceptance: "not_applicable", evidence: null, argv: [], limitations: [],
+    }),
+    declareSessionIdentityStrength: () => "asserted",
+    mapSessionOperation: () => ({ ok: true, mapping: { argv: [], identity: { providerSessionId: null, strength: "unknown", basis: null }, sessionTarget: null, notes: [], limitations: [] } }),
+    buildArgv: () => ({ ok: true, argv: [] }),
+    buildChildEnv: (ctx) => ({ ...ctx.parentEnv }),
+    preflight: () => [],
+    onSpawnConfirmed: () => ({}),
+    closeOut: () => {},
+  };
+}
+
+function contextFor(decision: OrchestratorDecision, parentEnv: NodeJS.ProcessEnv = {}): AdapterLaunchContext {
+  return {
+    decision,
+    projectDir: tmp,
+    projectName: "fixture",
+    sessionKey: "11111111-1111-4111-8111-111111111111",
+    receiptId: "orx-fixture0000",
+    runId: null,
+    taskId: null,
+    operation: { kind: "new" },
+    passthrough: [],
+    parentEnv,
+  };
+}
+
+test("shortcut adapter FG-158: --aws-profile wins over AWS_PROFILE for the CHILD env, and the parent is untouched", () => {
+  const parentEnv: NodeJS.ProcessEnv = { PATH: "/usr/bin", AWS_PROFILE: "env-profile" };
+  const adapter = claudeShortcutAdapter({
+    bedrockAsserted: true,
+    bedrockAssertedBy: "--bedrock",
+    awsProfile: "cli-profile",
+    base: stubBase(),
+  });
+
+  const child = adapter.buildChildEnv(contextFor(fakeDecision("bedrock"), parentEnv), EMPTY_READINESS);
+
+  assert.equal(child["CLAUDE_CODE_USE_BEDROCK"], "1");
+  assert.equal(child["AWS_PROFILE"], "cli-profile");
+  assert.equal(child["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
+  assert.deepEqual(parentEnv, { PATH: "/usr/bin", AWS_PROFILE: "env-profile" });
 });
 
-test("extractBedrockFromArgs: returns true when --bedrock is present", () => {
-  assert.equal(extractBedrockFromArgs(["--bedrock"]), true);
-  assert.equal(extractBedrockFromArgs(["--continue", "--bedrock", "--model", "sonnet"]), true);
+test("shortcut adapter FG-158: with no --aws-profile the AWS_PROFILE env value is used", () => {
+  const adapter = claudeShortcutAdapter({ bedrockAsserted: true, bedrockAssertedBy: "--bedrock", awsProfile: undefined, base: stubBase() });
+  const child = adapter.buildChildEnv(contextFor(fakeDecision("bedrock"), { AWS_PROFILE: "env-profile" }), EMPTY_READINESS);
+  assert.equal(child["AWS_PROFILE"], "env-profile");
 });
 
-// ----- extractAwsProfileFromArgs -----
+test("shortcut adapter AC2: a non-bedrock resolution carries no AWS or bedrock variable, even with --aws-profile", () => {
+  const adapter = claudeShortcutAdapter({ bedrockAsserted: false, bedrockAssertedBy: undefined, awsProfile: "cli-profile", base: stubBase() });
+  const child = adapter.buildChildEnv(contextFor(fakeDecision("subscription"), { PATH: "/usr/bin" }), EMPTY_READINESS);
 
-test("extractAwsProfileFromArgs: returns undefined when not present", () => {
-  assert.equal(extractAwsProfileFromArgs([]), undefined);
-  assert.equal(extractAwsProfileFromArgs(["--bedrock", "--continue"]), undefined);
+  assert.equal(child["CLAUDE_CODE_USE_BEDROCK"], undefined);
+  assert.equal(child["AWS_PROFILE"], undefined);
 });
 
-test("extractAwsProfileFromArgs: extracts value from two-token form", () => {
-  assert.equal(extractAwsProfileFromArgs(["--aws-profile", "my-profile"]), "my-profile");
-  assert.equal(
-    extractAwsProfileFromArgs(["--bedrock", "--aws-profile", "adx-dev", "--continue"]),
-    "adx-dev",
-  );
+test("shortcut adapter: an unused --aws-profile is REPORTED rather than silently dropped", () => {
+  const adapter = claudeShortcutAdapter({ bedrockAsserted: false, bedrockAssertedBy: undefined, awsProfile: "cli-profile", base: stubBase() });
+  const probed = adapter.probeReadiness(contextFor(fakeDecision("subscription")));
+
+  assert.ok(probed.ok);
+  assert.ok(probed.readiness.advisories.some((a) => a.includes("--aws-profile 'cli-profile' was not applied")));
+  assert.ok(probed.readiness.advisories.includes("base advisory"), "the base adapter's advisories must survive the wrapper");
 });
 
-test("extractAwsProfileFromArgs: extracts value from --aws-profile=<value> form", () => {
-  assert.equal(extractAwsProfileFromArgs(["--aws-profile=my-profile"]), "my-profile");
-  assert.equal(extractAwsProfileFromArgs(["--bedrock", "--aws-profile=adx-dev"]), "adx-dev");
+test("shortcut adapter: an inherited CLAUDE_CODE_USE_BEDROCK that contradicts the resolved auth is reported", () => {
+  const adapter = claudeShortcutAdapter({ bedrockAsserted: false, bedrockAssertedBy: undefined, awsProfile: undefined, base: stubBase() });
+  const probed = adapter.probeReadiness(contextFor(fakeDecision("subscription"), { CLAUDE_CODE_USE_BEDROCK: "1" }));
+
+  assert.ok(probed.ok);
+  assert.ok(probed.readiness.advisories.some((a) => a.includes("CLAUDE_CODE_USE_BEDROCK=1 is set in this shell")));
 });
 
-// ----- stripBedrockFlagsFromArgs -----
+test("shortcut adapter: an asserted Bedrock launch against a non-Bedrock profile REFUSES before spawn, with remedies", () => {
+  const adapter = claudeShortcutAdapter({ bedrockAsserted: true, bedrockAssertedBy: "--bedrock", awsProfile: undefined, base: stubBase() });
+  const probed = adapter.probeReadiness(contextFor(fakeDecision("subscription")));
 
-test("stripBedrockFlagsFromArgs: returns input unchanged when no bedrock flags", () => {
-  const input = ["--continue", "--model", "sonnet"];
-  assert.deepEqual(stripBedrockFlagsFromArgs(input), input);
+  assert.equal(probed.ok, false);
+  if (probed.ok) return;
+  assert.equal(probed.refusal.code, "adapter-not-ready");
+  assert.match(probed.refusal.message, /--bedrock/);
+  assert.match(probed.refusal.message, /claude-subscription/);
+  assert.match(probed.refusal.message, /auth 'subscription'/);
+  assert.ok(probed.refusal.remediation.length > 0, "a refusal with no remedy is a dead end");
 });
 
-test("stripBedrockFlagsFromArgs: removes --bedrock", () => {
-  assert.deepEqual(
-    stripBedrockFlagsFromArgs(["--bedrock", "--continue"]),
-    ["--continue"],
-  );
-  assert.deepEqual(
-    stripBedrockFlagsFromArgs(["--continue", "--bedrock", "--model", "sonnet"]),
-    ["--continue", "--model", "sonnet"],
-  );
+test("shortcut adapter: an asserted Bedrock launch against a Bedrock profile proceeds", () => {
+  const adapter = claudeShortcutAdapter({ bedrockAsserted: true, bedrockAssertedBy: "--bedrock", awsProfile: undefined, base: stubBase() });
+  assert.equal(adapter.probeReadiness(contextFor(fakeDecision("bedrock", "claude-bedrock"))).ok, true);
 });
 
-test("stripBedrockFlagsFromArgs: removes --aws-profile and its value (two-token form)", () => {
-  assert.deepEqual(
-    stripBedrockFlagsFromArgs(["--aws-profile", "adx-dev", "--continue"]),
-    ["--continue"],
-  );
-});
-
-test("stripBedrockFlagsFromArgs: removes --aws-profile=value (one-token form)", () => {
-  assert.deepEqual(
-    stripBedrockFlagsFromArgs(["--aws-profile=adx-dev", "--continue"]),
-    ["--continue"],
-  );
-});
-
-test("stripBedrockFlagsFromArgs: removes both --bedrock and --aws-profile together", () => {
-  assert.deepEqual(
-    stripBedrockFlagsFromArgs(["--bedrock", "--aws-profile", "adx-dev", "--continue"]),
-    ["--continue"],
-  );
-  assert.deepEqual(
-    stripBedrockFlagsFromArgs(["--bedrock", "--aws-profile=adx-dev", "--model", "sonnet"]),
-    ["--model", "sonnet"],
-  );
-});
-
-// ----- buildClaudeChildEnv -----
+// ----- buildClaudeChildEnv (re-exported from the adapter that now owns it) -----
 
 test("buildClaudeChildEnv: disables background tasks for non-Bedrock sessions", () => {
   const parentEnv: NodeJS.ProcessEnv = { PATH: "/test/bin" };
 
-  const childEnv = buildClaudeChildEnv(parentEnv);
+  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
 
   assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(childEnv.PATH, "/test/bin");
@@ -212,7 +338,7 @@ test("buildClaudeChildEnv: overrides an unsafe parent value without mutating it"
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
   };
 
-  const childEnv = buildClaudeChildEnv(parentEnv);
+  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
 
   assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(parentEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "0");
@@ -224,7 +350,7 @@ test("buildClaudeChildEnv: combines the invariant with Bedrock configuration", (
     AWS_PROFILE: "old-profile",
   };
 
-  const childEnv = buildClaudeChildEnv(parentEnv, "forge-profile");
+  const childEnv = buildClaudeChildEnv(parentEnv, "bedrock", "forge-profile");
 
   assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
@@ -232,4 +358,63 @@ test("buildClaudeChildEnv: combines the invariant with Bedrock configuration", (
   assert.equal(childEnv.PATH, "/test/bin");
   assert.equal(parentEnv.AWS_PROFILE, "old-profile");
   assert.equal(parentEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
+});
+
+// RF-1: the sibling of the Codex defect. An operator's shell that has Bedrock (or an
+// API key) armed must not decide which credential the session runs on — the RESOLVED
+// auth mode does, because that is what the durable receipt records.
+
+test("buildClaudeChildEnv: a subscription launch withholds every inherited credential selector", () => {
+  const parentEnv: NodeJS.ProcessEnv = {
+    PATH: "/test/bin",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    AWS_PROFILE: "operator-sso",
+    ANTHROPIC_API_KEY: "sk-operator",
+    ANTHROPIC_AUTH_TOKEN: "tok-operator",
+    // Not a credential selector: the operator's own session settings and toolchain.
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8000",
+    AWS_REGION: "us-west-2",
+  };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
+
+  for (const withheld of [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "AWS_PROFILE",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+  ]) {
+    assert.equal(childEnv[withheld], undefined, `${withheld} reached a subscription session`);
+  }
+  assert.equal(childEnv.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "8000");
+  assert.equal(childEnv.AWS_REGION, "us-west-2");
+  assert.equal(childEnv.PATH, "/test/bin");
+  assert.equal(parentEnv.CLAUDE_CODE_USE_BEDROCK, "1", "the parent shell was mutated");
+});
+
+test("buildClaudeChildEnv: an api launch keeps its own credential and still withholds Bedrock's", () => {
+  const parentEnv: NodeJS.ProcessEnv = {
+    ANTHROPIC_API_KEY: "sk-operator",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_PROFILE: "operator-sso",
+  };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "api");
+
+  assert.equal(childEnv.ANTHROPIC_API_KEY, "sk-operator");
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
+  assert.equal(childEnv.AWS_PROFILE, undefined);
+});
+
+test("buildClaudeChildEnv: a bedrock launch withholds the direct-API credentials", () => {
+  const parentEnv: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-operator", CLAUDE_CODE_USE_VERTEX: "1" };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "bedrock", "forge-profile");
+
+  assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(childEnv.CLAUDE_CODE_USE_VERTEX, undefined);
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
+  assert.equal(childEnv.AWS_PROFILE, "forge-profile");
 });

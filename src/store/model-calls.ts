@@ -354,12 +354,20 @@ export function captureUsageForTask(
 }
 
 // Extract usage from a Claude Code .jsonl transcript (the file Claude Code writes
-// to ~/.claude/projects/<hash>/<session-id>.jsonl). Different event shape from
-// --output-format=stream-json logs, but same usage payload inside message.usage.
+// under its state root at projects/<hash>/<session-id>.jsonl). Different event shape
+// from --output-format=stream-json logs, but same usage payload inside message.usage.
 // Each assistant turn produces one entry with { message: { id, model, usage } }.
+//
+// FG-576 step 8: `opts.sessionId` binds the extraction to ONE session. Transcript
+// entries carry their own `sessionId`, so an entry naming a different one is not this
+// session's usage whatever file it was found in. This is defense in depth behind the
+// by-identity file lookup in src/orchestrator/claude-session-state.ts — the two
+// together are what make "usage binds to the receipt's asserted session" a property
+// rather than a convention. Entries with no sessionId field are accepted: older
+// transcripts omit it, and the file lookup already established whose transcript it is.
 export function extractUsageFromTranscript(
   transcriptPath: string,
-  opts?: { taskId?: string; alias?: string },
+  opts?: { taskId?: string; alias?: string; sessionId?: string },
 ): UsageRow[] {
   let raw: string;
   try { raw = readFileSync(transcriptPath, "utf8"); }
@@ -373,6 +381,11 @@ export function extractUsageFromTranscript(
     try { entry = JSON.parse(line); }
     catch { continue; }
     if (!isObject(entry)) continue;
+
+    if (opts?.sessionId !== undefined) {
+      const entrySession = entry["sessionId"];
+      if (typeof entrySession === "string" && entrySession !== opts.sessionId) continue;
+    }
 
     const msg = isObject(entry["message"]) ? entry["message"] : undefined;
     if (!msg) continue;
@@ -405,6 +418,49 @@ export function extractUsageFromTranscript(
   }
 
   return Array.from(byRequest.values());
+}
+
+// FG-576 AC12 — the RECEIPT SAYS ONE MODEL, THE PROVIDER REPORTS ANOTHER.
+//
+// That disagreement is real information: it means the session did not run the model
+// the recorded launch decision claims, which is exactly the class of untrue receipt
+// this ticket exists to close. So it is REPORTED and the provider's own value is kept
+// verbatim on the row. Rewriting the row to agree with the receipt would destroy the
+// only evidence the mismatch happened, and rewriting the receipt would rewrite history.
+export type UsageModelMismatch = {
+  requestId: string;
+  /** What the provider's own state says ran. */
+  providerModel: string;
+  /** What the receipt recorded as the resolved selection. */
+  receiptModel: string;
+};
+
+// Bedrock model ids carry a region and vendor prefix in the runtime YAML
+// ("us.anthropic.claude-sonnet-4-6") while the provider's own events emit the short
+// form ("claude-sonnet-4-6"). Those are the SAME selection, so comparing them raw
+// would report a mismatch on every bedrock launch and teach operators to ignore the
+// signal. Normalize both sides once, here, next to the mapping comment at the top of
+// this file that documents the same convention for the rollup.
+export function normalizeModelId(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/^(us|eu|apac|us-gov)\./, "")
+    .replace(/^anthropic\./, "");
+}
+
+/** Rows whose provider-reported model disagrees with the receipt's. Empty when the
+ *  receipt recorded no explicit model — legacy mode records none rather than
+ *  fabricating one, and there is nothing to disagree with. */
+export function usageModelMismatches(rows: readonly UsageRow[], receiptModel: string | null): UsageModelMismatch[] {
+  if (!receiptModel) return [];
+  const expected = normalizeModelId(receiptModel);
+  const out: UsageModelMismatch[] = [];
+  for (const row of rows) {
+    if (normalizeModelId(row.model) === expected) continue;
+    out.push({ requestId: row.requestId, providerModel: row.model, receiptModel });
+  }
+  return out;
 }
 
 // Insert a batch of usage rows. Idempotent via (task_id, request_id) — re-running

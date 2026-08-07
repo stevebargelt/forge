@@ -107,6 +107,15 @@ overrides and activity defaults.
 `--workspace`, `--design-dir`, `--auth-profile`). They never leak into a task's
 inputs or composed prompt.
 
+## Choosing the interactive orchestrator
+
+The same profile/precedence stack also selects **which interactive launcher runs** —
+`forge orchestrator` and `forge claude` resolve the `orchestrator` agent role through this exact
+mechanism, with no separate policy vocabulary. Point `overrides.agents.orchestrator` at a profile
+whose runtime is `codex-subscription` to make Codex the default interactive session on this host or
+project; see `docs/how-to-orchestrator-launcher.md` for the full launcher surface, the
+capability/parity matrix versus Claude Code, and per-provider resume semantics.
+
 ## See and diagnose what resolved
 
 ```bash

@@ -31,6 +31,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { assetRoot } from "./asset-root.js";
 import { authoredCategories, autoRefreshableCategories } from "./seed-drift.js";
+import { CODEX_CARRIER_SOURCE_REL, CODEX_CARRIER_SPLICE_MARKER } from "./seed-generation.js";
 import { COVERED_ROLES } from "./agent-protocol.js";
 import { REVIEW_DISPATCH_ROLES, RISK_LENSES, lensRole } from "./review-contract.js";
 
@@ -104,6 +105,75 @@ test("FG-578: the installer routes every seed category through the ownership pol
       `${category} must be installed THROUGH the ownership-aware writer`,
     );
   }
+
+  // The mirror obligation, and the one FG-576 needed. A forge-owned category the
+  // installer never writes is worse than an unclassified one: the detector measures it
+  // against $FORGE_HOME forever, reports it `missing`, and names `forge upgrade` as the
+  // remedy — the non-converging promise FG-578 removed, reintroduced by omission. Both
+  // install prefixes count (skills land in CLAUDE_SKILLS_DEST), so this asserts the
+  // WRITER, not the destination.
+  for (const category of autoRefreshableCategories()) {
+    assert.match(
+      script,
+      new RegExp(`(install_category|seed_copy|seed_install_file)[^\\n]*\\s${category}\\s*$`, "m"),
+      `${category} is forge-owned, so the installer must actually write it — otherwise the detector reports it stale forever and names a remedy that converges nothing`,
+    );
+  }
+});
+
+// ─── FG-576 (D8): the Codex instruction carrier's ownership ──────────────────
+//
+// The carrier is a Forge-owned instruction surface an interactive orchestrator
+// EXECUTES against, and Codex's instructions file SUBSTITUTES the base surface rather
+// than appending to it. Both halves of that classification are asserted here, in the
+// file that already gates writer↔detector agreement, rather than in a new one.
+
+test("FG-576: the Codex carrier scaffolding is forge-owned and force-refreshable, never operator-authored", () => {
+  assert.ok(
+    autoRefreshableCategories().includes("codex"),
+    "the Codex carrier scaffolding is forge-owned — FORCE must refresh it, exactly as it refreshes runtimes",
+  );
+  assert.ok(
+    !authoredCategories().includes("codex"),
+    "exempting the carrier would leave an interactive orchestrator bound to an instruction surface no release shipped, with no remedy that converges it",
+  );
+});
+
+test("FG-576: the installer writes the carrier under FORGE's root and never into the operator's Codex config", () => {
+  const script = readFileSync(INSTALL_SCRIPT, "utf8");
+  const codexInstall = /^\s*install_category\s+"\$HERE\/seeds\/codex"\s+"\$DEST\/codex"\s+codex\s*$/m;
+  assert.match(script, codexInstall, "the carrier scaffolding installs under $DEST — Forge's own root — through the ownership-aware writer");
+
+  // D8, as a property of the WRITER. Nothing in the installer may name the operator's
+  // Codex config root: not to write it, not to redirect it, not to splice it. A single
+  // CODEX_HOME reference here is the whole prohibited behaviour, so it is grepped for
+  // rather than reasoned about at review time.
+  const lines = script.split("\n").filter((l) => !/^\s*#/.test(l));
+  for (const forbidden of ["CODEX_HOME", ".codex", "AGENTS.md", "config.toml"]) {
+    assert.ok(
+      !lines.some((l) => l.includes(forbidden)),
+      `install-seeds.sh must never reference ${forbidden} — the carrier lives under Forge's own root only (D8)`,
+    );
+  }
+});
+
+test("FG-576: this release carries the carrier scaffolding, with exactly one splice marker", () => {
+  // Publication treats a MISSING scaffolding as `absent` (a generation simply carries
+  // no carrier) so that fixture releases in other tests need not stage one. That makes
+  // deleting it from a real release a silent capability loss rather than a failure —
+  // this is the gate that isn't silent.
+  const source = join(assetRoot(), "seeds", CODEX_CARRIER_SOURCE_REL);
+  assert.ok(existsSync(source), `this release carries no ${source} — a Codex orchestrator would get no Forge policy`);
+  const text = readFileSync(source, "utf8");
+  assert.equal(
+    text.split(CODEX_CARRIER_SPLICE_MARKER).length - 1,
+    1,
+    "the scaffolding must carry the splice marker EXACTLY once — a second one (even quoted in a comment) splices the policy at the wrong point and truncates the scaffolding into it",
+  );
+  assert.ok(
+    text.trimEnd().endsWith(CODEX_CARRIER_SPLICE_MARKER),
+    "the marker belongs at the foot: everything above it is the scaffolding Codex would otherwise supply itself",
+  );
 });
 
 // ─── FG-654: the coverage agreement ─────────────────────────────────────────

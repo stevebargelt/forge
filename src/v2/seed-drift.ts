@@ -93,9 +93,17 @@ type SeedSpec = { category: string; rel: string; root: SeedRoot; ownership: Seed
 // AUTHORED_EXEMPT) but PROSE — orchestrator behavioral guidance Claude reads, so a
 // stale one is a reported warning (forge upgrade converges it) rather than a hard
 // readiness fail. They install into CLAUDE_SKILLS_DIR, not $FORGE_HOME.
+// FG-576 adds `codex`: seeds/codex/orchestrator-instructions.md is the SCAFFOLDING the
+// Forge-owned Codex instruction carrier is rendered from (seed-generation.ts
+// renderCodexCarrier). Forge-owned — the installer force-writes it and it is
+// deliberately NOT in AUTHORED_EXEMPT — and EXECUTABLE, because Codex's instructions
+// file SUBSTITUTES the base instruction surface: a stale scaffolding does not read as
+// stale prose, it silently binds an interactive orchestrator to an instruction surface
+// no release shipped, which is the runtimes-class failure wearing markdown.
 const SEED_SPECS: SeedSpec[] = [
   { category: "runtimes", rel: "runtimes", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
   { category: "workflows", rel: "workflows", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
+  { category: "codex", rel: "codex", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
   { category: "skills", rel: "skills", root: "claude-skills", ownership: "forge-owned", coupling: "prose" },
   { category: "agents", rel: "agents", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
   { category: "constraints", rel: "constraints", root: "forge-home", ownership: "operator-authored", coupling: "prose" },

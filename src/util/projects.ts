@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { uniqueProjectDirs } from "../store/runs.js";
 import { findForgeProjects } from "./find-forge-projects.js";
 import { resolveProjectMeta } from "./project-meta.js";
-import { loadHeartbeats } from "./orchestrator-heartbeats.js";
+import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
 import {
   repositoryCheckoutIdentity,
   type RepositoryCheckoutIdentity,
@@ -49,7 +49,7 @@ export type ProjectRecord = {
   runCount: number;       // 0 for filesystem-only projects
   inFlightCount: number;
   readmeFirstLine?: string;
-  liveSessions: number;   // #153: count of live Claude Code orchestrator sessions
+  liveSessions: number;   // #153/FG-576: live interactive orchestrator sessions, any provider, counted once each
   githubUrl?: string;
 };
 
@@ -60,6 +60,7 @@ export { deriveGithubUrl, githubBrowserUrl } from "./github-url.js";
 export type ListOptions = {
   scanRoots?: string[];   // defaults to [~/code] if HOME set
   scanMaxDepth?: number;
+  heartbeatsDir?: string; // FG-576: override for tests; never the operator's ~/.forge
 };
 
 export type ProjectSignal = {
@@ -231,10 +232,13 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
   const signals: ProjectSignal[] = [
     ...dbAggs,
     ...fsProjects.map((project) => ({ projectDir: project.projectDir })),
-    ...loadHeartbeats().filter((heartbeat) => heartbeat.isLive).map((heartbeat) => ({
-      projectDir: heartbeat.projectDir,
-      liveSessions: 1,
-    })),
+    // FG-576 D12 / FG-689 D11: ONE session may now have TWO files in
+    // ~/.forge/orchestrators — the launcher's record and the Claude hook's.
+    // liveOrchestratorSessions() merges on the canonical session identity, so
+    // this stays one `liveSessions: 1` signal per session rather than per file.
+    ...liveOrchestratorSessions(opts.heartbeatsDir ? { heartbeatsDir: opts.heartbeatsDir } : {})
+      .filter((session) => session.projectDir)
+      .map((session) => ({ projectDir: session.projectDir, liveSessions: 1 })),
   ];
   return aggregateProjectSignals(signals);
 }

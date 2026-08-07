@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${FORGE_HOME:-$HOME/.forge}"
 CLAUDE_SKILLS_DEST="${CLAUDE_SKILLS_DEST:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}"
 
-mkdir -p "$DEST/agents" "$DEST/constraints" "$DEST/runs" "$DEST/runtimes" "$DEST/workflows"
+mkdir -p "$DEST/agents" "$DEST/constraints" "$DEST/runs" "$DEST/runtimes" "$DEST/workflows" "$DEST/codex"
 
 # FG-578 — THE OWNERSHIP DECLARATION. Categories the OPERATOR authors. forge may
 # CREATE these (a host with no RACI has nothing to route with), but may never
@@ -163,6 +163,24 @@ fi
 # generation (above), never from this flat surface.
 if [[ -d "$HERE/seeds/workflows" ]]; then
   install_category "$HERE/seeds/workflows" "$DEST/workflows" workflows
+fi
+
+# FG-576 (D8) — the Forge-owned Codex instruction carrier's SCAFFOLDING. Forge-owned,
+# NOT in AUTHORED_EXEMPT: FORCE refreshes it exactly as it refreshes runtimes and
+# workflows, because Codex's instructions file SUBSTITUTES the base instruction surface
+# and a stale one silently mis-instructs an interactive orchestrator.
+#
+# Same flat-copy discipline as workflows: retained here ONLY so the seed-drift detector
+# (seed-drift.ts SEED_SPECS `codex`) has a $FORGE_HOME baseline to measure and a
+# converging `forge upgrade` remedy to name. The carrier a LAUNCH binds is the RENDERED
+# artifact inside the atomic seed generation, never this flat copy.
+#
+# What this deliberately does NOT touch: the operator's Codex config root. Nothing is
+# written under $CODEX_HOME or ~/.codex, CODEX_HOME is never redirected, and AGENTS.md,
+# CLAUDE.md, config.toml and plugins are never spliced or overwritten — FORCE=1
+# included. The carrier lives under Forge's own root only.
+if [[ -d "$HERE/seeds/codex" ]]; then
+  install_category "$HERE/seeds/codex" "$DEST/codex" codex
 fi
 
 # Host/orchestrator workflow skills (forge-campaign, forge-review-loop, etc.).
