@@ -46,6 +46,8 @@ const CONTRACT = {
   lens_scopes: { wide: ["src/"] },
 };
 
+const PARKED_DIGEST = "shard-plan-1-parked";
+
 let homeDir: string;
 let repoDir: string;
 let contractPath: string;
@@ -90,8 +92,8 @@ function seedParkedReview(): void {
     db.prepare(
       `INSERT INTO reviews (id, run_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
                             workspace_dir, contract_json, stage_evidence_json, lens_outcomes_json,
-                            review_mode, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            shard_plan_json, review_mode, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       "review-parked",
       "run-parked",
@@ -113,8 +115,42 @@ function seedParkedReview(): void {
       // THIS says every selected lens authored an outcome. Either one alone would let an
       // incomplete panel read as complete.
       JSON.stringify([
-        { lens: "wide", role: "red-wide", complete: true, outcome: "fail", authored: true, findings: [], taskId: "task-wide" },
+        {
+          lens: "wide",
+          role: "red-wide",
+          complete: true,
+          outcome: "fail",
+          authored: true,
+          findings: [],
+          taskId: "task-wide",
+          // FG-689: WHICH shard of the lens's scope this outcome reviewed, and the partition
+          // it was cut under. Without both, the outcome satisfies no shard of the plan below
+          // and `continue` would correctly re-enter discovery instead of reading the parked
+          // stage this test is about.
+          shard: { index: 1, of: 1 },
+          derivationDigest: PARKED_DIGEST,
+        },
       ]),
+      // FG-689: what discovery RECORDED AS OWED, written before its first container started.
+      // A parked review with outcomes but no plan is a review whose expectation nobody wrote
+      // down, and both the coordinator and the gate refuse it by name — so the crash-recovery
+      // shape this fixture stands for has to carry one.
+      JSON.stringify({
+        derivation: {
+          baseSha: "base000",
+          candidateSha: "conf222",
+          renderingId: "review-diff-1-parked",
+          budget: 600_000,
+          unit: "utf8_bytes",
+          budgetValidatedRuntime: "unvalidated",
+          scopesDigest: "scopes-parked",
+        },
+        digest: PARKED_DIGEST,
+        fanoutWidth: 4,
+        lenses: [{ lens: "wide", shards: [{ index: 1, of: 1, paths: ["src/a.ts"], chars: 120 }] }],
+        skipped: [],
+        recordedAt: "2026-07-30T00:00:03Z",
+      }),
       "evidence_led",
       "discovering",
       "2026-07-30T00:00:00Z",

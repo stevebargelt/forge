@@ -32,11 +32,13 @@ import { insertVerdict } from "../store/verdicts.js";
 import { gatesForTask } from "../store/gates.js";
 import {
   insertReview,
+  recordShardPlan,
   ingestFindings,
   recordDisposition,
   recordStageEvidence,
   setReviewState,
 } from "../store/reviews.js";
+import { oneShardPlan, shardOutcome } from "./review-shards.testkit.js";
 import { gate } from "./gate.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Run, Task, ReviewMode } from "../types/index.js";
@@ -134,9 +136,11 @@ function settledLedger(reviewMode: ReviewMode): void {
     contractConfirmedSha: SHA,
     trustedRemoteSha: SHA,
     contract: CONTRACT,
-    lensOutcomes: [{ lens: "backend", role: "red-backend", complete: true, outcome: "pass", authored: true, findings: [] }],
+    lensOutcomes: [shardOutcome({ lens: "backend", role: "red-backend", complete: true, outcome: "pass", authored: true, findings: [] })],
     state: "shipping_review",
   });
+  // FG-689: what discovery RECORDED AS OWED — the gate blocks on its absence.
+  recordShardPlan("review-iso", oneShardPlan(["backend"], { candidateSha: SHA }));
   recordStageEvidence("review-iso", "verified_final", { sha: SHA, detail: `green CI at ${SHA}` });
   recordStageEvidence("review-iso", "shipping", { sha: SHA, detail: "shipping", meta: { checks: checks() } });
   setReviewState("review-iso", "settled");

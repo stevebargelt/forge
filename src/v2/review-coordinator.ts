@@ -23,10 +23,10 @@
 
 import type { FixBatch } from "../store/fix-batches.js";
 import type { Review, ReviewFinding, ReviewStage, ReviewState } from "../store/reviews.js";
-import { lensAcceptancesOf, lensOutcomeRecordsOf, stageCompleteAt } from "../store/reviews.js";
-import { assessDiscoveryCompleteness, type LensOutcome } from "./review-discovery.js";
+import { lensAcceptancesOf, lensOutcomeRecordsOf, lensSkipRecordsOf, stageCompleteAt } from "../store/reviews.js";
+import { assessShardCompleteness, planCoversLenses, type LensOutcome } from "./review-discovery.js";
 import { recheckIsNoOp } from "./review-recheck.js";
-import { validateReviewContract, type RiskLens } from "./review-contract.js";
+import { RISK_LENSES, validateReviewContract, type RiskLens } from "./review-contract.js";
 
 export type TransitionKind =
   | "verify_entry"
@@ -79,6 +79,13 @@ function selectedLenses(review: Review): RiskLens[] {
 
 function recordedLensOutcomes(review: Review): LensOutcome[] {
   return lensOutcomeRecordsOf(review) as LensOutcome[];
+}
+
+/** A plan is read back off a durable row, so the lens names it carries are strings. A name
+ *  outside the vocabulary is REPORTED by the assessor and simply not offered here as a lens to
+ *  retry — narrowing it away with a cast would make it disappear from both. */
+function isRiskLens(lens: string): lens is RiskLens {
+  return (RISK_LENSES as readonly string[]).includes(lens);
 }
 
 /** Did this batch's payload carry this finding under the decision it carries NOW?
@@ -338,21 +345,47 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
   }
 
   // Stage 2b/3 — discovery. NEVER re-entered once complete for the confirmed sha.
+  //
+  // FG-689: NO RECORDED SHARD PLAN IS NOT COMPLETENESS, it is discovery that has not planned
+  // yet. The plan is written before the first container starts, so its absence means either
+  // nothing has been dispatched or the pass that would have dispatched refused — and both of
+  // those re-enter this stage. There is deliberately no arm that assesses completeness without
+  // a plan: with nothing recorded as owed, an empty ledger is trivially complete, which is the
+  // fail-open per-shard completeness exists to close.
   const lenses = selectedLenses(review);
-  const completeness = assessDiscoveryCompleteness(lenses, recordedLensOutcomes(review), {
-    acceptances: lensAcceptancesOf(review),
-    candidateSha: review.contractConfirmedSha,
-  });
+  const plan = review.shardPlan;
+  // A plan that does not name every selected lens is not a plan for THIS panel — the assessor
+  // iterates the plan, so a lens it never named is owed nothing and would read complete. Both
+  // it and an absent plan re-enter discovery, which re-plans from the contract in force.
+  const planned = plan !== undefined && planCoversLenses(plan, lenses).ok ? plan : undefined;
+  const completeness =
+    planned === undefined
+      ? undefined
+      : assessShardCompleteness(planned, recordedLensOutcomes(review), {
+          acceptances: lensAcceptancesOf(review),
+          skips: lensSkipRecordsOf(review),
+          candidateSha: review.contractConfirmedSha,
+        });
   const discoveryRecorded = stageCompleteAt(review, "discovery", review.contractConfirmedSha);
-  if (!discoveryRecorded || !completeness.complete) {
+  if (completeness === undefined || !discoveryRecorded || !completeness.complete) {
+    const pending = (completeness?.missing ?? []).map((m) => m.lens).filter(isRiskLens);
     return {
       kind: "discover",
       state: "discovering",
       stage: "discovery",
-      pendingLenses: completeness.missing.map((m) => m.lens),
-      reason: !completeness.complete
-        ? `discovery is incomplete: ${completeness.missing.map((m) => `${m.lens} (${m.reason})`).join(", ")}`
-        : `discovery has no completed record for the confirmed sha ${review.contractConfirmedSha}`,
+      pendingLenses: [...new Set(completeness === undefined ? lenses : pending)],
+      reason:
+        completeness === undefined
+          ? plan === undefined
+            ? `discovery has recorded no shard plan for the confirmed sha ${review.contractConfirmedSha}, so nothing ` +
+              `is yet recorded as owed${lenses.length > 0 ? ` for ${lenses.join(", ")}` : ""}`
+            : `the recorded shard plan does not describe the panel this contract selects ` +
+              `(${lenses.join(", ") || "none"}), so what discovery owes has to be re-derived`
+          : !completeness.complete
+            ? `discovery is incomplete: ${completeness.missing
+                .map((m) => `${m.lens}${m.shard !== undefined ? ` shard ${m.shard} of ${m.of}` : ""} (${m.reason})`)
+                .join(", ")}`
+            : `discovery has no completed record for the confirmed sha ${review.contractConfirmedSha}`,
     };
   }
 

@@ -510,7 +510,10 @@ test("FG-639 / PRD #15: continue after a crash resumes the persisted next stage 
 // re-recorded.
 const RESUME_BOUNDARIES: Array<{ completed: string; target: TransitionKind; expect: Calls }> = [
   { completed: "stage 1 verification entry", target: "confirm_contract", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
-  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["wide", "backend"], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
+  // FG-689: dispatch order follows the recorded shard PLAN — lenses in a stable order, then
+  // shards in index order — not the contract's declaration order. A partition has to be
+  // reproducible from its recorded inputs, and "whatever order the contract listed" is not one.
+  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["backend", "wide"], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
   { completed: "stage 3 discovery", target: "await_disposition", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
   { completed: "stage 4 the disposition decision", target: "batch_fix", expect: { lens: [], fixer: 1, docs: 0, rechecker: 0, verify: 0, commit: 1 } },
   { completed: "stage 5 the batch fix", target: "docs", expect: { lens: [], fixer: 0, docs: 1, rechecker: 0, verify: 0, commit: 0 } },
@@ -2017,10 +2020,10 @@ test("FG-639 / PRD #2: two lenses reporting the same mechanism AND invariant bec
   assert.equal(findings.length, 1, "one finding, not one per reviewer");
   assert.deepEqual(
     findings[0]?.sources.map((s) => s.redRole),
-    ["red-wide", "red-backend"],
+    ["red-backend", "red-wide"],
     "both reviewers survive as provenance",
   );
-  assert.deepEqual(findings[0]?.sources.map((s) => s.redTaskId), ["task-wide", "task-backend"]);
+  assert.deepEqual(findings[0]?.sources.map((s) => s.redTaskId), ["task-backend", "task-wide"]);
   assert.equal(findings[0]?.severity, "high", "a correlated agreement is not an escalation");
   const merges = getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[];
   assert.equal(merges.length, 1);
@@ -2032,7 +2035,7 @@ test("FG-639 / PRD #3: the same two lenses at the same anchor naming DIFFERENT i
 
   const findings = findingsForReview(REVIEW);
   assert.equal(findings.length, 2, "same mechanism, different promises — merging them would hide one defect");
-  assert.deepEqual(findings.map((f) => f.invariantRef), ["no partial write", "only forge publishes"]);
+  assert.deepEqual(findings.map((f) => f.invariantRef), ["only forge publishes", "no partial write"]);
   assert.deepEqual(findings.map((f) => f.sources.length), [1, 1]);
   assert.equal((getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[]).length, 0);
   assert.deepEqual(pending().blockingFindings, ["RF-1", "RF-2"]);
@@ -2387,6 +2390,9 @@ test("FG-654 RF-26: a re-run discovery preserves agent_protocol records alongsid
   // makes this test about the RECORD and not about discovery being broken generally.
   const accepted = recordLensAcceptance(REVIEW, {
     lens: "backend",
+    // FG-689 D16: once a plan names shards for a lens, an acceptance must NAME the one it
+    // clears. Discovery recorded a plan on the first pass, so this is shard 1 of 1.
+    shard: 1,
     missingEvidence: "no backend lens ran",
     rationale: "shipping anyway",
     operator: true,
@@ -2438,6 +2444,7 @@ test("FG-654 RF-12: a record committed DURING the lens fan-out survives the disc
         });
         const accepted = recordLensAcceptance(REVIEW, {
           lens: "backend",
+          shard: 1,
           missingEvidence: "the backend lens never reviewed the ledger write",
           rationale: "accepted mid-flight by the operator",
           operator: true,

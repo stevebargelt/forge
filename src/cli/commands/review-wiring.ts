@@ -89,12 +89,36 @@ function projectScripts(projectDir: string): Record<string, unknown> {
 /** The discovery prompt's REQUIRED shape, stated to the reviewer. Every field is listed
  *  because a lens whose output omits one is not schema-valid and therefore is not a
  *  completed outcome — leaving the requirement implicit is how a panel goes incomplete for
- *  a reason nobody can see. */
+ *  a reason nobody can see.
+ *
+ *  FG-689: IT STATES THE SHARD'S IDENTITY AND ITS PATH LIST, ahead of the diff. A reviewer
+ *  handed part of a change without being told it is part of one reads the absence of something
+ *  as evidence about the change — "no input validation anywhere" is a true statement about
+ *  shard 2 of 3 and a false one about the candidate. The paths are listed as well as the
+ *  identity, because "shard 2 of 3" alone does not say what shard 2 contains. */
 function discoveryTask(ctx: LensContext, diff: string, contract: unknown): string {
+  const whole = ctx.shard.of === 1;
   return [
-    `# Risk-targeted discovery — ${ctx.lens} lens`,
+    `# Risk-targeted discovery — ${ctx.lens} lens, shard ${ctx.shard.index} of ${ctx.shard.of}`,
     ``,
     `Review ${ctx.review.ticketId ?? "(no ticket)"} at candidate sha ${ctx.candidateSha}. READ-ONLY.`,
+    ``,
+    `## What you are being shown`,
+    ``,
+    whole
+      ? `This is shard 1 of 1: the WHOLE of the ${ctx.lens} lens's authored scope in this change, ` +
+        `${ctx.paths.length} changed path(s).`
+      : `This is SHARD ${ctx.shard.index} OF ${ctx.shard.of} of the ${ctx.lens} lens's authored scope. The diff ` +
+        `below is ${ctx.paths.length} of that scope's changed paths — NOT the whole change, and not even the ` +
+        `whole of this lens's scope. The other shard(s) are reviewed by their own dispatches.`,
+    ``,
+    `Review what you were given. Do NOT infer that something is absent from the change because`,
+    `it is absent from this shard, and do not report a finding whose evidence is a file you were`,
+    `not shown. If you cannot reach a conclusion without a path outside this shard, that is an`,
+    `authored \`inconclusive\` saying exactly which path you needed — not a pass.`,
+    ``,
+    `The ${ctx.paths.length} path(s) in this shard:`,
+    ...ctx.paths.map((p) => `  - ${p}`),
     ``,
     `## Confirmed review contract`,
     "```json",
@@ -105,7 +129,7 @@ function discoveryTask(ctx: LensContext, diff: string, contract: unknown): strin
     `and its protected_invariants are the promises whose violation is fix-before-advance`,
     `irrespective of the severity you assign.`,
     ``,
-    `## Implementation diff under review`,
+    whole ? `## Implementation diff under review` : `## Implementation diff under review — shard ${ctx.shard.index} of ${ctx.shard.of}`,
     "```diff",
     diff,
     "```",
@@ -587,21 +611,35 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       };
     },
 
+    // FG-689: THIS SEAM NO LONGER COMPUTES A DIFF. It receives the shard's already-rendered
+    // bytes, sliced out of the ONE pinned rendering the plan was cut from.
+    //
+    // Two things were deleted here and both were live defects, not tidying:
+    //
+    //   * THE FALLBACK BASE — the recorded base, or else the candidate's first parent. A
+    //     per-seam fallback base is how two parts of one guarantee end up describing different
+    //     changes: the coverage check made against the recorded base, the reviewer's bytes
+    //     against a synthesised one. There is one recorded base for the whole review or the
+    //     stage refuses, and the refusal is made where the rendering is (runDiscovery), before
+    //     anything is dispatched.
+    //   * THE PLACEHOLDER — a `catch` that substituted an apologetic sentence for the diff when
+    //     git failed. That is D15's case, and it is the failure this whole ticket is about: a
+    //     reviewer handed a not-the-diff authors an honest, schema-valid `pass` over it;
+    //     discovery counts that as a completed outcome; the disposition gate clears on a review
+    //     that never happened. A rendering failure now fails by measurement upstream and
+    //     dispatches NOTHING — there is no substitute a reviewer can pass over. The sentence
+    //     itself is deliberately not quoted anywhere in src/, so a grep for it finds nothing.
     dispatchLens: async (lensCtx: LensContext) => {
-      const base = lensCtx.review.baseSha ?? `${lensCtx.candidateSha}~1`;
-      let diff = "";
-      try {
-        diff = git(["diff", `${base}..${lensCtx.candidateSha}`]);
-      } catch {
-        diff = "(the implementation diff could not be computed)";
-      }
       const res = await dispatch({
         agentRole: lensCtx.role,
-        task: discoveryTask(lensCtx, diff, lensCtx.contract),
+        task: discoveryTask(lensCtx, lensCtx.diff, lensCtx.contract),
         projectDir: ctx.projectDir,
         readOnlyProject: true,
         ...(runIdFor() !== undefined ? { runId: runIdFor() as string } : {}),
-        runTitle: `review discovery ${lensCtx.lens} — ${ctx.ticketId}`,
+        runTitle:
+          lensCtx.shard.of === 1
+            ? `review discovery ${lensCtx.lens} — ${ctx.ticketId}`
+            : `review discovery ${lensCtx.lens} shard ${lensCtx.shard.index}/${lensCtx.shard.of} — ${ctx.ticketId}`,
         ...(ctx.route !== undefined ? { routeKey: ctx.route } : {}),
       });
       const failureKind = res.failureKind ?? (res.status === "complete" ? undefined : res.error);

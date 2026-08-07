@@ -37,7 +37,11 @@ import {
   getReview,
   ingestFindings,
   lensAcceptancesOf,
-  replaceLensOutcomes,
+  lensOutcomeRecordsOf,
+  lensSkipRecordsOf,
+  mergeLensOutcomesByShard,
+  recordLensSkipped,
+  recordShardPlan,
   invalidateResolutionsForCandidate,
   recordAgentProtocol,
   pendingDocsDispatch,
@@ -48,8 +52,11 @@ import {
   setReviewState,
   updateReview,
   type DocsDispatch,
+  type PlannedShard,
   type Review,
   type ReviewFinding,
+  type ShardDerivation,
+  type ShardPlan,
 } from "../store/reviews.js";
 import {
   ensureFixBatch,
@@ -72,12 +79,13 @@ import {
   type VerificationEntry,
 } from "./review-coordinator.js";
 import {
-  assessDiscoveryCompleteness,
   assessLens,
+  assessShardCompleteness,
   collectObservations,
   normalizeObservations,
   type LensDispatch,
   type LensOutcome,
+  type ShardIdentity,
 } from "./review-discovery.js";
 import {
   confirmContract,
@@ -86,7 +94,15 @@ import {
   type ContractProposal,
   type RiskLens,
 } from "./review-contract.js";
-import type { ReviewDiffRendering, ReviewDiffResult } from "./review-diff.js";
+import {
+  DEFAULT_SHARD_BUDGET,
+  SHARD_BUDGET_UNIT,
+  UNVALIDATED_BUDGET_RUNTIME,
+  planShards,
+  resolveScopes,
+  scopesDigestOf,
+} from "./review-shards.js";
+import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult } from "./review-diff.js";
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck } from "./review-recheck.js";
@@ -94,12 +110,27 @@ import { assessShippingReview, type ShippingAssessment, type ShippingInput } fro
 
 type Awaitable<T> = T | Promise<T>;
 
+/** FG-689: ONE DISPATCH'S WORTH of a lens's scope — never the whole change.
+ *
+ *  The three new fields are what stop a reviewer mistaking a shard for the change. `diff` is
+ *  the shard's ALREADY-RENDERED bytes, sliced out of the one pinned rendering the plan was cut
+ *  from: the dispatch seam no longer computes a diff at all, which is what removes the second
+ *  unpinned `git diff` and the `catch`-and-substitute placeholder that stood in for it (D15).
+ *  `shard` and `derivationDigest` are the coordinator's, not the seam's — see runDiscovery. */
 export type LensContext = {
   review: Review;
   lens: RiskLens;
   role: string;
   candidateSha: string;
   contract: unknown;
+  /** WHICH shard of this lens's scope, 1-based, and how many there are. */
+  shard: ShardIdentity;
+  /** The paths this shard covers, in the plan's order. */
+  paths: string[];
+  /** Those paths' rendered bodies, joined in order — the reviewer's whole input. */
+  diff: string;
+  /** The partition identity the shard was cut under. */
+  derivationDigest: string;
 };
 
 // No envelope field: the envelope is rendered from the batch ROW at materialization and
@@ -224,6 +255,13 @@ export type CoordinatorDeps = {
    *  refusal refuses; it never proceeds over a placeholder, because a reviewer handed anything
    *  other than the diff can author an honest pass over it and that pass clears the gate. */
   reviewDiff: (baseSha: string, candidateSha: string) => Awaitable<ReviewDiffResult>;
+  /** FG-689 D4: the shard budget this review plans under, when the operator overrode the
+   *  configured default. Absent means `DEFAULT_SHARD_BUDGET`, and the unit is always
+   *  `SHARD_BUDGET_UNIT` — the number travels with its unit into the recorded derivation, so
+   *  a provider change cannot reinterpret it (D10). A value here changes the plan's `digest`,
+   *  which is exactly what makes every shard-scoped decision recorded under the old budget
+   *  detectably superseded rather than silently honored. */
+  shardBudget?: number;
   /** The contract confirmation proposal. The default wiring confirms unchanged; a
    *  coordinator that observed drift supplies a widening claim or names the drift. */
   proposeContract: (ctx: { review: Review; candidateSha: string; changedPaths: string[] }) => Awaitable<ContractProposal>;
@@ -528,6 +566,62 @@ async function runContractConfirmation(reviewId: string, transition: Transition,
 
 // ─── stage 2b + 3 ───────────────────────────────────────────────────────────
 
+// FG-689: DISCOVERY IS SCOPED, SHARDED, BOUNDED AND ASSESSED PER SHARD.
+//
+// The old shape was one dispatch per lens over the WHOLE unscoped diff, fanned out with a bare
+// `Promise.all`. On a 46-file candidate that is 1,170,885 characters into every lens at once,
+// and all five crashed identically on the provider's input cap — which is the ticket.
+//
+// THE ORDER BELOW IS THE CORRECTNESS ARGUMENT, not a style. Each step exists because doing it
+// later opens a specific hole:
+//
+//   (a) render ONCE, pinned, and derive everything from those bytes (D8/D14). The path set the
+//       scopes are resolved against and the bodies the shards carry are the same rendering, so
+//       "every path is covered" cannot be true of one git invocation and false of another.
+//   (b) resolve the AUTHORED scopes. No inference, no exclusion form; an uncovered path is a
+//       refusal here as it is at confirmation, because the diff can only have grown a surface
+//       nobody owns if something changed between the two stages.
+//   (c) MEASURE, and refuse by measurement before anything starts. A file larger than one
+//       shard's budget stops the review citing the measurement, the budget and the unit. There
+//       is no arm that truncates, samples or summarises to make it fit (AC5/AC6).
+//   (d) RECORD THE PLAN BEFORE ANY CONTAINER STARTS. The plan is what discovery is OWED, and
+//       the gate reads it. Recorded after the fan-out it would not exist at the only moment it
+//       matters — a lens whose every shard crashed delivers nothing, and an absence cannot say
+//       how many shards were expected. The `lens_skipped` records go down here too, for the
+//       same reason: a zero-path lens leaving the panel with nothing saying so is a lens that
+//       silently vanished.
+//   (e) dispatch lens x shard through an EXPLICIT width limit (D9). One-per-lens was five
+//       containers; lens x shard is unbounded in principle, and this fan-out does not route
+//       through the runner's own limit.
+//   (f) MERGE the outcomes on shard identity (D7/D12) rather than replacing the column. A
+//       retry that wrote back only the shards this pass produced would erase the outcomes of
+//       the shards that already succeeded — the coverage the shard-granularity retry exists to
+//       preserve, destroyed by the mechanism meant to preserve it.
+//   (g) assess PER SHARD (D1). Every shard the plan names owes a schema-valid reviewer-authored
+//       outcome; one surviving shard never satisfies a lens whose other shards crashed.
+
+/** Run `work` over `items` with at most `width` in flight (FG-689 D9).
+ *
+ *  Results come back in ITEM order regardless of completion order, so the outcomes written to
+ *  the ledger do not depend on which container finished first. Nothing here rejects: `work`
+ *  is the assessor, which turns every dispatch failure into a named incomplete outcome. */
+async function boundedFanout<T, R>(items: readonly T[], width: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.max(1, Math.min(width, items.length)) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await work(items[i] as T);
+    }
+  });
+  await Promise.all(lanes);
+  return results;
+}
+
+/** One planned dispatch: which lens, which shard of it, and the bytes it carries. */
+type ShardTarget = { lens: RiskLens; shard: PlannedShard; diff: string };
+
 async function runDiscovery(reviewId: string, transition: Transition, deps: CoordinatorDeps): Promise<StageOutcome> {
   const review = getReview(reviewId) as Review;
   setReviewState(reviewId, "discovering", { reason: transition.reason });
@@ -537,79 +631,241 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
   const confirmedSha = review.contractConfirmedSha as string;
   const lenses = approved.contract.risk_lenses;
 
-  // Parallel, read-only, against ONE recorded sha.
-  const dispatches = await Promise.all(
-    lenses.map((lens) =>
-      Promise.resolve(
-        deps.dispatchLens({
-          review,
-          lens,
-          role: lensRole(lens),
-          candidateSha: confirmedSha,
-          contract: approved.contract,
-        }),
-      ),
-    ),
-  );
-  const outcomes: LensOutcome[] = dispatches.map(assessLens);
-  // The acceptances survive a re-dispatch: they are operator decisions about this confirmed
-  // candidate, and a retry that crashes again must not silently erase one. RF-26: the
-  // agent_protocol records survive too — they are statements about fix_batch / docs /
-  // recheck dispatches that ALREADY HAPPENED.
-  //
-  // WHAT SURVIVES IS READ AFTER THE FAN-OUT, INSIDE THE WRITE LOCK (RF-12's mechanism at
-  // this site). `review` above was read before one container per lens was awaited: deriving
-  // the survivors from it would silently erase any acceptance or protocol receipt another
-  // process committed during those minutes.
-  const updated = replaceLensOutcomes(reviewId, outcomes);
-  const acceptances = lensAcceptancesOf(updated);
+  // (a) ONE PINNED RENDERING, over the review's recorded base and the CONFIRMED sha — the same
+  // sha the outcomes are recorded against. No `~1` fallback anywhere in this path: one recorded
+  // base, or a refusal.
+  if (review.baseSha === undefined) {
+    return {
+      transition,
+      status: "refused",
+      message:
+        `this review records no base sha, so its implementation diff cannot be rendered and no reviewer can be ` +
+        `given anything to read. There is deliberately no ${confirmedSha}~1 fallback — a synthesised base would ` +
+        `let the coverage check and the shards describe two different changes. Re-open the review naming its ` +
+        `comparison base (forge review start --since <sha>). Nothing was recorded and no container was started.`,
+    };
+  }
+  const rendered = await deps.reviewDiff(review.baseSha, confirmedSha);
+  if (!rendered.ok) {
+    return {
+      transition,
+      status: "refused",
+      message:
+        `discovery cannot dispatch because the review's implementation diff could not be rendered ` +
+        `(${rendered.reason}): ${rendered.refusal} No shard plan was recorded and NO container was started — a ` +
+        `reviewer handed anything other than the diff authors an honest pass over a change nobody saw.`,
+    };
+  }
+  const rendering = rendered.rendering;
+  const bodyOf = new Map<string, ReviewDiffFile>(rendering.files.map((f) => [f.path, f]));
 
-  const completeness = assessDiscoveryCompleteness(lenses, outcomes, {
+  // (b) THE AUTHORED SCOPES, matched against THAT rendering's path set.
+  const scopes = resolveScopes(approved.contract, rendering.paths);
+  if (scopes.uncovered.length > 0) {
+    // Confirmation already refuses this (step 7), so reaching it here means the rendering moved
+    // between the two stages. Refusing rather than assigning an owner is the same rule in both
+    // places: forge does not infer a lens, or a lens's scope, from a path.
+    return {
+      transition,
+      status: "refused",
+      message:
+        `${scopes.uncovered.length} changed path(s) are matched by no selected lens's authored scope: ` +
+        `${scopes.uncovered.join(", ")}. Forge does not infer an owner from a filename, so there is nobody to ` +
+        `dispatch them to. The contract's approving authority must widen a lens's scope to cover them. No shard ` +
+        `plan was recorded and no container was started.`,
+    };
+  }
+
+  // (c) THE PARTITION'S INPUTS, recorded whole — `digest` is a sha over exactly these, so any
+  // change to any of them makes every shard-scoped decision detectably about a partition that
+  // no longer exists (D17).
+  const derivation: ShardDerivation = {
+    baseSha: rendering.baseSha,
+    candidateSha: rendering.candidateSha,
+    renderingId: rendering.renderingId,
+    budget: deps.shardBudget ?? DEFAULT_SHARD_BUDGET,
+    unit: SHARD_BUDGET_UNIT,
+    budgetValidatedRuntime: UNVALIDATED_BUDGET_RUNTIME,
+    scopesDigest: scopesDigestOf(approved.contract.lens_scopes),
+  };
+  const planned = planShards({
+    files: rendering.files,
+    owned: scopes.owned,
+    skipped: scopes.skipped,
+    derivation,
+  });
+  if (!planned.ok) {
+    // FAIL BY MEASUREMENT (AC6). `planShards` composes the refusal because it did the
+    // measuring; nothing is dispatched, nothing is recorded, and no file is cut down to size.
+    return {
+      transition,
+      status: "refused",
+      message:
+        `discovery cannot be dispatched (${planned.reason}): ${planned.refusal} No shard plan was recorded and ` +
+        `NO container was started.`,
+    };
+  }
+
+  // (d) THE PLAN, BEFORE ANY CONTAINER STARTS.
+  const write = recordShardPlan(reviewId, planned.plan);
+  const plan = write.review.shardPlan as ShardPlan;
+  for (const s of plan.skipped) {
+    recordLensSkipped(reviewId, {
+      lens: s.lens,
+      reason: s.reason,
+      derivationDigest: plan.digest,
+      candidateSha: confirmedSha,
+    });
+  }
+
+  // WHICH SHARDS STILL OWE AN OUTCOME, decided by the same assessor that decides whether
+  // discovery completed. A shard already authored under THIS partition is not re-dispatched and
+  // its outcome is never rewritten — that is what makes a re-entry after one crash preserve the
+  // coverage that already happened (D7) instead of paying for it twice and risking losing it.
+  const before = write.review;
+  const outstanding = assessShardCompleteness(plan, ledgerOutcomes(before), {
+    acceptances: lensAcceptancesOf(before),
+    skips: lensSkipRecordsOf(before),
+    candidateSha: confirmedSha,
+  }).missing.filter((m) => m.shard !== undefined);
+
+  const targets: ShardTarget[] = [];
+  for (const miss of outstanding) {
+    const shard = plan.lenses.find((l) => l.lens === miss.lens)?.shards.find((s) => s.index === miss.shard);
+    if (shard === undefined) continue;
+    targets.push({
+      lens: miss.lens as RiskLens,
+      shard,
+      diff: shard.paths.map((p) => bodyOf.get(p)?.body ?? "").join(""),
+    });
+  }
+
+  // (e) LENS x SHARD, BOUNDED. Read-only, against ONE recorded sha.
+  const outcomes = await boundedFanout(targets, plan.fanoutWidth, async (t): Promise<LensOutcome> => {
+    const identity: ShardIdentity = { index: t.shard.index, of: t.shard.of };
+    const dispatch = await deps.dispatchLens({
+      review: before,
+      lens: t.lens,
+      role: lensRole(t.lens),
+      candidateSha: confirmedSha,
+      contract: approved.contract,
+      shard: identity,
+      paths: [...t.shard.paths],
+      diff: t.diff,
+      derivationDigest: plan.digest,
+    });
+    // THE IDENTITY IS THE COORDINATOR'S, NOT THE SEAM'S. The host knows which shard it
+    // dispatched; taking that fact back off the dispatch's return would let a seam — or a
+    // reviewer whose output the seam echoes — claim to have reviewed a shard it did not.
+    return assessLens({
+      ...dispatch,
+      lens: t.lens,
+      role: lensRole(t.lens),
+      shard: identity,
+      derivationDigest: plan.digest,
+    });
+  });
+
+  // (f) MERGE, not replace. The read is inside the write lock (mergeLensOutcomesByShard), which
+  // is what preserves the operator acceptances, the agent_protocol receipts and the skip
+  // records another process may have committed during the minutes this fan-out was awaited.
+  const updated = mergeLensOutcomesByShard(reviewId, outcomes);
+  const acceptances = lensAcceptancesOf(updated);
+  const skips = lensSkipRecordsOf(updated);
+  const recorded = ledgerOutcomes(updated);
+
+  // (g) PER SHARD.
+  const completeness = assessShardCompleteness(plan, recorded, {
     acceptances,
+    skips,
     candidateSha: confirmedSha,
   });
   if (!completeness.complete) {
-    // NOT completion. No stage record, no synthesized pass, no empty finding set — the
-    // panel is incomplete and stays incomplete until the lens is retried, the contract is
-    // amended by its approving authority, or the missing evidence is explicitly accepted
-    // against the NAMED lens.
+    // NOT completion. No stage record, no synthesized pass, no empty finding set — the panel is
+    // incomplete and stays incomplete until the SHARD is retried, the contract is amended by its
+    // approving authority, or the missing evidence is explicitly accepted against the named
+    // lens AND shard.
+    const named = completeness.missing.map(describeMiss);
     setReviewState(reviewId, "discovering", {
-      reason: `discovery incomplete: ${completeness.missing.map((m) => `${m.lens} (${m.reason})`).join(", ")}`,
+      reason: `discovery incomplete: ${completeness.missing
+        .map((m) => `${shardLabel(m.lens, m.shard, m.of)} (${m.reason})`)
+        .join(", ")}`,
     });
     return {
       transition,
       status: "refused",
       message:
-        `discovery is INCOMPLETE — no reviewer-authored outcome for ` +
-        `${completeness.missing.map((m) => `${m.lens} (${m.reason}: ${m.detail})`).join("; ")}. ` +
-        `No pass and no empty finding set was synthesized. Retry the lens, amend the contract through its ` +
-        `approving authority, or record an authorized acceptance naming that lens ` +
-        `(\`forge review accept-lens ${reviewId} <lens> --operator --missing-evidence "..." --rationale "..."\`).`,
+        `discovery is INCOMPLETE — no reviewer-authored outcome for ${named.join("; ")}. ` +
+        `Completeness is owed PER SHARD: one shard that came back never stands in for a shard that crashed and ` +
+        `was never read. No pass and no empty finding set was synthesized. Retry the shard, amend the contract ` +
+        `through its approving authority, or record an authorized acceptance naming that lens and shard ` +
+        `(\`forge review accept-lens ${reviewId} <lens> --shard <n> --operator --missing-evidence "..." ` +
+        `--rationale "..."\`).` +
+        (completeness.superseded.length > 0
+          ? ` ${completeness.superseded.length} recorded decision(s) describe a partition that no longer exists ` +
+            `and satisfy nothing: ${completeness.superseded.map((s) => s.detail).join("; ")}.`
+          : ""),
     };
   }
 
-  const normalized = normalizeObservations(collectObservations(outcomes), { discoveredSha: confirmedSha });
+  // EVERY CURRENT SHARD'S EVIDENCE, from the LEDGER — not only the shards this pass dispatched.
+  // A re-entry that retried one crashed shard completes the review on the outcomes of all of
+  // them, and an outcome bound to a superseded partition contributes nothing.
+  const current = recorded.filter((o) => o.derivationDigest === plan.digest);
+  const normalized = normalizeObservations(collectObservations(current), { discoveredSha: confirmedSha });
   const ingested = ingestFindings(reviewId, normalized.observations);
+
+  const authored = current.filter((o) => o.complete);
+  const plannedShardCount = plan.lenses.reduce((n, l) => n + l.shards.length, 0);
 
   recordStageEvidence(reviewId, "discovery", {
     sha: confirmedSha,
     detail:
-      `${lenses.length - completeness.accepted.length} lens(es) authored an outcome` +
+      `${authored.length} of ${plannedShardCount} planned shard(s) across ${plan.lenses.length} lens(es) authored ` +
+      `an outcome` +
       (completeness.accepted.length > 0
-        ? `, ${completeness.accepted.map((a) => a.lens).join(", ")} cleared by an authorized acceptance`
+        ? `, ${completeness.accepted
+            .map((a) => shardLabel(a.lens, a.shard))
+            .join(", ")} cleared by an authorized acceptance`
+        : "") +
+      (completeness.skipped.length > 0
+        ? `, ${completeness.skipped.map((s) => s.lens).join(", ")} intentionally skipped (no in-scope path)`
         : "") +
       `; ${ingested.length} finding(s) ingested`,
     meta: {
       lenses: [...lenses],
-      outcomes: outcomes.map((o) => ({ lens: o.lens, outcome: o.complete ? o.outcome : "incomplete" })),
+      // FG-689: WHAT WAS OWED AND WHAT WAS DELIVERED, side by side. The plan is the durable
+      // answer to "how many dispatches did this review expect"; restating the expectation here
+      // is what lets a reader of the stage record see the two agreed at completion time.
+      shardPlan: {
+        digest: plan.digest,
+        derivation: plan.derivation,
+        fanoutWidth: plan.fanoutWidth,
+        expected: plan.lenses.map((l) => ({ lens: l.lens, shards: l.shards.length })),
+        dispatchedThisPass: targets.map((t) => ({ lens: t.lens, shard: t.shard.index, of: t.shard.of })),
+        supersededPlan: write.previous?.digest,
+      },
+      outcomes: current.map((o) => ({
+        lens: o.lens,
+        shard: o.shard?.index,
+        of: o.shard?.of,
+        outcome: o.complete ? o.outcome : "incomplete",
+      })),
       // FG-650: which lenses carried extra root keys the validator tolerated. Recorded so
       // tolerance is visible in the durable stage record rather than silently stripped.
-      toleratedRootKeys: outcomes
+      toleratedRootKeys: current
         .filter((o) => o.complete && (o.toleratedRootKeys?.length ?? 0) > 0)
-        .map((o) => ({ lens: o.lens, keys: o.complete ? o.toleratedRootKeys : [] })),
-      // The stage record must not read as if an accepted lens was reviewed — the acceptance
+        .map((o) => ({ lens: o.lens, shard: o.shard?.index, keys: o.complete ? o.toleratedRootKeys : [] })),
+      // The stage record must not read as if an accepted shard was reviewed — the acceptance
       // and the evidence it names are part of what this stage completed on.
-      acceptedLenses: completeness.accepted.map((a) => ({ lens: a.lens, missingEvidence: a.missingEvidence })),
+      acceptedLenses: completeness.accepted.map((a) => ({
+        lens: a.lens,
+        shard: a.shard,
+        missingEvidence: a.missingEvidence,
+      })),
+      // ...and a SKIPPED lens is neither reviewed nor absent. Its own key, so no reader has to
+      // infer a third state out of two lists.
+      skippedLenses: completeness.skipped.map((s) => ({ lens: s.lens, reason: s.reason })),
       merges: normalized.merges,
       findingRefs: ingested.map((f) => f.findingRef),
     },
@@ -619,9 +875,30 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
     transition,
     status: "advanced",
     message:
-      `discovery complete at ${confirmedSha}: ${ingested.length} finding(s) ingested from ${lenses.length} lens(es)` +
+      `discovery complete at ${confirmedSha}: ${ingested.length} finding(s) ingested from ${plannedShardCount} ` +
+      `shard(s) across ${plan.lenses.length} lens(es)` +
+      (completeness.skipped.length > 0
+        ? ` (${completeness.skipped.map((s) => s.lens).join(", ")} intentionally skipped — no in-scope path)`
+        : "") +
       (normalized.merges.length > 0 ? `, ${normalized.merges.length} deduplicated` : ""),
   };
+}
+
+/** The reviewer-authored half of `lens_outcomes_json`. Acceptances, protocol receipts and skip
+ *  records are filtered out by the store accessor, so nothing that is not an outcome can arrive
+ *  here as one. */
+function ledgerOutcomes(review: Review): LensOutcome[] {
+  return lensOutcomeRecordsOf(review) as LensOutcome[];
+}
+
+/** "wide shard 2 of 3", or "wide" for a lens with no shard identity to name. */
+function shardLabel(lens: string, shard: number | undefined, of?: number): string {
+  if (shard === undefined) return lens;
+  return of === undefined ? `${lens} shard ${shard}` : `${lens} shard ${shard} of ${of}`;
+}
+
+function describeMiss(m: { lens: string; shard?: number; of?: number; reason: string; detail: string }): string {
+  return `${shardLabel(m.lens, m.shard, m.of)} (${m.reason}: ${m.detail})`;
 }
 
 // ─── stage 5 ────────────────────────────────────────────────────────────────
