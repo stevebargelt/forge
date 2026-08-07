@@ -42,7 +42,7 @@ const { claimNextEligible, recordClaimLaunch } = await import("../../src/store/q
 const { setDispatcherPolicy, acquireDispatcherLease, DEFAULT_LEASE_TTL_MS } = await import(
   "../../src/store/dispatcher-policy.js"
 );
-const { recordEvaluation, recordWake } = await import("../../src/store/dispatcher-evidence.js");
+const { listWakes, recordEvaluation, recordWake } = await import("../../src/store/dispatcher-evidence.js");
 const { repositoryCheckoutIdentity } = await import("../../src/util/repository-identity.js");
 
 const PK_A = "pk-fg591-board";
@@ -507,7 +507,20 @@ test("FG-591: the dispatcher panel answers 'why did nothing start' from the dura
   assert.equal(panel.lastEvaluation?.wakeKind, "run_terminal");
   assert.equal(panel.lastEvaluation?.scannedCount, 2);
   assert.equal(panel.nextWatchdogAtMs, 1_780_000_000_000);
-  assert.equal(panel.pendingWakes, 1);
+  // The explicitly recorded wake, PLUS one per ticket the fixture's own rank/enqueue
+  // verbs moved: AC15's queue-change signal commits with the change (src/store/queue.ts),
+  // so a fixture that builds a queue leaves the wakes that queue building produces.
+  const wakeKeys = listWakes(PK_A).filter((w) => w.state === "pending").map((w) => w.wakeKey).sort();
+  assert.deepEqual(wakeKeys, [
+    "FG-201",
+    "ticket:FG-201",
+    "ticket:FG-202",
+    "ticket:FG-203",
+    "ticket:FG-204",
+    "ticket:FG-205",
+    "ticket:FG-206",
+  ]);
+  assert.equal(panel.pendingWakes, wakeKeys.length);
   // D2: arming and the ceiling stay CLI-only. The payload says so, so the board
   // renders an affordance instead of a disabled button.
   assert.equal(panel.controlSurface, "cli-only");

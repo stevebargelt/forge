@@ -181,8 +181,10 @@ function makeLauncher(): Launcher {
       n++;
       // Unique ACROSS PROCESSES: two racing workers must never mint the same launch
       // identity, or the store would collapse two containers into one record and the
-      // duplicate this suite is looking for would be invisible.
-      const id = `launch-w${WORKER_ID}-${n}`;
+      // duplicate this suite is looking for would be invisible. The dispatcher mints
+      // it now (it is stamped on the claim before this call), so the worker's own
+      // counter only labels the record.
+      const id = opts.id;
       launched.push({ ticketId: ticketIdFromArgv(argv), launchId: id, argv, cwd: opts.cwd, name: opts.name });
       const meta: LaunchMeta = {
         id,

@@ -1100,9 +1100,22 @@ function launcherAlive(pid: number): boolean {
   }
 }
 
+/** Mint a launch id WITHOUT starting anything, so a caller that must make the
+ *  identity durable BEFORE the physical launch (FG-591's claim stamp) can hand the
+ *  same id to startLaunch. The format is startLaunch's own, derived here so there is
+ *  one producer of it rather than two that can drift. */
+export function allocateLaunchId(name: string): string {
+  return `launch-${slugOf([name])}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 /** Start a command under a durable tmux owner. Returns the persisted record.
- *  Throws (before anything is written) if tmux is unavailable. */
-export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
+ *  Throws (before anything is written) if tmux is unavailable.
+ *
+ *  `opts.id` pre-assigns the launch identity (allocateLaunchId). It exists for the
+ *  callers whose durable pointer to this container must be committed BEFORE the
+ *  container can exist; supplying an id that is already taken is refused rather than
+ *  allowed to clobber another launch's record. */
+export function startLaunch(argv: string[], opts: { id?: string; name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
   if (argv.length === 0) throw new Error("forge launch run: no command given");
   // FG-555: refuse-before-execute. When a Forge-owned caller declares the
   // execution-environment contract, assert the toolchain BEFORE anything is
@@ -1162,9 +1175,12 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   // name — slugify it through the SAME charset as the auto-derived slug so a
   // crafted --name (path separators, "..") can never escape the launches dir.
   const name = opts.name === undefined ? slugOf(argv) : slugOf([opts.name]);
-  const id = `launch-${name}-${rand}`;
+  const id = opts.id ?? `launch-${name}-${rand}`;
   const session = `forge-${id}`;
   const dir = launchDir(id);
+  if (opts.id !== undefined && existsSync(dir)) {
+    throw new Error(`forge launch: refusing to launch — the pre-assigned launch id '${id}' already has a record at ${dir}`);
+  }
   mkdirSync(dir, { recursive: true });
 
   const meta: LaunchMeta = {

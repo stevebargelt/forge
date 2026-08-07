@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 import { closeDb, getDb } from "../../store/db.js";
 import { storeNowMs } from "../../store/publications.js";
-import { recordEvaluation, type CapacityHolder } from "../../store/dispatcher-evidence.js";
+import { claimWakes, pendingWakes, recordEvaluation, type CapacityHolder } from "../../store/dispatcher-evidence.js";
 import { acquireDispatcherLease } from "../../store/dispatcher-policy.js";
 import { insertRun } from "../../store/runs.js";
 import type { ScanEntry } from "../../store/queue-claims.js";
@@ -67,9 +67,9 @@ const READY_BODY = [
 
 type ForgeResult = { status: number | null; stdout: string; stderr: string };
 
-function forge(args: string[], extraEnv: Record<string, string> = {}): ForgeResult {
+function forge(args: string[], extraEnv: Record<string, string> = {}, cwd: string = project): ForgeResult {
   const res = spawnSync(tsx, withAuthorityTestkit(entry, args), {
-    cwd: project,
+    cwd,
     encoding: "utf8",
     env: {
       ...process.env,
@@ -141,6 +141,41 @@ function migrate(): string {
   assert.equal(res.status, 0, `migrate failed: ${res.stderr}`);
   closeDb();
   return readProjectKey();
+}
+
+/** A SECOND registered project on the same host store — the audience for a host-wide
+ *  policy change that did not originate in it. Its own repo (a distinct remote, so
+ *  project identity resolves separately) and its own migrate. */
+function migrateSecondProject(): string {
+  const dir = join(root, "project-two");
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  for (const args of [
+    ["init", "-q"],
+    ["config", "user.email", "test@example.invalid"],
+    ["config", "user.name", "Test"],
+    ["remote", "add", "origin", "git@github.com:stevebargelt/fg591-second.git"],
+  ]) {
+    const res = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    if (res.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${res.stderr}`);
+  }
+  writeFileSync(join(dir, ".forge", "config.yml"), "backlog:\n  prefix: SEC\n");
+  mkdirSync(join(dir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(dir, "backlog", "stories", "SEC-1-only.md"),
+    `---\nid: SEC-1\ntype: story\nstatus: active\ntitle: only\ncreated: '2026-01-01'\n---\n\n${READY_BODY}\n`,
+  );
+  writeFileSync(join(dir, "README.md"), "# second\n");
+  for (const args of [["add", "-A"], ["commit", "-q", "-m", "fixture"]]) {
+    const res = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    if (res.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${res.stderr}`);
+  }
+  const res = forge(["backlog", "migrate"], {}, dir);
+  assert.equal(res.status, 0, `second migrate failed: ${res.stderr}`);
+  closeDb();
+  const yml = readFileSync(join(dir, ".forge", "config.yml"), "utf8");
+  const m = yml.match(/^project_key:\s*(\S+)\s*$/m);
+  assert.ok(m, `expected a committed project_key for the second project, got:\n${yml}`);
+  return m![1]!;
 }
 
 function readProjectKey(): string {
@@ -359,6 +394,44 @@ test("FG-591: arming records who and when, and --by cannot replace the OS identi
   const after = policyRows()[0]!;
   assert.match(after["updated_by"] as string, /@/);
   assert.equal(after["armed"], 0);
+});
+
+// ─── a host-wide change reaches every dispatcher (AC15) ─────────────────────
+
+test("FG-591: a capacity change wakes EVERY project's dispatcher, not just the invoking one", () => {
+  const pkA = migrate();
+  const pkB = migrateSecondProject();
+  assert.notEqual(pkA, pkB, "the fixture needs two distinct registered projects");
+
+  // Both projects have a dispatcher. Only ONE of them runs the operator's command.
+  seedLiveDispatcher(pkA, "dispatcher-a@1");
+  seedLiveDispatcher(pkB, "dispatcher-b@1");
+  closeDb();
+
+  assert.equal(forge(["queue", "dispatcher", "arm", "--max-active-runs", "2"]).status, 0);
+  // Both dispatchers consume what arming left them, so the next assertion is about the
+  // NEXT change rather than a record that was already there.
+  for (const pk of [pkA, pkB]) {
+    assert.ok(claimWakes({ projectKey: pk, consumer: `consumer-${pk}` }).length > 0, `${pk} was not woken by arming`);
+  }
+  assert.equal(forge(["queue", "dispatcher", "set", "--max-active-runs", "4"]).status, 0);
+
+  // The ceiling is ONE host-wide value (D3), so a change to it is a change every live
+  // dispatcher must re-evaluate against. A wake that reached only the invoker would
+  // leave B enforcing the old ceiling until its watchdog — polling as the correctness
+  // mechanism, which AC15 forbids.
+  for (const pk of [pkA, pkB]) {
+    const wakes = pendingWakes(pk).filter((w) => w.kind === "capacity_changed");
+    assert.equal(wakes.length, 1, `${pk} has no pending capacity_changed wake`);
+    assert.equal(wakes[0]?.wakeKey, "capacity", "the idempotency key is the subject, so repeats collapse");
+    assert.match(String(wakes[0]?.detail), /max_active_runs=4/);
+  }
+
+  // A POLICY-only change (the armed flag / cadence) is host-wide by the same rule.
+  assert.equal(forge(["queue", "dispatcher", "disarm"]).status, 0);
+  for (const pk of [pkA, pkB]) {
+    assert.equal(pendingWakes(pk).filter((w) => w.kind === "policy_changed").length, 1, `${pk} missed the policy wake`);
+  }
 });
 
 // ─── hostile / malformed policy input ───────────────────────────────────────

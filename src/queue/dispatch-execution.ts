@@ -91,7 +91,7 @@ import {
   recordLaunchStart as recordLaunchStartReal,
   type LaunchObservation,
 } from "../store/launch-observations.js";
-import { removeLaunch as removeLaunchReal, startLaunch as startLaunchReal, type LaunchMeta } from "../v2/launch.js";
+import { allocateLaunchId, removeLaunch as removeLaunchReal, startLaunch as startLaunchReal, type LaunchMeta } from "../v2/launch.js";
 import { acquireRunLock, releaseRunLock } from "../util/run-lock.js";
 import { FORGE_HOME, DB_PATH } from "../util/paths.js";
 
@@ -156,7 +156,10 @@ function releaseReservation(claim: QueueClaim, outcome: ReleaseOutcome): QueueCl
  *  ownership transfer and the durable stamp ordering under test are the production
  *  ones. */
 export type ExecutionSeams = {
-  startLaunch?: (argv: string[], opts: { name: string; cwd: string }) => LaunchMeta;
+  /** `id` is the identity ALREADY stamped on the claim: the implementation must start
+   *  the container under it and return it, because it is the only durable pointer a
+   *  successor has to what this call started. */
+  startLaunch?: (argv: string[], opts: { id: string; name: string; cwd: string }) => LaunchMeta;
   recordLaunchStart?: (meta: LaunchMeta, association: { ticketId: string }) => boolean;
   removeLaunch?: (id: string, opts?: { force?: boolean }) => void;
   promoteLaunchObservations?: () => number;
@@ -165,8 +168,8 @@ export type ExecutionSeams = {
   cancelWork?: (target: { runId: string; abandonRun: boolean }) => CancelOutcome;
 };
 
-function seamStartLaunch(seams: ExecutionSeams): (argv: string[], opts: { name: string; cwd: string }) => LaunchMeta {
-  return seams.startLaunch ?? ((argv, opts) => startLaunchReal(argv, { name: opts.name, cwd: opts.cwd }));
+function seamStartLaunch(seams: ExecutionSeams): (argv: string[], opts: { id: string; name: string; cwd: string }) => LaunchMeta {
+  return seams.startLaunch ?? ((argv, opts) => startLaunchReal(argv, { id: opts.id, name: opts.name, cwd: opts.cwd }));
 }
 
 function seamRecordLaunchStart(seams: ExecutionSeams): (meta: LaunchMeta, association: { ticketId: string }) => boolean {
@@ -533,11 +536,16 @@ function recordTargetRefusal(input: {
  *   2. Resolve the target. An unresolvable checkout or workflow releases
  *      `launch_failed` and RECORDS why — the ticket is immediately re-claimable and
  *      the operator is told, rather than the queue silently stalling.
- *   3. startLaunch under tmux ownership transfer, with the ordinary single-ticket argv.
- *   4. recordClaimLaunch IMMEDIATELY, before anything else. If the stamp is refused
- *      (the lease lapsed under us, or a takeover superseded our generation) the
- *      container is force-removed rather than left orphaned: we are no longer
- *      authorized to make anything durable about it, so it must not keep running.
+ *   3. MINT the launch identity and recordClaimLaunch it — BEFORE anything physical
+ *      exists. A crash anywhere after this leaves the successor a predecessor stamp,
+ *      which it ADOPTS; a crash between a physical launch and its stamp would leave
+ *      the successor nothing at all, and it would start a second container. The
+ *      identity is therefore durable first and the container is started under it,
+ *      never the other way round. A refused stamp (a lapsed lease, a takeover that
+ *      superseded our generation) means NOTHING was started: there is no container to
+ *      kill and none to orphan.
+ *   4. startLaunch under tmux ownership transfer, with the ordinary single-ticket
+ *      argv, UNDER THE STAMPED ID. A launch that throws releases `launch_failed`.
  *   5. recordLaunchStart last — instrumentation, best-effort by its own contract, and
  *      the durable ticket association a later orphan discovery reads.
  */
@@ -595,12 +603,45 @@ export function launchClaimedTicket(input: LaunchClaimInput): LaunchClaimResult 
     return { kind: "refused", refusal: resolved.refusal, released, evaluation };
   }
 
-  // ── 3. the physical launch ─────────────────────────────────────────────────
+  // ── 3. the durable stamp, BEFORE anything physical exists ──────────────────
+  const launchName = `queue-claim-${claim.ticketId}`;
+  const launchId = allocateLaunchId(launchName);
+  const stamped = recordClaimLaunch({
+    projectKey: claim.projectKey,
+    claimId: claim.id,
+    owner: claim.owner,
+    generation: claim.generation,
+    launchId,
+  });
+  if (stamped === null) {
+    // Fenced: a stale generation, or a lease that lapsed under us. Nothing has been
+    // started, so there is nothing to kill and nothing that can outlive this decision.
+    // The release is ATTEMPTED but not assumed (releaseClaim is lease-fenced too; if
+    // it refuses, lease expiry plus takeover is the recovery path).
+    const released = releaseReservation(claim, "launch_failed");
+    const evaluation = recordTargetRefusal({
+      claim,
+      dispatcherOwner,
+      dispatcherGeneration,
+      detail:
+        `claim ${claim.id} for ${claim.ticketId} could not stamp its launch identity — the owner/generation ` +
+        `fence or the lease refused. NOTHING was started: the stamp precedes the launch.`,
+    });
+    return {
+      kind: "launch_failed",
+      error: `the launch stamp was refused for claim ${claim.id} at generation ${claim.generation}`,
+      released,
+      evaluation,
+    };
+  }
+
+  // ── 4. the physical launch, under the identity already made durable ────────
   const argv = buildDispatchArgv(forgeBin, resolved.target);
   let meta: LaunchMeta;
   try {
     meta = seamStartLaunch(seams)(argv, {
-      name: `queue-claim-${claim.ticketId}`,
+      id: launchId,
+      name: launchName,
       cwd: resolved.target.projectDir,
     });
   } catch (e) {
@@ -615,40 +656,36 @@ export function launchClaimedTicket(input: LaunchClaimInput): LaunchClaimResult 
     return { kind: "launch_failed", error: message, released, evaluation };
   }
 
-  // ── 4. the durable stamp, FIRST and alone ──────────────────────────────────
-  const stamped = recordClaimLaunch({
-    projectKey: claim.projectKey,
-    claimId: claim.id,
-    owner: claim.owner,
-    generation: claim.generation,
-    launchId: meta.id,
-  });
-  if (stamped === null) {
-    // We are fenced: a stale generation, or a lease that lapsed while tmux started.
-    // An unstampable launch is an ORPHAN — the successor would find no pointer to it —
-    // so it is removed rather than left running, and the release is ATTEMPTED but not
-    // assumed (releaseClaim is lease-fenced too; if it refuses, lease expiry plus
-    // takeover is the recovery path and the record says so).
+  // A launcher that started the container under a DIFFERENT id than the one on the
+  // claim has produced exactly the orphan this ordering exists to prevent: the durable
+  // pointer names something else, so no recovery surface can reach the real container.
+  // Make it discoverable through its declared ticket FIRST, then remove it — a kill
+  // that fails then leaves a container a successor can still adopt, rather than an
+  // invisible one it would duplicate.
+  if (meta.id !== launchId) {
+    try {
+      seamRecordLaunchStart(seams)(meta, { ticketId: claim.ticketId });
+    } catch {
+      /* the observation is best-effort by its own contract; the removal still runs */
+    }
+    let removeError: string | null = null;
     try {
       seamRemoveLaunch(seams)(meta.id, { force: true });
-    } catch {
-      /* best-effort kill of the unstampable child */
+    } catch (e) {
+      removeError = (e as Error).message;
     }
-    const released = releaseReservation(claim, "launch_failed");
-    const evaluation = recordTargetRefusal({
-      claim,
-      dispatcherOwner,
-      dispatcherGeneration,
-      detail:
-        `claim ${claim.id} for ${claim.ticketId} started launch ${meta.id} and could not stamp it — the ` +
-        `owner/generation fence or the lease refused. The container was removed rather than left orphaned.`,
-    });
-    return {
-      kind: "launch_failed",
-      error: `the launch stamp was refused for claim ${claim.id} at generation ${claim.generation}`,
-      released,
-      evaluation,
-    };
+    // The reservation is released ONLY when the stray is provably gone. A kill that
+    // failed leaves work that may still be running, and a released reservation would
+    // re-admit the ticket to the scan — cancel's rule (D4), applied to the same fact.
+    const released = removeError === null ? releaseReservation(claim, "launch_failed") : null;
+    const detail =
+      `claim ${claim.id} for ${claim.ticketId} stamped launch ${launchId} and the launcher returned ${meta.id} ` +
+      `instead. The container ` +
+      (removeError === null
+        ? `was removed and the reservation released.`
+        : `could NOT be removed (${removeError}); it was recorded against the ticket and the reservation is HELD.`);
+    const evaluation = recordTargetRefusal({ claim, dispatcherOwner, dispatcherGeneration, detail });
+    return { kind: "launch_failed", error: detail, released, evaluation };
   }
 
   // ── 5. the observation (best-effort by contract; the ticket association a later
@@ -1021,6 +1058,17 @@ export type CancelClaimResult =
   /** There is no live reservation for this ticket. NOTHING was released — an
    *  operator dequeue/unrank/defer reaching this module would land here. */
   | { kind: "no_live_claim"; detail: string }
+  /** The stamped launch could NOT be removed, so the work may still be running. The
+   *  reservation is deliberately HELD: releasing it would re-admit a ticket whose
+   *  container is alive, which is the duplicate D4's ordering exists to prevent. */
+  | {
+      kind: "stop_failed";
+      claimId: string;
+      launchId: string;
+      cancelOutcome: CancelOutcome | null;
+      error: string;
+      detail: string;
+    }
   | {
       kind: "cancelled";
       claimId: string;
@@ -1040,7 +1088,8 @@ export type CancelClaimResult =
  * The order is asymmetric and is the whole safety argument:
  *   1. STOP THE WORK through the existing `forge cancel` seam — the run's containers
  *      are killed and its tasks failed, exactly as the CLI verb does.
- *   2. Remove the launch, so the tmux-owned wrapper cannot keep running.
+ *   2. Remove the launch, so the tmux-owned wrapper cannot keep running. If that
+ *      removal FAILS the verb ends there (`stop_failed`) with the reservation intact.
  *   3. ONLY THEN release the reservation, as `cancelled`, issued by the LEASE OWNER.
  *
  * Reversing 1 and 3 re-admits the ticket to the scan while its container still runs,
@@ -1074,14 +1123,29 @@ export function cancelClaimedTicket(input: {
     cancelOutcome = seamCancelWork(seams)({ runId: claim.runId, abandonRun: input.abandonRun ?? true });
   }
 
-  // 2. The launch, so the tmux-owned wrapper stops too.
+  // 2. The launch, so the tmux-owned wrapper stops too. A removal that FAILS is the
+  //    one thing that may not be swallowed here: the reservation is the only record
+  //    keeping a second dispatcher off a ticket whose container is still alive, so a
+  //    stop that did not happen ends this verb rather than the reservation.
   let launchRemoved: string | null = null;
   if (claim.launchId !== null) {
     try {
       seamRemoveLaunch(seams)(claim.launchId, { force: true });
       launchRemoved = claim.launchId;
-    } catch {
-      /* best-effort: a launch record that cannot be removed does not block the release */
+    } catch (e) {
+      const error = (e as Error).message;
+      return {
+        kind: "stop_failed",
+        claimId: claim.id,
+        launchId: claim.launchId,
+        cancelOutcome,
+        error,
+        detail:
+          `launch ${claim.launchId} for ${input.ticketId} could not be removed (${error}), so its container may ` +
+          `still be running. Claim ${claim.id} is HELD rather than released: cancellation stops the work FIRST, ` +
+          `and a reservation released over live work re-admits the ticket to a second dispatcher. ` +
+          `Remove the launch (\`forge launch rm --force ${claim.launchId}\`) and cancel again.`,
+      };
     }
   }
 

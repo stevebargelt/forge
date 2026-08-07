@@ -198,10 +198,12 @@ function launcher(): Launcher {
       n++;
       const ticketId = ticketIdFromArgv(argv);
       launches.push({ argv, cwd: opts.cwd, name: opts.name, ticketId });
+      // The identity is the one ALREADY stamped on the claim — a launcher that minted
+      // its own would orphan the container the stamp points at.
       const meta: LaunchMeta = {
-        id: `launch-${n}`,
+        id: opts.id,
         command: argv,
-        tmuxSession: `forge-launch-${n}`,
+        tmuxSession: `forge-${opts.id}`,
         launcherPid: process.pid,
         ownerPid: null,
         startedAt: "2026-08-06T00:00:00.000Z",
@@ -865,6 +867,46 @@ describe("FG-591 step 8: the primary wake observer", () => {
     assert.equal(again.length, 1, "a second observation returns the SAME pending record");
     assert.equal(again[0]?.id, first[0]?.id, "a duplicate poke is harmless by construction, not by care");
     assert.equal(listWakes(PK).filter((w) => w.kind === "run_terminal").length, 1);
+  });
+
+  test("an ENQUEUE while the dispatcher is idle wakes it, without waiting for the watchdog", async () => {
+    // AC15's most common queue change. The dispatcher starts with an EMPTY queue and
+    // its watchdog far in the future, so a tick can only happen if the enqueue itself
+    // left a durable signal.
+    arm({ maxActiveRuns: 1 });
+    const l = launcher();
+
+    const summary = await runDispatcherLoop(
+      loopOptions({
+        maxTicks: 2,
+        maxIterations: 100,
+        seams: {
+          execution: l.execution,
+          // The operator enqueues while the loop sleeps — after the startup tick has
+          // already looked and found nothing.
+          sleep: sleepAdvancingClock((slept) => {
+            if (slept === 1) seedQueued(["FG-1"]);
+          }),
+        },
+      }),
+    );
+
+    const woken = summary.ticks.filter((t) => t.trigger === "wake");
+    assert.equal(woken.length, 1, `nothing woke the dispatcher — it waited for its watchdog. ${fullDump()}`);
+    assert.deepEqual(
+      woken[0]?.wakes.map((w) => w.kind),
+      ["queue_changed"],
+      "the signal it acted on is the queue change itself",
+    );
+    assert.deepEqual(ticketsLaunched(l), ["FG-1"], "the enqueued ticket was launched on the wake");
+
+    const queueWakes = listWakes(PK).filter((w) => w.kind === "queue_changed");
+    assert.deepEqual(
+      queueWakes.map((w) => w.wakeKey),
+      ["ticket:FG-1"],
+      "rank + enqueue name ONE subject, so they collapse onto one durable record",
+    );
+    assert.equal(queueWakes[0]?.state, "consumed", "the wake is consumed exactly once, by the dispatcher that acted");
   });
 
   test("observes only the claims THIS owner holds", async () => {

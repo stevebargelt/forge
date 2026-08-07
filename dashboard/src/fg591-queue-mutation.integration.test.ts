@@ -68,6 +68,7 @@ const {
   QUEUE_MUTATION_ROUTES,
   QUEUE_MUTATION_FORGE_VERBS,
   buildForgeArgv,
+  dashboardOrigins,
   guardBindAddress,
   guardMutationRequest,
   handleQueueMutation,
@@ -336,21 +337,63 @@ test("FG-591: the bind-address admission test, as a pure function", () => {
 
 test("FG-591: the header guard is exhaustive over provenance, as a pure function", () => {
   const host = "127.0.0.1:8024";
+  // The CONFIGURED origins of a default loopback dashboard — the server's own, never
+  // the request's. Passed explicitly so the guard is exercised without env fiddling.
+  const pinned = dashboardOrigins({ HOST: "127.0.0.1", PORT: "8024" });
+  const guard = (h: Parameters<typeof guardMutationRequest>[0]) => guardMutationRequest(h, pinned);
   const ok = { contentType: "application/json", host };
-  assert.equal(guardMutationRequest(ok), null, "a same-origin JSON request with no browser headers is allowed");
-  assert.equal(guardMutationRequest({ ...ok, origin: `http://${host}` }), null);
-  assert.equal(guardMutationRequest({ ...ok, origin: `https://${host}` }), null, "a TLS-terminating proxy keeps Host and is still same-origin");
-  assert.equal(guardMutationRequest({ ...ok, secFetchSite: "same-origin" }), null);
-  assert.equal(guardMutationRequest({ ...ok, secFetchSite: "none" }), null, "an address-bar / non-browser request is not cross-origin");
-  assert.equal(guardMutationRequest({ ...ok, contentType: "application/json; charset=utf-8" }), null);
+  assert.equal(guard(ok), null, "a same-origin JSON request with no browser headers is allowed");
+  assert.equal(guard({ ...ok, origin: `http://${host}` }), null);
+  assert.equal(guard({ ...ok, origin: `https://${host}` }), null, "a TLS-terminating proxy keeps Host and is still same-origin");
+  assert.equal(guard({ ...ok, host: "localhost:8024", origin: "http://localhost:8024" }), null, "localhost IS this server");
+  assert.equal(guard({ ...ok, secFetchSite: "same-origin" }), null);
+  assert.equal(guard({ ...ok, secFetchSite: "none" }), null, "an address-bar / non-browser request is not cross-origin");
+  assert.equal(guard({ ...ok, contentType: "application/json; charset=utf-8" }), null);
 
-  assert.equal(guardMutationRequest({ ...ok, origin: "http://evil.example" })?.status, 403);
-  assert.equal(guardMutationRequest({ ...ok, origin: "null" })?.status, 403, "a sandboxed iframe's null origin is never same-origin");
-  assert.equal(guardMutationRequest({ ...ok, origin: `http://${host}`, host: undefined })?.status, 403, "an Origin with no Host to check it against is refused");
-  assert.equal(guardMutationRequest({ ...ok, secFetchSite: "cross-site" })?.status, 403);
-  assert.equal(guardMutationRequest({ ...ok, secFetchSite: "same-site" })?.status, 403, "a sibling subdomain is not us");
-  assert.equal(guardMutationRequest({ contentType: "text/plain", host })?.status, 415);
-  assert.equal(guardMutationRequest({ host })?.status, 415, "a missing content type is refused, not defaulted");
+  assert.equal(guard({ ...ok, origin: "http://evil.example" })?.status, 403);
+  assert.equal(guard({ ...ok, origin: "null" })?.status, 403, "a sandboxed iframe's null origin is never same-origin");
+  assert.equal(guard({ ...ok, origin: `http://${host}`, host: undefined })?.status, 403, "an Origin with no Host to check it against is refused");
+  assert.equal(guard({ ...ok, secFetchSite: "cross-site" })?.status, 403);
+  assert.equal(guard({ ...ok, secFetchSite: "same-site" })?.status, 403, "a sibling subdomain is not us");
+  assert.equal(guardMutationRequest({ contentType: "text/plain", host }, pinned)?.status, 415);
+  assert.equal(guardMutationRequest({ host }, pinned)?.status, 415, "a missing content type is refused, not defaulted");
+});
+
+test("FG-591 (RF-7): a DNS-rebinding origin is refused, because the check is pinned to the CONFIGURED origin", () => {
+  const pinned = dashboardOrigins({ HOST: "127.0.0.1", PORT: "8024" });
+  // The attack, exactly: attacker.example is rebound to 127.0.0.1, so the browser
+  // reaches this loopback server while believing it is on the attacker's own origin.
+  // Every header is therefore self-consistent and browser-set — Origin and Host agree,
+  // Sec-Fetch-Site really is same-origin, and the JSON content type needs no preflight.
+  const rebound = {
+    contentType: "application/json",
+    host: "attacker.example:8024",
+    origin: "http://attacker.example:8024",
+    secFetchSite: "same-origin",
+  };
+  const refusal = guardMutationRequest(rebound, pinned);
+  assert.equal(refusal?.status, 403, "a rebound name that agrees with itself must NOT be treated as same-origin");
+  assert.match(String(refusal?.error), /Host: attacker\.example:8024/);
+  // The pre-fix guard compared Origin to the request's own Host, which this passes.
+  assert.equal(
+    rebound.origin,
+    `http://${rebound.host}`,
+    "the request is self-consistent — that is why comparing Origin to Host could never reject it",
+  );
+
+  // The two ways an operator legitimately serves this elsewhere, both explicit.
+  assert.equal(dashboardOrigins({ HOST: "0.0.0.0" }), null, "a non-loopback bind derives no origin to pin");
+  assert.deepEqual(dashboardOrigins({ FORGE_DASHBOARD_ORIGIN: "https://forge.internal, https://forge.lan/" }), [
+    "https://forge.internal",
+    "https://forge.lan",
+  ]);
+  assert.equal(
+    guardMutationRequest({ contentType: "application/json", host: "forge.internal", origin: "https://forge.internal" }, [
+      "https://forge.internal",
+    ]),
+    null,
+    "a declared origin is honoured",
+  );
 });
 
 // ─── 2. exactly the named verb, exactly this argv ────────────────────────────

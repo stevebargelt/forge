@@ -129,10 +129,48 @@ export type MutationRequestHeaders = {
   host?: string | undefined;
 };
 
+/**
+ * THE ORIGINS THIS DASHBOARD ACTUALLY HAS, derived from the server's OWN configuration
+ * — never from the request.
+ *
+ * A request's Host header is caller-controlled, so checking Origin against it only
+ * proves the two agree, which a DNS-REBINDING page satisfies trivially: serve a page
+ * at attacker.example, rebind that name to 127.0.0.1, and the browser then sends
+ * Origin AND Host of attacker.example plus `Sec-Fetch-Site: same-origin`. Every
+ * request-derived guard passes and the loopback dashboard runs the host's forge CLI.
+ * Pinning to the configured bind address is what closes it: the attacker's page cannot
+ * make the browser send an origin it does not have.
+ *
+ * The loopback aliases are enumerated because an operator reaches a 127.0.0.1 bind as
+ * `localhost` as readily as by address, and both are genuinely this server.
+ * FORGE_DASHBOARD_ORIGIN (comma-separated) replaces the derivation outright.
+ *
+ * NULL means "this deployment has no derivable origin": a non-loopback bind that
+ * declared no origin of its own. Only FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS reaches
+ * that state (guardBindAddress refuses it otherwise), and it is the operator saying
+ * this dashboard is fronted by their own authentication — forge cannot name their
+ * hostname, so it falls back to Origin/Host agreement there and pins nothing it
+ * would only be guessing at. The unauthenticated loopback surface D2 reasoned about
+ * is the one that gets the pin.
+ */
+export function dashboardOrigins(env: NodeJS.ProcessEnv = process.env): string[] | null {
+  const configured = env["FORGE_DASHBOARD_ORIGIN"];
+  if (configured !== undefined && configured.trim() !== "") {
+    return configured.split(",").map((o) => o.trim().replace(/\/+$/, "")).filter((o) => o !== "");
+  }
+  const host = env["HOST"] ?? "127.0.0.1";
+  if (!/^(127\.|::1$|\[::1\]$|localhost$)/.test(host)) return null;
+  const port = Number(env["PORT"] ?? 8024);
+  return ["127.0.0.1", "localhost", "[::1]"].flatMap((h) => [`http://${h}:${port}`, `https://${h}:${port}`]);
+}
+
 /** PURE over the request's headers, so the cross-origin rule can be exercised
  *  exhaustively without a socket. Runs BEFORE the body is read and long before any
  *  subprocess is considered. */
-export function guardMutationRequest(headers: MutationRequestHeaders): MutationRefusal | null {
+export function guardMutationRequest(
+  headers: MutationRequestHeaders,
+  allowedOrigins: readonly string[] | null = dashboardOrigins(),
+): MutationRefusal | null {
   // Sec-Fetch-Site is the browser's own statement of provenance and cannot be set by
   // page script. `none` is a user-initiated request (address bar, a curl that happens
   // to send it); `same-origin` is this page. Anything else — `cross-site`,
@@ -142,14 +180,44 @@ export function guardMutationRequest(headers: MutationRequestHeaders): MutationR
     return refuse(403, `cross-origin request refused (Sec-Fetch-Site: ${site}). This surface is same-origin only.`);
   }
 
-  // Origin, checked against THIS server's own Host. A browser sends it on every
-  // cross-origin POST; its absence means a non-browser client, which is the same
-  // trust position every other route on this unauthenticated loopback surface has.
+  const host = headers.host?.trim().toLowerCase();
   const origin = headers.origin?.trim();
-  if (origin !== undefined && origin !== "") {
-    const host = headers.host?.trim();
+
+  // The HOST the request names must be one this dashboard was configured to serve.
+  // This is the DNS-rebinding guard: the browser derives Host from the URL, so a page
+  // at attacker.example — however that name resolves — cannot send one of ours.
+  if (allowedOrigins !== null) {
+    const allowedHosts = new Set(allowedOrigins.map((o) => o.replace(/^https?:\/\//, "").toLowerCase()));
+    if (host === undefined || host === "") {
+      return refuse(403, "request refused: the request carries no Host header, and this surface checks it.");
+    }
+    if (!allowedHosts.has(host)) {
+      return refuse(
+        403,
+        `request refused (Host: ${host}). This dashboard answers mutations only at ${[...allowedHosts].join(", ")}; ` +
+          `a Host it was not configured for is a rebound name, not this server. Set FORGE_DASHBOARD_ORIGIN if you ` +
+          `deliberately serve it elsewhere.`,
+      );
+    }
+    // Origin, checked against the CONFIGURED origin — never against the request's own
+    // Host, which the caller supplies and a rebinding page satisfies by construction.
+    // A browser sends Origin on every POST; its absence means a non-browser client,
+    // which is the same trust position every other route on this unauthenticated
+    // loopback surface has.
+    if (origin !== undefined && origin !== "") {
+      // `Origin: null` (a sandboxed iframe, a file:// page) is never same-origin.
+      if (!allowedOrigins.some((o) => o.toLowerCase() === origin.replace(/\/+$/, "").toLowerCase())) {
+        return refuse(
+          403,
+          `cross-origin request refused (Origin: ${origin}). This surface is same-origin only, at ` +
+            `${allowedOrigins.join(", ")}.`,
+        );
+      }
+    }
+  } else if (origin !== undefined && origin !== "") {
+    // No derivable origin (a non-loopback bind behind the operator's own auth): all
+    // this can still assert is that the page and the request name the same host.
     if (!host) return refuse(403, "cross-origin request refused: the request carries an Origin but no Host to check it against.");
-    // `Origin: null` (a sandboxed iframe, a file:// page) is never same-origin.
     if (origin !== `http://${host}` && origin !== `https://${host}`) {
       return refuse(403, `cross-origin request refused (Origin: ${origin}). This surface is same-origin only.`);
     }

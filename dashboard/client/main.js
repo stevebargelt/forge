@@ -78,6 +78,8 @@ function App() {
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
   const [queue, setQueue] = useState(null);
+  // Sequence token for the queue read — see pollQueue.
+  const queueSeq = useRef(0);
   const [reviews, setReviews] = useState(null);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
@@ -308,13 +310,22 @@ function App() {
   // re-read explicitly after a mutation the CLI accepted — a refusal never triggers
   // a reload, because re-fetching over a refused move hides the reason it was refused.
   const pollQueue = useCallback(async () => {
+    // Scope-token, runtimeSeq's rule applied to the board the operator MUTATES from:
+    // an in-flight read for the previous project may resolve after the read for the
+    // one just switched to, and committing it would show project A's queue while
+    // every enqueue/reorder control on it submits against project B.
+    const seq = (queueSeq.current += 1);
     if (!projectFilter) { setQueue(null); return; }
     try {
       const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/queue${q}`);
+      if (seq !== queueSeq.current) return;
       if (res.ok) setQueue(await res.json());
       setNow(Date.now());
-    } catch (e) { setError(String(e)); }
+    } catch (e) {
+      if (seq !== queueSeq.current) return;
+      setError(String(e));
+    }
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {

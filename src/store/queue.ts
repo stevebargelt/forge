@@ -79,6 +79,10 @@
 // that republished snapshots machine-wide would be pure blast radius.
 
 import { getDb, writeTransaction } from "./db.js";
+// A CYCLE, and a deliberate one: dispatcher-evidence.ts imports QueueRefusal from
+// here. Both directions are used only inside function bodies — nothing here runs at
+// module-eval time — so the partially-evaluated namespace is never read.
+import { recordWake } from "./dispatcher-evidence.js";
 import { getTicket, ticketContentHash, type TicketRow } from "./tickets.js";
 import { isStatusBearingEvidenceSource } from "./blocked-source.js";
 import { evaluateReadiness, type ReadinessResult } from "../readiness/readiness.js";
@@ -204,7 +208,15 @@ function renumber(projectKey: string, orderedIds: string[]): void {
 /** Append one row to THE queue history. Exported since FG-610 so the claim
  *  primitives write claim/release history into this same table rather than
  *  opening a second one. The CALLER holds the write transaction — the event and
- *  the state change it records must commit together or not at all. */
+ *  the state change it records must commit together or not at all.
+ *
+ *  FG-591 AC15: an ORDER-AFFECTING event also records a durable `queue_changed`
+ *  wake, HERE, so the signal commits in the same transaction as the change that
+ *  caused it. Enqueue is the common case and the one that matters most — an
+ *  otherwise-idle dispatcher must re-evaluate on the change rather than at its next
+ *  watchdog tick, and polling is the fallback, never the correctness mechanism.
+ *  Claim and release are deliberately NOT in that set: the dispatcher writes them
+ *  itself and wakes on `run_terminal`, so waking on them would be a loop. */
 export function appendQueueEvent(
   projectKey: string,
   ticketId: string,
@@ -218,6 +230,14 @@ export function appendQueueEvent(
        VALUES (?, ?, ?, ?, ?)`,
     )
     .run(projectKey, ticketId, eventType, payload ? JSON.stringify(payload) : null, at);
+  if (QUEUE_ORDER_EVENT_TYPES.includes(eventType)) {
+    recordWake({
+      projectKey,
+      kind: "queue_changed",
+      wakeKey: `ticket:${ticketId}`,
+      detail: `${eventType} ${ticketId}`,
+    });
+  }
 }
 
 export function queueEvents(projectKey: string, ticketId?: string): QueueEvent[] {

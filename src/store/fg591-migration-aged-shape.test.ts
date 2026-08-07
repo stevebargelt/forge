@@ -686,15 +686,26 @@ test("FG-591: FG-609's and FG-610's paths still serve on an aged store carrying 
     assert.equal(claim.reason, "granted");
     assert.equal(claim.claimed?.ticketId, "FG-1");
 
-    // Nothing about the four new tables perturbed the claim ledger, and the dispatcher
-    // tables are still empty: this step adds SHAPE, never behaviour.
+    // Nothing about the four new tables perturbed the claim ledger, and the tables
+    // this step only adds SHAPE for are still empty.
     assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM queue_claims`).get() as { n: number }).n, 1);
     for (const table of DISPATCHER_TABLES) {
+      if (table === "dispatcher_wakes") continue;
       assert.equal(
         (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n,
         0,
         `${table} must stay empty — no code writes it yet`,
       );
     }
+    // dispatcher_wakes IS written, on the aged store like any other: AC15's queue
+    // change signal commits with the change. One pending record per subject ticket,
+    // and rank+enqueue for the same ticket collapse onto one.
+    const wakes = db
+      .prepare(`SELECT kind, wake_key, state FROM dispatcher_wakes WHERE project_key = ? ORDER BY wake_key ASC`)
+      .all(PK) as { kind: string; wake_key: string; state: string }[];
+    assert.deepEqual(wakes, [
+      { kind: "queue_changed", wake_key: "ticket:FG-1", state: "pending" },
+      { kind: "queue_changed", wake_key: "ticket:FG-2", state: "pending" },
+    ]);
   });
 });

@@ -509,6 +509,20 @@ export function getDispatcherLease(projectKey: string): DispatcherLease | undefi
   return readLease(projectKey);
 }
 
+/** Every project a dispatcher has ever held a lease in. This is the audience for a
+ *  HOST-WIDE change (the policy and the capacity ceiling are one value for the whole
+ *  machine): a wake that reached only the project the operator happened to run in
+ *  would leave every other live dispatcher on its watchdog. Lapsed leases are
+ *  INCLUDED — an expired lease proves only that heartbeating stopped, and a wake for
+ *  a project with no dispatcher is inert (it collapses onto one pending row and is
+ *  consumed idempotently whenever a dispatcher next runs). */
+export function dispatcherLeaseProjectKeys(): string[] {
+  const rows = getDb()
+    .prepare(`SELECT DISTINCT project_key FROM dispatcher_leases ORDER BY project_key ASC`)
+    .all() as { project_key: string }[];
+  return rows.map((r) => r.project_key);
+}
+
 /**
  * The operator-surface read: is there a dispatcher, is it authorized right now, and
  * when was it last actually alive. A dead dispatcher and an idle one are DIFFERENT

@@ -49,7 +49,7 @@ import {
 } from "../store/queue-claims.js";
 import { setDispatcherPolicy, getDispatcherPolicy } from "../store/dispatcher-policy.js";
 import { evaluationsFor, latestEvaluation } from "../store/dispatcher-evidence.js";
-import { recordLaunchObservation, updateLaunchObservationStatus } from "../store/launch-observations.js";
+import { getLaunchObservation, recordLaunchObservation, updateLaunchObservationStatus } from "../store/launch-observations.js";
 import type { LaunchMeta } from "../v2/launch.js";
 import { resetPublishBarrierForTest } from "../backlog/snapshot.js";
 import {
@@ -190,11 +190,16 @@ function recordingSeams(
   over: {
     onStartLaunch?: (argv: string[]) => void;
     throwOnLaunch?: string;
+    /** Return THIS id instead of the pre-stamped one — the misbehaving-launcher case. */
     launchId?: string;
     observe?: boolean;
   } = {},
-): ExecutionSeams & { launches: { argv: string[]; cwd: string; name: string }[]; removed: string[]; stampedWhenObserved: (string | null)[] } {
-  const launches: { argv: string[]; cwd: string; name: string }[] = [];
+): ExecutionSeams & {
+  launches: { argv: string[]; cwd: string; name: string; id: string }[];
+  removed: string[];
+  stampedWhenObserved: (string | null)[];
+} {
+  const launches: { argv: string[]; cwd: string; name: string; id: string }[] = [];
   const removed: string[] = [];
   const stampedWhenObserved: (string | null)[] = [];
   return {
@@ -204,8 +209,8 @@ function recordingSeams(
     startLaunch: (argv, opts) => {
       over.onStartLaunch?.(argv);
       if (over.throwOnLaunch) throw new Error(over.throwOnLaunch);
-      launches.push({ argv, cwd: opts.cwd, name: opts.name });
-      return fakeMeta(over.launchId ?? `launch-${launches.length}`, { cwd: opts.cwd, command: argv });
+      launches.push({ argv, cwd: opts.cwd, name: opts.name, id: opts.id });
+      return fakeMeta(over.launchId ?? opts.id, { cwd: opts.cwd, command: argv });
     },
     recordLaunchStart: (meta, association) => {
       // Prove the ORDER: by the time the observation is written, the durable claim
@@ -459,18 +464,78 @@ describe("FG-591 step 7: launching a claimed ticket", () => {
     assert.deepEqual(buildDispatchArgv(FORGE_BIN, { projectKey: PK, ticketId: "FG-1", title: "title FG-1", workflow: "feature", projectDir: CHECKOUT }), argv);
   });
 
-  test("the durable stamp lands BEFORE the launch observation is written", () => {
+  test("the durable stamp lands BEFORE the physical launch, and before the observation", () => {
     seedQueued(["FG-1"]);
     const claim = grant("FG-1");
-    const seams = recordingSeams({ launchId: "launch-order" });
+    const stampedWhenLaunched: (string | null)[] = [];
+    const seams = recordingSeams({
+      onStartLaunch: () => stampedWhenLaunched.push(liveClaims(PK).find((c) => c.ticketId === "FG-1")?.launchId ?? null),
+    });
     const res = launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
     assert.equal(res.kind, "launched");
+    if (res.kind !== "launched") return;
+
     assert.deepEqual(
-      seams.stampedWhenObserved,
-      ["launch-order"],
-      "recordClaimLaunch is the first act after the launch: the observation writer already sees the stamp",
+      stampedWhenLaunched,
+      [res.launchId],
+      "the launcher is called with an identity the claim ALREADY carries — a crash here leaves a stamp to adopt",
     );
-    assert.equal(getClaim(PK, claim.id)?.launchId, "launch-order");
+    assert.equal(seams.launches[0]?.id, res.launchId, "the container is started UNDER the stamped identity");
+    assert.deepEqual(seams.stampedWhenObserved, [res.launchId]);
+    assert.equal(getClaim(PK, claim.id)?.launchId, res.launchId);
+  });
+
+  test("a stamp the fence refuses starts NOTHING — there is no container to orphan", () => {
+    seedQueued(["FG-1"]);
+    const claim = grant("FG-1");
+    // The successor's takeover bumped our generation: our stamp can no longer land.
+    const superseded = { ...claim, generation: claim.generation + 7 } as QueueClaim;
+    const seams = recordingSeams({ onStartLaunch: () => assert.fail("an unstampable claim must never start a container") });
+
+    const res = launchClaimedTicket({ claim: superseded, forgeBin: FORGE_BIN, seams });
+    assert.equal(res.kind, "launch_failed");
+    assert.equal(seams.launches.length, 0);
+    assert.equal(seams.removed.length, 0, "nothing was started, so nothing is killed");
+    assert.equal(getClaim(PK, claim.id)?.launchId, null, "no identity was stamped under a superseded generation");
+    assert.match(latestEvaluation(PK)?.detail ?? "", /NOTHING was started/);
+  });
+
+  test("a launcher that returns a DIFFERENT id records the ticket association BEFORE removing the stray", () => {
+    seedQueued(["FG-1"]);
+    const claim = grant("FG-1");
+    const seams = recordingSeams({ launchId: "launch-not-the-stamped-one" });
+
+    const res = launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
+    assert.equal(res.kind, "launch_failed");
+    assert.deepEqual(seams.removed, ["launch-not-the-stamped-one"], "the stray container is removed");
+    // The observation is written FIRST, so a removal that had FAILED would still have
+    // left a container a successor can discover through its declared ticket.
+    assert.equal(
+      getLaunchObservation("launch-not-the-stamped-one")?.ticketId,
+      "FG-1",
+      "an unstampable container is made discoverable before any attempt to kill it",
+    );
+    assert.equal(liveClaims(PK).length, 0, "the stray is provably gone, so the slot is returned");
+  });
+
+  test("a stray container that could NOT be killed holds the reservation rather than re-admitting the ticket", () => {
+    seedQueued(["FG-1"]);
+    const claim = grant("FG-1");
+    const seams = recordingSeams({ launchId: "launch-unkillable" });
+    seams.removeLaunch = () => {
+      throw new Error("tmux: no server running");
+    };
+
+    const res = launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
+    assert.equal(res.kind, "launch_failed");
+    if (res.kind !== "launch_failed") return;
+    assert.equal(res.released, null, "nothing may be released over a container that may still be running");
+    assert.equal(liveClaims(PK).length, 1, "the ticket is NOT re-claimable while an unkilled container may hold it");
+    assert.equal(
+      getLaunchObservation("launch-unkillable")?.ticketId,
+      "FG-1",
+      "and the container it could not kill is discoverable, never untracked",
+    );
   });
 
   test("a launch that THROWS releases the claim 'launch_failed' and the ticket is immediately re-claimable", () => {
@@ -640,11 +705,11 @@ describe("FG-591 step 7: a takeover ADOPTS the prior launch rather than starting
     });
     seedQueued(["FG-1"]);
     const claim = grant("FG-1");
-    const seams = recordingSeams({ launchId: "launch-fresh" });
+    const seams = recordingSeams();
 
     const res = launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
     assert.equal(res.kind, "launched");
-    if (res.kind === "launched") assert.equal(res.launchId, "launch-fresh");
+    if (res.kind === "launched") assert.notEqual(res.launchId, "launch-older", "a fresh container was started, not the old one adopted");
   });
 });
 
@@ -695,10 +760,10 @@ describe("FG-591 step 7: the reservation and the execution are read separately",
   function launched(ticketId = "FG-1"): { claim: QueueClaim; launchId: string } {
     seedQueued([ticketId]);
     const claim = grant(ticketId);
-    const seams = recordingSeams({ launchId: "launch-exec" });
+    const seams = recordingSeams();
     const res = launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
     assert.equal(res.kind, "launched");
-    return { claim: getClaim(PK, claim.id) as QueueClaim, launchId: "launch-exec" };
+    return { claim: getClaim(PK, claim.id) as QueueClaim, launchId: (res as { launchId: string }).launchId };
   }
 
   test("a live launch with no run yet is RUNNING — never a reason to release", () => {
@@ -804,7 +869,7 @@ describe("FG-591 step 7 (D4): cancel stops the work FIRST, then the LEASE OWNER 
   function launchedWithRun(): QueueClaim {
     seedQueued(["FG-1"]);
     const claim = grant("FG-1");
-    const seams = recordingSeams({ launchId: "launch-cancel" });
+    const seams = recordingSeams();
     assert.equal(launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams }).kind, "launched");
     seedRun("run-cancel", { ticketId: "FG-1", status: "active" });
     const bound = reconcileClaimExecution({ projectKey: PK, claimId: claim.id, seams: recordingSeams() });
@@ -838,11 +903,15 @@ describe("FG-591 step 7 (D4): cancel stops the work FIRST, then the LEASE OWNER 
       true,
       "the release must come AFTER the stop: releasing first re-admits the ticket while its container still runs",
     );
-    assert.deepEqual(order, ["cancel:run-cancel", "remove:launch-cancel"], "the work is stopped, then its launch, then the reservation");
+    assert.deepEqual(
+      order,
+      ["cancel:run-cancel", `remove:${claim.launchId}`],
+      "the work is stopped, then its launch, then the reservation",
+    );
     assert.equal(res.kind, "cancelled");
     if (res.kind !== "cancelled") return;
     assert.equal(res.released?.outcome, "cancelled");
-    assert.equal(res.launchRemoved, "launch-cancel");
+    assert.equal(res.launchRemoved, claim.launchId);
     assert.equal(res.releaseRefused, null);
     assert.equal(liveClaims(PK).length, 0);
   });
@@ -910,8 +979,9 @@ describe("FG-591 step 7 (D4): cancel stops the work FIRST, then the LEASE OWNER 
   test("a reservation with no run yet still stops its launch and retires cleanly", () => {
     seedQueued(["FG-1"]);
     const claim = grant("FG-1");
-    const seams = recordingSeams({ launchId: "launch-prelaunch" });
-    launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
+    const seams = recordingSeams();
+    const launch = launchClaimedTicket({ claim, forgeBin: FORGE_BIN, seams });
+    assert.equal(launch.kind, "launched");
     const removed: string[] = [];
 
     const res = cancelClaimedTicket({
@@ -928,8 +998,40 @@ describe("FG-591 step 7 (D4): cancel stops the work FIRST, then the LEASE OWNER 
     assert.equal(res.kind, "cancelled");
     if (res.kind !== "cancelled") return;
     assert.equal(res.cancelOutcome, null);
-    assert.deepEqual(removed, ["launch-prelaunch"]);
+    assert.deepEqual(removed, [(launch as { launchId: string }).launchId]);
     assert.equal(res.released?.outcome, "cancelled");
+  });
+
+  test("a launch that CANNOT be removed holds the reservation rather than releasing over live work", () => {
+    const claim = launchedWithRun();
+    let stopped = false;
+
+    const res = cancelClaimedTicket({
+      projectKey: PK,
+      ticketId: "FG-1",
+      seams: {
+        promoteLaunchObservations: () => 0,
+        removeLaunch: () => {
+          throw new Error("tmux: no server running on /tmp/tmux-501/default");
+        },
+        cancelWork: (t) => {
+          stopped = true;
+          return { kind: "run-cancelled", runId: t.runId, tasksKilled: [], runAbandoned: true, runAbandonRefused: false };
+        },
+      },
+    });
+
+    assert.equal(stopped, true, "the stop is still attempted first");
+    assert.equal(res.kind, "stop_failed");
+    if (res.kind !== "stop_failed") return;
+    assert.equal(res.launchId, claim.launchId);
+    assert.match(res.detail, /HELD rather than released/);
+    assert.equal(
+      getClaim(PK, claim.id)?.state,
+      "live",
+      "D4: a reservation released over a launch that is still running re-admits the ticket to a second dispatcher",
+    );
+    assert.equal(liveClaims(PK).length, 1, "the ticket is NOT re-claimable while its container may be alive");
   });
 });
 

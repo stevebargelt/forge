@@ -105,7 +105,7 @@ import {
   type DispatcherEvaluation,
   type WakeKind,
 } from "../../store/dispatcher-evidence.js";
-import { setDispatcherPolicy, type DispatcherPolicy } from "../../store/dispatcher-policy.js";
+import { dispatcherLeaseProjectKeys, setDispatcherPolicy, type DispatcherPolicy } from "../../store/dispatcher-policy.js";
 import { cancelClaimedTicket } from "../../queue/dispatch-execution.js";
 import {
   DISPATCHER_ID_ENV,
@@ -1175,21 +1175,18 @@ function writePolicy(
 
   // The wake, so a running dispatcher re-evaluates on the CHANGE rather than at the
   // next watchdog tick (AC15 names capacity and policy changes as wake sources). The
-  // policy is host-wide but a wake is per-project: this records one for the project
-  // the operator ran in, and every OTHER project's dispatcher picks the change up on
-  // its own watchdog. That is the documented fallback doing exactly its job — the
-  // change is durable the instant it is written, and no claim can be granted against
-  // the old value once it is.
+  // policy and the ceiling are HOST-WIDE values (D3), so the change is host-wide and
+  // the wake must be too: one record for the project the operator ran in, and one for
+  // every project a dispatcher has held a lease in. Waking only the invoker would
+  // leave every other live dispatcher enforcing the old ceiling until its watchdog.
   const capacityMoved = policy.maxActiveRuns !== before.maxActiveRuns || policy.capacityScope !== before.capacityScope;
   const kind: WakeKind = capacityMoved ? "capacity_changed" : "policy_changed";
-  recordWake({
-    projectKey,
-    kind,
-    wakeKey: capacityMoved ? "capacity" : "policy",
-    detail:
-      `${verb} by ${updatedBy}: armed=${policy.armed}, max_active_runs=${policy.maxActiveRuns}, ` +
-      `${policy.capacityScope} scope, lease ${policy.leaseTtlMs}ms, heartbeat ${policy.heartbeatMs}ms`,
-  });
+  const detail =
+    `${verb} by ${updatedBy}: armed=${policy.armed}, max_active_runs=${policy.maxActiveRuns}, ` +
+    `${policy.capacityScope} scope, lease ${policy.leaseTtlMs}ms, heartbeat ${policy.heartbeatMs}ms`;
+  for (const key of new Set([projectKey, ...dispatcherLeaseProjectKeys()])) {
+    recordWake({ projectKey: key, kind, wakeKey: capacityMoved ? "capacity" : "policy", detail });
+  }
 
   const notes: string[] = [];
   if (policy.maxActiveRuns < before.maxActiveRuns) {
@@ -1759,6 +1756,18 @@ function registerDispatcher(queue: Command): void {
         });
         if (res.kind === "no_live_claim") {
           return { action: "cancel", ticketId: idArg, cancelled: false, refusal: `forge: queue cancel — ${res.detail}` };
+        }
+        if (res.kind === "stop_failed") {
+          // No wake: nothing was released, so no slot freed. Saying otherwise would
+          // invite the dispatcher to look at a ticket whose container is still alive.
+          return {
+            action: "cancel",
+            ticketId: idArg,
+            cancelled: false,
+            claimId: res.claimId,
+            workStopped: res.cancelOutcome,
+            refusal: `forge: queue cancel — ${res.detail}`,
+          };
         }
         // The reservation ended, so a slot may have freed. Recorded with the SAME
         // idempotency key the dispatcher's own terminal observer derives, so the two

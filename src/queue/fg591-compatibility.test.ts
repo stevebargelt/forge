@@ -504,6 +504,50 @@ describe("FG-591 D10: workspace lanes inside one repository", () => {
     );
   });
 
+  test("the SAME ticket id in another project is a different ticket — it does not serialise this one", () => {
+    // Ticket ids are per-project: FG-1 in two repositories is two tickets. Under a
+    // host-scoped active set, treating the id as host-global made one project's FG-1
+    // block the other's for a reason unconnected to capacity.
+    seedQueued(["FG-1"], PK2);
+    seedQueued(["FG-1"]);
+    const other = claimNext({ projectKey: PK2, owner: "ctl-other" });
+    assert.equal(other.reason, "granted");
+    assert.equal((other.claimed as QueueClaim).ticketId, "FG-1");
+
+    const facts = hydrate();
+    assert.equal(facts.activeRuns.length, 1, "host scope hydrates the other project's claim");
+    assert.equal(facts.activeRuns[0]?.projectKey, PK2);
+    assert.deepEqual(
+      evaluateCompatibility(facts, candidateFor("FG-1", 1), facts.activeRuns.map(summarizeFact)),
+      { compatible: true },
+      "another repository's FG-1 is not this FG-1",
+    );
+
+    // And the guard is not blanket: THIS project's own FG-1, live, still refuses.
+    const mine = claimNext();
+    assert.equal(mine.reason, "granted");
+    const after = hydrate();
+    const verdict = evaluateCompatibility(after, candidateFor("FG-1", 1), after.activeRuns.map(summarizeFact));
+    assert.equal(verdict.compatible, false);
+    assert.match(reasonOf(verdict), /already executing/);
+  });
+
+  test("a relation between two of THIS project's tickets never matches another project's ticket id", () => {
+    seedQueued(["FG-1"], PK2);
+    seedQueued(["FG-2"]);
+    // FG-2 blocks on FG-1 — in THIS project. The live FG-1 is in the other one.
+    seedRelation("FG-2", "FG-1", "depends_on");
+    const other = claimNext({ projectKey: PK2, owner: "ctl-other" });
+    assert.equal(other.reason, "granted");
+
+    const facts = hydrate();
+    assert.deepEqual(
+      evaluateCompatibility(facts, candidateFor("FG-2"), facts.activeRuns.map(summarizeFact)),
+      { compatible: true },
+      "a relation is a fact about two tickets in ONE project's relation table",
+    );
+  });
+
   test("a terminal RUN frees its lane", () => {
     seedQueued(["FG-1", "FG-2"]);
     claimWithRun("FG-1", "run-1", { runStatus: "complete" });

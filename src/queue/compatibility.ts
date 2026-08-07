@@ -517,10 +517,12 @@ function nameOf(fact: ActiveRunFact): string {
  *    1. per active claim, in claimId order:
  *       a. the claim is absent from the snapshot, or the snapshot no longer describes
  *          it → refuse (the read moved under the decision);
- *       b. the same ticket, already executing under a LIVE lease → refuse;
- *       c. a durable relation between the two tickets that orders, excludes, or is
+ *       b. the claim belongs to ANOTHER project → skipped: ticket identity, relations
+ *          and lanes are all repository-local, and only the CEILING is host-scoped;
+ *       c. the same ticket, already executing under a LIVE lease → refuse;
+ *       d. a durable relation between the two tickets that orders, excludes, or is
  *          not recognised → refuse;
- *       d. a workspace lane in the candidate's own repo that is shared or unknown →
+ *       e. a workspace lane in the candidate's own repo that is shared or unknown →
  *          refuse.
  *    2. the candidate's ticket executing OUTSIDE the claim ledger → refuse.
  *    3. a live durable resource lock over the candidate's project → refuse.
@@ -542,7 +544,9 @@ export function evaluateCompatibility(
 
   for (const a of ordered) {
     // The recoverable predecessor of this very ticket: skipped entirely, on every axis.
-    if (a.ticketId === candidate.ticketId && a.leaseExpiresAtMs < facts.hydratedAtMs) continue;
+    if (a.projectKey === facts.projectKey && a.ticketId === candidate.ticketId && a.leaseExpiresAtMs < facts.hydratedAtMs) {
+      continue;
+    }
 
     const fact = byClaimId.get(a.claimId);
     if (fact === undefined) {
@@ -560,6 +564,14 @@ export function evaluateCompatibility(
           `The snapshot is stale; re-scan rather than admit against it.`,
       );
     }
+
+    // EVERY axis below is repository-local: ticket identity, ticket relations and
+    // workspace lanes are all per-project facts, and project_key IS the repository
+    // identity here. A host-scoped active set (D3's ceiling scope) therefore carries
+    // claims this candidate has nothing to say about — FG-1 in another repository is
+    // not this FG-1, its relations are not in this project's relation table, and it
+    // shares no checkout. The ceiling still counts them; compatibility does not.
+    if (a.projectKey !== facts.projectKey) continue;
 
     if (a.ticketId === candidate.ticketId) {
       return no(
@@ -592,10 +604,6 @@ export function evaluateCompatibility(
         `waiting for ${a.ticketId} to finish — ${clause}, and ${a.ticketId} is executing under ${nameOf(fact)}.`,
       );
     }
-
-    // Lanes only collide inside one repository, and project_key IS the repository
-    // identity here. A claim in another project shares no checkout with this candidate.
-    if (fact.projectKey !== facts.projectKey) continue;
 
     if (fact.lane.kind === "unknown") {
       return no(
