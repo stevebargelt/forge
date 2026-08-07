@@ -528,9 +528,15 @@ export function dispatcherLeaseProjectKeys(): string[] {
  * when was it last actually alive. A dead dispatcher and an idle one are DIFFERENT
  * answers, and reporting the second when the first is true is the operator blindness
  * this ticket exists to close.
+ *
+ * `nowMs` names THE instant to evaluate at, defaulting to the store clock. Production
+ * never passes it. It is what lets this view and acquireDispatcherLease's takeover CAS
+ * (and dispatcherLeaseHeldBy) be compared AT ONE INSTANT: the store clock runs on
+ * between two reads, so at the expiry boundary one can report live and the other
+ * expired microseconds apart, which is the instrument moving rather than the lease.
  */
-export function dispatcherLeaseView(projectKey: string): DispatcherLeaseView {
-  const now = storeNowMs();
+export function dispatcherLeaseView(projectKey: string, nowMs?: number): DispatcherLeaseView {
+  const now = nowMs ?? storeNowMs();
   const lease = readLease(projectKey);
   if (!lease) return { lease: null, live: false, expired: false, msSinceHeartbeat: null, nowMs: now };
   const live = lease.leaseExpiresAtMs >= now;
@@ -560,6 +566,11 @@ export function dispatcherLeaseView(projectKey: string): DispatcherLeaseView {
  *
  * host/pid are recorded for the operator's "who holds this" answer only. Nothing keys
  * off them: physical liveness belongs to the tmux-owned ownership transfer.
+ *
+ * `nowMs` names THE instant the whole verb runs at — the expiry comparison, the new
+ * expiry and the heartbeat stamp alike — defaulting to the store clock read inside the
+ * transaction. Production never passes it; it is what makes "exactly at expiry is still
+ * live" assertable against THIS verb rather than against a hand-rolled probe.
  */
 export function acquireDispatcherLease(opts: {
   projectKey: string;
@@ -567,6 +578,7 @@ export function acquireDispatcherLease(opts: {
   ttlMs: number;
   host?: string;
   pid?: number;
+  nowMs?: number;
 }): DispatcherLeaseGrant {
   const verb = "queue dispatcher lease-acquire";
   requireDbModeProject(opts.projectKey, verb);
@@ -586,7 +598,7 @@ export function acquireDispatcherLease(opts: {
 
   return writeTransaction((): DispatcherLeaseGrant => {
     const db = getDb();
-    const now = storeNowMs();
+    const now = opts.nowMs ?? storeNowMs();
     const iso = new Date(now).toISOString();
     const existing = readLease(projectKey);
 
@@ -701,9 +713,18 @@ export function renewDispatcherLease(opts: {
  * re-checked across it: does owner@generation hold the LIVE lease AT THIS INSTANT?
  * True only when the row exists, owner and generation match exactly, and the lease has
  * not expired on the STORE clock. An expired former owner is fenced.
+ *
+ * `nowMs` names THE instant to evaluate at, defaulting to the store clock, so this and
+ * dispatcherLeaseView can be asked about one instant rather than two. Production never
+ * passes it.
  */
-export function dispatcherLeaseHeldBy(projectKey: string, owner: string, generation: number): boolean {
-  const now = storeNowMs();
+export function dispatcherLeaseHeldBy(
+  projectKey: string,
+  owner: string,
+  generation: number,
+  nowMs?: number,
+): boolean {
+  const now = nowMs ?? storeNowMs();
   const row = getDb()
     .prepare(
       `SELECT 1 FROM dispatcher_leases

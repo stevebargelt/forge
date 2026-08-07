@@ -967,8 +967,9 @@ describe("lease, fencing and takeover", () => {
   test("an EXPIRED lease authorizes NOBODY: claimIsStillHeld and recoverableClaims are never both true for one row", () => {
     seedQueued(["FG-1"]);
     const claim = claimNext().claimed!;
-    const heldBy = () => claimIsStillHeld({ projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1 });
-    const isRecoverable = () => recoverableClaims("project", PK).some((c) => c.id === claim.id);
+    const heldBy = (at?: number) =>
+      claimIsStillHeld({ projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1, nowMs: at });
+    const isRecoverable = (at?: number) => recoverableClaims("project", PK, at).some((c) => c.id === claim.id);
 
     // The reviewer's own execution: the store clock 10x the TTL past the grant.
     setPublicationClockOffsetForTest(10 * TTL);
@@ -988,10 +989,17 @@ describe("lease, fencing and takeover", () => {
 
     // The exclusion is not an artifact of one clock position: at every offset from
     // well inside the lease to well past it, EXACTLY ONE of the two is true.
-    for (const offset of [0, TTL / 4, TTL / 2, TTL - 1, TTL + 1, 2 * TTL, 10 * TTL]) {
-      setPublicationClockOffsetForTest(offset);
-      assert.equal(heldBy() && isRecoverable(), false, `offset ${offset}: authorized AND takeover-eligible`);
-      assert.equal(heldBy() || isRecoverable(), true, `offset ${offset}: neither authorized NOR takeover-eligible`);
+    //
+    // Both predicates are handed THE SAME instant. Read off the free-running store
+    // clock they are read microseconds apart, so at the boundary each can land on its
+    // own side of it and both report true — the instrument moving, not the comparisons
+    // disagreeing. Pinning one instant is also what makes `offset TTL` — now exactly
+    // equal to the expiry — expressible at all.
+    const grantMs = claim.leaseExpiresAtMs - TTL;
+    for (const offset of [0, TTL / 4, TTL / 2, TTL - 1, TTL, TTL + 1, 2 * TTL, 10 * TTL]) {
+      const at = grantMs + offset;
+      assert.equal(heldBy(at) && isRecoverable(at), false, `offset ${offset}: authorized AND takeover-eligible`);
+      assert.equal(heldBy(at) || isRecoverable(at), true, `offset ${offset}: neither authorized NOR takeover-eligible`);
     }
   });
 
