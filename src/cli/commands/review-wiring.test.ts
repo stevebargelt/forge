@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import {
   buildCoordinatorDeps,
+  parseLensWidening,
   resolveReviewBase,
   FIX_BATCH_ENVELOPE_PATH,
   FIX_BATCH_PAYLOAD_PATH,
@@ -1660,4 +1661,96 @@ test("FG-639 / RF-7: the commit-ness idiom is the one real git honors — `rev-p
     ["rev-parse", "--verify", "v1.2.0^{commit}"],
     "bare rev-parse consults no object store; --verify <rev>^{commit} does, and requires a commit",
   );
+});
+
+// ─── FG-689: `--add-lens` carries the authored scope, or it carries nothing ──
+//
+// The operator surface for the widening asymmetry, and since FG-689 every widening claim
+// names paths: adding a lens without saying what it owns is a reviewer with no surface, and
+// widening an already-selected lens IS the claim about paths. There is no spelling of this
+// flag that broadens the panel without saying what the new reviewer reads.
+//
+// The exact-segment-count rule below is the part worth pinning. The old parser destructured
+// three names off `split(":")` and dropped everything after the third colon on the floor —
+// silently, with no refusal. With a fourth meaningful segment that silence would start eating
+// SCOPE PATHS, quietly narrowing what a reviewer is handed, which is the failure this ticket
+// exists to close. A malformed spec is now a named refusal rather than a truncation.
+
+test("FG-689: --add-lens parses the lens, reason, evidence AND the authored scope paths", () => {
+  const parsed = parseLensWidening([
+    "security:a credential path appeared:src/util/creds.ts,src/auth/token.ts:src/util/,src/auth/",
+  ]);
+  assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.refusal);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.widening, [
+    {
+      lens: "security",
+      reason: "a credential path appeared",
+      diffEvidence: ["src/util/creds.ts", "src/auth/token.ts"],
+      scopePaths: ["src/util/", "src/auth/"],
+    },
+  ]);
+});
+
+test("FG-689: --add-lens with NO scope segment refuses by name, naming the form", () => {
+  const parsed = parseLensWidening(["security:a credential path appeared:src/util/creds.ts"]);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.refusal, /--add-lens expects <lens>:<reason>:<diff-evidence>:<scope-paths>/);
+  assert.match(parsed.refusal, /the authored paths it owns/);
+});
+
+test("FG-689: an EMPTY scope segment is refused too — an empty claim is not a claim", () => {
+  for (const spec of ["security:reason:evidence:", "security:reason:evidence:   ", "security:reason::src/"]) {
+    const parsed = parseLensWidening([spec]);
+    assert.equal(parsed.ok, false, `'${spec}' must be refused`);
+  }
+});
+
+test("FG-689: a spec with EXTRA colons is refused, not silently truncated", () => {
+  // The old parser answered this by dropping `:42:src/util/` and proceeding. A widening
+  // claim that quietly loses its scope paths is exactly the silent narrowing FG-689 forbids.
+  const parsed = parseLensWidening(["security:a reason:src/util/creds.ts:42:src/util/"]);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.refusal, /Exactly four ':'-separated segments/);
+  assert.match(parsed.refusal, /no ':' inside them/);
+});
+
+test("FG-689: the fail-closed diff summary tells the coordinator the scope-carrying form", async () => {
+  // The refusal an unevaluated diff produces is where an operator learns the flag. If it
+  // still taught the three-segment form, every operator who followed it would be refused.
+  const outcome = await confirmVia(["src/store/reviews.ts"]);
+  const refusal = outcome.kind === "confirmed" ? "" : outcome.refusal;
+  assert.match(refusal, /--add-lens <lens>:<reason>:<diff-evidence>:<scope-paths>/);
+});
+
+test("FG-689: a widening claim parsed from the CLI confirms end to end, scope and all", async () => {
+  const parsed = parseLensWidening(["backend:the diff moves a store write path:src/store/reviews.ts:src/store/"]);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+
+  const outcome = await confirmVia(["src/store/reviews.ts"], { addLenses: parsed.widening });
+  assert.equal(outcome.kind, "confirmed", outcome.kind === "confirmed" ? "" : outcome.refusal);
+  if (outcome.kind !== "confirmed") return;
+  assert.deepEqual(outcome.addedLenses, ["backend"]);
+  assert.deepEqual(
+    outcome.contract.lens_scopes.backend,
+    ["src/store/"],
+    "the flag's scope segment reaches the confirmed contract — the added lens owns a surface",
+  );
+  assert.equal(validateReviewContract(outcome.contract).ok, true, "and the widened contract reads back");
+});
+
+test("FG-689: --add-lens refuses an unknown lens name at the boundary it is typed at", () => {
+  // The name used to be cast straight to `RiskLens`. That was survivable while a widening
+  // claim only touched `risk_lenses` — an unknown name made the confirmed contract
+  // unreadable, and selection fails closed WIDER on one of those. FG-689 makes the same
+  // string a key in `lens_scopes` on the one path that builds a contract without re-parsing
+  // it, so the typo would now write an unreadable contract that also owns paths.
+  const parsed = parseLensWidening(["vibes:it felt risky:src/x.ts:src/"]);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.refusal, /'vibes', which is not a risk lens/);
+  assert.match(parsed.refusal, /wide, narrow, frontend, backend, security/);
 });

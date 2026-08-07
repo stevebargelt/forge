@@ -443,9 +443,11 @@ export function registerReview(program: Command): void {
     .option("--route <route-key>", "the resolved routing-policy key for the dispatches this drives")
     .option("--unrouted", "acknowledge a deliberately unrouted dispatch")
     .option(
-      "--add-lens <lens:reason:evidence>",
-      "ADD a risk lens with recorded diff evidence (repeatable). The coordinator may widen the " +
-        "contract; removing a lens or changing any other boundary returns to the approving authority",
+      "--add-lens <lens:reason:evidence:scope-paths>",
+      "ADD a risk lens with recorded diff evidence AND the authored paths it owns, or WIDEN an " +
+        "already-selected lens's scope with the same evidence (repeatable). The coordinator may only widen " +
+        "the contract; removing a lens, NARROWING a lens's scope, or changing any other boundary returns to " +
+        "the approving authority",
       (v: string, acc: string[] = []) => [...acc, v],
     )
     .option("--drift <text>", "name implementation drift you cannot classify — returns to plan/architecture")
@@ -578,8 +580,9 @@ export function registerReview(program: Command): void {
     .option("--route <route-key>", "the resolved routing-policy key for the dispatches this drives")
     .option("--unrouted", "acknowledge a deliberately unrouted dispatch")
     .option(
-      "--add-lens <lens:reason:evidence>",
-      "ADD a risk lens with recorded diff evidence (repeatable)",
+      "--add-lens <lens:reason:evidence:scope-paths>",
+      "ADD a risk lens, or WIDEN a selected lens's scope, with recorded diff evidence and the authored " +
+        "paths it owns (repeatable). Narrowing a scope returns to the approving authority",
       (v: string, acc: string[] = []) => [...acc, v],
     )
     .option("--drift <text>", "name implementation drift you cannot classify — returns to plan/architecture")
