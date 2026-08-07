@@ -22,10 +22,27 @@ import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js"
 import { reviewsForRun, summarizeReview, type ReviewSummary } from "../../store/reviews.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
+import {
+  ORCHESTRATOR_RECEIPT_COLUMNS,
+  rowToOrchestratorReceipt,
+  type OrchestratorReceipt,
+  type OrchestratorReceiptRow,
+} from "../../store/orchestrator-receipts.js";
+import {
+  findOrchestratorSession,
+  type InteractionState,
+  type OrchestratorSession,
+  type ProcessLiveness,
+  type RecordSource,
+  type SessionHealth,
+} from "../../util/orchestrator-heartbeats.js";
 
 export type ShowResult =
   | { kind: "task"; task: Task; verdicts: VerdictRow[]; events: Event[] }
   | { kind: "run"; run: Run; events: Event[]; tasks: Task[] }
+  // FG-576 (AC11): an interactive orchestrator launch receipt, addressed by its
+  // receipt id, its canonical session key, or the provider's own session id.
+  | { kind: "orchestrator"; receipt: OrchestratorReceipt }
   | { kind: "not-found"; id: string };
 
 export function performShow(id: string): ShowResult {
@@ -37,7 +54,322 @@ export function performShow(id: string): ShowResult {
   if (run) {
     return { kind: "run", run, events: eventsForRun(id), tasks: tasksForRun(id) };
   }
+  const receipt = findOrchestratorReceiptForShow(id);
+  if (receipt) {
+    return { kind: "orchestrator", receipt };
+  }
   return { kind: "not-found", id };
+}
+
+// ─── FG-576: the orchestrator receipt projection (AC11 / AC7) ───────────────
+//
+// TWO RECORDS, ONE ANSWER. The receipt (src/store/orchestrator-receipts.ts) says
+// what was SELECTED and that a spawn was confirmed at the moment it was written.
+// The launcher-owned liveness record (src/util/orchestrator-heartbeats.ts) says
+// whether the owning launcher is alive NOW. `forge show` reports RUNNING only
+// where both agree — a receipt column alone is a claim, never a liveness proof
+// (D15), and that is precisely the phantom-orchestrator row `forge claude` leaves
+// behind today when a SIGKILL or a lost terminal skips its child-exit handler.
+//
+// Read through the READ-ONLY handle, deliberately. The accessors in
+// orchestrator-receipts.ts take the WRITABLE handle — they exist to write — and a
+// writable open execs SCHEMA_SQL + applyMigrations, so reading a receipt through
+// them would CREATE this table (and run every migration) on a peer's older store
+// as a side effect of a `forge show`. That is the mutation-from-a-read class
+// #298 and FG-608 closed. Nothing is re-implemented to avoid it: the projection
+// reuses the module's own exported column list and row decoder.
+
+function readOrchestratorReceipts(where: string, params: unknown[]): OrchestratorReceipt[] {
+  try {
+    const rows = getDb({ readOnly: true })
+      .prepare(`SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts ${where}`)
+      .all(...params) as OrchestratorReceiptRow[];
+    return rows.map(rowToOrchestratorReceipt);
+  } catch {
+    // A store written by a peer that predates the table answers "no receipts",
+    // which is the TRUE answer for it — the read-only open path never migrates
+    // a store it has no authority over (db.ts), so the query names a missing
+    // table rather than creating one.
+    return [];
+  }
+}
+
+/** The receipt an operator can address: its own id, the canonical session key, or
+ *  the provider's own session id (an operator pastes whichever they have). */
+export function findOrchestratorReceiptForShow(id: string): OrchestratorReceipt | undefined {
+  return (
+    readOrchestratorReceipts("WHERE receipt_id = ? LIMIT 1", [id])[0] ??
+    readOrchestratorReceipts(
+      "WHERE session_key = ? OR provider_session_id = ? ORDER BY created_at DESC, receipt_id DESC LIMIT 1",
+      [id, id],
+    )[0]
+  );
+}
+
+/** The orchestrator receipt bound to a forge task, newest first. This is what
+ *  stops a task row whose interactive orchestrator was SIGKILLed from reading as
+ *  ordinary live work in `forge show <taskId>`. */
+export function findOrchestratorReceiptForTask(taskId: string): OrchestratorReceipt | undefined {
+  return readOrchestratorReceipts("WHERE task_id = ? ORDER BY created_at DESC, receipt_id DESC LIMIT 1", [taskId])[0];
+}
+
+/** What a SURFACE may say about a receipt. Deliberately not the receipt's own
+ *  state vocabulary: `running` here is a joined claim about the world, while the
+ *  receipt's `running` is a claim about the moment it was written. */
+export type OrchestratorPresentation =
+  | "running"
+  | "orphaned"
+  | "unverified"
+  | "pending"
+  | "exited"
+  | "spawn_failed"
+  | "unrecognized";
+
+export type OrchestratorProjection = {
+  presentation: OrchestratorPresentation;
+  /** True ONLY when the owning launcher is provably alive by process identity. */
+  running: boolean;
+  /** The receipt's own state, verbatim. */
+  recordedState: string;
+  processLiveness: ProcessLiveness;
+  interaction: InteractionState;
+  /** AC7: never `healthy` without POSITIVE interaction evidence. */
+  health: SessionHealth;
+  livenessRecord: boolean;
+  livenessSources: RecordSource[];
+  interactionLastSeen: string | null;
+  /** Why this presentation — the AC11 "and why" half, in the operator's terms. */
+  explanation: string;
+  guidance: string;
+};
+
+function interactionClause(interaction: InteractionState, lastSeen: string | null): string {
+  if (interaction === "recent") {
+    return ` Provider interaction evidence is recent (last turn ${lastSeen ?? "?"}) — evidence of ACTIVITY, not of a live process.`;
+  }
+  if (interaction === "stale") {
+    return ` Provider interaction evidence is stale (last turn ${lastSeen ?? "?"}).`;
+  }
+  return (
+    " The provider supplies no interaction hook, so interaction is UNKNOWN; absence of a provider hook is never" +
+    " reported as healthy liveness (AC7)."
+  );
+}
+
+/** Join a receipt to its launcher-owned liveness record. Pure: the caller supplies
+ *  the session, so the decision is testable without a filesystem. */
+export function projectOrchestratorReceipt(
+  receipt: OrchestratorReceipt,
+  session: OrchestratorSession | undefined,
+): OrchestratorProjection {
+  const processLiveness: ProcessLiveness = session?.processLiveness ?? "unknown";
+  const interaction: InteractionState = session?.interaction ?? "unknown";
+  const base = {
+    recordedState: receipt.state,
+    processLiveness,
+    interaction,
+    // AC7: with no record at all there is no interaction evidence either, so the
+    // health claim is `unknown`. Nothing on this path can produce `healthy`.
+    health: (session?.health ?? "unknown") as SessionHealth,
+    livenessRecord: session !== undefined,
+    livenessSources: session?.sources ?? [],
+    interactionLastSeen: session?.interactionLastSeen ?? null,
+  };
+
+  if (!receipt.stateRecognized) {
+    return {
+      ...base,
+      presentation: "unrecognized",
+      running: false,
+      explanation:
+        `The receipt records state '${receipt.state}', which this forge does not understand (a newer forge ` +
+        `wrote it). It is reported verbatim rather than reinterpreted as a state this binary knows.`,
+      guidance: "—  # upgrade forge to read this receipt's state",
+    };
+  }
+
+  if (!receipt.claimsRunning) {
+    if (receipt.state === "pending") {
+      return {
+        ...base,
+        presentation: "pending",
+        running: false,
+        explanation:
+          "The launch decision was recorded BEFORE spawn (D15). No session was ever confirmed under it, so it is " +
+          "not live and is never rendered as live.",
+        guidance: "—  # recorded pre-spawn; no session was confirmed under this receipt",
+      };
+    }
+    if (receipt.state === "spawn_failed") {
+      return {
+        ...base,
+        presentation: "spawn_failed",
+        running: false,
+        explanation: `The child never started${receipt.failureReason ? `: ${receipt.failureReason}` : "."}`,
+        guidance: "—  # nothing was spawned",
+      };
+    }
+    if (receipt.state === "orphaned") {
+      return {
+        ...base,
+        presentation: "orphaned",
+        running: false,
+        explanation:
+          "The LAUNCHER was lost. Per D17 this asserts launcher loss ONLY — it says nothing about the child's " +
+          "disposition and must not be read as 'the session exited'.",
+        guidance: "—  # the launcher is gone; the receipt is retained as the durable record of what was launched",
+      };
+    }
+    const how =
+      receipt.exitSignal !== null
+        ? `on signal ${receipt.exitSignal}`
+        : receipt.exitCode !== null
+          ? `with exit code ${receipt.exitCode}`
+          : "with no recorded exit code or signal";
+    return {
+      ...base,
+      presentation: "exited",
+      running: false,
+      explanation: `The child exited ${how}.`,
+      guidance: "—",
+    };
+  }
+
+  // The receipt CLAIMS a confirmed spawn. Only the process fence decides whether
+  // anything is behind it now.
+  if (processLiveness === "alive") {
+    return {
+      ...base,
+      presentation: "running",
+      running: true,
+      explanation:
+        "The receipt records a confirmed spawn and the owning launcher is provably alive by process identity." +
+        interactionClause(interaction, base.interactionLastSeen),
+      guidance: "—  # the session is live",
+    };
+  }
+  if (processLiveness === "dead") {
+    return {
+      ...base,
+      presentation: "orphaned",
+      running: false,
+      explanation:
+        "The receipt records a confirmed spawn, but the owning launcher's process identity is provably GONE (it " +
+        "exited, its pid now belongs to a different process, or the host has rebooted since). Reported ORPHANED, " +
+        "not running. Nothing was deleted — the receipt stands as evidence." +
+        interactionClause(interaction, base.interactionLastSeen),
+      guidance: "—  # the launcher is gone; this session is NOT live",
+    };
+  }
+  return {
+    ...base,
+    presentation: "unverified",
+    running: false,
+    explanation:
+      (session
+        ? "The receipt records a confirmed spawn, but its launcher liveness record carries no usable process fence " +
+          "(written on another host, or by an OS that supplied no start token), so liveness could not be PROVEN."
+        : `The receipt records a confirmed spawn, but no launcher liveness record was found for session ` +
+          `${receipt.sessionKey}, so liveness could not be PROVEN.`) +
+      " It is therefore NOT reported as running." +
+      interactionClause(interaction, base.interactionLastSeen),
+    guidance: "—  # liveness could not be proven from this host; nothing was changed",
+  };
+}
+
+/** AC11's ten recorded fields: what was selected, and the provenance of the
+ *  selection. Every one is present even when it is null — a field silently
+ *  omitted is indistinguishable from a field nothing recorded. */
+export function orchestratorSelection(receipt: OrchestratorReceipt): {
+  resolvedProfile: string | null;
+  runtime: string;
+  provider: string;
+  model: string | null;
+  authMode: string | null;
+  adapter: string;
+  resolvedBy: string | null;
+  sessionOperation: string;
+  sessionTarget: string | null;
+  identityStrength: string;
+  identityBasis: string | null;
+  limitations: { capability: string; note: string }[];
+} {
+  return {
+    resolvedProfile: receipt.resolvedProfile,
+    runtime: receipt.runtime,
+    provider: receipt.provider,
+    model: receipt.model,
+    authMode: receipt.authMode,
+    adapter: receipt.adapter,
+    resolvedBy: receipt.resolvedBy,
+    sessionOperation: receipt.sessionOperation,
+    sessionTarget: receipt.sessionTarget,
+    identityStrength: receipt.identityStrength,
+    identityBasis: receipt.identityBasis,
+    limitations: receipt.limitations,
+  };
+}
+
+/** One line naming the joined liveness answer — shared by the orchestrator view
+ *  and the task view, so a task whose orchestrator died cannot read as live work
+ *  on one surface and orphaned on the other. */
+export function orchestratorLivenessLine(p: OrchestratorProjection): string {
+  const fence =
+    p.processLiveness === "alive"
+      ? "launcher process ALIVE (identity fence)"
+      : p.processLiveness === "dead"
+        ? "launcher process DEAD (identity fence)"
+        : p.livenessRecord
+          ? "launcher process UNKNOWN (no usable identity fence)"
+          : "no launcher liveness record";
+  return `${fence}; interaction ${p.interaction}; health ${p.health}`;
+}
+
+const NONE = "—";
+
+function printOrchestrator(receipt: OrchestratorReceipt, p: OrchestratorProjection): void {
+  const s = orchestratorSelection(receipt);
+  console.log(`Orchestrator ${receipt.receiptId}`);
+  console.log(`  state:       ${p.presentation}  (receipt records: ${receipt.state})`);
+  console.log(`  liveness:    ${orchestratorLivenessLine(p)}`);
+  console.log(`  project:     ${receipt.projectName ?? NONE}  (${receipt.projectDir})`);
+  // AC11's ten fields, each on its own labelled line.
+  console.log(`  profile:     ${s.resolvedProfile ?? NONE}`);
+  console.log(`  runtime:     ${s.runtime}`);
+  console.log(`  provider:    ${s.provider}`);
+  console.log(`  model:       ${s.model ?? NONE}`);
+  console.log(`  auth:        ${s.authMode ?? NONE}`);
+  console.log(`  adapter:     ${s.adapter}`);
+  console.log(`  resolved_by: ${s.resolvedBy ?? NONE}`);
+  console.log(
+    `  operation:   ${s.sessionOperation}${s.sessionTarget ? ` (target ${s.sessionTarget})` : ""}`,
+  );
+  console.log(
+    `  identity:    ${s.identityStrength}${s.identityBasis ? ` — ${s.identityBasis}` : ""}  ` +
+      `session ${receipt.sessionKey}  provider id ${receipt.providerSessionId ?? NONE}`,
+  );
+  console.log(
+    `  carrier:     ${receipt.carrier.acceptance}` +
+      `${receipt.carrier.generation ? ` — generation ${receipt.carrier.generation}` : ""}` +
+      `${receipt.carrier.path ? ` at ${receipt.carrier.path}` : ""}`,
+  );
+  console.log("  limitations:");
+  if (s.limitations.length === 0) {
+    console.log("    (none recorded)");
+  } else {
+    // AC12: a recorded limitation is SHOWN, never omitted — "no equivalent usage
+    // evidence" is the honest answer and it has to be readable.
+    for (const l of s.limitations) console.log(`    - ${l.capability}: ${l.note}`);
+  }
+  console.log(`  started:     ${receipt.startedAt ?? NONE}`);
+  if (receipt.closedAt) console.log(`  closed:      ${receipt.closedAt}`);
+  console.log(`  task:        ${receipt.taskId ?? NONE}`);
+  console.log("");
+  console.log("Why:");
+  console.log(`  ${p.explanation}`);
+  console.log("");
+  console.log("Next:");
+  console.log(`  ${p.guidance}`);
 }
 
 // #298: the read-vs-reconcile decision for `forge show`, split out from rendering
@@ -54,6 +386,14 @@ export function showReconcileStep(
   deps: { containerAlive?: ContainerAlive; probe?: LivenessProbe; resultPresent?: ResultProbe } = {},
 ): { reconciled: boolean; candidateReason: ReconcileReason | null; runCandidates: RunReconcileCandidate[] } {
   const targetTask = getTask(id);
+  // FG-576: an interactive orchestrator receipt is NEVER a reconcile target.
+  // Reconciliation probes a CONTAINER, and an interactive orchestrator has none —
+  // its liveness is the launcher-owned process fence, which the projection READS
+  // and never repairs. Guarding here keeps `--reconcile <receiptId>` from
+  // reconciling an unrelated run id that happens to be typed the same way.
+  if (!targetTask && !getRun(id) && findOrchestratorReceiptForShow(id)) {
+    return { reconciled: false, candidateReason: null, runCandidates: [] };
+  }
   if (opts.reconcile) {
     reconcileRun(targetTask ? targetTask.runId : id, deps.containerAlive);
     return { reconciled: true, candidateReason: null, runCandidates: [] };
@@ -801,8 +1141,12 @@ export type ShowDeps = { containerAlive?: ContainerAlive; probe?: LivenessProbe;
 export function registerShow(program: Command, deps: ShowDeps = {}): void {
   program
     .command("show")
-    .argument("<id>", "task or run identifier")
-    .description("Show full details of a task or run: package, result, verdicts, timeline")
+    .argument("<id>", "task, run, or orchestrator identifier (receipt id, session key, or provider session id)")
+    .description(
+      "Show full details of a task or run (package, result, verdicts, timeline), or of an interactive " +
+        "orchestrator launch: the profile/runtime/provider/model/auth/adapter/resolved_by that were selected, " +
+        "and whether its launcher is provably alive",
+    )
     .option("--json", "emit JSON instead of human-readable output")
     .option("--reconcile", "reconcile the target against reality before showing — the ONLY mutating path (may emit task.reconciled / run.reconciled and finalize stale state). Default show is read-only.")
     .option(
@@ -824,6 +1168,42 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
 
       if (result.kind === "not-found") {
         throw new Error(`Not found: ${id}`);
+      }
+
+      // FG-576 (AC11): an interactive orchestrator receipt — what was selected,
+      // why, and whether anything is actually alive behind it. Read-only: the
+      // liveness record is joined, never written or garbage-collected here.
+      if (result.kind === "orchestrator") {
+        const { receipt } = result;
+        const session = findOrchestratorSession(receipt.sessionKey);
+        const projection = projectOrchestratorReceipt(receipt, session);
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                orchestrator: receipt,
+                // AC11's ten recorded fields, hoisted out of the receipt so a
+                // machine consumer reads the SELECTION without re-deriving it.
+                selection: orchestratorSelection(receipt),
+                liveness: projection,
+                diagnostic: {
+                  // Deliberately distinct from receipt.state: `running` here is the
+                  // JOINED answer, and it is false unless the launcher is provably
+                  // alive by process identity (AC7).
+                  running: projection.running,
+                  presentation: projection.presentation,
+                  explanation: projection.explanation,
+                  nextCommand: projection.guidance,
+                },
+              },
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+        printOrchestrator(receipt, projection);
+        return;
       }
 
       if (result.kind === "task") {
@@ -888,6 +1268,15 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
         // (reconciliation repairs THAT one onto the publication).
         const publishedAfterCancel = failureKind === "cancelled"
           ? publicationAttemptsForTask(task.id).find((a) => a.state === "published")
+          : undefined;
+        // FG-576 (AC7/AC11): the interactive orchestrator bound to this task,
+        // joined to its launcher-owned liveness record. `forge claude` marks its
+        // task complete only inside the child-exit handler, so a SIGKILL or a lost
+        // terminal leaves this row `active` forever — the join is what stops that
+        // from reading as live work here.
+        const orchestratorReceipt = findOrchestratorReceiptForTask(task.id);
+        const orchestratorProjection = orchestratorReceipt
+          ? projectOrchestratorReceipt(orchestratorReceipt, findOrchestratorSession(orchestratorReceipt.sessionKey))
           : undefined;
         const containerCausalEvidence = getContainerCausalEvidenceFromEvents(events);
         const containerEvidenceSummary = isFanoutParentFailure
@@ -983,6 +1372,17 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
                   containerEvidence: containerCausalEvidence ?? null,
                   containerEvidenceSummary,
                   missingContainerEvidence: missingEvidence,
+                  // FG-576: null unless an interactive orchestrator receipt is
+                  // bound to this task. `liveness.running` is the joined answer —
+                  // a task row can be `active` while its orchestrator is orphaned.
+                  orchestrator:
+                    orchestratorReceipt && orchestratorProjection
+                      ? {
+                          receipt: orchestratorReceipt,
+                          selection: orchestratorSelection(orchestratorReceipt),
+                          liveness: orchestratorProjection,
+                        }
+                      : null,
                   elapsed,
                   lastOutputAgo,
                   idleTimeoutMs,
@@ -1026,6 +1426,16 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
         // #298: surface a reconcile candidate read-only — never silently mutate.
         if (reconcileReason) {
           console.log(`  reconcile: ${reconcileCandidateLine(reconcileReason, task.id)}`);
+        }
+        // FG-576 (AC7): never let a task whose interactive orchestrator is gone
+        // render as ordinary live work — name the joined liveness answer here.
+        if (orchestratorReceipt && orchestratorProjection) {
+          console.log(
+            `  orchestrator: ${orchestratorReceipt.receiptId}  ${orchestratorProjection.presentation}  ` +
+              `(${orchestratorReceipt.provider}/${orchestratorReceipt.runtime}, adapter ${orchestratorReceipt.adapter}) — ` +
+              orchestratorLivenessLine(orchestratorProjection),
+          );
+          console.log(`    forge show ${orchestratorReceipt.receiptId}  # the full recorded launch decision`);
         }
         if (failureKind) console.log(`  failure:   ${failureKind}`);
         if (holdReason) console.log(`  gate hold: ${holdReason}`);
