@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-05
+**Last revised:** 2026-08-07
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -11,17 +11,26 @@ dependencies, and lifecycle state. Forge runtime state is authoritative for
 what is running, blocked, or done. `backlog/notes.md` is a session handoff and
 may lag this plan.
 
-**Expected replacement:** the operator controls and running dispatcher in
-FG-591. FG-496's DB-backed backlog and queue primitives are complete.
+**Expected replacement:** FG-591 has shipped, so the condition this file was
+written to expire on is met. Whether the queue and board actually replace a
+statement of operator sequencing intent is now a live operator decision, not a
+pending dependency — see the retirement rule at the end.
 
 ## Current objective
 
-**FG-576 — provider-neutral interactive orchestrator launcher.** The operator-queue
-program is closed: FG-496's primitives, FG-610's claim/lease/recovery, and FG-591's
-operator controls and dispatcher have all shipped. FG-576 resolves Claude or Codex from
-model policy and absorbs the policy-driven `forge claude` path plus the
-provider-specific live-session capabilities from FG-554 and FG-448 — confirm that
-absorption against those two tickets before scoping, rather than assuming it.
+**FG-691 — the store clock is unfreezable.** Promoted to `Now` on 2026-08-07
+(operator). `storeNowMs()` is the live SQLite clock plus a fixed offset, so no
+lease boundary assertion can hold an instant. It has already produced one red on
+`test` — a required check — at `offset 19999`, 1 ms inside a 20000 ms TTL, and
+passed on every later run. It is not fixed, and it is the most likely source of a
+CI red that looks inexplicable. Do not resolve it by widening the assertion; the
+boundary is the point.
+
+**FG-576 sits immediately behind it** and is smaller than this file previously
+implied. The absorption claim has now been checked: FG-554 (policy-driven
+`forge claude` model resolution) and FG-448 (remote-control URL on the project
+card) are both **done**, not active. FG-576 cannot absorb or close them — they
+shipped independently. Scope FG-576 against what FG-554 actually delivered.
 
 ## Recently completed
 
@@ -35,17 +44,17 @@ absorption against those two tickets before scoping, rather than assuming it.
 
 ## Now
 
-1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve Claude or
-   Codex from model policy; confirm what FG-554 and FG-448 actually contribute before
-   treating them as absorbed.
+1. **FG-691 — the store clock is unfreezable**, so lease boundary assertions race.
+   Temporarily ahead of FG-576 (operator, 2026-08-07): it has already produced one red
+   on a required check and will keep producing unexplained CI failures until it lands.
 
 ## Next
 
-1. **FG-691 — the store clock is unfreezable**, so lease boundary assertions race. It
-   has already produced one intermittent red on a required check; it is the most likely
-   source of an unexplained CI failure until it lands.
+1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve Claude or
+   Codex from model policy. FG-554 and FG-448 are already shipped, so the remaining
+   scope is only what they did not deliver.
 2. **FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.** Cost
-   is proportional to how far a wave got, and it bit twice this session.
+   is proportional to how far a wave got, and it bit twice on 2026-08-06.
 3. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA
    contrast, origin pinning excluding a non-default loopback bind).
 
@@ -89,10 +98,6 @@ it does not override ticket dependencies or authorize scope expansion.
 - **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
   prebuilds directory, permanently refusing a correct cache; plus a stale
   review-wiring comment.
-- **FG-686** — FG-685 residue: `fg352 (11)` no longer induces a failure at the `git
-  commit` invocation.
-- **FG-687** — FG-584 residue: `renewRunLock` reports success after a superseded write
-  to an unlinked inode; the CAS protects the successor, only the return value lies.
 - **FG-686** — FG-685 residue: `fg352 (11)` no longer induces a failure at the
   `git commit` invocation, because the `--no-verify` capture exemption made its
   hook-based device inert and the replacement wedge fails at `git add`.
@@ -156,5 +161,8 @@ or have no demonstrated impact.
   priorities as if they were current.
 - Link ticket IDs instead of copying full acceptance criteria.
 - Do not duplicate live run state or record progress percentages here.
-- Retire this file when FG-591 provides the authoritative operator controls and
-  running dispatcher that replace it.
+- Retirement is now an open operator decision, not a pending dependency. FG-591
+  shipped the operator controls and running dispatcher this file was to be retired
+  for, but those surfaces carry queue and dispatch state — not the sequencing
+  rationale, interruption policy, and execution rules recorded here. Retire this
+  file only by deciding where that prose lives, not merely because FG-591 landed.
