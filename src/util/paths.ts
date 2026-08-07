@@ -37,6 +37,45 @@ export const ROUTING_POLICY_PATH = join(FORGE_HOME, "routing-policy.yml");
 // tree the installer wrote.
 export const CLAUDE_SKILLS_DIR =
   process.env.CLAUDE_SKILLS_DEST ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "skills");
+// FG-576 step 8 — THE CLAUDE PROVIDER-STATE ROOT. Claude Code writes its own
+// session state beneath this root: per-session transcripts at
+// `projects/<path-hash>/<session-id>.jsonl`, `history.jsonl`, `settings.json`.
+// Forge READS it (never writes it) to bind a finished session's usage and its
+// remote-control URL to the receipt that launched it — see
+// src/orchestrator/claude-session-state.ts, which is the only consumer.
+//
+// This seam is an AC13 PRECONDITION, not a tidy-up. Until now the one reader
+// hardcoded homedir(), which meant any test touching Claude session state had to
+// mutate the operator's real HOME — so the feature could not be tested without
+// doing the exact thing the ticket forbids. Precedence mirrors CLAUDE_SKILLS_DIR
+// above and Claude Code's own relocation variable, so forge reads exactly the tree
+// Claude writes: FORGE_CLAUDE_STATE_DIR (forge's own isolation seam) →
+// CLAUDE_CONFIG_DIR (Claude Code's) → ~/.claude.
+//
+// Resolved at CALL time, like resolveDbPath and hostConfigPath: a process-start
+// snapshot here would read ANOTHER root's session state rather than merely
+// misnaming a directory, and a test that redirects the seam after import would be
+// silently reading the operator's live sessions.
+export function claudeStateDir(): string {
+  return process.env.FORGE_CLAUDE_STATE_DIR ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+}
+
+// FG-576 step 8 / FG-448 — where a LIVE REMOTE-CONTROL CREDENTIAL is held while its
+// session runs, and nowhere else. The URL grants control of the session, so it is
+// session-scoped ephemeral state keyed by the canonical session identity: one file
+// per live session, removed at close-out, never a column, never project metadata,
+// never in a cross-project projection.
+//
+// A SUBDIRECTORY of the orchestrator namespace rather than a sibling of the liveness
+// records: same lifecycle, same thing to relocate, and readdir over that namespace
+// only ever considers `*.json` FILES, so this directory is invisible to it (and to
+// its stale-record GC). Derived from FORGE_HOME, not $HOME, because — unlike the
+// liveness namespace, which a provider hook script also writes — nothing outside
+// forge ever writes here.
+export function orchestratorRemoteControlDir(): string {
+  return join(process.env.FORGE_HOME ?? join(homedir(), ".forge"), "orchestrators", "remote-control");
+}
+
 // Append-only JSONL audit trail of orchestrator-mediated RACI changes (#279).
 // One line per `forge raci apply --confirm`; host-global, outside any repo.
 export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");

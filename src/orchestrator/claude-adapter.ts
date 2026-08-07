@@ -51,13 +51,22 @@ import {
 import { readProjectAuth } from "../util/project-meta.js";
 import { startSsoWatchdog } from "../util/sso-watchdog.js";
 import { findOrchestratorReceiptBySessionIdentity } from "../store/orchestrator-receipts.js";
-import type { CapabilityLimitation } from "../store/orchestrator-receipts.js";
+import type { CapabilityLimitation, SessionIdentityStrength } from "../store/orchestrator-receipts.js";
+import { markTaskComplete, markTaskFailed } from "../store/tasks.js";
+import {
+  captureClaudeOrchestratorUsage,
+  clearRemoteControlLink,
+  startRemoteControlCapture,
+  type ClaudeSessionBinding,
+  type RemoteControlCapture,
+} from "./claude-session-state.js";
 import {
   isSafeSessionIdentifier,
   launchRefusal,
   type AdapterArgvParts,
   type AdapterArgvResult,
   type AdapterCarrier,
+  type AdapterCloseOutcome,
   type AdapterLaunchContext,
   type AdapterOperationResult,
   type AdapterReadiness,
@@ -142,6 +151,17 @@ export type ClaudeAdapterOptions = {
   assetRoot?: string;
   /** Resolved lazily so a test that sets FORGE_HOME after import is still isolated. */
   forgeHome?: string;
+  // ---- FG-576 step 8. Every one of these DEFAULTS to the documented env seam, so a
+  // real launch reads Claude's state root exactly where Claude wrote it; they exist so
+  // a test can point the reader at a FAKE root instead of the operator's (AC13). ----
+  /** Overrides claudeStateDir() — Claude Code's own state root. READ-only, always. */
+  claudeStateDir?: string;
+  /** Overrides orchestratorRemoteControlDir() — where the live credential is held. */
+  remoteControlDir?: string;
+  /** How often the session's transcript is checked for a remote-control URL. */
+  remoteControlPollMs?: number;
+  /** Where an AC12 mismatch or a close-out problem is surfaced. */
+  report?: (line: string) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -187,11 +207,54 @@ export function resolveClaudeBedrockProfile(ctx: AdapterLaunchContext): string |
 // The adapter
 // ---------------------------------------------------------------------------
 
+/**
+ * The session identity THIS launch asserted, or null.
+ *
+ * Claude Code takes `--session-id`, so a new session's identity is Forge's own and a
+ * resume acts on an identifier the operator named — both are asserted. `--continue`
+ * lets Claude pick the conversation, so Forge asserts nothing and this is null. That
+ * null is load-bearing: it is what stops post-session usage and the remote-control
+ * credential from being attributed to whichever transcript happens to be newest.
+ */
+export function claudeAssertedSessionIdentity(
+  ctx: AdapterLaunchContext,
+): { sessionId: string | null; strength: SessionIdentityStrength } {
+  const op = ctx.operation;
+  if (op.kind === "new") return { sessionId: ctx.sessionKey, strength: "asserted" };
+  if (op.kind === "resume" && isSafeSessionIdentifier(op.sessionId)) {
+    return { sessionId: op.sessionId, strength: "asserted" };
+  }
+  return { sessionId: null, strength: "unknown" };
+}
+
 export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): OrchestratorAdapter {
   const helpProbe = opts.helpProbe ?? systemClaudeHelpProbe;
+  const report = opts.report ?? ((line: string) => console.error(line));
 
   const carrierSourcePath = (): string => join(opts.assetRoot ?? assetRoot(), "seeds", "orchestrator-template.md");
   const forgeHome = (): string => opts.forgeHome ?? process.env["FORGE_HOME"] ?? join(homedir(), ".forge");
+
+  /** Roots passed to every provider-state read, so one launch reads one tree. */
+  const stateOptions = (): { stateDir?: string; remoteControlDir?: string } => ({
+    ...(opts.claudeStateDir !== undefined ? { stateDir: opts.claudeStateDir } : {}),
+    ...(opts.remoteControlDir !== undefined ? { remoteControlDir: opts.remoteControlDir } : {}),
+  });
+
+  const bindingFor = (ctx: AdapterLaunchContext): ClaudeSessionBinding => {
+    const identity = claudeAssertedSessionIdentity(ctx);
+    return {
+      projectDir: ctx.projectDir,
+      sessionKey: ctx.sessionKey,
+      receiptId: ctx.receiptId,
+      providerSessionId: identity.sessionId,
+      identityStrength: identity.strength,
+    };
+  };
+
+  /** Live for the duration of ONE session. Held in the adapter's closure rather than
+   *  a module map: the launcher builds one adapter per launch, so there is nothing to
+   *  key and nothing to leak. */
+  let remoteControl: RemoteControlCapture | null = null;
 
   return {
     id: "claude-code",
@@ -455,15 +518,115 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
       // SSO watchdog keeps the bedrock credential fresh for the life of the session;
       // it is a no-op unless FORGE_SSO_WATCHDOG names an installed script.
       if (ctx.decision.auth === "bedrock" && ctx.runId) startSsoWatchdog(ctx.runId);
+
+      // FG-448: capture is REQUIRED behavior, not a nicety — a live session whose
+      // remote-control URL is available and is not captured is a defect. It cannot be
+      // read once at spawn (the URL does not exist yet: `remoteControlAtStartup` may
+      // be off and the operator may run `/remote-control` at any point), so the
+      // session's own transcript is watched for the life of the session. Absence, a
+      // disabled startup and unreadable provider state all yield no link and NO
+      // failure — see startRemoteControlCapture, which never throws.
+      try {
+        remoteControl = startRemoteControlCapture(bindingFor(ctx), {
+          ...stateOptions(),
+          ...(opts.remoteControlPollMs !== undefined ? { pollMs: opts.remoteControlPollMs } : {}),
+        });
+      } catch {
+        remoteControl = null;
+      }
       return {};
     },
 
-    closeOut(): void {
-      // The carrier file, the liveness record and the receipt are all launcher-owned;
-      // this adapter has no close-out state of its own. Post-session usage capture
-      // binds to the receipt's asserted session id and is step 8's.
+    closeOut(ctx: AdapterLaunchContext, outcome: AdapterCloseOutcome): void {
+      // Never throws: close-out runs on the exit path, and a telemetry failure must
+      // not change the exit code the operator sees.
+      try {
+        remoteControl?.stop();
+      } catch {
+        /* the timer is already gone */
+      }
+      remoteControl = null;
+
+      // The credential dies with the session, ALWAYS — on a clean exit, on a crash,
+      // and on a spawn that never happened. It is a live control credential, never
+      // durable metadata, so its removal is unconditional and comes first.
+      try {
+        clearRemoteControlLink(ctx.sessionKey, stateOptions());
+      } catch {
+        /* nothing to remove */
+      }
+
+      if (outcome.state !== "exited") {
+        // Nothing ran, so there is no usage and no session to account for. The task
+        // is settled as failed rather than left `running` forever — an orchestrator
+        // task with no process behind it is the same lie as a `running` receipt with
+        // no process behind it.
+        settleTask(ctx.taskId, { failed: outcome.reason ?? "the interactive orchestrator never started" });
+        return;
+      }
+
+      let summary: Record<string, unknown> = {};
+      try {
+        const capture = captureClaudeOrchestratorUsage(
+          {
+            ...bindingFor(ctx),
+            taskId: ctx.taskId,
+            expectedModel: ctx.decision.modelExplicit ? ctx.decision.model : null,
+            alias: ctx.decision.profile ?? null,
+          },
+          stateOptions(),
+        );
+        summary = {
+          usageRows: capture.rowCount,
+          transcript: capture.transcriptPath,
+          ...(capture.skipped ? { usageSkipped: capture.skipped } : {}),
+          ...(capture.error ? { usageError: capture.error } : {}),
+          ...(capture.mismatches.length > 0 ? { modelMismatches: capture.mismatches } : {}),
+        };
+
+        // AC12: SURFACE the disagreement, never rewrite it. The rows keep the
+        // provider's own model value and the receipt keeps the decision it recorded;
+        // what the operator gets is the fact that the two disagree.
+        for (const mismatch of capture.mismatches) {
+          report(
+            `forge: ⚠ usage for request ${mismatch.requestId} reports model '${mismatch.providerModel}', but this ` +
+              `orchestrator receipt recorded '${mismatch.receiptModel}'. The provider's value is kept as-is; ` +
+              `neither the usage row nor the receipt was rewritten.`,
+          );
+        }
+        if (capture.error) {
+          report(`forge: ⚠ post-session usage capture failed: ${capture.error}`);
+        }
+      } catch (e) {
+        summary = { usageError: (e as Error).message };
+      }
+
+      settleTask(ctx.taskId, { complete: summary, exitCode: outcome.exitCode, signal: outcome.signal });
     },
   };
+
+  /** The orchestrator instrumentation task the launcher opened (#163). Best-effort,
+   *  exactly like the write that created it: telemetry ABOUT the session must not be
+   *  able to fail the session. */
+  function settleTask(
+    taskId: string | null,
+    outcome: { complete?: Record<string, unknown>; failed?: string; exitCode?: number | null; signal?: string | null },
+  ): void {
+    if (!taskId) return;
+    try {
+      if (outcome.failed !== undefined) {
+        markTaskFailed(taskId, outcome.failed);
+        return;
+      }
+      markTaskComplete(taskId, {
+        ...outcome.complete,
+        exitCode: outcome.exitCode ?? null,
+        signal: outcome.signal ?? null,
+      });
+    } catch {
+      /* telemetry only */
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
