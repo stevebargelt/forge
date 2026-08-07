@@ -33,6 +33,7 @@ import { registerSweep } from "./commands/sweep.js";
 import { registerCancel } from "./commands/cancel.js";
 import { registerRecover } from "./commands/recover.js";
 import { registerClaude } from "./commands/claude.js";
+import { registerOrchestrator } from "./commands/orchestrator.js";
 import { registerDesign } from "./commands/design.js";
 import { registerModel } from "./commands/model.js";
 import { registerProviders } from "./commands/providers.js";
@@ -108,6 +109,7 @@ export function buildProgram(): Command {
   registerCancel(program);
   registerRecover(program);
   registerClaude(program);
+  registerOrchestrator(program);
   registerDesign(program);
   registerModel(program);
   registerProviders(program);
