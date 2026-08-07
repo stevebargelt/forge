@@ -15,6 +15,20 @@ const policy = `model_profiles:\n  claude:\n    provider: anthropic\n    auth: a
 function env(extra: Record<string, string> = {}) { return { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: db, FORGE_ORCHESTRATORS_DIR: heartbeats, PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_RECORD: record, ANTHROPIC_API_KEY: "fixture", ...extra }; }
 function run(extra: Record<string, string> = {}) { const r = spawnSync(process.execPath, [...cli, "orchestrator"], { cwd: project, env: env(extra), encoding: "utf8", timeout: 30_000 }); closeDb(); return { status: r.status, stderr: r.stderr ?? "" }; }
 function receipts() { process.env.FORGE_DB_PATH = db; process.env.FORGE_HOME = home; closeDb(); return listOrchestratorReceiptsForProject(project); }
+async function waitFor<T>(condition: () => T | undefined | false, description: string): Promise<T> {
+  const deadline = Date.now() + 30_000;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    try {
+      const value = condition();
+      if (value) return value;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((done) => setTimeout(done, 10));
+  }
+  assert.fail(`timed out after 30s waiting for ${description}${lastError ? `; last read error: ${lastError}` : ""}`);
+}
 // realpath the temp base ONCE: the child reports its cwd resolved, so on a host whose
 // tmpdir sits behind a symlink (darwin's /var -> /private/var) an unresolved base would
 // query for receipts the launcher filed under the physical path.
@@ -24,6 +38,19 @@ test("FG-576 D11/D15: spawn failure, child exit, SIGKILL and unwritable receipt 
   let r = run({ PATH: join(base, "no-such-bin") }); assert.notEqual(r.status, 0); let receiptRows = receipts(); assert.equal(receiptRows[0]!.state, "spawn_failed"); assert.equal(receiptRows[0]!.claimsRunning, false);
   r = run({ FAKE_CLAUDE_MODE: "exit:17" }); assert.notEqual(r.status, 0); receiptRows = receipts(); assert.equal(receiptRows.find((x) => x.exitCode === 17)?.state, "exited");
   const child = spawn(process.execPath, [...cli, "orchestrator"], { cwd: project, env: env({ FAKE_CLAUDE_MODE: "hold", FAKE_CLAUDE_READY: join(base, "ready") }), stdio: "ignore" });
-  for (let i = 0; i < 400 && !existsSync(join(base, "ready")); i += 1) await new Promise((done) => setTimeout(done, 10)); assert.ok(existsSync(join(base, "ready"))); child.kill("SIGKILL"); await new Promise<void>((done) => child.once("exit", () => done())); assert.equal(loadHeartbeats({ heartbeatsDir: heartbeats })[0]!.state, "orphaned");
+  await waitFor(() => existsSync(join(base, "ready")), "the fake Claude readiness signal");
+  const runningReceipt = await waitFor(
+    () => receipts().find((receipt) => receipt.launcherPid === child.pid && receipt.claimsRunning),
+    "the launcher's running receipt for the child process",
+  );
+  const liveHeartbeat = await waitFor(
+    () => loadHeartbeats({ heartbeatsDir: heartbeats }).find((heartbeat) => heartbeat.receiptId === runningReceipt.receiptId && heartbeat.sessionId === runningReceipt.sessionKey && heartbeat.sources.includes("launcher")),
+    "the launcher's readable heartbeat for that receipt",
+  );
+  assert.equal(liveHeartbeat.state, "live");
+  const exited = new Promise<void>((done) => child.once("exit", () => done()));
+  child.kill("SIGKILL");
+  await exited;
+  assert.equal(loadHeartbeats({ heartbeatsDir: heartbeats })[0]!.state, "orphaned");
   const blocked = join(base, "blocked"); writeFileSync(blocked, "file"); rmSync(record, { force: true }); r = run({ FORGE_DB_PATH: join(blocked, "forge.db") }); assert.notEqual(r.status, 0); assert.match(r.stderr, /nothing was spawned/i); assert.equal(existsSync(record), false); for (const receipt of receipts()) assert.notEqual(receipt.state, "running");
 });
