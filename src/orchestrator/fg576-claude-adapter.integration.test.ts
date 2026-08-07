@@ -259,7 +259,7 @@ test("integ FG-576: legacy mode records no model rather than fabricating one, an
 
 test("integ FG-576 AC2: the Claude child env is composed from the parent and never mutates it", () => {
   const parent: NodeJS.ProcessEnv = { PATH: "/usr/bin", HOME: "/home/x" };
-  const child = buildClaudeChildEnv(parent, "sso-prod");
+  const child = buildClaudeChildEnv(parent, "bedrock", "sso-prod");
 
   assert.equal(child["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
   assert.equal(child["CLAUDE_CODE_USE_BEDROCK"], "1");
@@ -279,6 +279,28 @@ test("integ FG-576 AC2: a subscription launch carries no AWS or bedrock variable
   assert.equal(planned.plan.env["CLAUDE_CODE_USE_BEDROCK"], undefined);
   assert.equal(planned.plan.env["AWS_PROFILE"], undefined);
   assert.equal(resolveClaudeBedrockProfile(ctx), undefined);
+});
+
+test("integ FG-576 AC2: a subscription launch withholds a Bedrock activation inherited from the operator's shell", () => {
+  // The sibling of the Codex defect: `{...parentEnv}` would hand the child an auth
+  // mode the receipt does not record. The decision decides, not the shell.
+  const adapter = adapterWithHelp(HELP_WITH_FILE_FLAG);
+  const ctx = contextFor(decisionFor(), {
+    parentEnv: {
+      PATH: "/usr/bin",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_PROFILE: "operator-sso",
+      ANTHROPIC_API_KEY: "sk-operator",
+    },
+  });
+  const planned = planLaunch(adapter, ctx);
+  assert.ok(planned.ok);
+
+  assert.equal(ctx.decision.auth, "subscription");
+  assert.equal(planned.plan.env["CLAUDE_CODE_USE_BEDROCK"], undefined, "the child was armed for Bedrock");
+  assert.equal(planned.plan.env["AWS_PROFILE"], undefined);
+  assert.equal(planned.plan.env["ANTHROPIC_API_KEY"], undefined);
+  assert.equal(planned.plan.env["PATH"], "/usr/bin");
 });
 
 test("integ FG-576 AC2: a bedrock-auth resolution injects the bedrock variables into the CHILD only", () => {

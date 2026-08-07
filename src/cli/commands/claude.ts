@@ -270,20 +270,22 @@ export function claudeShortcutAdapter(opts: ClaudeShortcutAdapterOptions): Orche
         );
       }
       if (ctx.decision.auth !== "bedrock" && ctx.parentEnv["CLAUDE_CODE_USE_BEDROCK"] === "1") {
-        // Inherited from the operator's shell, not asserted through Forge. The
-        // child inherits it too, so say plainly that the environment and the
-        // recorded decision disagree instead of letting the receipt look settled.
+        // Inherited from the operator's shell, not asserted through Forge. The child
+        // does NOT get it (buildClaudeChildEnv withholds it), so the session matches
+        // its receipt — but say plainly that the shell and the recorded decision
+        // disagree, because the operator asked for Bedrock somewhere and is not
+        // getting it here.
         advisories.push(
           `CLAUDE_CODE_USE_BEDROCK=1 is set in this shell, but the orchestrator resolution declares auth ` +
-            `'${ctx.decision.auth}'. The recorded receipt says '${ctx.decision.auth}'; unset the variable, or ` +
-            `select a Bedrock profile, so the two agree.`,
+            `'${ctx.decision.auth}'. The variable is withheld from the session so it runs as the receipt ` +
+            `records it; select a Bedrock profile if you meant to launch on Bedrock.`,
         );
       }
       return { ok: true, readiness: { ...probed.readiness, advisories } };
     },
 
     buildChildEnv(ctx: AdapterLaunchContext): NodeJS.ProcessEnv {
-      return buildClaudeChildEnv(ctx.parentEnv, bedrockProfileFor(ctx));
+      return buildClaudeChildEnv(ctx.parentEnv, ctx.decision.auth, bedrockProfileFor(ctx));
     },
 
     preflight(ctx: AdapterLaunchContext): string[] {

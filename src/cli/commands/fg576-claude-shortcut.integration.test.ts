@@ -480,6 +480,29 @@ test("integ FG-576 AC2: a subscription-resolving shortcut launch carries no AWS 
   assert.equal(receipts()[0]!.authMode, "subscription");
 });
 
+test("integ FG-576 AC2: a Bedrock activation armed in the operator's shell never reaches a subscription session", () => {
+  // The receipt records `subscription`. If the shell's CLAUDE_CODE_USE_BEDROCK=1 were
+  // inherited, the session would run on AWS credentials while its durable record said
+  // otherwise — the receipt and the process would describe two different launches.
+  clearRecord();
+  const res = runCli(["claude"], {
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_PROFILE: "operator-sso",
+    ANTHROPIC_API_KEY: "sk-operator",
+  });
+  assert.equal(res.status, 0, res.stderr);
+
+  const record = readRecord();
+  assert.equal(record.env["CLAUDE_CODE_USE_BEDROCK"], undefined, "the child was armed for Bedrock");
+  assert.equal(record.env["AWS_PROFILE"], undefined);
+  assert.equal(record.env["ANTHROPIC_API_KEY"], undefined);
+  assert.equal(receipts()[0]!.authMode, "subscription");
+  // The disagreement is still SURFACED — withholding the variable silently would
+  // leave an operator who meant to launch on Bedrock with no idea they did not.
+  assert.match(res.stdout, /CLAUDE_CODE_USE_BEDROCK=1 is set in this shell/);
+  assert.match(res.stdout, /withheld/);
+});
+
 // ─── AC15: the operator documentation ships in this step ────────────────────
 
 test("integ FG-576 AC15/D16: the operator doc documents the shortcut, the refusal and both remedies", () => {

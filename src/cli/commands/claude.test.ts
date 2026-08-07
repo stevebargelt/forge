@@ -324,7 +324,7 @@ test("shortcut adapter: an asserted Bedrock launch against a Bedrock profile pro
 test("buildClaudeChildEnv: disables background tasks for non-Bedrock sessions", () => {
   const parentEnv: NodeJS.ProcessEnv = { PATH: "/test/bin" };
 
-  const childEnv = buildClaudeChildEnv(parentEnv);
+  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
 
   assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(childEnv.PATH, "/test/bin");
@@ -338,7 +338,7 @@ test("buildClaudeChildEnv: overrides an unsafe parent value without mutating it"
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
   };
 
-  const childEnv = buildClaudeChildEnv(parentEnv);
+  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
 
   assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(parentEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "0");
@@ -350,7 +350,7 @@ test("buildClaudeChildEnv: combines the invariant with Bedrock configuration", (
     AWS_PROFILE: "old-profile",
   };
 
-  const childEnv = buildClaudeChildEnv(parentEnv, "forge-profile");
+  const childEnv = buildClaudeChildEnv(parentEnv, "bedrock", "forge-profile");
 
   assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
@@ -358,4 +358,63 @@ test("buildClaudeChildEnv: combines the invariant with Bedrock configuration", (
   assert.equal(childEnv.PATH, "/test/bin");
   assert.equal(parentEnv.AWS_PROFILE, "old-profile");
   assert.equal(parentEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
+});
+
+// RF-1: the sibling of the Codex defect. An operator's shell that has Bedrock (or an
+// API key) armed must not decide which credential the session runs on — the RESOLVED
+// auth mode does, because that is what the durable receipt records.
+
+test("buildClaudeChildEnv: a subscription launch withholds every inherited credential selector", () => {
+  const parentEnv: NodeJS.ProcessEnv = {
+    PATH: "/test/bin",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    AWS_PROFILE: "operator-sso",
+    ANTHROPIC_API_KEY: "sk-operator",
+    ANTHROPIC_AUTH_TOKEN: "tok-operator",
+    // Not a credential selector: the operator's own session settings and toolchain.
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8000",
+    AWS_REGION: "us-west-2",
+  };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
+
+  for (const withheld of [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "AWS_PROFILE",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+  ]) {
+    assert.equal(childEnv[withheld], undefined, `${withheld} reached a subscription session`);
+  }
+  assert.equal(childEnv.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "8000");
+  assert.equal(childEnv.AWS_REGION, "us-west-2");
+  assert.equal(childEnv.PATH, "/test/bin");
+  assert.equal(parentEnv.CLAUDE_CODE_USE_BEDROCK, "1", "the parent shell was mutated");
+});
+
+test("buildClaudeChildEnv: an api launch keeps its own credential and still withholds Bedrock's", () => {
+  const parentEnv: NodeJS.ProcessEnv = {
+    ANTHROPIC_API_KEY: "sk-operator",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_PROFILE: "operator-sso",
+  };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "api");
+
+  assert.equal(childEnv.ANTHROPIC_API_KEY, "sk-operator");
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
+  assert.equal(childEnv.AWS_PROFILE, undefined);
+});
+
+test("buildClaudeChildEnv: a bedrock launch withholds the direct-API credentials", () => {
+  const parentEnv: NodeJS.ProcessEnv = { ANTHROPIC_API_KEY: "sk-operator", CLAUDE_CODE_USE_VERTEX: "1" };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "bedrock", "forge-profile");
+
+  assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(childEnv.CLAUDE_CODE_USE_VERTEX, undefined);
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
+  assert.equal(childEnv.AWS_PROFILE, "forge-profile");
 });

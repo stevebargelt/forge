@@ -28,7 +28,10 @@
 //
 //   4. THE CHILD ENVIRONMENT IS COMPOSED FROM THE PARENT, INDEPENDENTLY. Bedrock
 //      variables are injected into the CHILD only; the parent shell is never mutated,
-//      and no other adapter's environment is ever extended (AC2).
+//      and no other adapter's environment is ever extended (AC2). A credential-
+//      selection variable the RESOLVED auth mode does not call for is withheld rather
+//      than inherited, so the session cannot run under credentials its own receipt
+//      contradicts (see buildClaudeChildEnv).
 //
 // The readiness probe is deliberately NOT a gate here. A missing `claude` binary must
 // reach the spawn path and close the receipt as `spawn_failed` — turning it into a
@@ -49,6 +52,7 @@ import {
   resolveProfileSsoIdentity,
 } from "../util/creds.js";
 import { readProjectAuth } from "../util/project-meta.js";
+import type { EffectiveAuth } from "../v2/model-resolution.js";
 import { startSsoWatchdog } from "../util/sso-watchdog.js";
 import { findOrchestratorReceiptBySessionIdentity } from "../store/orchestrator-receipts.js";
 import type { CapabilityLimitation, SessionIdentityStrength } from "../store/orchestrator-receipts.js";
@@ -168,29 +172,64 @@ export type ClaudeAdapterOptions = {
 // Child environment (AC2)
 // ---------------------------------------------------------------------------
 
+/** The variables that decide WHICH CREDENTIAL Claude Code talks to. Forge sets every
+ *  one of them from the auth mode the receipt records, so an inherited value is
+ *  withheld rather than passed through: a shell that armed `CLAUDE_CODE_USE_BEDROCK=1`
+ *  for something else must not move a policy-selected subscription session onto
+ *  Bedrock while its durable receipt says `subscription` (AC2).
+ *
+ *  Named exactly, not by prefix — unlike the Codex adapter's family denylist. This
+ *  child IS Claude, so `CLAUDE_`/`ANTHROPIC_` here are its own behavior controls
+ *  (output style, telemetry, config root) and withholding the family wholesale would
+ *  strip settings the operator chose for the session they are about to sit in. What
+ *  Forge owns on this path is the credential SELECTION, and that is what it withholds.
+ *
+ *  `CLAUDE_CODE_USE_VERTEX` is withheld in every mode: Forge resolves no Vertex auth
+ *  mode at all, so no receipt could truthfully describe such a session.
+ *  `AWS_PROFILE` is here because on a Claude launch it is the Bedrock credential
+ *  selector (FORGE-DEC-007/013); the rest of the `AWS_` family stays, since without
+ *  an activation flag it cannot move Claude's credentials and it is the operator's
+ *  own toolchain state inside an interactive session. */
+const CLAUDE_CREDENTIAL_SELECTION_ENV: Record<string, EffectiveAuth | null> = {
+  CLAUDE_CODE_USE_BEDROCK: "bedrock",
+  AWS_PROFILE: "bedrock",
+  CLAUDE_CODE_USE_VERTEX: null,
+  ANTHROPIC_API_KEY: "api",
+  ANTHROPIC_AUTH_TOKEN: "api",
+};
+
 /**
- * The Claude child environment, composed from the parent and returned as a NEW
- * object — the parent is never mutated, and no other adapter's environment is ever
- * extended. Semantics preserved verbatim from `forge claude` (FG-158): background
- * tasks off for every Forge-owned session, bedrock variables injected only when a
- * bedrock profile was resolved.
+ * The Claude child environment, COMPOSED from the parent — built up entry by entry
+ * and returned as a NEW object, so the parent is never mutated and no other adapter's
+ * environment is ever extended. Semantics preserved from `forge claude` (FG-158):
+ * background tasks off for every Forge-owned session, bedrock variables injected only
+ * when a bedrock profile was resolved.
+ *
+ * WHAT IT WITHHOLDS: every credential-selection variable that the RESOLVED auth mode
+ * does not call for (see CLAUDE_CREDENTIAL_SELECTION_ENV). Inheriting one is how a
+ * session ends up running under credentials its own receipt contradicts — the same
+ * defect the Codex adapter carried, in its sibling.
  */
 export function buildClaudeChildEnv(
   parentEnv: NodeJS.ProcessEnv,
+  auth: EffectiveAuth | undefined,
   bedrockProfile?: string,
 ): NodeJS.ProcessEnv {
-  return {
-    ...parentEnv,
-    // Forge-owned sessions put durable work in tmux via `forge launch`.
-    // Claude's background-task registry is vulnerable to harness-wide reaping.
-    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
-    ...(bedrockProfile
-      ? {
-          CLAUDE_CODE_USE_BEDROCK: "1",
-          AWS_PROFILE: bedrockProfile,
-        }
-      : {}),
-  };
+  const child: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(parentEnv)) {
+    if (name in CLAUDE_CREDENTIAL_SELECTION_ENV && CLAUDE_CREDENTIAL_SELECTION_ENV[name] !== auth) continue;
+    child[name] = value;
+  }
+
+  // Forge-owned sessions put durable work in tmux via `forge launch`.
+  // Claude's background-task registry is vulnerable to harness-wide reaping.
+  child["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1";
+
+  if (bedrockProfile) {
+    child["CLAUDE_CODE_USE_BEDROCK"] = "1";
+    child["AWS_PROFILE"] = bedrockProfile;
+  }
+  return child;
 }
 
 /** The AWS profile a bedrock-auth launch uses, in the order `forge claude` has
@@ -267,7 +306,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
       // Probed with the CHILD's environment so PATH resolution matches the spawn
       // that follows — a probe that found a different binary would be evidence
       // about the wrong build.
-      const env = buildClaudeChildEnv(ctx.parentEnv, resolveClaudeBedrockProfile(ctx));
+      const env = buildClaudeChildEnv(ctx.parentEnv, ctx.decision.auth, resolveClaudeBedrockProfile(ctx));
       const help = helpProbe("claude", env);
       const evidence: Record<string, string> = {};
       const advisories: string[] = [];
@@ -503,7 +542,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
     },
 
     buildChildEnv(ctx: AdapterLaunchContext): NodeJS.ProcessEnv {
-      return buildClaudeChildEnv(ctx.parentEnv, resolveClaudeBedrockProfile(ctx));
+      return buildClaudeChildEnv(ctx.parentEnv, ctx.decision.auth, resolveClaudeBedrockProfile(ctx));
     },
 
     preflight(ctx: AdapterLaunchContext): string[] {

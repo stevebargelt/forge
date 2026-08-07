@@ -36,7 +36,10 @@ import { closeDb } from "../store/db.js";
 import {
   getOrchestratorReceipt,
   listOrchestratorReceiptsForProject,
+  markOrchestratorReceiptRunning,
   persistPendingOrchestratorReceipt,
+  OrchestratorReceiptWriteError,
+  type SpawnConfirmation,
 } from "../store/orchestrator-receipts.js";
 import { loadHeartbeats } from "../util/orchestrator-heartbeats.js";
 import { runOrchestratorLaunch } from "./launch.js";
@@ -430,6 +433,76 @@ test("integ FG-576 D11: a receipt that cannot be written refuses before spawn, n
   assert.match(res.stderr, /retry/i);
   assert.match(res.stderr, /nothing was spawned/i);
   assert.equal(existsSync(roots.record), false, "a child was created despite an unrecordable launch");
+  assert.equal(loadHeartbeats({ heartbeatsDir: roots.orchestrators }).length, 0);
+});
+
+// ─── D11's MIRROR: a go-live write that fails AFTER a confirmed spawn ───────
+//
+// Pre-spawn, an unwritable receipt refuses the launch. Post-spawn refusing is gone —
+// the child is up — so the failure mode is the opposite one: a live session whose
+// receipt is stuck `pending`. D15 allows `exited` only from `running`, so without the
+// held retry below the close is refused too and the session that really ran is
+// recorded forever as one that never started.
+
+test("integ FG-576 D11/D15: a go-live write that fails after spawn is held and retried, so the session still closes honestly", async () => {
+  applyEnv();
+
+  const attempts: (SpawnConfirmation | undefined)[] = [];
+  const errors: string[] = [];
+  const outcome = await runOrchestratorLaunch({
+    commandName: "forge orchestrator",
+    cwd: roots.project,
+    heartbeatsDir: roots.orchestrators,
+    stdio: "ignore",
+    out: () => {},
+    err: (line) => errors.push(line),
+    markRunningFn: (receiptId, confirmation) => {
+      attempts.push(confirmation);
+      if (attempts.length === 1) {
+        throw new OrchestratorReceiptWriteError("forge: simulated store failure", receiptId, "<test store>", null);
+      }
+      return markOrchestratorReceiptRunning(receiptId, confirmation);
+    },
+  });
+
+  assert.equal(outcome.spawned, true);
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(attempts.length, 2, "the held go-live write was never retried");
+
+  const receipt = listOrchestratorReceiptsForProject(roots.project)[0]!;
+  assert.equal(receipt.state, "exited");
+  assert.equal(receipt.exitCode, 0);
+  assert.equal(receipt.terminal, true);
+  // The retry records when the spawn was ACTUALLY confirmed, not when it was retried.
+  assert.equal(receipt.startedAt, attempts[0]?.startedAt);
+  // The gap was reported while it was open, rather than discovered afterwards.
+  assert.match(errors.join("\n"), /still records 'pending'/);
+});
+
+test("integ FG-576 D11/D15: a go-live write that never succeeds is named, and no state is invented for it", async () => {
+  applyEnv();
+
+  const errors: string[] = [];
+  const outcome = await runOrchestratorLaunch({
+    commandName: "forge orchestrator",
+    cwd: roots.project,
+    heartbeatsDir: roots.orchestrators,
+    stdio: "ignore",
+    out: () => {},
+    err: (line) => errors.push(line),
+    markRunningFn: (receiptId) => {
+      throw new OrchestratorReceiptWriteError("forge: simulated store failure", receiptId, "<test store>", null);
+    },
+  });
+
+  assert.equal(outcome.spawned, true);
+  const receipt = listOrchestratorReceiptsForProject(roots.project)[0]!;
+  // Still `pending`: `spawn_failed` is the only other edge out of it, and the spawn
+  // did not fail. Forge says what happened instead of recording a lie.
+  assert.equal(receipt.recordedState, "pending");
+  const reported = errors.join("\n");
+  assert.match(reported, new RegExp(receipt.receiptId));
+  assert.match(reported, /ran and has now exited/);
   assert.equal(loadHeartbeats({ heartbeatsDir: roots.orchestrators }).length, 0);
 });
 

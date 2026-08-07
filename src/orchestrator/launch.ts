@@ -23,7 +23,12 @@
 //                         root only. Nothing is written into an operator config root.
 //   6. SPAWN              and wait for node's `spawn` event — a CONFIRMED spawn.
 //   7. GO LIVE            receipt `pending` -> `running` AND the launcher-owned
-//                         liveness record appears, in that order, only now.
+//                         liveness record appears, in that order, only now. If that
+//                         receipt write fails the child is already up, so D11's
+//                         refusal is no longer available: the write is HELD and
+//                         retried at close-out, because `exited` is reachable only
+//                         from `running` and a session that ran must still be able to
+//                         close honestly.
 //   8. CLOSE HONESTLY     child exit / signal -> `exited`; a child that never
 //                         started -> `spawn_failed`. A launcher killed mid-session
 //                         writes nothing at all, which is exactly why its record
@@ -49,6 +54,7 @@ import {
   OrchestratorReceiptWriteError,
   type CapabilityLimitation,
   type SessionOperation,
+  type SpawnConfirmation,
 } from "../store/orchestrator-receipts.js";
 import { insertRun, updateRunStatus } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
@@ -268,6 +274,11 @@ export type OrchestratorLaunchInput = {
   /** Observation hook fired the instant the receipt exists and BEFORE spawn, so a
    *  test can prove the receipt is `pending` — not `running` — at that moment (D15). */
   onBeforeSpawn?: ((state: { receiptId: string; sessionKey: string; plan: LaunchPlan }) => void) | undefined;
+  /** The go-live write. A seam because a POST-SPAWN store failure is the one thing a
+   *  test cannot induce from outside: every other write can be blocked by making a
+   *  path unwritable before the launch, but this one has to fail while a confirmed
+   *  child is already running. */
+  markRunningFn?: typeof markOrchestratorReceiptRunning | undefined;
 };
 
 export type OrchestratorLaunchOutcome = {
@@ -506,9 +517,16 @@ export async function runOrchestratorLaunch(input: OrchestratorLaunchInput): Pro
     env: plan.env,
   });
 
+  const markRunning = input.markRunningFn ?? markOrchestratorReceiptRunning;
+
   return await new Promise<OrchestratorLaunchOutcome>((resolveOutcome) => {
     let confirmed = false;
     let settled = false;
+    /** The go-live write, or null once it has been recorded. Held because D15 allows
+     *  `exited` only from `running`: a receipt still `pending` at exit could not be
+     *  closed at all, which is how a session that really ran ends up permanently
+     *  recorded as one that never started (the mirror of D11's pre-spawn refusal). */
+    let deferredGoLive: SpawnConfirmation | null = null;
 
     const cleanupCarrier = (): void => {
       if (plan.carrier.path) {
@@ -524,13 +542,24 @@ export async function runOrchestratorLaunch(input: OrchestratorLaunchInput): Pro
       confirmed = true;
       // ---- 9. GO LIVE. Receipt first, then the liveness record — in that order,
       // only now, and only because a spawn was confirmed (D15, AC6).
+      const goLive: SpawnConfirmation = {
+        startedAt: nowIso(),
+        launcherPid: process.pid,
+        launcherIdentity: JSON.stringify(captureProcessIdentity()),
+      };
       try {
-        markOrchestratorReceiptRunning(receiptId, {
-          launcherPid: process.pid,
-          launcherIdentity: JSON.stringify(captureProcessIdentity()),
-        });
+        markRunning(receiptId, goLive);
       } catch (e) {
+        // Refusing is no longer available — the child is up. The write is HELD and
+        // retried at close-out with the timestamp the spawn was actually confirmed
+        // at, so a session that really ran can still close honestly instead of being
+        // stranded `pending` forever by one failed write.
+        deferredGoLive = goLive;
         err(`${label}: ⚠ ${(e as Error).message}`);
+        err(
+          `${label}: ⚠ the session is running, but its receipt ${receiptId} still records 'pending' and no ` +
+            `surface will report it as started. Forge will record it when the session ends.`,
+        );
       }
 
       try {
@@ -590,10 +619,27 @@ export async function runOrchestratorLaunch(input: OrchestratorLaunchInput): Pro
       cleanupCarrier();
       closeLauncherHeartbeat(sessionKey, { heartbeatsDir: input.heartbeatsDir });
       if (confirmed) {
+        // A held go-live write goes first: `exited` is reachable only from `running`,
+        // so without it the honest close below would be refused as an illegal
+        // transition and the receipt would stay `pending` for a session that ran.
+        if (deferredGoLive) {
+          try {
+            markRunning(receiptId, deferredGoLive);
+            deferredGoLive = null;
+          } catch (e) {
+            err(`${label}: ⚠ ${(e as Error).message}`);
+          }
+        }
         // The child ran and stopped. `exited` is the honest terminal fact whether it
         // returned 0, returned non-zero, or was killed by a signal — the code and the
         // signal say which, and neither is reinterpreted as the other.
-        closeReceiptQuietly(receiptId, { state: "exited", exitCode: code, signal: signal ?? null }, err, label);
+        const closed = closeReceiptQuietly(receiptId, { state: "exited", exitCode: code, signal: signal ?? null }, err, label);
+        if (!closed) {
+          err(
+            `${label}: ⚠ the interactive orchestrator ran and has now exited, but its receipt ${receiptId} could ` +
+              `not be updated and does not record that. Nothing is running; the receipt is stale, not live.`,
+          );
+        }
       } else {
         closeReceiptQuietly(
           receiptId,
@@ -632,11 +678,13 @@ function closeReceiptQuietly(
   outcome: { state: "exited" | "spawn_failed" | "orphaned"; exitCode?: number | null; signal?: string | null; reason?: string | null },
   err: (line: string) => void,
   label: string,
-): void {
+): boolean {
   try {
     closeOrchestratorReceipt(receiptId, outcome);
+    return true;
   } catch (e) {
     err(`${label}: ⚠ could not close orchestrator receipt ${receiptId}: ${(e as Error).message}`);
+    return false;
   }
 }
 
