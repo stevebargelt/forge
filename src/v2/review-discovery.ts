@@ -11,6 +11,11 @@
 //    and could not tell" and "no reviewer looked" is the difference the whole lifecycle
 //    is built to preserve, and collapsing them is how an unreviewed panel reads clean.
 //
+//    FG-689 SHARPENS THIS RULE RATHER THAN RELAXING IT. Once a lens's scope is too large for
+//    one dispatch it is reviewed as several shards, and the debt is owed PER SHARD: one
+//    surviving shard never satisfies a lens whose other shards crashed. See
+//    `assessShardCompleteness`.
+//
 // 2. DEDUPLICATION MERGES ONLY WHEN TWO OBSERVATIONS NAME THE SAME ANCHORED MECHANISM
 //    AND THE SAME AFFECTED INVARIANT. Unanchored observations never merge — there is no
 //    mechanism to compare. Every source survives the merge as provenance, and merging
@@ -21,7 +26,14 @@
 import { z } from "zod";
 import { RISK_LENSES, type RiskLens } from "./review-contract.js";
 import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
-import type { FindingSource, LensAcceptance, Observation } from "../store/reviews.js";
+import type {
+  FindingSource,
+  LensAcceptance,
+  LensSkipReason,
+  LensSkipRecord,
+  Observation,
+  ShardPlan,
+} from "../store/reviews.js";
 
 export const REACHABILITY = ["demonstrated", "supported", "speculative"] as const;
 export type Reachability = (typeof REACHABILITY)[number];
@@ -120,7 +132,19 @@ export type LensDispatch = {
   /** FG-654: the protocol generation the dispatched agent ran under, read back off its
    *  task manifest. The manifest is authoritative; this is the ledger's index of it. */
   protocol?: LensProtocolRecord;
+  /** FG-689: WHICH shard of this lens's scope this dispatch reviewed. */
+  shard?: ShardIdentity;
+  /** FG-689: the partition identity the shard was cut under. */
+  derivationDigest?: string;
 };
+
+/** WHICH shard of a lens's scope a dispatch and its outcome are about.
+ *
+ *  `of` travels with `index` rather than living only on the plan so a single record read in
+ *  isolation still says "1 of 3". A reviewer, an operator and a later reader of the ledger
+ *  must never mistake a shard for the whole change, and a record that can only say "shard 1"
+ *  invites exactly that reading. */
+export type ShardIdentity = { index: number; of: number };
 
 /** FG-654. Deliberately per-DISPATCH, not per stage: `StageEvidence` is one record per
  *  stage while Stage 2b fans out five lens dispatches, so recording it there would be the
@@ -160,6 +184,13 @@ export type LensOutcome =
       taskId?: string;
       verdictId?: string;
       protocol?: LensProtocolRecord;
+      /** FG-689: the shard of the lens's scope this outcome reviewed, and the partition it
+       *  was cut under. Optional because a review planned before FG-689 has neither — an
+       *  outcome carrying no shard identity satisfies no shard, which is the fail-closed
+       *  direction. Carried on BOTH branches: a crash needs to say which shard crashed as
+       *  much as an authored outcome needs to say which shard it covers. */
+      shard?: ShardIdentity;
+      derivationDigest?: string;
     }
   | {
       lens: RiskLens;
@@ -169,6 +200,8 @@ export type LensOutcome =
       detail: string;
       taskId?: string;
       protocol?: LensProtocolRecord;
+      shard?: ShardIdentity;
+      derivationDigest?: string;
     };
 
 function classifyFailure(failureKind: string | undefined): LensIncompleteReason {
@@ -190,6 +223,11 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
     role: dispatch.role,
     taskId: dispatch.taskId,
     ...(dispatch.protocol !== undefined ? { protocol: dispatch.protocol } : {}),
+    // FG-689: carried through EVERY branch below, including the failures. A shard that
+    // crashed is the shard the assessor has to name, so its identity cannot be a property
+    // only successful outcomes keep.
+    ...(dispatch.shard !== undefined ? { shard: dispatch.shard } : {}),
+    ...(dispatch.derivationDigest !== undefined ? { derivationDigest: dispatch.derivationDigest } : {}),
   };
 
   if (dispatch.synthesized === true) {
@@ -330,6 +368,256 @@ export function assessDiscoveryCompleteness(
     }
   }
   return { complete: missing.length === 0, missing, accepted };
+}
+
+// ─── FG-689: completeness is PER SHARD ──────────────────────────────────────
+//
+// THE RULE `assessDiscoveryCompleteness` CANNOT EXPRESS. It iterates the selected lenses and
+// accepts the FIRST complete outcome for a lens. That is right while a lens is one dispatch;
+// the moment a lens is several, it means one surviving shard satisfies a lens whose other
+// shards crashed — the review reads complete while most of the code in that lens's scope was
+// never read by anyone. It is the same fail-open the whole evidence-led model exists to close,
+// arriving through the partition rather than through a missing container, and no amount of
+// care in the sharding code prevents it: the assessor has to owe an outcome PER SHARD.
+//
+// So every shard the plan names owes a schema-valid reviewer-authored outcome, and ONE missing
+// shard leaves the review incomplete exactly as one missing lens does today. There are three
+// ways that debt is discharged and they are structurally distinct on purpose:
+//
+//   - an AUTHORED outcome for that shard under the current partition. Evidence.
+//   - an operator ACCEPTANCE that names that shard (D16). Not evidence — a recorded decision
+//     to proceed with a narrower review, reported separately so it never reads as one.
+//   - for a lens the plan gave ZERO shards, a matching `lens_skipped` ledger record. Neither
+//     evidence nor an absence: nothing was in scope, so nothing was owed. It is reported in
+//     its own array and contributes no observation, which is what keeps it distinguishable at
+//     the gate from a lens that produced nothing.
+//
+// And every durable decision here is bound to the PARTITION that produced it. A shard's
+// identity is a function of the derivation, so an acceptance, a skip record or an outcome
+// carrying a different `derivationDigest` describes a shard of a partition that no longer
+// exists. Those are NAMED as superseded (D17) rather than silently dropped or silently
+// honored — the same treatment `assessDiscoveryCompleteness` gives an acceptance whose
+// candidate moved, for the same reason: the operator who decided something once has to be
+// able to read that it no longer applies.
+
+/** One shard (or one plan-skipped lens) with nothing to discharge its debt.
+ *
+ *  `lens` is a plain string rather than `RiskLens` because the plan is read back off the
+ *  durable row: a plan naming something outside the vocabulary must be REPORTED, not narrowed
+ *  away by a cast that makes it disappear from the refusal. */
+export type ShardMiss = {
+  lens: string;
+  /** 1-based. Absent only for a lens the plan recorded as SKIPPED — it has no shards, so
+   *  there is no shard to name; `reason` is `skip_unrecorded` there. */
+  shard?: number;
+  of?: number;
+  reason: LensIncompleteReason | "no_outcome" | "skip_unrecorded";
+  detail: string;
+};
+
+/** A durable decision that describes a partition other than the one being assessed. */
+export type SupersededDecision = {
+  kind: "outcome" | "acceptance" | "skip";
+  lens: string;
+  shard?: number;
+  /** The partition the record was made under; absent when it carried none at all. */
+  recordedDigest?: string;
+  detail: string;
+};
+
+export type ShardCompleteness = {
+  complete: boolean;
+  missing: ShardMiss[];
+  /** Shards cleared by an operator acceptance NAMING that shard. Reported rather than folded
+   *  into completeness: an accepted shard is a narrower review than the contract states. */
+  accepted: LensAcceptance[];
+  /** Lenses the plan gave zero shards, with a matching ledger record. SATISFIED, and its own
+   *  array — never `missing`, and never an outcome. */
+  skipped: Array<{ lens: string; reason: LensSkipReason }>;
+  /** Decisions bound to a partition that no longer exists, named rather than dropped (D17). */
+  superseded: SupersededDecision[];
+};
+
+/** What a shard-granular assessment may consult. `skips` is the `lens_skipped` half of
+ *  `lens_outcomes_json`, read through its own accessor so a skip can never arrive here as an
+ *  outcome. */
+export type ShardClearances = AcceptedLenses & {
+  skips?: readonly LensSkipRecord[];
+};
+
+export function assessShardCompleteness(
+  plan: ShardPlan,
+  outcomes: readonly LensOutcome[],
+  clearances: ShardClearances = {},
+): ShardCompleteness {
+  const missing: ShardMiss[] = [];
+  const accepted: LensAcceptance[] = [];
+  const skipped: ShardCompleteness["skipped"] = [];
+  const superseded: SupersededDecision[] = [];
+
+  const digest = plan.digest;
+  const acceptances = clearances.acceptances ?? [];
+  const skips = clearances.skips ?? [];
+
+  for (const planned of plan.lenses) {
+    const lens = planned.lens;
+    const count = planned.shards.length;
+
+    // A skip recorded for a lens THIS partition gives shards to is a decision about a
+    // partition where the lens owned nothing. It cannot satisfy a shard, and dropping it
+    // quietly would leave an operator reading a review as skipped that is now dispatched.
+    for (const s of skips.filter((r) => r.lens === lens)) {
+      superseded.push({
+        kind: "skip",
+        lens,
+        recordedDigest: s.derivationDigest,
+        detail:
+          `the ${lens} lens is recorded as intentionally skipped under partition ${s.derivationDigest}, but the ` +
+          `partition being assessed (${digest}) gives it ${count} shard(s) — the skip describes a different ` +
+          `partition and satisfies none of them`,
+      });
+    }
+
+    // An outcome with NO shard identity satisfies nothing here. It is a lens-granular record —
+    // written before this review was partitioned, or by a path that did not carry the shard —
+    // and honoring it would be the whole fail-open: one un-sharded outcome standing in for
+    // every shard of the lens.
+    for (const o of outcomes.filter((o) => o.lens === lens && o.shard === undefined)) {
+      superseded.push({
+        kind: "outcome",
+        lens,
+        detail:
+          `an outcome for the ${lens} lens carries no shard identity, so it cannot say which of the ${count} ` +
+          `shard(s) of this lens's scope was reviewed — it satisfies none of them`,
+      });
+    }
+
+    for (const shard of planned.shards) {
+      const label = `${lens} shard ${shard.index} of ${shard.of}`;
+      const forShard = outcomes.filter((o) => o.lens === lens && o.shard?.index === shard.index);
+      const current = forShard.filter((o) => o.derivationDigest === digest);
+
+      for (const o of forShard.filter((o) => o.derivationDigest !== digest)) {
+        superseded.push({
+          kind: "outcome",
+          lens,
+          shard: shard.index,
+          recordedDigest: o.derivationDigest,
+          detail:
+            `an outcome for ${label} was authored against partition ${o.derivationDigest ?? "(none recorded)"}, ` +
+            `not the partition being assessed (${digest}) — it reviewed a different set of paths and does not ` +
+            `satisfy this shard`,
+        });
+      }
+
+      if (current.some((o) => o.complete)) continue;
+
+      // FG-654's precedence, unchanged and checked BEFORE any acceptance: a stale-protocol
+      // refusal is not a narrower review, so there is nothing for an operator to accept.
+      const last = current[current.length - 1];
+      if (last && !last.complete && last.reason === "stale_protocol") {
+        missing.push({ lens, shard: shard.index, of: shard.of, reason: last.reason, detail: last.detail });
+        continue;
+      }
+
+      // D16: only an acceptance NAMING this shard clears it. A shardless acceptance recorded
+      // before the partition existed covers no shard in particular, and treating it as
+      // covering all of them would clear shards that crashed and were never read.
+      const forLens = acceptances.filter((a) => a.lens === lens);
+      const named = forLens.filter((a) => a.shard === shard.index);
+      const bound = named.filter(
+        (a) =>
+          a.derivationDigest === digest &&
+          clearances.candidateSha !== undefined &&
+          a.candidateSha === clearances.candidateSha,
+      );
+      const usable = bound[bound.length - 1];
+      if (usable) {
+        accepted.push(usable);
+        continue;
+      }
+
+      const notes: string[] = [];
+      for (const a of named.filter((a) => !bound.includes(a))) {
+        const why =
+          a.derivationDigest !== digest
+            ? `it was made against partition ${a.derivationDigest ?? "(none recorded)"}, not ${digest}`
+            : `it was made against candidate ${a.candidateSha}, which is not the candidate being assessed`;
+        superseded.push({
+          kind: "acceptance",
+          lens,
+          shard: shard.index,
+          recordedDigest: a.derivationDigest,
+          detail: `an authorized acceptance of ${label} exists but ${why} — accept it again against the current shard, or retry it`,
+        });
+        notes.push(`(an authorized acceptance of ${label} exists but ${why})`);
+      }
+      for (const a of forLens.filter((a) => a.shard === undefined)) {
+        superseded.push({
+          kind: "acceptance",
+          lens,
+          recordedDigest: a.derivationDigest,
+          detail:
+            `an authorized acceptance of the ${lens} lens names no shard, so it cannot clear ${label} — one ` +
+            `acceptance covering every shard would clear shards that crashed and were never read`,
+        });
+        notes.push(`(an acceptance of the ${lens} lens exists but names no shard, so it clears none of them)`);
+      }
+      const staleNote = notes.length > 0 ? ` ${notes.join(" ")}` : "";
+
+      const failed = current[current.length - 1];
+      if (failed && !failed.complete) {
+        missing.push({
+          lens,
+          shard: shard.index,
+          of: shard.of,
+          reason: failed.reason,
+          detail: `${failed.detail}${staleNote}`,
+        });
+      } else {
+        missing.push({
+          lens,
+          shard: shard.index,
+          of: shard.of,
+          reason: "no_outcome",
+          detail: `${label} produced no outcome — it covers ${shard.paths.length} path(s) that no reviewer read${staleNote}`,
+        });
+      }
+    }
+  }
+
+  // A lens the plan gave ZERO shards owes a matching ledger record and nothing else. The
+  // record is required rather than inferred from the plan: the plan is what forge INTENDED,
+  // the record is what it durably decided, and a skip nobody recorded is a lens that silently
+  // vanished from the panel. Re-recording it is cheap; reading past its absence is not.
+  for (const s of plan.skipped) {
+    const forLens = skips.filter((r) => r.lens === s.lens);
+    if (forLens.some((r) => r.derivationDigest === digest)) {
+      skipped.push({ lens: s.lens, reason: s.reason });
+      continue;
+    }
+    for (const r of forLens) {
+      superseded.push({
+        kind: "skip",
+        lens: s.lens,
+        recordedDigest: r.derivationDigest,
+        detail:
+          `the ${s.lens} lens's skip record was made under partition ${r.derivationDigest}, not the partition ` +
+          `being assessed (${digest}) — a re-partition can legitimately give a lens paths, so the earlier skip ` +
+          `is not a current decision about this one`,
+      });
+    }
+    missing.push({
+      lens: s.lens,
+      reason: "skip_unrecorded",
+      detail:
+        `the plan records the ${s.lens} lens as intentionally skipped (${s.reason}), but the ledger carries no ` +
+        `matching skip record for partition ${digest} — an unrecorded skip is a lens that left the panel with ` +
+        `nothing saying so`,
+    });
+  }
+
+  return { complete: missing.length === 0, missing, accepted, skipped, superseded };
 }
 
 // ─── normalization + deduplication (Stage 3) ────────────────────────────────
