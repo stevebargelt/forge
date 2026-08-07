@@ -16,53 +16,38 @@ FG-591. FG-496's DB-backed backlog and queue primitives are complete.
 
 ## Current objective
 
-FG-591 → FG-576. **FG-584 shipped 2026-08-06** (`00000e76`, PR #217), its
-AC14 dogfood proven on the production path; the sequence resumes at FG-591.
-
-**Why FG-584 came first (retained for context).** FG-610 demonstrated it live: the runner
-fanned both plan steps in parallel even though the plan declared step 2
-sequenced after step 1, so the docs child correctly self-failed rather than
-document a schema that was not committed yet. File-disjointness does not make
-semantically dependent children executable: each starts from the same committed
-base, so consumers cannot see a primitive another child creates and composition
-tests cannot see the behavior they are meant to verify.
-
-FG-584 is not a new scheduler design. It completes the Gas City-aligned
-controller / durable-work / Refinery contract that FG-116 and FG-139 claimed:
-plan-step dependencies are durable work dependencies; the controller dispatches
-only ready work; mutating workers use private writable workspaces; completed
-worker commits enter Forge's deterministic integration publisher; and dependent
-work starts from the candidate containing its integrated prerequisites. Merge
-conflicts are visible integration outcomes, not a reason to collapse every
-dependent plan into one worker.
-
-Until FG-584 lands, collapsing dependent implementation steps is the safe
-workaround, explicitly not the target architecture. Everything in
-review-infrastructure stays non-preempting.
+**FG-576 — provider-neutral interactive orchestrator launcher.** The operator-queue
+program is closed: FG-496's primitives, FG-610's claim/lease/recovery, and FG-591's
+operator controls and dispatcher have all shipped. FG-576 resolves Claude or Codex from
+model policy and absorbs the policy-driven `forge claude` path plus the
+provider-specific live-session capabilities from FG-554 and FG-448 — confirm that
+absorption against those two tickets before scoping, rather than assuming it.
 
 ## Recently completed
 
-- **FG-584** (`00000e76`, PR #217) — plan-step `depends_on` is now executable
-  controller data: dependency-ready dispatch, per-group bases cut from the gated
-  candidate, a mid-wave prerequisite gate, typed merge-conflict blocks, and
-  four-boundary crash convergence. Proven end to end by a production-path dogfood
-  whose plan the tech-lead ordered unprompted.
-- **FG-685** (`ee303508`, PR #216) — the no-AI-attribution hook is materialized
-  into every Forge-provisioned task clone at provisioning time, with
-  `core.hooksPath` pinned workspace-relative so the guard survives the container
-  mount.
+- **FG-591** (`ecbe7d6f`, PR #218) — the operator work queue: a Kanban board over
+  orthogonal durable fields, CLI and dashboard controls, and a long-lived
+  capacity-limited dispatcher whose every selection records why it passed candidates
+  over. Reviewed under FG-689's sharded discovery — 8 shards, 5 lenses.
+- **FG-689** (`0cc6decb`, PR #220) — reviewer input is scoped to authored lens-to-path
+  ownership and sharded when it still exceeds budget, with completeness owed per shard.
+  Removed a placeholder a reviewer could author a clean pass on.
 
 ## Now
 
-1. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
-   capacity-limited dispatch over the FG-496/FG-610 queue primitives.
+1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve Claude or
+   Codex from model policy; confirm what FG-554 and FG-448 actually contribute before
+   treating them as absorbed.
 
 ## Next
 
-1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
-   Claude or Codex from model policy after the operator queue program closes;
-   includes the policy-driven `forge claude` path and provider-specific live
-   session capabilities absorbed from FG-554 and FG-448.
+1. **FG-691 — the store clock is unfreezable**, so lease boundary assertions race. It
+   has already produced one intermittent red on a required check; it is the most likely
+   source of an unexplained CI failure until it lands.
+2. **FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.** Cost
+   is proportional to how far a wave got, and it bit twice this session.
+3. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA
+   contrast, origin pinning excluding a non-default loopback bind).
 
 `Next` is deliberately short. Ordering here expresses current operator intent;
 it does not override ticket dependencies or authorize scope expansion.
@@ -104,6 +89,10 @@ it does not override ticket dependencies or authorize scope expansion.
 - **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
   prebuilds directory, permanently refusing a correct cache; plus a stale
   review-wiring comment.
+- **FG-686** — FG-685 residue: `fg352 (11)` no longer induces a failure at the `git
+  commit` invocation.
+- **FG-687** — FG-584 residue: `renewRunLock` reports success after a superseded write
+  to an unlinked inode; the CAS protects the successor, only the return value lies.
 - **FG-686** — FG-685 residue: `fg352 (11)` no longer induces a failure at the
   `git commit` invocation, because the `--no-verify` capture exemption made its
   hook-based device inert and the replacement wedge fails at `git add`.
