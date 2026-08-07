@@ -19,13 +19,19 @@
 // decides it, which every refusal names. `--force` still exists and is still the human's
 // override — it is not the ordinary settlement path, and the refusal says so.
 
-import { lensAcceptancesOf, lensOutcomeRecordsOf, type Review, type ReviewFinding } from "../store/reviews.js";
+import {
+  lensAcceptancesOf,
+  lensOutcomeRecordsOf,
+  lensSkipRecordsOf,
+  type Review,
+  type ReviewFinding,
+} from "../store/reviews.js";
 import type { VerdictRow } from "../types/index.js";
 import { tasksForRun } from "../store/tasks.js";
 import { gatesForTask } from "../store/gates.js";
 import { logEvent } from "../store/events.js";
 import type { Workflow } from "./schema.js";
-import { assessDiscoveryCompleteness, type LensOutcome, type Reachability } from "./review-discovery.js";
+import { assessShardCompleteness, planCoversLenses, type LensOutcome, type Reachability } from "./review-discovery.js";
 import { validateReviewContract, type RiskLens } from "./review-contract.js";
 import { evidenceKindSufficientFor, sufficientEvidenceKinds } from "./review-evidence.js";
 import { verdictBlocksGate } from "./gate.js";
@@ -37,6 +43,8 @@ export const REVIEW_DISPOSITION_GATE = "review_disposition";
  *  count of how many things are wrong. */
 export const DISPOSITION_GATE_CONDITIONS = [
   "lens_outcome_missing",
+  "shard_plan_absent",
+  "shard_plan_stale",
   "contract_unreadable",
   "finding_untriaged",
   "architecture_question_open",
@@ -62,7 +70,16 @@ export type DispositionGateCondition = {
 /** What the gate explicitly did NOT block on. Reported so the widened-authority half of
  *  Change 3 is visible in the same place the narrowed half is. */
 export type DispositionGateAllowance = {
-  id: "advisory_red_fail_dispositioned" | "settled_disposition" | "superseded_verdict";
+  id:
+    | "advisory_red_fail_dispositioned"
+    | "settled_disposition"
+    | "superseded_verdict"
+    /** FG-689 AC3: a lens the plan gave ZERO shards because its authored scope matched no
+     *  changed path. It is reported on its OWN line — never folded into `lens_outcome_missing`
+     *  and never rendered as an outcome — because "nothing was in scope, so nothing was owed"
+     *  and "a reviewer was owed and produced nothing" are different facts, and an operator
+     *  reading one as the other is the whole point of the distinction. */
+    | "lens_intentionally_skipped";
   detail: string;
 };
 
@@ -87,12 +104,19 @@ function recordedLensOutcomes(review: Review): LensOutcome[] {
   return lensOutcomeRecordsOf(review) as LensOutcome[];
 }
 
+/** "wide shard 2 of 3" — the lens AND the shard, always both. A refusal that named only the
+ *  lens would send an operator to retry a whole panel when one shard of it is what crashed,
+ *  and would leave "which part of this lens was never read" unanswerable from the gate. */
+function shardLabel(m: { lens: string; shard?: number; of?: number }): string {
+  return m.shard === undefined ? m.lens : `${m.lens} shard ${m.shard} of ${m.of ?? "?"}`;
+}
+
 /** The selected lenses, or the reason there is no readable answer.
  *
- *  FAILING OPEN HERE WOULD BE THE WHOLE GATE. `assessDiscoveryCompleteness` iterates the
- *  selected lenses, so an empty list is trivially "complete" — an unreadable contract would
- *  mean no lens is owed an outcome, which is exactly backwards: the review whose contract
- *  cannot be parsed is the one whose discovery coverage is least established. It gets its own
+ *  FAILING OPEN HERE WOULD BE THE WHOLE GATE. The completeness assessor iterates what is
+ *  OWED, so an empty expectation is trivially "complete" — an unreadable contract would mean
+ *  no lens is owed an outcome, which is exactly backwards: the review whose contract cannot be
+ *  parsed is the one whose discovery coverage is least established. It gets its own
  *  blocking condition instead, matching `selectRedsForContract`, which treats the same input
  *  as fail-closed-WIDER rather than as "nothing to review". */
 function selectedLenses(review: Review): { ok: true; lenses: RiskLens[] } | { ok: false; refusal: string } {
@@ -228,9 +252,40 @@ export function assessReviewDisposition(input: ReviewDispositionInput): ReviewDi
         `review ${review.id} carries no readable review contract, so which lenses discovery owed an outcome ` +
         `cannot be established: ${lenses.refusal}`,
     });
+  } else if (review.shardPlan === undefined) {
+    // FG-689 D1, THE HALF THE ASSESSOR CANNOT SEE. Completeness is owed per shard, and what is
+    // owed is the recorded plan — so a review with a readable contract and NO plan is a review
+    // whose expectation was never written down. Assessing it anyway would read an empty ledger
+    // against an empty expectation and call that complete: the gate cannot detect the absence
+    // of a record it never knew to look for, so the absence is its own blocking condition.
+    //
+    // Since FG-689 every readable contract carries `lens_scopes`, so this fires for every
+    // scoped contract with no plan. It clears the way it is meant to: by discovery running and
+    // recording what it dispatched.
+    conditions.push({
+      id: "shard_plan_absent",
+      detail:
+        `review ${review.id} carries a readable contract (lenses ${lenses.lenses.join(", ")}) but NO recorded ` +
+        `shard plan, so nothing says how many reviewer outcomes discovery was owed. Discovery records the plan ` +
+        `before its first container starts, so an absent plan means discovery has not dispatched — an unrecorded ` +
+        `expectation is unestablished coverage, not satisfied coverage. Run \`forge review continue ${review.id}\`.`,
+    });
+  } else if (!planCoversLenses(review.shardPlan, lenses.lenses).ok) {
+    // THE SAME HOLE FROM THE OTHER SIDE. An absent plan is caught above; a plan that does not
+    // name a selected lens is caught here, because the assessor iterates the PLAN — so a lens
+    // the plan never named is owed nothing and reads complete. Assessing anyway is the
+    // fail-open with an extra step.
+    conditions.push({
+      id: "shard_plan_stale",
+      detail:
+        `review ${review.id}'s recorded shard plan does not describe the panel its contract selects ` +
+        `(${lenses.lenses.join(", ")}): ` +
+        `${(planCoversLenses(review.shardPlan, lenses.lenses) as { detail: string }).detail}`,
+    });
   } else {
-    const completeness = assessDiscoveryCompleteness(lenses.lenses, recordedLensOutcomes(review), {
+    const completeness = assessShardCompleteness(review.shardPlan, recordedLensOutcomes(review), {
       acceptances: lensAcceptancesOf(review),
+      skips: lensSkipRecordsOf(review),
       // The CONFIRMED sha discovery was assessed at, which is what an acceptance stands in
       // for — the outcomes beside it are recorded against the confirmed candidate too. No
       // fallback to the moving candidate: `recordLensAcceptance` binds an acceptance to the
@@ -247,15 +302,25 @@ export function assessReviewDisposition(input: ReviewDispositionInput): ReviewDi
       conditions.push({
         id: "lens_outcome_missing",
         detail:
-          `${completeness.missing.length} selected lens(es) have no schema-valid reviewer-authored outcome: ` +
-          completeness.missing.map((m) => `${m.lens} (${m.reason}: ${m.detail})`).join("; ") +
+          `${completeness.missing.length} planned shard(s) have no schema-valid reviewer-authored outcome: ` +
+          completeness.missing.map((m) => `${shardLabel(m)} (${m.reason}: ${m.detail})`).join("; ") +
           (stale.length > 0
-            ? `. ${stale.length} of these (${stale.map((m) => m.lens).join(", ")}) were REFUSED at dispatch for a ` +
+            ? `. ${stale.length} of these (${stale.map(shardLabel).join(", ")}) were REFUSED at dispatch for a ` +
               `stale Forge-owned review protocol — run \`forge upgrade\` and re-run discovery. An operator lens ` +
               `acceptance cannot clear these: accepting one accepts a review whose reviewer was never told the ` +
               `contract, which is categorically different from accepting a narrower but informed one.`
             : ""),
       });
+    }
+    // A decision bound to a partition that no longer exists satisfies nothing, and it is named
+    // rather than dropped (D17) — the operator who decided something once has to be able to
+    // read that it no longer applies. It is not its own condition: whatever it failed to
+    // satisfy is already blocking above.
+    if (completeness.superseded.length > 0 && conditions.some((c) => c.id === "lens_outcome_missing")) {
+      const last = conditions[conditions.length - 1] as DispositionGateCondition;
+      last.detail +=
+        `. ${completeness.superseded.length} recorded decision(s) describe a partition that no longer exists ` +
+        `and satisfy nothing: ${completeness.superseded.map((s) => s.detail).join("; ")}`;
     }
   }
 
@@ -363,6 +428,28 @@ function allowances(input: ReviewDispositionInput): DispositionGateAllowance[] {
   const out: DispositionGateAllowance[] = [];
   const verdicts = input.verdicts ?? [];
   const candidate = input.review.candidateSha;
+
+  // FG-689 AC3. A SKIP IS ITS OWN LINE, and it is rendered from the PLAN and the ledger record
+  // together: the plan is what forge intended, the record is what it durably decided, and a
+  // plan-skipped lens with no matching record is not reported here at all — it is blocking
+  // above as `skip_unrecorded`. So an operator reads "intentionally skipped (zero in-scope
+  // paths)" only where both halves agree, and never reads it in place of a missing outcome.
+  const skipped = lensSkipRecordsOf(input.review).filter(
+    (r) => input.review.shardPlan !== undefined && r.derivationDigest === input.review.shardPlan.digest,
+  );
+  const planSkipped = new Set((input.review.shardPlan?.skipped ?? []).map((s) => s.lens));
+  const current = skipped.filter((r) => planSkipped.has(r.lens));
+  if (current.length > 0) {
+    out.push({
+      id: "lens_intentionally_skipped",
+      detail:
+        `${current.length} selected lens(es) were intentionally skipped and are owed no outcome: ` +
+        current.map((r) => `${r.lens} (${r.reason})`).join(", ") +
+        ` — their authored scope matched no changed path, so nothing was in scope to review. This is NOT a lens ` +
+        `that produced no outcome and NOT an accepted absence of evidence; no reviewer was owed and none was ` +
+        `dispatched.`,
+    });
+  }
 
   const advisoryFails = verdicts.filter((v) => v.verdict === "fail" && !verdictBlocksGate(v));
   if (advisoryFails.length > 0) {

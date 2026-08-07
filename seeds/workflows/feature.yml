@@ -98,11 +98,30 @@ steps:
       review_contract is the risk surface this change must be reviewed against, and the
       human gate on THIS step is what approves it (FG-640). Shape:
         {threat_model, protected_invariants: [], acceptance_refs: [], non_goals: [],
-         risk_lenses: [one or more of wide, narrow, frontend, backend, security]}
+         risk_lenses: [one or more of wide, narrow, frontend, backend, security],
+         lens_scopes: {<selected lens>: [authored repo-relative paths this lens owns]}}
       Select the lenses the change's actual risk surface needs — a backend-only change does
       not need a frontend reviewer. Only the selected lenses are dispatched at build. You may
       not narrow it later: the coordinator can ADD a lens with recorded diff evidence, but
       removing one or changing the threat model returns here, to the approving authority.
+
+      lens_scopes says WHICH PATHS each selected lens owns, so each reviewer is handed its own
+      surface instead of the whole diff (FG-689). Author it; never derive it. Rules:
+        - One entry per selected lens, and no entry for a lens you did not select. Either way
+          round is a refusal by name.
+        - A pattern is a literal repo-relative path, or a directory prefix ending in `/`.
+          There is NO negation and NO exclusion form: an exclusion list is a path classifier
+          by another name, so generated and vendored artifacts get an owner like anything else.
+        - Every path the final diff touches must be owned by at least one selected lens, or
+          contract confirmation refuses before any reviewer is dispatched and names the path.
+          Scope generously: overlap between lenses is allowed and expected.
+        - TESTS SHARE THE SCOPE OF THE CODE THEY EXERCISE. A test file goes in the same lens's
+          scope as the module it tests. Test files are often half a change's volume, so this
+          convention materially determines how the review is split — do not leave it implicit.
+        - A scope may be WIDENED later with recorded diff evidence, the same way a lens is
+          added. NARROWING one — dropping a pattern, or dropping a lens's entry — returns
+          HERE, to the approving authority, because narrowing a scope to nothing removes a
+          lens without saying so.
 
   # ----- build -----
   # Fanout: one child task per plan-step, agent routed by step.discipline.

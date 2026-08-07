@@ -15,6 +15,7 @@ import type { Review, ReviewFinding } from "../store/reviews.js";
 import type { VerdictRow } from "../types/index.js";
 import { assessReviewDisposition, assessEvidenceLedGate, REVIEW_DISPOSITION_GATE } from "./review-gate.js";
 import type { DispositionGateConditionId } from "./review-gate.js";
+import { oneShardPlan, shardOutcome } from "./review-shards.testkit.js";
 
 const SHA = "cand640";
 const OLD_SHA = "cand639";
@@ -25,12 +26,15 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 18"],
   risk_lenses: ["backend", "security"],
   non_goals: ["rewriting every workflow"],
+  lens_scopes: { backend: ["src/v2/review-gate.ts"], security: ["src/v2/review-discovery.ts"] },
 };
 
 /** A completed, reviewer-authored outcome for a lens. `authored: true` is the whole point —
  *  see review-discovery.ts. */
 function lensOutcome(lens: string, outcome = "pass"): unknown {
-  return { lens, role: `red-${lens}`, complete: true, outcome, authored: true, findings: [] };
+  // FG-689: an outcome says WHICH shard of the lens's scope it reviewed. One that carries no
+  // shard identity satisfies nothing — it cannot say which of the lens's shards was read.
+  return shardOutcome({ lens, role: `red-${lens}`, complete: true, outcome, authored: true, findings: [] });
 }
 
 function shippingRecord(sha: string, overrides: Array<{ id: string; ok: boolean; detail: string }> = []): unknown {
@@ -59,6 +63,10 @@ function settledReview(over: Partial<Review> = {}): Review {
     contractConfirmedSha: SHA,
     trustedRemoteSha: SHA,
     contract: CONTRACT,
+    // FG-689: what discovery was OWED. The gate blocks on its absence, so a fixture that is
+    // settled in every other respect has to carry one — an unrecorded expectation is
+    // unestablished coverage, and the gate is right to refuse it.
+    shardPlan: oneShardPlan(["backend", "security"], { candidateSha: SHA }),
     lensOutcomes: [lensOutcome("backend"), lensOutcome("security")],
     stageEvidence: {
       verified_entry: { sha: SHA, at: "2026-07-30T00:00:00Z" },
@@ -307,7 +315,7 @@ test("FG-640: a TASK-bound review wins over a run-scoped one — the more specif
   assert.equal(review?.id, "review-task");
 });
 
-// Fail-OPEN was the bug here: assessDiscoveryCompleteness iterates the selected lenses, so an
+// Fail-OPEN was the bug here: the completeness assessor iterates what is OWED, so an
 // unparseable contract yields zero lenses and reads trivially complete — the review with the
 // least-established coverage would be the one owing no outcomes at all.
 test("FG-640 blocks: an unreadable review contract, rather than owing no lens outcomes at all", () => {

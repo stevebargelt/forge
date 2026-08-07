@@ -39,7 +39,8 @@ import { getTask, insertTask } from "../store/tasks.js";
 import { newTaskId } from "../util/ids.js";
 import { resolveModel } from "./model-resolution.js";
 import { taskDir } from "../util/paths.js";
-import { assessLens, assessDiscoveryCompleteness, LENS_INCOMPLETE_REASONS } from "./review-discovery.js";
+import { assessLens, assessShardCompleteness, LENS_INCOMPLETE_REASONS } from "./review-discovery.js";
+import { FIXTURE_DIGEST as FG654_DIGEST, oneShardPlan } from "./review-shards.testkit.js";
 import { assessReviewDisposition } from "./review-gate.js";
 import { COVERED_ROLES, STALE_PROTOCOL_FAILURE_KIND, protocolRelPath } from "./agent-protocol.js";
 import type { DockerExecFn } from "./docker-exec.js";
@@ -338,15 +339,22 @@ test("integ FG-654: a refused lens surfaces as `stale_protocol`, never as no_out
 });
 
 test("integ FG-654: a bound, current-candidate operator acceptance does NOT clear a stale-protocol lens", () => {
+  // FG-689 step 8: the same rule, now through the ONE (shard-granular) assessor. The lens fits
+  // one dispatch, so this is the 1-of-1 case — the acceptance names shard 1 and the partition
+  // it was made under, exactly as `recordLensAcceptance` stamps it.
   const refused = assessLens({
     lens: "security",
     role: "red-security",
     dispatched: false,
     failureKind: STALE_PROTOCOL_FAILURE_KIND,
+    shard: { index: 1, of: 1 },
+    derivationDigest: FG654_DIGEST,
   });
   const acceptance: LensAcceptance = {
     kind: "lens_acceptance",
     lens: "security",
+    shard: 1,
+    derivationDigest: FG654_DIGEST,
     missingEvidence: "no security lens ran",
     rationale: "shipping anyway",
     candidateSha: "cafe1234",
@@ -356,15 +364,24 @@ test("integ FG-654: a bound, current-candidate operator acceptance does NOT clea
 
   // The control: this exact acceptance DOES clear an ordinary missing lens, so the
   // assertion below is about the REASON and not about the acceptance being malformed.
-  const ordinary = assessDiscoveryCompleteness(
-    ["security"],
-    [assessLens({ lens: "security", role: "red-security", dispatched: false, failureKind: "container_crash" })],
+  const ordinary = assessShardCompleteness(
+    oneShardPlan(["security"]),
+    [
+      assessLens({
+        lens: "security",
+        role: "red-security",
+        dispatched: false,
+        failureKind: "container_crash",
+        shard: { index: 1, of: 1 },
+        derivationDigest: FG654_DIGEST,
+      }),
+    ],
     { acceptances: [acceptance], candidateSha: "cafe1234" },
   );
   assert.equal(ordinary.complete, true, "control: a crashed lens IS clearable by a bound acceptance");
   assert.equal(ordinary.accepted.length, 1);
 
-  const staleProtocol = assessDiscoveryCompleteness(["security"], [refused], {
+  const staleProtocol = assessShardCompleteness(oneShardPlan(["security"]), [refused], {
     acceptances: [acceptance],
     candidateSha: "cafe1234",
   });
@@ -392,17 +409,24 @@ test("integ FG-654: the disposition gate still names the remedy, and says an acc
       acceptance_refs: ["FG-654 AC 3"],
       risk_lenses: ["security"],
       non_goals: [],
+      lens_scopes: { security: ["src/v2/agent-protocol.ts"] },
     },
     contractConfirmedSha: "cafe1234",
     candidateSha: "cafe1234",
+    // FG-689: the gate reads what discovery RECORDED AS OWED. A review with a readable
+    // contract and no plan blocks on `shard_plan_absent` instead, which would prove nothing
+    // about the stale-protocol remedy this test is here for.
+    shardPlan: oneShardPlan(["security"]),
     lensOutcomes: [
-      acceptance,
+      { ...acceptance, shard: 1, derivationDigest: FG654_DIGEST },
       {
         lens: "security",
         role: "red-security",
         complete: false,
         reason: "stale_protocol",
         detail: "no manifest-consistent agent-protocols/red-security.md; run `forge upgrade`",
+        shard: { index: 1, of: 1 },
+        derivationDigest: FG654_DIGEST,
       },
     ],
   } as unknown as Parameters<typeof assessReviewDisposition>[0]["review"];

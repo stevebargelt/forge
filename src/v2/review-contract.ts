@@ -7,12 +7,18 @@
 // direction is autonomous:
 //
 //   add a lens, with recorded diff evidence   → confirmed by the coordinator
+//   WIDEN a lens's authored scope, with
+//     recorded diff evidence                   → confirmed by the coordinator
 //   evaluated, no lens change needed (no_drift,
 //     with the diff examined and the statement) → confirmed by the coordinator
 //   remove a lens                             → back to the approving authority
+//   NARROW a lens's authored scope             → back to the approving authority
+//   REWRITE a scope (adds AND removes)         → refused by name; neither direction
 //   change threat_model / protected_invariants /
 //     acceptance_refs / non_goals              → back to the approving authority
 //   drift the coordinator cannot classify      → back to plan/architecture
+//   a changed path no selected lens's scope
+//     owns (FG-689 AC2)                        → back to plan/architecture, paths named
 //
 // AND IT IS NOT A FILE-PATH CLASSIFIER. Nothing here reads a changed path and decides
 // "this looks like frontend, add the frontend lens". The coordinator (or an operator)
@@ -20,8 +26,29 @@
 // the claim is well-formed and points in the permitted direction. Inferring lenses from
 // paths is explicitly out of scope for this lifecycle (PRD "Review contract"), and
 // `confirmContract` is written so that changed paths alone can never move a lens.
+//
+// FG-689 ADDS `lens_scopes` AND DOES NOT WEAKEN THAT. The scopes say which paths each
+// selected lens OWNS, so a reviewer can be handed its own surface rather than the whole
+// diff — but they are AUTHORED with the contract and approved with it, never derived here.
+// The direction of inference is the point: an authored scope is a human saying "security
+// owns these paths"; a classifier is forge saying "this path looks like security". The
+// first is a contract, the second is the thing the PRD refuses.
 
 import { z } from "zod";
+// FG-689 step 7: the OWNERSHIP RULE IS NOT RESTATED HERE. `resolveScopes` is the one place
+// that decides whether an authored pattern owns a path, and the coverage check below is that
+// same decision read for its complement. A second matcher living in this module would be the
+// two-renderings defect one level up: "every path is covered" true of the matcher the
+// confirmation used and false of the matcher the shards were cut with.
+//
+// The import is a module cycle (review-shards imports RISK_LENSES and the contract types back
+// from here) and it is deliberate and safe: neither module touches the other's bindings at
+// module-evaluation time, so whichever is loaded first finishes evaluating before any
+// function here runs. Both orders are exercised: `fg689-coverage-refusal.test.ts` loads this
+// module first and `fg689-sharding.test.ts` loads `review-shards.js` first, in separate
+// processes, so a top-level reference across the cycle would fail one of them with a TDZ error
+// before a single assertion ran.
+import { resolveScopes } from "./review-shards.js";
 
 /** The fixed lens vocabulary, resolved directly by the coordinator. The PRD is explicit
  *  that shipping this lifecycle must NOT introduce a general conditional-workflow
@@ -127,7 +154,34 @@ export function selectRedsForContract<T extends { agent: string }>(
 
 const nonEmpty = z.string().trim().min(1);
 
-export const ReviewContractSchema = z
+/** FG-689: ONE authored lens-to-path scope pattern — a literal repo-relative path, or a
+ *  directory prefix. AUTHORED ONLY. Nothing in forge derives one of these from a filename,
+ *  a directory name or an extension; the not-a-path-classifier statement above holds for
+ *  scopes exactly as it holds for lenses, and this module still never reads a diff.
+ *
+ *  THERE IS DELIBERATELY NO NEGATION FORM (FG-689 D5). An exclusion list is a path
+ *  classifier by another name: "everything under src/ EXCEPT the generated bits" is a rule
+ *  about what filenames mean, which is the one thing the PRD puts out of scope. A generated
+ *  or vendored artifact gets an owner like any other path, and the cost is accepted. */
+const scopePattern = nonEmpty
+  .refine((p) => !p.startsWith("!"), {
+    message:
+      "a scope pattern has no negation form — an exclusion list is a path classifier by another name (FG-689 D5)",
+  })
+  .refine((p) => !p.startsWith("/"), { message: "a scope pattern is repo-relative, not absolute" })
+  .refine((p) => !p.split("/").includes(".."), { message: "a scope pattern may not contain a `..` segment" });
+
+/** The authored map from a selected risk lens to the paths that lens owns. Partial over the
+ *  vocabulary on purpose: a contract carries an entry for exactly the lenses it selects, and
+ *  `validateReviewContract` refuses either half of that being untrue. */
+export const LensScopesSchema = z.partialRecord(z.enum(RISK_LENSES), z.array(scopePattern).min(1));
+
+export type LensScopes = z.infer<typeof LensScopesSchema>;
+
+/** The five fields a contract carried before FG-689 added `lens_scopes`. Kept so a contract
+ *  that predates scopes can be RECOGNISED rather than merely rejected — see
+ *  `SCOPELESS_CONTRACT_REFUSAL_KIND`. */
+const LegacyReviewContractSchema = z
   .object({
     threat_model: nonEmpty,
     protected_invariants: z.array(nonEmpty),
@@ -137,41 +191,151 @@ export const ReviewContractSchema = z
   })
   .strict();
 
+export const ReviewContractSchema = z
+  .object({
+    threat_model: nonEmpty,
+    protected_invariants: z.array(nonEmpty),
+    acceptance_refs: z.array(nonEmpty),
+    risk_lenses: z.array(z.enum(RISK_LENSES)).min(1),
+    non_goals: z.array(nonEmpty),
+    lens_scopes: LensScopesSchema,
+  })
+  .strict();
+
 export type ReviewContract = z.infer<typeof ReviewContractSchema>;
+
+/** FG-689 D2. Making `lens_scopes` required invalidates every already-approved contract,
+ *  which is the correct fail-closed direction — a scopeless contract cannot satisfy the
+ *  every-path-covered guarantee — but it must never surface as an unreadable parse error.
+ *
+ *  Modelled on `STALE_PROTOCOL_FAILURE_KIND`: a version skew is a NAMED refusal that states
+ *  its remedy, because the operator reading it did nothing wrong and the fix is not "correct
+ *  your JSON". It matters more here than usual: the plan-step prompt that teaches agents to
+ *  author `lens_scopes` lives in `seeds/workflows/feature.yml`, a separate deployment surface
+ *  reached only through `forge upgrade` (FG-654's precedent), so a host can legitimately be
+ *  running new code against contracts authored under the old prompt. */
+export const SCOPELESS_CONTRACT_REFUSAL_KIND = "contract_predates_lens_scopes";
+
+/** Why a contract was refused. `contract_invalid` is the generic parse refusal;
+ *  `contract_predates_lens_scopes` is D2's version skew; `lens_scope_mismatch` is a
+ *  well-formed contract whose scopes and lenses disagree. */
+export type ContractRefusalKind =
+  | "contract_invalid"
+  | typeof SCOPELESS_CONTRACT_REFUSAL_KIND
+  | "lens_scope_mismatch";
 
 export type ContractValidation =
   | { ok: true; contract: ReviewContract }
-  | { ok: false; refusal: string };
+  | { ok: false; refusal: string; refusalKind: ContractRefusalKind };
+
+function normalizeLensScopes(scopes: LensScopes): LensScopes {
+  const out: LensScopes = {};
+  for (const lens of RISK_LENSES) {
+    const patterns = scopes[lens];
+    if (patterns === undefined) continue;
+    out[lens] = [...new Set(patterns)].sort();
+  }
+  return out;
+}
 
 /** Validate and normalize a contract. Duplicate lenses collapse (a lens is selected or
- *  it is not); everything else is taken as authored. A contract is never reconstructed
- *  from prompts after the fact, so a malformed one is a refusal, not a repair. */
+ *  it is not), and each lens's scope patterns dedupe and sort for the same reason — a
+ *  pattern is in a scope or it is not, and a stable order is what makes a derivation
+ *  digest over the scopes reproducible. Everything else is taken as authored: a contract
+ *  is never reconstructed from prompts after the fact, so a malformed one is a refusal,
+ *  not a repair. */
 export function validateReviewContract(raw: unknown): ContractValidation {
   const parsed = ReviewContractSchema.safeParse(raw);
   if (!parsed.success) {
+    // D2: an otherwise well-formed contract that simply predates the field is a version
+    // skew, not malformed input. Say so, and say what fixes it.
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Object.prototype.hasOwnProperty.call(raw, "lens_scopes") &&
+      LegacyReviewContractSchema.safeParse(raw).success
+    ) {
+      return {
+        ok: false,
+        refusalKind: SCOPELESS_CONTRACT_REFUSAL_KIND,
+        refusal:
+          `this review contract PREDATES LENS SCOPES: it is well-formed in every other respect but carries no ` +
+          `lens_scopes, and without it forge cannot tell which paths each selected lens owns. The contract must ` +
+          `be re-approved by its approving authority with a lens_scopes entry for each of ` +
+          `${[...new Set((raw as { risk_lenses: RiskLens[] }).risk_lenses)].join(", ")}. Forge will not infer ` +
+          `scopes from file paths.`,
+      };
+    }
     const detail = parsed.error.issues
       .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("; ");
     return {
       ok: false,
+      refusalKind: "contract_invalid",
       refusal:
         `review contract invalid: ${detail}. Required: threat_model, protected_invariants, ` +
-        `acceptance_refs, risk_lenses (one or more of ${RISK_LENSES.join(", ")}), non_goals.`,
+        `acceptance_refs, risk_lenses (one or more of ${RISK_LENSES.join(", ")}), non_goals, ` +
+        `lens_scopes (authored owned paths, one entry per selected lens).`,
     };
   }
   const contract = parsed.data;
-  return { ok: true, contract: { ...contract, risk_lenses: [...new Set(contract.risk_lenses)] } };
+  const lenses = [...new Set(contract.risk_lenses)];
+  const scopes = normalizeLensScopes(contract.lens_scopes);
+
+  const unscoped = lenses.filter((l) => scopes[l] === undefined);
+  if (unscoped.length > 0) {
+    return {
+      ok: false,
+      refusalKind: "lens_scope_mismatch",
+      refusal:
+        `review contract invalid: risk lens ${unscoped.join(", ")} has no lens_scopes entry — every selected ` +
+        `lens must be given the paths it owns, because a lens with no authored scope is a reviewer nobody ` +
+        `assigned a surface to. Forge does not infer scopes from file paths.`,
+    };
+  }
+  const unselected = RISK_LENSES.filter((l) => scopes[l] !== undefined && !lenses.includes(l));
+  if (unselected.length > 0) {
+    return {
+      ok: false,
+      refusalKind: "lens_scope_mismatch",
+      refusal:
+        `review contract invalid: lens_scopes names ${unselected.join(", ")}, which the contract does not select ` +
+        `in risk_lenses — a scope for a lens nobody dispatches assigns paths to a reviewer that will never read ` +
+        `them. Select the lens or drop the scope.`,
+    };
+  }
+
+  return { ok: true, contract: { ...contract, risk_lenses: lenses, lens_scopes: scopes } };
 }
 
-/** A widening claim: the coordinator wants ONE more lens, and says which diff evidence
- *  made it necessary. `diffEvidence` is the recorded justification — changed paths, a
- *  diff excerpt, a named new surface. It is required because "recorded evidence" is
- *  what separates a broadened contract from an unexplained one. */
+/** A widening claim, and since FG-689 it has TWO shapes that share one rule.
+ *
+ *  Either the coordinator wants ONE more lens, or it wants an ALREADY-SELECTED lens to own
+ *  more paths than the approved contract gave it. Both broaden what gets reviewed, both are
+ *  autonomous, and both need the same thing: `reason` plus non-empty `diffEvidence` — the
+ *  recorded justification (changed paths, a diff excerpt, a named new surface) that is what
+ *  separates a broadened contract from an unexplained one.
+ *
+ *  `scopePaths` is REQUIRED in practice for both shapes, and means the same thing in each:
+ *  the authored patterns this claim ADDS. For a new lens they become its whole scope; for a
+ *  selected lens they are unioned into the one it has. Adding a lens without saying what it
+ *  owns is not a smaller version of adding a lens — it is a reviewer with no surface, which
+ *  every-path-covered cannot be checked against. It is typed optional only so a proposal that
+ *  omits it reaches `confirmContract`'s NAMED refusal instead of failing to compile at a call
+ *  site that would then have nothing to say to the operator. */
 export type LensWidening = {
   lens: RiskLens;
   reason: string;
   diffEvidence: string[];
+  scopePaths?: string[];
 };
+
+/** One lens's authored scope grew — the patterns this confirmation ADDED to it. */
+export type ScopeWidening = { lens: RiskLens; addedPatterns: string[] };
+
+/** One lens's authored scope shrank — the patterns a proposal wanted REMOVED from it.
+ *  Never autonomous: narrowing a scope to nothing removes a lens without saying so. */
+export type ScopeNarrowing = { lens: RiskLens; removedPatterns: string[] };
 
 /** The recorded evaluation that the final diff needs NO lens change — the third recorded
  *  outcome beside a widening claim and named drift.
@@ -199,8 +363,14 @@ export type ContractProposal = {
   unclassifiableDrift?: string;
   /** The sha the confirmation is about — becomes contract_confirmed_sha. */
   candidateSha: string;
-  /** Changed paths in the final implementation diff. RECORDED, never classified:
-   *  this module reads it only to put it in the confirmation record. */
+  /** Changed paths in the final implementation diff, as the ONE pinned rendering reported
+   *  them (`review-diff.ts`). Recorded with the confirmation, and — FG-689 AC2 — checked for
+   *  COVERAGE against the confirmed contract's authored `lens_scopes`.
+   *
+   *  Still never CLASSIFIED. Coverage asks "did the contract's approving authority assign an
+   *  owner to this path", which is a question about the authored scopes; it never answers
+   *  "which lens should own it", which is the classification the PRD refuses. An unowned path
+   *  returns to plan precisely because forge will not answer the second question. */
   changedPaths?: string[];
 };
 
@@ -212,6 +382,10 @@ export type ContractConfirmation =
       addedLenses: RiskLens[];
       widening: LensWidening[];
       changedPaths: string[];
+      /** FG-689: the scope patterns this confirmation added, per lens. Empty on an unchanged
+       *  confirmation. Recorded for the same reason `addedLenses` is — a broadened contract
+       *  has to say what it broadened, or the widening is as unrecorded as a silent one. */
+      widenedScopes: ScopeWidening[];
       /** Present when the confirmation rests on a recorded `no_drift` evaluation rather
        *  than on an empty diff. Persisted with the stage record. */
       noDrift?: NoDriftEvaluation;
@@ -220,6 +394,11 @@ export type ContractConfirmation =
       kind: "needs_approving_authority";
       changedFields: string[];
       removedLenses: RiskLens[];
+      /** FG-689: scopes a still-selected lens would have LOST. Reported separately from
+       *  `changedFields` because it is not a boundary-field change — it is the third
+       *  change-control class, and a consumer that reads `changedFields` to mean "boundary"
+       *  must not start seeing `lens_scopes` in it. */
+      narrowedScopes: ScopeNarrowing[];
       refusal: string;
     }
   | { kind: "returns_to_plan"; refusal: string }
@@ -232,17 +411,116 @@ function sameStringSet(a: string[], b: string[]): boolean {
   return left.every((v, i) => v === right[i]);
 }
 
-/** The boundary fields — every contract field except `risk_lenses`. Changing any of them
- *  is a change to what reviewers are allowed to conclude, so it returns to whoever
- *  approved it. */
-const BOUNDARY_FIELDS = ["threat_model", "protected_invariants", "acceptance_refs", "non_goals"] as const;
+/** THE THREE CHANGE-CONTROL CLASSES. Every contract field belongs to exactly one, and the
+ *  classes differ in WHICH DIRECTION the coordinator may move the field on its own:
+ *
+ *    `boundary`     — no autonomous change at all. Changing what reviewers are allowed to
+ *                     conclude returns to whoever approved it, in either direction.
+ *    `lens_list`    — ADD a lens with recorded diff evidence; REMOVING one returns to the
+ *                     approving authority. Whole-list granularity.
+ *    `lens_scopes`  — FG-689 D3/D13, and a shape neither of the others can express: widening
+ *                     is autonomous with recorded evidence and narrowing returns to the
+ *                     approving authority, PER SCOPE rather than per contract. A per-contract
+ *                     rule cannot say "security gained a path and backend lost one".
+ *
+ *  IT IS A MAP AND NOT A LIST, AND THAT IS THE POINT. What this replaces was a hardcoded
+ *  four-name `BOUNDARY_FIELDS` literal that nothing checked against the schema, so a field
+ *  added later was change-controlled by whether someone remembered to append to it —
+ *  omission meant "compare it against nothing", which is fail-OPEN and silent. `satisfies`
+ *  makes a missing key a typecheck error and an unknown key a typecheck error, so a future
+ *  contract field cannot fail open by being forgotten; `fg689-scope-change-control.test.ts`
+ *  holds the runtime half against `ReviewContractSchema`'s own shape. */
+export type ChangeControlClass = "boundary" | "lens_list" | "lens_scopes";
+
+export const CONTRACT_FIELD_CHANGE_CONTROL = {
+  threat_model: "boundary",
+  protected_invariants: "boundary",
+  acceptance_refs: "boundary",
+  non_goals: "boundary",
+  risk_lenses: "lens_list",
+  lens_scopes: "lens_scopes",
+} as const satisfies { [K in keyof ReviewContract]-?: ChangeControlClass };
+
+type FieldsInClass<C extends ChangeControlClass> = {
+  [K in keyof typeof CONTRACT_FIELD_CHANGE_CONTROL]: (typeof CONTRACT_FIELD_CHANGE_CONTROL)[K] extends C ? K : never;
+}[keyof typeof CONTRACT_FIELD_CHANGE_CONTROL];
+
+/** DERIVED from the classification above rather than restated beside it. */
+const BOUNDARY_FIELDS = (Object.keys(CONTRACT_FIELD_CHANGE_CONTROL) as (keyof ReviewContract)[]).filter(
+  (f): f is FieldsInClass<"boundary"> => CONTRACT_FIELD_CHANGE_CONTROL[f] === "boundary",
+);
+
+/** The per-lens scope delta between the approved contract and a proposal. Computed only over
+ *  lenses the APPROVED contract scoped: a lens being added carries its scope through the
+ *  widening claim, which has its own rule.
+ *
+ *  Three outcomes, and the classification is exhaustive by construction — added-only,
+ *  removed-only, or both. "Both" is the case that has no autonomous answer, and it is
+ *  refused by name rather than being rounded to whichever half the code happened to check
+ *  first. */
+type ScopeDelta = { lens: RiskLens; added: string[]; removed: string[] };
+
+function scopeDeltas(approved: LensScopes, proposed: LensScopes): ScopeDelta[] {
+  const out: ScopeDelta[] = [];
+  for (const lens of RISK_LENSES) {
+    const before = approved[lens];
+    if (before === undefined) continue;
+    const after = proposed[lens] ?? [];
+    const beforeSet = new Set(before);
+    const afterSet = new Set(after);
+    const added = after.filter((p) => !beforeSet.has(p));
+    const removed = before.filter((p) => !afterSet.has(p));
+    if (added.length > 0 || removed.length > 0) out.push({ lens, added, removed });
+  }
+  return out;
+}
+
+/** FG-689 AC2. Every changed path must be OWNED by at least one selected lens's authored
+ *  scope before any reviewer is dispatched.
+ *
+ *  WHY `returns_to_plan` AND NOT A FOURTH DECLINE STATE. `confirmContract` already has exactly
+ *  three ways to decline, and the unclassifiable-drift arm above already says the sentence this
+ *  case needs: "Forge does not infer risk lenses from file paths." An uncovered path IS that
+ *  sentence's case — the diff grew a surface the approved contract assigned to nobody, and the
+ *  host must not guess an owner. A parallel refusal state would be a second answer to a
+ *  question that already has one, and the two would drift.
+ *
+ *  WHY HERE AND NOT AT PLAN TIME. Scopes are authored before the diff exists. Plan time can
+ *  check that the scopes are well-formed; only confirmation can check them against the paths
+ *  that actually changed.
+ *
+ *  It is checked against the CONFIRMED contract — after widening, after the change-control
+ *  arms — so a widening that adds the lens or the pattern covering a new surface covers it,
+ *  and a proposal that also narrows or rewrites a scope reports THAT rather than the uncovered
+ *  paths it happens to produce.
+ *
+ *  EVERY uncovered path is named, not a sample. An operator reading this refusal has to author
+ *  a scope for each one, and a truncated list is the same family of defect as a truncated
+ *  diff — an input trimmed to be convenient, on which a decision then gets made. */
+function uncoveredPathsDecline(contract: ReviewContract, changedPaths: string[]): ContractConfirmation | undefined {
+  if (changedPaths.length === 0) return undefined;
+  const { uncovered } = resolveScopes(contract, changedPaths);
+  if (uncovered.length === 0) return undefined;
+  return {
+    kind: "returns_to_plan",
+    refusal:
+      `${uncovered.length} changed path(s) are owned by no selected lens's authored scope: ${uncovered.join(", ")}. ` +
+      `Every changed path must be covered by at least one selected lens before any reviewer is dispatched — a ` +
+      `surface nobody was assigned is a surface nobody reviews, and a review that skipped it silently reads as ` +
+      `evidence. Forge does not infer risk lenses from file paths, so it will not pick an owner: returning to ` +
+      `plan/architecture for the contract's approving authority to extend the authored lens_scopes (or to add a ` +
+      `lens with its scope). Nothing was written.`,
+  };
+}
 
 /** Confirm the approved contract against the final implementation diff.
  *
  *  Order matters and is deliberate: unclassifiable drift short-circuits FIRST (an
  *  uncertain coordinator must not get as far as reasoning about lenses), then boundary
- *  changes and lens removals — which are refusals whichever way the widening claim is
- *  shaped — then the widening claim itself. */
+ *  changes, lens removals and scope NARROWINGS — which are refusals whichever way the
+ *  widening claim is shaped — then a scope rewrite, which has no direction at all, and only
+ *  then the widening claim itself. Putting the weakening checks first is what stops a
+ *  well-evidenced addition from carrying a removal past them in the same proposal. */
 export function confirmContract(approved: ReviewContract, proposal: ContractProposal): ContractConfirmation {
   if (proposal.unclassifiableDrift !== undefined && proposal.unclassifiableDrift.trim() !== "") {
     return {
@@ -279,6 +557,8 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
   }
 
   if (proposal.contract === undefined && widening.length === 0) {
+    const uncovered = uncoveredPathsDecline(approved, changedPaths);
+    if (uncovered !== undefined) return uncovered;
     return {
       kind: "confirmed",
       contract: approved,
@@ -286,15 +566,60 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
       addedLenses: [],
       widening: [],
       changedPaths,
+      widenedScopes: [],
       ...(noDrift !== undefined ? { noDrift } : {}),
     };
   }
 
   // A widening-only proposal (no explicit contract) is the approved contract plus the
-  // claimed lenses — so the common case never has to restate the whole contract.
+  // claimed lenses — so the common case never has to restate the whole contract. FG-689:
+  // it is also plus the claimed lenses' SCOPES, because a selected lens with no scope is
+  // not a contract this module will validate, and a confirmation must not hand the rest of
+  // the lifecycle a contract that cannot be read back.
   let proposed: ReviewContract;
   if (proposal.contract === undefined) {
-    proposed = { ...approved, risk_lenses: [...new Set([...approved.risk_lenses, ...widening.map((w) => w.lens)])] };
+    const scopes: LensScopes = { ...approved.lens_scopes };
+    for (const w of widening) {
+      const paths = (w.scopePaths ?? []).map((p) => p.trim()).filter((p) => p !== "");
+      const existing = scopes[w.lens];
+      if (paths.length === 0) {
+        return {
+          kind: "refused",
+          refusal:
+            `widening to ${w.lens} names no scope paths — ` +
+            (existing === undefined
+              ? `a lens added without the paths it owns is a reviewer with no surface, and every-path-covered ` +
+                `cannot be checked against it.`
+              : `${w.lens} is already selected, so this claim can only be a request to broaden its authored ` +
+                `scope, and a widening that names no paths broadens nothing.`) +
+            ` Nothing was written.`,
+        };
+      }
+      // THE WIDENING-ONLY PATH BYPASSES `validateReviewContract`, so the pattern grammar has
+      // to be enforced HERE too — otherwise `--add-lens security:r:e:!src/generated/` writes
+      // the exclusion form D5 exists to make unspellable straight into a confirmed contract,
+      // through the one door that never re-parses what it builds.
+      const invalid = paths.filter((p) => !scopePattern.safeParse(p).success);
+      if (invalid.length > 0) {
+        return {
+          kind: "refused",
+          refusal:
+            `widening to ${w.lens} names scope pattern(s) that are not authorable: ${invalid.join(", ")}. ` +
+            `A scope pattern is a repo-relative path or directory prefix with no negation form, no leading ` +
+            `slash and no '..' segment — an exclusion list is a path classifier by another name (FG-689 D5). ` +
+            `Nothing was written.`,
+        };
+      }
+      // A new lens takes these as its whole scope; a selected one takes them IN ADDITION to
+      // what it already owns. Union, never replace: a widening claim is not a rewrite, and
+      // letting it drop an approved pattern would put narrowing behind the autonomous door.
+      scopes[w.lens] = [...new Set([...(existing ?? []), ...paths])].sort();
+    }
+    proposed = {
+      ...approved,
+      risk_lenses: [...new Set([...approved.risk_lenses, ...widening.map((w) => w.lens)])],
+      lens_scopes: scopes,
+    };
   } else {
     const validated = validateReviewContract(proposal.contract);
     if (!validated.ok) return { kind: "refused", refusal: validated.refusal };
@@ -310,17 +635,58 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
   }
   const removedLenses = approved.risk_lenses.filter((l) => !proposed.risk_lenses.includes(l));
 
-  if (changedFields.length > 0 || removedLenses.length > 0) {
+  // FG-689 D3/D13. A lens the proposal REMOVES is already reported as a removed lens, and
+  // its scope going with it says nothing extra — so scope movement is classified only for
+  // lenses that survive, where losing paths is the change that would otherwise be invisible.
+  const stillSelected = new Set<RiskLens>(proposed.risk_lenses);
+  const deltas = scopeDeltas(approved.lens_scopes, proposed.lens_scopes).filter((d) => stillSelected.has(d.lens));
+  const narrowed = deltas.filter((d) => d.removed.length > 0 && d.added.length === 0);
+  const rewritten = deltas.filter((d) => d.removed.length > 0 && d.added.length > 0);
+  const widenedScopes = deltas.filter((d) => d.added.length > 0 && d.removed.length === 0);
+
+  if (changedFields.length > 0 || removedLenses.length > 0 || narrowed.length > 0) {
     const parts: string[] = [];
     if (removedLenses.length > 0) parts.push(`removes risk lens ${removedLenses.join(", ")}`);
+    if (narrowed.length > 0) {
+      parts.push(
+        `NARROWS the authored scope of ${narrowed
+          .map((d) => `${d.lens} (removing ${d.removed.join(", ")})`)
+          .join(", ")}`,
+      );
+    }
     if (changedFields.length > 0) parts.push(`changes ${changedFields.join(", ")}`);
     return {
       kind: "needs_approving_authority",
       changedFields,
       removedLenses,
+      narrowedScopes: narrowed.map((d) => ({ lens: d.lens, removedPatterns: d.removed })),
       refusal:
-        `contract confirmation ${parts.join(" and ")} — the coordinator may only ADD lenses. ` +
-        `Weakening the approved contract returns to the original approving authority. Nothing was written.`,
+        `contract confirmation ${parts.join(" and ")} — the coordinator may only ADD lenses and WIDEN their ` +
+        `authored scopes. Weakening the approved contract returns to the original approving authority` +
+        (narrowed.length > 0
+          ? `: narrowing a lens's scope to nothing removes that lens without saying so, so it goes the same way a ` +
+            `removal does`
+          : ``) +
+        `. Nothing was written.`,
+    };
+  }
+
+  // NEITHER DIRECTION. A scope that both gained and lost patterns is not a widening the
+  // coordinator may make and not a narrowing with a route to take — it is an unrecorded
+  // rewrite, and the one thing forge must not do with it is pick the half it can justify.
+  // Say which lens and what moved, and stop.
+  if (rewritten.length > 0) {
+    const detail = rewritten
+      .map((d) => `${d.lens} (adds ${d.added.join(", ")}; removes ${d.removed.join(", ")})`)
+      .join("; ");
+    return {
+      kind: "refused",
+      refusal:
+        `contract confirmation REWRITES the authored lens scope of ${detail} — that is neither a widening (which ` +
+        `the coordinator may make with a recorded reason and diff evidence) nor a narrowing (which returns to the ` +
+        `contract's approving authority), and forge will not classify it as whichever half it could justify. ` +
+        `Re-propose the added patterns as a widening with its evidence, and take the removed ones to the ` +
+        `approving authority. Nothing was written.`,
     };
   }
 
@@ -336,13 +702,31 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
     };
   }
 
+  // FG-689: the SAME rule, one level down. A lens whose authored scope grew has broadened
+  // what forge reviews just as an added lens has, so it owes the same recorded claim — and
+  // it is the likelier of the two to arrive unclaimed, because a scope can grow inside a
+  // proposal that changes nothing else about which lenses run.
+  const unevidencedScopes = widenedScopes.filter((d) => !claimed.has(d.lens));
+  if (unevidencedScopes.length > 0) {
+    return {
+      kind: "refused",
+      refusal:
+        `the authored scope of ${unevidencedScopes
+          .map((d) => `${d.lens} (adding ${d.added.join(", ")})`)
+          .join(", ")} was widened with no recorded diff evidence — a scope may be broadened only with the ` +
+        `evidence and reason that made it necessary, exactly as a lens may. Nothing was written.`,
+    };
+  }
+
+  const scopeGrew = new Set(widenedScopes.map((d) => d.lens));
   for (const w of widening) {
-    if (!addedLenses.includes(w.lens)) {
+    if (!addedLenses.includes(w.lens) && !scopeGrew.has(w.lens)) {
       return {
         kind: "refused",
         refusal:
           `widening names ${w.lens}, which is not being added (the approved contract already selects it ` +
-          `or the proposal omits it). Nothing was written.`,
+          `or the proposal omits it) and whose authored scope is unchanged — the claim widens nothing. ` +
+          `Nothing was written.`,
       };
     }
     if (w.reason.trim() === "" || w.diffEvidence.length === 0 || w.diffEvidence.every((e) => e.trim() === "")) {
@@ -355,6 +739,9 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
     }
   }
 
+  const uncovered = uncoveredPathsDecline(proposed, changedPaths);
+  if (uncovered !== undefined) return uncovered;
+
   return {
     kind: "confirmed",
     contract: proposed,
@@ -362,6 +749,7 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
     addedLenses,
     widening,
     changedPaths,
+    widenedScopes: widenedScopes.map((d) => ({ lens: d.lens, addedPatterns: d.added })),
   };
 }
 

@@ -67,6 +67,10 @@ const CONTRACT = {
   acceptance_refs: ["FG-655 AC 1"],
   risk_lenses: ["backend"],
   non_goals: ["FG-682's late-docs amendment path"],
+  // FG-689 AC2: the scope owns what THIS fixture's repository changes — `src/` and `docs/`.
+  // The migrated literal named forge's own `src/v2/review-run.ts`, which the fixture repo does
+  // not contain.
+  lens_scopes: { backend: ["src/", "docs/"] },
 };
 
 let db: DatabaseInstance;

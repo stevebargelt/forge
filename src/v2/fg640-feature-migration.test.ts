@@ -42,6 +42,7 @@ const APPROVED: ReviewContract = {
   acceptance_refs: ["FG-640 AC 16"],
   risk_lenses: ["backend", "security"],
   non_goals: [],
+  lens_scopes: { backend: ["src/store/"], security: ["src/util/creds.ts"] },
 };
 
 // ── the explicit cutover ─────────────────────────────────────────────────────
@@ -106,7 +107,11 @@ test("FG-640 / PRD #16: `feature` selects only the contract's declared risk lens
 
 test("FG-640 / PRD #16: the shipping reviewer is not a risk lens, so it is never selected away", () => {
   assert.equal(lensForRole("shipping-reviewer"), undefined);
-  const narrow = selectRedsForContract(BUILD.reds, { ...APPROVED, risk_lenses: ["narrow"] });
+  const narrow = selectRedsForContract(BUILD.reds, {
+    ...APPROVED,
+    risk_lenses: ["narrow"],
+    lens_scopes: { narrow: ["src/store/"] },
+  });
   assert.ok(narrow.selected.some((r) => r.agent === "shipping-reviewer"));
   assert.deepEqual(narrow.selected.map((r) => r.agent).sort(), ["red-narrow", "shipping-reviewer"]);
 });
@@ -125,7 +130,15 @@ test("FG-640 / PRD #23: changed file paths cannot reach the panel — selection 
   // The frontend lens is NOT approved. A diff that is entirely frontend paths must not
   // conjure it: the only input `selectRedsForContract` takes is the contract.
   const frontendHeavy = ["dashboard/src/App.tsx", "dashboard/src/styles.css", "dashboard/src/routes.tsx"];
-  const confirmed = confirmContract(APPROVED, { candidateSha: "cand1", changedPaths: frontendHeavy });
+  // FG-689 AC2: the approving authority assigned `dashboard/` to BACKEND — an odd-looking but
+  // entirely authorable choice, and the strongest form of this test. Every changed path is
+  // covered, so the confirmation reaches the panel question, and the answer is still that a
+  // diff made of nothing but frontend-shaped paths does not conjure the frontend lens.
+  const owningDashboard: ReviewContract = {
+    ...APPROVED,
+    lens_scopes: { backend: ["src/store/", "dashboard/"], security: ["src/util/creds.ts"] },
+  };
+  const confirmed = confirmContract(owningDashboard, { candidateSha: "cand1", changedPaths: frontendHeavy });
   assert.equal(confirmed.kind, "confirmed");
   assert.deepEqual(confirmed.kind === "confirmed" ? confirmed.contract.risk_lenses : [], ["backend", "security"]);
 
@@ -155,6 +168,7 @@ test("FG-640 / PRD #27: a coordinator-added lens with recorded evidence WIDENS t
         lens: "frontend",
         reason: "the final diff adds a rendered operator surface the approved contract did not cover",
         diffEvidence: ["dashboard/src/ReviewLedger.tsx (new file, 240 lines)"],
+        scopePaths: ["dashboard/src/ReviewLedger.tsx"],
       },
     ],
     changedPaths: ["dashboard/src/ReviewLedger.tsx"],
@@ -174,7 +188,7 @@ test("FG-640 / PRD #27: a coordinator-added lens with recorded evidence WIDENS t
 test("FG-640 / PRD #27: a REFUSED removal leaves the panel wide — the contract is what selects", () => {
   const removal = confirmContract(APPROVED, {
     candidateSha: "cand4",
-    contract: { ...APPROVED, risk_lenses: ["backend"] },
+    contract: { ...APPROVED, risk_lenses: ["backend"], lens_scopes: { backend: APPROVED.lens_scopes.backend } },
   });
   assert.equal(removal.kind, "needs_approving_authority");
   assert.deepEqual(removal.kind === "needs_approving_authority" ? removal.removedLenses : [], ["security"]);
@@ -187,7 +201,12 @@ test("FG-640 / PRD #27: a REFUSED removal leaves the panel wide — the contract
 test("FG-640 / PRD #27: changing the threat model cannot narrow the panel either", () => {
   const rewrite = confirmContract(APPROVED, {
     candidateSha: "cand5",
-    contract: { ...APPROVED, threat_model: "nothing much can go wrong here", risk_lenses: ["narrow"] },
+    contract: {
+      ...APPROVED,
+      threat_model: "nothing much can go wrong here",
+      risk_lenses: ["narrow"],
+      lens_scopes: { narrow: ["src/store/"] },
+    },
   });
   assert.equal(rewrite.kind, "needs_approving_authority");
   assert.deepEqual(

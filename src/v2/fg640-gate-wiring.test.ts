@@ -23,6 +23,7 @@ import { insertTask, getTask } from "../store/tasks.js";
 import { insertVerdict } from "../store/verdicts.js";
 import {
   insertReview,
+  recordShardPlan,
   ingestFindings,
   recordDisposition,
   recordResolution,
@@ -30,6 +31,7 @@ import {
   updateReview,
   setReviewState,
 } from "../store/reviews.js";
+import { oneShardPlan, shardOutcome } from "./review-shards.testkit.js";
 import { gate } from "./gate.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Run, Task, ReviewMode } from "../types/index.js";
@@ -41,6 +43,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 18"],
   risk_lenses: ["backend", "security"],
   non_goals: [],
+  lens_scopes: { backend: ["src/v2/gate.ts"], security: ["src/v2/review-gate.ts"] },
 };
 
 let db: DatabaseInstance;
@@ -92,8 +95,10 @@ function seedRun(workflow: string, reviewMode: ReviewMode): Run {
   return run;
 }
 
+/** FG-689: an outcome names the SHARD of the lens's scope it reviewed, and the partition it
+ *  was cut under. One that carries neither satisfies no shard. */
 function lensOutcome(lens: string, over: Record<string, unknown> = {}): unknown {
-  return { lens, role: `red-${lens}`, complete: true, outcome: "pass", authored: true, findings: [], ...over };
+  return shardOutcome({ lens, role: `red-${lens}`, complete: true, outcome: "pass", authored: true, findings: [], ...over });
 }
 
 function shippingChecks(): unknown[] {
@@ -124,6 +129,9 @@ function seedSettledLedger(runId: string, lensOutcomes: unknown[] = [lensOutcome
     lensOutcomes,
     state: "shipping_review",
   });
+  // FG-689: what discovery RECORDED AS OWED. The gate blocks on its absence, so a ledger that
+  // is settled in every other respect has to carry one.
+  recordShardPlan("review-wire", oneShardPlan(["backend", "security"], { candidateSha: SHA }));
   recordStageEvidence("review-wire", "verified_final", { sha: SHA, detail: "green CI at cand640wire" });
   recordStageEvidence("review-wire", "shipping", { sha: SHA, detail: "shipping", meta: { checks: shippingChecks() } });
   setReviewState("review-wire", "settled");
@@ -189,6 +197,7 @@ test("FG-640: a RUN-scoped review (no subject task) settles the gate — the sha
     lensOutcomes: [lensOutcome("backend"), lensOutcome("security")],
     state: "shipping_review",
   });
+  recordShardPlan("review-run-scoped", oneShardPlan(["backend", "security"], { candidateSha: SHA }));
   recordStageEvidence("review-run-scoped", "verified_final", { sha: SHA, detail: "green" });
   recordStageEvidence("review-run-scoped", "shipping", { sha: SHA, detail: "shipping", meta: { checks: shippingChecks() } });
   setReviewState("review-run-scoped", "settled");
@@ -228,15 +237,15 @@ test("FG-640 / PRD #21: one crashed selected lens keeps the gate blocked while t
   const run = seedRun("wf-el", "evidence_led");
   seedSettledLedger(run.id, [
     lensOutcome("backend"),
-    { lens: "security", role: "red-security", complete: false, reason: "crashed", detail: "container_crash" },
+    shardOutcome({ lens: "security", role: "red-security", complete: false, reason: "crashed", detail: "container_crash" }),
   ]);
 
   const msg = await refusal(() => gate("task-build", "advance", undefined, {}));
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /security \(crashed/);
+  assert.match(msg, /security shard 1 of 1 \(crashed/);
   // The point of the scenario: nothing about the OTHER lenses passing clears it, and no
   // disposition on some other finding clears it either.
-  assert.doesNotMatch(msg, /backend \(/);
+  assert.doesNotMatch(msg, /backend shard/);
 });
 
 // ── AC #22 ───────────────────────────────────────────────────────────────────
@@ -273,12 +282,12 @@ test("FG-640 / PRD #22: a SYNTHESIZED inconclusive does not count as completed d
   const run = seedRun("wf-el", "evidence_led");
   seedSettledLedger(run.id, [
     lensOutcome("backend"),
-    { lens: "security", role: "red-security", complete: false, reason: "synthesized", detail: "forge synthesized this verdict, no reviewer authored it" },
+    shardOutcome({ lens: "security", role: "red-security", complete: false, reason: "synthesized", detail: "forge synthesized this verdict, no reviewer authored it" }),
   ]);
 
   const msg = await refusal(() => gate("task-build", "advance", undefined, {}));
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /security \(synthesized/);
+  assert.match(msg, /security shard 1 of 1 \(synthesized/);
 });
 
 // ── the fix_now round trip, through the real store ───────────────────────────
@@ -339,6 +348,7 @@ test("FG-640: the candidate moving invalidates the resolution and re-blocks the 
     lensOutcomes: [lensOutcome("backend"), lensOutcome("security")],
     state: "shipping_review",
   });
+  recordShardPlan("review-wire-2", oneShardPlan(["backend", "security"], { candidateSha: "moved999" }));
   const msg = await refusal(() => gate("task-build-2", "advance", undefined, {}));
   assert.match(msg, /verification_absent_or_red/);
   assert.match(msg, /acceptance_unmet/);

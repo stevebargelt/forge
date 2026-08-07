@@ -83,6 +83,11 @@ const CONTRACT = {
   acceptance_refs: ["FG-650 AC 1"],
   risk_lenses: ["wide", "backend"],
   non_goals: ["relaxing nested strictness"],
+  // FG-689: BOTH lenses own the candidate's one changed file. This suite's subject is root
+  // tolerance across a whole panel, so both lenses have to be dispatched — a lens whose
+  // authored scope matched nothing would be correctly recorded as intentionally skipped and
+  // would prove nothing about tolerance. Overlapping scopes are expected and legal.
+  lens_scopes: { wide: ["src/"], backend: ["src/reconcile.ts"] },
 };
 
 let dbFile: string;
@@ -484,7 +489,7 @@ test("integ FG-650: a MISSING required root field is still refused whole — the
   const out = await runNextStage(REVIEW, h.deps);
   assert.equal(out.status, "refused");
   assert.match(out.message, /discovery is INCOMPLETE/);
-  assert.match(out.message, /backend \(malformed_output/);
+  assert.match(out.message, /backend shard 1 of 1 \(malformed_output/);
   assert.match(out.message, /outcome/, "the refusal names the field that was missing");
 
   assert.equal(findingsForReview(REVIEW).length, 0, "nothing was ingested from a refused panel");
@@ -513,7 +518,7 @@ test("integ FG-650: an unknown key INSIDE a finding is still refused — the tol
 
   const out = await runNextStage(REVIEW, h.deps);
   assert.equal(out.status, "refused");
-  assert.match(out.message, /backend \(malformed_output/);
+  assert.match(out.message, /backend shard 1 of 1 \(malformed_output/);
   assert.match(out.message, /findings\.0/, "the refusal anchors to the finding that carried it");
   assert.match(out.message, /confidence/, "and names the offending key");
 

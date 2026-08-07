@@ -76,6 +76,10 @@ const CONTRACT = {
   acceptance_refs: ["FG-649 AC 1"],
   risk_lenses: ["backend"],
   non_goals: ["migrating the already-stuck pilot review row"],
+  // FG-689 AC2: the scope owns what THIS fixture's repository actually changes — `src/`, where
+  // reconcile.ts lives. The migrated literal named forge's own paths, which no fixture repo
+  // contains; nothing compared the two until the confirmation started checking coverage.
+  lens_scopes: { backend: ["src/"] },
 };
 
 let db: DatabaseInstance;

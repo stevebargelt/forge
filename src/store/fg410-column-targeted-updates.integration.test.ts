@@ -282,7 +282,7 @@ test("FG-649/RF-4 interleaved lanes: a workspace rebind must not resurrect the c
       baseSha: "base0000",
       candidateSha: "cand1111",
       workspaceDir: "/tmp/bound-before",
-      contract: { risk_lenses: ["wide"] },
+      contract: { risk_lenses: ["wide"], lens_scopes: { wide: ["src/"] } },
       state: "fixing",
     })
   );
@@ -316,7 +316,11 @@ test("FG-649/RF-4 interleaved lanes: a workspace rebind must not resurrect the c
       "cand1111",
       `${laneName}: the fix stage record must survive the rebind`,
     );
-    assert.deepEqual(row.contract, { risk_lenses: ["wide"] }, `${laneName}: columns nobody named are untouched`);
+    assert.deepEqual(
+      row.contract,
+      { risk_lenses: ["wide"], lens_scopes: { wide: ["src/"] } },
+      `${laneName}: columns nobody named are untouched`,
+    );
   }
 });
 

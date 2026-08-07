@@ -13,8 +13,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  assessDiscoveryCompleteness,
   assessLens,
+  assessShardCompleteness,
   collectObservations,
   normalizeObservations,
   LENS_INCOMPLETE_REASONS,
@@ -22,6 +22,7 @@ import {
   type LensDispatch,
   type LensOutcome,
 } from "./review-discovery.js";
+import type { ShardPlan } from "../store/reviews.js";
 
 function finding(over: Partial<DiscoveryFinding> = {}): DiscoveryFinding {
   return {
@@ -44,6 +45,37 @@ function dispatch(over: Partial<LensDispatch> = {}): LensDispatch {
     result: { outcome: "pass", findings: [] },
     ...over,
   };
+}
+
+const DIGEST = "shard-plan-1-fixture";
+
+/** FG-689 step 8: the FG-639 completeness rules below are now expressed against the ONE
+ *  assessor, which is shard-granular. A lens that fits in a single dispatch is the 1-of-1
+ *  case, so the rules read the same — which is the point: per-shard completeness SHARPENS the
+ *  fail-closed rule rather than replacing it. */
+function planOf(...lenses: string[]): ShardPlan {
+  return {
+    derivation: {
+      baseSha: "base000",
+      candidateSha: "cand111",
+      renderingId: "review-diff-fixture",
+      budget: 600_000,
+      unit: "utf8_bytes",
+      envelopes: {},
+      budgetValidatedRuntime: "unvalidated",
+      scopesDigest: "scopes-fixture",
+    },
+    digest: DIGEST,
+    fanoutWidth: 4,
+    lenses: lenses.map((lens) => ({ lens, shards: [{ index: 1, of: 1, paths: [`src/${lens}.ts`], chars: 100 }] })),
+    skipped: [],
+    recordedAt: "2026-08-07T00:00:00Z",
+  };
+}
+
+/** One 1-of-1 dispatch, carrying the identity the coordinator stamps on it. */
+function only(over: Partial<LensDispatch> = {}): LensOutcome {
+  return assessLens({ ...dispatch(over), shard: { index: 1, of: 1 }, derivationDigest: DIGEST });
 }
 
 // ─── fail-closed lens outcomes ──────────────────────────────────────────────
@@ -167,10 +199,10 @@ test("FG-650: root tolerance does NOT reach inside a finding — an unknown find
 
 test("FG-639 / PRD #21: one crashed lens leaves discovery incomplete while the others pass", () => {
   const outcomes: LensOutcome[] = [
-    assessLens(dispatch({ lens: "wide", role: "red-wide" })),
-    assessLens(dispatch({ lens: "security", role: "red-security", dispatched: false, failureKind: "container_crash", result: undefined })),
+    only({ lens: "wide", role: "red-wide" }),
+    only({ lens: "security", role: "red-security", dispatched: false, failureKind: "container_crash", result: undefined }),
   ];
-  const c = assessDiscoveryCompleteness(["wide", "security"], outcomes);
+  const c = assessShardCompleteness(planOf("wide", "security"), outcomes);
   assert.equal(c.complete, false);
   assert.deepEqual(
     c.missing.map((m) => m.lens),
@@ -180,17 +212,103 @@ test("FG-639 / PRD #21: one crashed lens leaves discovery incomplete while the o
 });
 
 test("FG-639: a selected lens that was never dispatched is reported as having no outcome", () => {
-  const c = assessDiscoveryCompleteness(["wide", "frontend"], [assessLens(dispatch({ lens: "wide", role: "red-wide" }))]);
+  const c = assessShardCompleteness(planOf("wide", "frontend"), [only({ lens: "wide", role: "red-wide" })]);
   assert.equal(c.complete, false);
+  assert.equal(c.missing[0]?.lens, "frontend");
   assert.equal(c.missing[0]?.reason, "no_outcome");
 });
 
 test("FG-639: a RETRIED lens that later authors an outcome clears the earlier failure", () => {
   const outcomes: LensOutcome[] = [
-    assessLens(dispatch({ lens: "wide", role: "red-wide", dispatched: false, failureKind: "container_crash", result: undefined })),
-    assessLens(dispatch({ lens: "wide", role: "red-wide" })),
+    only({ lens: "wide", role: "red-wide", dispatched: false, failureKind: "container_crash", result: undefined }),
+    only({ lens: "wide", role: "red-wide" }),
   ];
-  assert.equal(assessDiscoveryCompleteness(["wide"], outcomes).complete, true);
+  assert.equal(assessShardCompleteness(planOf("wide"), outcomes).complete, true);
+});
+
+// ─── FG-689: shard identity travels with the outcome, on BOTH branches ──────
+
+test("FG-689: an authored outcome carries the shard identity and the partition it was cut under", () => {
+  const o = assessLens(
+    dispatch({ lens: "wide", role: "red-wide", shard: { index: 2, of: 3 }, derivationDigest: "sha256:p" }),
+  );
+  assert.equal(o.complete, true);
+  assert.deepEqual(o.shard, { index: 2, of: 3 });
+  assert.equal(o.derivationDigest, "sha256:p");
+});
+
+test("FG-689: a CRASHED shard keeps its identity — the shard that failed is the one that has to be named", () => {
+  const o = assessLens(
+    dispatch({
+      lens: "wide",
+      role: "red-wide",
+      dispatched: false,
+      failureKind: "container_crash",
+      result: undefined,
+      shard: { index: 2, of: 3 },
+      derivationDigest: "sha256:p",
+    }),
+  );
+  assert.equal(o.complete, false);
+  assert.deepEqual(o.shard, { index: 2, of: 3 }, "an identity only successful outcomes keep names nothing when it matters");
+  assert.equal(o.derivationDigest, "sha256:p");
+});
+
+test("FG-689: a dispatch with no shard records none — nothing here invents an identity", () => {
+  const o = assessLens(dispatch({ lens: "wide", role: "red-wide" }));
+  assert.equal(o.shard, undefined);
+  assert.equal(o.derivationDigest, undefined);
+  assert.equal("shard" in (o as Record<string, unknown>), false);
+});
+
+test("FG-689 step 8: there is exactly ONE completeness assessor, and it is the shard-granular one", async () => {
+  // The lens-granular assessor is DELETED, not left beside this one. Two answers to "is
+  // discovery complete" is the D1 fail-open with a longer fuse: any call site that kept the old
+  // one — or any new one that reached for it — would let one surviving shard satisfy a lens
+  // whose other shards crashed. This asserts the module exports no second assessor, which is
+  // the only form of that guarantee a test can hold.
+  //
+  // Its name is built by concatenation so THIS file does not itself contain the literal a
+  // repo-wide grep must not find (the same device fg654-agent-protocol uses for its banned
+  // exports).
+  const removed = "assessDiscovery" + "Completeness";
+  const mod = (await import("./review-discovery.js")) as Record<string, unknown>;
+  assert.equal(mod[removed], undefined, `the lens-granular assessor ${removed} must not exist`);
+  assert.equal(typeof mod["assessShardCompleteness"], "function");
+
+  // ...and the case that made it wrong: shard 1 authored, shard 2 crashed, lens INCOMPLETE.
+  const outcomes: LensOutcome[] = [
+    assessLens(dispatch({ lens: "wide", role: "red-wide", shard: { index: 1, of: 2 }, derivationDigest: DIGEST })),
+    assessLens(
+      dispatch({
+        lens: "wide",
+        role: "red-wide",
+        dispatched: false,
+        failureKind: "container_crash",
+        result: undefined,
+        shard: { index: 2, of: 2 },
+        derivationDigest: DIGEST,
+      }),
+    ),
+  ];
+  const two: ShardPlan = {
+    ...planOf("wide"),
+    lenses: [
+      {
+        lens: "wide",
+        shards: [
+          { index: 1, of: 2, paths: ["src/a.ts"], chars: 10 },
+          { index: 2, of: 2, paths: ["src/b.ts"], chars: 10 },
+        ],
+      },
+    ],
+  };
+  const c = assessShardCompleteness(two, outcomes);
+  assert.equal(c.complete, false);
+  assert.deepEqual(
+    c.missing.map((m) => `${m.lens} ${m.shard} of ${m.of}`),
+    ["wide 2 of 2"],
+  );
 });
 
 test("FG-639 / PRD #22: an authored inconclusive normalizes into a lens_inconclusive finding", () => {

@@ -60,6 +60,7 @@ import {
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime } from "./loader.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
+import { fakeReviewDiff } from "./review-diff.testkit.js";
 import { nextTransition } from "./review-coordinator.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { readTaskManifest, writeTaskManifest, type TaskManifest } from "./task-manifest.js";
@@ -1555,6 +1556,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-664 AC2"],
   risk_lenses: ["backend"] as const,
   non_goals: ["detecting a fabricated verdict from a lane that CAN load the real driver"],
+  lens_scopes: { backend: ["src/store/"] },
 };
 const EXECUTED_OUTPUT = "ok 1 - the rechecker reuses the real driver";
 
@@ -1585,8 +1587,13 @@ function harness(over: Partial<CoordinatorDeps> = {}): { deps: CoordinatorDeps; 
   const deps: CoordinatorDeps = {
     headSha: () => head,
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" }),
-    changedPaths: () => ["src/v2/reconcile.ts"],
-    diff: () => "--- a/src/v2/reconcile.ts",
+    // FG-689 AC2: the rendered path is one CONTRACT's backend scope owns. The old fake named
+    // `src/v2/reconcile.ts` against a `src/store/` scope, which nothing compared until the
+    // coverage check existed.
+    reviewDiff: fakeReviewDiff(["src/store/reconcile.ts"]),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({
       candidateSha: "",
       changedPaths,

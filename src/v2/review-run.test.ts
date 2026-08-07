@@ -47,6 +47,7 @@ import {
 } from "../store/fix-batches.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
+import { fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -64,6 +65,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-639 AC 1"],
   risk_lenses: ["wide", "backend"] as const,
   non_goals: ["protect the host from malicious candidate code"],
+  lens_scopes: { wide: ["src/"], backend: ["src/store/"] },
 };
 
 const EXECUTED = "ok 1 - the reconcile path guards a partial write";
@@ -152,8 +154,10 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
       calls.verify += 1;
       return { ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" };
     },
-    changedPaths: () => ["src/store/reviews.ts"],
-    diff: () => "--- a/src/store/reviews.ts",
+    reviewDiff: fakeReviewDiff(["src/store/reviews.ts"]),
+    // FG-689 RF-1: an explicit ZERO dispatch envelope — this harness is not exercising the
+    // composed-input reserve, and an ABSENT measurement refuses by design.
+    measureLensEnvelope: () => 0,
     proposeContract: ({ changedPaths }) => ({ candidateSha: "", changedPaths }),
     dispatchLens: (ctx) => {
       calls.lens.push(ctx.lens);
@@ -509,7 +513,10 @@ test("FG-639 / PRD #15: continue after a crash resumes the persisted next stage 
 // re-recorded.
 const RESUME_BOUNDARIES: Array<{ completed: string; target: TransitionKind; expect: Calls }> = [
   { completed: "stage 1 verification entry", target: "confirm_contract", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
-  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["wide", "backend"], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
+  // FG-689: dispatch order follows the recorded shard PLAN — lenses in a stable order, then
+  // shards in index order — not the contract's declaration order. A partition has to be
+  // reproducible from its recorded inputs, and "whatever order the contract listed" is not one.
+  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["backend", "wide"], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
   { completed: "stage 3 discovery", target: "await_disposition", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
   { completed: "stage 4 the disposition decision", target: "batch_fix", expect: { lens: [], fixer: 1, docs: 0, rechecker: 0, verify: 0, commit: 1 } },
   { completed: "stage 5 the batch fix", target: "docs", expect: { lens: [], fixer: 0, docs: 1, rechecker: 0, verify: 0, commit: 0 } },
@@ -1047,6 +1054,38 @@ test("FG-639: with no fix_now findings and an unmoved candidate the recheck is a
   assert.equal(recheck.status, "advanced");
   assert.equal(h.calls.rechecker, 0, "no rechecker is dispatched for a genuine no-op");
   assert.equal(getReview(REVIEW)?.stageEvidence?.recheck?.meta?.["noop"], true);
+});
+
+// FG-689 D15: the remediation delta comes from the SAME pinned seam as the review diff, and a
+// rendering it cannot compute refuses the stage. The rule this holds is the one the ticket
+// exists for: a reviewer — the rechecker included — is never handed a stand-in for the change
+// it is judging. The old `deps.diff` threw on a git failure and the throw escaped the
+// coordinator, which is not a decision anybody made either.
+test("FG-689: a remediation delta that cannot be rendered REFUSES the recheck — no stand-in delta", async () => {
+  const h = harness();
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  await runNextStage(REVIEW, h.deps); // batch_fix
+  await runNextStage(REVIEW, h.deps); // docs
+  await runNextStage(REVIEW, h.deps); // verify_final
+
+  const blind: CoordinatorDeps = { ...h.deps, reviewDiff: refusingReviewDiff("diff_unreadable", "git could not render it.") };
+  const recheck = await runNextStage(REVIEW, blind);
+
+  assert.equal(recheck.transition.kind, "recheck");
+  assert.equal(recheck.status, "refused");
+  assert.match(recheck.message, /remediation delta/);
+  assert.match(recheck.message, /diff_unreadable/, "the refusal names the renderer's reason");
+  assert.match(recheck.message, /No rechecker was dispatched/);
+  assert.equal(h.calls.rechecker, 0, "nothing was dispatched over a delta nobody could compute");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.recheck, undefined, "and no stage record was written");
+
+  // Re-entry with a working seam completes the stage — the refusal recorded nothing, so this
+  // is the same stage running, not a stage stepped over.
+  const retried = await runNextStage(REVIEW, h.deps);
+  assert.equal(retried.status, "advanced", retried.message);
+  assert.equal(h.calls.rechecker, 1);
 });
 
 // ─── PRD #14 — a candidate change invalidates candidate-bound evidence ──────
@@ -1984,10 +2023,10 @@ test("FG-639 / PRD #2: two lenses reporting the same mechanism AND invariant bec
   assert.equal(findings.length, 1, "one finding, not one per reviewer");
   assert.deepEqual(
     findings[0]?.sources.map((s) => s.redRole),
-    ["red-wide", "red-backend"],
+    ["red-backend", "red-wide"],
     "both reviewers survive as provenance",
   );
-  assert.deepEqual(findings[0]?.sources.map((s) => s.redTaskId), ["task-wide", "task-backend"]);
+  assert.deepEqual(findings[0]?.sources.map((s) => s.redTaskId), ["task-backend", "task-wide"]);
   assert.equal(findings[0]?.severity, "high", "a correlated agreement is not an escalation");
   const merges = getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[];
   assert.equal(merges.length, 1);
@@ -1999,7 +2038,7 @@ test("FG-639 / PRD #3: the same two lenses at the same anchor naming DIFFERENT i
 
   const findings = findingsForReview(REVIEW);
   assert.equal(findings.length, 2, "same mechanism, different promises — merging them would hide one defect");
-  assert.deepEqual(findings.map((f) => f.invariantRef), ["no partial write", "only forge publishes"]);
+  assert.deepEqual(findings.map((f) => f.invariantRef), ["only forge publishes", "no partial write"]);
   assert.deepEqual(findings.map((f) => f.sources.length), [1, 1]);
   assert.equal((getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[]).length, 0);
   assert.deepEqual(pending().blockingFindings, ["RF-1", "RF-2"]);
@@ -2354,6 +2393,9 @@ test("FG-654 RF-26: a re-run discovery preserves agent_protocol records alongsid
   // makes this test about the RECORD and not about discovery being broken generally.
   const accepted = recordLensAcceptance(REVIEW, {
     lens: "backend",
+    // FG-689 D16: once a plan names shards for a lens, an acceptance must NAME the one it
+    // clears. Discovery recorded a plan on the first pass, so this is shard 1 of 1.
+    shard: 1,
     missingEvidence: "no backend lens ran",
     rationale: "shipping anyway",
     operator: true,
@@ -2405,6 +2447,7 @@ test("FG-654 RF-12: a record committed DURING the lens fan-out survives the disc
         });
         const accepted = recordLensAcceptance(REVIEW, {
           lens: "backend",
+          shard: 1,
           missingEvidence: "the backend lens never reviewed the ledger write",
           rationale: "accepted mid-flight by the operator",
           operator: true,

@@ -80,6 +80,18 @@ const CONTRACT = {
   acceptance_refs: ["FG-653 AC 1"],
   risk_lenses: [...RISK_LENSES],
   non_goals: ["relaxing nested validation", "changing any schema"],
+  // FG-689: all five lenses own the candidate's changed file, deliberately. This suite's
+  // subject is that a FIVE-LENS panel authored to the amended seeds ingests through the real
+  // dispatch seam — so all five have to be dispatched. Scoping them apart would leave four
+  // with no in-scope path, correctly recorded as intentionally skipped, which proves nothing
+  // about the seeds. Overlap between lenses is expected and legal.
+  lens_scopes: {
+    wide: ["src/"],
+    narrow: ["src/reconcile.ts"],
+    frontend: ["src/reconcile.ts"],
+    backend: ["src/"],
+    security: ["src/reconcile.ts"],
+  },
 };
 
 let dbFile: string;
@@ -430,10 +442,14 @@ test("integ FG-653: ONE non-compliant lens costs the WHOLE panel — the complia
   const outcome = await runDiscovery(h.deps);
 
   assert.equal(outcome.status, "refused");
-  assert.ok(outcome.message.includes("security (malformed_output"), `the offending lens is named — got: ${outcome.message}`);
+  // FG-689: the refusal names the lens AND the shard of its scope that produced nothing.
+  assert.ok(
+    outcome.message.includes("security shard 1 of 1 (malformed_output"),
+    `the offending lens and shard are named — got: ${outcome.message}`,
+  );
   for (const lens of RISK_LENSES) {
     if (lens === "security") continue;
-    assert.ok(!outcome.message.includes(`${lens} (`), `the compliant ${lens} lens is not blamed`);
+    assert.ok(!outcome.message.includes(`${lens} shard`), `the compliant ${lens} lens is not blamed`);
   }
   assert.equal(findingsForReview(REVIEW).length, 0, "no partial panel is ingested");
   assert.equal(discoveryStage(), undefined);

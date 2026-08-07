@@ -339,7 +339,23 @@ export type EventType =
   // FG-640: the third route by which an absent lens clears. The payload NAMES the missing
   // evidence, the lens it attaches to, and the candidate it was accepted against — an
   // acceptance is a decision about one candidate's missing review, never a standing waiver.
-  | "review.lens_accepted";
+  | "review.lens_accepted"
+  // FG-689: what discovery is OWED, recorded BEFORE any lens container starts — the
+  // derivation, its digest, the expected shard count per lens and the lenses given none.
+  // On the timeline rather than only in the row because a plan that was replaced is the
+  // fact a superseded shard-scoped decision has to be read against, and the row keeps
+  // only the current one.
+  | "review.shard_plan_recorded"
+  // FG-689: a selected lens whose authored scope matched no changed path, recorded as
+  // INTENTIONALLY skipped. Its own event for the same reason it is its own record kind:
+  // a skip is neither a review that happened nor a review that is missing, and an
+  // operator reading the timeline must be able to tell all three apart.
+  | "review.lens_skipped"
+  // FG-689 D10/RF-1: a real dispatch delivered a composed input at this budget and came
+  // back, so the budget is no longer an untested number. Carries the runtime that took it
+  // and the largest composed size, because "600,000 utf8_bytes" means nothing without the
+  // runtime it was proven on and how close to the line the proof actually ran.
+  | "review.shard_budget_validated";
 
 export type Event = {
   id: number;

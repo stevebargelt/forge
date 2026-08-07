@@ -25,6 +25,11 @@ import {
   ingestFindings,
   insertReview,
   invalidateResolutionsForCandidate,
+  lensOutcomeRecordsOf,
+  lensSkipRecordsOf,
+  mergeLensOutcomesByShard,
+  recordLensSkipped,
+  recordShardPlan,
   getDocsDispatch,
   markDocsDispatchDelivered,
   openDocsDispatch,
@@ -65,7 +70,7 @@ beforeEach(() => {
     baseSha: "base000",
     contractConfirmedSha: "conf222",
     candidateSha: "cand111",
-    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide"] },
+    contract: { threat_model: "operator_trusted_candidate", risk_lenses: ["wide"], lens_scopes: { wide: ["src/"] } },
     state: "awaiting_disposition",
   });
 });
@@ -342,4 +347,81 @@ test("FG-655 RF-4: the STORE refuses a second live binding for a review — the 
 test("FG-655: a review with no docs dispatch reads back undefined, not a fabricated one", () => {
   assert.equal(pendingDocsDispatch(REVIEW), undefined);
   assert.equal(getDocsDispatch("docs-dispatch-nope"), undefined);
+});
+
+// ─── FG-689: what is OWED is not what was DELIVERED ─────────────────────────
+//
+// The same refusal-to-collapse as disposition-vs-resolution above, one layer down:
+// deciding what a reviewer must look at proves nothing about what it looked at. The
+// shard plan and the lens outcomes are two columns, two writers and two lifecycles, and
+// the whole file's per-scenario detail lives in fg689-shard-plan.test.ts.
+
+const PLAN = {
+  derivation: {
+    baseSha: "base000",
+    candidateSha: "conf222",
+    renderingId: "fg689-pinned-v1",
+    budget: 600_000,
+    unit: "characters",
+    envelopes: {},
+    budgetValidatedRuntime: "codex-subscription",
+    scopesDigest: "scopes-aaa",
+  },
+  digest: "digest-1",
+  fanoutWidth: 4,
+  lenses: [
+    {
+      lens: "wide",
+      shards: [
+        { index: 1, of: 2, paths: ["src/a.ts"], chars: 400_000 },
+        { index: 2, of: 2, paths: ["src/b.ts"], chars: 350_000 },
+      ],
+    },
+  ],
+  skipped: [],
+};
+
+test("FG-689: what is OWED survives writing what was DELIVERED, and neither is derivable from the other", () => {
+  recordShardPlan(REVIEW, PLAN);
+  // The whole point of a separate column: a lens whose every shard crashed delivers
+  // nothing, and an empty outcomes array cannot say that two shards were expected.
+  mergeLensOutcomesByShard(REVIEW, []);
+
+  const review = getReview(REVIEW);
+  assert.equal(review?.shardPlan?.digest, "digest-1");
+  assert.equal(review?.shardPlan?.lenses[0]?.shards.length, 2, "the expectation outlives an empty delivery");
+  assert.deepEqual(lensOutcomeRecordsOf(review as never), []);
+});
+
+test("FG-689: an intentionally-skipped lens is neither an outcome nor an absence", () => {
+  recordLensSkipped(REVIEW, {
+    lens: "frontend",
+    reason: "zero_in_scope_paths",
+    derivationDigest: "digest-1",
+    candidateSha: "conf222",
+  });
+  const review = getReview(REVIEW);
+  // Not evidence: a skip that reached an outcome consumer would be a review that did not
+  // happen, counted as one that did. Not an absence: it has its own record, so the gate
+  // can tell it apart from a lens that produced nothing.
+  assert.deepEqual(lensOutcomeRecordsOf(review as never), []);
+  assert.equal(lensSkipRecordsOf(review as never).length, 1);
+  assert.equal(summarizeReview(REVIEW)?.lensAcceptances.length, 0, "and it is not an operator's acceptance either");
+});
+
+test("FG-689: a shard-granularity write preserves the outcome another shard already produced", () => {
+  recordShardPlan(REVIEW, PLAN);
+  mergeLensOutcomesByShard(REVIEW, [
+    { lens: "wide", complete: true, outcome: "pass", authored: true, findings: [], shard: { index: 1, of: 2 }, derivationDigest: "digest-1" },
+  ]);
+  mergeLensOutcomesByShard(REVIEW, [
+    { lens: "wide", complete: true, outcome: "pass", authored: true, findings: [], shard: { index: 2, of: 2 }, derivationDigest: "digest-1" },
+  ]);
+
+  const outcomes = lensOutcomeRecordsOf(getReview(REVIEW) as never) as Array<{ shard: { index: number } }>;
+  assert.deepEqual(
+    outcomes.map((o) => o.shard.index),
+    [1, 2],
+    "retrying one shard through a whole-column replace would erase the coverage the retry exists to preserve",
+  );
 });

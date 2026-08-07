@@ -191,6 +191,88 @@ export type StageRecord = {
 
 export type StageEvidence = Partial<Record<ReviewStage, StageRecord>>;
 
+// ─── FG-689: the shard plan (what discovery is OWED) ────────────────────────
+
+/** THE INPUTS THE PARTITION IS A FUNCTION OF. Recorded whole rather than summarized,
+ *  because `digest` is a sha over exactly these and a reader who cannot see them cannot
+ *  tell WHY a recorded decision was superseded.
+ *
+ *  `unit` travels WITH `budget` (FG-689 D10) and is never assumed: 600,000 characters
+ *  reinterpreted as 600,000 tokens under a provider change is a 4x overshoot straight
+ *  back into the crash this ticket exists to fix. `budgetValidatedRuntime` names the
+ *  runtime the budget was validated against by a REAL dispatch — the host measures its
+ *  own half of the input and can never see the provider's system prompt or tool schemas,
+ *  so a budget carried without the runtime it was proven on is an untested number. */
+export type ShardDerivation = {
+  baseSha: string;
+  candidateSha: string;
+  /** Names the PINNED diff flag set the bodies were rendered with, so a later flag change
+   *  invalidates recorded derivations rather than silently re-partitioning. */
+  renderingId: string;
+  budget: number;
+  unit: string;
+  /** FG-689 RF-1: per lens, the host's own measurement — in `unit` — of everything the
+   *  dispatch seam composes AROUND a shard's diff (contract JSON, path list, output contract,
+   *  fixed instructions). The packer's allowance is `budget - envelopes[lens]`, because the
+   *  budget has to bound the input a reviewer RECEIVES and the diff is only part of it.
+   *
+   *  It is a recorded DERIVATION input and it is digested, for exactly the reason `renderingId`
+   *  is: it determines where the cuts fall. Editing the reviewer prompt changes this number,
+   *  which re-partitions — and a re-partition that did not move the digest would leave every
+   *  shard-scoped decision silently honored against a partition that no longer exists (D17). */
+  envelopes: Record<string, number>;
+  /** The runtime a REAL dispatch proved this budget against, or `unvalidated` until one has.
+   *  Written by OBSERVATION (`recordShardBudgetValidation`) from the manifest of a dispatch
+   *  that actually delivered a composed input at this budget and came back — never by hand,
+   *  because a runtime name nobody measured is exactly the untested number D4 forbids. */
+  budgetValidatedRuntime: string;
+  /** The largest COMPOSED input, in `unit`, that validation actually delivered — diff plus
+   *  the envelope the dispatch seam wrapped around it. The runtime name alone says a dispatch
+   *  happened; this says how close to the budget it came. Absent until validated. */
+  budgetValidatedChars?: number;
+  scopesDigest: string;
+};
+
+/** One dispatch's worth of a lens's scope. `of` is carried on the shard rather than only
+ *  on the lens so a single record read in isolation still says "1 of 3" — a reviewer, and
+ *  a later reader of the ledger, must never mistake a shard for the whole change. */
+export type PlannedShard = {
+  index: number;
+  of: number;
+  paths: string[];
+  chars: number;
+};
+
+export type PlannedLens = {
+  lens: string;
+  shards: PlannedShard[];
+};
+
+/** A lens the plan gives ZERO shards. Structurally its own list, not a lens with an empty
+ *  shard array: "intentionally skipped" is a third state, and a lens with no shards in the
+ *  `lenses` list would read as a lens that is owed nothing for want of anyone recording
+ *  why. The matching `lens_skipped` ledger record is what satisfies completeness. */
+export type SkippedLens = {
+  lens: string;
+  reason: LensSkipReason;
+};
+
+export type ShardPlan = {
+  derivation: ShardDerivation;
+  /** The partition's IDENTITY: a digest over the canonically-serialized derivation. Any
+   *  change to any input yields a different digest, which is what makes a durable
+   *  shard-scoped decision detectably about a partition that no longer exists (D17)
+   *  rather than silently honored against one. */
+  digest: string;
+  /** The width dispatch is bounded to. Recorded with the plan because lens x shard is a
+   *  bigger fan-out than one-per-lens ever was, and a bound nobody recorded is a bound
+   *  nobody can audit after the fact (D9). */
+  fanoutWidth: number;
+  lenses: PlannedLens[];
+  skipped: SkippedLens[];
+  recordedAt: string;
+};
+
 export type Review = {
   id: string;
   runId?: string;
@@ -208,6 +290,11 @@ export type Review = {
   contract?: unknown;
   lensOutcomes?: unknown;
   stageEvidence?: StageEvidence;
+  /** FG-689: what discovery is OWED — the shard set recorded before any container starts.
+   *  Absent on a review that has not planned yet, and on every row written before FG-689.
+   *  Deliberately not derivable from `lensOutcomes`: a lens whose every shard crashed
+   *  delivers nothing, and an absence cannot say how many shards were expected. */
+  shardPlan?: ShardPlan;
   reviewMode: ReviewMode;
   state: ReviewState;
   createdAt: string;
@@ -264,6 +351,7 @@ type ReviewRow = {
   contract_json: string | null;
   lens_outcomes_json: string | null;
   stage_evidence_json: string | null;
+  shard_plan_json: string | null;
   review_mode: string;
   state: string;
   created_at: string;
@@ -322,6 +410,13 @@ function rowToReview(row: ReviewRow): Review {
     lensOutcomes: row.lens_outcomes_json !== null ? (JSON.parse(row.lens_outcomes_json) as unknown) : undefined,
     stageEvidence:
       row.stage_evidence_json !== null ? (JSON.parse(row.stage_evidence_json) as StageEvidence) : undefined,
+    // `?? null` rather than a bare property read: an aged row migrated forward has the
+    // column but SQLite hands back NULL, and a pre-FG-689 binary's row read through a
+    // newer accessor has no property at all. Both are "no plan recorded", and both must
+    // surface as undefined rather than as null — every consumer reads this with `?? ` /
+    // `if (x)` semantics, and a null leaking through is the shape that survives those.
+    shardPlan:
+      (row.shard_plan_json ?? null) !== null ? (JSON.parse(row.shard_plan_json as string) as ShardPlan) : undefined,
     reviewMode: row.review_mode as ReviewMode,
     state: row.state as ReviewState,
     createdAt: row.created_at,
@@ -612,6 +707,136 @@ export function stageCompleteAt(review: Review, stage: ReviewStage, sha: string 
   return rec.sha === sha;
 }
 
+// ─── FG-689: the shard plan writer ──────────────────────────────────────────
+
+export type ShardPlanWrite = {
+  review: Review;
+  /** Did this call actually write? False when the recorded plan already has this digest. */
+  recorded: boolean;
+  /** The plan this one REPLACED, when it replaced one. The caller needs it to name the
+   *  shard-scoped decisions a re-partition supersedes (D17) rather than dropping them
+   *  silently — a superseded acceptance is still a decision an operator made. */
+  previous?: ShardPlan;
+};
+
+/** The shards a plan names for one lens, or an empty list. A lens the plan recorded as
+ *  intentionally SKIPPED has no shards here and is not owed any — read `plan.skipped` for
+ *  that fact rather than inferring it from this absence. */
+export function plannedShardsFor(plan: ShardPlan | undefined, lens: string): PlannedShard[] {
+  return plan?.lenses.find((l) => l.lens === lens)?.shards ?? [];
+}
+
+/** Record what discovery is OWED, BEFORE any container starts.
+ *
+ *  Replaces an existing plan only when `digest` differs. The digest is a function of the
+ *  derivation, so an equal digest means the same partition of the same bytes: rewriting the
+ *  row would move `recordedAt` and make a re-entered discovery look like a re-partition to
+ *  everything that keys on it. A DIFFERENT digest is a genuine re-partition and is written,
+ *  with the superseded plan handed back so the caller can name what it invalidated.
+ *
+ *  The read is inside `writeTransaction` (BEGIN IMMEDIATE) for the same reason every other
+ *  writer in this module takes it there: the compare-then-write is not atomic otherwise, and
+ *  a concurrent `forge review continue` planning the same review would let one process's
+ *  no-op decision be made against a plan the other had already replaced. */
+export function recordShardPlan(
+  reviewId: string,
+  plan: Omit<ShardPlan, "recordedAt"> & { recordedAt?: string },
+): ShardPlanWrite {
+  const at = plan.recordedAt ?? nowIso();
+  const next: ShardPlan = { ...plan, recordedAt: at };
+
+  const result = writeTransaction<{ recorded: boolean; previous?: ShardPlan }>(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) throw new Error(`forge: no review ${reviewId}`);
+    const existing = fresh.shardPlan;
+    if (existing !== undefined && existing.digest === next.digest) return { recorded: false };
+
+    getDb()
+      .prepare(`UPDATE reviews SET shard_plan_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(next), at, reviewId);
+    logEvent("review.shard_plan_recorded", {
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
+      payload: {
+        reviewId,
+        digest: next.digest,
+        supersedes: existing?.digest ?? null,
+        derivation: next.derivation,
+        fanoutWidth: next.fanoutWidth,
+        // What is OWED, flattened, so the timeline answers "how many dispatches did this
+        // review expect" without a reader having to re-derive it from the plan blob.
+        expected: next.lenses.map((l) => ({ lens: l.lens, shards: l.shards.length })),
+        skipped: next.skipped,
+        recordedAt: at,
+      },
+    });
+    return existing !== undefined ? { recorded: true, previous: existing } : { recorded: true };
+  });
+
+  return { review: getReview(reviewId) as Review, ...result };
+}
+
+/** FG-689 D10 / RF-1: RECORD THAT A REAL DISPATCH PROVED THIS BUDGET, and against what.
+ *
+ *  A plan used to be dispatched — and rendered to the operator — carrying "validated against:
+ *  unvalidated" long after real containers had received real composed inputs at that budget.
+ *  The claim the budget is supposed to carry is empirical, so it is written from an
+ *  OBSERVATION: `runtime` is read back off the manifest of a dispatch that completed, and
+ *  `composedChars` is the host's measurement of the bytes it actually assembled for it.
+ *
+ *  It is bound to `digest`, and a plan whose digest has moved on is left alone: a validation
+ *  is evidence about the partition it was collected under, and silently stamping it onto a
+ *  re-partition would be the untested-number failure again by another route.
+ *
+ *  It is MONOTONE in `composedChars` — the largest composed input a runtime actually took is
+ *  the interesting number, so a later, smaller dispatch never walks the evidence back. And it
+ *  moves NO digest: `shardPlanDigest` deliberately excludes both fields, so recording a
+ *  validation supersedes no operator decision (D17). */
+export function recordShardBudgetValidation(
+  reviewId: string,
+  validation: { digest: string; runtime: string; composedChars: number },
+): Review {
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) throw new Error(`forge: no review ${reviewId}`);
+    const plan = fresh.shardPlan;
+    if (plan === undefined || plan.digest !== validation.digest) return;
+    if (validation.runtime === "" || !Number.isFinite(validation.composedChars)) return;
+
+    const already = plan.derivation.budgetValidatedRuntime === validation.runtime;
+    const recorded = plan.derivation.budgetValidatedChars ?? 0;
+    if (already && recorded >= validation.composedChars) return;
+
+    const next: ShardPlan = {
+      ...plan,
+      derivation: {
+        ...plan.derivation,
+        budgetValidatedRuntime: validation.runtime,
+        budgetValidatedChars: Math.max(recorded, validation.composedChars),
+      },
+    };
+    const at = nowIso();
+    getDb()
+      .prepare(`UPDATE reviews SET shard_plan_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(next), at, reviewId);
+    logEvent("review.shard_budget_validated", {
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
+      payload: {
+        reviewId,
+        digest: plan.digest,
+        budget: plan.derivation.budget,
+        unit: plan.derivation.unit,
+        runtime: validation.runtime,
+        composedChars: next.derivation.budgetValidatedChars,
+        supersedes: plan.derivation.budgetValidatedRuntime,
+      },
+    });
+  });
+
+  return getReview(reviewId) as Review;
+}
+
 // ─── lens acceptance (FG-640) ───────────────────────────────────────────────
 
 /** An operator's authorized acceptance of ONE named lens's missing evidence.
@@ -625,6 +850,17 @@ export function stageCompleteAt(review: Review, stage: ReviewStage, sha: string 
 export type LensAcceptance = {
   kind: "lens_acceptance";
   lens: string;
+  /** FG-689 D16: WHICH SHARD this acceptance clears, 1-based, when the review has a
+   *  recorded plan. Optional only because a review with no plan has no shard to name —
+   *  `recordLensAcceptance` REFUSES a shardless acceptance the moment a plan names shards
+   *  for the lens, because one acceptance clearing every shard would clear shards that
+   *  crashed and were never read, which is exactly the fail-open per-shard completeness
+   *  exists to close. */
+  shard?: number;
+  /** The plan digest this acceptance was made against, stamped from the recorded plan.
+   *  A re-partition changes the digest, which is what makes the decision detectably about
+   *  a partition that no longer exists (D17) instead of silently honored against one. */
+  derivationDigest?: string;
   /** WHAT WAS NOT REVIEWED, in the operator's words. Required: an acceptance that does not
    *  name the missing evidence is a blanket waiver, which is what `--force` already is. */
   missingEvidence: string;
@@ -640,6 +876,94 @@ export type LensAcceptance = {
 
 export function isLensAcceptance(v: unknown): v is LensAcceptance {
   return typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "lens_acceptance";
+}
+
+// ─── FG-689: intentionally skipped lenses (the FOURTH record kind) ──────────
+
+export const LENS_SKIP_REASONS = ["zero_in_scope_paths"] as const;
+export type LensSkipReason = (typeof LENS_SKIP_REASONS)[number];
+
+/** A lens the plan gave ZERO shards because its authored scope matched no changed path.
+ *
+ *  A GENUINE THIRD STATE, and the reason it is its own record kind rather than a value in
+ *  an existing enum is worth stating, because both alternatives fail in a specific way:
+ *
+ *    - recorded as a `complete: true, authored: true` outcome, `collectObservations`
+ *      (review-discovery.ts) would treat it as reviewer-produced evidence — a review that
+ *      did not happen, counted as one that did.
+ *    - added to `LENS_INCOMPLETE_REASONS`, it would BLOCK, and it would then be clearable
+ *      by `forge review accept-lens` — an operator verb that means "I accept that this
+ *      lens's evidence is missing", which is not what a lens with nothing in scope is.
+ *
+ *  So it rides `lens_outcomes_json` beside the acceptances and the protocol receipts (that
+ *  array already has per-dispatch cardinality) and is filtered out of every outcome read,
+ *  and it is SATISFYING rather than blocking — but only through its own accessor, which is
+ *  what keeps a skip distinguishable at the gate from a lens that produced no outcome. */
+export type LensSkipRecord = {
+  kind: "lens_skipped";
+  lens: string;
+  reason: LensSkipReason;
+  /** The plan digest this skip was decided under. A re-partition can legitimately give the
+   *  lens paths, so a skip that outlives its derivation is superseded, not current. */
+  derivationDigest: string;
+  candidateSha: string;
+  at: string;
+};
+
+export function isLensSkipped(v: unknown): v is LensSkipRecord {
+  return typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "lens_skipped";
+}
+
+/** The lenses this review recorded as intentionally skipped. Read by the completeness
+ *  assessor and by `forge review show`; invisible to every outcome consumer. */
+export function lensSkipRecordsOf(review: Review): LensSkipRecord[] {
+  return lensRecordsOf(review).filter(isLensSkipped);
+}
+
+/** Record ONE lens as intentionally skipped, appended beside the outcomes.
+ *
+ *  Idempotent on `(lens, derivationDigest)`: re-entering discovery under the same partition
+ *  re-states the same fact, and a second identical record adds nothing while growing the
+ *  column without bound. A skip under a DIFFERENT digest is a different fact and is
+ *  appended — the earlier one stays as history, superseded rather than rewritten, for the
+ *  same reason `recordAgentProtocol` never edits its own past records.
+ *
+ *  The read is inside the write lock; see `recordAgentProtocol` for why this column's
+ *  read-modify-write cannot be split. */
+export function recordLensSkipped(
+  reviewId: string,
+  rec: Omit<LensSkipRecord, "kind" | "at"> & { at?: string },
+): Review {
+  const at = rec.at ?? nowIso();
+  const record: LensSkipRecord = { kind: "lens_skipped", ...rec, at };
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) return;
+    // An unreadable outcomes array is left alone rather than overwritten — the same refusal
+    // recordAgentProtocol and recordLensAcceptance make, for the same reason: losing
+    // reviewer-authored outcomes to record a skip beside them is a strictly worse trade.
+    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) return;
+    const already = lensSkipRecordsOf(fresh).some(
+      (s) => s.lens === record.lens && s.derivationDigest === record.derivationDigest,
+    );
+    if (already) return;
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify([...lensRecordsOf(fresh), record]), at, reviewId);
+    logEvent("review.lens_skipped", {
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
+      payload: {
+        reviewId,
+        lens: record.lens,
+        reason: record.reason,
+        derivationDigest: record.derivationDigest,
+        candidateSha: record.candidateSha,
+        at,
+      },
+    });
+  });
+  return getReview(reviewId) as Review;
 }
 
 // ─── agent protocol generation (FG-654) ─────────────────────────────────────
@@ -718,9 +1042,20 @@ export function lensAcceptancesOf(review: Review): LensAcceptance[] {
 /** The reviewer-authored half of the same array. Every consumer that asks "did discovery
  *  happen" reads THIS, so an acceptance can never be counted as an outcome by accident. */
 export function lensOutcomeRecordsOf(review: Review): unknown[] {
-  // FG-654 adds a third record kind to the same array; it is filtered HERE so every
-  // existing outcome consumer keeps seeing only outcomes without having to learn about it.
-  return lensRecordsOf(review).filter((r) => !isLensAcceptance(r) && !isAgentProtocolRecord(r));
+  // FG-654 adds a third record kind to the same array and FG-689 a fourth; both are
+  // filtered HERE so every existing outcome consumer keeps seeing only outcomes without
+  // having to learn about them. The `lens_skipped` filter is load-bearing rather than
+  // tidy: a skip that reached an outcome consumer would be a review that did not happen,
+  // counted as one that did.
+  return lensRecordsOf(review).filter((r) => !isNonOutcomeRecord(r));
+}
+
+/** Everything in `lens_outcomes_json` that is NOT a reviewer-authored outcome. One
+ *  predicate, so a writer that preserves the non-outcomes and a reader that filters them
+ *  cannot drift into disagreeing about which records those are — which is exactly how a
+ *  new record kind gets silently erased by the next whole-column write. */
+function isNonOutcomeRecord(r: unknown): boolean {
+  return isLensAcceptance(r) || isAgentProtocolRecord(r) || isLensSkipped(r);
 }
 
 /** Replace the reviewer-authored OUTCOMES of `lens_outcomes_json`, preserving everything
@@ -737,7 +1072,7 @@ export function replaceLensOutcomes(reviewId: string, outcomes: unknown[]): Revi
   writeTransaction(() => {
     const fresh = getReview(reviewId);
     if (!fresh) return;
-    const surviving = lensRecordsOf(fresh).filter((r) => isLensAcceptance(r) || isAgentProtocolRecord(r));
+    const surviving = lensRecordsOf(fresh).filter(isNonOutcomeRecord);
     getDb()
       .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify([...surviving, ...outcomes]), at, reviewId);
@@ -745,11 +1080,69 @@ export function replaceLensOutcomes(reviewId: string, outcomes: unknown[]): Revi
   return getReview(reviewId) as Review;
 }
 
+/** THE SHARD-GRANULARITY WRITER (FG-689 D7/D12). Merges outcomes on
+ *  `(lens, shard.index, derivationDigest)`, leaving every already-authored shard outcome
+ *  that this call does not itself carry INTACT.
+ *
+ *  Beside `replaceLensOutcomes`, not instead of it. Once dispatch is lens x shard, a retry
+ *  of one crashed shard through a whole-column replace-all would write back only the shards
+ *  this pass produced and erase the outcomes of the shards that already succeeded — the
+ *  exact coverage the shard-granularity retry exists to preserve, destroyed by the verb
+ *  meant to preserve it. So the merge key is the shard's identity, and a partial result set
+ *  is a partial WRITE rather than a total one.
+ *
+ *  A record with no readable `lens` has no identity to merge on and is appended untouched:
+ *  nothing here drops a record it cannot classify.
+ *
+ *  Replacements land IN PLACE, so the column's order is stable across retries and
+ *  `forge review show` does not reshuffle on every pass. The read is inside the write lock,
+ *  as it is in every other writer of this column. */
+export function mergeLensOutcomesByShard(reviewId: string, outcomes: readonly unknown[]): Review {
+  const at = nowIso();
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) return;
+    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) return;
+
+    const merged = [...lensRecordsOf(fresh)];
+    for (const incoming of outcomes) {
+      const key = shardOutcomeKey(incoming);
+      const existing =
+        key === undefined ? -1 : merged.findIndex((r) => !isNonOutcomeRecord(r) && shardOutcomeKey(r) === key);
+      if (existing >= 0) merged[existing] = incoming;
+      else merged.push(incoming);
+    }
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(merged), at, reviewId);
+  });
+  return getReview(reviewId) as Review;
+}
+
+/** The identity a shard outcome merges on, or undefined when the record carries none.
+ *
+ *  The derivation digest is PART of the key rather than a precondition checked around it:
+ *  an outcome authored against a superseded partition describes a shard that no longer
+ *  exists, so it must not be overwritten by — nor overwrite — an outcome for the same
+ *  index under the current one. Keeping both is what lets the assessor report the stale one
+ *  as superseded BY NAME instead of it having been silently dropped here. */
+function shardOutcomeKey(record: unknown): string | undefined {
+  if (typeof record !== "object" || record === null) return undefined;
+  const r = record as { lens?: unknown; shard?: { index?: unknown }; derivationDigest?: unknown };
+  if (typeof r.lens !== "string") return undefined;
+  const index = typeof r.shard?.index === "number" ? r.shard.index : null;
+  const digest = typeof r.derivationDigest === "string" ? r.derivationDigest : null;
+  return JSON.stringify([r.lens, index, digest]);
+}
+
 export type LensAcceptanceRequest = {
   lens: string;
   missingEvidence: string;
   rationale: string;
   operator: boolean;
+  /** FG-689 D16: the 1-based shard this acceptance clears. Required when the review's
+   *  recorded plan names shards for the lens; refused when it does not. */
+  shard?: number;
 };
 
 export type LensAcceptanceOutcome =
@@ -838,10 +1231,60 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
     };
   }
 
+  // FG-689 D16. An acceptance is a decision about ONE dispatch's missing evidence, and once
+  // a lens is dispatched as several shards, a shardless acceptance would clear all of them —
+  // including shards that crashed and were never read by anyone. That is the fail-open
+  // per-shard completeness exists to close, arriving through the operator surface instead of
+  // through the assessor, so it is refused BY NAME here rather than being an assessor rule
+  // the store can be talked past.
+  //
+  // The rule fires only where the fact exists: a review with no recorded plan has no shard to
+  // name, and behaves exactly as it did before FG-689.
+  const planned = plannedShardsFor(review.shardPlan, req.lens);
+  const shard = req.shard;
+  if (planned.length > 0 && shard === undefined) {
+    return {
+      ok: false,
+      refusal:
+        `the ${req.lens} lens was dispatched as ${planned.length} shard(s), so an acceptance must NAME the one ` +
+        `it clears — pass --shard <1..${planned.length}>. One acceptance covering every shard would clear shards ` +
+        `that crashed and were never read. Nothing was written.`,
+    };
+  }
+  if (shard !== undefined) {
+    if (planned.length === 0) {
+      const why =
+        review.shardPlan === undefined
+          ? `review ${reviewId} has no recorded shard plan`
+          : `its recorded shard plan gives the ${req.lens} lens no shards`;
+      return {
+        ok: false,
+        refusal:
+          `--shard ${shard} names a shard that does not exist: ${why}, so there is no shard ${shard} of the ` +
+          `${req.lens} lens to accept. Nothing was written.`,
+      };
+    }
+    if (!Number.isInteger(shard) || shard < 1 || shard > planned.length) {
+      return {
+        ok: false,
+        refusal:
+          `--shard ${shard} is not one of the ${req.lens} lens's shards — the recorded plan names ` +
+          `1..${planned.length}. Nothing was written.`,
+      };
+    }
+  }
+
   const at = nowIso();
   const acceptance: LensAcceptance = {
     kind: "lens_acceptance",
     lens: req.lens,
+    ...(shard !== undefined ? { shard } : {}),
+    // Stamped from the plan the acceptance was made against, so a later re-partition makes
+    // this decision detectably superseded (D17) rather than silently honored against a
+    // partition that no longer exists.
+    ...(shard !== undefined && review.shardPlan !== undefined
+      ? { derivationDigest: review.shardPlan.digest }
+      : {}),
     missingEvidence: req.missingEvidence,
     rationale: req.rationale,
     candidateSha,
@@ -874,6 +1317,8 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
       payload: {
         reviewId,
         lens: req.lens,
+        shard: acceptance.shard ?? null,
+        derivationDigest: acceptance.derivationDigest ?? null,
         missingEvidence: req.missingEvidence,
         rationale: req.rationale,
         candidateSha,

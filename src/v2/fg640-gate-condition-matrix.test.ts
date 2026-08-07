@@ -40,9 +40,12 @@ import {
   updateReview,
   setReviewState,
   findingsForReview,
+  recordShardPlan,
+  recordLensSkipped,
   reviewsForTask,
   reviewsForRun,
 } from "../store/reviews.js";
+import { FIXTURE_DIGEST, oneShardPlan, shardOutcome, shardPlanFixture } from "./review-shards.testkit.js";
 import { gate } from "./gate.js";
 import {
   DISPOSITION_GATE_CONDITIONS,
@@ -64,6 +67,7 @@ const CONTRACT = {
   acceptance_refs: ["FG-640 AC 18"],
   risk_lenses: ["backend", "security"],
   non_goals: [],
+  lens_scopes: { backend: ["src/v2/review-gate.ts"], security: ["src/store/reviews.ts"] },
 };
 
 let db: DatabaseInstance;
@@ -120,8 +124,11 @@ function seedRun(workflow: string, reviewMode: ReviewMode): Run {
   return run;
 }
 
+/** FG-689: an outcome carries the SHARD it reviewed and the partition it was cut under. A
+ *  1-of-1 shard is the ordinary case for a change this size; what matters is that the identity
+ *  is there at all, because an outcome carrying none satisfies no shard. */
 function lensOutcome(lens: string, over: Record<string, unknown> = {}): unknown {
-  return { lens, role: `red-${lens}`, complete: true, outcome: "pass", authored: true, findings: [], ...over };
+  return shardOutcome({ lens, role: `red-${lens}`, complete: true, outcome: "pass", authored: true, findings: [], ...over });
 }
 
 function checks(over: Array<{ id: string; ok: boolean; detail: string }> = []): unknown[] {
@@ -146,6 +153,9 @@ type LedgerOpts = {
   trusted?: string | null;
   verified?: boolean;
   shipping?: "green" | "unmet_ac" | "absent";
+  /** FG-689: what discovery RECORDED AS OWED. `false` seeds no plan at all — the
+   *  `shard_plan_absent` case, and nothing else should use it. */
+  shardPlan?: false | ReturnType<typeof shardPlanFixture>;
 };
 
 /** A ledger that is settled in every respect the gate reads. Each case breaks exactly one. */
@@ -164,6 +174,13 @@ function seedLedger(runId: string, opts: LedgerOpts = {}): void {
     lensOutcomes: opts.lensOutcomes ?? [lensOutcome("backend"), lensOutcome("security")],
     state: "shipping_review",
   });
+  // FG-689: the plan is what discovery was OWED, and the gate now blocks on its absence — a
+  // review whose expectation was never recorded is unestablished coverage, not satisfied
+  // coverage. Every settled fixture therefore records one, exactly as a real discovery does
+  // before its first container starts.
+  if (opts.shardPlan !== false) {
+    recordShardPlan(REVIEW, opts.shardPlan ?? oneShardPlan(["backend", "security"], { candidateSha: sha }));
+  }
   if (opts.verified !== false) {
     recordStageEvidence(REVIEW, "verified_final", { sha, detail: `green CI at ${sha}` });
   }
@@ -300,10 +317,60 @@ const BLOCKING: BlockingCase[] = [
   {
     expect: ["lens_outcome_missing"],
     title: "a selected lens has no reviewer-authored outcome",
-    detail: /security \(no_outcome/,
+    // FG-689: the refusal names the lens AND the shard. "security" alone would send an
+    // operator to retry a whole panel when one shard of it is what was never read.
+    detail: /security shard 1 of 1 \(no_outcome/,
     setup: () => {
       seedRun("wf-el", "evidence_led");
       seedLedger("run-matrix", { lensOutcomes: [lensOutcome("backend")] });
+    },
+  },
+  {
+    expect: ["lens_outcome_missing"],
+    title: "FG-689 D1: one shard of a two-shard lens crashed — the surviving shard does not satisfy the lens",
+    detail: /backend shard 2 of 2/,
+    setup: () => {
+      seedRun("wf-el", "evidence_led");
+      seedLedger("run-matrix", {
+        shardPlan: shardPlanFixture({
+          lenses: {
+            backend: [["src/v2/review-gate.ts"], ["src/v2/review-run.ts"]],
+            security: [["src/store/reviews.ts"]],
+          },
+          candidateSha: SHA,
+        }),
+        lensOutcomes: [
+          lensOutcome("backend", { shard: { index: 1, of: 2 } }),
+          lensOutcome("security"),
+        ],
+      });
+    },
+  },
+  {
+    expect: ["shard_plan_stale"],
+    title: "FG-689 D1: the recorded plan does not name a lens the contract selects — nothing records it as owed",
+    detail: /the contract selects security, which the recorded shard plan names neither/,
+    setup: () => {
+      seedRun("wf-el", "evidence_led");
+      // The assessor iterates the PLAN, so a selected lens the plan never named is owed
+      // nothing and would read complete. The plan and the contract disagreeing is therefore
+      // its own refusal, not something to narrow to whichever list is shorter.
+      seedLedger("run-matrix", {
+        shardPlan: shardPlanFixture({ lenses: { backend: [["src/v2/review-gate.ts"]] }, candidateSha: SHA }),
+        lensOutcomes: [lensOutcome("backend")],
+      });
+    },
+  },
+  {
+    expect: ["shard_plan_absent"],
+    title: "FG-689 D1: a readable contract with NO recorded shard plan — nothing says what discovery owed",
+    detail: /NO recorded shard plan/,
+    setup: () => {
+      seedRun("wf-el", "evidence_led");
+      // Fully-authored outcomes, and it still blocks: the gate cannot detect the absence of a
+      // record it never knew to look for, so an unrecorded expectation is its own refusal.
+      // Assessing anyway would read an empty ledger against an empty expectation.
+      seedLedger("run-matrix", { shardPlan: false });
     },
   },
   {
@@ -510,6 +577,7 @@ const DECLARED_ALLOWANCES: Record<DispositionGateAllowance["id"], true> = {
   advisory_red_fail_dispositioned: true,
   settled_disposition: true,
   superseded_verdict: true,
+  lens_intentionally_skipped: true,
 };
 
 type AllowanceCase = {
@@ -582,6 +650,31 @@ const ALLOWANCES: AllowanceCase[] = [
       resettle(SHA);
     },
   },
+  {
+    id: "lens_intentionally_skipped",
+    // FG-689 AC3. This is the case that must be DISTINGUISHABLE at the gate from a lens with
+    // no outcome — and the two rendered lines are the proof: `lens_intentionally_skipped`
+    // ADVANCES and is reported as an allowance, while `lens_outcome_missing` BLOCKS. The
+    // assertion that they are two different forms is below, outside the table.
+    title: "a lens whose authored scope matched no changed path is owed no outcome and does not block",
+    setup: () => {
+      seedRun("wf-el", "evidence_led");
+      seedLedger("run-matrix", {
+        shardPlan: shardPlanFixture({
+          lenses: { backend: [["src/v2/review-gate.ts"]] },
+          skipped: ["security"],
+          candidateSha: SHA,
+        }),
+        lensOutcomes: [lensOutcome("backend")],
+      });
+      recordLensSkipped(REVIEW, {
+        lens: "security",
+        reason: "zero_in_scope_paths",
+        derivationDigest: FIXTURE_DIGEST,
+        candidateSha: SHA,
+      });
+    },
+  },
 ];
 
 for (const c of ALLOWANCES) {
@@ -604,4 +697,70 @@ test("FG-640: every allowance the gate defines has a case that ADVANCES through 
     Object.keys(DECLARED_ALLOWANCES).sort(),
     "an allowance with no advancing case is a 'we no longer block on this' claim nothing checks",
   );
+});
+
+// ── FG-689 AC3: an intentional skip and an absent outcome are TWO RENDERED FORMS ──
+
+test("FG-689 AC3: the gate distinguishes an intentionally-skipped lens from a lens with no outcome", () => {
+  // THE SAME LENS, the same panel, the same plan shape — the ONLY difference is whether
+  // `security` owned any changed path. If these two produced one rendered form, an operator
+  // reading "security: nothing" could not tell "nothing was in scope" from "a reviewer was
+  // owed and produced nothing", which is the fail-open AC3 exists to close.
+  const skippedPlan = shardPlanFixture({
+    lenses: { backend: [["src/v2/review-gate.ts"]] },
+    skipped: ["security"],
+    candidateSha: SHA,
+  });
+  seedRun("wf-el", "evidence_led");
+  seedLedger("run-matrix", { shardPlan: skippedPlan, lensOutcomes: [lensOutcome("backend")] });
+  recordLensSkipped(REVIEW, {
+    lens: "security",
+    reason: "zero_in_scope_paths",
+    derivationDigest: FIXTURE_DIGEST,
+    candidateSha: SHA,
+  });
+
+  const skipped = assessEvidenceLedGate({
+    taskId: TASK,
+    reviews: reviewsForTask(TASK),
+    runReviews: reviewsForRun("run-matrix"),
+    findingsFor: findingsForReview,
+    verdicts: [],
+  }).assessment;
+  const skipLine = skipped.nonBlocking.find((a) => a.id === "lens_intentionally_skipped");
+  assert.ok(skipLine, "an intentional skip must be REPORTED, not be a silent absence");
+  assert.match(skipLine!.detail, /security \(zero_in_scope_paths\)/);
+  assert.match(skipLine!.detail, /nothing was in scope to review/);
+  assert.equal(
+    skipped.conditions.some((c) => c.id === "lens_outcome_missing"),
+    false,
+    "a skip is not a missing outcome — nothing was owed",
+  );
+
+  // Now the OTHER form: same lens, but the plan gives it a shard and nobody reviewed it.
+  db.close();
+  db = makeInMemoryDb();
+  setDbForTest(db);
+  seedRun("wf-el", "evidence_led");
+  seedLedger("run-matrix", { lensOutcomes: [lensOutcome("backend")] });
+
+  const missing = assessEvidenceLedGate({
+    taskId: TASK,
+    reviews: reviewsForTask(TASK),
+    runReviews: reviewsForRun("run-matrix"),
+    findingsFor: findingsForReview,
+    verdicts: [],
+  }).assessment;
+  const missLine = missing.conditions.find((c) => c.id === "lens_outcome_missing");
+  assert.ok(missLine, "a lens the plan owed an outcome and never got one must BLOCK");
+  assert.match(missLine!.detail, /security shard 1 of 1 \(no_outcome/);
+  assert.equal(
+    missing.nonBlocking.some((a) => a.id === "lens_intentionally_skipped"),
+    false,
+    "and it must never be rendered as an intentional skip",
+  );
+
+  // The two forms share no text: one is a blocking condition naming the shard, the other a
+  // non-blocking allowance naming the reason nothing was owed.
+  assert.notEqual(skipLine!.detail, missLine!.detail);
 });
