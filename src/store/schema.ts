@@ -1356,6 +1356,103 @@ CREATE TABLE IF NOT EXISTS dispatcher_evaluations (
 );
 CREATE INDEX IF NOT EXISTS idx_dispatcher_evaluations_project
   ON dispatcher_evaluations(project_key, id);
+
+-- FG-576 (D7/D11/D15): THE LAUNCHER-OWNED ORCHESTRATOR LAUNCH RECEIPT. One row per
+-- interactive orchestrator session "forge orchestrator" / "forge claude" launches,
+-- carrying the WHOLE pre-spawn decision (AC6) and the explanation of it (AC11).
+--
+-- Brand-new table arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open
+-- path — the same additive-only BD-15 contract as every table above. user_version is
+-- NOT bumped, so an older forge binary sharing ~/.forge/forge.db opens this store
+-- unharmed and simply never reads the table.
+--
+-- NO CHECK on any vocabulary this table owns (enum-as-convention, FG-585): the
+-- provider/runtime/adapter/state/strength vocabularies grow as adapters are added, and
+-- SQLite cannot WIDEN a CHECK on an additive-only path. Legality is enforced by the
+-- accessors in src/store/orchestrator-receipts.ts, which refuse by name.
+--
+-- NO FOREIGN KEY to tasks or runs, deliberately — queue_claims' and dispatcher_*'s
+-- stated precedent. A receipt is the evidence that an interactive session was launched;
+-- a CASCADE that deleted it because some other row went away is how "a live session
+-- with no receipt" happens, which is the failure this table exists to close.
+--
+-- state IS THE LIFECYCLE, EXPLICITLY (D15) — never inferred, and never inferred from
+-- the ABSENCE of a provider hook:
+--   'pending'      persisted BEFORE spawn. NOT live and never rendered as live.
+--   'running'      only after a CONFIRMED spawn. A CLAIM the launcher was alive when
+--                  it wrote it — never proof of present liveness. A surface reports
+--                  running only after joining the launcher-owned liveness record.
+--   'exited'       terminal: the child exited (exit_code / exit_signal carry which).
+--   'spawn_failed' terminal: the child never started.
+--   'orphaned'     the LAUNCHER was lost. Per D17 this asserts launcher loss ONLY and
+--                  says NOTHING about the child's disposition; it must never be
+--                  rendered as "session exited" or "child stopped".
+--
+-- provider / runtime / adapter are FIRST-CLASS COLUMNS, never derived at read time and
+-- never defaulted. A Codex receipt read by a reader that knows only the generic columns
+-- must still report provider='openai' — a default of any kind would let one provider's
+-- session be read as another's.
+--
+-- identity_strength is the HONEST PARITY GAP (AC9): 'asserted' (Forge minted the id and
+-- passed it to the provider — Claude), 'correlated' (matched after spawn from recorded
+-- evidence — Codex), 'ambiguous' (two candidates in the correlation window; a guess was
+-- REFUSED), 'unknown'. identity_basis records what the correlation was based on. It
+-- defaults to the WEAKEST value so a row this binary cannot interpret never reads as
+-- asserted.
+--
+-- carrier_* is instruction provenance (AC8): which seed generation supplied the
+-- Forge-owned instruction carrier, where it was bound from, and whether the provider
+-- gave POSITIVE EVIDENCE it accepted it. It defaults to 'unproven' — constructing a
+-- flag is not evidence it was honored, so the fail-closed value is the default and
+-- 'accepted' must always be written deliberately.
+--
+-- limitations is the JSON [{capability, note}] list of what the selected provider
+-- CANNOT supply (AC12: "no equivalent usage evidence" is a RECORDED VALUE here, never a
+-- fabricated number somewhere else).
+--
+-- Every indexed column is a primary key or NOT NULL with NO DEFAULT, so ADD COLUMN
+-- could not restore it anyway and indexing it cannot grow the FG-608 parity guard's
+-- UNDROPPABLE set.
+CREATE TABLE IF NOT EXISTS orchestrator_receipts (
+  receipt_id          TEXT PRIMARY KEY,
+  session_key         TEXT NOT NULL,
+  state               TEXT NOT NULL,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  project_dir         TEXT NOT NULL,
+  project_name        TEXT,
+  resolved_profile    TEXT,
+  runtime             TEXT NOT NULL,
+  provider            TEXT NOT NULL,
+  model               TEXT,
+  auth_mode           TEXT,
+  resolved_by         TEXT,
+  adapter             TEXT NOT NULL,
+  session_operation   TEXT NOT NULL,
+  session_target      TEXT,
+  provider_session_id TEXT,
+  identity_strength   TEXT NOT NULL DEFAULT 'unknown',
+  identity_basis      TEXT,
+  carrier_generation  TEXT,
+  carrier_path        TEXT,
+  carrier_acceptance  TEXT NOT NULL DEFAULT 'unproven',
+  carrier_evidence    TEXT,
+  limitations         TEXT,
+  task_id             TEXT,
+  launcher_pid        INTEGER,
+  launcher_identity   TEXT,
+  started_at          TEXT,
+  closed_at           TEXT,
+  exit_code           INTEGER,
+  exit_signal         TEXT,
+  failure_reason      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_project
+  ON orchestrator_receipts(project_dir, created_at);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_state
+  ON orchestrator_receipts(state, created_at);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_session
+  ON orchestrator_receipts(session_key);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -1753,4 +1850,42 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "dispatcher_evaluations", column: "scan_evidence", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN scan_evidence TEXT" },
   { table: "dispatcher_evaluations", column: "wake_kind", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN wake_kind TEXT" },
   { table: "dispatcher_evaluations", column: "next_watchdog_at_ms", ddl: "ALTER TABLE dispatcher_evaluations ADD COLUMN next_watchdog_at_ms INTEGER" },
+
+  // FG-576: orchestrator_receipts. Brand-new, so a real old DB gets it whole from
+  // CREATE TABLE IF NOT EXISTS and none of these ALTERs ever fires there. They are
+  // declared anyway for the SAME reason FG-609's, FG-610's, FG-655's, FG-679's and
+  // FG-591's brand-new tables are: the additive-only invariant is only CHECKABLE if
+  // this list is EXHAUSTIVE, and fg608-migration-parity.test.ts enforces that by
+  // stripping a fresh DB to the oldest shape SQLite permits and demanding parity.
+  //
+  // Only the RESTORABLE columns appear. receipt_id is the primary key, and
+  // session_key, state, created_at, updated_at, project_dir, runtime, provider,
+  // adapter and session_operation are NOT NULL with NO DEFAULT, so ADD COLUMN could
+  // never put any of them back and listing them would be a lie.
+  //
+  // identity_strength and carrier_acceptance carry FAIL-CLOSED defaults, so a row
+  // restored onto an older shape reads as 'unknown'/'unproven' — never as an asserted
+  // session identity or an accepted instruction carrier nothing proved (AC8/AC9).
+  { table: "orchestrator_receipts", column: "project_name", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN project_name TEXT" },
+  { table: "orchestrator_receipts", column: "resolved_profile", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN resolved_profile TEXT" },
+  { table: "orchestrator_receipts", column: "model", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN model TEXT" },
+  { table: "orchestrator_receipts", column: "auth_mode", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN auth_mode TEXT" },
+  { table: "orchestrator_receipts", column: "resolved_by", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN resolved_by TEXT" },
+  { table: "orchestrator_receipts", column: "session_target", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN session_target TEXT" },
+  { table: "orchestrator_receipts", column: "provider_session_id", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN provider_session_id TEXT" },
+  { table: "orchestrator_receipts", column: "identity_strength", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN identity_strength TEXT NOT NULL DEFAULT 'unknown'" },
+  { table: "orchestrator_receipts", column: "identity_basis", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN identity_basis TEXT" },
+  { table: "orchestrator_receipts", column: "carrier_generation", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN carrier_generation TEXT" },
+  { table: "orchestrator_receipts", column: "carrier_path", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN carrier_path TEXT" },
+  { table: "orchestrator_receipts", column: "carrier_acceptance", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN carrier_acceptance TEXT NOT NULL DEFAULT 'unproven'" },
+  { table: "orchestrator_receipts", column: "carrier_evidence", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN carrier_evidence TEXT" },
+  { table: "orchestrator_receipts", column: "limitations", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN limitations TEXT" },
+  { table: "orchestrator_receipts", column: "task_id", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN task_id TEXT" },
+  { table: "orchestrator_receipts", column: "launcher_pid", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN launcher_pid INTEGER" },
+  { table: "orchestrator_receipts", column: "launcher_identity", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN launcher_identity TEXT" },
+  { table: "orchestrator_receipts", column: "started_at", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN started_at TEXT" },
+  { table: "orchestrator_receipts", column: "closed_at", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN closed_at TEXT" },
+  { table: "orchestrator_receipts", column: "exit_code", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN exit_code INTEGER" },
+  { table: "orchestrator_receipts", column: "exit_signal", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN exit_signal TEXT" },
+  { table: "orchestrator_receipts", column: "failure_reason", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN failure_reason TEXT" },
 ];
