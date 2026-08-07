@@ -1,6 +1,6 @@
 // FG-640: an absent lens clears by exactly three routes, and dispositioning is not one of them.
 //
-// The ticket, the orchestrator seed and `assessDiscoveryCompleteness`'s own doc comment all state
+// The ticket, the orchestrator seed and the completeness assessor's own doc comment all state
 // the same rule: "An absent lens is cleared only by retrying it, amending the contract through its
 // approving authority, or an authorized risk acceptance that NAMES the missing evidence — never by
 // dispositioning some other finding."
@@ -15,7 +15,7 @@
 // findings and can never clear a lens — not even an `accepted_risk` whose text names the missing
 // lens by hand. `recordLensAcceptance` writes an operator-authorized record against the NAMED
 // lens, naming what was not reviewed, bound to the confirmed candidate, and
-// `assessDiscoveryCompleteness` consults it. Both halves are tested here: the route that clears
+// the completeness assessor consults it. Both halves are tested here: the route that clears
 // the lens, and the routes that must never be able to.
 
 import { test, beforeEach, afterEach } from "node:test";
@@ -34,12 +34,14 @@ import {
   lensAcceptancesOf,
   recordDisposition,
   recordLensAcceptance,
+  recordShardPlan,
   recordStageEvidence,
   summarizeReview,
   updateReview,
   setReviewState,
 } from "../store/reviews.js";
 import { renderReview } from "../cli/commands/review.js";
+import { oneShardPlan, shardOutcome } from "./review-shards.testkit.js";
 import { gate } from "./gate.js";
 import { confirmContract, validateReviewContract } from "./review-contract.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
@@ -87,17 +89,21 @@ steps:
   publishFlatAsGeneration(homeDir);
 }
 
+/** FG-689: every outcome record carries the shard it reviewed and the partition it was cut
+ *  under, exactly as the coordinator stamps them. The lenses here each fit one dispatch, so
+ *  these are 1-of-1 shards — but the identity is not optional: an outcome that carries none
+ *  cannot say which of a lens's shards was read, and satisfies none of them. */
 function authored(lens: string): unknown {
-  return { lens, role: `red-${lens}`, complete: true, outcome: "pass", authored: true, findings: [] };
+  return shardOutcome({ lens, role: `red-${lens}`, complete: true, outcome: "pass", authored: true, findings: [] });
 }
 
-const CRASHED_SECURITY = {
+const CRASHED_SECURITY = shardOutcome({
   lens: "security",
   role: "red-security",
   complete: false,
   reason: "crashed",
   detail: "the security lens did not produce a review (container_crash)",
-};
+});
 
 function checks(): unknown[] {
   return [
@@ -146,6 +152,10 @@ function seedWorldWithCrashedLens(): void {
     lensOutcomes: [authored("backend"), CRASHED_SECURITY],
     state: "discovering",
   });
+  // FG-689: what discovery RECORDED AS OWED, written before its first container started. The
+  // gate blocks on its absence, so a world that is settled in every respect but the crashed
+  // lens has to carry one.
+  recordShardPlan(REVIEW, oneShardPlan(["backend", "security"], { candidateSha: SHA }));
   recordStageEvidence(REVIEW, "verified_final", { sha: SHA, detail: `green CI at ${SHA}` });
   recordStageEvidence(REVIEW, "shipping", { sha: SHA, detail: "shipping", meta: { checks: checks() } });
   setReviewState(REVIEW, "shipping_review");
@@ -181,7 +191,7 @@ afterEach(() => {
 test("FG-640 / PRD #21: the crashed lens is the ONLY thing blocking — the rest of the ledger is settled", async () => {
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /security \(crashed/);
+  assert.match(msg, /security shard 1 of 1 \(crashed/);
   // If any other condition were also open, the tests below could clear the lens and still see a
   // refusal, and "dispositioning does not clear it" would pass for the wrong reason.
   assert.deepEqual([...msg.matchAll(/^ {2}- (\w+):/gm)].map((m) => m[1]), ["lens_outcome_missing"]);
@@ -230,7 +240,7 @@ test("FG-640: an accepted_risk FINDING that names the missing lens still does no
 
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /security \(crashed/);
+  assert.match(msg, /security shard 1 of 1 \(crashed/);
 });
 
 // ── route 1: retry the lens ──────────────────────────────────────────────────
@@ -246,18 +256,18 @@ test("FG-640: a retry that came back SYNTHESIZED does not clear it — forge did
     lensOutcomes: [
       authored("backend"),
       CRASHED_SECURITY,
-      {
+      shardOutcome({
         lens: "security",
         role: "red-security",
         complete: false,
         reason: "synthesized",
         detail: "forge synthesized this verdict, no reviewer authored it",
-      },
+      }),
     ],
   });
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /security \(synthesized/, "the LATEST attempt is what the refusal reports");
+  assert.match(msg, /security shard 1 of 1 \(synthesized/, "the LATEST attempt is what the refusal reports");
 });
 
 test("FG-640: a retry that came back INCONCLUSIVE clears the lens but lands as a finding to disposition", async () => {
@@ -265,7 +275,7 @@ test("FG-640: a retry that came back INCONCLUSIVE clears the lens but lands as a
   updateReview(REVIEW, {
     lensOutcomes: [
       authored("backend"),
-      {
+      shardOutcome({
         lens: "security",
         role: "red-security",
         complete: true,
@@ -273,7 +283,7 @@ test("FG-640: a retry that came back INCONCLUSIVE clears the lens but lands as a
         authored: true,
         inconclusiveReason: "could not reach the auth path from the diff",
         findings: [],
-      },
+      }),
     ],
   });
   ingestFindings(REVIEW, [
@@ -290,6 +300,34 @@ test("FG-640: a retry that came back INCONCLUSIVE clears the lens but lands as a
 test("FG-640: AMENDING the contract to drop the lens clears it — the panel is what the contract selects", async () => {
   const amended = { ...CONTRACT, risk_lenses: ["backend"], lens_scopes: { backend: CONTRACT.lens_scopes.backend } };
   updateReview(REVIEW, { contract: amended });
+
+  // FG-689: the amended contract alone does NOT clear it, and that is the fail-closed
+  // direction. What discovery is owed is the recorded PLAN, and the plan still names the lens
+  // the amendment dropped — so until discovery re-plans, the gate is looking at a partition
+  // for a panel that is no longer this one. It says so by name rather than silently narrowing
+  // to whichever of the two lists is shorter.
+  const stale = await refusal();
+  assert.match(stale, /shard_plan_stale/);
+  assert.match(stale, /names security, which the contract does not select/);
+
+  // Re-planning is what the amendment's remedy actually is — `forge review continue` re-enters
+  // discovery, which re-derives the plan from the contract in force and records it. THEN the
+  // dropped lens is owed nothing, because nothing records it as owed.
+  // A re-plan changes the partition IDENTITY as well as the lens list — `scopesDigest` moves
+  // with the contract — so the backend outcome recorded under the old one is superseded and
+  // backend is re-dispatched. That is D17 working, not an inconvenience: an outcome authored
+  // over a different set of owned paths does not satisfy a shard of this partition.
+  const AMENDED = "shard-plan-1-amended";
+  recordShardPlan(REVIEW, oneShardPlan(["backend"], { candidateSha: SHA, digest: AMENDED }));
+  updateReview(REVIEW, {
+    lensOutcomes: [
+      shardOutcome(
+        { lens: "backend", role: "red-backend", complete: true, outcome: "pass", authored: true, findings: [] },
+        { index: 1, of: 1 },
+        AMENDED,
+      ),
+    ],
+  });
   const result = await gate(TASK, "advance", undefined, {});
   assert.equal(result.task.status, "complete");
 });
@@ -318,6 +356,10 @@ test("FG-640: the COORDINATOR cannot make that amendment — a removal returns t
 function acceptSecurity(over: Partial<Parameters<typeof recordLensAcceptance>[1]> = {}) {
   return recordLensAcceptance(REVIEW, {
     lens: "security",
+    // FG-689 D16: the acceptance NAMES the shard it clears. The lens is one shard here, and
+    // `recordLensAcceptance` refuses a shardless acceptance the moment a plan names any —
+    // one acceptance covering every shard would clear shards that crashed and were never read.
+    shard: 1,
     missingEvidence: "no security review of the new auth-path guard at src/v2/gate.ts:158",
     rationale: "the diff is confined to gate wiring; the auth path is unchanged and covered by FG-638's tests",
     operator: true,
@@ -369,7 +411,7 @@ test("FG-640: a lens the contract never selected has no missing evidence to acce
 test("FG-640: accepting one lens says nothing about another — the acceptance is per NAMED lens", async () => {
   updateReview(REVIEW, {
     lensOutcomes: [
-      { lens: "backend", role: "red-backend", complete: false, reason: "crashed", detail: "the backend lens did not produce a review (container_crash)" },
+      shardOutcome({ lens: "backend", role: "red-backend", complete: false, reason: "crashed", detail: "the backend lens did not produce a review (container_crash)" }),
       CRASHED_SECURITY,
     ],
   });
@@ -377,8 +419,8 @@ test("FG-640: accepting one lens says nothing about another — the acceptance i
 
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /backend \(crashed/);
-  assert.doesNotMatch(msg, /security \(crashed/, "the accepted lens is cleared; the other one is not");
+  assert.match(msg, /backend shard 1 of 1 \(crashed/);
+  assert.doesNotMatch(msg, /security shard 1 of 1 \(crashed/, "the accepted lens is cleared; the other one is not");
 });
 
 test("FG-640: an acceptance recorded against a SUPERSEDED candidate does not clear the lens", async () => {
@@ -389,8 +431,8 @@ test("FG-640: an acceptance recorded against a SUPERSEDED candidate does not cle
 
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /an authorized acceptance of this lens exists at cand640lens/);
-  assert.match(msg, /accept it again at the current candidate or retry the lens/);
+  assert.match(msg, /an authorized acceptance of security shard 1 of 1 exists but it was made against candidate cand640lens/);
+  assert.match(msg, /accept it again against the current shard, or retry it/);
 });
 
 test("FG-640: an acceptance is bound to the CONFIRMED candidate — a confirmation that lands at another sha does not clear it", async () => {
@@ -403,7 +445,7 @@ test("FG-640: an acceptance is bound to the CONFIRMED candidate — a confirmati
 
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
-  assert.match(msg, /an authorized acceptance of this lens exists at cand640lens,/);
+  assert.match(msg, /an authorized acceptance of security shard 1 of 1 exists but it was made against candidate cand640lens/);
 });
 
 test("FG-640: an acceptance BEFORE contract confirmation is refused by name — there is no confirmed candidate to bind to", () => {

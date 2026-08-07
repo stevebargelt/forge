@@ -171,7 +171,10 @@ test("FG-653: a result authored exactly as the amended seeds instruct ingests, f
     "advanced",
     `a seed-compliant discovery output must complete the panel — got: ${outcome.message}`,
   );
-  assert.deepEqual(h.calls, [...RISK_LENSES], "every selected lens was dispatched");
+  // FG-689: dispatch order follows the recorded shard PLAN (lenses sorted, then shards in
+  // index order), not the contract's declaration order — a partition has to be reproducible
+  // from its inputs, and "whatever order the contract happened to list" is not one of them.
+  assert.deepEqual(h.calls.sort(), [...RISK_LENSES].sort(), "every selected lens was dispatched");
 
   const findings = findingsForReview(REVIEW);
   assert.equal(findings.length, RISK_LENSES.length, "one finding per lens survived ingestion");
@@ -249,12 +252,19 @@ const CONTRACT = {
   acceptance_refs: ["FG-653 AC 1"],
   risk_lenses: [...RISK_LENSES],
   non_goals: ["loosening nested validation"],
+  // FG-689: EVERY lens owns the one path this suite's rendering carries, deliberately. The
+  // subject here is that the amended seed prose is bound to the discovery SCHEMA, and it is a
+  // claim about all five lenses — so all five have to be dispatched. Scoping them apart (as an
+  // authored contract for a real change would) would leave three with no in-scope path, and
+  // three intentionally-skipped lenses is a correct FG-689 outcome that proves nothing about
+  // the seeds. Overlapping scopes are expected and legal: two reviewers reading the same file
+  // through different lenses is the point of having lenses.
   lens_scopes: {
     wide: ["src/"],
-    narrow: ["src/v2/review-discovery.ts"],
-    frontend: ["dashboard/"],
+    narrow: ["src/store/reviews.ts"],
+    frontend: ["src/store/"],
     backend: ["src/store/"],
-    security: ["src/util/creds.ts"],
+    security: ["src/store/reviews.ts"],
   },
 };
 

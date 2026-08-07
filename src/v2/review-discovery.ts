@@ -297,19 +297,6 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
   };
 }
 
-export type DiscoveryCompleteness = {
-  complete: boolean;
-  /** Every selected lens with no schema-valid reviewer-authored outcome, and why. An
-   *  absent lens is cleared only by retrying it, amending the contract through its
-   *  approving authority, or an authorized acceptance that NAMES the lens — never by
-   *  dispositioning some other finding. */
-  missing: Array<{ lens: RiskLens; reason: LensIncompleteReason | "no_outcome"; detail: string }>;
-  /** The lenses that have no authored outcome and are cleared by an operator acceptance of
-   *  the named missing evidence — the third route, reported rather than silently folded into
-   *  completeness, because an accepted lens is a narrower review than the contract states. */
-  accepted: LensAcceptance[];
-};
-
 /** The acceptances a completeness assessment may consult, and the candidate they must be
  *  bound to. Both or neither: an acceptance recorded against a superseded candidate is a
  *  decision about a review of code that is no longer the one being assessed. */
@@ -318,67 +305,20 @@ export type AcceptedLenses = {
   candidateSha?: string;
 };
 
-export function assessDiscoveryCompleteness(
-  selectedLenses: readonly RiskLens[],
-  outcomes: readonly LensOutcome[],
-  clearances: AcceptedLenses = {},
-): DiscoveryCompleteness {
-  const missing: DiscoveryCompleteness["missing"] = [];
-  const accepted: LensAcceptance[] = [];
-  for (const lens of selectedLenses) {
-    const found = outcomes.filter((o) => o.lens === lens);
-    const authored = found.find((o) => o.complete);
-    if (authored) continue;
-
-    // FG-654: a stale-protocol refusal is NOT acceptable-away, and it is checked BEFORE
-    // any acceptance is consulted. The acceptance route exists so an operator can
-    // knowingly accept a NARROWER review; a stale-protocol agent did not produce a
-    // narrower review — it produced output under a contract nobody stated, or none at
-    // all. Different facts, and collapsing them recreates the fail-open this closes.
-    // The remedy is `forge upgrade` and then the lens, which is self-service.
-    const last = found[found.length - 1];
-    if (last && !last.complete && last.reason === "stale_protocol") {
-      missing.push({ lens, reason: last.reason, detail: last.detail });
-      continue;
-    }
-
-    const forLens = (clearances.acceptances ?? []).filter((a) => a.lens === lens);
-    const bound = forLens.filter(
-      (a) => clearances.candidateSha !== undefined && a.candidateSha === clearances.candidateSha,
-    );
-    const current = bound[bound.length - 1];
-    if (current) {
-      accepted.push(current);
-      continue;
-    }
-    // A superseded acceptance is named in the refusal rather than dropped: the operator who
-    // accepted this lens once needs to read that the candidate moved out from under it.
-    const stale = forLens[forLens.length - 1];
-    const staleNote =
-      stale !== undefined
-        ? ` (an authorized acceptance of this lens exists at ${stale.candidateSha}, which is not the ` +
-          `candidate being assessed — accept it again at the current candidate or retry the lens)`
-        : "";
-
-    const failed = found[found.length - 1];
-    if (failed && !failed.complete) {
-      missing.push({ lens, reason: failed.reason, detail: `${failed.detail}${staleNote}` });
-    } else {
-      missing.push({ lens, reason: "no_outcome", detail: `the ${lens} lens was never dispatched${staleNote}` });
-    }
-  }
-  return { complete: missing.length === 0, missing, accepted };
-}
-
 // ─── FG-689: completeness is PER SHARD ──────────────────────────────────────
 //
-// THE RULE `assessDiscoveryCompleteness` CANNOT EXPRESS. It iterates the selected lenses and
-// accepts the FIRST complete outcome for a lens. That is right while a lens is one dispatch;
-// the moment a lens is several, it means one surviving shard satisfies a lens whose other
-// shards crashed — the review reads complete while most of the code in that lens's scope was
-// never read by anyone. It is the same fail-open the whole evidence-led model exists to close,
-// arriving through the partition rather than through a missing container, and no amount of
-// care in the sharding code prevents it: the assessor has to owe an outcome PER SHARD.
+// THE RULE THE LENS-GRANULAR ASSESSOR COULD NOT EXPRESS, and why it is gone rather than kept
+// beside this one. `assessDiscoveryCompleteness` iterated the selected lenses and accepted the
+// FIRST complete outcome for a lens. That is right while a lens is one dispatch; the moment a
+// lens is several, it means one surviving shard satisfies a lens whose other shards crashed —
+// the review reads complete while most of the code in that lens's scope was never read by
+// anyone. It is the same fail-open the whole evidence-led model exists to close, arriving
+// through the partition rather than through a missing container, and no amount of care in the
+// sharding code prevents it: the assessor has to owe an outcome PER SHARD.
+//
+// Leaving both assessors in the tree would have been the same hole with a longer fuse: two
+// answers to "is discovery complete", and any call site that kept the old one — or any new one
+// that picked it — would be the fail-open back. There is one assessor.
 //
 // So every shard the plan names owes a schema-valid reviewer-authored outcome, and ONE missing
 // shard leaves the review incomplete exactly as one missing lens does today. There are three
@@ -444,6 +384,47 @@ export type ShardCompleteness = {
 export type ShardClearances = AcceptedLenses & {
   skips?: readonly LensSkipRecord[];
 };
+
+/** DOES THIS PLAN DESCRIBE THIS CONTRACT'S PANEL?
+ *
+ *  `assessShardCompleteness` iterates the PLAN, which is right — the plan is what discovery
+ *  recorded as owed — and is exactly why this check has to exist beside it. A plan that does
+ *  not name a selected lens owes nothing for it, so the assessor reports complete over a lens
+ *  no reviewer ever read: the same shape as the empty-lens-list fail-open the gate's
+ *  `contract_unreadable` condition already closes, arriving through a stale plan instead of an
+ *  unparseable contract. The reverse (a plan naming a lens the contract no longer selects) is
+ *  the same disagreement seen from the other side, and is refused rather than silently
+ *  narrowed: which lenses are owed is the contract's answer, and a plan that disagrees with it
+ *  is a plan for a panel that is not this one.
+ *
+ *  Both directions are one refusal because both have one remedy — re-run discovery, which
+ *  re-plans from the contract in force and records the new partition. */
+export function planCoversLenses(
+  plan: ShardPlan,
+  selectedLenses: readonly string[],
+): { ok: true } | { ok: false; detail: string } {
+  const named = new Set([...plan.lenses.map((l) => l.lens), ...plan.skipped.map((s) => s.lens)]);
+  const unplanned = selectedLenses.filter((l) => !named.has(l));
+  const unselected = [...named].filter((l) => !selectedLenses.includes(l));
+  if (unplanned.length === 0 && unselected.length === 0) return { ok: true };
+  return {
+    ok: false,
+    detail:
+      [
+        unplanned.length > 0
+          ? `the contract selects ${unplanned.join(", ")}, which the recorded shard plan names neither as ` +
+            `sharded nor as intentionally skipped — nothing is recorded as owed for ${unplanned.length === 1 ? "it" : "them"}, ` +
+            `so an assessment against this plan would report a lens nobody reviewed as complete`
+          : "",
+        unselected.length > 0
+          ? `the recorded shard plan names ${unselected.join(", ")}, which the contract does not select — the plan ` +
+            `describes a panel that is not this review's`
+          : "",
+      ]
+        .filter((s) => s !== "")
+        .join("; ") + `. The plan is re-derived from the contract in force: re-run discovery.`,
+  };
+}
 
 export function assessShardCompleteness(
   plan: ShardPlan,

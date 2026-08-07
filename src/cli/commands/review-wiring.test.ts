@@ -1861,3 +1861,97 @@ test("FG-689: --add-lens refuses an unknown lens name at the boundary it is type
   assert.match(parsed.refusal, /'vibes', which is not a risk lens/);
   assert.match(parsed.refusal, /wide, narrow, frontend, backend, security/);
 });
+
+// ─── FG-689 step 8: the lens dispatch carries a SHARD, not the whole change ──
+//
+// Two deletions and one addition, and all three are about the same failure: a reviewer that
+// cannot tell what it is looking at.
+//
+//   * the seam no longer computes a diff, so there is no second unpinned `git diff` and no
+//     `catch` that substitutes an apology for one. A reviewer handed a not-the-diff authors an
+//     honest, schema-valid `pass` over it, and that pass clears the disposition gate.
+//   * the prompt STATES the shard's identity and its path list. "No input validation anywhere"
+//     is a true statement about shard 2 of 3 and a false one about the candidate, and a
+//     reviewer that was never told which it had is being invited to make that mistake.
+
+/** A `LensContext` the coordinator would build: the shard's already-rendered bytes and its
+ *  identity, with no git seam involved at all. */
+function lensCtx(over: Partial<Parameters<CoordinatorDeps["dispatchLens"]>[0]> = {}) {
+  return {
+    review: REVIEW,
+    lens: "wide" as const,
+    role: "red-wide",
+    candidateSha: "cand111",
+    contract: APPROVED,
+    shard: { index: 1, of: 1 },
+    paths: ["src/store/reviews.ts"],
+    diff: pinnedFileBody("src/store/reviews.ts"),
+    derivationDigest: "shard-plan-1-wiring",
+    ...over,
+  };
+}
+
+test("FG-689 D15: the lens dispatch never computes a diff — a git that explodes cannot produce a placeholder", async () => {
+  const { invokeFn, calls } = capturingInvoke();
+  const deps = buildCoordinatorDeps({
+    projectDir: "/nonexistent-project",
+    ticketId: "FG-689",
+    // ANY git call from this seam is the defect returning. The old wiring ran `git diff` here
+    // and caught the failure into a sentence that stood in for the diff.
+    git: () => {
+      throw new Error("the lens dispatch must not touch git");
+    },
+    invokeFn,
+  });
+
+  await deps.dispatchLens(lensCtx());
+  assert.equal(calls.length, 1, "the shard was dispatched from the bytes it was handed");
+  const task = calls[0]!.task as string;
+  assert.ok(task.includes(pinnedFileBody("src/store/reviews.ts")), "the reviewer got the shard's rendered bytes");
+  assert.ok(!/could not be comp/.test(task), "and no substitute for them");
+});
+
+test("FG-689: a multi-shard dispatch TELLS the reviewer it is seeing one shard, and which paths", async () => {
+  const { invokeFn, calls } = capturingInvoke();
+  const deps = buildCoordinatorDeps({
+    projectDir: "/nonexistent-project",
+    ticketId: "FG-689",
+    git: () => "",
+    invokeFn,
+  });
+
+  await deps.dispatchLens(
+    lensCtx({
+      shard: { index: 2, of: 3 },
+      paths: ["src/store/reviews.ts", "src/store/schema.ts"],
+      diff: pinnedFileBody("src/store/reviews.ts") + pinnedFileBody("src/store/schema.ts"),
+    }),
+  );
+
+  const task = calls[0]!.task as string;
+  assert.match(task, /shard 2 of 3/, "the identity is stated");
+  assert.match(task, /NOT the whole change/, "and stated as a warning, not as a header nobody reads");
+  assert.match(task, /^ {2}- src\/store\/reviews\.ts$/m, "the path list is enumerated");
+  assert.match(task, /^ {2}- src\/store\/schema\.ts$/m);
+  assert.match(task, /do not report a finding whose evidence is a file you were/, "and the inference rule is stated");
+  assert.match(calls[0]!.runTitle as string, /shard 2\/3/, "the run title says so too");
+});
+
+test("FG-689: a 1-of-1 shard is told it has the WHOLE of the lens's scope — not warned about a partition that does not exist", () => {
+  // The warning above is load-bearing precisely because it is not always there. A reviewer
+  // told "this may be part of a change" on every dispatch learns to ignore it.
+  return (async () => {
+    const { invokeFn, calls } = capturingInvoke();
+    const deps = buildCoordinatorDeps({
+      projectDir: "/nonexistent-project",
+      ticketId: "FG-689",
+      git: () => "",
+      invokeFn,
+    });
+    await deps.dispatchLens(lensCtx());
+    const task = calls[0]!.task as string;
+    assert.match(task, /shard 1 of 1: the WHOLE of the wide lens's authored scope/);
+    assert.ok(!/NOT the whole change/.test(task));
+    assert.ok(!/shard 1\/1/.test(calls[0]!.runTitle as string), "and the run title stays the unsharded one");
+  })();
+});
