@@ -1,5 +1,5 @@
 /**
- * Integration tests for FG-158: --bedrock / --aws-profile flags + project.json auth config.
+ * Integration tests for FG-158 / FG-435 / FG-499: `forge claude`'s Bedrock surface.
  *
  * Covers five areas thin in the existing unit-test suite:
  *   (1) AWS_PROFILE resolution order: --aws-profile flag > project.json.awsProfile
@@ -10,29 +10,51 @@
  *       argv that would be forwarded to claude.
  *   (4) apikey mode exits non-zero when ANTHROPIC_API_KEY is unset (subprocess test).
  *   (5) readProjectAuth returns null for absent / invalid project.json (cross-check).
+ *   (6/7) FG-435 + FG-499: the STS / SSO preflight is profile-scoped and ADVISORY.
+ *
+ * FG-576 step 6 rewired the command onto the shared launch primitive, so these were
+ * updated in three ways — each one STRENGTHENING what is asserted, not relaxing it:
+ *
+ *   * The precedence checks (1) now run through the shipped code path
+ *     (claudeShortcutAdapter().buildChildEnv) instead of a mirror of the expression
+ *     the command used to evaluate inline. A mirror can agree with a comment while
+ *     disagreeing with the binary.
+ *   * The subprocess FG-499 tests put a FAKE `claude` on PATH and assert
+ *     **exit code 0**. Previously `claude` was absent, the spawn failed for an
+ *     unrelated reason, and "advisory only" could only be inferred from the banner
+ *     appearing. Now a non-zero exit for an advisory finding fails the test outright,
+ *     which is what FG-499 actually protects.
+ *   * The advisory text is asserted against combined stdout+stderr: the shared
+ *     launcher prints every adapter advisory through ONE stream so `forge claude`
+ *     and `forge orchestrator` cannot report the same finding differently. The
+ *     wording, the profile scoping and the non-fatality are unchanged.
+ *
+ * Every subprocess run uses disposable FORGE_HOME / FORGE_DB_PATH /
+ * FORGE_ORCHESTRATORS_DIR / FORGE_AWS_DIR roots and a fake CLI: no billed session is
+ * started and no real auth is read or mutated (AC13).
  */
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import {
-  extractAwsProfileFromArgs,
-  stripBedrockFlagsFromArgs,
-  stripNameFromArgs,
-} from "./claude.js";
+import { claudeShortcutAdapter, parseClaudeShortcutArgs } from "./claude.js";
 import { readProjectAuth } from "../../util/project-meta.js";
 import { resolveProfileSsoIdentity, ssoTokenCacheFilename, stsCacheFilename } from "../../util/creds.js";
 import { utimesSync } from "node:fs";
+import type { AdapterLaunchContext, AdapterReadiness } from "../../orchestrator/adapter.js";
+import type { OrchestratorDecision } from "../../v2/orchestrator-resolve.js";
+import type { EffectiveAuth } from "../../v2/model-resolution.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // From src/cli/commands/ go up two to src/, then into cli/index.ts.
 const entry = resolve(here, "..", "..", "cli", "index.ts");
 // node_modules lives at the project root (three levels above here).
 const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+const FAKE_CLAUDE = resolve(here, "..", "..", "orchestrator", "__fixtures__", "fake-claude.js");
 
 let tmp: string;
 let savedAwsProfile: string | undefined;
@@ -64,163 +86,170 @@ function writeForgeProjectJson(projectDir: string, body: Record<string, unknown>
   writeFileSync(join(projectDir, ".forge", "project.json"), JSON.stringify(body));
 }
 
-// Mirrors the resolution logic in claude.ts action (the single expression the
-// action evaluates when bedrockActive is true):
-//   awsProfileFlag ?? projectAuth?.awsProfile ?? process.env.AWS_PROFILE ?? "default"
-function resolveProfile(
-  awsProfileFlag: string | undefined,
-  projectAuth: ReturnType<typeof readProjectAuth>,
-): string {
-  return awsProfileFlag ?? projectAuth?.awsProfile ?? process.env.AWS_PROFILE ?? "default";
+/** A disposable PATH whose `claude` is the fixture executable. AC13: nothing here
+ *  may reach a real provider CLI. */
+function fakeClaudeBin(): string {
+  const bin = join(tmp, "bin");
+  mkdirSync(bin, { recursive: true });
+  const fake = join(bin, "claude");
+  copyFileSync(FAKE_CLAUDE, fake);
+  chmodSync(fake, 0o755);
+  return bin;
 }
 
-// ─── (1) AWS_PROFILE resolution order ────────────────────────────────────────
+/** Disposable Forge roots for a subprocess run, so no test writes into the
+ *  operator's ~/.forge, store or heartbeat namespace. */
+function disposableRoots(): Record<string, string> {
+  const home = join(tmp, "forge-home");
+  mkdirSync(home, { recursive: true });
+  return {
+    FORGE_HOME: home,
+    FORGE_DB_PATH: join(home, "forge.db"),
+    FORGE_ORCHESTRATORS_DIR: join(tmp, "orchestrators"),
+  };
+}
+
+// ─── (1) AWS_PROFILE resolution order, through the shipped code path ──────────
+//
+// `forge claude --aws-profile <p>` is a Forge-owned flag: it is extracted here and
+// handed to the adapter, which is the ONLY thing that decides which AWS profile
+// reaches the child. So the precedence assertions run against that adapter.
+
+function bedrockDecision(auth: EffectiveAuth = "bedrock"): OrchestratorDecision {
+  return {
+    adapter: "claude-code",
+    provider: "anthropic",
+    runtime: "claude-bedrock",
+    profile: "claude-bedrock",
+    model: "us.anthropic.claude-sonnet-4-6",
+    modelExplicit: true,
+    auth,
+    alias: "default",
+    costTier: "standard",
+    resolvedBy: "defaults.profile",
+    modelResolvedBy: "profile.map.default",
+    policySource: "host",
+    policyPath: "/fixture/model-policy.yml",
+    legacy: false,
+    operation: { kind: "new" },
+    projectDir: tmp,
+    authProbe: { provider: "anthropic", mode: auth, status: "available", detail: "fixture probe" },
+    sessionIdentityStrength: "asserted",
+    limitations: [],
+    notes: [],
+    providerPin: "claude-code",
+  };
+}
+
+const EMPTY_READINESS: AdapterReadiness = { evidence: {}, advisories: [], limitations: [] };
+
+function childEnvFor(args: string[], parentEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const parsed = parseClaudeShortcutArgs(args);
+  const adapter = claudeShortcutAdapter({
+    bedrockAsserted: true,
+    bedrockAssertedBy: "--bedrock",
+    awsProfile: parsed.awsProfile,
+  });
+  const ctx: AdapterLaunchContext = {
+    decision: bedrockDecision(),
+    projectDir: tmp,
+    projectName: "fixture",
+    sessionKey: "11111111-1111-4111-8111-111111111111",
+    receiptId: "orx-fixture0000",
+    runId: null,
+    taskId: null,
+    operation: { kind: "new" },
+    passthrough: [],
+    parentEnv,
+  };
+  return adapter.buildChildEnv(ctx, EMPTY_READINESS);
+}
 
 test("integ FG-158: --aws-profile CLI flag wins over project.json.awsProfile", () => {
   writeForgeProjectJson(tmp, { auth: "bedrock", awsProfile: "project-profile" });
-  const awsProfileFlag = extractAwsProfileFromArgs(["--bedrock", "--aws-profile", "cli-profile"]);
-  const projectAuth = readProjectAuth(tmp);
-  assert.equal(resolveProfile(awsProfileFlag, projectAuth), "cli-profile");
+  const env = childEnvFor(["--bedrock", "--aws-profile", "cli-profile"], {});
+  assert.equal(env["AWS_PROFILE"], "cli-profile");
 });
 
 test("integ FG-158: --aws-profile CLI flag wins over AWS_PROFILE env var", () => {
-  process.env.AWS_PROFILE = "env-profile";
-  const awsProfileFlag = extractAwsProfileFromArgs(["--bedrock", "--aws-profile", "cli-profile"]);
-  assert.equal(resolveProfile(awsProfileFlag, null), "cli-profile");
+  const env = childEnvFor(["--bedrock", "--aws-profile", "cli-profile"], { AWS_PROFILE: "env-profile" });
+  assert.equal(env["AWS_PROFILE"], "cli-profile");
 });
 
 test("integ FG-158: --aws-profile=<value> (single-token form) wins over project.json.awsProfile", () => {
   writeForgeProjectJson(tmp, { auth: "bedrock", awsProfile: "project-profile" });
-  const awsProfileFlag = extractAwsProfileFromArgs(["--bedrock", "--aws-profile=flag-profile"]);
-  const projectAuth = readProjectAuth(tmp);
-  assert.equal(resolveProfile(awsProfileFlag, projectAuth), "flag-profile");
+  const env = childEnvFor(["--bedrock", "--aws-profile=flag-profile"], {});
+  assert.equal(env["AWS_PROFILE"], "flag-profile");
 });
 
 test("integ FG-158: project.json.awsProfile wins over AWS_PROFILE env var", () => {
   writeForgeProjectJson(tmp, { auth: "bedrock", awsProfile: "project-profile" });
-  process.env.AWS_PROFILE = "env-profile";
-  // No --aws-profile flag in the args.
-  const awsProfileFlag = extractAwsProfileFromArgs(["--bedrock"]);
-  const projectAuth = readProjectAuth(tmp);
-  assert.equal(resolveProfile(awsProfileFlag, projectAuth), "project-profile");
+  const env = childEnvFor(["--bedrock"], { AWS_PROFILE: "env-profile" });
+  assert.equal(env["AWS_PROFILE"], "project-profile");
 });
 
 test("integ FG-158: AWS_PROFILE env var wins over hard-coded 'default' fallback", () => {
-  process.env.AWS_PROFILE = "env-profile";
-  // No --aws-profile flag, no project.json.
-  const awsProfileFlag = extractAwsProfileFromArgs(["--bedrock"]);
-  const projectAuth = readProjectAuth(tmp);   // returns null — no project.json
-  assert.equal(resolveProfile(awsProfileFlag, projectAuth), "env-profile");
+  const env = childEnvFor(["--bedrock"], { AWS_PROFILE: "env-profile" });
+  assert.equal(env["AWS_PROFILE"], "env-profile");
 });
 
 test("integ FG-158: falls back to 'default' when no profile source is configured", () => {
-  delete process.env.AWS_PROFILE;
-  const awsProfileFlag = extractAwsProfileFromArgs(["--bedrock"]);
-  const projectAuth = readProjectAuth(tmp);   // returns null — no project.json
-  assert.equal(resolveProfile(awsProfileFlag, projectAuth), "default");
+  const env = childEnvFor(["--bedrock"], {});
+  assert.equal(env["AWS_PROFILE"], "default");
 });
 
 // ─── (2) Parent process.env is not mutated when building childEnv ─────────────
-// The action in claude.ts arms the child via spread:
-//   childEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: resolvedProfile }
-// This verifies that the spread pattern never writes back to process.env.
 
-test("integ FG-158: childEnv has CLAUDE_CODE_USE_BEDROCK=1 and AWS_PROFILE; process.env is not mutated", () => {
-  // Ensure the bedrock key is absent from the parent before we run.
-  delete process.env.CLAUDE_CODE_USE_BEDROCK;
-  const originalAwsProfile = process.env.AWS_PROFILE;
+test("integ FG-158: childEnv has CLAUDE_CODE_USE_BEDROCK=1 and AWS_PROFILE; the parent env object is not mutated", () => {
+  const parentEnv: NodeJS.ProcessEnv = { PATH: "/usr/bin", AWS_PROFILE: "pre-existing" };
 
-  // Reproduce the exact pattern from claude.ts action:
-  const resolvedProfile = "integ-bedrock-profile";
-  const childEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    CLAUDE_CODE_USE_BEDROCK: "1",
-    AWS_PROFILE: resolvedProfile,
-  };
+  const childEnv = childEnvFor(["--bedrock", "--aws-profile", "integ-bedrock-profile"], parentEnv);
 
-  // Child env carries the expected values.
-  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
-  assert.equal(childEnv.AWS_PROFILE, "integ-bedrock-profile");
-
-  // Parent process.env must NOT have been mutated.
-  assert.equal(
-    process.env.CLAUDE_CODE_USE_BEDROCK,
-    undefined,
-    "spread must not write CLAUDE_CODE_USE_BEDROCK back to process.env",
-  );
-  assert.equal(
-    process.env.AWS_PROFILE,
-    originalAwsProfile,
-    "spread must not change process.env.AWS_PROFILE",
-  );
+  assert.equal(childEnv["CLAUDE_CODE_USE_BEDROCK"], "1");
+  assert.equal(childEnv["AWS_PROFILE"], "integ-bedrock-profile");
+  // The parent object the adapter composed from is untouched — the FG-158 invariant.
+  assert.deepEqual(parentEnv, { PATH: "/usr/bin", AWS_PROFILE: "pre-existing" });
 });
 
 test("integ FG-158: childEnv inherits all parent env vars alongside the injected bedrock vars", () => {
-  process.env._FG158_SENTINEL = "sentinel-value";
-  try {
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      CLAUDE_CODE_USE_BEDROCK: "1",
-      AWS_PROFILE: "bedrock-profile",
-    };
-    // Injected vars are present.
-    assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
-    assert.equal(childEnv.AWS_PROFILE, "bedrock-profile");
-    // Pre-existing parent var is carried into the child.
-    assert.equal(childEnv._FG158_SENTINEL, "sentinel-value");
-    // Parent itself is still uncontaminated.
-    assert.equal(process.env.CLAUDE_CODE_USE_BEDROCK, undefined);
-  } finally {
-    delete process.env._FG158_SENTINEL;
-  }
+  const parentEnv: NodeJS.ProcessEnv = { _FG158_SENTINEL: "sentinel-value" };
+
+  const childEnv = childEnvFor(["--bedrock", "--aws-profile", "bedrock-profile"], parentEnv);
+
+  assert.equal(childEnv["CLAUDE_CODE_USE_BEDROCK"], "1");
+  assert.equal(childEnv["AWS_PROFILE"], "bedrock-profile");
+  assert.equal(childEnv["_FG158_SENTINEL"], "sentinel-value");
+  assert.equal(parentEnv["CLAUDE_CODE_USE_BEDROCK"], undefined);
 });
 
-// ─── (3) Forge flags stripped from argv passed to claude ─────────────────────
+// ─── (3) Forge flags stripped from what reaches claude ───────────────────────
 
-test("integ FG-158: --bedrock and --aws-profile (two-token form) stripped; other flags reach claude", () => {
-  const rawArgs = ["--bedrock", "--aws-profile", "adx-dev", "--continue", "--model", "sonnet"];
-  // Reproduce the pipeline the action uses:
-  const stripped = stripBedrockFlagsFromArgs(rawArgs);          // strip forge flags
-  const passthrough = stripNameFromArgs(stripped);               // strip user -n if any
-  const finalArgs = ["-n", "my-project", ...passthrough];       // forge re-inserts -n
+test("integ FG-158: --bedrock and --aws-profile (two-token form) never reach claude; other flags are honored", () => {
+  const parsed = parseClaudeShortcutArgs(["--bedrock", "--aws-profile", "adx-dev", "--continue", "--model", "sonnet"]);
 
-  assert.ok(!finalArgs.includes("--bedrock"), "--bedrock must not reach claude");
-  assert.ok(!finalArgs.includes("--aws-profile"), "--aws-profile must not reach claude");
-  assert.ok(!finalArgs.includes("adx-dev"), "aws-profile value must not reach claude");
-  assert.ok(finalArgs.includes("--continue"), "--continue must pass through");
-  assert.ok(finalArgs.includes("--model"), "--model must pass through");
-  assert.ok(finalArgs.includes("sonnet"), "model value must pass through");
-  // forge always puts -n <name> first.
-  assert.equal(finalArgs[0], "-n");
-  assert.equal(finalArgs[1], "my-project");
+  assert.equal(parsed.bedrock, true);
+  assert.equal(parsed.awsProfile, "adx-dev");
+  // Forge owns --continue and --model now, so neither is passthrough either — but
+  // both are still honored, which is what an existing alias depends on (AC14).
+  assert.equal(parsed.continueSession, true);
+  assert.equal(parsed.model, "sonnet");
+  assert.deepEqual(parsed.passthrough, [], "no forge-owned flag may reach claude as passthrough");
 });
 
-test("integ FG-158: --aws-profile=<value> (single-token form) stripped; other flags reach claude", () => {
-  const rawArgs = ["--bedrock", "--aws-profile=adx-dev", "--resume", "abc123"];
-  const stripped = stripBedrockFlagsFromArgs(rawArgs);
-  const passthrough = stripNameFromArgs(stripped);
-  const finalArgs = ["-n", "my-project", ...passthrough];
+test("integ FG-158: --aws-profile=<value> (single-token form) never reaches claude; --resume is honored", () => {
+  const parsed = parseClaudeShortcutArgs(["--bedrock", "--aws-profile=adx-dev", "--resume", "abc123"]);
 
-  assert.ok(!finalArgs.includes("--bedrock"), "--bedrock must not reach claude");
-  assert.ok(
-    !finalArgs.some((a) => a.startsWith("--aws-profile")),
-    "--aws-profile=... must not reach claude",
-  );
-  assert.ok(finalArgs.includes("--resume"), "--resume must pass through");
-  assert.ok(finalArgs.includes("abc123"), "resume value must pass through");
+  assert.equal(parsed.awsProfile, "adx-dev");
+  assert.equal(parsed.resume, "abc123");
+  assert.deepEqual(parsed.passthrough, []);
 });
 
-test("integ FG-158: no bedrock flags in args → finalArgs unchanged (no spurious strips)", () => {
-  const rawArgs = ["--continue", "--model", "sonnet"];
-  const stripped = stripBedrockFlagsFromArgs(rawArgs);
-  const passthrough = stripNameFromArgs(stripped);
-  const finalArgs = ["-n", "my-project", ...passthrough];
+test("integ FG-158: no bedrock flags in args → provider-native flags pass through untouched", () => {
+  const parsed = parseClaudeShortcutArgs(["--add-dir", "/tmp/extra", "--permission-mode", "plan"]);
 
-  // Everything except the auto-inserted -n pair should be present.
-  assert.ok(finalArgs.includes("--continue"));
-  assert.ok(finalArgs.includes("--model"));
-  assert.ok(finalArgs.includes("sonnet"));
-  assert.equal(finalArgs.length, 5, "only 5 elements: -n name --continue --model sonnet");
+  assert.equal(parsed.bedrock, false);
+  assert.equal(parsed.awsProfile, undefined);
+  assert.deepEqual(parsed.passthrough, ["--add-dir", "/tmp/extra", "--permission-mode", "plan"]);
 });
 
 // ─── (4) apikey mode exits non-zero when ANTHROPIC_API_KEY is unset ──────────
@@ -233,7 +262,7 @@ test("integ FG-158: forge claude exits 1 when auth=apikey and ANTHROPIC_API_KEY 
   writeForgeProjectJson(tmp, { auth: "apikey" });
 
   // Strip ANTHROPIC_API_KEY from the subprocess env so the guard fires.
-  const testEnv = { ...process.env };
+  const testEnv = { ...process.env, ...disposableRoots() };
   delete testEnv.ANTHROPIC_API_KEY;
   delete testEnv.CLAUDE_CODE_USE_BEDROCK;   // ensure only the apikey path is hit
 
@@ -241,7 +270,7 @@ test("integ FG-158: forge claude exits 1 when auth=apikey and ANTHROPIC_API_KEY 
     cwd: tmp,
     env: testEnv,
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: 30_000,
   });
 
   assert.equal(
@@ -257,26 +286,31 @@ test("integ FG-158: forge claude exits 1 when auth=apikey and ANTHROPIC_API_KEY 
 });
 
 test("integ FG-158: forge claude does NOT exit prematurely when auth=apikey and ANTHROPIC_API_KEY IS set", () => {
-  // When the key is present, the apikey guard passes and the process continues
-  // until it tries to spawn `claude` (which will fail if not installed, but
-  // that error comes from the child spawn, not the apikey guard).
+  // When the key is present the apikey guard passes and the launch proceeds all the
+  // way to the (fake) child.
   mkdirSync(join(tmp, ".git"));
   writeForgeProjectJson(tmp, { auth: "apikey" });
 
-  const testEnv: NodeJS.ProcessEnv = { ...process.env, ANTHROPIC_API_KEY: "sk-test-placeholder" };
+  const testEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...disposableRoots(),
+    ANTHROPIC_API_KEY: "sk-test-placeholder",
+    PATH: `${fakeClaudeBin()}:${process.env.PATH ?? ""}`,
+  };
   delete testEnv.CLAUDE_CODE_USE_BEDROCK;
 
   const result = spawnSync(tsx, [entry, "claude"], {
     cwd: tmp,
     env: testEnv,
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: 30_000,
   });
 
   // The apikey guard must NOT have fired (which exits 1 with "auth=apikey requires ...").
   const apiKeyGuardFired =
     result.status === 1 && result.stderr.includes("auth=apikey requires ANTHROPIC_API_KEY");
   assert.ok(!apiKeyGuardFired, "apikey guard must not fire when ANTHROPIC_API_KEY is set");
+  assert.equal(result.status, 0, `expected a clean launch; stdout=${result.stdout} stderr=${result.stderr}`);
 });
 
 // ─── (5) readProjectAuth returns null for absent / invalid project.json ────────
@@ -347,36 +381,49 @@ function writeStaleCachesForProfile(awsDir: string, profile: string): void {
   utimesSync(stsFile, stsTime, stsTime);
 }
 
+/** Run `forge claude` against the fake CLI with disposable roots. Returns the exit
+ *  status plus the combined operator-facing output: the shared launcher prints one
+ *  advisory stream for both commands, so an assertion on WHICH stream carried a
+ *  finding would test the launcher's plumbing rather than FG-499's contract. */
+function runForgeClaude(env: NodeJS.ProcessEnv): { status: number | null; stdout: string; stderr: string; output: string } {
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: { ...env, ...disposableRoots(), PATH: `${fakeClaudeBin()}:${env.PATH ?? ""}` },
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+  };
+}
+
 test("integ FG-435: forge claude does NOT hard-block when STS cache looks stale but export-credentials succeeds (work-laptop recurrence)", () => {
   mkdirSync(join(tmp, ".git"));
   const awsDir = join(tmp, "fake-aws");
   writeAwsConfigForFakeProfile(awsDir, "forge-fg435-test-profile");
   writeStaleCachesForProfile(awsDir, "forge-fg435-test-profile");
 
-  const testEnv: NodeJS.ProcessEnv = {
+  const result = runForgeClaude({
     ...process.env,
     CLAUDE_CODE_USE_BEDROCK: "1",
     AWS_PROFILE: "forge-fg435-test-profile",
     FORGE_AWS_DIR: awsDir,
     FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t",
-  };
-
-  const result = spawnSync(tsx, [entry, "claude"], {
-    cwd: tmp,
-    env: testEnv,
-    encoding: "utf8",
-    timeout: 15_000,
   });
 
+  assert.equal(result.status, 0, `advisory findings must never fail the launch; stdout=${result.stdout} stderr=${result.stderr}`);
   assert.match(
-    result.stdout,
+    result.output,
     /advisory.*continuing|continuing.*advisory/s,
-    `expected an advisory (non-blocking) message in stdout; got stdout=${result.stdout} stderr=${result.stderr}`,
+    `expected an advisory (non-blocking) message; got ${result.output}`,
   );
   assert.doesNotMatch(
-    result.stderr,
+    result.output,
     /Credential export also failed/,
-    `must not hard-block when export-credentials succeeded; stderr=${result.stderr}`,
+    `must not report a hard failure when export-credentials succeeded; got ${result.output}`,
   );
 });
 
@@ -386,33 +433,28 @@ test("integ FG-499: forge claude does NOT hard-block (advisory only), naming the
   writeAwsConfigForFakeProfile(awsDir, "forge-fg435-test-profile");
   writeStaleCachesForProfile(awsDir, "forge-fg435-test-profile");
 
-  const testEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435-test-profile", FORGE_AWS_DIR: awsDir };
-  delete testEnv.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials shells out to the real (absent) `aws` binary and fails
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435-test-profile", FORGE_AWS_DIR: awsDir };
+  delete env.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials shells out to the real (absent) `aws` binary and fails
 
-  const result = spawnSync(tsx, [entry, "claude"], {
-    cwd: tmp,
-    env: testEnv,
-    encoding: "utf8",
-    timeout: 15_000,
-  });
+  const result = runForgeClaude(env);
 
-  // FG-499: an interactive claude session handles its own auth failure
-  // natively, so this preflight condition must never exit non-zero — only
-  // warn (naming the profile + remediation) and proceed past preflight. If
-  // `claude` itself isn't on PATH in this test environment, the spawn
-  // ("error") handler exits 1 for reasons unrelated to the preflight check —
-  // that's why we assert on stderr content rather than the exit code.
-  assert.match(result.stderr, /profile 'forge-fg435-test-profile'/);
-  assert.match(result.stderr, /aws sso login --profile forge-fg435-test-profile/);
-  assert.match(result.stderr, /advisory only/);
-  // Prove launch actually proceeds past the credential check: the status
-  // banner is only printed (step 7 of claude.ts) after both preflight checks
-  // above have run to completion without a process.exit call.
+  // FG-499: an interactive claude session handles its own auth failure natively, so
+  // this preflight condition must never exit non-zero — only warn (naming the
+  // profile + remediation) and proceed to launch. With a fake `claude` on PATH the
+  // exit code is now a direct assertion rather than an inference.
+  assert.equal(result.status, 0, `FG-499: an advisory finding must not fail the launch; stdout=${result.stdout} stderr=${result.stderr}`);
+  assert.match(result.output, /profile 'forge-fg435-test-profile'/);
+  assert.match(result.output, /aws sso login --profile forge-fg435-test-profile/);
+  assert.match(result.output, /advisory only/);
+  // Launch actually proceeded past the credential check: the banner is printed by
+  // the shared launcher only after every pre-spawn gate has passed.
   assert.match(
     result.stdout,
-    /Launching as '.*' orchestrator.*bedrock:forge-fg435-test-profile/,
-    `expected the status banner in stdout, proving launch proceeded past the credential preflight; got stdout=${result.stdout} stderr=${result.stderr}`,
+    /Launching as '.*' orchestrator via Claude Code/,
+    `expected the shared launch banner; got stdout=${result.stdout} stderr=${result.stderr}`,
   );
+  assert.match(result.stdout, /bedrock:forge-fg435-test-profile/, "the resolved AWS profile must stay visible at launch");
+  assert.match(result.stdout, /auth: anthropic\/bedrock/);
 });
 
 // ─── (7) FG-435 round 2: profile-scoped SSO-expiry check (no STS cache at all) ─
@@ -445,29 +487,17 @@ test("integ FG-499: forge claude does NOT hard-block (advisory only) on expired 
   writeAwsConfigForFakeProfile(awsDir, "forge-fg435r2-test-profile");
   writeExpiredSsoOnlyForProfile(awsDir, "forge-fg435r2-test-profile");
 
-  const testEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435r2-test-profile", FORGE_AWS_DIR: awsDir };
-  delete testEnv.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials shells out to the real (absent) `aws` binary and fails
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435r2-test-profile", FORGE_AWS_DIR: awsDir };
+  delete env.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials shells out to the real (absent) `aws` binary and fails
 
-  const result = spawnSync(tsx, [entry, "claude"], {
-    cwd: tmp,
-    env: testEnv,
-    encoding: "utf8",
-    timeout: 15_000,
-  });
+  const result = runForgeClaude(env);
 
-  // FG-499: advisory only — must proceed past preflight, never exit non-zero
-  // for this condition. See the note in the STS-stale test above for why we
-  // assert on stderr content rather than the exit code.
-  assert.match(result.stderr, /profile 'forge-fg435r2-test-profile'/);
-  assert.match(result.stderr, /aws sso login --profile forge-fg435r2-test-profile/);
-  assert.match(result.stderr, /advisory only/);
-  // Prove launch actually proceeds past the credential check (see note above
-  // the STS-stale test's equivalent assertion).
-  assert.match(
-    result.stdout,
-    /Launching as '.*' orchestrator.*bedrock:forge-fg435r2-test-profile/,
-    `expected the status banner in stdout, proving launch proceeded past the credential preflight; got stdout=${result.stdout} stderr=${result.stderr}`,
-  );
+  assert.equal(result.status, 0, `FG-499: advisory only — must not exit non-zero; stdout=${result.stdout} stderr=${result.stderr}`);
+  assert.match(result.output, /profile 'forge-fg435r2-test-profile'/);
+  assert.match(result.output, /aws sso login --profile forge-fg435r2-test-profile/);
+  assert.match(result.output, /advisory only/);
+  assert.match(result.stdout, /Launching as '.*' orchestrator via Claude Code/);
+  assert.match(result.stdout, /bedrock:forge-fg435r2-test-profile/);
 });
 
 test("integ FG-435 round 2: forge claude does NOT hard-block on expired SSO session when export-credentials succeeds (advisory only)", () => {
@@ -476,30 +506,24 @@ test("integ FG-435 round 2: forge claude does NOT hard-block on expired SSO sess
   writeAwsConfigForFakeProfile(awsDir, "forge-fg435r2-test-profile");
   writeExpiredSsoOnlyForProfile(awsDir, "forge-fg435r2-test-profile");
 
-  const testEnv: NodeJS.ProcessEnv = {
+  const result = runForgeClaude({
     ...process.env,
     CLAUDE_CODE_USE_BEDROCK: "1",
     AWS_PROFILE: "forge-fg435r2-test-profile",
     FORGE_AWS_DIR: awsDir,
     FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t",
-  };
-
-  const result = spawnSync(tsx, [entry, "claude"], {
-    cwd: tmp,
-    env: testEnv,
-    encoding: "utf8",
-    timeout: 15_000,
   });
 
+  assert.equal(result.status, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
   assert.match(
-    result.stdout,
+    result.output,
     /advisory.*continuing|continuing.*advisory/s,
-    `expected an advisory (non-blocking) message in stdout; got stdout=${result.stdout} stderr=${result.stderr}`,
+    `expected an advisory (non-blocking) message; got ${result.output}`,
   );
   assert.doesNotMatch(
-    result.stderr,
-    /profile 'forge-fg435r2-test-profile'/,
-    `must not hard-block when export-credentials succeeded; stderr=${result.stderr}`,
+    result.output,
+    /aws sso login --profile forge-fg435r2-test-profile/,
+    `must not report the hard-failure remediation when export-credentials succeeded; got ${result.output}`,
   );
 });
 
@@ -542,34 +566,23 @@ test("integ FG-435 round 2: a fresh OTHER profile does not mask the resolved pro
   // Resolved (target) profile: expired SSO session, no STS cache.
   writeExpiredSsoOnlyForProfile(awsDir, "forge-fg435r2-expired-target");
 
-  const testEnv: NodeJS.ProcessEnv = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     CLAUDE_CODE_USE_BEDROCK: "1",
     AWS_PROFILE: "forge-fg435r2-expired-target",
     FORGE_AWS_DIR: awsDir,
   };
-  delete testEnv.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials fails for the target profile
+  delete env.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials fails for the target profile
 
-  const result = spawnSync(tsx, [entry, "claude"], {
-    cwd: tmp,
-    env: testEnv,
-    encoding: "utf8",
-    timeout: 15_000,
-  });
+  const result = runForgeClaude(env);
 
-  // FG-499: advisory only — the target profile's own expiry must still be
-  // named (not masked by the fresh other profile) in the warning, but this
-  // must never exit non-zero.
-  assert.match(result.stderr, /profile 'forge-fg435r2-expired-target'/);
-  assert.doesNotMatch(result.stderr, /forge-fg435r2-fresh-other/);
-  assert.match(result.stderr, /advisory only/);
-  // Prove launch actually proceeds past the credential check (see note above
-  // the STS-stale test's equivalent assertion).
-  assert.match(
-    result.stdout,
-    /Launching as '.*' orchestrator.*bedrock:forge-fg435r2-expired-target/,
-    `expected the status banner in stdout, proving launch proceeded past the credential preflight; got stdout=${result.stdout} stderr=${result.stderr}`,
-  );
+  // FG-499: advisory only — the target profile's own expiry must still be named
+  // (not masked by the fresh other profile), and this must never exit non-zero.
+  assert.equal(result.status, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
+  assert.match(result.output, /profile 'forge-fg435r2-expired-target'/);
+  assert.doesNotMatch(result.output, /forge-fg435r2-fresh-other/);
+  assert.match(result.output, /advisory only/);
+  assert.match(result.stdout, /Launching as '.*' orchestrator via Claude Code/);
 });
 
 test("integ FG-435 round 2 fix: forge claude does NOT hard-block a plain (non-SSO) static-credential bedrock profile, and never shells out to export-credentials for it", () => {
@@ -585,27 +598,19 @@ test("integ FG-435 round 2 fix: forge claude does NOT hard-block a plain (non-SS
     `[forge-fg435r2-static-profile]\naws_access_key_id = AKIAFAKE\naws_secret_access_key = fakesecret\n`,
   );
 
-  const testEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435r2-static-profile", FORGE_AWS_DIR: awsDir };
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435r2-static-profile", FORGE_AWS_DIR: awsDir };
   // No FORGE_AWS_CREDS_FOR_TEST override and no real `aws` binary reachable in
   // this shape — if the fix regresses and this profile is treated as SSO, the
-  // export-credentials call fails and the process hard-blocks (status 1).
-  delete testEnv.FORGE_AWS_CREDS_FOR_TEST;
+  // export-credentials call fails and an SSO remediation is reported.
+  delete env.FORGE_AWS_CREDS_FOR_TEST;
 
-  const result = spawnSync(tsx, [entry, "claude"], {
-    cwd: tmp,
-    env: testEnv,
-    encoding: "utf8",
-    timeout: 15_000,
-  });
+  const result = runForgeClaude(env);
 
-  // Don't assert on result.status here — if `claude` itself isn't on PATH in
-  // this test environment, the spawn ("error") handler exits 1 for reasons
-  // unrelated to the preflight check. What matters is that the SSO-expiry
-  // hard-block message never appears for a non-SSO profile.
+  assert.equal(result.status, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
   assert.doesNotMatch(
-    result.stderr,
+    result.output,
     /no SSO session mapping could be resolved/,
-    `must not treat a non-SSO profile as an unresolvable SSO mapping; stderr=${result.stderr}`,
+    `must not treat a non-SSO profile as an unresolvable SSO mapping; got ${result.output}`,
   );
-  assert.doesNotMatch(result.stderr, /aws sso login/, `must not hard-block a non-SSO profile; stderr=${result.stderr}`);
+  assert.doesNotMatch(result.output, /aws sso login/, `must not report an SSO remediation for a non-SSO profile; got ${result.output}`);
 });

@@ -605,21 +605,26 @@ overrides:
   assert.equal(listOrchestratorReceiptsForProject(roots.project).length, 0);
 });
 
-// ─── AC14 at this boundary: `forge claude` is untouched by this step ────────
+// ─── AC14 at this boundary: `forge claude` runs through THIS primitive ──────
 
-test("integ FG-576 AC14: `forge claude` still launches through its own path, unchanged by this step", () => {
+test("integ FG-576 AC14: `forge claude` launches through the shared primitive and records the same lifecycle", () => {
   const res = runCli(["claude", "--print-nothing-just-exit"]);
   assert.equal(res.status, 0, res.stderr);
 
   const record = readRecord();
-  // Today's `forge claude` is an unresolved passthrough: it sets the display name
-  // and forwards the rest. Step 6 rewires it onto the shared primitive; until then
-  // this asserts that step 5 did not change it.
-  assert.deepEqual(record.argv, ["-n", "project", "--print-nothing-just-exit"]);
+  // Step 6 rewired the shortcut onto this file's primitive (it was an unresolved
+  // passthrough before). It still sets the display name and still forwards the
+  // provider-native tail — but now the policy model, the asserted session id and
+  // the Forge-owned carrier come from here, so the two commands cannot drift.
+  assert.deepEqual(record.argv.slice(0, 2), ["-n", "project"]);
+  assert.deepEqual(record.argv.slice(-1), ["--print-nothing-just-exit"]);
+  for (const flag of ["--model", "--session-id", "--append-system-prompt-file"]) {
+    assert.equal(countFlag(record.argv, flag), 1, `${flag} in ${record.argv.join(" ")}`);
+  }
+
   applyEnv();
-  assert.equal(
-    listOrchestratorReceiptsForProject(roots.project).length,
-    0,
-    "`forge claude` does not yet write an orchestrator receipt — that is step 6",
-  );
+  const receipts = listOrchestratorReceiptsForProject(roots.project);
+  assert.equal(receipts.length, 1, "`forge claude` must record exactly one orchestrator receipt");
+  assert.equal(receipts[0]!.adapter, "claude-code");
+  assert.equal(receipts[0]!.state, "exited");
 });
