@@ -66,6 +66,7 @@
 import { randomBytes } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
 import { resolveDbPath } from "../util/paths.js";
+import { projectIdentity } from "../v2/project-identity.js";
 import {
   classifyProcessIdentity,
   coerceProcessIdentity,
@@ -778,6 +779,17 @@ export function findOrchestratorReceiptBySessionIdentity(identifier: string): Or
   return row ? rowToOrchestratorReceipt(row) : undefined;
 }
 
+/** A receipt is filed under the PHYSICAL project directory: the launcher resolves its
+ *  project root from `process.cwd()`, which the OS has already resolved through every
+ *  symlink. A caller holding another spelling of the same directory — `/var/...` for
+ *  `/private/var/...` on darwin, a relative path, a trailing slash — must not read as
+ *  though the project has no receipts, which is how a live orchestrator goes missing
+ *  from `forge show` and the dashboard.
+ *
+ *  projectIdentity is the ONE canonicalizer (src/v2/project-identity.ts, FG-425) and is
+ *  reused rather than restated. It realpaths and falls back to `resolve` when the path
+ *  cannot be resolved, so this operator read degrades to the as-written spelling instead
+ *  of throwing on a project that has since been deleted. */
 export function listOrchestratorReceiptsForProject(projectDir: string, limit = 200): OrchestratorReceipt[] {
   const rows = getDb()
     .prepare(
@@ -786,7 +798,7 @@ export function listOrchestratorReceiptsForProject(projectDir: string, limit = 2
         ORDER BY created_at DESC, receipt_id DESC
         LIMIT ?`,
     )
-    .all(projectDir, limit) as OrchestratorReceiptRow[];
+    .all(projectIdentity(projectDir).canonicalDir, limit) as OrchestratorReceiptRow[];
   return rows.map(rowToOrchestratorReceipt);
 }
 

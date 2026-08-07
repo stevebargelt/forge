@@ -24,6 +24,8 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { join } from "node:path";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { makeInMemoryDb, setDbForTest, getDb } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
 import { FORGE_HOME } from "../util/paths.js";
@@ -517,6 +519,45 @@ test("the provider's OWN session id is bindable after spawn, and never onto a cl
     () => recordOrchestratorSessionIdentity("orx-correlate", { strength: "correlated", basis: "too late" }),
     (e: unknown) => e instanceof OrchestratorReceiptTransitionError && /closed receipt/i.test((e as Error).message),
   );
+});
+
+// ===========================================================================
+// FG-576: the project read resolves project_dir the way the launcher's cwd
+// already did. Proven with an EXPLICIT symlink rather than by relying on the
+// host's tmpdir layout, so the darwin `/var` -> `/private/var` failure this
+// closes reproduces on every platform.
+// ===========================================================================
+test("a project read finds the receipt through any spelling of the same directory, and never throws on one that is gone", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg576-receipt-canon-")));
+  const physical = join(base, "project");
+  const link = join(base, "link-to-project");
+  mkdirSync(physical);
+  symlinkSync(physical, link);
+  try {
+    persistPendingOrchestratorReceipt({ ...CLAUDE_DECISION, receiptId: "orx-canon", projectDir: physical });
+
+    assert.equal(listOrchestratorReceiptsForProject(physical).length, 1, "the physical path reads its own receipt");
+    assert.equal(
+      listOrchestratorReceiptsForProject(link).length,
+      1,
+      "a symlinked spelling is the same directory: a live orchestrator must not go missing from an operator surface",
+    );
+    assert.equal(listOrchestratorReceiptsForProject(`${physical}/`).length, 1, "a trailing slash is the same directory");
+    assert.equal(
+      listOrchestratorReceiptsForProject(join(base, "sibling")).length,
+      0,
+      "resolution never widens the read to another directory",
+    );
+
+    rmSync(physical, { recursive: true, force: true });
+    assert.equal(
+      listOrchestratorReceiptsForProject(physical).length,
+      1,
+      "a project that no longer resolves degrades to its as-written spelling rather than throwing on an operator read",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 // ===========================================================================
