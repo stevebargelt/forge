@@ -47,7 +47,6 @@ import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { authorityTestkitBinEnv } from "../backlog/container-authority.testkit-spawn.js";
 import { closeDb, getDb } from "../store/db.js";
 import { completeRun } from "../store/runs.js";
 import { claimHistoryForTicket, liveClaims, type QueueClaim } from "../store/queue-claims.js";
@@ -57,11 +56,8 @@ import { getDispatcherLease } from "../store/dispatcher-policy.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, "..", "..");
 const FORGE_BIN = join(REPO_ROOT, "bin", "forge");
-const WORKER = join(here, "fg591-falsification-worker.ts");
+const WORKER = join(here, "fg591-falsification-smoke-worker.ts");
 
-// The tmux ownership transfer IS the mechanism under test in leg (a); without tmux
-// there is nothing to prove, so the suite skips cleanly rather than passing vacuously.
-const skipNoTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0 ? false : "tmux not available";
 
 /** test-setup.ts's per-process temp home, put back after each case. */
 const originalForgeHome = process.env["FORGE_HOME"];
@@ -138,7 +134,6 @@ function childEnv(overlay: Record<string, string> = {}): NodeJS.ProcessEnv {
     // forward it explicitly into the tmux-owned dispatcher (which the tmux server's own
     // environment would otherwise not supply).
     TMUX_TMPDIR: process.env["TMUX_TMPDIR"] ?? "",
-    ...authorityTestkitBinEnv(),
     ...overlay,
   };
 }
@@ -476,7 +471,6 @@ function assertNeverLaunchedTwice(ticketId: string): void {
 
 test(
   "FG-591 falsification (a): the orchestrator is SIGKILLed, the first run goes terminal, and the second ticket starts anyway",
-  { skip: skipNoTmux },
   async () => {
     // The interactive orchestrator: it starts the dispatcher under tmux ownership
     // through the production launcher and then just sits there, as a session does.
@@ -568,7 +562,6 @@ test(
 
 test(
   "FG-591 falsification (b): with the primary wake suppressed, the watchdog recovers the slot EXACTLY once",
-  { skip: skipNoTmux },
   async () => {
     // The dispatcher process for this leg composes runDispatcherLoop exactly as the CLI
     // does, with ONE difference: observeWakes returns nothing, so a run-terminal
@@ -664,7 +657,6 @@ test(
 
 test(
   "FG-591 falsification (c): a restarted dispatcher ADOPTS the lease and the live claim instead of duplicating them",
-  { skip: skipNoTmux },
   async () => {
     const first = spawnDispatcherCli("fg591-c", "dispatcher-c1.log");
     const claim1 = await poll("FG-1 to be claimed and launched", () => launchedClaimFor("FG-1"));
