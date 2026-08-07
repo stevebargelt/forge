@@ -36,7 +36,7 @@ Turning a durable reservation primitive into an autonomous execution engine rais
 
 ## Decisions
 
-These are the ticket's binding decisions D1–D13, recorded as decided. D1–D11 are architecture; D12–D13 constrain how the required falsification is built.
+These are the ticket's binding decisions D1–D13 and D15, recorded as decided (D14 is not used). D1–D11 are architecture; D12, D13 and D15 constrain how the required falsification is built.
 
 ### D1 — a dashboard mutation that shells the CLI violates neither FORGE-DEC-015 nor BD-7 ✅
 
@@ -68,7 +68,7 @@ An operator dequeue, unrank or defer records planning **intent** and never touch
 
 The store already refuses the shortcut, which is why the shortcut is dangerous rather than merely wrong: `releaseClaim` is owner+generation fenced and additionally requires a live lease, so a dequeue path could not release someone else's claim even if it tried — it would silently return `null`, which *looks like success*.
 
-Cancellation is `forge queue cancel <id>`, and the ordering is not symmetric: **stop the work first**, through the existing cancel seam, and only then let the claim's own **lease owner** retire the reservation. Where the owning dispatcher is dead, lease expiry plus takeover is the recovery path, and the successor discovers the prior launch through the retired predecessor's recorded launch identity rather than finding an empty slot.
+Cancellation is `forge queue cancel <id>`, and the ordering is not symmetric: **stop the work first**, through the existing cancel seam, then remove its launch record, and only then let the claim's own **lease owner** retire the reservation. A launch record that cannot be removed refuses the whole verb (`stop_failed`) and HOLDS the reservation rather than retiring it — the same defect this decision exists to prevent, reached by a different door: releasing over a container that may still be alive re-admits the ticket to a second dispatcher. Where the owning dispatcher is dead, lease expiry plus takeover is the recovery path, and the successor discovers the prior launch through the retired predecessor's recorded launch identity rather than finding an empty slot.
 
 FG-591 owns the release vocabulary this creates: `completed | failed | cancelled | launch_failed | superseded`, beside FG-610's existing takeover outcome. Each value describes the **reservation**, never the work — `launch_failed` means the reservation ended because no container was ever started, which is a different operational fact from `failed`, and conflating them makes a never-launched ticket look like a failed one on the board. `queue_claims.outcome` carries no `CHECK` (FG-585's convention, and SQLite cannot widen one on the additive-only path), so the closure is enforced by a closed exported set pinned by test.
 
@@ -114,6 +114,16 @@ Found on the first build attempt. `storeNowMs()` returns the live SQLite clock p
 
 The invariant is real and kept: **two dispatchers reading the same instant must not disagree about whether a holder is gone, and a lease expiring exactly now has not expired.** What was missing is a seam that can express it, so the lease reads accept an explicit `nowMs` and a caller (or a test) evaluates acquire and view against the same value. Explicitly rejected: loosening the assertion, comparing with a tolerance window, or asserting only the acquire path. A test that cannot pin the instant cannot prove the invariant.
 
+### D15 — the credential-gated falsification legs are an operator-run live proof, never a CI tier ✅
+
+The three falsification cases drive the production CLI end to end: the dispatcher claims the ticket and launches a real `forge new`, which must validate real agent credentials before it creates a run. CI has no such credentials by design, so every leg times out waiting for a run row that can structurally never appear — proving only that the credential guard worked, not anything about the dispatcher's claim/launch/retire/re-grant behavior under test. That is a property no CI tier can prove, on the precedent FG-621 and FG-559 already set for the same shape of gap.
+
+The cases live in `scripts/fg591-falsification-smoke.sh`, an operator-run entry point, and are **removed** from the integration tier rather than skipped there — a skip-capable CI test is a false proof, which is the whole reason for the move. Run once, host-side, by the operator, with the complete output pasted into FG-591. It stays outside every npm tier and outside CI discovery **by name** (the live runner, `src/queue/fg591-falsification-smoke-runner.ts`, is deliberately not suffixed `.integration.test.ts`), and it is added to no CI job and no required check.
+
+**Fails closed.** A missing `node`, `git`, `tmux`, usable project checkout, installed `tsx`, or usable agent credentials is a nonzero exit with a diagnostic; nothing skips. There is exactly one success exit, on the script's final line, reached only after all three live assertions pass. `src/queue/fg591-falsification-smoke-script.integration.test.ts` is the guard that keeps this honest: it pins the script outside npm/CI discovery, proves each fails-closed prerequisite check, and proves the adjudicator can go RED — that the runner's assertions read a process that never started, a run row that must be absent, or a command-not-found exit as failure, never as a quiet pass.
+
+**Evidence retained, not just the verdict.** The runner keeps every spawned child's exit-or-never-started record, and for each tmux-owned launch its argv, cwd, owner-PID liveness, session liveness, exit record and full `out.log` — for the dispatcher and for the `forge new` grandchild alike. This is not incidental: an earlier falsification round's root cause (a watchdog-deadline assertion measuring elapsed time from the wrong origin) was only readable from exactly that evidence, and weaker capture would have hidden it again.
+
 ---
 
 ## Consequences
@@ -145,4 +155,5 @@ The invariant is real and kept: **two dispatchers reading the same instant must 
 - `docs/invariants.md` → invariant 23
 - `docs/quick-start.md` § 14
 - `docs/SCHEMA-CONTRACT.md` → **dispatcher tables**, **`GET /api/queue`**, **`POST /api/queue/*`**
-- FORGE-DEC-015 (dashboard shells the CLI for mutations), FG-609, FG-610, FG-584, FG-492
+- `scripts/fg591-falsification-smoke.sh` — the D15 operator-run entry point
+- FORGE-DEC-015 (dashboard shells the CLI for mutations), FG-609, FG-610, FG-584, FG-492, FG-621, FG-559
