@@ -32,6 +32,7 @@ import { spawnSync } from "node:child_process";
 import { hostname } from "node:os";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { authorityTestkitBinEnv } from "../backlog/container-authority.testkit-spawn.js";
 import { resolveDispatcherOwner, runDispatcherLoop, DISPATCHER_ID_ENV } from "./dispatcher-loop.js";
 
 const MODE = process.env["MODE"] ?? "orchestrate";
@@ -80,15 +81,14 @@ function forgeBinArgv(): string[] {
  * private tmux socket the test tier is required to stay on.
  */
 function runOrchestrate(): void {
+  const authorityEnv = authorityTestkitBinEnv();
   const dispatcherArgv = [
     "env",
     `PATH=${process.env["PATH"] ?? ""}`,
     `FORGE_HOME=${process.env["FORGE_HOME"] ?? ""}`,
     `FORGE_DB_PATH=${process.env["FORGE_DB_PATH"] ?? ""}`,
     `TMUX_TMPDIR=${process.env["TMUX_TMPDIR"] ?? ""}`,
-    `NODE_OPTIONS=${process.env["NODE_OPTIONS"] ?? ""}`,
-    `FORGE_TEST_AUTHORITY_MOUNT=${process.env["FORGE_TEST_AUTHORITY_MOUNT"] ?? ""}`,
-    `FORGE_BACKLOG_SNAPSHOT_DIR=`,
+    ...Object.entries(authorityEnv).map(([name, value]) => `${name}=${value}`),
     `NO_NOTIFY=true`,
     join(REPO_ROOT, "bin", "forge"),
     "queue",
