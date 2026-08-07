@@ -69,7 +69,9 @@ forge init                       # one-time per project; installs orchestrator b
 
 After `forge init`, you have two ways to drive forge in this project:
 
-**Orchestrator-led (recommended for most work).** Open `claude` in the project directory. The orchestrator block that `forge init` added to `CLAUDE.md` tells the Claude Code session to classify your request and route it through the right forge agent or workflow. You describe what you want in plain English; the orchestrator picks the agent, calls `forge invoke` or `forge new` for you, watches the result, and reports back. You don't have to remember workflow names or flags.
+**Orchestrator-led (recommended for most work).** Open `claude` in the project directory (or run `forge claude`/`forge orchestrator` — see below). The orchestrator block that `forge init` added to `CLAUDE.md` tells the Claude Code session to classify your request and route it through the right forge agent or workflow. You describe what you want in plain English; the orchestrator picks the agent, calls `forge invoke` or `forge new` for you, watches the result, and reports back. You don't have to remember workflow names or flags.
+
+`forge orchestrator` resolves which interactive CLI to launch — Claude Code or Codex — from the same effective `model-policy.yml` that already selects models for containerized agents; `forge claude` is the explicit Claude Code shortcut. See `docs/how-to-orchestrator-launcher.md` for the full launcher surface, including how to make Codex the default with one policy line, and exactly what Codex does and does not support relative to Claude.
 
 **Direct CLI.** Run `forge new` or `forge invoke` yourself. Useful for scripting, automation, or when you already know which workflow + flags you want:
 
@@ -144,4 +146,7 @@ Note that `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds — it does 
 
 Start with the [documentation index](docs/README.md). It separates current
 operator guides and contracts from historical PRDs, implementation plans,
-research, and decision records.
+research, and decision records. For the interactive orchestrator launcher
+(`forge orchestrator` / `forge claude`, Claude vs. Codex, and the failure/resume
+behavior around them), see
+[docs/how-to-orchestrator-launcher.md](docs/how-to-orchestrator-launcher.md).
