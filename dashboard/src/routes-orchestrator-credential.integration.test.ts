@@ -27,7 +27,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -37,7 +37,10 @@ import { captureProcessIdentity } from "../../src/util/process-identity.js";
 const TEST_PORT = 18791;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 
-const testHome = mkdtempSync(join(tmpdir(), "forge-fg576-cred-"));
+// realpath'd: `orchestrator_receipts.project_dir` is stored CANONICAL, so a fixture
+// that inserted rows under a symlinked tmpdir spelling (darwin's /var -> /private/var)
+// would be describing a row the launcher could never write.
+const testHome = realpathSync(mkdtempSync(join(tmpdir(), "forge-fg576-cred-")));
 const forgeHome = join(testHome, ".forge");
 const reposRoot = join(testHome, "checkouts");
 const heartbeatsDir = join(forgeHome, "orchestrators");
@@ -173,6 +176,9 @@ database.close();
 // ─── boot ───────────────────────────────────────────────────────────────────
 
 const { server } = await import("./server.js");
+// Imported the same way, and for the same reason: every module here resolves its
+// store path from the env set above, so nothing may be loaded before the fixtures are.
+const { orchestratorEntries } = await import("./queries.js");
 after(() => {
   server.closeAllConnections?.();
   server.close();
@@ -402,4 +408,25 @@ test("FG-448: the orchestrator read has no cross-project form", async () => {
   const foreign = await get(`/api/orchestrators?projectDir=${encodeURIComponent("/not/a/registered/checkout")}`);
   assert.equal(foreign.status, 404);
   assert.ok(!foreign.text.includes("claude.ai/code/session_"));
+});
+
+// ─── 7. one directory, one key ──────────────────────────────────────────────
+
+test("FG-576: the project-scoped read resolves a scope holding another spelling of the same checkout", () => {
+  const link = join(testHome, "alpha-symlink");
+  symlinkSync(ALPHA, link);
+  const physical = orchestratorEntries(ALPHA).map((entry) => entry.receiptId).sort();
+  assert.ok(physical.length > 0, "precondition: alpha still has an open receipt, or the assertion below is vacuous");
+  assert.deepEqual(
+    orchestratorEntries(link).map((entry) => entry.receiptId).sort(),
+    physical,
+    "project_dir is stored canonical: a scope carrying a symlinked spelling of the checkout must resolve to it " +
+      "rather than answer with an empty orchestrator list for a project that has a live session",
+  );
+  assert.deepEqual(
+    orchestratorEntries([link]).map((entry) => entry.receiptId).sort(),
+    physical,
+    "including the multi-path scope form a projectKey request produces",
+  );
+  assert.deepEqual(orchestratorEntries(join(testHome, "checkouts")).map((e) => e.receiptId), [], "and never widens to a parent");
 });

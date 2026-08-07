@@ -389,6 +389,22 @@ export function newOrchestratorReceiptId(): string {
   return `orx-${randomBytes(3).toString("hex")}${randomBytes(3).toString("hex")}`;
 }
 
+/** THE INVARIANT: `project_dir` is always STORED canonical, so every seam that keys
+ *  or filters on it canonicalizes the same way and the write and read halves cannot
+ *  disagree. One directory has many spellings — a symlinked ancestor (`/tmp` ->
+ *  `/private/tmp` on darwin), a relative path, a trailing slash — and a receipt
+ *  written under one spelling that cannot be read back under another is a live
+ *  orchestrator missing from `forge show` and the dashboard.
+ *
+ *  projectIdentity is the ONE canonicalizer (src/v2/project-identity.ts, FG-425),
+ *  delegated to rather than restated: a second normalizer is how the two halves
+ *  drifted apart in the first place. It realpaths and falls back to `resolve` when
+ *  the path does not resolve, so a deleted project degrades to its as-written
+ *  spelling on BOTH halves rather than throwing. */
+export function canonicalReceiptProjectDir(projectDir: string): string {
+  return projectIdentity(projectDir).canonicalDir;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -487,7 +503,7 @@ export function persistPendingOrchestratorReceipt(decision: OrchestratorLaunchDe
           state: "pending",
           created_at: at,
           updated_at: at,
-          project_dir: decision.projectDir,
+          project_dir: canonicalReceiptProjectDir(decision.projectDir),
           project_name: decision.projectName ?? null,
           resolved_profile: decision.resolvedProfile ?? null,
           runtime: decision.runtime,
@@ -779,17 +795,11 @@ export function findOrchestratorReceiptBySessionIdentity(identifier: string): Or
   return row ? rowToOrchestratorReceipt(row) : undefined;
 }
 
-/** A receipt is filed under the PHYSICAL project directory: the launcher resolves its
- *  project root from `process.cwd()`, which the OS has already resolved through every
- *  symlink. A caller holding another spelling of the same directory — `/var/...` for
- *  `/private/var/...` on darwin, a relative path, a trailing slash — must not read as
- *  though the project has no receipts, which is how a live orchestrator goes missing
- *  from `forge show` and the dashboard.
- *
- *  projectIdentity is the ONE canonicalizer (src/v2/project-identity.ts, FG-425) and is
- *  reused rather than restated. It realpaths and falls back to `resolve` when the path
- *  cannot be resolved, so this operator read degrades to the as-written spelling instead
- *  of throwing on a project that has since been deleted. */
+/** A receipt is filed under the PHYSICAL project directory — the invariant
+ *  `canonicalReceiptProjectDir` states and the persist boundary enforces. The read
+ *  canonicalizes its query the same way, so a caller holding another spelling of the
+ *  same directory does not read as though the project has no receipts, which is how a
+ *  live orchestrator goes missing from `forge show` and the dashboard. */
 export function listOrchestratorReceiptsForProject(projectDir: string, limit = 200): OrchestratorReceipt[] {
   const rows = getDb()
     .prepare(
@@ -798,7 +808,7 @@ export function listOrchestratorReceiptsForProject(projectDir: string, limit = 2
         ORDER BY created_at DESC, receipt_id DESC
         LIMIT ?`,
     )
-    .all(projectIdentity(projectDir).canonicalDir, limit) as OrchestratorReceiptRow[];
+    .all(canonicalReceiptProjectDir(projectDir), limit) as OrchestratorReceiptRow[];
   return rows.map(rowToOrchestratorReceipt);
 }
 

@@ -560,6 +560,55 @@ test("a project read finds the receipt through any spelling of the same director
   }
 });
 
+test("the WRITE path files a receipt under the canonical dir, so either spelling written is found by either spelling read", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg576-receipt-write-canon-")));
+  const physical = join(base, "project");
+  const link = join(base, "link-to-project");
+  mkdirSync(physical);
+  symlinkSync(physical, link);
+  try {
+    // The two directions the launcher can hold the SAME directory in: a symlinked
+    // spelling (the darwin `/tmp` -> `/private/tmp` case) and the physical one.
+    persistPendingOrchestratorReceipt({ ...CLAUDE_DECISION, receiptId: "orx-wrote-link", projectDir: link });
+    persistPendingOrchestratorReceipt({
+      ...CLAUDE_DECISION,
+      receiptId: "orx-wrote-physical",
+      projectDir: physical,
+      sessionKey: "s-physical",
+    });
+
+    assert.deepEqual(
+      getDb().prepare(`SELECT receipt_id, project_dir FROM orchestrator_receipts ORDER BY receipt_id`).all(),
+      [
+        { receipt_id: "orx-wrote-link", project_dir: physical },
+        { receipt_id: "orx-wrote-physical", project_dir: physical },
+      ],
+      "project_dir is STORED canonical whatever spelling the launcher held — one directory is one key",
+    );
+
+    for (const spelling of [physical, link, `${link}/`, `${physical}/`]) {
+      assert.deepEqual(
+        listOrchestratorReceiptsForProject(spelling).map((r) => r.receiptId).sort(),
+        ["orx-wrote-link", "orx-wrote-physical"],
+        `both receipts must be readable through ${spelling}`,
+      );
+    }
+
+    assert.equal(
+      getOrchestratorReceipt("orx-wrote-link")?.projectDir,
+      physical,
+      "and the receipt reports the directory it is actually filed under, not the spelling it was handed",
+    );
+    assert.equal(
+      listOrchestratorReceiptsForProject(join(base, "sibling")).length,
+      0,
+      "canonicalizing the write never widens a receipt to another directory",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 // ===========================================================================
 // The read surfaces the downstream steps consume.
 // ===========================================================================

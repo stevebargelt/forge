@@ -44,6 +44,7 @@ import {
 } from "@forge/heartbeats";
 import {
   ORCHESTRATOR_RECEIPT_COLUMNS,
+  canonicalReceiptProjectDir,
   rowToOrchestratorReceipt,
   type CapabilityLimitation,
   type OrchestratorReceipt,
@@ -3865,6 +3866,13 @@ function cachedOrchestratorSessions(): Map<string, OrchestratorSession> {
   return sessions;
 }
 
+/** Every spelling in a scope, resolved through the store's ONE canonicalizer. */
+function canonicalScope(scope: ProjectScope): ProjectScope {
+  if (scope === undefined) return undefined;
+  if (typeof scope === "string") return canonicalReceiptProjectDir(scope);
+  return scope.map(canonicalReceiptProjectDir);
+}
+
 export type OrchestratorReadOptions = {
   /** Injected by tests so the receipt × liveness matrix can be exercised without
    *  a real ~/.forge/orchestrators. Production always reads the real records. */
@@ -3875,9 +3883,16 @@ export type OrchestratorReadOptions = {
  *  their liveness records. A CLOSED receipt is not here at all, which is what makes
  *  "after a receipt closes it is absent from every subsequent response" structural.
  *
+ *  The scope is canonicalized before it filters `project_dir`, because that column is
+ *  written canonical (canonicalReceiptProjectDir, the invariant the store owns). A
+ *  registry-supplied or request-supplied spelling of the same directory that skipped
+ *  it would return NOTHING for a project that has live orchestrators — the same
+ *  write/read asymmetry, one seam over. Other tables' `project_dir` columns carry no
+ *  such invariant, so `scopeSql` itself stays literal.
+ *
  *  Never carries a credential — see the type's own comment. */
 export function orchestratorEntries(scope: ProjectScope, opts: OrchestratorReadOptions = {}): OrchestratorEntry[] {
-  const project = scopeSql("project_dir", scope);
+  const project = scopeSql("project_dir", canonicalScope(scope));
   const receipts = readOrchestratorReceipts(
     `WHERE state NOT IN ('exited', 'spawn_failed', 'orphaned') ${project.clause}
       ORDER BY created_at DESC, receipt_id DESC LIMIT 200`,
