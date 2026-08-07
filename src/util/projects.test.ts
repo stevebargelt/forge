@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregateProjectSignals, findProject, type RepositoryIdentityResolver } from "./projects.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { aggregateProjectSignals, findProject, listProjects, type RepositoryIdentityResolver } from "./projects.js";
+import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
+import { captureProcessIdentity } from "./process-identity.js";
 
 const forgeKey = "repo-forge";
 
@@ -104,4 +109,77 @@ test("aggregateProjectSignals recovers a deleted Claude scratchpad's canonical r
   const deleted = projects[0]!.checkouts.find((checkout) => checkout.projectDir === scratchpad);
   assert.equal(deleted?.exists, false);
   assert.equal(deleted?.branch, undefined);
+});
+
+// FG-576 D12 / FG-689 D11: the launcher is a SECOND writer into
+// ~/.forge/orchestrators. Two files now describe ONE session, so anything that
+// counted files counted that session twice.
+test("FG-576: a launcher record and a hook record for one session count as ONE live session", () => {
+  const heartbeatsDir = mkdtempSync(join(tmpdir(), "forge-projects-hb-"));
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-projects-proj-"));
+  try {
+    const now = Date.parse("2026-05-26T12:00:00Z");
+    writeFileSync(join(heartbeatsDir, "sess-1.launcher.json"), JSON.stringify({
+      kind: "forge-launcher-orchestrator",
+      version: 1,
+      sessionId: "sess-1",
+      projectDir,
+      startedAt: "2026-05-26T11:50:00Z",
+      refreshedAt: "2026-05-26T11:59:00Z",
+      provider: "anthropic",
+      runtime: "claude-code",
+      adapter: "claude",
+      process: captureProcessIdentity(),
+    }));
+    writeFileSync(join(heartbeatsDir, "sess-1.json"), JSON.stringify({
+      sessionId: "sess-1",
+      projectDir,
+      startedAt: "2026-05-26T11:50:00Z",
+      lastSeen: new Date(now).toISOString(),
+    }));
+
+    const sessions = liveOrchestratorSessions({ heartbeatsDir, now });
+    assert.equal(sessions.length, 1, "two files, one canonical session identity");
+
+    const projects = listProjects({ scanRoots: [], heartbeatsDir });
+    const record = projects.find((project) => project.projectDirs.includes(projectDir));
+    assert.ok(record, "the live session's project must be listed");
+    assert.equal(record.liveSessions, 1, "one session must not be counted once per heartbeat file");
+
+    // And the aggregation seam agrees when fed the deduped signal.
+    const aggregated = aggregateProjectSignals(
+      sessions.map((session) => ({ projectDir: session.projectDir, liveSessions: 1 })),
+    );
+    assert.equal(aggregated[0]?.liveSessions, 1);
+  } finally {
+    rmSync(heartbeatsDir, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-576: a dead launcher's record contributes no live session", () => {
+  const heartbeatsDir = mkdtempSync(join(tmpdir(), "forge-projects-hb-"));
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-projects-proj-"));
+  try {
+    writeFileSync(join(heartbeatsDir, "sess-dead.launcher.json"), JSON.stringify({
+      kind: "forge-launcher-orchestrator",
+      version: 1,
+      sessionId: "sess-dead",
+      projectDir,
+      startedAt: "2026-05-26T11:50:00Z",
+      refreshedAt: "2026-05-26T11:59:00Z",
+      provider: "openai",
+      runtime: "codex-cli",
+      adapter: "codex",
+      // A pid that is real but whose start fence can never match.
+      process: { ...captureProcessIdentity(), startToken: "recycled-pid-token" },
+    }));
+
+    const projects = listProjects({ scanRoots: [], heartbeatsDir });
+    const record = projects.find((project) => project.projectDirs.includes(projectDir));
+    assert.equal(record, undefined, "an orphaned launcher record is not a live project signal");
+  } finally {
+    rmSync(heartbeatsDir, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
 });
