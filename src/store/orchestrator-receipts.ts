@@ -15,6 +15,24 @@
 // this column (AC7, D15). `claimsRunning` is named the way it is so a caller cannot
 // reach for it believing it means "live".
 //
+// THE READ IS FENCED (D14/D15/D17). A launcher that is SIGKILLed runs no exit handler,
+// so nothing can close its `running` row from the launch side — by construction, since
+// the code that would do it died with the process. A row nothing can falsify is the
+// phantom orchestrator this ticket exists to close, so the RESOLUTION IS ON THE READ
+// PATH: a receipt recorded `running` whose launcher fence
+// (src/util/process-identity.ts — the one mechanism, consumed here, not re-invented)
+// classifies `dead` is reported `orphaned`. Per D17 that asserts LAUNCHER LOSS ONLY;
+// the child's disposition stays unasserted, no exit code or signal is invented for it,
+// and nothing here kills, replaces or resumes anything. A fence that cannot be judged
+// (`unknown` — no recorded identity, another host, an OS that supplied no start token)
+// resolves NOTHING: it is not evidence of loss any more than it is evidence of life,
+// and the operator surfaces render it as unverified rather than as running.
+//
+// The read never REWRITES the row. `recordedState` carries the stored bytes verbatim
+// alongside the resolved `state`, so "orphaned (receipt records: running)" is what an
+// operator reads — and so a dashboard holding a read-only handle can answer honestly
+// without a write it is not allowed to make.
+//
 // THREE PROPERTIES THIS MODULE OWNS, all of them refusals rather than conveniences:
 //
 //   D11 — WRITE FAILURE IS NEVER SWALLOWED. Every accessor that writes raises
@@ -48,6 +66,12 @@
 import { randomBytes } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
 import { resolveDbPath } from "../util/paths.js";
+import {
+  classifyProcessIdentity,
+  coerceProcessIdentity,
+  type ProcessIdentity,
+  type ProcessLiveness,
+} from "../util/process-identity.js";
 
 // ─── vocabularies ───────────────────────────────────────────────────────────
 
@@ -204,14 +228,24 @@ export type OrchestratorReceipt = {
    *  record (D12), so a receipt and its liveness file are joinable and one session
    *  counts once. Distinct from `providerSessionId`, which is the provider's own. */
   sessionKey: string;
-  /** The state AS RECORDED. A value outside the five is carried verbatim and
-   *  `stateRecognized` is false — a state this binary does not understand is never
-   *  reinterpreted as one it does. */
+  /** The HONEST state: as recorded, resolved to `orphaned` when the row records
+   *  `running` and the owning launcher's process identity is provably gone (D15/D17).
+   *  A value outside the five is carried verbatim and `stateRecognized` is false — a
+   *  state this binary does not understand is never reinterpreted as one it does. */
   state: OrchestratorReceiptState | (string & {});
+  /** The stored bytes, unresolved. Provenance, so a surface can say what the receipt
+   *  itself records next to what the fence says about it. */
+  recordedState: OrchestratorReceiptState | (string & {});
   stateRecognized: boolean;
-  /** The receipt CLAIMS a confirmed spawn. NEVER proof of present liveness — a
-   *  surface reports running only after joining the liveness record (AC7). */
+  /** The receipt CLAIMS a confirmed spawn. NEVER proof of present liveness, and NOT
+   *  falsified by launcher loss either — it stays true of a receipt resolved to
+   *  `orphaned`, because a spawn WAS confirmed under it. Surfaces report running only
+   *  after joining the process fence (AC7). */
   claimsRunning: boolean;
+  /** What the recorded launcher fence establishes about the launcher NOW. `unknown`
+   *  for any receipt that does not claim a confirmed spawn — there is no launcher to
+   *  ask about — and never upgraded to `alive` by anything else on the row. */
+  launcherLiveness: ProcessLiveness;
   terminal: boolean;
   createdAt: string;
   updatedAt: string;
@@ -283,16 +317,36 @@ function decodeLimitations(raw: string | null): CapabilityLimitation[] {
   }
 }
 
+/** The launcher fence the launcher wrote at `running`, read back. It is stored as
+ *  opaque JSON there and interpreted only here. */
+function decodeLauncherIdentity(raw: string | null): ProcessIdentity | undefined {
+  if (raw === null || raw === "") return undefined;
+  try {
+    return coerceProcessIdentity(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
 export function rowToOrchestratorReceipt(row: OrchestratorReceiptRow): OrchestratorReceipt {
-  const recognized = isKnownReceiptState(row.state);
+  // Exact match on the recorded bytes: an unrecognized state is not running.
+  const claimsRunning = row.state === "running";
+  const launcherLiveness: ProcessLiveness = claimsRunning
+    ? classifyProcessIdentity(decodeLauncherIdentity(row.launcher_identity))
+    : "unknown";
+  // D17: launcher loss, and only launcher loss. `dead` is the sole answer that
+  // resolves anything — `unknown` leaves the recorded state exactly as it stands.
+  const state = claimsRunning && launcherLiveness === "dead" ? "orphaned" : row.state;
+  const recognized = isKnownReceiptState(state);
   return {
     receiptId: row.receipt_id,
     sessionKey: row.session_key,
-    state: row.state,
+    state,
+    recordedState: row.state,
     stateRecognized: recognized,
-    // Exact match on the recorded bytes: an unrecognized state is not running.
-    claimsRunning: row.state === "running",
-    terminal: recognized && isTerminalReceiptState(row.state as OrchestratorReceiptState),
+    claimsRunning,
+    launcherLiveness,
+    terminal: recognized && isTerminalReceiptState(state as OrchestratorReceiptState),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     projectDir: row.project_dir,

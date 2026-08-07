@@ -42,8 +42,9 @@
 //
 //   5. AUTH IS CODEX-ONLY. The openai/subscription probe from provider-doctor is the
 //      one the resolver ran (src/v2/orchestrator-resolve.ts runs exactly one probe,
-//      for the selected provider), the child environment is composed from the PARENT
-//      and from nothing else, no Claude credential preflight runs on this path, and no
+//      for the selected provider), the child environment is COMPOSED from the parent
+//      with Forge's Claude credential and control families withheld (see
+//      buildCodexChildEnv), no Claude credential preflight runs on this path, and no
 //      SSO watchdog is ever started.
 //
 // No Codex remote-control capability is claimed anywhere here (the matrix row says
@@ -229,18 +230,53 @@ export function evaluateCodexCarrierSupport(versionOutput: string | null): Codex
 // Child environment (AC2)
 // ---------------------------------------------------------------------------
 
-/**
- * The Codex child environment: a COPY of the launcher's, and nothing else.
+/** The variable FAMILIES that are Forge's Claude credential and control surface, by
+ *  prefix rather than by name.
  *
- * It adds nothing and removes nothing, and that is the point rather than an omission.
- * Forge injects no Claude auth or behavior variable here (there is no parameter through
- * which one could arrive — see adapter.ts), and it does NOT set `CODEX_HOME`: pointing
- * the child at a different Codex home would move the operator's sessions and
- * credentials out from under them, which D8 forbids. The parent object is never
- * mutated.
+ *  `CLAUDE_` and `ANTHROPIC_` are Claude Code's own controls and credentials.
+ *  `AWS_` is here because bedrock IS a Claude auth mode in forge (FORGE-DEC-007/013):
+ *  `AWS_PROFILE` alongside `CLAUDE_CODE_USE_BEDROCK` is how a Claude launch reaches
+ *  Bedrock, so on this path it is a Claude credential, not neutral operator state.
+ *
+ *  Prefixes rather than an exact list because the list is not Forge's to close: a
+ *  Claude control variable that ships tomorrow must be excluded from a Codex child
+ *  WITHOUT this file being edited. */
+export const CLAUDE_CONTROL_ENV_PREFIXES = ["CLAUDE_", "ANTHROPIC_", "AWS_"] as const;
+
+export function isClaudeControlEnvVar(name: string): boolean {
+  return CLAUDE_CONTROL_ENV_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * The Codex child environment, COMPOSED — built up entry by entry from the parent,
+ * never handed the parent wholesale.
+ *
+ * WHAT IT ADDS: nothing. There is no parameter through which a Claude credential could
+ * arrive (see adapter.ts), and `CODEX_HOME` is deliberately not set — pointing the
+ * child at another Codex home would move the operator's sessions and credentials out
+ * from under them, which D8 forbids.
+ *
+ * WHAT IT WITHHOLDS: Forge's Claude credential and control surface, by family. An
+ * interactive Codex session must not receive `CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`,
+ * `ANTHROPIC_API_KEY` or their relatives merely because the operator's shell had them
+ * armed for `forge claude`. Two providers, two independently composed environments —
+ * neither one's credentials are the other's.
+ *
+ * The rule is a family DENYLIST and not an allowlist on purpose. This child is an
+ * interactive coding agent that then runs the operator's own toolchain, so an
+ * allowlist would silently strip whatever their tools need (`GOPATH`, `PNPM_HOME`, a
+ * private registry token) and break work Forge knows nothing about. What Forge can
+ * enumerate is its OWN provider surface, so that is what it withholds.
+ *
+ * The parent object is never mutated.
  */
 export function buildCodexChildEnv(parentEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...parentEnv };
+  const child: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(parentEnv)) {
+    if (isClaudeControlEnvVar(name)) continue;
+    child[name] = value;
+  }
+  return child;
 }
 
 // ---------------------------------------------------------------------------

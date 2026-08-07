@@ -165,7 +165,9 @@ export function projectOrchestratorReceipt(
   const processLiveness: ProcessLiveness = session?.processLiveness ?? "unknown";
   const interaction: InteractionState = session?.interaction ?? "unknown";
   const base = {
-    recordedState: receipt.state,
+    // The stored bytes, so "(receipt records: running)" stays true even once the read
+    // path has resolved the receipt itself to `orphaned` on a dead launcher fence.
+    recordedState: receipt.recordedState,
     processLiveness,
     interaction,
     // AC7: with no record at all there is no interaction evidence either, so the

@@ -367,18 +367,49 @@ test("FG-576 D6: passthrough may not set the provider, model, auth, project root
 // AC2 — auth isolation
 // ---------------------------------------------------------------------------
 
-test("FG-576 AC2: the Codex child environment is the parent's, with nothing injected and nothing redirected", () => {
+test("FG-576 AC2: the Codex child environment is COMPOSED — no Claude credential or control reaches it", () => {
   publishCarrierGeneration();
-  const parent = { PATH: "/usr/bin", HOME: "/home/op", CLAUDE_CODE_USE_BEDROCK: "1" } as NodeJS.ProcessEnv;
+  const parent = {
+    PATH: "/usr/bin",
+    HOME: "/home/op",
+    GOPATH: "/home/op/go",
+    OPENAI_BASE_URL: "https://example.invalid",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    ANTHROPIC_API_KEY: "claude-secret",
+    AWS_PROFILE: "claude-only",
+  } as NodeJS.ProcessEnv;
   const child = buildCodexChildEnv(parent);
 
-  // Composed from the parent INDEPENDENTLY: Forge adds no Claude auth or behavior
-  // variable, and — D8 — it does not point the child at another Codex home.
-  assert.deepEqual(child, parent);
+  // Composed from the parent INDEPENDENTLY: Forge's Claude credential and control
+  // families are withheld, whether the operator armed them or a `forge claude` shell
+  // did. A Codex child that inherited them would make Claude's auth reachable from a
+  // session whose recorded auth decision is Codex's.
+  for (const claudeOwned of ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "ANTHROPIC_API_KEY", "AWS_PROFILE"]) {
+    assert.equal(claudeOwned in child, false, `${claudeOwned} reached the Codex child environment`);
+  }
+
+  // ...and the operator's own environment is NOT stripped: this child runs their
+  // toolchain, so everything outside Forge's provider surface passes through.
+  assert.deepEqual(child, { PATH: "/usr/bin", HOME: "/home/op", GOPATH: "/home/op/go", OPENAI_BASE_URL: "https://example.invalid" });
+
   assert.notEqual(child, parent, "the parent environment must never be handed to the child by reference");
+  // D8: Forge does not point the child at another Codex home.
   assert.equal("CODEX_HOME" in child, false);
-  assert.equal("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" in child, false);
-  assert.deepEqual(parent, { PATH: "/usr/bin", HOME: "/home/op", CLAUDE_CODE_USE_BEDROCK: "1" }, "the parent was mutated");
+  assert.deepEqual(
+    parent,
+    {
+      PATH: "/usr/bin",
+      HOME: "/home/op",
+      GOPATH: "/home/op/go",
+      OPENAI_BASE_URL: "https://example.invalid",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+      ANTHROPIC_API_KEY: "claude-secret",
+      AWS_PROFILE: "claude-only",
+    },
+    "the parent was mutated",
+  );
 });
 
 test("FG-576 AC2: preflight consults the Codex auth probe only, and never a Claude credential", () => {

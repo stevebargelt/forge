@@ -3762,7 +3762,9 @@ export function projectOrchestratorLiveness(
 ): OrchestratorLiveness {
   const processLiveness: ProcessLiveness = session?.processLiveness ?? "unknown";
   const base = {
-    recordedState: receipt.state,
+    // The stored bytes, so the surface reports what the receipt itself records even
+    // once the read path has resolved it to `orphaned` on a dead launcher fence.
+    recordedState: receipt.recordedState,
     processLiveness,
     interaction: (session?.interaction ?? "unknown") as InteractionState,
     // AC7: with no record at all there is no interaction evidence either, so the
