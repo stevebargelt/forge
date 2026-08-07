@@ -18,44 +18,38 @@ pending dependency — see the retirement rule at the end.
 
 ## Current objective
 
-**FG-691 — the store clock is unfreezable.** Promoted to `Now` on 2026-08-07
-(operator). `storeNowMs()` is the live SQLite clock plus a fixed offset, so no
-lease boundary assertion can hold an instant. It has already produced one red on
-`test` — a required check — at `offset 19999`, 1 ms inside a 20000 ms TTL, and
-passed on every later run. It is not fixed, and it is the most likely source of a
-CI red that looks inexplicable. Do not resolve it by widening the assertion; the
-boundary is the point.
+**FG-576 — provider-neutral interactive orchestrator launcher.** FG-691 shipped
+2026-08-07, so the temporary promotion ahead of this item is spent.
 
-**FG-576 sits immediately behind it** and is smaller than this file previously
-implied. The absorption claim has now been checked: FG-554 (policy-driven
-`forge claude` model resolution) and FG-448 (remote-control URL on the project
-card) are both **done**, not active. FG-576 cannot absorb or close them — they
-shipped independently. Scope FG-576 against what FG-554 actually delivered.
+FG-576 is smaller than this file previously implied. The absorption claim has been
+checked: FG-554 (policy-driven `forge claude` model resolution) and FG-448
+(remote-control URL on the project card) are both **done**, not active. FG-576
+cannot absorb or close them — they shipped independently. Scope it against what
+FG-554 actually delivered.
 
 ## Recently completed
 
+- **FG-691** (`0d0ed85a`, PR #222) — an explicit instant on the paired lease predicates,
+  defaulting to `storeNowMs()`. The boundary is now assertable at exactly the expiry
+  instant, and the exact-expiry offset was added to both sweeps. `storeNowMs` itself is
+  unchanged and no caller was migrated. Settled clean under evidence-led review
+  `review-42fc831bfdf7` — 4 lenses, 4 shards, 0 findings.
 - **FG-591** (`ecbe7d6f`, PR #218) — the operator work queue: a Kanban board over
   orthogonal durable fields, CLI and dashboard controls, and a long-lived
   capacity-limited dispatcher whose every selection records why it passed candidates
   over. Reviewed under FG-689's sharded discovery — 8 shards, 5 lenses.
-- **FG-689** (`0cc6decb`, PR #220) — reviewer input is scoped to authored lens-to-path
-  ownership and sharded when it still exceeds budget, with completeness owed per shard.
-  Removed a placeholder a reviewer could author a clean pass on.
 
 ## Now
-
-1. **FG-691 — the store clock is unfreezable**, so lease boundary assertions race.
-   Temporarily ahead of FG-576 (operator, 2026-08-07): it has already produced one red
-   on a required check and will keep producing unexplained CI failures until it lands.
-
-## Next
 
 1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve Claude or
    Codex from model policy. FG-554 and FG-448 are already shipped, so the remaining
    scope is only what they did not deliver.
-2. **FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.** Cost
+
+## Next
+
+1. **FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.** Cost
    is proportional to how far a wave got, and it bit twice on 2026-08-06.
-3. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA
+2. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA
    contrast, origin pinning excluding a non-default loopback bind).
 
 `Next` is deliberately short. Ordering here expresses current operator intent;
