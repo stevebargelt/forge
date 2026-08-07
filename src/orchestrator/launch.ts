@@ -72,6 +72,7 @@ import {
   type OrchestratorSessionOperation,
 } from "../v2/orchestrator-resolve.js";
 import { createClaudeAdapter } from "./claude-adapter.js";
+import { createCodexAdapter } from "./codex-adapter.js";
 import {
   isSafeSessionIdentifier,
   launchRefusal,
@@ -94,6 +95,7 @@ type AdapterFactory = () => OrchestratorAdapter;
 
 const ADAPTER_FACTORIES = new Map<OrchestratorAdapterId, AdapterFactory>([
   ["claude-code", () => createClaudeAdapter()],
+  ["codex", () => createCodexAdapter()],
 ]);
 
 /** Register an interactive adapter implementation. The registry is a MAP rather than
