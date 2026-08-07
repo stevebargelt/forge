@@ -20,12 +20,13 @@ import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
 import { readTaskManifest } from "../../v2/task-manifest.js";
 import type { LensProtocolRecord } from "../../v2/review-discovery.js";
 import { renderReviewDiff, type ReviewDiffResult } from "../../v2/review-diff.js";
+import { DEFAULT_SHARD_BUDGET, SHARD_BUDGET_UNIT } from "../../v2/review-shards.js";
 import type { DependencyEnvironmentReceipt } from "../../v2/dependency-provisioning.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import { getTask } from "../../store/tasks.js";
 import { getDocsDispatch, markDocsDispatchDelivered, openDocsDispatch } from "../../store/reviews.js";
-import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
+import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn, ShardSelector } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
 import { REVIEW_DISPATCH_ROLES, RISK_LENSES } from "../../v2/review-contract.js";
@@ -62,6 +63,13 @@ export type WiringContext = {
   /** The evaluator's statement that the final diff needs no lens change. Recorded as the
    *  `no_drift` evaluation, with the diff summary it was made against. */
   evaluatedNoDrift?: string;
+  /** FG-689 D4: the operator's `--shard-budget <n>` override, in `SHARD_BUDGET_UNIT`. Absent
+   *  means the configured default. It enters the recorded derivation, so changing it
+   *  re-partitions and every decision recorded under the old one is named as superseded. */
+  shardBudget?: number;
+  /** FG-689 D7: `--retry-shard <lens>:<index>`, repeatable. Narrows the discovery pass's
+   *  dispatch to these shards and nothing else. */
+  retryShards?: readonly ShardSelector[];
   /** Acceptance claims for Stage 9, read from --acceptance <file.json>. */
   acceptance?: AcClaim[];
   /** FG-640 shipping duty 6, read from --docs-closeout <file.json>. Absent means NOT
@@ -522,6 +530,12 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
 
   return {
     headSha,
+
+    // FG-689 D4/D7: the two operator overrides, forwarded verbatim. Neither is defaulted here —
+    // the coordinator owns the default budget and the "every outstanding shard" dispatch set,
+    // and a wiring-side default would be a second answer to both.
+    ...(ctx.shardBudget !== undefined ? { shardBudget: ctx.shardBudget } : {}),
+    ...(ctx.retryShards !== undefined && ctx.retryShards.length > 0 ? { retryShards: ctx.retryShards } : {}),
 
     verify: async (sha: string): Promise<VerificationEntry> => {
       // review-loop's verify resolves HEAD itself and tolerates a dirty tree by degrading to
@@ -1639,4 +1653,69 @@ export function parseLensWidening(specs: readonly string[]): { ok: true; widenin
     });
   }
   return { ok: true, widening };
+}
+
+/** Parse the repeatable `--retry-shard <lens>:<index>` specs (FG-689 D7).
+ *
+ *  The lens name is checked against the fixed vocabulary HERE, at the boundary the operator's
+ *  string enters through, for the same reason `--add-lens` checks it: a name that is not a lens
+ *  cannot name a shard of one, and carrying the typo inward turns a mistyped flag into a
+ *  refusal about the shard plan rather than about what was typed. WHICH shard it names is the
+ *  coordinator's question, not this parser's — the plan is durable state and this is a string. */
+export function parseRetryShards(
+  specs: readonly string[],
+): { ok: true; shards: ShardSelector[] } | { ok: false; refusal: string } {
+  const shards: ShardSelector[] = [];
+  for (const spec of specs) {
+    const parts = spec.split(":");
+    const [lens, index] = parts;
+    if (parts.length !== 2 || lens === undefined || index === undefined) {
+      return {
+        ok: false,
+        refusal:
+          `--retry-shard expects <lens>:<index> (got '${spec}') — exactly two ':'-separated segments, e.g. ` +
+          `'wide:2'. Repeat the flag to retry several shards.`,
+      };
+    }
+    const named = lens.trim();
+    if (!(RISK_LENSES as readonly string[]).includes(named)) {
+      return {
+        ok: false,
+        refusal:
+          `--retry-shard names '${named}', which is not a risk lens. The vocabulary is fixed: ` +
+          `${RISK_LENSES.join(", ")}.`,
+      };
+    }
+    // 1-based and integral, matched on the LITERAL so '2.0', '+2', ' 2e0' and '0x2' are refused
+    // rather than silently coerced. A shard index that took a different value than the operator
+    // typed would retry a shard they did not name.
+    if (!/^[1-9][0-9]*$/.test(index.trim())) {
+      return {
+        ok: false,
+        refusal:
+          `--retry-shard ${named}:${index.trim()} — the shard index must be a whole number from 1, as ` +
+          `\`forge review show\` renders it ("shard 2 of 3" is --retry-shard ${named}:2).`,
+      };
+    }
+    shards.push({ lens: named, index: Number(index.trim()) });
+  }
+  return { ok: true, shards };
+}
+
+/** Parse `--shard-budget <n>` (FG-689 D4's operator override).
+ *
+ *  A whole positive number of `SHARD_BUDGET_UNIT`, and the unit is stated in every refusal
+ *  because the number is meaningless without it: 600,000 read as tokens rather than bytes is a
+ *  ~4x overshoot straight back into the crash this ticket exists to fix (D10). */
+export function parseShardBudget(raw: string): { ok: true; budget: number } | { ok: false; refusal: string } {
+  const text = raw.trim();
+  if (!/^[1-9][0-9]*$/.test(text)) {
+    return {
+      ok: false,
+      refusal:
+        `--shard-budget expects a whole positive number of ${SHARD_BUDGET_UNIT} (got '${raw}'). The configured ` +
+        `default is ${DEFAULT_SHARD_BUDGET} ${SHARD_BUDGET_UNIT}. Nothing was written.`,
+    };
+  }
+  return { ok: true, budget: Number(text) };
 }

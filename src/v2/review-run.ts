@@ -262,6 +262,21 @@ export type CoordinatorDeps = {
    *  which is exactly what makes every shard-scoped decision recorded under the old budget
    *  detectably superseded rather than silently honored. */
   shardBudget?: number;
+  /** FG-689 D7: restrict THIS discovery pass's dispatch to the named shards.
+   *
+   *  Absent (the default) means "dispatch every shard that still owes an outcome", which is
+   *  already the cheapest correct re-entry. This narrows that further, and it exists because a
+   *  reproducible shard set is only operationally load-bearing if an operator can act on ONE
+   *  shard of it: a lens whose shard 3 crashed for a container reason should not have to pay
+   *  for shards 1, 2 and 4 again, and paying for them again is also how an authored outcome
+   *  gets overwritten by a worse one.
+   *
+   *  It can only ever NARROW what this pass dispatches. A selector naming a shard that is not
+   *  outstanding — already authored under this partition, or cleared by an authorized
+   *  acceptance — is REFUSED by name rather than re-dispatched: a retry is for a shard that
+   *  owes an outcome, and silently re-reviewing one that does not would destroy evidence
+   *  through the verb that exists to preserve it. */
+  retryShards?: readonly ShardSelector[];
   /** The contract confirmation proposal. The default wiring confirms unchanged; a
    *  coordinator that observed drift supplies a widening claim or names the drift. */
   proposeContract: (ctx: { review: Review; candidateSha: string; changedPaths: string[] }) => Awaitable<ContractProposal>;
@@ -622,6 +637,120 @@ async function boundedFanout<T, R>(items: readonly T[], width: number, work: (it
 /** One planned dispatch: which lens, which shard of it, and the bytes it carries. */
 type ShardTarget = { lens: RiskLens; shard: PlannedShard; diff: string };
 
+/** ONE named shard, as an operator names it on `forge review continue --retry-shard
+ *  <lens>:<index>`. `lens` is a plain string rather than `RiskLens` because it arrives from a
+ *  command line: a typo must be REPORTED by name against the plan, not narrowed away by a cast
+ *  that turns it into a shard nobody named. */
+export type ShardSelector = { lens: string; index: number };
+
+/** Restrict this pass's dispatch set to the shards the operator named, or refuse by name.
+ *
+ *  Every refusal here leaves the pass having dispatched NOTHING. The plan for the current
+ *  partition is already recorded by the time this runs — that ordering is the invariant, not an
+ *  accident — so the refusals say "no container was started" rather than claiming nothing was
+ *  written at all. */
+function restrictToRetry(
+  plan: ShardPlan,
+  outstanding: readonly ShardTarget[],
+  accepted: readonly { lens: string; shard?: number }[],
+  selectors: readonly ShardSelector[],
+): { ok: true; targets: ShardTarget[] } | { ok: false; refusal: string } {
+  const targets: ShardTarget[] = [];
+  const seen = new Set<string>();
+
+  for (const sel of selectors) {
+    const planned = plan.lenses.find((l) => l.lens === sel.lens);
+    if (planned === undefined) {
+      const skipped = plan.skipped.find((s) => s.lens === sel.lens);
+      return {
+        ok: false,
+        refusal:
+          `--retry-shard ${sel.lens}:${sel.index} names a lens this review's recorded shard plan gives no ` +
+          `shards to. ` +
+          (skipped !== undefined
+            ? `The ${sel.lens} lens is recorded as INTENTIONALLY SKIPPED (${skipped.reason}) under partition ` +
+              `${plan.digest}: its authored scope matched no changed path, so it owes no outcome and there is ` +
+              `nothing to retry. Widening its scope is the contract's approving authority's decision, not a retry.`
+            : `The plan names ${plan.lenses.map((l) => `${l.lens} (${l.shards.length} shard(s))`).join(", ") || "no lens"}. ` +
+              `No container was started.`),
+      };
+    }
+    const shard = planned.shards.find((s) => s.index === sel.index);
+    if (shard === undefined) {
+      return {
+        ok: false,
+        refusal:
+          `--retry-shard ${sel.lens}:${sel.index} names a shard that does not exist — the recorded plan gives the ` +
+          `${sel.lens} lens shards 1..${planned.shards.length} under partition ${plan.digest}. A shard's identity ` +
+          `is a function of the derivation that produced it, so an index from another partition names nothing ` +
+          `here. No container was started.`,
+      };
+    }
+
+    const target = outstanding.find((t) => t.lens === sel.lens && t.shard.index === sel.index);
+    if (target === undefined) {
+      const clearedBy = accepted.some((a) => a.lens === sel.lens && a.shard === sel.index)
+        ? `it was cleared by an authorized operator acceptance naming that shard`
+        : `it already carries a schema-valid reviewer-authored outcome under partition ${plan.digest}`;
+      return {
+        ok: false,
+        refusal:
+          `--retry-shard ${sel.lens}:${sel.index} names a shard that owes nothing: ${clearedBy}. A retry ` +
+          `re-dispatches a shard that is still MISSING an outcome; re-dispatching one that is not would ` +
+          `overwrite evidence that already exists, through the verb that exists to preserve it. ` +
+          `\`forge review show\` renders what each shard delivered. No container was started.`,
+      };
+    }
+
+    const key = `${sel.lens}#${sel.index}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(target);
+  }
+
+  return { ok: true, targets };
+}
+
+/** Every durable shard-scoped decision bound to a partition that is NOT the one being
+ *  dispatched, named rather than dropped (D17).
+ *
+ *  Deliberately enumerated off the LEDGER rather than taken from `assessShardCompleteness`,
+ *  which iterates the current plan and therefore cannot see a record whose shard index no
+ *  longer exists — exactly what a `--shard-budget` change that produces FEWER shards leaves
+ *  behind. A re-partition must be able to say "these are the decisions you made that no longer
+ *  describe anything", and a list that silently omits the ones furthest from the new shape is
+ *  the silent drop this exists to prevent. Nothing here deletes a record: they stay in the
+ *  column as history and satisfy nothing. */
+function supersededByPartition(review: Review, plan: ShardPlan): string[] {
+  const named: string[] = [];
+  const digest = plan.digest;
+  const at = (d: string | undefined): string => d ?? "(none recorded)";
+
+  for (const o of ledgerOutcomes(review)) {
+    if (o.shard === undefined && o.derivationDigest === undefined) continue;
+    if (o.derivationDigest === digest) continue;
+    named.push(
+      `the ${shardLabel(o.lens, o.shard?.index, o.shard?.of)} outcome authored against partition ` +
+        `${at(o.derivationDigest)}`,
+    );
+  }
+  for (const a of lensAcceptancesOf(review)) {
+    if (a.shard === undefined && a.derivationDigest === undefined) continue;
+    if (a.derivationDigest === digest) continue;
+    named.push(
+      `the operator acceptance of ${shardLabel(a.lens, a.shard)} recorded against partition ` +
+        `${at(a.derivationDigest)} (by ${a.acceptedBy} at ${a.acceptedAt})`,
+    );
+  }
+  for (const s of lensSkipRecordsOf(review)) {
+    if (s.derivationDigest === digest) continue;
+    named.push(
+      `the ${s.lens} lens's intentionally-skipped record (${s.reason}) made under partition ${s.derivationDigest}`,
+    );
+  }
+  return named;
+}
+
 async function runDiscovery(reviewId: string, transition: Transition, deps: CoordinatorDeps): Promise<StageOutcome> {
   const review = getReview(reviewId) as Review;
   setReviewState(reviewId, "discovering", { reason: transition.reason });
@@ -723,21 +852,57 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
   // its outcome is never rewritten — that is what makes a re-entry after one crash preserve the
   // coverage that already happened (D7) instead of paying for it twice and risking losing it.
   const before = write.review;
-  const outstanding = assessShardCompleteness(plan, ledgerOutcomes(before), {
+  const owed = assessShardCompleteness(plan, ledgerOutcomes(before), {
     acceptances: lensAcceptancesOf(before),
     skips: lensSkipRecordsOf(before),
     candidateSha: confirmedSha,
-  }).missing.filter((m) => m.shard !== undefined);
+  });
+  const outstanding = owed.missing.filter((m) => m.shard !== undefined);
 
-  const targets: ShardTarget[] = [];
+  // D17: EVERY shard-scoped decision bound to another partition, named. Enumerated before the
+  // dispatch so the operator reads it whether this pass advances or refuses — a `--shard-budget`
+  // change re-partitions, and the acceptance an operator recorded under the old budget describes
+  // a shard that no longer exists. It stays in the ledger; it just satisfies nothing.
+  //
+  // Stated only when THIS pass re-partitioned. On an ordinary re-entry the per-shard assessment
+  // already explains, shard by shard, why a stale record clears nothing; restating the whole
+  // list every pass would bury the one moment it is news.
+  const superseded = write.previous !== undefined ? supersededByPartition(before, plan) : [];
+  const supersededNote =
+    write.previous === undefined
+      ? ""
+      : ` The shard partition CHANGED: ${write.previous.digest} (budget ${write.previous.derivation.budget} ` +
+        `${write.previous.derivation.unit}) was replaced by ${plan.digest} (budget ${plan.derivation.budget} ` +
+        `${plan.derivation.unit}).` +
+        (superseded.length === 0
+          ? ` No recorded shard-scoped decision was bound to the superseded partition.`
+          : ` ${superseded.length} recorded shard-scoped decision(s) describe a partition that no longer exists and ` +
+            `are REFUSED — retained in the ledger as history, satisfying nothing: ${superseded.join("; ")}. ` +
+            `Re-record any of them against the current partition (${plan.digest}) if the decision still stands.`);
+
+  const allTargets: ShardTarget[] = [];
   for (const miss of outstanding) {
     const shard = plan.lenses.find((l) => l.lens === miss.lens)?.shards.find((s) => s.index === miss.shard);
     if (shard === undefined) continue;
-    targets.push({
+    allTargets.push({
       lens: miss.lens as RiskLens,
       shard,
       diff: shard.paths.map((p) => bodyOf.get(p)?.body ?? "").join(""),
     });
+  }
+
+  // (d2) THE OPERATOR'S RETRY, which can only ever NARROW this pass (D7). It is applied after
+  // the plan is recorded and after outstanding-ness is decided, so a selector is validated
+  // against what this partition actually owes rather than against what a previous one did.
+  const selectors = deps.retryShards ?? [];
+  let targets = allTargets;
+  if (selectors.length > 0) {
+    const restricted = restrictToRetry(plan, allTargets, owed.accepted, selectors);
+    if (!restricted.ok) {
+      setReviewState(reviewId, "discovering", { reason: `shard retry refused: ${restricted.refusal}` });
+      return { transition, status: "refused", message: `${restricted.refusal}${supersededNote}` };
+    }
+    targets = restricted.targets;
   }
 
   // (e) LENS x SHARD, BOUNDED. Read-only, against ONE recorded sha.
@@ -804,7 +969,8 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
         (completeness.superseded.length > 0
           ? ` ${completeness.superseded.length} recorded decision(s) describe a partition that no longer exists ` +
             `and satisfy nothing: ${completeness.superseded.map((s) => s.detail).join("; ")}.`
-          : ""),
+          : "") +
+        supersededNote,
     };
   }
 
@@ -844,6 +1010,11 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
         expected: plan.lenses.map((l) => ({ lens: l.lens, shards: l.shards.length })),
         dispatchedThisPass: targets.map((t) => ({ lens: t.lens, shard: t.shard.index, of: t.shard.of })),
         supersededPlan: write.previous?.digest,
+        // D17: what a re-partition invalidated, named in the durable record and not only in the
+        // sentence the operator happened to be looking at when it happened.
+        supersededDecisions: superseded,
+        // D7: the operator narrowed this pass to these shards, or drove every outstanding one.
+        retryShards: selectors.length > 0 ? selectors.map((s) => `${s.lens}:${s.index}`) : undefined,
       },
       outcomes: current.map((o) => ({
         lens: o.lens,
@@ -880,7 +1051,8 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
       (completeness.skipped.length > 0
         ? ` (${completeness.skipped.map((s) => s.lens).join(", ")} intentionally skipped — no in-scope path)`
         : "") +
-      (normalized.merges.length > 0 ? `, ${normalized.merges.length} deduplicated` : ""),
+      (normalized.merges.length > 0 ? `, ${normalized.merges.length} deduplicated` : "") +
+      supersededNote,
   };
 }
 
