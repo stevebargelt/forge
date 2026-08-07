@@ -683,10 +683,26 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
 // FG-685 changed the INDUCTION, not the guard. Forge's safety commit is exempt
 // from hooks via `--no-verify`, so the fixture configures a failing signing
 // program instead. `git add -A` completes first; only `git commit` invokes the
-// signer, which proves the failure belongs to the commit step without changing
-// Forge's hook exemption. What is under test is unchanged — a FAILED safety
-// commit with changes present must retain the workspace and the branch and fail
-// the task.
+// signer, which proves the failure belongs to the commit step. What is under
+// test is unchanged — a FAILED safety commit with changes present must retain
+// the workspace and the branch and fail the task.
+//
+// FG-686: the workspace also gets an always-failing pre-commit hook, and that
+// is what keeps `--no-verify` under test rather than merely described. git runs
+// pre-commit BEFORE it signs, so the two markers below distinguish the two
+// worlds a bare "the commit failed" assertion cannot tell apart:
+//
+//   • --no-verify present  → hook never runs (no hook marker), signing is
+//     reached and fails (signer marker) — the assertions below.
+//   • --no-verify removed  → the hook aborts the commit first, so the signer
+//     marker is absent and the hook marker is present. Capture still fails, and
+//     every other assertion in this test still holds, but BOTH marker
+//     assertions flip. Removing the exemption cannot pass this fixture.
+//
+// That exemption is load-bearing, not incidental: the clone is provisioned with
+// a no-AI-attribution commit-msg hook, and an agent is root over its own
+// workspace's hooks. Without --no-verify, an agent-controlled hook could turn
+// Forge's own safety commit into safety_commit_failed and discard the work.
 
 test("fg352 (11): auto-commit fails with changes present — ok:false, task fails, worktree and branch retained", async () => {
   setPlatform("darwin");
@@ -702,9 +718,10 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
     inputs: {},
     projectDir: repo,
   });
-  const signerDir = makeTmpDir();
-  const signerPath = join(signerDir, "fail-signer.sh");
-  const signerLog = join(signerDir, "invoked");
+  const markerDir = makeTmpDir();
+  const signerPath = join(markerDir, "fail-signer.sh");
+  const signerLog = join(markerDir, "signer-invoked");
+  const hookLog = join(markerDir, "pre-commit-invoked");
   writeFileSync(signerPath, `#!/bin/sh\nprintf 'commit reached signer\\n' > "${signerLog}"\nexit 1\n`);
   chmodSync(signerPath, 0o755);
 
@@ -713,11 +730,18 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
     assert.ok(worktreePath, "stub: /project mount must be in docker args");
     writeFileSync(stderrPath, "");
 
-    // Signing is attempted by `git commit`, not `git add`. The safety commit's
-    // --no-verify remains exercised: it bypasses hooks but does not suppress
-    // signing, so this provides a deterministic commit-only failure.
+    // Signing is attempted by `git commit`, not `git add`, so it fails the
+    // commit step deterministically without touching the hook exemption.
     execFileSync("git", ["config", "commit.gpgsign", "true"], { cwd: worktreePath!, stdio: "ignore" });
     execFileSync("git", ["config", "gpg.program", signerPath], { cwd: worktreePath!, stdio: "ignore" });
+
+    // The --no-verify probe. An agent is root over its own workspace's hooks,
+    // so installing one here is exactly the capability the exemption exists to
+    // neutralize. git runs pre-commit before it signs: bypassed, the signer is
+    // reached; honored, it is not.
+    const hookPath = join(worktreePath!, ".git", "hooks", "pre-commit");
+    writeFileSync(hookPath, `#!/bin/sh\nprintf 'pre-commit ran\\n' > "${hookLog}"\nexit 1\n`);
+    chmodSync(hookPath, 0o755);
 
     // Write agent output but do NOT commit — leaves uncommitted changes in the
     // worktree for mergeWorktreeBranch's auto-commit to discover and attempt.
@@ -738,6 +762,11 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
   assert.deepEqual(wave.completedSteps, [], "no steps must complete");
 
   assert.ok(existsSync(signerLog), "the failing signer proves capture reached git commit after git add -A");
+  assert.ok(
+    !existsSync(hookLog),
+    "FG-686 AC3: the safety commit must keep passing --no-verify — an always-failing pre-commit hook the agent " +
+      "installed in its own workspace must not have run, or an agent-controlled hook can discard captured work",
+  );
 
   const tasks = tasksForRun(runId);
   const primary = tasks.find((t) => t.phase === "build" && t.parentId === undefined);
