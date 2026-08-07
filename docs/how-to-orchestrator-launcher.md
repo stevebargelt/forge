@@ -114,6 +114,25 @@ The reason is receipt truthfulness: if passthrough could change the model, the r
 session other than the one running. `--print` is refused for the mirror-image reason — a non-interactive print run
 under a receipt claiming a live interactive orchestrator is a false receipt.
 
+### Credential environment variables are isolated per adapter
+
+The child's environment is composed from the parent one entry at a time, not inherited wholesale — each adapter
+withholds the variables that could move the session onto credentials its own receipt does not describe:
+
+- **Claude Code.** `CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are each
+  withheld unless the resolved auth mode actually calls for them — a shell with `CLAUDE_CODE_USE_BEDROCK=1` armed
+  for something else does not move a policy-selected `subscription` or `api` launch onto Bedrock.
+  `CLAUDE_CODE_USE_VERTEX` is withheld unconditionally, because Forge resolves no Vertex auth mode a receipt could
+  truthfully describe. When the shell disagrees with the resolved auth this way, `forge claude` prints an advisory
+  naming the mismatch and that the variable was withheld — never a silent override of what the receipt records.
+- **Codex CLI.** The entire `CLAUDE_`, `ANTHROPIC_` and `AWS_` families are withheld unconditionally, by prefix —
+  an operator's shell primed for `forge claude` (Bedrock profile, API key, …) cannot leak a Claude credential into
+  a Codex session that has no use for it.
+
+Everything else in the parent environment — the operator's own toolchain, unrelated tool state — passes through
+unchanged; this is a credential-selection denylist, not an allowlist that would strip tools Forge knows nothing
+about.
+
 ## What `forge claude` refuses, and what to do about it
 
 `forge claude` is a **provider shortcut**. It launches Claude Code, and it never silently launches something else
@@ -269,7 +288,10 @@ capability limitation.
 - If the receipt **cannot be written**, Forge refuses and spawns nothing. The message names the write target and
   the retry. An orchestrator Forge cannot record is not launched.
 - The receipt becomes `running` only after a **confirmed** spawn, at which point the launcher-owned liveness
-  record appears.
+  record appears. If that write itself fails, refusing is no longer available — the child is already up — so
+  Forge holds it and retries at close-out instead: the operator sees an advisory that the session is running
+  ahead of its receipt, and the receipt still closes honestly (rather than being stranded `pending` forever) once
+  the session ends.
 - Child exit, a signal, and a spawn failure all close the same receipt honestly.
 - A launcher that dies mid-session writes nothing — its record is then classified `orphaned` by process identity.
   `orphaned` asserts that **launcher ownership was lost**; it does not claim the interactive session ended.
