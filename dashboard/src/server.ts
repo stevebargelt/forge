@@ -12,6 +12,7 @@
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 // - GET /api/queue                        the operator work-queue board: five projections + dispatcher panel + capacity context (?projectKey|?projectDir, FG-591)
+// - GET /api/orchestrators                interactive orchestrators for ONE project, liveness-joined; the only route that can carry a remote-control URL (?projectKey|?projectDir REQUIRED, FG-576)
 //
 // - POST /api/queue/enqueue|dequeue|rank|reorder   the operator's QUEUE PLANNING writes (FG-591)
 //
@@ -30,7 +31,7 @@ import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
-  currentActivity, launchDetail, launchLogTail, queueBoard,
+  currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -319,6 +320,56 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       payload = JSON.stringify({ error: message });
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  // FG-576 step 11 (AC7 / AC11 / FG-448 / D13): the interactive orchestrators of ONE
+  // project, joined to the launcher-owned liveness record, and the ONLY route that
+  // can ever carry a remote-control URL.
+  //
+  // PROJECT-SCOPED BY CONSTRUCTION. A scope parameter is REQUIRED and it is resolved
+  // through the dashboard's OWN registry, exactly as /api/queue and /api/backlog
+  // resolve it — an unscoped or unregistered request is refused rather than widened,
+  // because "every orchestrator on the host" is precisely the cross-project payload a
+  // live control credential must never be assembled into. The URL is additionally
+  // withheld entirely off a loopback bind (queries.ts, remoteControlWithheldReason):
+  // 200, rows intact, no link, no error.
+  //
+  // no-store: a credential-bearing response must not sit in an intermediary or in
+  // the browser's disk cache after the session it belongs to has ended.
+  if (path === "/api/orchestrators") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    if (!projectDir && !projectKey) {
+      res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(
+        JSON.stringify({
+          error:
+            "a project scope is required: pass ?projectKey= or ?projectDir=. This route is never answered across projects.",
+        }),
+      );
+      return;
+    }
+    const owner = resolveOwnerProject(projectsForDashboard(), projectKey, projectDir);
+    if (!owner) {
+      res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(
+        JSON.stringify({ error: "no registered project matches this request." }),
+      );
+      return;
+    }
+    // An exact checkout stays exact; a projectKey request covers that repository's
+    // own observed paths and nothing else.
+    const scope = projectDir ?? owner.projectDirs;
+    let payload: string;
+    try {
+      payload = JSON.stringify(scopedOrchestratorView(scope));
+    } catch (err) {
+      // Keep the page up, name the failure — but never render an empty list as if
+      // it were the answer, which would read as "no orchestrator is running".
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/orchestrators: reading orchestrator receipts failed:", err);
+      payload = JSON.stringify({ error: message });
+    }
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(payload);
     return;
   }
 
