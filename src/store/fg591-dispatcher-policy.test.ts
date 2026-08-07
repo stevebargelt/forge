@@ -511,24 +511,37 @@ describe("the dispatcher lease", () => {
     assert.ok(g.granted);
     const expiry = g.lease.leaseExpiresAtMs;
 
-    // The store clock cannot be parked on an exact instant, so strictness is proven
-    // against the CAS PREDICATE itself, run with now set exactly equal to the expiry.
-    const atExpiry = db
+    // The CAS PREDICATE itself, run with now set exactly equal to the expiry.
+    const atExpiryProbe = db
       .prepare(
         `UPDATE dispatcher_leases SET owner = 'probe'
           WHERE project_key = ? AND generation = ? AND lease_expires_at_ms < ?`,
       )
       .run(PK, g.lease.generation, expiry);
-    assert.equal(atExpiry.changes, 0, "lease_expires_at_ms == now is NOT expired");
+    assert.equal(atExpiryProbe.changes, 0, "lease_expires_at_ms == now is NOT expired");
     assert.equal(getDispatcherLease(PK)!.owner, OWNER_A);
 
+    // And now against the REAL verbs, at THE instant rather than near it. The store
+    // clock cannot be parked, so this used to be assertable only against the probe
+    // above; an explicit instant lets the acquire CAS and the operator view be asked
+    // about ONE value — exactly the expiry — instead of two reads a hair apart, which
+    // is how the acquire said "still live" while the view said "expired".
+    const denied = acquireDispatcherLease({ projectKey: PK, owner: OWNER_B, ttlMs: TTL, nowMs: expiry });
+    assert.equal(denied.granted, false, "at now == expiry the real verb denies the takeover too");
+    assert.equal(denied.granted === false ? denied.reason : "", "held_by_live_owner");
+    assert.equal(getDispatcherLease(PK)!.owner, OWNER_A, "and wrote nothing");
+    const viewAtExpiry = dispatcherLeaseView(PK, expiry);
+    assert.equal(viewAtExpiry.live, true, "the view, asked about the SAME instant, agrees the lease is live");
+    assert.equal(viewAtExpiry.expired, false);
+    assert.equal(dispatcherLeaseHeldBy(PK, OWNER_A, 1, expiry), true, "as does the authorization fence");
+
     // One millisecond past it, the real verb takes over and bumps the fencing token.
-    setPublicationClockOffsetForTest(TTL + 1);
-    const taken = acquireDispatcherLease({ projectKey: PK, owner: OWNER_B, ttlMs: TTL });
+    const taken = acquireDispatcherLease({ projectKey: PK, owner: OWNER_B, ttlMs: TTL, nowMs: expiry + 1 });
     assert.ok(taken.granted);
     assert.equal(taken.mode, "took_over");
     assert.equal(taken.lease.owner, OWNER_B);
     assert.equal(taken.lease.generation, 2);
+    assert.equal(dispatcherLeaseView(PK, expiry + 1).live, true, "and the successor's own lease reads live");
   });
 
   test("FALSIFICATION: a takeover that DROPS the strict-expiry predicate steals a live lease", () => {
@@ -682,12 +695,19 @@ describe("dispatcherLeaseView", () => {
   });
 
   test("live and expired are mutually exclusive at every instant", () => {
-    acquireDispatcherLease({ projectKey: PK, owner: OWNER_A, ttlMs: TTL });
-    for (const offset of [0, TTL / 2, TTL + 1, 10 * TTL]) {
-      setPublicationClockOffsetForTest(offset);
-      const v = dispatcherLeaseView(PK);
+    const g = acquireDispatcherLease({ projectKey: PK, owner: OWNER_A, ttlMs: TTL });
+    assert.ok(g.granted);
+    // The view and the fence are handed THE SAME instant. Two reads of the running
+    // store clock straddle the boundary, and the pair then disagrees about one lease —
+    // which is the instrument, not the predicates. Pinning it is also what makes
+    // `offset TTL`, now exactly equal to the expiry, expressible here at all.
+    const grantMs = g.lease.leaseExpiresAtMs - TTL;
+    for (const offset of [0, TTL / 2, TTL - 1, TTL, TTL + 1, 10 * TTL]) {
+      const at = grantMs + offset;
+      const v = dispatcherLeaseView(PK, at);
       assert.notEqual(v.live, v.expired, `at offset ${offset} the lease is exactly one of the two`);
-      assert.equal(v.live, dispatcherLeaseHeldBy(PK, OWNER_A, 1), "and the view agrees with the fence");
+      assert.equal(v.live, dispatcherLeaseHeldBy(PK, OWNER_A, 1, at), "and the view agrees with the fence");
+      assert.equal(v.live, offset <= TTL, `at offset ${offset} the lease is live iff now <= expiry`);
     }
   });
 });

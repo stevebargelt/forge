@@ -550,11 +550,17 @@ export function liveClaimCount(scope: CapacityScope, projectKey: string): number
  *  rather than duplicates.
  *
  *  A row in this set is, at this same instant, one that claimIsStillHeld returns
- *  false for. The two are mutually exclusive by construction and asserted to be. */
-export function recoverableClaims(scope: CapacityScope, projectKey?: string): QueueClaim[] {
+ *  false for. The two are mutually exclusive by construction and asserted to be.
+ *
+ *  `nowMs` names THE instant to evaluate at, defaulting to the store clock. Production
+ *  never passes it. It exists so a caller that must compare this predicate against
+ *  claimIsStillHeld can hand BOTH the same value: the store clock keeps running between
+ *  two reads, so at the expiry boundary the pair can otherwise each observe its own side
+ *  of it and both report true — a property of the instrument, not of the comparisons. */
+export function recoverableClaims(scope: CapacityScope, projectKey?: string, nowMs?: number): QueueClaim[] {
   const pk = requireScopeProjectKey(projectKey, scope, "claim-recoverable");
   requireDbModeProject(pk, "claim-recoverable");
-  const now = storeNowMs();
+  const now = nowMs ?? storeNowMs();
   return liveClaimsInScopeFor(scope, pk).filter((c) => c.leaseExpiresAtMs < now);
 }
 
@@ -1251,15 +1257,20 @@ export function recordClaimLaunch(req: {
  *  The lease term is what makes this and recoverableClaims MUTUALLY EXCLUSIVE. A row
  *  the recovery surface is offering for takeover must never simultaneously tell its
  *  incumbent it is still authorized to drive; that contradiction is a
- *  duplicate-execution vector, and it is asserted against directly. */
+ *  duplicate-execution vector, and it is asserted against directly.
+ *
+ *  `nowMs` names THE instant to evaluate at, defaulting to the store clock — see
+ *  recoverableClaims, whose exclusion with this predicate is only expressible at the
+ *  boundary when both are handed the same value. Production never passes it. */
 export function claimIsStillHeld(req: {
   projectKey: string;
   claimId: string;
   owner: string;
   generation: number;
+  nowMs?: number;
 }): boolean {
   requireDbModeProject(req.projectKey, "claim-is-still-held");
-  const now = storeNowMs();
+  const now = req.nowMs ?? storeNowMs();
   return (
     getDb()
       .prepare(
