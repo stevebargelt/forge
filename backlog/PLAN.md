@@ -18,39 +18,57 @@ pending dependency — see the retirement rule at the end.
 
 ## Current objective
 
-**FG-576 — provider-neutral interactive orchestrator launcher.** FG-691 shipped
-2026-08-07, so the temporary promotion ahead of this item is spent.
+**FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.**
+Promoted 2026-08-07 by operator decision, on its third reproduction. FG-576's build
+wave lost one child to `result_missing`; that terminated the fanout parent
+`prerequisite_blocked` with EIGHT of nine children already completed and merged
+(+12,685 lines, including the single heaviest step). `forge recover --re-drive`
+would have discarded all of it — `recover.ts:498-508` says so in its own comment —
+so the work was salvaged by hand instead.
 
-FG-576 is smaller than this file previously implied. The absorption claim has been
-checked: FG-554 (policy-driven `forge claude` model resolution) and FG-448
-(remote-control URL on the project card) are both **done**, not active. FG-576
-cannot absorb or close them — they shipped independently. Scope it against what
-FG-554 actually delivered.
+The same incident exposed a second defect in the same surface: the read-only
+inspector RECOMMENDS `--re-drive`, but `performReDrive` refuses unless the failure
+kind is `fanout_wave_orphaned`, which `prerequisite_blocked` is not. Following
+forge's own printed advice is refused. Treat both as ONE gap: recovery cannot
+preserve completed ordered-wave work, and the surface advising the operator does
+not know what the recovery path will accept.
 
 ## Recently completed
 
+- **FG-576** (`04fbfeb9`, PR #223) — `forge orchestrator`, the provider-neutral interactive
+  launcher: receipt store, launcher-owned liveness with a process-identity fence, resolution
+  and capability matrix, the Forge-owned Codex instruction carrier, both adapters, and the
+  `forge show`/dashboard surfaces. 15/15 acceptance criteria evidenced at the final
+  candidate. Built as a 12-step ordered DAG, salvaged after a fanout failure, and reviewed
+  over the whole range — 5 lenses, 9 shards, 5 findings, all settled.
 - **FG-691** (`0d0ed85a`, PR #222) — an explicit instant on the paired lease predicates,
-  defaulting to `storeNowMs()`. The boundary is now assertable at exactly the expiry
-  instant, and the exact-expiry offset was added to both sweeps. `storeNowMs` itself is
-  unchanged and no caller was migrated. Settled clean under evidence-led review
-  `review-42fc831bfdf7` — 4 lenses, 4 shards, 0 findings.
-- **FG-591** (`ecbe7d6f`, PR #218) — the operator work queue: a Kanban board over
-  orthogonal durable fields, CLI and dashboard controls, and a long-lived
-  capacity-limited dispatcher whose every selection records why it passed candidates
-  over. Reviewed under FG-689's sharded discovery — 8 shards, 5 lenses.
+  defaulting to `storeNowMs()`. The boundary is assertable at exactly the expiry instant and
+  that offset was added to both sweeps; `storeNowMs` itself is unchanged and no caller was
+  migrated. Settled clean: 4 lenses, 0 findings.
 
 ## Now
 
-1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve Claude or
-   Codex from model policy. FG-554 and FG-448 are already shipped, so the remaining
-   scope is only what they did not deliver.
+1. **FG-688 — adopt-preserving re-drive for a terminally-failed ordered wave**, plus the
+   inspector recommending a verb its own failure-kind guard rejects. One gap, two halves.
 
 ## Next
 
-1. **FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.** Cost
-   is proportional to how far a wave got, and it bit twice on 2026-08-06.
-2. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA
-   contrast, origin pinning excluding a non-default loopback bind).
+1. **FG-682 — a correction found after the docs stage has no supported amendment path.**
+   No longer theoretical: FG-576 hit it and paid a documented tip-equality override, and
+   re-running shipping refused `blocked_environment (candidate_not_checked_out)`. Scoped as
+   a BOUNDED late amendment, never a general re-anchor: declared paths only, undeclared
+   dirty files refused by name, the coordinator commits and advances, SHA-bound
+   verification invalidated and CI required at the new candidate, plus a bounded delta
+   check rather than full re-discovery. Adjacent to FG-688 — both are review/recovery
+   control-plane gaps.
+2. **FG-681 — the host integration tier is broadly red on darwin while CI is green** (~76
+   tests across 13+ files; the dominant signature is a pre-container refusal, not assertion
+   drift). Root-cause the shared harness from the smallest `fg381` and largest `fg628`
+   reproductions; do not patch, skip or allowlist individual symptoms. Newly urgent: three
+   of FG-576's five defects were darwin-only and invisible to CI and to the Linux agent
+   containers, so the split is now costing real defects rather than only noise.
+3. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA contrast),
+   now also carrying the FG-576 finding that dashboard orchestrator rows are mouse-only.
 
 `Next` is deliberately short. Ordering here expresses current operator intent;
 it does not override ticket dependencies or authorize scope expansion.
@@ -58,21 +76,6 @@ it does not override ticket dependencies or authorize scope expansion.
 ## Captured follow-ups that do not preempt `Now`
 
 - **FG-652** — stage-record SHA in the crash-after-advance recovery window.
-- **FG-682** — a documentation correction discovered AFTER the docs stage has
-  completed has no supported amendment path. Adjacent to FG-655 but distinct:
-  FG-655 is a stage that produced edits and could not commit them; this is a
-  correction that arrives once no stage remains to carry it. Scoped as a bounded
-  late-docs amendment (declared documentation paths only; code/tests/config and
-  undeclared dirty files refused by name; the COORDINATOR commits and advances
-  the candidate; SHA-bound verification invalidated and CI required at the new
-  candidate; docs closeout plus a bounded delta check, never full re-discovery).
-  FG-678's two overrides are its demonstrated impact.
-- **FG-681** — roughly 76 integration tests across at least 13 files fail on the
-  Darwin host and pass in CI at the same commits. The dominant signature is a
-  pre-container refusal, not assertion drift. Root-cause the shared harness or
-  runtime input from the smallest `fg381` and largest `fg628` reproductions;
-  do not patch, skip, or allowlist individual symptoms. FG-676 may explain only
-  the five campaign cases and is no longer the leading general hypothesis.
 - **FG-656** — fanout model resolution can drift from the held seed
   generation.
 - **FG-657** — reconcile and close the DB ticket for the already-shipped PR
