@@ -8,8 +8,9 @@
 //
 // WHAT IT READS: persisted state ONLY — task/run rows, the `launch_observations`
 // table (FG-679), and the newest `review_loop.ci_observed` event per
-// (runId, projectDir). It makes NO outbound call of any kind: no tmux, no
-// `readLaunch`/`listLaunches`, no `git`, no `gh`, no shell, no Forge CLI (BD-7/BD-12).
+// (runId, projectDir) THAT IS STILL ANCHORED TO CURRENT WORK (FG-694). It makes NO
+// outbound call of any kind: no tmux, no `readLaunch`/`listLaunches`, no `git`, no
+// `gh`, no shell, no Forge CLI (BD-7/BD-12).
 // The database handle is INJECTED because the dashboard opens its own read-only
 // connection; the derivation itself owns no handle and mints no store.
 //
@@ -24,7 +25,13 @@
 //   - It never computes what the candidate sha IS. The observer DECLARES the sha it
 //     probed; this reader presents only the NEWEST observation, so an observation
 //     bound to a superseded candidate simply stops being the newest and disappears
-//     rather than being carried forward or relabeled (BD-6).
+//     rather than being carried forward or relabeled (BD-6). FG-694 does NOT relax
+//     this: it narrows which observations are CURRENT, by asking the persisted run
+//     and review rows whether the work is still open — never by re-deriving a sha.
+//   - It never presents a CI observation whose only anchor is FINISHED work
+//     (FG-694). "Newest for its (run, project) pair" was never a claim of currency:
+//     a pair whose run completed months ago has a newest row forever, and ten of
+//     them rendered at once under the heading `Current activity` on 2026-08-08.
 //   - It never consults a launch name, argv, log text, or the quarantined
 //     `forgeIds`. Placement is authorized by the persisted association alone — the
 //     DECLARED submission ids and `project_dir` (BD-2/BD-15).
@@ -42,6 +49,7 @@ import {
   type LaunchObservation,
   type LaunchObservationRow,
 } from "../store/launch-observations.js";
+import { isTerminalReviewState } from "../store/reviews.js";
 
 /** Re-exported so a second consumer (the dashboard) validates a launch id against
  *  the SAME definition `launchDir` uses, and renders the status through the SAME
@@ -64,6 +72,30 @@ export const CI_OBSERVATION_FRESH_MS = 15 * 60_000;
 export const CI_NOT_OBSERVED_LABEL = "CI not observed";
 export const CI_NOT_RUNNING_LABEL = "CI not running";
 export const CI_RUNNING_LABEL = "CI running";
+
+/** FG-694: the THIRD absence, and the one the pre-fix surface could not say. Nothing
+ *  in scope is still open — no anchored run, no open review — so there is nothing that
+ *  could be waiting on required checks, which is a different fact from "we have a current
+ *  candidate and have observed no CI for it" (`CI not observed`). Collapsing the two
+ *  is the same class of error as the stale-row defect, pointed the other way: one
+ *  invents currency, the other invents an observation. */
+export const CI_NO_CANDIDATE_LABEL = "no current CI candidate";
+
+/** A run row that is not `active` is finished, by any of the three names the
+ *  vocabulary gives it (`complete`, `failed`, `abandoned`). Selected POSITIVELY, so
+ *  a status this binary does not know reads as "not current" rather than leaking
+ *  through a NOT-IN list that predates it. */
+const ACTIVE_RUN_STATUS = "active";
+
+/** Review terminality is NOT enumerated here. It is a property of the review state
+ *  vocabulary, so it is decided at the one place that vocabulary is defined
+ *  (`REVIEW_STATE_TERMINALITY` in src/store/reviews.ts), exhaustively and under the
+ *  compiler. FG-694/RF-1: this module used to carry its own `["settled", "failed"]`,
+ *  which is an allowlist of two names pretending to be an open-ended terminal set —
+ *  a twelfth state would have been added over there and silently read as an OPEN
+ *  anchor here. Every review row is now classified through `isTerminalReviewState`,
+ *  which still reads a state it does not recognize as OPEN (surfacing live work
+ *  rather than hiding it) — but a state that EXISTS can no longer go unclassified. */
 
 export const CI_OBSERVED_EVENT_TYPE = "review_loop.ci_observed";
 
@@ -152,9 +184,16 @@ export type RequiredCiObservation = {
 };
 
 export type RequiredCiSection = {
-  /** `not_observed` — no observation exists at all, which is a different fact from
-   *  "CI is not running" (BD-8). */
-  state: "not_observed" | "observed";
+  /** THREE facts, not two, and none substitutes for another:
+   *  `no_current_candidate` — nothing in scope could be waiting on required checks: no
+   *    work reference is still open (`hasCurrentCandidate`), no open review. The
+   *    consumer omits the CI row entirely; it must NOT report that CI was not observed,
+   *    because nothing was owed an observation (FG-694).
+   *  `not_observed` — there IS current work in scope and no observation exists for
+   *    it, which is a fact about the OBSERVER and a different fact from "CI is not
+   *    running" (BD-8).
+   *  `observed` — at least one current observation, each carrying its own state. */
+  state: "no_current_candidate" | "not_observed" | "observed";
   label: string;
   observations: RequiredCiObservation[];
 };
@@ -322,20 +361,268 @@ function parseContexts(raw: unknown): RequiredCiContext[] {
   return out;
 }
 
-/** The newest `review_loop.ci_observed` per (runId, projectDir), and nothing else.
- *  Presenting only the newest IS the BD-6 supersession rule: an observation bound to
- *  a sha the candidate has moved past is not the newest, so it disappears. Nothing
- *  here derives, compares, or "carries forward" a sha. */
-function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivityScope, nowMs: number): RequiredCiObservation[] {
+/** One open review, reduced to the three fields that can anchor an observation. */
+type ReviewAnchor = { runId: string | null; ticketId: string | null; workspaceDir: string | null };
+
+/** The WORK a row names: the run it declares, the project home it declares, and the
+ *  ticket it declares. Every currency question in this module is asked about one of
+ *  these, through ONE predicate (`workIsCurrent`), with the reference the row itself
+ *  DECLARED — never with a shape-specific subset of it.
+ *
+ *  FG-694/RF-2: the anchor rule and the observation filter used to call the same
+ *  matcher with DIFFERENT inputs — the anchor passed a run id and dropped the ticket —
+ *  so they agreed for every review STATE and still disagreed for a review SHAPE. A
+ *  settled ticket-only review retired the observation and left the run's anchor
+ *  standing, which is `CI not observed` for finished work. Passing one reference makes
+ *  the divergence unrepresentable rather than untested. */
+type WorkRef = { runId: string | null; projectDir: string | null; ticketId: string | null };
+
+/** What is still OPEN, read from the persisted run and review rows and nothing else.
+ *  This is the whole of FG-694's selection authority: an observation is current
+ *  because the work it names is current, never because it happens to be the newest
+ *  row for a pair. */
+type CiCurrency = {
+  activeRuns: readonly { id: string; projectDir: string | null }[];
+  activeRunIds: ReadonlySet<string>;
+  openReviews: readonly ReviewAnchor[];
+  /** Reviews that are OVER, carried for the same reason the open ones are. AC2 names
+   *  a terminal run OR a terminal review, and those are not the same fact: a run stays
+   *  `active` through its docs and close-out phases, so "this run is active" cannot
+   *  answer "is the review of this work over" (FG-694/RF-4). */
+  terminalReviews: readonly ReviewAnchor[];
+  /** Which runs the 500-row event window may be spent on: `runCouldHoldCurrentWork`
+   *  over every run an active row or an open review names. Deliberately a SUPERSET of
+   *  the runs that turn out to have a current observation — it is a budget rule, not a
+   *  currency answer, and a run it keeps is still decided row by row by the one
+   *  predicate. Excluding a run it should have kept is the only way this can be wrong,
+   *  which is why the ticket it does not know is quantified rather than assumed away. */
+  windowRunIds: ReadonlySet<string>;
+};
+
+/** What one pass over the event window produced: the CURRENT observations, and which
+ *  runs the store DECLARED CI work for in this scope. Both come out of the one pass on
+ *  purpose — the second is what the candidate question is answered with, so it cannot
+ *  be computed from a different rule than the observations were. */
+type CiObservationRead = {
+  observations: RequiredCiObservation[];
+  declaredRunIds: ReadonlySet<string>;
+};
+
+function reviewColumns(db: DatabaseInstance): ReadonlySet<string> {
+  // PRAGMA table_info on a MISSING table returns zero rows rather than throwing
+  // (db.ts's shape-probe rule), so this doubles as the table-existence check. It has
+  // to: `reviews` is an FG-638 table, and the read-model fixtures that predate it —
+  // and any store opened by an older binary — carry runs/tasks/events/launch_
+  // observations and no `reviews` at all. A bare prepare() would throw at parse time
+  // and take the whole surface down with it.
+  return new Set((db.prepare(`PRAGMA table_info(reviews)`).all() as Array<{ name: string }>).map((c) => c.name));
+}
+
+function readCiCurrency(db: DatabaseInstance): CiCurrency {
+  const activeRuns = db.prepare(`
+    SELECT id, project_dir FROM runs WHERE status = ?
+  `).all(ACTIVE_RUN_STATUS) as Array<{ id: string; project_dir: string | null }>;
+
+  const cols = reviewColumns(db);
+  // Every column below arrived by ALTER (FG-638/FG-649), so an aged store can carry a
+  // `reviews` table without them. Missing any one means this store cannot answer "is a
+  // review open here", and the honest reading of that is "no review anchor available"
+  // — not a crash, and not an invented anchor.
+  const reviewsUsable = ["run_id", "ticket_id", "workspace_dir", "state"].every((c) => cols.has(c));
+  // Every review row, open and terminal alike, classified in ONE place by
+  // terminality. The state is no longer a WHERE clause: a query that filtered by two
+  // names could only ever answer "not one of these two", which is what RF-1 is about.
+  const reviewRows = reviewsUsable
+    ? (db.prepare(`
+        SELECT run_id, ticket_id, workspace_dir, state FROM reviews
+      `).all() as Array<{ run_id: string | null; ticket_id: string | null; workspace_dir: string | null; state: string | null }>)
+    : [];
+  const openReviews: ReviewAnchor[] = [];
+  const terminalReviews: ReviewAnchor[] = [];
+  for (const r of reviewRows) {
+    const anchor: ReviewAnchor = { runId: r.run_id, ticketId: r.ticket_id, workspaceDir: r.workspace_dir };
+    (isTerminalReviewState(r.state ?? "") ? terminalReviews : openReviews).push(anchor);
+  }
+
+  const activeRunIds = new Set(activeRuns.map((r) => r.id));
+  const openReviewRunIds = new Set(
+    openReviews.map((r) => r.runId).filter((id): id is string => id !== null && id !== ""),
+  );
+  const work = { activeRunIds, openReviews, terminalReviews };
+  // Every run any row NAMES as possibly-live. An open review's run is included even
+  // when its run row has closed — the work is still being reviewed.
+  const windowRunIds = new Set(
+    [...activeRunIds, ...openReviewRunIds].filter((id) => runCouldHoldCurrentWork(id, work)),
+  );
+
+  return {
+    activeRuns: activeRuns.map((r) => ({ id: r.id, projectDir: r.project_dir })),
+    ...work,
+    windowRunIds,
+  };
+}
+
+/** Does this review anchor NAME this work?
+ *
+ *  A review that recorded a RUN speaks for that run and no other. A review that
+ *  recorded none — a standalone review-loop round — speaks for its ticket, in its
+ *  workspace when it declared one. That distinction is load-bearing in both
+ *  directions: it is what lets a settled review retire the observation of the run it
+ *  reviewed (RF-4), and what stops the previous attempt's settled review retiring the
+ *  LIVE attempt of a ticket that was re-run under a new run id. */
+function reviewNamesWork(anchor: ReviewAnchor, work: WorkRef): boolean {
+  const anchorRun = reviewRunOf(anchor);
+  if (anchorRun !== null) return anchorRun === (work.runId === "" ? null : work.runId);
+  if (work.ticketId === null || work.ticketId === "") return false;
+  return anchor.ticketId === work.ticketId
+    && (anchor.workspaceDir === null || work.projectDir === null || anchor.workspaceDir === work.projectDir);
+}
+
+function reviewRunOf(anchor: ReviewAnchor): string | null {
+  return anchor.runId === null || anchor.runId === "" ? null : anchor.runId;
+}
+
+/** Is the work this reference NAMES still open? The ONE currency predicate: an
+ *  observation asks it about the run, project and ticket it declared, and a run asks it
+ *  about the work the store declares for that run. It reads the run and review rows and
+ *  answers from those alone — nothing is inferred from a sha, a label, or a timestamp. */
+function workIsCurrent(work: WorkRef, currency: Omit<CiCurrency, "activeRuns" | "windowRunIds">): boolean {
+  const named = (r: ReviewAnchor): boolean => reviewNamesWork(r, work);
+
+  // The REVIEW answers first, and it answers in both directions. An open review naming
+  // this work keeps it current even after its run row closes; a review that is OVER
+  // retires it even while its run row is still `active` — the run has other phases
+  // after the review, and AC2 names a terminal run OR a terminal review (FG-694/RF-4).
+  if (currency.openReviews.some(named)) return true;
+  if (currency.terminalReviews.some(named)) return false;
+
+  // No review names this work at all — CI observed before a review was opened. A
+  // DECLARED run is then the only anchor there is, and it is decisive both ways: a
+  // finished run makes its newest observation history, which is the thing the
+  // newest-per-pair rule had no way to say.
+  if (work.runId !== null && work.runId !== "") return currency.activeRunIds.has(work.runId);
+  // A standalone review-loop round records no run, so with no review naming its
+  // ticket there is nothing left to anchor it.
+  return false;
+}
+
+/** Could this review name SOME work of this run, for a ticket the RUN ROW does not
+ *  declare? A review that recorded this run names all of its work whatever the ticket;
+ *  a ticket-only review names the work that declares its ticket, and whether any of
+ *  this run's work does is a question only a DECLARATION can answer — so it is left
+ *  open here rather than answered `no` by omission, which is the FG-694/RF-2 defect. */
+function reviewCouldNameRun(anchor: ReviewAnchor, runId: string): boolean {
+  const anchorRun = reviewRunOf(anchor);
+  if (anchorRun !== null) return anchorRun === runId;
+  return anchor.ticketId !== null && anchor.ticketId !== "";
+}
+
+/** `workIsCurrent` for a run whose ticket is UNKNOWN — the run row declares none — with
+ *  that ticket existentially quantified: could ANY work of this run still be open?
+ *  Answered in the same order by the same rules, so it can only ever be weaker than the
+ *  filter, never in conflict with it.
+ *
+ *  Used for two things and nothing else: which runs the event window may be spent on,
+ *  and whether a run for which the store declares NO CI work is a current candidate.
+ *  Once the store DOES declare that work — an observation carries the run, project and
+ *  ticket together — the declaration is what gets asked, through `workIsCurrent`. */
+function runCouldHoldCurrentWork(runId: string, currency: Omit<CiCurrency, "activeRuns" | "windowRunIds">): boolean {
+  if (currency.openReviews.some((r) => reviewCouldNameRun(r, runId))) return true;
+  // A terminal review that recorded this run names EVERY ticket of it, so it retires
+  // the run outright. A terminal TICKET-ONLY review retires only the work declaring its
+  // ticket, which no run row declares — that is decided per observation, not here.
+  if (currency.terminalReviews.some((r) => reviewRunOf(r) === runId)) return false;
+  return currency.activeRunIds.has(runId);
+}
+
+/** The newest CURRENT `review_loop.ci_observed` per (runId, projectDir), and nothing
+ *  else. Presenting only the newest IS the BD-6 supersession rule: an observation
+ *  bound to a sha the candidate has moved past is not the newest, so it disappears.
+ *  Nothing here derives, compares, or "carries forward" a sha.
+ *
+ *  FG-694 adds the half the pair rule never carried. A pair claims its slot the moment
+ *  its newest in-scope row is seen, and if that row is not anchored to open work the
+ *  pair contributes NOTHING: the older rows behind it are not promoted in its place,
+ *  which would carry a superseded candidate forward under a fresher label — exactly
+ *  what AC3 forbids. */
+function readNewestCiObservations(
+  db: DatabaseInstance,
+  scope: CurrentActivityScope,
+  nowMs: number,
+  currency: CiCurrency,
+): CiObservationRead {
+  // Nothing anywhere is open — no active run, no open review — so no event in the table
+  // can be current under any reference. Skipping the scan is not merely an optimization:
+  // it is the statement that the answer does not depend on the event history at all.
+  if (currency.activeRunIds.size === 0 && currency.openReviews.length === 0) {
+    return { observations: [], declaredRunIds: new Set() };
+  }
+
+  // EVERY narrowing the caller asked for is pushed INTO the query, because the 500-row
+  // window is applied by SQLite and anything filtered afterwards has already spent it.
+  // That is one defect with two faces: historical noise from finished runs evicting the
+  // live candidate (the 2026-08-08 report), and — the same eviction pointed at a
+  // narrower read — 500 newer rows from OTHER projects evicting the requested project's
+  // current observation, so Home renders no CI row for work that IS waiting on checks
+  // (RF-2). A missing current candidate reads as observed absence, which is exactly what
+  // this surface may not do.
+  //
+  // The JS checks below are NOT removed: the payload parsed there stays the authority
+  // for what a row says, and these clauses only decide which rows the window spends
+  // itself on.
+  // `windowRunIds` already excludes a run a terminal review RECORDED — it can produce no
+  // current observation (`workIsCurrent` rejects every row declaring that run), so it may
+  // not hold a slot. A run no review recorded is kept whatever the ticket-only reviews
+  // say, because the ticket that would decide it lives in the rows this query returns.
+  const eligibleRunIds = [...currency.windowRunIds]
+    .filter((id) => scope.runId === undefined || id === scope.runId);
+
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (scope.runId !== undefined) {
+    // A run-scoped read wants that run's rows and nothing else — not the no-run rows a
+    // host-wide read has to consider, which were dropped AFTER the limit before.
+    if (eligibleRunIds.length === 0) return { observations: [], declaredRunIds: new Set() };
+    clauses.push("AND run_id = ?");
+    params.push(scope.runId);
+  } else if (eligibleRunIds.length === 0) {
+    // Rows with no run id stay in: their anchor is a review, resolved per row below.
+    clauses.push("AND run_id IS NULL");
+  } else {
+    clauses.push(`AND (run_id IS NULL OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`);
+    params.push(...eligibleRunIds);
+  }
+  if (scope.projectDirs !== undefined) {
+    if (scope.projectDirs.length === 0) return { observations: [], declaredRunIds: new Set() };
+    // The project home lives in the payload, so the window is narrowed by reading it
+    // there. CASE, not `json_valid(...) AND json_extract(...)`: only CASE is guaranteed
+    // not to evaluate its branch, and json_extract raises on malformed JSON. An
+    // unreadable payload yields NULL here and is dropped — the same outcome the JSON
+    // parse below reaches for it, and never a thrown query.
+    clauses.push(`AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.projectDir') END) IN (${scope.projectDirs.map(() => "?").join(",")})`);
+    params.push(...scope.projectDirs);
+  }
+
   const rows = db.prepare(`
     SELECT run_id, payload, created_at
       FROM events
      WHERE event_type = ?
+     ${clauses.join("\n     ")}
      ORDER BY created_at DESC, id DESC
      LIMIT 500
-  `).all(CI_OBSERVED_EVENT_TYPE) as Array<{ run_id: string | null; payload: string | null; created_at: string }>;
+  `).all(CI_OBSERVED_EVENT_TYPE, ...params) as Array<{ run_id: string | null; payload: string | null; created_at: string }>;
 
   const newest = new Map<string, RequiredCiObservation>();
+  /** Pairs whose newest in-scope row has already been DECIDED — kept separate from
+   *  `newest` so a pair rejected as historical stays rejected, instead of falling
+   *  through to the next-oldest row for the same pair. */
+  const decided = new Set<string>();
+  /** The runs whose CI work the store DECLARED in this scope — every run named by a row
+   *  that reached the decision below, current or not. What makes the anchor and the
+   *  filter one answer: a run that declared work has been answered BY that work, so it
+   *  never falls back to the ticketless run-level question that cannot see a ticket-only
+   *  review (FG-694/RF-1, RF-2). */
+  const declaredRunIds = new Set<string>();
   for (const row of rows) {
     let payload: CiPayload;
     try {
@@ -345,10 +632,17 @@ function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivitySc
     }
     const projectDir = typeof payload.projectDir === "string" ? payload.projectDir : null;
     const key = `${row.run_id ?? ""} ${projectDir ?? ""}`;
-    if (newest.has(key)) continue; // rows arrive newest-first
+    if (decided.has(key)) continue; // rows arrive newest-first
     if (typeof payload.candidateSha !== "string" || payload.candidateSha === "") continue;
     if (scope.runId !== undefined && row.run_id !== scope.runId) continue;
     if (!inProjectScope(projectDir, scope.projectDirs)) continue;
+
+    // This row IS the newest in-scope observation for its pair. Whatever is decided
+    // about it is decided about the pair.
+    decided.add(key);
+    if (row.run_id !== null && row.run_id !== "") declaredRunIds.add(row.run_id);
+    const ticketId = typeof payload.ticketId === "string" ? payload.ticketId : null;
+    if (!workIsCurrent({ runId: row.run_id, projectDir, ticketId }, currency)) continue;
 
     const observedAt = typeof payload.observedAt === "string" ? payload.observedAt : row.created_at;
     const contexts = parseContexts(payload.contexts);
@@ -365,7 +659,7 @@ function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivitySc
       projectDir,
       projectLabel: projectLabelOf(projectDir),
       attemptId: typeof payload.attemptId === "string" ? payload.attemptId : "",
-      ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
+      ticketId,
       candidateSha: payload.candidateSha,
       observedAt,
       outcome,
@@ -379,7 +673,33 @@ function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivitySc
           : CI_NOT_RUNNING_LABEL,
     });
   }
-  return [...newest.values()];
+  return { observations: [...newest.values()], declaredRunIds };
+}
+
+/** Is SOMETHING in scope still open and therefore owed a required-check observation?
+ *  This is the `not_observed` / `no_current_candidate` decision, and it is answered by
+ *  the SAME predicate the observations went through, over the SAME references:
+ *
+ *    - a surviving observation IS a current reference, so it settles the question;
+ *    - a run whose CI work the store declared has just had every one of those
+ *      declarations decided, and none survived — the run is not a candidate, whatever
+ *      shape of review retired it (FG-694/RF-1, RF-2);
+ *    - a run the store declares NO CI work for has an unknown ticket, so the run-level
+ *      question is asked with that ticket quantified rather than assumed absent;
+ *    - an open review is current work by definition, even after its run row closes. */
+function hasCurrentCandidate(
+  scope: CurrentActivityScope,
+  currency: CiCurrency,
+  read: CiObservationRead,
+): boolean {
+  if (read.observations.length > 0) return true;
+  const candidate = (id: string): boolean => !read.declaredRunIds.has(id) && runCouldHoldCurrentWork(id, currency);
+  if (scope.runId !== undefined) return candidate(scope.runId);
+  if (scope.projectDirs !== undefined) {
+    return currency.activeRuns.some((r) => inProjectScope(r.projectDir, scope.projectDirs) && candidate(r.id))
+      || currency.openReviews.some((r) => inProjectScope(r.workspaceDir, scope.projectDirs));
+  }
+  return currency.activeRuns.some((r) => candidate(r.id)) || currency.openReviews.length > 0;
 }
 
 /** The ONE derivation `forge status` and the dashboard both call (BD-9). */
@@ -428,7 +748,17 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
       .map((o) => toHostLaunch(o, "host", nowMs))
     : [];
 
-  const observations = readNewestCiObservations(db, scope, nowMs);
+  // FG-694: what is OPEN is read once, and it decides two different things through ONE
+  // predicate over the SAME work references — which observations are current, and which
+  // of the three CI absences is the true one.
+  const currency = readCiCurrency(db);
+  const read = readNewestCiObservations(db, scope, nowMs, currency);
+  const observations = read.observations;
+  // The three-way choice the trap in FG-694 is about. `not_observed` is only ever
+  // reachable when there IS current work owed an observation; with nothing open,
+  // "we observed no CI" would be a claim about an observer that was never asked.
+  const ciState: RequiredCiSection["state"] =
+    observations.length > 0 ? "observed" : hasCurrentCandidate(scope, currency, read) ? "not_observed" : "no_current_candidate";
 
   return {
     generatedAt: now.toISOString(),
@@ -439,8 +769,12 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
     agents: readAgents(db, scope),
     hostVerification,
     requiredCi: {
-      state: observations.length === 0 ? "not_observed" : "observed",
-      label: observations.length === 0 ? CI_NOT_OBSERVED_LABEL : `${observations.length} observed`,
+      state: ciState,
+      label: ciState === "observed"
+        ? `${observations.length} observed`
+        : ciState === "not_observed"
+          ? CI_NOT_OBSERVED_LABEL
+          : CI_NO_CANDIDATE_LABEL,
       observations,
     },
     unassociated,
@@ -466,7 +800,14 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   }
 
   lines.push("  Required CI");
-  if (activity.requiredCi.state === "not_observed") {
+  if (activity.requiredCi.state === "no_current_candidate") {
+    // Parenthesised like the other two empty-section lines, and deliberately NOT
+    // `CI not observed`: nothing was waiting on required checks, so there was no
+    // observation to miss. The heading stays — `forge status` is the diagnostic
+    // surface, where the three sections are a fixed shape an operator reads down
+    // (FG-694 narrows HOME; it does not delete evidence structure here).
+    lines.push(`    (${CI_NO_CANDIDATE_LABEL})`);
+  } else if (activity.requiredCi.state === "not_observed") {
     lines.push(`    ${CI_NOT_OBSERVED_LABEL}`);
   } else {
     for (const ci of activity.requiredCi.observations) {

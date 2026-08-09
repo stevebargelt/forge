@@ -15,10 +15,9 @@ import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
 } from "./verification-render.js";
-import {
-  launchBadge, launchAssociationLabel, launchIdentityLine,
-  ciSectionLabel, ciBadgeClass, ciBadgeText, ciContextRows, activityIsEmpty,
-} from "./current-activity-render.js";
+import { ACTIVITY_LOADING, createActivityReader } from "./current-activity-render.js";
+import { CurrentActivitySection } from "./current-activity-view.js";
+import { formatDuration } from "./duration.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -40,6 +39,7 @@ function appendScope(url, project, checkoutDir = null) {
   if (!q) return url;
   return `${url}${url.includes("?") ? "&" + q.slice(1) : q}`;
 }
+
 
 function App() {
   // Top-level view toggle. Home is the default landing view; Activity retains
@@ -92,21 +92,35 @@ function App() {
   const [verifyRecent, setVerifyRecent] = useState([]);
   // FG-679: the three-section Current activity projection. Read-only, and read from
   // PERSISTED state only — the server makes no outbound call to answer it.
-  const [activity, setActivity] = useState(null);
+  // FG-694: the LOAD STATE, not the payload. `loading`, `ready` and `unavailable` are
+  // three different things to say, and collapsing them into "payload or null" is what
+  // made a failed read render as an observed absence.
+  const [activityLoad, setActivityLoad] = useState(ACTIVITY_LOADING);
+  // FG-694/RF-4: the read timeout is FOUR polls long, so a poll that started a fresh
+  // read every tick superseded every slow read before its own timeout could land and
+  // the surface stayed in `loading` forever. The reader owns that reconciliation — one
+  // read per URL in flight — rather than a sequence token here that only ever decided
+  // which answer wins a race the poll should not have started.
+  const activityReader = useRef(null);
+  if (activityReader.current === null) activityReader.current = createActivityReader(setActivityLoad);
   // FG-576: the project-scoped orchestrator read. Null until a project is selected —
   // /api/orchestrators has no cross-project form, because it is the one route that
   // can carry a live remote-control credential.
   const [orchestrators, setOrchestrators] = useState(null);
 
   const poll = useCallback(async () => {
+    const q = projectScopeQuery(projectFilter, checkoutFilter);
+    // Deliberately OUTSIDE the Promise.all below. A rejection from any sibling fetch
+    // used to abandon the whole batch, which left the Current-activity surface
+    // showing its last payload as though it were still current; this read owns its
+    // own outcome — including its own failure — and always lands.
+    activityReader.current.poll(`/api/current-activity${q}`);
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
       const reqs = [
         view === "activity" ? fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`) : Promise.resolve(null),
         fetch(`/api/in-flight${q}`),
         fetch(`/api/verifications/in-progress${q}`),
         fetch(`/api/review-loop/phases${q}`),
-        fetch(`/api/current-activity${q}`),
         // Only asked for with a project in hand: the route refuses an unscoped
         // request, and asking anyway would be building the cross-project habit the
         // credential rule exists to prevent.
@@ -115,12 +129,11 @@ function App() {
       // Only poll /api/projects on the projects view (or first load) — saves a
       // filesystem scan every 2s once the registry is populated.
       if (view === "projects" || projects.length === 0) reqs.push(fetch("/api/projects"));
-      const [feedRes, ifRes, ivRes, phasesRes, activityRes, orchRes, projRes] = await Promise.all(reqs);
+      const [feedRes, ifRes, ivRes, phasesRes, orchRes, projRes] = await Promise.all(reqs);
       if (feedRes?.ok) setFeed(await feedRes.json());
       if (ifRes.ok) setInFlight(await ifRes.json());
       if (ivRes && ivRes.ok) setInProgressVerifications(await ivRes.json());
       if (phasesRes && phasesRes.ok) setReviewLoopPhases(await phasesRes.json());
-      if (activityRes && activityRes.ok) setActivity(await activityRes.json());
       setOrchestrators(orchRes && orchRes.ok ? await orchRes.json() : null);
       if (projRes && projRes.ok) setProjects(await projRes.json());
       setError(null);
@@ -129,6 +142,13 @@ function App() {
       setError(String(e));
     }
   }, [view, projectFilter, checkoutFilter, projects.length]);
+
+  // The retry affordance behind AC7. It supersedes whatever is in flight and goes back
+  // to `loading` first, so the operator sees the click do something and the stale
+  // failure copy does not linger over a read that is already running.
+  const retryCurrentActivity = useCallback(() => {
+    activityReader.current.retry(`/api/current-activity${projectScopeQuery(projectFilter, checkoutFilter)}`);
+  }, [projectFilter, checkoutFilter]);
 
   const pollPlanUsage = useCallback(async () => {
     setPlanUsageLoading(true);
@@ -454,7 +474,8 @@ function App() {
             inFlight=${inFlight}
             verifications=${inProgressVerifications}
             phases=${reviewLoopPhases}
-            activity=${activity}
+            activityLoad=${activityLoad}
+            onRetryActivity=${retryCurrentActivity}
             now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
@@ -519,7 +540,12 @@ function App() {
             onRefreshPlanUsage=${refreshPlanUsage}
           />`
         : html`
-          <${CurrentActivitySection} activity=${activity} now=${now} onTaskClick=${(id) => setSelectedTaskId(id)} />
+          <${CurrentActivitySection}
+            load=${activityLoad}
+            now=${now}
+            onTaskClick=${(id) => setSelectedTaskId(id)}
+            onRetry=${retryCurrentActivity}
+          />
 
           <${OrchestratorSection} data=${orchestrators} onTaskClick=${(id) => setSelectedTaskId(id)} />
 
@@ -548,7 +574,7 @@ function App() {
   `;
 }
 
-function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activity, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
+function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
   return html`
     <section class="home-view" aria-label="Dashboard home">
       <${UsageLimits}
@@ -558,7 +584,7 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
         refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
-      <${CurrentActivitySection} activity=${activity} now=${now} onTaskClick=${onTaskClick} />
+      <${CurrentActivitySection} load=${activityLoad} now=${now} onTaskClick=${onTaskClick} onRetry=${onRetryActivity} />
       <div class="home-in-flight-group">
         <div class="home-section-heading">
           <div>
@@ -1351,167 +1377,6 @@ function ProjectChip({ entry }) {
   `;
 }
 
-// FG-679 (BD-1): ONE `Current activity` surface with three DISTINCT sections.
-//
-// Host verification is NEVER represented as an agent task, and a pending required
-// check is never represented as either — the sections are disjoint by construction
-// because the server derives them disjointly. The surface answers the operator's
-// actual question at a glance ("is something happening, or is this stuck?"), which
-// a task-only projection structurally cannot: a run whose only work in flight is a
-// `forge launch run` verification has no task row at all.
-//
-// READ-ONLY. There is no start, stop, or retry affordance here for a launch or for
-// CI, and no host filesystem path is rendered or linked: a launch is addressed by
-// its identity.
-// An agent row navigates to its task, so it is a control and must be reachable as
-// one: focusable, with Enter/Space activating it. Same shape as ProjectCard's — a
-// mouse-only affordance on a new surface is a defect in the surface.
-function caRowKey(event, activate) {
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    activate();
-  }
-}
-
-function CurrentActivitySection({ activity, now, onTaskClick }) {
-  const agents = (activity && activity.agents) || [];
-  const launches = (activity && activity.hostVerification) || [];
-  const unassociated = (activity && activity.unassociated) || [];
-  const ci = (activity && activity.requiredCi) || { state: "not_observed", observations: [] };
-  const ciEmpty = ciSectionLabel(ci);
-
-  return html`
-    <section class="current-activity" aria-labelledby="current-activity-heading">
-      <div class="home-section-heading">
-        <div>
-          <div class="home-section-kicker">Right now</div>
-          <h2 id="current-activity-heading">Current activity</h2>
-        </div>
-        ${activity === null ? html`<span class="muted mono">loading…</span>` : activityIsEmpty(activity) ? html`<span class="muted mono">nothing observed</span>` : null}
-      </div>
-
-      <section class="ca-section" aria-labelledby="ca-agents-heading">
-        <h3 id="ca-agents-heading" class="ca-heading">Agents</h3>
-        ${agents.length === 0
-          ? html`<div class="ca-empty">No agent task in flight.</div>`
-          : agents.map((a) => html`
-            <div
-              class="item ca-row ca-agent-row"
-              key=${a.taskId}
-              role="button"
-              tabIndex="0"
-              aria-label=${`Open task ${a.taskId} — ${a.agentRole}, ${a.runTitle}`}
-              onClick=${() => onTaskClick && onTaskClick(a.taskId)}
-              onKeyDown=${(event) => caRowKey(event, () => onTaskClick && onTaskClick(a.taskId))}
-            >
-              <span class="badge status-${a.status}">${a.status.replace(/_/g, " ")}</span>
-              <div>
-                <div><strong>${a.agentRole}</strong> <span class="faint"> ·</span> <span class="muted">${a.runTitle}</span></div>
-                <div class="faint mono" style="font-size: 11px;">${a.phase} · ${a.taskId}${a.projectLabel ? ` · ${a.projectLabel}` : ""}</div>
-              </div>
-              <div class="muted mono" style="font-size: 11px;">${caElapsed(a.startedAt, now)}</div>
-            </div>
-          `)}
-      </section>
-
-      <section class="ca-section" aria-labelledby="ca-host-heading">
-        <h3 id="ca-host-heading" class="ca-heading">Host verification</h3>
-        ${launches.length === 0
-          ? html`<div class="ca-empty">No host launch observed in flight.</div>`
-          : launches.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
-      </section>
-
-      <section class="ca-section" aria-labelledby="ca-ci-heading">
-        <h3 id="ca-ci-heading" class="ca-heading">Required CI</h3>
-        ${ciEmpty
-          ? html`<div class="ca-empty ca-ci-empty">${ciEmpty}</div>`
-          : ci.observations.map((o) => html`<${RequiredCiRow} key=${o.candidateSha + o.attemptId} observation=${o} />`)}
-      </section>
-
-      ${unassociated.length > 0 ? html`
-        <section class="ca-section" aria-labelledby="ca-unassoc-heading">
-          <h3 id="ca-unassoc-heading" class="ca-heading">Unassociated activity</h3>
-          <div class="faint" style="font-size: 11px; padding: 0 14px 6px;">
-            Running under no registered project home. Forge will not guess an owner from a launch name, its argv, or its log.
-          </div>
-          ${unassociated.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
-        </section>
-      ` : null}
-    </section>
-  `;
-}
-
-// The badge text is the server-rendered `statusLabel` — src/v2/launch.ts's
-// `statusLine`, byte for byte. SIGTERM-terminated, a bare signal-range `exited 143`,
-// owner-gone and unknown are FOUR DIFFERENT FACTS and none of them is a generic
-// `failed` (BD-4); a stale observation reads `unobserved since <t>` and is never
-// dressed up as `running` or as terminal (BD-12).
-// Elapsed, or an explicit dash. A start time we cannot read — or one that is AHEAD
-// of the reader's clock (host/browser skew) — is not an elapsed duration, and
-// rendering a negative one would be a small lie in a surface whose whole job is not
-// to tell them.
-function caElapsed(startedAt, now) {
-  if (!startedAt) return "—";
-  const ms = now - new Date(startedAt).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  return html`⏱ ${formatDuration(ms)}`;
-}
-
-function LaunchRow({ entry, now }) {
-  const badge = launchBadge(entry);
-  const assoc = launchAssociationLabel(entry);
-  return html`
-    <div class="item ca-row ca-launch-row">
-      <span class="badge ${badge.class}" title=${`observed ${entry.observedAt}`}>${badge.text}</span>
-      <div>
-        <div>
-          <strong class="mono">${entry.name || entry.launchId}</strong>
-          ${assoc ? html`<span class="ca-assoc-badge">${assoc}</span>` : null}
-        </div>
-        <div class="faint mono" style="font-size: 11px;">${entry.commandLine}</div>
-        <div class="faint mono" style="font-size: 11px;">${launchIdentityLine(entry)}</div>
-      </div>
-      <div class="muted mono" style="font-size: 11px;" title="time since the launch started">
-        ${caElapsed(entry.startedAt, now)}
-      </div>
-    </div>
-  `;
-}
-
-// BD-5: the EXACT candidate sha, and EVERY required context with its own state, URL
-// and observation time. A summary verdict does not satisfy this, so there is no
-// summary-only rendering here. BD-6: only the newest observation is ever served, so
-// evidence bound to a superseded candidate is simply absent — never carried forward
-// and never relabeled.
-function RequiredCiRow({ observation }) {
-  const rows = ciContextRows(observation);
-  return html`
-    <div class="item ca-row ca-ci-row">
-      <span class="badge ${ciBadgeClass(observation)}">${ciBadgeText(observation)}</span>
-      <div>
-        <div>
-          <span class="muted">candidate</span> <strong class="mono ca-sha">${observation.candidateSha}</strong>
-          ${observation.ticketId ? html`<span class="faint"> · ${observation.ticketId}</span>` : null}
-        </div>
-        ${rows.length === 0
-          ? html`<div class="faint mono" style="font-size: 11px;">No required context enumerated at this sha.</div>`
-          : html`<div class="ca-ci-contexts">
-              ${rows.map((c) => html`
-                <div class="ca-ci-context" key=${c.context}>
-                  <span class="ca-ctx-name mono">${c.context}</span>
-                  <span class="ca-ctx-state ${c.class}">${c.state}</span>
-                  ${c.url ? html`<a class="ca-ctx-url" href=${c.url} target="_blank" rel="noreferrer noopener">check</a>` : html`<span class="faint">(no url)</span>`}
-                  <span class="faint mono ca-ctx-observed">observed ${c.observedAt}</span>
-                </div>
-              `)}
-            </div>`}
-        ${observation.unavailableReason ? html`<div class="faint mono" style="font-size: 11px;">unavailable: ${observation.unavailableReason}</div>` : null}
-      </div>
-      <div class="muted mono" style="font-size: 11px;">${observation.observedAt}</div>
-    </div>
-  `;
-}
-
 // FG-576 (AC7/AC11) — the project-scoped interactive orchestrator panel.
 //
 // Each row is a receipt JOINED to the launcher-owned liveness record, so it says
@@ -2065,17 +1930,8 @@ function formatRelativeTime(iso) {
   return `${day}d ago`;
 }
 
-// Wall-clock run-time of a finished task. Sub-minute shows seconds; longer keeps
-// seconds for at-a-glance precision (matches `forge show`'s duration intent).
-function formatDuration(ms) {
-  if (ms == null) return null;
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ${sec % 60}s`;
-  const hr = Math.floor(min / 60);
-  return `${hr}h ${min % 60}m`;
-}
+// Wall-clock run-time of a finished task — `formatDuration`, imported from
+// duration.js since FG-694 so the Current-activity view shares the one format.
 
 function truncate(s, max) {
   if (s.length <= max) return s;
