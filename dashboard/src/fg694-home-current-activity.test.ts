@@ -31,9 +31,11 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { h } from "preact";
 import {
   ACTIVITY_LOADING,
+  RENDER_DEREFERENCE_CONTRACT,
   CI_FAILED_LABEL,
   CI_NOT_STARTED_LABEL,
   CI_PASSED_LABEL,
@@ -49,6 +51,7 @@ import {
   homeActivityView,
   homeCiSummaries,
   isCurrentActivityPayload,
+  isRenderableEntry,
   readCurrentActivity,
 } from "../client/current-activity-render.js";
 import { CurrentActivitySection } from "../client/current-activity-view.js";
@@ -135,6 +138,12 @@ function observation(over: Partial<RequiredCiObservationEntry> = {}): RequiredCi
     label: CI_RUNNING_LABEL,
     ...over,
   };
+}
+
+/** An `observed` requiredCi section around whatever observations a fixture wants —
+ *  including deliberately malformed ones, which is why it takes `unknown[]`. */
+function ciSection(observations: unknown[]): { state: string; label: string; observations: unknown[] } {
+  return { state: "observed", label: `${observations.length} observed`, observations };
 }
 
 /** The ticket's own example: 10 required contexts, 7 of them settled. */
@@ -489,15 +498,23 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
     assert.match(collapsed(load), new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
   });
 
-  // ── RF-3: a structurally malformed ENTRY is a failed read, not renderable data ──
+  // ── RF-3 / RF-5: a structurally malformed ENTRY is a failed read, at ANY depth ──
   //
-  // The container check alone said `ready` for a 200 whose `agents` array held a
+  // RF-3: the container check alone said `ready` for a 200 whose `agents` array held a
   // `null`, and the render then threw building the row — showing the operator neither
-  // the activity nor the unavailable state with its Retry. AC7 enumerates exactly this
-  // case, so the validator has to reject the entries, not just their containers.
-  describe("FG-694 AC7 (RF-3) — malformed entries resolve to `unavailable`, never to a thrown render", () => {
-    /** The PRE-FIX rule, restated, so each fixture below is shown to be non-vacuous:
-     *  every one of them is a body the shipped validator called `ready`. */
+  // the activity nor the unavailable state with its Retry.
+  //
+  // RF-5: the SAME defect one level deeper, and the reason RF-3's first fix was not
+  // enough. That fix validated the CI observation object but not its `contexts`
+  // members, so `contexts: [null]` still read as `ready` and `ciContextRows` still
+  // threw on `c.context`.
+  //
+  // AC7 enumerates exactly this case, so what is asserted below is the CLASS, not the
+  // two reported shapes: every field named by RENDER_DEREFERENCE_CONTRACT, at every
+  // depth in it, on every entry array that reaches a row.
+  describe("FG-694 AC7 (RF-3/RF-5) — malformed entries resolve to `unavailable`, never to a thrown render", () => {
+    /** The PRE-RF-3 rule, restated, so each fixture below is shown to be non-vacuous:
+     *  every one of them is a body the originally shipped validator called `ready`. */
     const containerOnlyAccepted = (v: unknown): boolean => {
       const o = v as Record<string, unknown> | null;
       if (!o || typeof o !== "object" || Array.isArray(o)) return false;
@@ -508,8 +525,23 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       return Array.isArray(ci.observations);
     };
 
-    const MALFORMED: Array<{ name: string; body: unknown }> = [
-      { name: "agents: [null] — the reported case; the row build reads `a.taskId`", body: payload({ agents: [null] } as never) },
+    /** The RF-3 fix, restated — entries validated, their MEMBERS not. A fixture this
+     *  one accepts is a fixture that defeats the previous remediation cycle, which is
+     *  what makes the RF-5 coverage below non-vacuous against it specifically. */
+    const entryOnlyAccepted = (v: unknown): boolean => {
+      if (!containerOnlyAccepted(v)) return false;
+      const o = v as Record<string, unknown>;
+      const obj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === "object" && !Array.isArray(x);
+      const str = (x: unknown): boolean => typeof x === "string" && x !== "";
+      const launches = [...(o.hostVerification as unknown[]), ...(Array.isArray(o.unassociated) ? o.unassociated : [])];
+      if (!(o.agents as unknown[]).every((a) => obj(a) && str(a.taskId) && str(a.status))) return false;
+      if (!launches.every((l) => obj(l) && str(l.launchId))) return false;
+      const ci = o.requiredCi as Record<string, unknown>;
+      return (ci.observations as unknown[]).every((c) => obj(c) && str(c.candidateSha));
+    };
+
+    const MALFORMED: Array<{ name: string; body: unknown; defeatsEntryOnlyFix?: true }> = [
+      { name: "agents: [null] — the reported RF-3 case, where the row build reads `a.taskId`", body: payload({ agents: [null] } as never) },
       { name: "an agent entry with no taskId", body: payload({ agents: [{ ...agent, taskId: undefined }] } as never) },
       { name: "an agent entry with no status — AgentRow calls `entry.status.replace`", body: payload({ agents: [{ ...agent, status: undefined }] } as never) },
       { name: "agents: [[]] — an array where an entry belongs", body: payload({ agents: [[]] } as never) },
@@ -521,13 +553,63 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       },
       {
         name: "a CI observation carrying no candidate sha",
-        body: payload({ requiredCi: { state: "observed", label: "1 observed", observations: [{ ...observation(), candidateSha: "" }] } } as never),
+        body: payload({ requiredCi: ciSection([{ ...observation(), candidateSha: "" }]) } as never),
+      },
+      // ── RF-5 — the same class one level deeper, inside an observation ──
+      {
+        name: "contexts: [null] — the reported RF-5 case, where ciContextRows reads `c.context`",
+        body: payload({ requiredCi: ciSection([{ candidateSha: "a".repeat(40), contexts: [null] }]) } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "a null context alongside well-formed ones, in a fully populated observation",
+        body: payload({ requiredCi: ciSection([observation({ contexts: [context("test", "pending"), null] as never })]) } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "a null context under the SECOND of two current candidates",
+        body: payload({
+          requiredCi: ciSection([
+            observation({ ticketId: "FG-253" }),
+            observation({ ticketId: "FG-679", attemptId: "attempt-2", contexts: [null] as never }),
+          ]),
+        } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "a context that is a string rather than an object",
+        body: payload({ requiredCi: ciSection([observation({ contexts: ["test"] as never })]) } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "a context with no name — ciContextRows reads `c.context` and keys the row on it",
+        body: payload({ requiredCi: ciSection([observation({ contexts: [{ state: "pending", url: null, observedAt: OBSERVED_AT }] as never })]) } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "a context with no state — the row renders it as its own text",
+        body: payload({ requiredCi: ciSection([observation({ contexts: [{ context: "test", url: null, observedAt: OBSERVED_AT }] as never })]) } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "an observation with no contexts array at all — `CI not started` would be a claim about checks we never read",
+        body: payload({ requiredCi: ciSection([{ ...observation(), contexts: undefined }]) } as never),
+        defeatsEntryOnlyFix: true,
+      },
+      {
+        name: "an observation whose contexts is an object rather than an array",
+        body: payload({ requiredCi: ciSection([{ ...observation(), contexts: { test: "pending" } }]) } as never),
+        defeatsEntryOnlyFix: true,
       },
     ];
 
-    for (const { name, body } of MALFORMED) {
+    for (const { name, body, defeatsEntryOnlyFix } of MALFORMED) {
       test(`${name} → unavailable + retry, and none of the four claims`, async () => {
         assert.equal(containerOnlyAccepted(body), true, "NOT vacuous: the pre-fix container check accepted this body");
+        if (defeatsEntryOnlyFix) {
+          assert.equal(entryOnlyAccepted(body), true,
+            "NOT vacuous against the PREVIOUS remediation either: entry-level validation accepted this body too");
+        }
         assert.equal(isCurrentActivityPayload(body), false);
 
         // Through the shipping read path, not a hand-built load.
@@ -580,6 +662,228 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       const sparse = payload({ agents: [{ taskId: "task-1", status: "running" }] } as never);
       assert.equal(isCurrentActivityPayload(sparse), true);
       assert.doesNotThrow(() => collapsed({ phase: "ready", activity: sparse }));
+    });
+
+    test("a `ready` load holding the RF-5 shape renders the unavailable state rather than throwing in ciContextRows", () => {
+      // The other door into the renderer, at the depth RF-5 found. `homeActivityView`
+      // walked straight into `ciContextRows` and threw `Cannot read properties of null
+      // (reading 'context')` before any of this rendered.
+      const load = { phase: "ready", activity: payload({ requiredCi: ciSection([{ candidateSha: "a".repeat(40), contexts: [null] }]) } as never) };
+      assert.equal(activityPhase(load), "unavailable");
+      assert.doesNotThrow(() => homeActivityView(load));
+      assert.doesNotThrow(() => collapsed(load));
+      assert.match(collapsed(load), new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
+    });
+
+    // ─────── the CLASS, generated from the contract rather than from bug reports ──────
+    //
+    // One test per entry kind the renderer walks into, driven by the SAME table the
+    // validator is generated from. A field added to the contract is covered here the
+    // moment it is added, which is the property RF-5 showed a hand-written case list
+    // does not have.
+
+    /** Where an entry of each kind sits in a payload. */
+    const MOUNT: Record<string, (entry: unknown) => unknown> = {
+      agent: (e) => payload({ agents: [e] } as never),
+      launch: (e) => payload({ hostVerification: [e] } as never),
+      ciObservation: (e) => payload({ requiredCi: ciSection([e]) } as never),
+      ciContext: (e) => payload({ requiredCi: ciSection([observation({ contexts: [e] as never })]) } as never),
+    };
+
+    /** A well-formed entry of each kind, so every rejection below is shown to be caused
+     *  by the one broken field and not by the fixture. */
+    const WELL_FORMED: Record<string, () => Record<string, unknown>> = {
+      agent: () => ({ ...agent }),
+      launch: () => ({ ...launch }),
+      ciObservation: () => ({ ...observation() }),
+      ciContext: () => ({ ...context("test", "pending") }),
+    };
+
+    /** Values that break a field of each declared kind. */
+    const BREAKS: Record<string, unknown[]> = {
+      text: [undefined, null, "", 7, {}, []],
+      string: [undefined, null, 7, {}, []],
+      "ciContext[]": [undefined, null, 7, "test", {}, [null], ["test"], [{ state: "pending" }]],
+    };
+
+    /** The whole AC7 promise for one body, through the shipping read path. */
+    const assertUnavailable = (body: unknown, because: string): void => {
+      const load = activityFromBody(body);
+      assert.equal(activityPhase(load), "unavailable", because);
+      assert.equal((load as { reason: string }).reason, "malformed", because);
+      const text = collapsed(load);
+      assert.match(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL), because);
+      assert.equal(elements(home(load)).filter((el) => el.type === "button").length, 1, `${because} — and the operator can retry`);
+      for (const claim of OBSERVATION_CLAIMS) assert.doesNotMatch(text, new RegExp(claim), `${because} — may not claim "${claim}"`);
+      // The other door: a load that CLAIMS `ready` must not throw its way past the state.
+      assert.doesNotThrow(() => collapsed({ phase: "ready", activity: body }), because);
+    };
+
+    for (const kind of Object.keys(RENDER_DEREFERENCE_CONTRACT)) {
+      test(`RENDER_DEREFERENCE_CONTRACT.${kind} covers every field the renderer dereferences — breaking any one of them resolves to unavailable`, () => {
+        const mount = MOUNT[kind]!;
+        const wellFormed = WELL_FORMED[kind]!;
+
+        // NOT vacuous, per kind: the same fixture, unbroken, is a payload that renders.
+        assert.equal(isRenderableEntry(kind, wellFormed()), true, `the ${kind} fixture must itself be well formed`);
+        assert.equal(isCurrentActivityPayload(mount(wellFormed())), true, `a well-formed ${kind} entry IS a payload`);
+        assert.equal(activityPhase(activityFromBody(mount(wellFormed()))), "ready", `a well-formed ${kind} entry still reaches ready`);
+
+        for (const notAnEntry of [null, undefined, 7, "entry", [], true]) {
+          const body = mount(notAnEntry);
+          assert.equal(isCurrentActivityPayload(body), false, `${kind}: ${String(notAnEntry)} is not an entry`);
+          assertUnavailable(body, `${kind} entry ${String(notAnEntry)}`);
+        }
+
+        const fields = RENDER_DEREFERENCE_CONTRACT[kind as keyof typeof RENDER_DEREFERENCE_CONTRACT] as Record<string, string>;
+        assert.ok(Object.keys(fields).length > 0, `${kind} declares no dereferenced field`);
+        for (const [field, spec] of Object.entries(fields)) {
+          const breaks = BREAKS[spec];
+          assert.ok(breaks !== undefined, `no break values known for field kind "${spec}" — extend BREAKS alongside the contract`);
+          for (const value of breaks!) {
+            const body = mount({ ...wellFormed(), [field]: value });
+            assert.equal(isCurrentActivityPayload(body), false, `${kind}.${field} = ${String(value)} must not validate`);
+            assertUnavailable(body, `${kind}.${field} = ${String(value)}`);
+          }
+        }
+      });
+    }
+
+    // ─────────────── the mechanism that is supposed to prevent the next RF-5 ───────────
+    //
+    // RF-5 was RF-3 one level deeper: the fix validated what the report named and the
+    // renderer kept dereferencing one field further down. This test reads the render
+    // source and requires every unguarded dereference to be accounted for — either the
+    // contract validates it, or this table declares that it is read through a guard.
+    // A new field read without validation fails HERE, at the commit that adds it.
+
+    const SOURCE: Record<string, string> = {
+      "current-activity-view.js": readFileSync(new URL("../client/current-activity-view.js", import.meta.url), "utf8"),
+      "current-activity-render.js": readFileSync(new URL("../client/current-activity-render.js", import.meta.url), "utf8"),
+    };
+
+    function bodyOf(file: string, fn: string): string {
+      const src = SOURCE[file]!;
+      const start = src.indexOf(`function ${fn}(`);
+      assert.notEqual(start, -1, `${file} no longer defines ${fn} — re-audit its dereferences against RENDER_DEREFERENCE_CONTRACT`);
+      const end = src.indexOf("\n}", start);
+      assert.notEqual(end, -1, `${file}: could not find the end of ${fn}`);
+      return src.slice(start, end);
+    }
+
+    /** `isCurrentActivityPayload` validates these four at the payload level. */
+    const PAYLOAD_VALIDATED = ["agents", "hostVerification", "requiredCi", "unassociated"];
+
+    const validatedFields = (kind: string): string[] =>
+      kind === "payload"
+        ? PAYLOAD_VALIDATED
+        : Object.keys(RENDER_DEREFERENCE_CONTRACT[kind as keyof typeof RENDER_DEREFERENCE_CONTRACT]);
+
+    /** Every place the render path walks into payload data, and what it reads there.
+     *  `guarded` is the explicit claim "this one cannot crash and may legitimately be
+     *  absent" — a type check, a `||` fallback, or a plain text interpolation. */
+    const AUDIT: Array<{ file: string; fn: string; receiver: string; kind: string; guarded: string[] }> = [
+      { file: "current-activity-view.js", fn: "CurrentActivityBlock", receiver: "a", kind: "agent", guarded: [] },
+      { file: "current-activity-view.js", fn: "CurrentActivityBlock", receiver: "l", kind: "launch", guarded: [] },
+      { file: "current-activity-view.js", fn: "AgentRow", receiver: "entry", kind: "agent",
+        guarded: ["agentRole", "runTitle", "phase", "projectLabel", "startedAt"] },
+      { file: "current-activity-view.js", fn: "LaunchRow", receiver: "entry", kind: "launch",
+        guarded: ["name", "commandLine", "observedAt", "startedAt"] },
+      { file: "current-activity-view.js", fn: "ciRowKey", receiver: "o", kind: "ciObservation", guarded: ["attemptId"] },
+      { file: "current-activity-view.js", fn: "RequiredCiRow", receiver: "observation", kind: "ciObservation",
+        guarded: ["observedAt", "unavailableReason"] },
+      { file: "current-activity-render.js", fn: "ciContextRows", receiver: "observation", kind: "ciObservation", guarded: [] },
+      { file: "current-activity-render.js", fn: "ciContextRows", receiver: "c", kind: "ciContext",
+        guarded: ["url", "observedAt"] },
+      { file: "current-activity-render.js", fn: "ciCompactSummary", receiver: "o", kind: "ciObservation",
+        guarded: ["state", "outcome", "unavailableReason", "label"] },
+      { file: "current-activity-render.js", fn: "ciCandidateLabel", receiver: "observation", kind: "ciObservation",
+        guarded: ["ticketId"] },
+      { file: "current-activity-render.js", fn: "launchBadgeClass", receiver: "entry", kind: "launch",
+        guarded: ["observation", "status"] },
+      { file: "current-activity-render.js", fn: "launchBadgeText", receiver: "entry", kind: "launch", guarded: ["statusLabel"] },
+      { file: "current-activity-render.js", fn: "launchAssociationLabel", receiver: "entry", kind: "launch", guarded: ["unassociated"] },
+      { file: "current-activity-render.js", fn: "launchIdentityLine", receiver: "entry", kind: "launch",
+        guarded: ["runId", "taskId", "ticketId", "campaignId", "projectLabel"] },
+      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: [] },
+    ];
+
+    test("every field the render path dereferences is either validated by the contract or declared guarded", () => {
+      for (const row of AUDIT) {
+        const body = bodyOf(row.file, row.fn);
+        const read = new Set<string>();
+        for (const match of body.matchAll(new RegExp(`\\b${row.receiver}\\.([A-Za-z_$][\\w$]*)`, "g"))) read.add(match[1]!);
+        assert.ok(read.size > 0,
+          `${row.file} ${row.fn}: no \`${row.receiver}.\` dereference found — this audit row is stale and is proving nothing`);
+
+        const accounted = new Set([...validatedFields(row.kind), ...row.guarded]);
+        const unaudited = [...read].filter((field) => !accounted.has(field));
+        assert.deepEqual(unaudited, [],
+          `${row.file} ${row.fn} reads ${row.receiver}.${unaudited[0]} off a ${row.kind} that no one validated. `
+          + `A field dereferenced without validation is exactly how RF-5 appeared one level below RF-3: it renders `
+          + `until a payload omits it, and then it throws instead of showing the unavailable state. Either add it to `
+          + `RENDER_DEREFERENCE_CONTRACT.${row.kind}, or read it through a guard and list it as guarded here.`);
+      }
+    });
+
+    test("the audit table itself is honest — a guarded field really is absent-tolerant", () => {
+      // Otherwise the table would be a way to silence the audit rather than satisfy it.
+      // Every field DECLARED guarded is stripped from a well-formed payload at once, and
+      // the surface must still validate and still render.
+      const strip = (entry: Record<string, unknown>, fields: string[]): Record<string, unknown> => {
+        const out = { ...entry };
+        for (const field of fields) delete out[field];
+        return out;
+      };
+      const guardedFor = (kind: string): string[] =>
+        [...new Set(AUDIT.filter((row) => row.kind === kind).flatMap((row) => row.guarded))];
+
+      const stripped = payload({
+        agents: [strip({ ...agent }, guardedFor("agent"))],
+        hostVerification: [strip({ ...launch }, guardedFor("launch"))],
+        requiredCi: ciSection([
+          strip({ ...observation({ contexts: [strip({ ...context("test", "pending") }, guardedFor("ciContext"))] as never }) },
+            guardedFor("ciObservation")),
+        ]),
+      } as never);
+
+      assert.equal(isCurrentActivityPayload(stripped), true, "a guarded field must be optional in fact, not only by declaration");
+      const text = collapsed({ phase: "ready", activity: stripped });
+      assert.doesNotMatch(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
+      assert.match(text, /task-build-aef6ae/, "the agent row still renders");
+      assert.match(text, /launch-worktree-8pagjk/, "the launch row still renders");
+    });
+
+    test("NOT vacuous at depth: a payload whose contexts are ALL well formed reaches ready and keeps its per-context evidence", () => {
+      const good = payload({
+        agents: [agent],
+        hostVerification: [launch],
+        requiredCi: ciSection([sevenOfTen]),
+      } as never);
+      assert.equal(isCurrentActivityPayload(good), true);
+      assert.equal(activityPhase(activityFromBody(good)), "ready");
+      const load = activityFromBody(good);
+      assert.match(collapsed(load), /CI running/);
+      assert.match(collapsed(load), /7\/10 complete/);
+      assert.equal(withClass(home(load), "ca-ci-context").length, 10, "every context survives the tightened validation");
+      assert.match(opened(load), /check-0/);
+    });
+
+    test("a context with an EMPTY state string is still a payload — the observer may report one", () => {
+      // `parseContexts` in src/v2/current-activity.ts passes an empty `context` name
+      // through, and defaults an unreadable state to a string. Neither can crash the row,
+      // so neither may turn a readable dashboard into a permanent error banner.
+      const empties = payload({
+        requiredCi: ciSection([observation({ contexts: [{ context: "", state: "", url: null, observedAt: "" }] as never })]),
+      } as never);
+      assert.equal(isCurrentActivityPayload(empties), true);
+      assert.equal(activityPhase(activityFromBody(empties)), "ready");
+    });
+
+    test("an observation with an EMPTY contexts array is still a payload — that is `CI not started`, an observed fact", () => {
+      const none = payload({ requiredCi: ciSection([observation({ contexts: [], state: "not_running", outcome: "success" })]) } as never);
+      assert.equal(isCurrentActivityPayload(none), true);
+      assert.match(collapsed(activityFromBody(none)), new RegExp(CI_NOT_STARTED_LABEL));
     });
   });
 

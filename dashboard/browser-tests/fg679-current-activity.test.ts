@@ -513,6 +513,50 @@ test("FG-694 AC7 (RF-3): a 200 whose ENTRIES are malformed renders the unavailab
   }
 });
 
+test("FG-694 AC7 (RF-5): a 200 whose CI CONTEXTS are malformed renders the unavailable state — the surface never breaks mid-render", async () => {
+  // The same defect one level deeper, and the reason RF-3's first fix was not enough:
+  // the observation object validated, its `contexts` members did not, and
+  // `ciContextRows` threw `Cannot read properties of null (reading 'context')` while
+  // composing the compact CI line. In a browser that is a blank surface, not an error
+  // state — the operator sees neither the activity nor the Retry.
+  servedRawBody = JSON.stringify({
+    generatedAt: NOW,
+    scope: { runId: null, projectDirs: null },
+    agents: [],
+    hostVerification: [],
+    requiredCi: {
+      state: "observed",
+      label: "1 observed",
+      observations: [{ candidateSha: "a".repeat(40), contexts: [null] }],
+    },
+    unassociated: [],
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1200 }, reducedMotion: "reduce" });
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    await page.goto(`${baseUrl}/`);
+    await page.locator("section.current-activity").waitFor();
+    await page.locator(".ca-unavailable").waitFor();
+
+    const text = await page.locator("section.current-activity").innerText();
+    assert.match(text, /Current activity unavailable/);
+    assert.match(text, /could not read/, "the detail is about the READ, never about the checks");
+    for (const claim of ["No agent task in flight", "No host launch observed", "CI not observed", "Nothing currently running"]) {
+      assert.doesNotMatch(text, new RegExp(claim), `a malformed read may not claim "${claim}"`);
+    }
+    assert.equal(await page.locator(".ca-retry").count(), 1, "the operator's recovery is not a page reload");
+    assert.equal(await page.locator(".ca-ci-item").count(), 0, "no CI row was built from the malformed contexts");
+    assert.equal(await page.locator(".ca-ci-context").count(), 0, "and no per-context row either");
+    assert.deepEqual(errors, [], "the render did not throw");
+
+    await page.screenshot({ path: join(SHOTS, "fg694-rf5-malformed-context.png"), fullPage: true });
+    await page.close();
+  } finally {
+    servedRawBody = null;
+  }
+});
+
 test("FG-679 BD-3/BD-14: an unassociated launch is LABELED, and a host-level bucket renders separately", async () => {
   served = base({
     hostVerification: [launch({ launchId: "launch-cwd-ffffff", associationKind: "cwd", unassociated: true, placement: "project", runId: null })],

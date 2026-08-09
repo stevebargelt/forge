@@ -210,34 +210,107 @@ function isArrayOf(value, valid) {
   return Array.isArray(value) && value.every(valid);
 }
 
-/** The fields the ROW COMPONENTS dereference without asking — `entry.status.replace`
- *  in AgentRow, `entry.name || entry.launchId` in LaunchRow. An entry missing one of
- *  them is not sparse data to render around; it throws mid-render, and a thrown render
- *  is the one thing AC7 has no state for. Deliberately NOT a full field-by-field
- *  schema: `runTitle`, `phase`, `agentRole` and friends render as nothing when absent,
- *  and rejecting a whole payload over a cosmetic gap would turn tolerable drift from an
- *  older server into `Current activity unavailable`. */
-function isAgentEntry(value) {
-  return isPlainObject(value) && isNonEmptyString(value.taskId) && isNonEmptyString(value.status);
+// ─────────────────── The dereference contract (FG-694 / RF-3 / RF-5) ───────────────
+//
+// Two review findings, one defect, at two depths. RF-3: `agents: [null]` validated as
+// a payload because only the CONTAINER was checked, and the render then read `a.taskId`
+// and threw. RF-5: the same thing one level deeper — the fix for RF-3 validated the CI
+// observation object but not its `contexts` members, so `contexts: [null]` still
+// validated and `ciContextRows` still threw on `c.context`. A thrown render is the one
+// outcome AC7 has no state for: the operator sees neither the activity nor the
+// unavailable banner with its Retry.
+//
+// So the check is not written per bug report. It is written as ONE TABLE of what the
+// render path DEREFERENCES, at every level it walks into, and the predicates are
+// generated from it. Adding a level means adding a row; the recursion and the
+// rejection come for free. `fg694-home-current-activity.test.ts` audits the render
+// source against this table and fails if a field is dereferenced that is neither
+// listed here nor declared to be read through an explicit guard — which is how the
+// next RF-5 gets caught at the commit that introduces it rather than one review later.
+//
+// It is deliberately NOT a schema of the whole payload. `runTitle`, `phase`,
+// `agentRole`, `observedAt` and friends render as nothing when absent, so rejecting a
+// payload over one of them would turn tolerable drift from an older server into a
+// permanent `Current activity unavailable` — the opposite of what AC7 is for. What is
+// listed is exactly the set that CRASHES, or that is used as a list key.
+
+/** The value kinds a contract field may declare. `text` is "rendered AND used as a
+ *  key or aria-label", so an empty string is not good enough; `string` is "rendered as
+ *  text", where empty is a real value the observer may report. `<kind>[]` recurses into
+ *  another entry kind in the table. */
+const FIELD_KINDS = {
+  text: isNonEmptyString,
+  string: (value) => typeof value === "string",
+};
+
+/** Every field the render path reads WITHOUT a guard, by the entry kind that carries
+ *  it. Keep it in agreement with what the renderer actually does — the audit test is
+ *  the mechanism that makes disagreement loud.
+ *
+ *    agent          AgentRow: `entry.status.replace(…)`, `entry.taskId` as the row key
+ *                   and in its aria-label; CurrentActivityBlock keys on `a.taskId`.
+ *    launch         LaunchRow: `entry.name || entry.launchId`; CurrentActivityBlock
+ *                   keys on `l.launchId`.
+ *    ciObservation  RequiredCiRow renders `observation.candidateSha`, ciRowKey builds
+ *                   its key from it, and ciContextRows walks `observation.contexts`.
+ *    ciContext      ciContextRows reads `c.context` (also the row key) and `c.state`.
+ *                   `c.url` and `c.observedAt` are read THROUGH type guards there, so
+ *                   they cannot crash and are deliberately not required. */
+export const RENDER_DEREFERENCE_CONTRACT = Object.freeze({
+  agent: Object.freeze({ taskId: "text", status: "text" }),
+  launch: Object.freeze({ launchId: "text" }),
+  ciObservation: Object.freeze({ candidateSha: "text", contexts: "ciContext[]" }),
+  ciContext: Object.freeze({ context: "string", state: "string" }),
+});
+
+function checkField(spec, value) {
+  if (spec.endsWith("[]")) return isArrayOf(value, (item) => isRenderableEntry(spec.slice(0, -2), item));
+  return FIELD_KINDS[spec](value);
 }
 
-function isLaunchEntry(value) {
-  return isPlainObject(value) && isNonEmptyString(value.launchId);
+/** Does `value` carry everything the render path will dereference on an entry of this
+ *  kind? Exported so a test asserts against the SAME table the renderer is validated
+ *  by, rather than a second copy of it that can drift. */
+export function isRenderableEntry(kind, value) {
+  const fields = RENDER_DEREFERENCE_CONTRACT[kind];
+  if (fields === undefined) return false;
+  if (!isPlainObject(value)) return false;
+  return Object.keys(fields).every((name) => checkField(fields[name], value[name]));
 }
 
-function isCiObservationEntry(value) {
-  return isPlainObject(value) && isNonEmptyString(value.candidateSha);
+// A typo in the table would otherwise reject every payload silently — an unreadable
+// dashboard with no cause on screen. Fail at import instead: it cannot reach a browser
+// without every test that imports this module failing first.
+for (const [kind, fields] of Object.entries(RENDER_DEREFERENCE_CONTRACT)) {
+  for (const [name, spec] of Object.entries(fields)) {
+    const resolved = spec.endsWith("[]") ? RENDER_DEREFERENCE_CONTRACT[spec.slice(0, -2)] : FIELD_KINDS[spec];
+    if (resolved === undefined) throw new Error(`RENDER_DEREFERENCE_CONTRACT.${kind}.${name}: unknown field kind "${spec}"`);
+  }
 }
+
+const isAgentEntry = (value) => isRenderableEntry("agent", value);
+const isLaunchEntry = (value) => isRenderableEntry("launch", value);
+const isCiObservationEntry = (value) => isRenderableEntry("ciObservation", value);
 
 /** Is this actually a current-activity payload? A 200 carrying an HTML error page,
  *  an empty object, or a truncated body is NOT missing data we can render around —
  *  it is a read that failed, and saying so is the whole of AC7.
  *
- *  The ENTRIES are validated, not just their containers (FG-694/RF-3). `agents: [null]`
- *  is a syntactically valid 200 that used to read as `ready` and then throw on
- *  `a.taskId` while building the row — and a crashed render shows the operator neither
- *  the activity nor the explicit unavailable state with its Retry, which is precisely
- *  the malformed-response case AC7 enumerates.
+ *  Validated at EVERY DEPTH THE RENDERER WALKS INTO, from one table
+ *  (RENDER_DEREFERENCE_CONTRACT), not per reported case: the entries of `agents`,
+ *  `hostVerification` and `unassociated`, the entries of `requiredCi.observations`,
+ *  and the members of each observation's `contexts`. `agents: [null]` (RF-3) and
+ *  `requiredCi.observations[0].contexts: [null]` (RF-5) are both syntactically valid
+ *  200s that used to read as `ready` and then throw mid-render — on `a.taskId` and on
+ *  `c.context` respectively. A crashed render shows the operator neither the activity
+ *  nor the explicit unavailable state with its Retry, which is precisely the
+ *  malformed-response case AC7 enumerates.
+ *
+ *  It rejects the PAYLOAD rather than skipping the bad entry, and the renderer is not
+ *  made defensive to compensate. Rendering the readable half of an unreadable body
+ *  would put partial data on screen under the heading `Current activity` with nothing
+ *  saying so — presenting unobserved absence as observed, which is the entire failure
+ *  class this ticket exists to remove.
  *
  *  Still deliberately tolerant of a payload from an OLDER server: `requiredCi.state` is
  *  not checked against the three known values, so a server that predates FG-694's

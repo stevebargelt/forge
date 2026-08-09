@@ -143,6 +143,19 @@ export function readCurrentActivity(
   fetchImpl?: typeof fetch | null,
   timeoutMs?: number,
 ): Promise<ActivityLoad>;
+/** Every field the render path dereferences WITHOUT a guard, by entry kind — the one
+ *  table `isCurrentActivityPayload` validates from, at every depth the renderer walks
+ *  into (FG-694 / RF-3 / RF-5). `text` is a non-empty string (rendered AND used as a
+ *  list key or aria-label), `string` is any string, `<kind>[]` recurses. */
+export const RENDER_DEREFERENCE_CONTRACT: Readonly<{
+  agent: Readonly<Record<string, string>>;
+  launch: Readonly<Record<string, string>>;
+  ciObservation: Readonly<Record<string, string>>;
+  ciContext: Readonly<Record<string, string>>;
+}>;
+/** Does `value` carry everything the renderer will dereference on an entry of `kind`?
+ *  Unknown kind → false. */
+export function isRenderableEntry(kind: string, value: unknown): boolean;
 export function isCurrentActivityPayload(value: unknown): boolean;
 export function activityFromBody(body: unknown): ActivityLoad;
 export function activityPhase(load: unknown): "loading" | "ready" | "unavailable";

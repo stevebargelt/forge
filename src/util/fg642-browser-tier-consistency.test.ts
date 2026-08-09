@@ -50,13 +50,18 @@ const RESOLVER = join("src", "util", "chrome-bin.ts");
 // surface — three distinct sections, the four BD-4 launch statuses as four distinct
 // strings, `unobserved since <t>`, per-context required CI, old-sha evidence
 // disappearing, and the no-host-path/read-only guarantees.
+// FG-694 grew that suite to 12: the compact hierarchy under the reported historical
+// noise, and one test per malformed-payload depth AC7 has to survive in a real
+// browser — a null AGENT entry (RF-3) and a null CI CONTEXT inside a valid-looking
+// observation (RF-5). Both used to throw mid-render, which leaves the operator a
+// blank surface rather than the unavailable state and its Retry.
 // Growing or pruning the tier is fine — update this map in the same commit, on purpose.
 const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
   "fg591-queue-board.test.ts": 6,
-  "fg679-current-activity.test.ts": 11,
+  "fg679-current-activity.test.ts": 12,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,
@@ -74,7 +79,7 @@ test("FG-642 (exact set): the browser tier is exactly the suites TIER_TESTS name
   );
 });
 
-test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 65", () => {
+test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 66", () => {
   let total = 0;
   for (const [file, expected] of Object.entries(TIER_TESTS)) {
     const found = (tierSource(file).match(/^test\(/gm) ?? []).length;
@@ -87,8 +92,8 @@ test("FG-642 (exact set): every suite keeps its own test count, and the tier kee
   }
   assert.equal(
     total,
-    65,
-    "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added, FG-679's 10 (plus FG-694/RF-3's malformed-entry render) and FG-591's 6"
+    66,
+    "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added, FG-679's 10 (plus FG-694/RF-3's malformed-entry render and FG-694/RF-5's malformed-context render) and FG-591's 6"
   );
 });
 
