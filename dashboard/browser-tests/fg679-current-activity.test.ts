@@ -47,6 +47,8 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { renderShell } from "../src/shell.js";
 import { requireChrome } from "../../src/util/chrome-bin.js";
+import { makeInMemoryDb } from "../../src/store/db.js";
+import { deriveCurrentActivity } from "../../src/v2/current-activity.js";
 import { statusLine, type CurrentActivity } from "@forge/current-activity";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +59,64 @@ mkdirSync(SHOTS, { recursive: true });
 const NOW = "2026-08-05T12:00:00.000Z";
 const SHA_OLD = "a".repeat(40);
 const SHA_NEW = "b".repeat(40);
+const FG694_NOW = new Date("2026-08-08T12:00:00.000Z");
+const FG694_HISTORICAL = ["FG-686", "FG-576", "MG-51", "FG-591", "FG-689", "FG-584", "FG-685", "FG-610", "FG-655", "FG-684"];
+const FG694_CURRENT_SHA = "c".repeat(40);
+
+/**
+ * AC8's reported production shape, intentionally constructed in the browser
+ * fixture through the real derivation.  Supplying only its already-filtered API
+ * result would let a renderer test pass even if the selection layer had quietly
+ * started carrying historical observations forward again.
+ */
+function fg694ReportedShape(): Activity {
+  const db = makeInMemoryDb();
+  const ago = (ms: number): string => new Date(FG694_NOW.getTime() - ms).toISOString();
+  const addRun = (id: string, status: string): void => {
+    db.prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, 'feature', ?, ?, ?, ?)`)
+      .run(id, `run ${id}`, status, ago(7 * 24 * 3_600_000), "/repos/forge");
+  };
+  const addReview = (id: string, runId: string, ticketId: string, state: string): void => {
+    db.prepare(`INSERT INTO reviews (id, run_id, ticket_id, workspace_dir, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, runId, ticketId, "/repos/forge", state, ago(3_600_000), ago(60_000));
+  };
+  const addCi = (runId: string, ticketId: string, sha: string, observedAt: string): void => {
+    const contexts = Array.from({ length: 10 }, (_value, i) => ({
+      context: `check-${i}`,
+      state: i < 7 ? "success" : "pending",
+      url: `https://github.com/o/r/actions/runs/${ticketId}-${i}`,
+      observedAt,
+    }));
+    db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, 'review_loop.ci_observed', ?, ?)`)
+      .run(runId, JSON.stringify({
+        attemptId: `attempt-${ticketId}`,
+        ticketId,
+        projectDir: "/repos/forge",
+        candidateSha: sha,
+        observedAt,
+        outcome: "pending",
+        unavailableReason: null,
+        contexts,
+      }), observedAt);
+  };
+
+  const terminal = ["complete", "failed", "abandoned"];
+  FG694_HISTORICAL.forEach((ticket, i) => {
+    const runId = `run-${ticket.toLowerCase()}`;
+    addRun(runId, terminal[i % terminal.length]!);
+    addReview(`review-${ticket}`, runId, ticket, "settled");
+    addCi(runId, ticket, `${i}`.repeat(2).padEnd(40, "a"), ago(2 * 3_600_000 + i * 60_000));
+  });
+  addRun("run-fg694", "active");
+  addReview("review-FG-694", "run-fg694", "FG-694", "verifying");
+  addCi("run-fg694", "FG-694", FG694_CURRENT_SHA, ago(30_000));
+
+  try {
+    return deriveCurrentActivity(db, { now: FG694_NOW }) as Activity;
+  } finally {
+    db.close();
+  }
+}
 
 // The four BD-4 facts, as the derivation would carry them.
 const FOUR = [
@@ -263,36 +323,49 @@ test("FG-679 BD-12: a stale observation renders literally `unobserved since <t>`
   await page.close();
 });
 
-test("FG-679 BD-5 / FG-694 AC4-AC5: Home shows ONE compact line, and opening it names the exact sha and EVERY context with state, URL and observation time", async () => {
-  served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_OLD, "running", "CI running")] } });
+test("FG-679 BD-5 / FG-694 AC4-AC5/AC8: the reported ten-run historical-noise shape leaves one compact current CI row, with evidence only behind its disclosure", async () => {
+  const derived = fg694ReportedShape();
+  // The real selection layer must discard the ten terminal candidates BEFORE Home
+  // sees the payload.  Keep agents and launches populated too, so the browser
+  // proves the compact hierarchy's authored order under the reported CI load.
+  served = {
+    ...derived,
+    agents: [{
+      runId: "run-fg694", runTitle: "make Home compact and honest", workflow: "feature",
+      projectDir: "/repos/forge", projectLabel: "forge", taskId: "task-build-aef6ae",
+      agentRole: "engineer", agentModel: null, phase: "build", status: "running", startedAt: "2026-08-08T11:50:00.000Z",
+    }],
+    hostVerification: [launch({ launchId: "launch-fg694-current", runId: "run-fg694", ticketId: "FG-694" })],
+  };
   const page = await open();
-  const ciSection = page.locator("section.current-activity section.ca-section").first();
+  assert.deepEqual(await sectionHeadings(page), ["Agents", "Host verification", "Required CI"], "only populated sections render, in their fixed hierarchy order");
+  const ciSection = page.locator("section.current-activity section.ca-section").nth(2);
   await ciSection.locator(".ca-ci-summary").waitFor();
 
-  // AC4: ONE compact line, and no audit payload on the summary.
+  // AC4/AC8: ONE compact line after the reported ten terminal rows were supplied
+  // to the derivation, and no audit payload on the summary.
   assert.equal(await ciSection.locator(".ca-ci-summary").count(), 1);
   const compact = await ciSection.locator(".ca-ci-summary").innerText();
-  assert.match(compact, /FG-679/, "the candidate is named by its ticket");
+  assert.match(compact, /FG-694/, "the current candidate is named by its ticket");
   assert.match(compact, /CI running/);
-  assert.doesNotMatch(compact, new RegExp(SHA_OLD), "the full sha is drill-down detail");
-  assert.doesNotMatch(compact, /example\.invalid/, "check URLs are drill-down detail");
-  assert.doesNotMatch(compact, /2026-08-05T11:59:30/, "raw observation timestamps are drill-down detail");
+  assert.match(compact, /7\/10 complete/, "the compact row retains a useful progress summary");
+  assert.doesNotMatch(compact, new RegExp(FG694_CURRENT_SHA), "the full sha is drill-down detail");
+  assert.doesNotMatch(compact, /github\.com\/o\/r\/actions/, "check URLs are drill-down detail");
+  assert.doesNotMatch(compact, /2026-08-08T11:59:30/, "raw observation timestamps are drill-down detail");
+  const wholeSurface = await page.locator("section.current-activity").innerText();
+  for (const ticket of FG694_HISTORICAL) assert.doesNotMatch(wholeSurface, new RegExp(ticket), `${ticket} is historical noise, never current Home content`);
 
   // AC5: the evidence MOVED, it was not deleted. Everything BD-5 requires is one
   // disclosure away.
   await openCiDetails(page);
   const text = await ciSection.innerText();
 
-  assert.match(text, new RegExp(SHA_OLD), "the FULL candidate sha is named");
-  assert.equal(await ciSection.locator(".ca-ci-context").count(), 2, "EVERY required context is enumerated — a summary verdict does not satisfy BD-5");
-  assert.deepEqual(await ciSection.locator(".ca-ctx-name").allInnerTexts(), ["test", "test-extended"]);
-  assert.deepEqual(await ciSection.locator(".ca-ctx-state").allInnerTexts(), ["pending", "queued"]);
-  assert.deepEqual(
-    await ciSection.locator(".ca-ctx-url").evaluateAll((els) => els.map((e) => (e as HTMLAnchorElement).href)),
-    ["https://example.invalid/checks/1", "https://example.invalid/checks/2"],
-  );
-  assert.match(text, /observed 2026-08-05T11:59:30\.000Z/);
-  assert.match(text, /observed 2026-08-05T11:59:31\.000Z/);
+  assert.match(text, new RegExp(FG694_CURRENT_SHA), "the FULL candidate sha is named");
+  assert.equal(await ciSection.locator(".ca-ci-context").count(), 10, "EVERY required context is reachable — a summary verdict does not satisfy AC5");
+  assert.deepEqual(await ciSection.locator(".ca-ctx-name").allInnerTexts(), Array.from({ length: 10 }, (_value, i) => `check-${i}`));
+  assert.equal((await ciSection.locator(".ca-ctx-url").all()).length, 10, "every context retains its diagnostic URL");
+  assert.match(text, /observed 2026-08-08T11:59:30\.000Z/);
+  await page.screenshot({ path: join(SHOTS, "fg694-historical-noise-current.png"), fullPage: true });
   await page.close();
 });
 
@@ -481,7 +554,7 @@ test("FG-679: an agent row is reachable and activatable BY KEYBOARD, not by mous
 });
 
 test("FG-679: the screenshots for the populated, empty and stale states exist", () => {
-  for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png", "fg694-unavailable.png"]) {
+  for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png", "fg694-unavailable.png", "fg694-historical-noise-current.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);
   }
   console.log(`FG-679 screenshots: ${SHOTS}`);
