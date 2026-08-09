@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,10 @@ import {
   type OperatorWorkflowId,
 } from "../../v2/operator-workflows.js";
 import { currentAdapterStamp } from "../../v2/adapter-stamp.js";
+// One predicate, not two: the drift detector already owns "is this link forge's own
+// pre-FG-253 artifact?", and an installer that answered it differently would migrate
+// what doctor calls the operator's — or leave standing a remedy that converges nothing.
+import { isLegacyForgeSlashCommandLink } from "../../v2/seed-drift.js";
 import { renderClaudeCommands } from "../../v2/render-claude-commands.js";
 import {
   CODEX_DEPRECATED_PROMPT_DIRS,
@@ -180,7 +185,7 @@ export function registerInit(program: Command): void {
       const hostPolicy = ensureHostRoutingPolicy({ raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, seedRaciPath: seedRaciPath() });
       console.log(`  routing policy:   ${hostPolicy.status}`);
       if (!hostPolicy.ok) console.warn(`        ⚠ routing policy not generated — ${hostPolicy.status}`);
-      if (installHooks) warnOperatorAdapterOverrides(adaptersPlan);
+      if (installHooks) warnExecutedAdapterOverrides(adaptersResult.outcomes);
       console.log(``);
       console.log(`Note: .claude/settings.local.json, .claude/commands/ and the forge skill dirs under`);
       console.log(`      ${CODEX_SKILLS_ROOT}/ are per-developer (gitignored).`);
@@ -993,7 +998,7 @@ function classifyAdapterTarget(target: string, projectDir: string, surface: Adap
     let linkTarget = "";
     try { linkTarget = readlinkSync(target); }
     catch { return { kind: "foreign", reason: "unreadable symlink" }; }
-    if (surface === "claude-command" && isLegacyForgeCommandLink(linkTarget, basename(target))) {
+    if (surface === "claude-command" && isLegacyForgeSlashCommandLink(linkTarget, basename(target))) {
       return { kind: "legacy-symlink", linkTarget };
     }
     return { kind: "foreign", reason: `symlink → ${linkTarget} (project override)` };
@@ -1009,15 +1014,6 @@ function classifyAdapterTarget(target: string, projectDir: string, surface: Adap
     return { kind: "foreign", reason: "regular file with no forge ownership marker (project override)" };
   }
   return { kind: "forge-owned", stamp, bytes };
-}
-
-/** Forge's own pre-FG-253 artifact: an absolute symlink into a forge checkout's
- *  `scripts/claude-commands/<name>.md`. Those sources no longer exist, so the
- *  link is dangling on every host — recognizing it by shape is what lets an
- *  already-onboarded project migrate to bytes instead of reporting an override
- *  forever. Nothing else about a symlink makes it forge's. */
-function isLegacyForgeCommandLink(linkTarget: string, name: string): boolean {
-  return linkTarget.endsWith(`/scripts/claude-commands/${name}`);
 }
 
 /** Non-null when the directory forge would write into is not a real directory
@@ -1064,7 +1060,11 @@ export type AdapterApplied = "written" | "unchanged" | "left-alone" | "skipped-c
 
 export type AdapterOutcome = {
   relPath: string;
+  /** Absolute path, so a report can name the file the operator would go look at. */
+  target: string;
+  surface: AdapterSurfaceKind;
   label: string;
+  name: string;
   decision: AdapterDecision;
   applied: AdapterApplied;
   details?: string;
@@ -1077,31 +1077,41 @@ export function executeOperatorAdapters(plan: OperatorAdaptersPlan): AdapterExec
 
   const outcomes: AdapterOutcome[] = [];
   for (const e of plan.entries) {
-    if (e.decision === "already-current") {
-      outcomes.push({ relPath: e.relPath, label: e.label, decision: e.decision, applied: "unchanged" });
-      continue;
-    }
+    const outcome = (applied: AdapterApplied, details?: string): AdapterOutcome => ({
+      relPath: e.relPath,
+      target: e.target,
+      surface: e.surface,
+      label: e.label,
+      name: e.name,
+      decision: e.decision,
+      applied,
+      ...(details ? { details } : {}),
+    });
+
     if (e.decision === "override") {
-      outcomes.push({ relPath: e.relPath, label: e.label, decision: e.decision, applied: "left-alone", details: e.details });
+      // The one outcome that needs no re-read: it is a claim about what forge DID
+      // (nothing), not about what is on disk now.
+      outcomes.push(outcome("left-alone", e.details));
       continue;
     }
-    // Between planning and now the target could have been replaced — including
-    // by a symlink aimed somewhere sensitive. Re-read its identity and mutate
-    // ONLY if it still is what the planner classified.
+    // Between planning and now the target could have been replaced — including by a
+    // symlink aimed somewhere sensitive. Re-read its identity, and report a state
+    // only if it still is what the planner classified. `already-current` is in here
+    // too: "already current (no change)" is an assertion about the bytes on disk, so
+    // a run that skipped the re-read for it would be reporting the plan's reading of
+    // a file it never looked at again.
     const now = classifyAdapterTarget(e.target, plan.projectDir, e.surface);
     if (!observedMatches(now, e.observed)) {
-      outcomes.push({
-        relPath: e.relPath,
-        label: e.label,
-        decision: e.decision,
-        applied: "skipped-changed",
-        details: `target changed since the plan was made (now: ${describeObserved(now)})`,
-      });
+      outcomes.push(outcome("skipped-changed", `target changed since the plan was made (now: ${describeObserved(now)})`));
+      continue;
+    }
+    if (e.decision === "already-current") {
+      outcomes.push(outcome("unchanged"));
       continue;
     }
     mkdirSync(dirname(e.target), { recursive: true });
     atomicWrite(e.target, e.bytes);
-    outcomes.push({ relPath: e.relPath, label: e.label, decision: e.decision, applied: "written", details: e.details });
+    outcomes.push(outcome("written", e.details));
   }
   return { summary: summarizeAdapterOutcomes(outcomes), outcomes };
 }
@@ -1128,6 +1138,14 @@ function describeObserved(o: AdapterOnDisk): string {
  *  half-file a session could read, and the rename REPLACES a legacy symlink's
  *  directory entry rather than writing through it.
  *
+ *  The temp name is UNPREDICTABLE and the create is EXCLUSIVE (`wx` → O_CREAT|
+ *  O_EXCL, which also refuses to follow a symlink at that name). It used to be a
+ *  deterministic PID-derived name that was unlinked and then opened: both halves
+ *  of that are the same defect — the name can be computed by anyone who can read
+ *  the process table, and unlink-then-open is a window in which a link planted at
+ *  that name redirects the write to any file the operator can write. Random name
+ *  plus O_EXCL means this call CREATES the file it writes or it fails.
+ *
  *  Residual, stated rather than hidden: classification and write are two syscall
  *  sequences, so a racing local process could still swap a component between
  *  them. Closing that needs openat/O_NOFOLLOW, which node does not expose. What
@@ -1136,10 +1154,16 @@ function describeObserved(o: AdapterOnDisk): string {
  *  content at an adapter path), because the re-read happens after the plan the
  *  operator saw. */
 function atomicWrite(target: string, bytes: string): void {
-  const tmp = join(dirname(target), `.${basename(target)}.forge-${process.pid}.tmp`);
-  try { unlinkSync(tmp); } catch { /* no stale temp to clear */ }
-  writeFileSync(tmp, bytes);
-  renameSync(tmp, target);
+  const tmp = join(dirname(target), `.${basename(target)}.forge-${randomBytes(12).toString("hex")}.tmp`);
+  writeFileSync(tmp, bytes, { flag: "wx" });
+  try {
+    renameSync(tmp, target);
+  } catch (e) {
+    // An unpredictable name is not self-cleaning the way the PID-derived one was,
+    // so the only run that can remove a temp this call leaked is this one.
+    try { unlinkSync(tmp); } catch { /* nothing left to clear */ }
+    throw e;
+  }
 }
 
 function summarizeAdapterOutcomes(outcomes: readonly AdapterOutcome[]): string {
@@ -1212,10 +1236,38 @@ function absenceLines(plan: Exclude<OperatorAdaptersPlan, { action: "skipped" }>
   return plan.absentSurfaces.map((s) => `    ${s.id}: no files — ${s.operatorAnswer}`);
 }
 
-/** The targets a project already owns, so forge leaves them alone. */
+/** The targets a project already owns, so forge leaves them alone. Plan-derived,
+ *  which is what a `--dry-run` has and all it can honestly report: nothing ran. */
 export function operatorAdapterOverrides(plan: OperatorAdaptersPlan): AdapterEntry[] {
   if (plan.action === "skipped") return [];
   return plan.entries.filter((e) => e.decision === "override");
+}
+
+/** The same list for a run that ACTUALLY EXECUTED, derived from outcomes.
+ *
+ *  Not the same set as the plan's, and that is the point. A target the plan meant to
+ *  install, that someone owned between the plan and the write, is skipped by the
+ *  re-read — forge did not install it and did not clobber it, which is exactly the
+ *  fact this list exists to carry. Read off the plan, that file would be reported as
+ *  installed and would appear in no override list at all. */
+export function executedAdapterOverrides(outcomes: readonly AdapterOutcome[]): readonly AdapterOutcome[] {
+  return outcomes.filter((o) => o.applied === "left-alone" || o.applied === "skipped-changed");
+}
+
+/** Why forge did not install this target, in the operator's terms. `left-alone` is a
+ *  file that was already theirs when the plan was made; `skipped-changed` became
+ *  somebody's between the plan and the write. */
+export function adapterNotInstalledReason(o: AdapterOutcome): string {
+  return o.applied === "skipped-changed"
+    ? (o.details ?? "the target changed after the plan was made")
+    : `already exists (${o.details ?? "unknown reason"})`;
+}
+
+export function warnExecutedAdapterOverrides(outcomes: readonly AdapterOutcome[]): void {
+  for (const o of executedAdapterOverrides(outcomes)) {
+    console.warn(`  ⚠  ${o.label} was NOT installed — ${o.target} ${adapterNotInstalledReason(o)}.`);
+    console.warn(`     forge does not own that file and will not overwrite it. To use forge's version: remove it and re-run.`);
+  }
 }
 
 export function warnOperatorAdapterOverrides(plan: OperatorAdaptersPlan): void {
@@ -1249,6 +1301,11 @@ export function executeClaudeCommandsPlan(plan: OperatorAdaptersPlan): string {
 /** Claude-surface overrides only — see the note above. */
 export function skippedClaudeCommands(plan: OperatorAdaptersPlan): AdapterEntry[] {
   return operatorAdapterOverrides(plan).filter((e) => e.surface === "claude-command");
+}
+
+/** Claude-surface overrides only, from what the run actually did. */
+export function skippedClaudeCommandOutcomes(outcomes: readonly AdapterOutcome[]): readonly AdapterOutcome[] {
+  return executedAdapterOverrides(outcomes).filter((o) => o.surface === "claude-command");
 }
 
 export function warnSkippedClaudeCommands(plan: OperatorAdaptersPlan): void {

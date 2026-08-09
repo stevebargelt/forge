@@ -13,6 +13,7 @@ import {
   documentedAbsenceSurfaces,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
+  executedAdapterOverrides,
   executeHookPlan,
   executeOperatorAdapters,
   forgeAdapterPaths,
@@ -25,6 +26,7 @@ import {
   provisionSeedFile,
   scaffoldBacklogDirs,
   skippedClaudeCommands,
+  skippedClaudeCommandOutcomes,
 } from "./init.js";
 import { isValidAdapterStamp, operatorSurface, parseAdapterMarker } from "../../v2/operator-workflows.js";
 import { currentAdapterStamp as driftAdapterStamp } from "../../v2/seed-drift.js";
@@ -986,6 +988,117 @@ test("FG-253: legacy recognition is by shape only — a symlink whose tail is no
   writeFileSync(decoy, "not forge's\n");
   symlinkSync(decoy, target);
   assert.equal(decisionFor(planOperatorAdapters(projectDir, STAMP_A), rel)?.decision, "override");
+});
+
+// RF-3 / RF-4: a suffix match is not ownership. Forge's legacy artifact is a
+// DANGLING absolute link into a `scripts/claude-commands/` that no longer exists in
+// any forge tree; an operator's own link that merely ends the same way points at real
+// bytes they maintain, and replacing its directory entry takes their link away.
+test("FG-253 REFUSES: an operator's LIVE link whose tail matches forge's legacy path is theirs, not a migration", () => {
+  const rel = claudeHandoff();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+
+  // Their own tree, which happens to be laid out `…/scripts/claude-commands/<name>`.
+  const theirTree = mkdtempSync(join(tmpdir(), "forge-not-forge-"));
+  try {
+    const theirs = join(theirTree, "scripts", "claude-commands", "handoff.md");
+    mkdirSync(dirname(theirs), { recursive: true });
+    writeFileSync(theirs, "# my handoff\n");
+    symlinkSync(theirs, target);
+
+    const plan = planOperatorAdapters(projectDir, STAMP_A);
+    assert.equal(decisionFor(plan, rel)?.decision, "override", "a link that RESOLVES is somebody's live file");
+    executeOperatorAdapters(plan);
+    assert.ok(lstatSync(target).isSymbolicLink(), "the operator's link must survive");
+    assert.equal(readlinkSync(target), theirs);
+    assert.equal(readFileSync(theirs, "utf8"), "# my handoff\n");
+  } finally {
+    rmSync(theirTree, { recursive: true, force: true });
+  }
+});
+
+test("FG-253 REFUSES: a RELATIVE link with forge's legacy tail was not written by forge", () => {
+  const rel = claudeHandoff();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  symlinkSync("../../elsewhere/scripts/claude-commands/handoff.md", target);
+  assert.equal(decisionFor(planOperatorAdapters(projectDir, STAMP_A), rel)?.decision, "override");
+});
+
+// ----- RF-2: the temp file the write goes through ---------------------------
+
+test("FG-253 REFUSES: a symlink planted at the OLD predictable temp name redirects nothing", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  const victim = join(projectDir, "victim.md");
+  const victimBytes = "someone else's file\n";
+  writeFileSync(victim, victimBytes);
+
+  // Exactly the name the pre-fix writer computed, which anyone who can read the
+  // process table could compute too — and which it unlinked and then re-opened.
+  const guessable = join(dirname(target), `.${"orient.md"}.forge-${process.pid}.tmp`);
+  symlinkSync(victim, guessable);
+
+  const run = executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+
+  assert.equal(readFileSync(victim, "utf8"), victimBytes, "the rendered bytes were written through a planted link");
+  assert.equal(parseAdapterMarker(readFileSync(target, "utf8")), STAMP_A, "the adapter itself must still install");
+  assert.ok(run.outcomes.some((o) => o.relPath === rel && o.applied === "written"));
+  // The planted link is the operator's problem, not forge's to delete.
+  assert.ok(lstatSync(guessable).isSymbolicLink());
+});
+
+test("FG-253: the adapter write leaves no temp file behind", () => {
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+  const strays = readdirSync(join(projectDir, ".claude", "commands")).filter((f) => f.endsWith(".tmp"));
+  assert.deepEqual(strays, []);
+});
+
+// ----- RF-1: the run reports what it OBSERVED, including for already-current --
+
+test("FG-253: `already current` is re-read before it is claimed — a file taken over after the plan is not reported unchanged", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "already-current");
+
+  // The operator takes the file over between the plan and the run.
+  const mine = "# mine now\n";
+  writeFileSync(target, mine);
+
+  const run = executeOperatorAdapters(plan);
+  const outcome = run.outcomes.find((o) => o.relPath === rel);
+  assert.equal(outcome?.applied, "skipped-changed", "forge claimed a state it never re-read");
+  assert.match(outcome?.details ?? "", /no forge ownership marker/);
+  assert.equal(readFileSync(target, "utf8"), mine, "and their bytes are still theirs");
+
+  const line = adapterOutcomeLines(plan, run.outcomes).find((l) => l.includes(rel));
+  assert.ok(!/already current/.test(line ?? ""), `a taken-over file must not read as current: ${line}`);
+});
+
+test("FG-253: executedAdapterOverrides carries BOTH not-installed shapes; the plan's list carries only one", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  const overridden = adapterPath(projectDir, codexOrientSkill());
+  mkdirSync(dirname(overridden), { recursive: true });
+  writeFileSync(overridden, "operator owned\n");
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, "# arrived late\n");
+  const run = executeOperatorAdapters(plan);
+
+  assert.deepEqual(operatorAdapterOverrides(plan).map((e) => e.relPath), [codexOrientSkill()]);
+  assert.deepEqual(
+    executedAdapterOverrides(run.outcomes).map((o) => o.relPath).sort(),
+    [codexOrientSkill(), rel].sort(),
+    "the file that became theirs after the plan is invisible in the plan-derived list",
+  );
+  assert.deepEqual(skippedClaudeCommandOutcomes(run.outcomes).map((o) => o.relPath), [rel]);
 });
 
 // ----- TOCTOU: the plan is not a licence to write later ----------------------

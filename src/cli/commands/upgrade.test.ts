@@ -10,14 +10,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
-  classifyStep, unresolvedReasons, classifyAdapterEntries,
+  classifyStep, unresolvedReasons, classifyAdapterEntries, classifyAdapterOutcomes,
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
   type AuthoredRetentionOutcome, type UpgradeStepOutcomes, type SeedGenerationOutcome,
   type AdapterSurfacesOutcome,
   parseRetainedLine,
 } from "./upgrade.js";
-import type { AdapterDecision } from "./init.js";
+import type { AdapterDecision, AdapterOutcome } from "./init.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
 
@@ -545,6 +545,31 @@ test("FG-253 step 5: classifyAdapterEntries reaches every outcome it can name", 
   // and a run that also installed two files should not hide it behind "installed".
   assert.equal(classifyAdapterEntries([{ decision: "install" }, { decision: "override" }], false), "user-override");
   assert.equal(classifyAdapterEntries([{ decision: "override" }], true), "user-override", "…on a dry run too — the override is decided by what is already on disk");
+});
+
+// RF-1: on a run that EXECUTED, every reported field is read off the outcomes. The
+// plan and the outcomes disagree precisely where the operator's trust surface lives —
+// a target that became somebody's between the plan and the write.
+test("FG-253: a run that executed classifies from its OUTCOMES, so a skipped write is never reported as installed", () => {
+  const outcome = (applied: AdapterOutcome["applied"], decision: AdapterDecision = "install"): AdapterOutcome => ({
+    relPath: ".claude/commands/orient.md",
+    target: "/p/.claude/commands/orient.md",
+    surface: "claude-command",
+    label: "/orient",
+    name: "orient.md",
+    decision,
+    applied,
+  });
+
+  assert.equal(classifyAdapterOutcomes([]), "not-run", "nobody looked — not 'already current'");
+  assert.equal(classifyAdapterOutcomes([outcome("written")]), "installed");
+  assert.equal(classifyAdapterOutcomes([outcome("unchanged", "already-current")]), "already-current");
+  assert.equal(classifyAdapterOutcomes([outcome("left-alone", "override")]), "user-override");
+  // The one the plan gets wrong: the plan still says `install`, so a plan-derived
+  // classification reports an install of a file forge deliberately did not write.
+  assert.equal(classifyAdapterEntries([{ decision: "install" }], false), "installed");
+  assert.equal(classifyAdapterOutcomes([outcome("skipped-changed")]), "user-override");
+  assert.equal(classifyAdapterOutcomes([outcome("written"), outcome("skipped-changed")]), "user-override");
 });
 
 test("FG-577 (cell 3): a dirty dev checkout is NOT an operator-requested skip", () => {

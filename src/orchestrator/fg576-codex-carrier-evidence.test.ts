@@ -21,7 +21,9 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { currentAdapterStamp, projectAdapterBaseline } from "../v2/seed-drift.js";
+import type { AdapterStamp } from "../v2/operator-workflows.js";
 import { closeDb } from "../store/db.js";
 import { persistPendingOrchestratorReceipt } from "../store/orchestrator-receipts.js";
 import { FORGE_OWNED_CODEX_SKILL_DIRS } from "../v2/render-codex-skills.js";
@@ -595,4 +597,80 @@ test("FG-576 AC13: the session reader resolves through FORGE_CODEX_DIR and reads
   // fragile by construction and a reader that threw would break the launcher.
   process.env["FORGE_CODEX_DIR"] = join(base, "does-not-exist");
   assert.deepEqual(listCodexSessions(), []);
+});
+
+// ---------------------------------------------------------------------------
+// FG-253 RF-5 — the launch-boundary generation split judges the BOUND carrier
+// ---------------------------------------------------------------------------
+//
+// Codex resolves its instruction carrier out of the PUBLISHED seed generation, so a
+// failed or deferred publication leaves a session running new code while bound to an
+// older generation's orientation bytes. The adapter-split report used to compare the
+// project against the RUNNING assets, which is wrong in both directions: silence when
+// the bound carrier disagrees with the project, and a warning when it agrees.
+// Detectability is what step 8 shipped in place of atomicity, so a detector that is
+// wrong in both directions is worse than none.
+
+/** Publish a generation whose source tree NAMES itself the way a release does, so the
+ *  bound generation has a stamp that is not this checkout's. */
+function publishNamedGeneration(id: string): SeedGeneration {
+  const gen = publishCarrierGeneration();
+  writeFileSync(join(gen.manifest.sourceAssetRoot, "forge-release.json"), JSON.stringify({ id }), "utf8");
+  return gen;
+}
+
+function installProjectAdapters(stamp: AdapterStamp): void {
+  for (const base of projectAdapterBaseline(stamp)) {
+    const target = join(projectDir, ...base.path.split("/"));
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, base.bytes, "utf8");
+  }
+}
+
+function adapterLimitation(plan: { limitations: readonly { capability: string; note: string }[] }) {
+  return plan.limitations.find((l) => l.capability === "operator-adapters");
+}
+
+test("FG-253 RF-5: adapters that agree with the RUNNING assets are still reported when the session is bound to an older generation", () => {
+  const boundId = "release-fg253-codexbound-01";
+  publishNamedGeneration(boundId);
+  assert.notEqual(currentAdapterStamp(), boundId, "the fixture must differ from the running assets");
+  installProjectAdapters(currentAdapterStamp());
+
+  const planned = planLaunch(adapterWithVersion(SUPPORTED_VERSION), contextFor(decisionFor()));
+  assert.ok(planned.ok, planned.ok ? "" : planned.refusal.message);
+
+  const limitation = adapterLimitation(planned.plan);
+  assert.ok(limitation, "a session bound to another generation reported agreement it does not have");
+  assert.match(limitation.note, new RegExp(boundId), "the report must name the generation actually bound");
+  assert.match(limitation.note, new RegExp(currentAdapterStamp()));
+});
+
+test("FG-253 RF-5: adapters that agree with the BOUND generation report nothing, even when the running assets differ", () => {
+  const boundId = "release-fg253-codexbound-02";
+  publishNamedGeneration(boundId);
+  installProjectAdapters(boundId);
+
+  const planned = planLaunch(adapterWithVersion(SUPPORTED_VERSION), contextFor(decisionFor()));
+  assert.ok(planned.ok, planned.ok ? "" : planned.refusal.message);
+  assert.equal(
+    adapterLimitation(planned.plan),
+    undefined,
+    "warning about adapters that match the carrier this session is bound to is a false positive",
+  );
+});
+
+test("FG-253 RF-5: a bound generation with no nameable release is reported unverifiable, not as agreement", () => {
+  // publishCarrierGeneration's source tree carries no release manifest — a dev
+  // checkout that is not the running one, whose content identity this process cannot
+  // compute. Silence there would be a claim; so would a comparison.
+  publishCarrierGeneration();
+  installProjectAdapters(currentAdapterStamp());
+
+  const planned = planLaunch(adapterWithVersion(SUPPORTED_VERSION), contextFor(decisionFor()));
+  assert.ok(planned.ok, planned.ok ? "" : planned.refusal.message);
+
+  const limitation = adapterLimitation(planned.plan);
+  assert.ok(limitation, "an unnameable binding must be reported, not silently compared against the running assets");
+  assert.match(limitation.note, /cannot be compared/);
 });

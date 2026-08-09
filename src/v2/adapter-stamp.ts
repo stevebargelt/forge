@@ -16,6 +16,8 @@
 // learn its own identity, nor the reverse. So it is its own module, and both
 // import it.
 
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfString } from "../util/content-digest.js";
 import { isValidAdapterStamp, type AdapterStamp } from "./operator-workflows.js";
@@ -41,17 +43,47 @@ function devAdapterStamp(): AdapterStamp {
   return `dev.${sha256OfString(rendered).slice(0, 12)}`;
 }
 
-/** The stamp the RUNNING forge renders adapters with, for every caller: the
- *  installer, the drift detector, and the launch-boundary generation check. A
- *  release names itself by its manifest id; a dev checkout has no such name and
- *  falls back to the content identity above. */
-export function currentAdapterStamp(): AdapterStamp {
-  const id = readReleaseManifest(assetRoot())?.manifest.id;
-  if (id === undefined) return devAdapterStamp();
+/** A release tree's own name for itself, or null when the tree carries no manifest. */
+function releaseAdapterStamp(root: string): AdapterStamp | null {
+  const id = readReleaseManifest(root)?.manifest.id;
+  if (id === undefined) return null;
   // A manifest id is a plain token by construction. One that could not survive the
   // marker's HTML comment is hashed rather than sanitized or thrown on: an odd
   // release still gets an opaque-but-distinct identity that still says `release`,
   // instead of making `forge init` unusable, claiming a name the bytes did not come
   // from, or reporting a release build as a dev tree.
   return isValidAdapterStamp(id) ? id : `release.${sha256OfString(id).slice(0, 12)}`;
+}
+
+/** The stamp the RUNNING forge renders adapters with, for every caller: the
+ *  installer, the drift detector, and the launch-boundary generation check. A
+ *  release names itself by its manifest id; a dev checkout has no such name and
+ *  falls back to the content identity above. */
+export function currentAdapterStamp(): AdapterStamp {
+  return releaseAdapterStamp(assetRoot()) ?? devAdapterStamp();
+}
+
+/** The stamp the forge at `root` renders adapters with — for a caller comparing a
+ *  project against a release that is NOT the one executing. FG-253 step 8's launch
+ *  check needs this: an adapter can bind its instruction surface out of a PUBLISHED
+ *  seed generation, and a failed or deferred publication leaves that generation
+ *  behind the running assets.
+ *
+ *  Null is a real answer and must not be papered over. A tree with no release
+ *  manifest has only a CONTENT identity, and the only content this process can render
+ *  is its own — so for somebody else's dev checkout there is nothing here to compute.
+ *  Returning the running stamp instead would make a drift detector report agreement
+ *  with a generation it never looked at, which is the failure this function exists to
+ *  stop. */
+export function adapterStampForAssetRoot(root: string): AdapterStamp | null {
+  const release = releaseAdapterStamp(root);
+  if (release !== null) return release;
+  return isSameTree(root, assetRoot()) ? devAdapterStamp() : null;
+}
+
+function isSameTree(a: string, b: string): boolean {
+  const real = (p: string): string => {
+    try { return realpathSync(p); } catch { return resolve(p); }
+  };
+  return real(a) === real(b);
 }

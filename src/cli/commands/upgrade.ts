@@ -3,6 +3,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
+  adapterNotInstalledReason,
   adapterOutcomeLines,
   adapterReportLines,
   applyOrchestratorBlock,
@@ -10,15 +11,19 @@ import {
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
   executeHookPlan,
+  executedAdapterOverrides,
   executeOperatorAdapters,
   operatorAdapterOverrides,
   planOperatorAdapters,
   skippedClaudeCommands,
+  skippedClaudeCommandOutcomes,
   planClaudeHooks,
   planCommitMsgHook,
   planGitignoreEntries,
+  warnExecutedAdapterOverrides,
   warnOperatorAdapterOverrides,
   type AdapterDecision,
+  type AdapterOutcome,
 } from "./init.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
@@ -435,6 +440,22 @@ export function classifyAdapterEntries(
   if (entries.some((e) => e.decision === "override")) return "user-override";
   if (entries.every((e) => e.decision === "already-current")) return "already-current";
   return dryRun ? "would-install" : "installed";
+}
+
+/** The same classification for a run that EXECUTED, read off what it did rather than
+ *  off the plan it started from.
+ *
+ *  A plan is a forecast, and this step is the operator's evidence that forge did not
+ *  clobber their file — so on a real run it must come from the outcomes. The two
+ *  disagree exactly where it matters: a target that became somebody's between the plan
+ *  and the write is `skipped-changed`, which the plan still calls an install. Both
+ *  not-installed shapes land on `user-override`, the state that outranks the rest
+ *  because it is the one an operator must SEE. */
+export function classifyAdapterOutcomes(outcomes: readonly AdapterOutcome[]): AdapterSurfacesOutcome {
+  if (outcomes.length === 0) return "not-run";
+  if (executedAdapterOverrides(outcomes).length > 0) return "user-override";
+  if (outcomes.every((o) => o.applied === "unchanged")) return "already-current";
+  return "installed";
 }
 
 export type UpgradeOptions = {
@@ -893,20 +914,25 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         const adapters = planOperatorAdapters(cwd);
         const gitignore = planGitignoreEntries(cwd);
         const adapterEntries = adapters.action === "skipped" ? [] : adapters.entries;
-        slashCommandOverrides = skippedClaudeCommands(adapters).map(
-          (e) => `${"/" + e.name.replace(/\.md$/, "")} NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"})`,
-        );
-        adapterOverrides = operatorAdapterOverrides(adapters).map(
-          (e) => `${e.label} NOT installed — ${e.relPath} already exists (${e.details ?? "unknown reason"})`,
-        );
-        slashCommands = classifyAdapterEntries(adapterEntries.filter((e) => e.surface === "claude-command"), dryRun);
-        adapterSurfaces = classifyAdapterEntries(adapterEntries, dryRun);
         if (dryRun) {
+          // A dry run has nothing but the plan, and says so by construction: every
+          // state it reports is a forecast of what is already on disk, which is the
+          // one thing a dry run predicts exactly.
+          slashCommandOverrides = skippedClaudeCommands(adapters).map(
+            (e) => `${"/" + e.name.replace(/\.md$/, "")} NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"})`,
+          );
+          adapterOverrides = operatorAdapterOverrides(adapters).map(
+            (e) => `${e.label} NOT installed — ${e.relPath} already exists (${e.details ?? "unknown reason"})`,
+          );
+          slashCommands = classifyAdapterEntries(adapterEntries.filter((e) => e.surface === "claude-command"), true);
+          adapterSurfaces = classifyAdapterEntries(adapterEntries, true);
+
           say(`        commit-msg hook:   ${commitMsg.action}`);
           say(`        claude hooks:      ${claudeHooks.action}`);
           say(`        operator adapters: ${adapters.action}`);
           for (const line of adapterReportLines(adapters)) say(`    ${line}`);
           say(`        .gitignore:        ${gitignore.action}`);
+          if (!json) warnOperatorAdapterOverrides(adapters);
         } else {
           say(`        commit-msg hook:   ${executeHookPlan(commitMsg)}`);
           say(`        claude hooks:      ${executeClaudeHooksPlan(claudeHooks)}`);
@@ -917,13 +943,25 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           say(`        operator adapters: ${applied.summary}`);
           for (const line of adapterOutcomeLines(adapters, applied.outcomes)) say(`    ${line}`);
           say(`        .gitignore:        ${executeGitignoreEntriesPlan(gitignore)}`);
+
+          // EVERY consumer of the adapter step — --json, the exit code's step
+          // classification, and the human ⚠ — reads the same outcomes the run
+          // produced. The override list is the operator's evidence that forge left
+          // their file alone; derived from the plan it would be reporting a state
+          // nothing observed, and would silently omit a file that became theirs
+          // after the plan was made.
+          slashCommandOverrides = skippedClaudeCommandOutcomes(applied.outcomes).map(
+            (o) => `${"/" + o.name.replace(/\.md$/, "")} NOT installed — ${o.target} ${adapterNotInstalledReason(o)}`,
+          );
+          adapterOverrides = executedAdapterOverrides(applied.outcomes).map(
+            (o) => `${o.label} NOT installed — ${o.relPath} ${adapterNotInstalledReason(o)}`,
+          );
+          slashCommands = classifyAdapterOutcomes(applied.outcomes.filter((o) => o.surface === "claude-command"));
+          adapterSurfaces = classifyAdapterOutcomes(applied.outcomes);
+          // Suppressed under --json rather than written straight to the console
+          // beside a document that claims to be the whole answer.
+          if (!json) warnExecutedAdapterOverrides(applied.outcomes);
         }
-        // The ⚠ is a RENDER of the `adapterSurfaces` / `adapterOverrides` state
-        // above, so it is ordered like one: suppressed under --json rather than
-        // written straight to the console beside a document that claims to be the
-        // whole answer, and printed on a dry run too — the override is decided by
-        // what is already on disk, which a dry run predicts exactly.
-        if (!json) warnOperatorAdapterOverrides(adapters);
       }
 
       // #229: rebuild the agent image only when explicitly asked (the one

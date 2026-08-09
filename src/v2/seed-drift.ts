@@ -349,14 +349,36 @@ export type ProjectAdapterReport = {
   ok: boolean;
 };
 
-/** forge's own pre-FG-253 artifact: an absolute symlink into the release's
- *  `scripts/claude-commands/<name>.md`. Recognized by the link's TAIL, because the
- *  head is whatever path forge happened to be installed at when the link was made.
- *  Exported so the installer's migration and this detector share one predicate —
- *  a project whose adapters upgrade converges must not be reported here as the
- *  operator's. */
+/** forge's own pre-FG-253 artifact: an ABSOLUTE, now-DANGLING symlink into the
+ *  release's `scripts/claude-commands/<name>.md`.
+ *
+ *  Exported so the installer's migration and this detector share one predicate — a
+ *  project whose adapters upgrade converges must not be reported here as the
+ *  operator's, and a link the installer replaces must not be reported here as theirs.
+ *
+ *  ALL THREE CONDITIONS ARE LOAD-BEARING, and the tail alone is not one of them. The
+ *  tail is necessary because the head is whatever path forge happened to be installed
+ *  at when the link was made, so it cannot be checked. But a tail match is not
+ *  ownership: an operator's own link into an unrelated tree that happens to end
+ *  `/scripts/claude-commands/orient.md` is theirs, and classifying it as forge's
+ *  legacy artifact hands forge a directory entry it never created. So:
+ *
+ *   - ABSOLUTE: the pre-FG-253 installer resolved its source module-relative and
+ *     symlinked the absolute result. A relative link at an adapter path was written by
+ *     somebody else.
+ *   - DANGLING: forge deleted `scripts/claude-commands/` when this ticket replaced the
+ *     symlinks with rendered bytes, so the legacy link's target does not exist in any
+ *     forge tree on any host — that is the state the migration exists to clear. A link
+ *     that RESOLVES is pointing at real bytes somebody maintains; forge replacing that
+ *     directory entry would take an operator's live link away from them. Refusing here
+ *     costs only a reported override the operator can clear by deleting the link;
+ *     accepting costs them the link, which is the invariant this predicate guards. */
 export function isLegacyForgeSlashCommandLink(linkTarget: string, fileName: string): boolean {
-  return linkTarget.endsWith(`/scripts/claude-commands/${fileName}`);
+  if (!linkTarget.startsWith("/")) return false;
+  if (!linkTarget.endsWith(`/scripts/claude-commands/${fileName}`)) return false;
+  // existsSync FOLLOWS the link target's own components, which is what "does this
+  // resolve to something" means here.
+  return !existsSync(linkTarget);
 }
 
 /** Re-exported, not reimplemented: this detector and the installer that writes the
@@ -425,7 +447,9 @@ function inspectOne(projectDir: string, base: AdapterBaseline): ProjectAdapterEn
     } catch {
       /* unreadable link — falls through to the operator-owned branch below */
     }
-    if (linkTarget && isLegacyForgeSlashCommandLink(linkTarget, basename(base.path))) {
+    // Claude-surface only, exactly as the installer's migration is: forge never wrote
+    // a symlink on any other surface, so a link there is somebody else's by definition.
+    if (linkTarget && base.surface === "claude-code" && isLegacyForgeSlashCommandLink(linkTarget, basename(base.path))) {
       return forgeOwned("legacy-symlink", null, `symlink → ${linkTarget}`);
     }
     // forge renders BYTES now and never writes a symlink, so any other link at an

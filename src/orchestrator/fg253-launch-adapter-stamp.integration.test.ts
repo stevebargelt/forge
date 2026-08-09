@@ -32,7 +32,13 @@ import { currentAdapterStamp } from "../cli/commands/init.js";
 import { projectAdapterBaseline } from "../v2/seed-drift.js";
 import type { AdapterStamp } from "../v2/operator-workflows.js";
 import { claudeProjectPreflight } from "./claude-adapter.js";
-import { inspectLaunchAdapterGeneration, runOrchestratorLaunch } from "./launch.js";
+import {
+  boundGeneration,
+  describeAdapterGenerationSplit,
+  inspectLaunchAdapterGeneration,
+  resolvedGeneration,
+  runOrchestratorLaunch,
+} from "./launch.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE_CLAUDE = join(HERE, "__fixtures__", "fake-claude.js");
@@ -311,12 +317,12 @@ test("integ FG-253: the report claims installation only — never that the provi
 test("integ FG-253: the split is computed from the stamp it is HANDED, so a launch judges its own generation", () => {
   installAdapters(OTHER_GENERATION);
 
-  const agreeing = inspectLaunchAdapterGeneration(roots.project, "claude-code", OTHER_GENERATION);
+  const agreeing = inspectLaunchAdapterGeneration(roots.project, "claude-code", resolvedGeneration(OTHER_GENERATION));
   assert.deepEqual(agreeing.fromAnotherGeneration, []);
   assert.deepEqual(agreeing.missing, []);
   assert.deepEqual(agreeing.unresolvable, []);
 
-  const split = inspectLaunchAdapterGeneration(roots.project, "claude-code", "release-fg253-thirdgen-01");
+  const split = inspectLaunchAdapterGeneration(roots.project, "claude-code", resolvedGeneration("release-fg253-thirdgen-01"));
   assert.equal(split.fromAnotherGeneration.length, 2);
   assert.ok(split.fromAnotherGeneration.every((e) => e.stamp === OTHER_GENERATION));
 
@@ -328,6 +334,73 @@ test("integ FG-253: the split is computed from the stamp it is HANDED, so a laun
     "the fixture did not install the Codex surface, so this assertion proves nothing",
   );
 });
+
+// ─── the basis of the comparison, not just its result ───────────────────────
+//
+// RF-5: the split is only worth anything if it judges the project against the forge
+// this SESSION IS BOUND TO. An adapter that binds its instruction carrier out of the
+// published seed generation can be running new code against an older generation — and
+// comparing against the running assets there is wrong in BOTH directions: silence when
+// the bound carrier disagrees with the project, a warning when it agrees.
+
+test("integ FG-253: the split is judged against the BOUND generation, not the running one", () => {
+  const bound = releaseTree("release-fg253-bound-0002");
+  const running = currentAdapterStamp();
+  assert.notEqual(boundGeneration(bound).stamp, running, "the fixture must actually differ from the running assets");
+
+  // Adapters installed from the BOUND generation. Against the running assets these
+  // read as a split; against what the session is bound to they agree — and agreement
+  // is the truth, so a warning here would be the false positive that trains the
+  // signal out of an operator.
+  installAdapters("release-fg253-bound-0002");
+  assert.equal(
+    describeAdapterGenerationSplit(inspectLaunchAdapterGeneration(roots.project, "claude-code", boundGeneration(bound))),
+    null,
+  );
+  assert.ok(
+    describeAdapterGenerationSplit(inspectLaunchAdapterGeneration(roots.project, "claude-code", resolvedGeneration(running))),
+    "the fixture proves nothing unless the running-assets comparison DOES report a split",
+  );
+
+  // The dangerous direction: adapters that agree with the running assets while the
+  // session is bound to an older generation. Reported, not silence.
+  installAdapters(running);
+  const split = inspectLaunchAdapterGeneration(roots.project, "claude-code", boundGeneration(bound));
+  assert.equal(split.fromAnotherGeneration.length, 2);
+  assert.ok(split.fromAnotherGeneration.every((e) => e.stamp === running));
+  assert.match(String(describeAdapterGenerationSplit(split)?.note), /release-fg253-bound-0002/);
+});
+
+test("integ FG-253: a bound generation this forge cannot NAME is reported as unverifiable, never as agreement", () => {
+  // A generation published out of somebody else's dev checkout: no release manifest,
+  // and the only content identity this process can compute is its own.
+  const unnameable = join(roots.base, "some-other-checkout");
+  mkdirSync(unnameable, { recursive: true });
+  const binding = boundGeneration(unnameable);
+  assert.equal(binding.stamp, null);
+
+  installAdapters(currentAdapterStamp());
+  const split = inspectLaunchAdapterGeneration(roots.project, "claude-code", binding);
+
+  assert.deepEqual(split.fromAnotherGeneration, [], "nothing can be CLAIMED to disagree either");
+  assert.equal(split.unverifiable.length, 2);
+  const note = String(describeAdapterGenerationSplit(split)?.note);
+  assert.match(note, /cannot be compared/);
+  assert.match(note, new RegExp(escapeRe(unnameable)));
+});
+
+test("integ FG-253: a null bound root is the running assets — the default every Claude launch takes", () => {
+  assert.deepEqual(boundGeneration(null), resolvedGeneration());
+  assert.equal(boundGeneration(null).stamp, currentAdapterStamp());
+});
+
+/** A disposable tree that names itself the way a release does. */
+function releaseTree(id: string): string {
+  const dir = join(roots.base, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "forge-release.json"), JSON.stringify({ id }), "utf8");
+  return dir;
+}
 
 test("integ FG-253: the Claude preflight is advisory and creates nothing it warns about", () => {
   const warnings = claudeProjectPreflight(roots.project, currentAdapterStamp());

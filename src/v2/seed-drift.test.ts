@@ -418,10 +418,65 @@ test("FG-253: a legacy forge slash-command symlink is forge's own, not an operat
 });
 
 test("FG-253 isLegacyForgeSlashCommandLink: matches the tail, not the install prefix", () => {
+  // The prefix cannot be checked — it is whatever path forge was installed at when
+  // the link was made — so the tail is what identifies the shape. All of these are
+  // dangling: `scripts/claude-commands/` exists in no forge tree any more.
   assert.equal(isLegacyForgeSlashCommandLink("/a/b/forge/scripts/claude-commands/orient.md", "orient.md"), true);
   assert.equal(isLegacyForgeSlashCommandLink("/opt/other/scripts/claude-commands/orient.md", "orient.md"), true);
   assert.equal(isLegacyForgeSlashCommandLink("/a/b/scripts/claude-commands/handoff.md", "orient.md"), false);
   assert.equal(isLegacyForgeSlashCommandLink("/a/b/my-commands/orient.md", "orient.md"), false);
+});
+
+// RF-3 / RF-4: the tail alone is not ownership. Forge's legacy artifact is dangling
+// (its source was deleted when this ticket replaced the symlinks with bytes) and
+// absolute (the pre-FG-253 installer resolved its source and linked the result). A
+// link that resolves is somebody's live file; forge replacing that directory entry
+// would take their link away on a normal `forge init`, no attacker required.
+test("FG-253 isLegacyForgeSlashCommandLink: a link that RESOLVES, or is relative, is not forge's", () => {
+  const tree = mkdtempSync(join(tmpdir(), "fg253-not-forge-"));
+  try {
+    const live = join(tree, "scripts", "claude-commands", "orient.md");
+    mkdirSync(dirname(live), { recursive: true });
+    writeFileSync(live, "# somebody's own orient\n");
+
+    assert.equal(isLegacyForgeSlashCommandLink(live, "orient.md"), false, "a live target is not forge's dead artifact");
+    assert.equal(isLegacyForgeSlashCommandLink(`${live}.gone`, "orient.md"), false, "…and the tail still has to match");
+    assert.equal(
+      isLegacyForgeSlashCommandLink("../elsewhere/scripts/claude-commands/orient.md", "orient.md"),
+      false,
+      "forge only ever wrote absolute links",
+    );
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test("FG-253: a resolving link with forge's legacy tail is reported as the operator's, with no converging remedy", () => {
+  const { dir, cleanup } = projectRoot();
+  const tree = mkdtempSync(join(tmpdir(), "fg253-not-forge-drift-"));
+  try {
+    const live = join(tree, "scripts", "claude-commands", "handoff.md");
+    mkdirSync(dirname(live), { recursive: true });
+    writeFileSync(live, "# somebody's own handoff\n");
+
+    const target = renderClaudeCommands(STAMP).find((c) => c.workflow === "handoff")!.path;
+    const abs = join(dir, ...target.split("/"));
+    mkdirSync(dirname(abs), { recursive: true });
+    symlinkSync(live, abs);
+
+    const report = detectProjectAdapterDrift(dir, STAMP);
+    const e = entryFor(report, target);
+    assert.equal(e.status, "operator-owned");
+    assert.equal(e.ownership, "operator-authored");
+    // The remedy names only what forge converges, and forge will not touch this —
+    // it belongs on the "these are YOURS" line instead.
+    const rendered = renderProjectAdapterDrift(report).split("\n");
+    assert.ok(!rendered.find((l) => l.includes("converges:"))?.includes(target));
+    assert.ok(rendered.find((l) => l.includes("they are YOURS:"))?.includes(target));
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+    cleanup();
+  }
 });
 
 test("FG-253 renderProjectAdapterDrift: names the ONE project inspected and refuses to claim activation", () => {

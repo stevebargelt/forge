@@ -78,6 +78,7 @@ import {
   type OrchestratorSessionOperation,
 } from "../v2/orchestrator-resolve.js";
 import { currentAdapterStamp } from "../cli/commands/init.js";
+import { adapterStampForAssetRoot } from "../v2/adapter-stamp.js";
 import { inspectProjectAdapters, type ProjectAdapterEntry } from "../v2/seed-drift.js";
 import { operatorSurface, type AdapterStamp } from "../v2/operator-workflows.js";
 import { createClaudeAdapter } from "./claude-adapter.js";
@@ -201,15 +202,66 @@ export function guardPassthrough(adapter: OrchestratorAdapter, tokens: readonly 
  *  stamp is real, but it is `forge doctor`'s report (FG-253 step 6) and naming it here
  *  would name the wrong remedy. */
 export type AdapterGenerationSplit = {
-  /** The generation this launch resolved — what the running forge would install. */
-  resolved: AdapterStamp;
+  /** Which forge this session is BOUND to, and therefore what the project's adapters
+   *  are judged against. */
+  binding: LaunchGenerationBinding;
+  /** The generation this launch is judged against. Null when the bound forge has no
+   *  stamp this process can name — see `LaunchGenerationBinding`. */
+  resolved: AdapterStamp | null;
   /** Installed, marked, and naming a DIFFERENT generation. */
   fromAnotherGeneration: ProjectAdapterEntry[];
   /** Advertised by the resolved surface, absent from the project. */
   missing: ProjectAdapterEntry[];
   /** Present, but carrying no marker, so no generation resolves for them at all. */
   unresolvable: ProjectAdapterEntry[];
+  /** Installed and marked, but the BOUND generation has no nameable stamp, so
+   *  agreement cannot be decided either way. Reported rather than assumed: silently
+   *  comparing these against the running assets is what made this check claim
+   *  agreement with a generation the session was not bound to. */
+  unverifiable: ProjectAdapterEntry[];
 };
+
+/** WHICH FORGE the project's adapters must agree with for THIS session.
+ *
+ *  Not always the running one. The launcher resolves an adapter's instruction surface
+ *  through the adapter, and Codex binds its carrier out of the PUBLISHED seed
+ *  generation — so a failed or deferred `forge upgrade` can leave a session running
+ *  new code while bound to an older generation's orientation bytes. Comparing the
+ *  project against the running assets in that state reports agreement in one direction
+ *  and a warning in the other, and both are wrong; a drift detector that is wrong in
+ *  both directions is worse than none, because step 8 shipped detectability in place
+ *  of atomicity.
+ *
+ *  `stamp: null` is the honest third answer: the bound forge is a tree this process
+ *  cannot name (a dev checkout that is not the running one has only a content
+ *  identity, and the only content this process can render is its own). */
+export type LaunchGenerationBinding = {
+  stamp: AdapterStamp | null;
+  /** How the report names it. */
+  source: string;
+};
+
+/** The default binding: the running assets, which is what the launcher would install
+ *  and what an adapter reading the running tree binds. */
+export function resolvedGeneration(stamp: AdapterStamp = currentAdapterStamp()): LaunchGenerationBinding {
+  return { stamp, source: `forge generation ${stamp}` };
+}
+
+/** The binding for an adapter that bound its carrier out of a release OTHER than the
+ *  running one. A null root is "the running assets" — the common case. */
+export function boundGeneration(boundAssetRoot: string | null): LaunchGenerationBinding {
+  if (boundAssetRoot === null) return resolvedGeneration();
+  const stamp = adapterStampForAssetRoot(boundAssetRoot);
+  if (stamp === null) {
+    return {
+      stamp: null,
+      source:
+        `the forge at ${boundAssetRoot}, which rendered the instruction carrier bound to this session and which ` +
+        `this forge cannot name a generation for`,
+    };
+  }
+  return { stamp, source: `forge generation ${stamp}, bound to this session from ${boundAssetRoot}` };
+}
 
 /** `currentAdapterStamp` is deliberately the INSTALLER's (src/cli/commands/init.ts):
  *  the question here is "which forge rendered the bytes in this project?", and the
@@ -223,19 +275,25 @@ export type AdapterGenerationSplit = {
 export function inspectLaunchAdapterGeneration(
   projectDir: string,
   adapterId: OrchestratorAdapterId,
-  resolved: AdapterStamp = currentAdapterStamp(),
+  binding: LaunchGenerationBinding = resolvedGeneration(),
 ): AdapterGenerationSplit {
   // "Advertised" is the surface's own claim about what it renders, so a surface that
-  // deliberately renders nothing (the generic fallback) reports no absence.
+  // deliberately renders nothing (the generic fallback) reports no absence. The stamp
+  // handed to the inspector only decides which BYTES count as current — the split
+  // below reads each entry's own marker — so an unnameable binding still enumerates
+  // the surface honestly.
   const advertised = new Set(operatorSurface(adapterId).renders);
-  const entries = inspectProjectAdapters(projectDir, resolved).filter(
+  const entries = inspectProjectAdapters(projectDir, binding.stamp ?? currentAdapterStamp()).filter(
     (e) => e.surface === adapterId && advertised.has(e.workflow),
   );
+  const marked = entries.filter((e) => e.stamp !== null);
   return {
-    resolved,
-    fromAnotherGeneration: entries.filter((e) => e.stamp !== null && e.stamp !== resolved),
+    binding,
+    resolved: binding.stamp,
+    fromAnotherGeneration: binding.stamp === null ? [] : marked.filter((e) => e.stamp !== binding.stamp),
     missing: entries.filter((e) => e.status === "missing"),
     unresolvable: entries.filter((e) => e.status !== "missing" && e.stamp === null),
+    unverifiable: binding.stamp === null ? marked : [],
   };
 }
 
@@ -248,6 +306,9 @@ export function describeAdapterGenerationSplit(split: AdapterGenerationSplit): C
   for (const e of split.fromAnotherGeneration) {
     parts.push(`${e.path} carries generation ${e.stamp}`);
   }
+  for (const e of split.unverifiable) {
+    parts.push(`${e.path} carries generation ${e.stamp}, which cannot be compared against the bound one`);
+  }
   if (split.missing.length > 0) {
     parts.push(`${split.missing.map((e) => e.path).join(", ")} absent`);
   }
@@ -258,7 +319,7 @@ export function describeAdapterGenerationSplit(split: AdapterGenerationSplit): C
   return {
     capability: "operator-adapters",
     note:
-      `this session resolved forge generation ${split.resolved}, but the project's operator adapters do not agree: ` +
+      `this session is bound to ${split.binding.source}, but the project's operator adapters do not agree: ` +
       `${parts.join("; ")}. The session was launched anyway — forge does not own this repo, so the two can only be ` +
       `reported apart, never held together. Installation is not activation either: these are bytes on disk, not ` +
       `evidence the provider loaded them.`,
@@ -307,8 +368,15 @@ export function planLaunch(adapter: OrchestratorAdapter, ctx: AdapterLaunchConte
   const argvResult = adapter.buildArgv(ctx, { readiness, carrier, operation });
   if (!argvResult.ok) return { ok: false, refusal: argvResult.refusal };
 
+  // Judged against the generation this session is BOUND to, which the adapter that
+  // bound it is the only thing that can name — not against the running assets, which
+  // a failed or deferred seed publication leaves ahead of the carrier actually in use.
   const adapterSplit = describeAdapterGenerationSplit(
-    inspectLaunchAdapterGeneration(ctx.projectDir, ctx.decision.adapter),
+    inspectLaunchAdapterGeneration(
+      ctx.projectDir,
+      ctx.decision.adapter,
+      boundGeneration(adapter.declareBoundAssetRoot?.(readiness) ?? null),
+    ),
   );
 
   return {
