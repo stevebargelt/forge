@@ -1,22 +1,33 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  adapterDecisions,
+  adapterPathsAvoidDeprecatedCodexPrompts,
+  adapterOutcomeLines,
+  adapterReportLines,
   applyOrchestratorBlock,
-  executeClaudeCommandsPlan,
+  currentAdapterStamp,
+  documentedAbsenceSurfaces,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
   executeHookPlan,
+  executeOperatorAdapters,
+  forgeAdapterPaths,
   forgeSlashCommands,
-  planClaudeCommands,
+  operatorAdapterOverrides,
   planClaudeHooks,
   planCommitMsgHook,
   planGitignoreEntries,
+  planOperatorAdapters,
   provisionSeedFile,
   scaffoldBacklogDirs,
+  skippedClaudeCommands,
 } from "./init.js";
+import { isValidAdapterStamp, operatorSurface, parseAdapterMarker } from "../../v2/operator-workflows.js";
+import { CODEX_DEPRECATED_PROMPT_DIRS } from "../../v2/render-codex-skills.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
 # forge orchestrator
@@ -646,18 +657,39 @@ test("planGitignoreEntries: action=install when no .gitignore exists", () => {
   const plan = planGitignoreEntries(projectDir);
   assert.equal(plan.action, "install");
   if (plan.action === "install") {
-    assert.equal(plan.missing.length, 2);
+    assert.equal(plan.missing.length, 4);
     assert.ok(plan.missing.includes(".claude/settings.local.json"));
     assert.ok(plan.missing.includes(".claude/commands/"));
+    // FG-253: the Codex skill dirs, PER-DIRECTORY.
+    assert.ok(plan.missing.includes(".agents/skills/forge-orient/"));
+    assert.ok(plan.missing.includes(".agents/skills/forge-handoff/"));
   }
 });
 
 test("executeGitignoreEntriesPlan: creates .gitignore with the forge entries", () => {
   const msg = executeGitignoreEntriesPlan(planGitignoreEntries(projectDir));
-  assert.match(msg, /added 2/);
+  assert.match(msg, /added 4/);
   const content = readFileSync(join(projectDir, ".gitignore"), "utf8");
   assert.match(content, /\.claude\/settings\.local\.json/);
   assert.match(content, /\.claude\/commands\//);
+  assert.match(content, /\.agents\/skills\/forge-orient\//);
+  assert.match(content, /\.agents\/skills\/forge-handoff\//);
+});
+
+// FG-253: the parent `.agents/skills/` belongs to the operator and may hold
+// skills forge knows nothing about. Ignoring it would silently un-commit
+// somebody else's work, so the entries are per-directory and this asserts the
+// broader forms are absent.
+test("planGitignoreEntries: NEVER ignores the whole .agents/skills/ tree — only forge's own dirs", () => {
+  const plan = planGitignoreEntries(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action !== "install") return;
+  for (const tooBroad of [".agents/", ".agents/skills/", ".agents/skills", ".agents"]) {
+    assert.ok(!plan.missing.includes(tooBroad), `must not ignore ${tooBroad}`);
+  }
+  for (const e of plan.missing.filter((x) => x.startsWith(".agents/"))) {
+    assert.match(e, /^\.agents\/skills\/forge-[a-z]+\/$/, `${e} must be a single forge-owned skill dir`);
+  }
 });
 
 test("executeGitignoreEntriesPlan: appends to existing .gitignore without disturbing other entries", () => {
@@ -673,13 +705,19 @@ test("executeGitignoreEntriesPlan: appends to existing .gitignore without distur
 });
 
 test("planGitignoreEntries: action=already-current when entries are already present", () => {
-  writeFileSync(join(projectDir, ".gitignore"), "node_modules/\n.claude/settings.local.json\n.claude/commands/\n");
+  writeFileSync(
+    join(projectDir, ".gitignore"),
+    "node_modules/\n.claude/settings.local.json\n.claude/commands/\n.agents/skills/forge-orient/\n.agents/skills/forge-handoff/\n",
+  );
   const plan = planGitignoreEntries(projectDir);
   assert.equal(plan.action, "already-current");
 });
 
 test("planGitignoreEntries: action=install when ONE entry is missing", () => {
-  writeFileSync(join(projectDir, ".gitignore"), "node_modules/\n.claude/settings.local.json\n");
+  writeFileSync(
+    join(projectDir, ".gitignore"),
+    "node_modules/\n.claude/settings.local.json\n.agents/skills/forge-orient/\n.agents/skills/forge-handoff/\n",
+  );
   const plan = planGitignoreEntries(projectDir);
   assert.equal(plan.action, "install");
   if (plan.action === "install") {
@@ -694,114 +732,395 @@ test("executeGitignoreEntriesPlan: idempotent — running twice doesn't duplicat
   const content = readFileSync(join(projectDir, ".gitignore"), "utf8");
   const settingsLocalCount = (content.match(/\.claude\/settings\.local\.json/g) ?? []).length;
   const commandsCount = (content.match(/\.claude\/commands\//g) ?? []).length;
+  const orientSkillCount = (content.match(/\.agents\/skills\/forge-orient\//g) ?? []).length;
   assert.equal(settingsLocalCount, 1, "settings.local.json entry should appear exactly once");
   assert.equal(commandsCount, 1, ".claude/commands/ entry should appear exactly once");
+  assert.equal(orientSkillCount, 1, "forge-orient skill dir entry should appear exactly once");
 });
 
-// ----- planClaudeCommands / executeClaudeCommandsPlan (/orient + /handoff) -----
+// ─────────────────────────────────────────────────────────────────────────────
+// FG-253: project-scoped operator adapters — install, refresh, migrate, and
+// (the half that matters) REFUSE.
+//
+// Every negative case below is the same threat stated four ways: forge writes
+// generated files into a repository it does not own, so anything at a target
+// path that is not provably forge's must survive the run byte-for-byte. The
+// happy path is one test; the rest are the refusals.
+// ─────────────────────────────────────────────────────────────────────────────
 
-test("forgeSlashCommands: includes both /orient and /handoff templates", () => {
-  const cmds = forgeSlashCommands();
-  assert.ok(cmds.includes("orient.md"));
-  assert.ok(cmds.includes("handoff.md"));
+const STAMP_A = "test-stamp-aaa";
+const STAMP_B = "test-stamp-bbb";
+
+function adapterPath(projectDir: string, rel: string): string {
+  return join(projectDir, ...rel.split("/"));
+}
+
+function claudeOrient(): string {
+  const p = forgeAdapterPaths().find((x) => x.endsWith("/orient.md"));
+  if (!p) throw new Error("no rendered Claude /orient target");
+  return p;
+}
+
+function claudeHandoff(): string {
+  const p = forgeAdapterPaths().find((x) => x.endsWith("/handoff.md"));
+  if (!p) throw new Error("no rendered Claude /handoff target");
+  return p;
+}
+
+function codexOrientSkill(): string {
+  const p = forgeAdapterPaths().find((x) => x.includes("forge-orient"));
+  if (!p) throw new Error("no rendered Codex forge-orient target");
+  return p;
+}
+
+function decisionFor(plan: ReturnType<typeof planOperatorAdapters>, rel: string) {
+  return adapterDecisions(plan).find((d) => d.relPath === rel);
+}
+
+test("FG-253 forgeAdapterPaths: exactly the four adapter targets — 2 Claude commands + 2 Codex skills", () => {
+  const paths = forgeAdapterPaths();
+  assert.equal(paths.length, 4, `expected 4 adapter targets, got ${paths.join(", ")}`);
+  assert.deepEqual(
+    paths.filter((p) => p.startsWith(".claude/commands/")).sort(),
+    [".claude/commands/handoff.md", ".claude/commands/orient.md"],
+  );
+  assert.deepEqual(
+    paths.filter((p) => p.startsWith(".agents/skills/")).sort(),
+    [".agents/skills/forge-handoff/SKILL.md", ".agents/skills/forge-orient/SKILL.md"],
+  );
 });
 
-test("planClaudeCommands: action=install for a fresh project with no .claude/commands dir", () => {
-  const plan = planClaudeCommands(projectDir);
+test("FG-253: no rendered adapter path is under a deprecated Codex custom-prompt directory", () => {
+  assert.ok(adapterPathsAvoidDeprecatedCodexPrompts(), `deprecated prompt dirs: ${CODEX_DEPRECATED_PROMPT_DIRS.join(", ")}`);
+  for (const p of forgeAdapterPaths()) {
+    assert.ok(!p.includes("prompts"), `${p} must not live in a prompts directory`);
+  }
+});
+
+test("FG-253 currentAdapterStamp: is a stamp the marker renderer will actually accept", () => {
+  assert.ok(isValidAdapterStamp(currentAdapterStamp()), `invalid stamp: ${currentAdapterStamp()}`);
+});
+
+test("FG-253 planOperatorAdapters: a fresh project plans install for all four targets", () => {
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
   assert.equal(plan.action, "install");
-  if (plan.action === "install") {
-    assert.equal(plan.entries.length, forgeSlashCommands().length);
-    for (const e of plan.entries) {
-      assert.equal(e.status, "install");
-      assert.match(e.source, /scripts\/claude-commands\//);
-      assert.match(e.target, /\.claude\/commands\//);
-    }
+  const decisions = adapterDecisions(plan);
+  assert.equal(decisions.length, 4);
+  for (const d of decisions) assert.equal(d.decision, "install", `${d.relPath} should be a fresh install`);
+});
+
+test("FG-253 executeOperatorAdapters: writes marked REGULAR FILES (not symlinks) at every target", () => {
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  const run = executeOperatorAdapters(plan);
+  assert.equal(run.outcomes.filter((o) => o.applied === "written").length, 4);
+  for (const rel of forgeAdapterPaths()) {
+    const target = adapterPath(projectDir, rel);
+    assert.ok(existsSync(target), `${rel} should exist`);
+    assert.ok(!lstatSync(target).isSymbolicLink(), `${rel} must be bytes, not a symlink`);
+    assert.equal(parseAdapterMarker(readFileSync(target, "utf8")), STAMP_A, `${rel} must carry the marker + stamp`);
   }
 });
 
-test("executeClaudeCommandsPlan: creates .claude/commands dir + symlinks each command", () => {
-  const plan = planClaudeCommands(projectDir);
-  const msg = executeClaudeCommandsPlan(plan);
-  assert.match(msg, /installed/);
-  const dir = join(projectDir, ".claude", "commands");
-  for (const name of forgeSlashCommands()) {
-    const target = join(dir, name);
-    assert.ok(existsSync(target), `${name} should exist at ${target}`);
-    assert.ok(lstatSync(target).isSymbolicLink(), `${name} should be a symlink, not a copy`);
-  }
-});
-
-test("planClaudeCommands: action=already-current after a fresh install", () => {
-  executeClaudeCommandsPlan(planClaudeCommands(projectDir));
-  const replan = planClaudeCommands(projectDir);
+test("FG-253: a second run over the same release is already-current and rewrites nothing", () => {
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+  const before = forgeAdapterPaths().map((rel) => readFileSync(adapterPath(projectDir, rel), "utf8"));
+  const replan = planOperatorAdapters(projectDir, STAMP_A);
   assert.equal(replan.action, "already-current");
+  for (const d of adapterDecisions(replan)) assert.equal(d.decision, "already-current");
+  const run = executeOperatorAdapters(replan);
+  assert.equal(run.outcomes.filter((o) => o.applied === "written").length, 0, "nothing may be rewritten");
+  forgeAdapterPaths().forEach((rel, i) => {
+    assert.equal(readFileSync(adapterPath(projectDir, rel), "utf8"), before[i], `${rel} must be byte-identical`);
+  });
 });
 
-test("planClaudeCommands: refuses to clobber a project-local override (regular file at the target path)", () => {
-  const dir = join(projectDir, ".claude", "commands");
-  mkdirSync(dir, { recursive: true });
-  // User wrote their own /orient.md — must not be replaced.
-  writeFileSync(join(dir, "orient.md"), "# my custom orient\n");
-  const plan = planClaudeCommands(projectDir);
+test("FG-253: a stamp bump refreshes forge-owned bytes in place", () => {
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+  const plan = planOperatorAdapters(projectDir, STAMP_B);
   assert.equal(plan.action, "install");
-  if (plan.action === "install") {
-    const orient = plan.entries.find((e) => e.name === "orient.md");
-    assert.equal(orient?.status, "exists-other");
-    assert.match(orient?.details ?? "", /regular file/);
-  }
-  // Execute leaves the custom file alone, installs the other commands.
-  const msg = executeClaudeCommandsPlan(plan);
-  assert.match(msg, /SKIPPED/);
-  assert.equal(readFileSync(join(dir, "orient.md"), "utf8"), "# my custom orient\n");
-});
-
-test("planClaudeCommands: detects a stale-symlink to an unrelated path as exists-other so we don't clobber", () => {
-  const dir = join(projectDir, ".claude", "commands");
-  mkdirSync(dir, { recursive: true });
-  // Decoy: point /orient.md at some unrelated file (simulates a prior tool that managed slash commands)
-  const decoy = join(projectDir, "decoy.md");
-  writeFileSync(decoy, "decoy content");
-  symlinkSync(decoy, join(dir, "orient.md"));
-  const plan = planClaudeCommands(projectDir);
-  assert.equal(plan.action, "install");
-  if (plan.action === "install") {
-    const orient = plan.entries.find((e) => e.name === "orient.md");
-    assert.equal(orient?.status, "exists-other");
-    assert.match(orient?.details ?? "", /symlink/);
+  for (const d of adapterDecisions(plan)) assert.equal(d.decision, "refresh", `${d.relPath} should refresh`);
+  executeOperatorAdapters(plan);
+  for (const rel of forgeAdapterPaths()) {
+    assert.equal(parseAdapterMarker(readFileSync(adapterPath(projectDir, rel), "utf8")), STAMP_B);
   }
 });
 
-test("planClaudeCommands: detects a stale forge symlink (different forge path) and flags it for replacement", () => {
-  const dir = join(projectDir, ".claude", "commands");
-  mkdirSync(dir, { recursive: true });
-  // Simulate an old forge install at a different path — broken symlink because
-  // /old/forge doesn't exist on this machine.
-  symlinkSync("/old/forge/scripts/claude-commands/orient.md", join(dir, "orient.md"));
-  symlinkSync("/old/forge/scripts/claude-commands/handoff.md", join(dir, "handoff.md"));
-  const plan = planClaudeCommands(projectDir);
-  assert.equal(plan.action, "install");
-  if (plan.action === "install") {
-    const orient = plan.entries.find((e) => e.name === "orient.md");
-    assert.equal(orient?.status, "install", "stale forge symlink should be flagged for upgrade-install, not skipped");
-    assert.match(orient?.details ?? "", /replace stale/);
+// ----- REFUSALS: content forge does not own must survive byte-for-byte -------
+
+test("FG-253 REFUSES: an UNMARKED .claude/commands/orient.md is a project override, left byte-identical", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  const mine = "# my own orient\n\nDo not touch this.\n";
+  writeFileSync(target, mine);
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "override");
+  assert.match(decisionFor(plan, rel)?.details ?? "", /no forge ownership marker/);
+
+  const run = executeOperatorAdapters(plan);
+  assert.equal(run.outcomes.find((o) => o.relPath === rel)?.applied, "left-alone");
+  assert.equal(readFileSync(target, "utf8"), mine, "the operator's file must be byte-identical");
+  // The other three still install — one override does not abort the set.
+  assert.equal(run.outcomes.filter((o) => o.applied === "written").length, 3);
+});
+
+test("FG-253 REFUSES: an UNMARKED .agents/skills/forge-orient/SKILL.md is a project override, left byte-identical", () => {
+  const rel = codexOrientSkill();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  const mine = "---\nname: forge-orient\n---\n\nmy own version\n";
+  writeFileSync(target, mine);
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "override");
+  executeOperatorAdapters(plan);
+  assert.equal(readFileSync(target, "utf8"), mine);
+});
+
+test("FG-253 REFUSES: a foreign symlink at an adapter path is never written THROUGH", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  const victim = join(projectDir, "victim.md");
+  const victimBytes = "someone else's file\n";
+  writeFileSync(victim, victimBytes);
+  symlinkSync(victim, target);
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "override");
+  executeOperatorAdapters(plan);
+  assert.ok(lstatSync(target).isSymbolicLink(), "the symlink itself must survive");
+  assert.equal(readFileSync(victim, "utf8"), victimBytes, "writing through the link would have clobbered this");
+});
+
+test("FG-253 REFUSES: a symlinked adapter DIRECTORY that escapes the project is not a write target", () => {
+  const outside = mkdtempSync(join(tmpdir(), "forge-outside-"));
+  try {
+    const commandsDir = join(projectDir, ".claude", "commands");
+    mkdirSync(dirname(commandsDir), { recursive: true });
+    symlinkSync(outside, commandsDir);
+
+    const plan = planOperatorAdapters(projectDir, STAMP_A);
+    for (const d of adapterDecisions(plan).filter((x) => x.relPath.startsWith(".claude/commands/"))) {
+      assert.equal(d.decision, "override", `${d.relPath} must be refused, not written outside the project`);
+      assert.match(d.details ?? "", /outside the project/);
+    }
+    executeOperatorAdapters(plan);
+    assert.deepEqual(readdirSync(outside), [], "nothing may be written outside the project root");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
-test("executeClaudeCommandsPlan: replaces stale forge symlinks in place without EEXIST", () => {
-  const dir = join(projectDir, ".claude", "commands");
-  mkdirSync(dir, { recursive: true });
-  symlinkSync("/old/forge/scripts/claude-commands/orient.md", join(dir, "orient.md"));
-  symlinkSync("/old/forge/scripts/claude-commands/handoff.md", join(dir, "handoff.md"));
-  const msg = executeClaudeCommandsPlan(planClaudeCommands(projectDir));
-  // Should succeed (no thrown EEXIST) and report both installed.
-  assert.match(msg, /installed/);
-  // New symlinks now point at the live forge repo, not /old/forge.
-  for (const name of ["orient.md", "handoff.md"]) {
-    const target = join(dir, name);
-    assert.ok(lstatSync(target).isSymbolicLink());
-    const linkTarget = readlinkSync(target);
-    assert.ok(!linkTarget.startsWith("/old/forge"), `${name} should no longer point at /old/forge; got ${linkTarget}`);
+test("FG-253 REFUSES: a DANGLING symlinked adapter directory is reported, not mkdir'd into a crash", () => {
+  // existsSync follows links, so a dangling `.claude/commands` reads as absent —
+  // and mkdir over it throws EEXIST. `forge init` must classify it, not die.
+  const commandsDir = join(projectDir, ".claude", "commands");
+  mkdirSync(dirname(commandsDir), { recursive: true });
+  symlinkSync(join(projectDir, "nowhere"), commandsDir);
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  for (const d of adapterDecisions(plan).filter((x) => x.relPath.startsWith(".claude/commands/"))) {
+    assert.equal(d.decision, "override");
+    assert.match(d.details ?? "", /dangling symlink/);
   }
+  const run = executeOperatorAdapters(plan);
+  assert.equal(run.outcomes.filter((o) => o.applied === "written").length, 2, "the Codex half still installs");
+  assert.ok(lstatSync(commandsDir).isSymbolicLink(), "the dangling link must survive untouched");
+  assert.ok(!existsSync(join(projectDir, "nowhere")), "forge must not materialize the link's target");
+});
+
+test("FG-253 REFUSES: a regular file where an adapter DIRECTORY belongs is an override", () => {
+  const skillsDir = join(projectDir, ".agents", "skills");
+  mkdirSync(dirname(skillsDir), { recursive: true });
+  writeFileSync(skillsDir, "a file, not a directory\n");
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  for (const d of adapterDecisions(plan).filter((x) => x.relPath.startsWith(".agents/skills/"))) {
+    assert.equal(d.decision, "override");
+    assert.match(d.details ?? "", /not a directory/);
+  }
+  executeOperatorAdapters(plan);
+  assert.equal(readFileSync(skillsDir, "utf8"), "a file, not a directory\n");
+});
+
+test("FG-253 REFUSES: a directory sitting at an adapter file path is an override, not a target", () => {
+  const rel = claudeOrient();
+  mkdirSync(adapterPath(projectDir, rel), { recursive: true });
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "override");
+  assert.match(decisionFor(plan, rel)?.details ?? "", /directory/);
+  executeOperatorAdapters(plan);
+  assert.ok(lstatSync(adapterPath(projectDir, rel)).isDirectory(), "the directory must survive");
+});
+
+// ----- MIGRATION: forge's own prior artifact, recognized from the bytes -------
+
+test("FG-253 MIGRATES: a legacy absolute forge symlink becomes marked bytes", () => {
+  const rel = claudeHandoff();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  symlinkSync("/some/old/forge/scripts/claude-commands/handoff.md", target);
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "migrate");
+  executeOperatorAdapters(plan);
+  assert.ok(!lstatSync(target).isSymbolicLink(), "the legacy link must be replaced by bytes");
+  assert.equal(parseAdapterMarker(readFileSync(target, "utf8")), STAMP_A);
+});
+
+test("FG-253: legacy recognition is by shape only — a symlink whose tail is not forge's stays foreign", () => {
+  const rel = claudeHandoff();
+  const target = adapterPath(projectDir, rel);
+  mkdirSync(dirname(target), { recursive: true });
+  const decoy = join(projectDir, "elsewhere-claude-commands-handoff.md");
+  writeFileSync(decoy, "not forge's\n");
+  symlinkSync(decoy, target);
+  assert.equal(decisionFor(planOperatorAdapters(projectDir, STAMP_A), rel)?.decision, "override");
+});
+
+// ----- TOCTOU: the plan is not a licence to write later ----------------------
+
+test("FG-253 REFUSES: a target replaced between plan and execute is skipped, not clobbered", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  assert.equal(decisionFor(plan, rel)?.decision, "install");
+
+  // Someone drops their own file in after the plan was made.
+  mkdirSync(dirname(target), { recursive: true });
+  const theirs = "# arrived after the plan\n";
+  writeFileSync(target, theirs);
+
+  const run = executeOperatorAdapters(plan);
+  const outcome = run.outcomes.find((o) => o.relPath === rel);
+  assert.equal(outcome?.applied, "skipped-changed");
+  assert.match(outcome?.details ?? "", /changed since the plan/);
+  assert.equal(readFileSync(target, "utf8"), theirs, "the late arrival must be byte-identical");
+});
+
+test("FG-253 REFUSES: a forge-owned file edited between plan and execute is skipped", () => {
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  const plan = planOperatorAdapters(projectDir, STAMP_B);
+  assert.equal(decisionFor(plan, rel)?.decision, "refresh");
+
+  const edited = "# hand-edited, marker removed\n";
+  writeFileSync(target, edited);
+  const run = executeOperatorAdapters(plan);
+  assert.equal(run.outcomes.find((o) => o.relPath === rel)?.applied, "skipped-changed");
+  assert.equal(readFileSync(target, "utf8"), edited);
+});
+
+// ----- PRESERVATION: files outside the write set ------------------------------
+
+test("FG-253 PRESERVES: AGENTS.md, Codex config, and an operator's own skill are byte-identical across a run", () => {
+  const protectedFiles: Record<string, string> = {
+    "AGENTS.md": "# my agents doc\n\nforge must never write here.\n",
+    ".codex/config.toml": "model = \"my-model\"\n",
+    ".agents/skills/my-own-skill/SKILL.md": "---\nname: my-own-skill\n---\n\nmine.\n",
+    ".agents/skills/README.md": "operator notes about this directory\n",
+  };
+  for (const [rel, bytes] of Object.entries(protectedFiles)) {
+    const p = adapterPath(projectDir, rel);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, bytes);
+  }
+
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_A));
+  executeOperatorAdapters(planOperatorAdapters(projectDir, STAMP_B));
+
+  for (const [rel, bytes] of Object.entries(protectedFiles)) {
+    assert.equal(readFileSync(adapterPath(projectDir, rel), "utf8"), bytes, `${rel} must be untouched`);
+  }
+  // And the operator's skill directory still holds exactly what they put there.
+  assert.deepEqual(readdirSync(join(projectDir, ".agents", "skills", "my-own-skill")), ["SKILL.md"]);
+});
+
+// ----- dry-run ⇔ real run -----------------------------------------------------
+
+test("FG-253: the planned decisions are exactly the decisions the run then takes", () => {
+  // A mixed project: one fresh target, one override, one legacy symlink.
+  const orient = adapterPath(projectDir, claudeOrient());
+  mkdirSync(dirname(orient), { recursive: true });
+  writeFileSync(orient, "# mine\n");
+  symlinkSync("/old/forge/scripts/claude-commands/handoff.md", adapterPath(projectDir, claudeHandoff()));
+
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  const planned = adapterDecisions(plan);
+  const run = executeOperatorAdapters(plan);
+
+  assert.deepEqual(
+    run.outcomes.map((o) => ({ relPath: o.relPath, decision: o.decision })),
+    planned.map((p) => ({ relPath: p.relPath, decision: p.decision })),
+    "the executed decision list must match the printed one, in order",
+  );
+  // Both reports name every target, and the real one reports OUTCOMES.
+  const would = adapterReportLines(plan);
+  const did = adapterOutcomeLines(plan, run.outcomes);
+  assert.equal(would.length, did.length);
+  for (const rel of forgeAdapterPaths()) {
+    assert.ok(would.some((l) => l.includes(rel)), `dry-run must name ${rel}`);
+    assert.ok(did.some((l) => l.includes(rel)), `the real run must name ${rel}`);
+  }
+});
+
+test("FG-253: the real run's report states what HAPPENED — never 'installed' for a file it skipped", () => {
+  const rel = claudeOrient();
+  const target = adapterPath(projectDir, rel);
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  // …the target is taken over between plan and execute.
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, "# arrived late\n");
+
+  const run = executeOperatorAdapters(plan);
+  const line = adapterOutcomeLines(plan, run.outcomes).find((l) => l.includes(rel));
+  assert.ok(line, `no report line for ${rel}`);
+  assert.match(line, /SKIPPED/);
+  assert.ok(!/installed/.test(line), `a skipped file must not be reported as installed: ${line}`);
+  // The dry-run line, by contrast, predicted an install — that is the plan, and
+  // the divergence is exactly what the outcome report exists to show.
+  assert.match(adapterReportLines(plan).find((l) => l.includes(rel)) ?? "", /WOULD install/);
+});
+
+test("FG-253: the generic surface is reported as a documented absence and renders no files", () => {
+  const generic = operatorSurface("generic");
+  assert.equal(generic.renders.length, 0, "the generic surface must render nothing");
+  assert.ok(documentedAbsenceSurfaces().some((s) => s.id === "generic"));
+  const lines = adapterReportLines(planOperatorAdapters(projectDir, STAMP_A));
+  const genericLine = lines.find((l) => l.includes("generic:"));
+  assert.ok(genericLine, "init must say what a generic provider does");
+  assert.match(genericLine, /no files/);
+  assert.match(genericLine, /forge CLI is the interface/);
+});
+
+test("FG-253: a --no-install-hooks plan is skipped and writes nothing", () => {
+  const run = executeOperatorAdapters({ action: "skipped" });
+  assert.deepEqual(run.outcomes, []);
+  assert.ok(!existsSync(join(projectDir, ".claude")));
+  assert.ok(!existsSync(join(projectDir, ".agents")));
+});
+
+// ----- the pre-FG-253 upgrade entry points still work ------------------------
+
+test("FG-253: forgeSlashCommands still names the Claude command files, derived from the renderer", () => {
+  const cmds = forgeSlashCommands();
+  assert.deepEqual([...cmds].sort(), ["handoff.md", "orient.md"]);
+});
+
+test("FG-253: skippedClaudeCommands reports Claude-surface overrides only (the upgrade --json field means slash commands)", () => {
+  const claudeRel = claudeOrient();
+  const codexRel = codexOrientSkill();
+  for (const rel of [claudeRel, codexRel]) {
+    const p = adapterPath(projectDir, rel);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, "operator owned\n");
+  }
+  const plan = planOperatorAdapters(projectDir, STAMP_A);
+  const all = operatorAdapterOverrides(plan).map((e) => e.relPath).sort();
+  assert.deepEqual(all, [codexRel, claudeRel].sort(), "both overrides are visible on the full list");
+  assert.deepEqual(skippedClaudeCommands(plan).map((e) => e.relPath), [claudeRel]);
 });
 
 // ----- scaffoldBacklogDirs (FG-332: structured backlog layout) -----

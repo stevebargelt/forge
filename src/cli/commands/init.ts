@@ -1,10 +1,34 @@
 import type { Command } from "commander";
-import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { basename, join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeBacklogConfig } from "../../backlog/config.js";
 import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
 import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH, currentLinkIn } from "../../util/paths.js";
+// FG-253: the project-scoped operator adapters. The BYTES come from the two
+// renderers, which derive everything they say from the single provider-neutral
+// definition; this module owns only where they land on disk and who is allowed
+// to overwrite what.
+import {
+  isDocumentedAbsence,
+  isValidAdapterStamp,
+  parseAdapterMarker,
+  OPERATOR_SURFACES,
+  operatorSurface,
+  type AdapterStamp,
+  type OperatorSurface,
+  type OperatorWorkflowId,
+} from "../../v2/operator-workflows.js";
+import { renderClaudeCommands } from "../../v2/render-claude-commands.js";
+import {
+  CODEX_DEPRECATED_PROMPT_DIRS,
+  CODEX_SKILLS_ROOT,
+  FORGE_OWNED_CODEX_SKILL_DIRS,
+  renderCodexSkills,
+} from "../../v2/render-codex-skills.js";
+import { assetRoot } from "../../v2/asset-root.js";
+import { readReleaseManifest } from "../../v2/release.js";
 // FG-685: the bundled-hook source resolution moved to src/util so the clone
 // substrate (src/v2/worktree-lifecycle.ts) and this installer answer "where are
 // the hook bytes" the same way. What the operator's primary checkout installs is
@@ -34,17 +58,17 @@ const LOCAL_SETTINGS_FILENAME = "settings.local.json";
 const LEGACY_SETTINGS_FILENAME = "settings.json";
 
 // Gitignore entries forge ensures are present in each project's .gitignore so
-// the per-developer config doesn't get accidentally committed.
+// the per-developer artifacts forge writes don't get accidentally committed.
+//
+// FG-253: the Codex skill entries are PER-DIRECTORY, derived from the set the
+// renderer owns — never the `.agents/skills/` parent, which belongs to the
+// operator and may hold skills forge knows nothing about. Ignoring the parent
+// would silently un-commit somebody else's work.
 const FORGE_GITIGNORE_ENTRIES = [
   ".claude/settings.local.json",
   ".claude/commands/",
+  ...FORGE_OWNED_CODEX_SKILL_DIRS.map((d) => `${CODEX_SKILLS_ROOT}/${d}/`),
 ];
-
-// Slash-command templates that ship with forge and get symlinked into each
-// project's .claude/commands/ so /orient + /handoff are available everywhere.
-// Symlink (not copy) so `forge upgrade` propagates template improvements to
-// all projects without per-project re-install.
-const FORGE_SLASH_COMMANDS: ReadonlyArray<string> = ["orient.md", "handoff.md"];
 
 // Wraps the project's CLAUDE.md with the forge orchestrator block. Idempotent:
 // if the fenced markers already exist, replaces the block in place; if they
@@ -99,7 +123,7 @@ export function registerInit(program: Command): void {
       const installHooks = options.installHooks !== false;
       const hookPlan = installHooks ? planCommitMsgHook(projectDir, FORGE_HOME) : { action: "skipped" as const };
       const claudeHooksPlan = installHooks ? planClaudeHooks(projectDir) : { action: "skipped" as const };
-      const slashCommandsPlan = installHooks ? planClaudeCommands(projectDir) : { action: "skipped" as const };
+      const adaptersPlan: OperatorAdaptersPlan = installHooks ? planOperatorAdapters(projectDir) : { action: "skipped" as const };
       const gitignorePlan = installHooks ? planGitignoreEntries(projectDir) : { action: "skipped" as const };
 
       if (options.dryRun) {
@@ -112,7 +136,11 @@ export function registerInit(program: Command): void {
         console.log(`  docs-surfaces.yml:${describeSeedProvisionPlan(forgeProjectDir, "docs-surfaces.yml")}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
-        console.log(`  slash commands:   ${describeClaudeCommandsPlan(slashCommandsPlan)}`);
+        console.log(`  operator adapters: ${describeClaudeCommandsPlan(adaptersPlan)}`);
+        // Per-FILE decisions, from the same list the real run executes — a dry
+        // run that summarized instead of enumerating could not be checked
+        // against what the run then did.
+        for (const line of adapterReportLines(adaptersPlan)) console.log(line);
         console.log(`  .gitignore:       ${describeGitignorePlan(gitignorePlan)}`);
         const hostPolicyDry = ensureHostRoutingPolicy({ raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, seedRaciPath: seedRaciPath(), dryRun: true });
         console.log(`  routing policy:   ${hostPolicyDry.status}`);
@@ -134,7 +162,7 @@ export function registerInit(program: Command): void {
       const docsSurfacesResult = provisionSeedFile(forgeProjectDir, "docs-surfaces.yml", "docs-surfaces.example.yml");
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
-      const slashCommandsResult = installHooks ? executeClaudeCommandsPlan(slashCommandsPlan) : "skipped (--no-install-hooks)";
+      const adaptersResult = installHooks ? executeOperatorAdapters(adaptersPlan) : { summary: "skipped (--no-install-hooks)", outcomes: [] };
       const gitignoreResult = installHooks ? executeGitignoreEntriesPlan(gitignorePlan) : "skipped (--no-install-hooks)";
 
       console.log(`forge init complete in ${projectDir}`);
@@ -147,16 +175,18 @@ export function registerInit(program: Command): void {
       console.log(`  docs-surfaces.yml:${docsSurfacesResult}`);
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
-      console.log(`  slash commands:   ${slashCommandsResult}`);
+      console.log(`  operator adapters: ${adaptersResult.summary}`);
+      for (const line of adapterOutcomeLines(adaptersPlan, adaptersResult.outcomes)) console.log(line);
       console.log(`  .gitignore:       ${gitignoreResult}`);
       // #286: keep the derived host routing policy compiled from the RACI seed so
       // a fresh project is immediately routable without a separate compile step.
       const hostPolicy = ensureHostRoutingPolicy({ raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, seedRaciPath: seedRaciPath() });
       console.log(`  routing policy:   ${hostPolicy.status}`);
       if (!hostPolicy.ok) console.warn(`        ⚠ routing policy not generated — ${hostPolicy.status}`);
-      if (installHooks) warnSkippedClaudeCommands(slashCommandsPlan);
+      if (installHooks) warnOperatorAdapterOverrides(adaptersPlan);
       console.log(``);
-      console.log(`Note: .claude/settings.local.json and .claude/commands/ are per-developer.`);
+      console.log(`Note: .claude/settings.local.json, .claude/commands/ and the forge skill dirs under`);
+      console.log(`      ${CODEX_SKILLS_ROOT}/ are per-developer (gitignored).`);
       console.log(`      Other contributors run \`forge init\` after cloning to bootstrap their local copies.`);
       console.log(``);
       console.log(`Next: run 'forge claude' from this directory to talk to the forge orchestrator.`);
@@ -763,150 +793,524 @@ function resolveHeartbeatSource(): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Slash commands (/orient + /handoff). Symlinked into <project>/.claude/commands
-// so `forge upgrade` propagates template edits without per-project re-copy.
-// Each entry is a Claude Code custom command — markdown file at
-// `<project>/.claude/commands/<name>.md`, invoked as `/<name>` in the session.
+// FG-253: project-scoped operator adapters (/orient + /handoff, on every
+// provider surface that has one).
+//
+// WHAT CHANGED, AND WHY. These files used to be SYMLINKS into the forge
+// checkout's scripts/claude-commands/*.md. A symlink cannot carry a release
+// stamp, and a committed absolute link is dead in every other clone — so a
+// project could neither be told which release its guidance came from nor be
+// checked for drift. They are now MATERIALIZED BYTES rendered from the
+// provider-neutral definition, one file per (surface, workflow).
+//
+// OWNERSHIP IS DECIDED FROM THE BYTES ON DISK. Never from a record of what
+// forge previously wrote: projects get cloned, forge gets reinstalled at a new
+// path, and any install-time memory mis-fires on the copy. A file carrying the
+// forge ownership marker is forge's and is freely refreshed; a legacy symlink
+// into `scripts/claude-commands/<name>.md` is forge's own prior artifact and is
+// migrated to bytes; ANYTHING ELSE at a target path is FOREIGN — reported,
+// never written over, and RESOLVED rather than a failure, because a project
+// that deliberately owns its own /orient is not a broken project.
+//
+// WHAT IS OUT OF THE WRITE SET ENTIRELY. AGENTS.md, CLAUDE.md prose outside the
+// orchestrator marker block, any Codex config or CODEX_HOME, and every
+// `.agents/skills/<name>` directory outside FORGE_OWNED_CODEX_SKILL_DIRS. None
+// of them is read for splicing, written, or deleted here — the installer's
+// whole write set is the rendered target list below.
+//
+// DEPRECATED CODEX CUSTOM PROMPTS ARE NOT USED. The target list is asserted
+// disjoint from CODEX_DEPRECATED_PROMPT_DIRS.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type ClaudeCommandsPlan =
-  | { action: "install"; commandsDir: string; entries: ClaudeCommandEntry[] }
-  | { action: "already-current"; commandsDir: string }
-  | { action: "skipped" };
+/** Which provider surface a target belongs to. Reported, not inferred from the
+ *  path, so a future surface cannot be mistaken for an existing one. */
+export type AdapterSurfaceKind = "claude-command" | "codex-skill";
 
-export type ClaudeCommandEntry = {
-  name: string;             // e.g. "orient.md"
-  target: string;           // <commandsDir>/<name>
-  source: string;           // absolute path in the forge repo
-  status: "install" | "already-linked" | "exists-other";
-  details?: string;         // for exists-other: what's blocking
+/** What the planner found at a target path. `foreign` carries its reason so the
+ *  operator is told WHY forge declined, not merely that it did. */
+export type AdapterOnDisk =
+  | { kind: "absent" }
+  | { kind: "forge-owned"; stamp: AdapterStamp; bytes: string }
+  | { kind: "legacy-symlink"; linkTarget: string }
+  | { kind: "foreign"; reason: string };
+
+/** The decision for one target. `override` is the operator-owns-this outcome:
+ *  reported and resolved, never an error. */
+export type AdapterDecision = "install" | "refresh" | "migrate" | "already-current" | "override";
+
+export type AdapterEntry = {
+  workflow: OperatorWorkflowId;
+  surface: AdapterSurfaceKind;
+  /** How an operator names this thing: `/orient`, or `forge-orient`. */
+  label: string;
+  /** Legacy display name, kept so the pre-FG-253 `forge upgrade` reporting path
+   *  keeps rendering the Claude half exactly as it did. Step 5 replaces it. */
+  name: string;
+  /** Repo-relative, POSIX — the identity that appears in reports and --json. */
+  relPath: string;
+  /** Absolute path under the project dir. */
+  target: string;
+  decision: AdapterDecision;
+  details?: string;
+  /** The bytes this release renders for the target. */
+  bytes: string;
+  /** What the planner saw, re-verified before execute mutates anything. */
+  observed: AdapterOnDisk;
 };
 
-export function planClaudeCommands(projectDir: string): ClaudeCommandsPlan {
-  const commandsDir = join(projectDir, ".claude", "commands");
-  const entries: ClaudeCommandEntry[] = [];
-  let anyWork = false;
-  for (const name of FORGE_SLASH_COMMANDS) {
-    const source = resolveSlashCommandSource(name);
-    const target = join(commandsDir, name);
-    // Use lstatSync to detect symlinks (including broken ones pointing at a
-    // stale forge path). existsSync follows symlinks → a broken link returns
-    // false → install path would EEXIST when it tried to recreate the link.
-    let st;
-    try { st = lstatSync(target); }
-    catch { st = null; }
-    if (!st) {
-      entries.push({ name, target, source, status: "install" });
-      anyWork = true;
-      continue;
-    }
-    if (st.isSymbolicLink()) {
-      let linkTarget = "";
-      try { linkTarget = readlinkSync(target); } catch { /* unreadable link */ }
-      const resolved = linkTarget ? resolve(dirname(target), linkTarget) : "";
-      if (linkTarget === source || resolved === source) {
-        entries.push({ name, target, source, status: "already-linked" });
-        continue;
-      }
-      // Stale forge symlink (points at a different forge path, possibly
-      // broken). Treat as "upgrade in place" — replace the symlink.
-      // Distinguish from a user's deliberate override: we recognize forge's
-      // own targets by the "claude-commands/<name>.md" tail.
-      const isStaleForge = linkTarget.endsWith(`/scripts/claude-commands/${name}`);
-      if (isStaleForge) {
-        entries.push({ name, target, source, status: "install", details: `replace stale symlink → ${linkTarget}` });
-        anyWork = true;
-      } else {
-        entries.push({ name, target, source, status: "exists-other", details: `symlink → ${linkTarget}` });
-      }
-      continue;
-    }
-    entries.push({ name, target, source, status: "exists-other", details: "regular file (project-local override)" });
+/** Kept as `ClaudeCommandsPlan` too (below) so `forge upgrade` compiles and
+ *  behaves unchanged until step 5 gives adapters their own upgrade step. */
+export type OperatorAdaptersPlan =
+  | { action: "install"; projectDir: string; stamp: AdapterStamp; entries: AdapterEntry[]; absentSurfaces: readonly OperatorSurface[] }
+  | { action: "already-current"; projectDir: string; stamp: AdapterStamp; entries: AdapterEntry[]; absentSurfaces: readonly OperatorSurface[] }
+  | { action: "skipped" };
+
+// ── The release stamp embedded in every rendered adapter ─────────────────────
+
+/** The identity of the forge that rendered a project's adapters.
+ *
+ *  Inside a release that is the release manifest's id. On a dev checkout there is
+ *  no manifest, so it is derived from the checkout's own physical path — stable
+ *  across runs of THAT tree and different for any other, because the one thing a
+ *  stamp must never do is make two unrelated trees compare equal. A dev stamp
+ *  does not change when the checkout's content changes, which is why
+ *  already-current is decided by comparing BYTES (below) and not stamps: editing
+ *  the definition and re-running `forge init` still refreshes the files, the way
+ *  the old symlink propagated an edit.
+ *
+ *  Exported because the drift detector (step 6) and the launch-boundary stamp
+ *  check (step 8) must answer "which release rendered this?" the same way this
+ *  installer does — two resolvers would be two answers. */
+export function currentAdapterStamp(): AdapterStamp {
+  const root = assetRoot();
+  const found = readReleaseManifest(root);
+  if (found) {
+    const id = found.manifest.id;
+    // A manifest id is a plain token by construction; hash rather than throw if
+    // one ever is not, so an odd id degrades to an opaque-but-distinct stamp
+    // instead of making `forge init` unusable.
+    return isValidAdapterStamp(id) ? id : `release-${shortHash(id)}`;
   }
-  if (!anyWork && entries.every((e) => e.status === "already-linked")) {
-    return { action: "already-current", commandsDir };
-  }
-  return { action: "install", commandsDir, entries };
+  return `dev-${shortHash(safeRealpath(root))}`;
 }
 
-export function executeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
-  if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
-  if (plan.action === "already-current") return "already current (no change)";
+function shortHash(s: string): string {
+  return createHash("sha256").update(s).digest("hex").slice(0, 12);
+}
 
-  mkdirSync(plan.commandsDir, { recursive: true });
-  let installed = 0;
-  let replaced = 0;
-  let alreadyLinked = 0;
-  const skipped: string[] = [];
+function safeRealpath(p: string): string {
+  try { return realpathSync(p); } catch { return resolve(p); }
+}
+
+// ── Rendering → targets ──────────────────────────────────────────────────────
+
+type RenderedTarget = {
+  workflow: OperatorWorkflowId;
+  surface: AdapterSurfaceKind;
+  label: string;
+  name: string;
+  relPath: string;
+  bytes: string;
+};
+
+/** Every file forge would write for `stamp`, derived from OPERATOR_SURFACES so a
+ *  surface that renders nothing (the generic fallback) contributes nothing — the
+ *  documented absence is structural here, not a special case someone remembers. */
+export function renderedAdapterTargets(stamp: AdapterStamp): readonly RenderedTarget[] {
+  const out: RenderedTarget[] = [];
+  for (const surface of OPERATOR_SURFACES) {
+    if (isDocumentedAbsence(surface)) continue;
+    const renders = new Set<OperatorWorkflowId>(surface.renders);
+    if (surface.id === "claude-code") {
+      for (const r of renderClaudeCommands(stamp)) {
+        if (!renders.has(r.workflow)) continue;
+        out.push({
+          workflow: r.workflow,
+          surface: "claude-command",
+          label: r.slashCommand,
+          name: `${r.workflow}.md`,
+          relPath: r.path,
+          bytes: r.bytes,
+        });
+      }
+    } else if (surface.id === "codex") {
+      for (const r of renderCodexSkills(stamp)) {
+        if (!renders.has(r.workflow)) continue;
+        out.push({
+          workflow: r.workflow,
+          surface: "codex-skill",
+          label: r.skillName,
+          name: `${r.skillName}/SKILL.md`,
+          relPath: r.path,
+          bytes: r.contents,
+        });
+      }
+    }
+    // A surface forge has no renderer for contributes nothing rather than
+    // guessing a layout — an unwritten file is recoverable; a file written into
+    // a guessed location in somebody's repo is not.
+  }
+  return out;
+}
+
+/** The surfaces that deliberately render no files. Reported so `forge init`'s
+ *  answer for a generic provider is the honest one — the CLI is the interface —
+ *  rather than a silence that reads like a missing feature. */
+export function documentedAbsenceSurfaces(): readonly OperatorSurface[] {
+  return OPERATOR_SURFACES.filter(isDocumentedAbsence);
+}
+
+// ── Planning ─────────────────────────────────────────────────────────────────
+
+export function planOperatorAdapters(projectDir: string, stamp: AdapterStamp = currentAdapterStamp()): OperatorAdaptersPlan {
+  const entries: AdapterEntry[] = [];
+  for (const t of renderedAdapterTargets(stamp)) {
+    const target = join(projectDir, ...t.relPath.split("/"));
+    const observed = classifyAdapterTarget(target, projectDir, t.surface);
+    entries.push({ ...t, target, observed, ...decide(observed, t.bytes) });
+  }
+  const absentSurfaces = documentedAbsenceSurfaces();
+  const anyWork = entries.some((e) => e.decision === "install" || e.decision === "refresh" || e.decision === "migrate");
+  return anyWork
+    ? { action: "install", projectDir, stamp, entries, absentSurfaces }
+    : { action: "already-current", projectDir, stamp, entries, absentSurfaces };
+}
+
+function decide(observed: AdapterOnDisk, rendered: string): { decision: AdapterDecision; details?: string } {
+  switch (observed.kind) {
+    case "absent":
+      return { decision: "install" };
+    case "forge-owned":
+      // Byte comparison, not stamp comparison: it converges on a stamp refresh
+      // AND on a definition edit under an unchanged dev stamp, and it cannot
+      // report "current" for a file whose content someone changed by hand.
+      return observed.bytes === rendered
+        ? { decision: "already-current" }
+        : { decision: "refresh", details: `forge-owned, stamp ${observed.stamp} → rewrite` };
+    case "legacy-symlink":
+      return { decision: "migrate", details: `legacy forge symlink → ${observed.linkTarget}` };
+    case "foreign":
+      return { decision: "override", details: observed.reason };
+  }
+}
+
+/** Read the identity of a target path from the FILESYSTEM.
+ *
+ *  Two refusals matter more than the rest:
+ *   - lstat, never stat: a symlink is classified as a symlink, so bytes are only
+ *     ever read from — and written to — a REGULAR FILE. Writing through a link
+ *     would let a link planted at an adapter path redirect forge's write
+ *     anywhere the user can write.
+ *   - containment: the deepest existing ancestor of the target must resolve
+ *     inside the project. A `.claude/commands` symlinked out of the tree is
+ *     foreign, not a write target. */
+function classifyAdapterTarget(target: string, projectDir: string, surface: AdapterSurfaceKind): AdapterOnDisk {
+  const escape = containmentProblem(target, projectDir);
+  if (escape) return { kind: "foreign", reason: escape };
+
+  let st;
+  try { st = lstatSync(target); }
+  catch { return { kind: "absent" }; }
+
+  if (st.isSymbolicLink()) {
+    let linkTarget = "";
+    try { linkTarget = readlinkSync(target); }
+    catch { return { kind: "foreign", reason: "unreadable symlink" }; }
+    if (surface === "claude-command" && isLegacyForgeCommandLink(linkTarget, basename(target))) {
+      return { kind: "legacy-symlink", linkTarget };
+    }
+    return { kind: "foreign", reason: `symlink → ${linkTarget} (project override)` };
+  }
+  if (!st.isFile()) {
+    return { kind: "foreign", reason: st.isDirectory() ? "a directory is at this path" : "not a regular file" };
+  }
+  let bytes: string;
+  try { bytes = readFileSync(target, "utf8"); }
+  catch (e) { return { kind: "foreign", reason: `unreadable (${(e as Error).message})` }; }
+  const stamp = parseAdapterMarker(bytes);
+  if (stamp === null) {
+    return { kind: "foreign", reason: "regular file with no forge ownership marker (project override)" };
+  }
+  return { kind: "forge-owned", stamp, bytes };
+}
+
+/** Forge's own pre-FG-253 artifact: an absolute symlink into a forge checkout's
+ *  `scripts/claude-commands/<name>.md`. Those sources no longer exist, so the
+ *  link is dangling on every host — recognizing it by shape is what lets an
+ *  already-onboarded project migrate to bytes instead of reporting an override
+ *  forever. Nothing else about a symlink makes it forge's. */
+function isLegacyForgeCommandLink(linkTarget: string, name: string): boolean {
+  return linkTarget.endsWith(`/scripts/claude-commands/${name}`);
+}
+
+/** Non-null when the directory forge would write into is not a real directory
+ *  inside the project.
+ *
+ *  The walk uses lstat, never existsSync: existsSync FOLLOWS links, so a dangling
+ *  `.claude/commands` symlink would read as "not there", we would try to mkdir it,
+ *  and node throws EEXIST — `forge init` dying on a symlink somebody left behind.
+ *  A directory entry that exists as a link is a thing to classify, not a hole to
+ *  fill. Refusals returned here surface as project overrides: reported, not
+ *  written over, not fatal. */
+function containmentProblem(target: string, projectDir: string): string | null {
+  const root = safeRealpath(projectDir);
+  let probe = dirname(target);
+  while (!entryExists(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe) return `no existing ancestor directory under ${projectDir}`;
+    probe = parent;
+  }
+  let real: string;
+  try { real = realpathSync(probe); }
+  catch { return `refusing to write: ${probe} does not resolve (dangling symlink)`; }
+  if (!(real === root || real.startsWith(root + sep))) {
+    return `refusing to write: ${probe} resolves to ${real}, outside the project at ${root}`;
+  }
+  try {
+    if (!statSync(real).isDirectory()) return `refusing to write: ${probe} is not a directory`;
+  } catch {
+    return `refusing to write: ${probe} is unreadable`;
+  }
+  return null;
+}
+
+/** Does a directory ENTRY exist here — link or not? lstat, so a dangling symlink
+ *  answers yes. */
+function entryExists(p: string): boolean {
+  try { lstatSync(p); return true; }
+  catch { return false; }
+}
+
+// ── Execution ────────────────────────────────────────────────────────────────
+
+export type AdapterApplied = "written" | "unchanged" | "left-alone" | "skipped-changed";
+
+export type AdapterOutcome = {
+  relPath: string;
+  label: string;
+  decision: AdapterDecision;
+  applied: AdapterApplied;
+  details?: string;
+};
+
+export type AdapterExecution = { summary: string; outcomes: readonly AdapterOutcome[] };
+
+export function executeOperatorAdapters(plan: OperatorAdaptersPlan): AdapterExecution {
+  if (plan.action === "skipped") return { summary: "skipped (--no-install-hooks)", outcomes: [] };
+
+  const outcomes: AdapterOutcome[] = [];
   for (const e of plan.entries) {
-    if (e.status === "install") {
-      // If a stale forge symlink is in the way (planClaudeCommands flagged it
-      // by setting `details`), unlink first. lstatSync inside a guarded block
-      // so a missing file path still works.
-      try {
-        const st = lstatSync(e.target);
-        if (st) { unlinkSync(e.target); replaced += 1; }
-      } catch { /* nothing to remove */ }
-      symlinkSync(e.source, e.target);
-      installed += 1;
-    } else if (e.status === "already-linked") {
-      alreadyLinked += 1;
-    } else {
-      skipped.push(`${e.name} (${e.details ?? "exists"})`);
+    if (e.decision === "already-current") {
+      outcomes.push({ relPath: e.relPath, label: e.label, decision: e.decision, applied: "unchanged" });
+      continue;
     }
+    if (e.decision === "override") {
+      outcomes.push({ relPath: e.relPath, label: e.label, decision: e.decision, applied: "left-alone", details: e.details });
+      continue;
+    }
+    // Between planning and now the target could have been replaced — including
+    // by a symlink aimed somewhere sensitive. Re-read its identity and mutate
+    // ONLY if it still is what the planner classified.
+    const now = classifyAdapterTarget(e.target, plan.projectDir, e.surface);
+    if (!observedMatches(now, e.observed)) {
+      outcomes.push({
+        relPath: e.relPath,
+        label: e.label,
+        decision: e.decision,
+        applied: "skipped-changed",
+        details: `target changed since the plan was made (now: ${describeObserved(now)})`,
+      });
+      continue;
+    }
+    mkdirSync(dirname(e.target), { recursive: true });
+    atomicWrite(e.target, e.bytes);
+    outcomes.push({ relPath: e.relPath, label: e.label, decision: e.decision, applied: "written", details: e.details });
   }
+  return { summary: summarizeAdapterOutcomes(outcomes), outcomes };
+}
+
+function observedMatches(now: AdapterOnDisk, expected: AdapterOnDisk): boolean {
+  if (now.kind !== expected.kind) return false;
+  if (now.kind === "forge-owned" && expected.kind === "forge-owned") return now.bytes === expected.bytes;
+  if (now.kind === "legacy-symlink" && expected.kind === "legacy-symlink") return now.linkTarget === expected.linkTarget;
+  // `absent` matches `absent`; a `foreign` re-read never reaches here (foreign
+  // is decided as `override` and never mutated).
+  return now.kind === "absent";
+}
+
+function describeObserved(o: AdapterOnDisk): string {
+  switch (o.kind) {
+    case "absent":         return "absent";
+    case "forge-owned":    return `forge-owned (stamp ${o.stamp})`;
+    case "legacy-symlink": return `legacy symlink → ${o.linkTarget}`;
+    case "foreign":        return o.reason;
+  }
+}
+
+/** Write via a same-directory temp + rename(2): the target is never a truncated
+ *  half-file a session could read, and the rename REPLACES a legacy symlink's
+ *  directory entry rather than writing through it.
+ *
+ *  Residual, stated rather than hidden: classification and write are two syscall
+ *  sequences, so a racing local process could still swap a component between
+ *  them. Closing that needs openat/O_NOFOLLOW, which node does not expose. What
+ *  IS closed is the durable version — a link or file planted BEFORE the run,
+ *  which is the realistic shape here (a repo checked out with someone else's
+ *  content at an adapter path), because the re-read happens after the plan the
+ *  operator saw. */
+function atomicWrite(target: string, bytes: string): void {
+  const tmp = join(dirname(target), `.${basename(target)}.forge-${process.pid}.tmp`);
+  try { unlinkSync(tmp); } catch { /* no stale temp to clear */ }
+  writeFileSync(tmp, bytes);
+  renameSync(tmp, target);
+}
+
+function summarizeAdapterOutcomes(outcomes: readonly AdapterOutcome[]): string {
+  const written = outcomes.filter((o) => o.applied === "written");
+  const unchanged = outcomes.filter((o) => o.applied === "unchanged");
+  const overrides = outcomes.filter((o) => o.applied === "left-alone");
+  const stale = outcomes.filter((o) => o.applied === "skipped-changed");
   const parts: string[] = [];
-  if (installed > 0)     parts.push(`installed ${installed} (${plan.entries.filter((e) => e.status === "install").map((e) => "/" + e.name.replace(/\.md$/, "")).join(", ")})`);
-  if (alreadyLinked > 0) parts.push(`${alreadyLinked} already current`);
-  if (skipped.length)    parts.push(`SKIPPED ${skipped.length}: ${skipped.join(", ")}`);
+  if (written.length)    parts.push(`wrote ${written.length} (${written.map((o) => o.label).join(", ")})`);
+  if (unchanged.length)  parts.push(`${unchanged.length} already current`);
+  if (overrides.length)  parts.push(`SKIPPED ${overrides.length} project override(s): ${overrides.map((o) => `${o.relPath} (${o.details ?? "exists"})`).join(", ")}`);
+  if (stale.length)      parts.push(`SKIPPED ${stale.length} changed-since-plan: ${stale.map((o) => o.relPath).join(", ")}`);
   return parts.join("; ") || "no-op";
 }
 
-/** The commands a project already owns, so forge leaves them alone. Shared by the
- *  human warning below and `forge upgrade --json`, which must name the same set. */
-export function skippedClaudeCommands(plan: ClaudeCommandsPlan): ClaudeCommandEntry[] {
-  if (plan.action !== "install") return [];
-  return plan.entries.filter((e) => e.status === "exists-other");
+// ── Reporting: one decision list, rendered by both --dry-run and the real run ─
+
+export type AdapterPlannedDecision = { relPath: string; label: string; decision: AdapterDecision; details?: string };
+
+/** The per-file decisions a plan carries. `--dry-run` prints THIS and the real
+ *  run executes THIS, so "the dry run predicts the real run" is a property of
+ *  there being one list, not of two code paths agreeing by inspection. */
+export function adapterDecisions(plan: OperatorAdaptersPlan): readonly AdapterPlannedDecision[] {
+  if (plan.action === "skipped") return [];
+  return plan.entries.map((e) => ({ relPath: e.relPath, label: e.label, decision: e.decision, details: e.details }));
 }
 
-export function warnSkippedClaudeCommands(plan: ClaudeCommandsPlan): void {
-  const skipped = skippedClaudeCommands(plan);
-  for (const e of skipped) {
-    const cmd = "/" + e.name.replace(/\.md$/, "");
-    console.warn(`  ⚠  ${cmd} was NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"}).`);
-    console.warn(`     To use forge's version: remove the file and re-run this command.`);
+function decisionVerb(d: AdapterDecision, mode: "would" | "did"): string {
+  switch (d) {
+    case "install":         return mode === "would" ? "WOULD install" : "installed";
+    case "refresh":         return mode === "would" ? "WOULD refresh" : "refreshed";
+    case "migrate":         return mode === "would" ? "WOULD migrate legacy symlink → bytes" : "migrated legacy symlink → bytes";
+    case "already-current": return "already current (no change)";
+    case "override":        return "project override — LEFT ALONE";
   }
 }
 
-function describeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
-  if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
-  if (plan.action === "already-current") return "already current (no change)";
-  const installs = plan.entries.filter((e) => e.status === "install").map((e) => "/" + e.name.replace(/\.md$/, ""));
-  const others = plan.entries.filter((e) => e.status === "exists-other");
-  const parts: string[] = [];
-  if (installs.length > 0) parts.push(`WOULD install ${installs.join(", ")}`);
-  if (others.length > 0)   parts.push(`WOULD SKIP ${others.map((e) => e.name).join(", ")} (exists)`);
-  return parts.join("; ") || "no-op";
-}
-
-function resolveSlashCommandSource(name: string): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(here, "..", "..", "..", "scripts", "claude-commands", name),
-    join(here, "..", "..", "..", "..", "scripts", "claude-commands", name),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  throw new Error(
-    `slash-command source not found for ${name}. Looked at:\n  ${candidates.join("\n  ")}`
+/** What `--dry-run` prints: one line per planned decision, plus the documented
+ *  absences. */
+export function adapterReportLines(plan: OperatorAdaptersPlan): string[] {
+  if (plan.action === "skipped") return ["    skipped (--no-install-hooks)"];
+  const lines = adapterDecisions(plan).map(
+    (d) => `    ${d.relPath}: ${decisionVerb(d.decision, "would")}${d.details ? ` (${d.details})` : ""}`,
   );
+  return lines.concat(absenceLines(plan));
 }
 
-// Exposed for tests/upgrade so they can introspect the canonical list without
-// reaching into the module-private constant.
+/** What the REAL run prints: one line per OUTCOME, not per planned decision.
+ *
+ *  These must not be the same function reading the plan twice. A target that
+ *  changed between plan and execute is skipped — and a report generated from the
+ *  plan would print "installed" for a file forge deliberately did not write,
+ *  which is exactly the false claim this ticket's threat model puts first. */
+export function adapterOutcomeLines(plan: OperatorAdaptersPlan, outcomes: readonly AdapterOutcome[]): string[] {
+  if (plan.action === "skipped") return ["    skipped (--no-install-hooks)"];
+  const lines = outcomes.map((o) => `    ${o.relPath}: ${outcomeVerb(o)}${o.details ? ` (${o.details})` : ""}`);
+  return lines.concat(absenceLines(plan));
+}
+
+function outcomeVerb(o: AdapterOutcome): string {
+  switch (o.applied) {
+    case "written":         return decisionVerb(o.decision, "did");
+    case "unchanged":       return decisionVerb("already-current", "did");
+    case "left-alone":      return decisionVerb("override", "did");
+    case "skipped-changed": return "SKIPPED — target changed since the plan";
+  }
+}
+
+function absenceLines(plan: Exclude<OperatorAdaptersPlan, { action: "skipped" }>): string[] {
+  return plan.absentSurfaces.map((s) => `    ${s.id}: no files — ${s.operatorAnswer}`);
+}
+
+/** The targets a project already owns, so forge leaves them alone. */
+export function operatorAdapterOverrides(plan: OperatorAdaptersPlan): AdapterEntry[] {
+  if (plan.action === "skipped") return [];
+  return plan.entries.filter((e) => e.decision === "override");
+}
+
+export function warnOperatorAdapterOverrides(plan: OperatorAdaptersPlan): void {
+  for (const e of operatorAdapterOverrides(plan)) {
+    console.warn(`  ⚠  ${e.label} was NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"}).`);
+    console.warn(`     forge does not own that file and will not overwrite it. To use forge's version: remove it and re-run.`);
+  }
+}
+
+// ── Names kept for `forge upgrade` until step 5 rewires it ───────────────────
+//
+// `forge upgrade` (src/cli/commands/upgrade.ts) calls the four names below.
+// They now drive the full adapter set — Claude AND Codex — so an upgrade
+// installs and refreshes everything. Only the *reporting* helpers stay
+// Claude-scoped: `skippedClaudeCommands` feeds an upgrade --json field named
+// `slashCommandOverrides`, and reporting a Codex skill there would put a claim
+// about slash commands into a field that means something else. Step 5 adds the
+// `adapterSurfaces` step that names both halves properly.
+
+export type ClaudeCommandsPlan = OperatorAdaptersPlan;
+export type ClaudeCommandEntry = AdapterEntry;
+
+export function planClaudeCommands(projectDir: string): OperatorAdaptersPlan {
+  return planOperatorAdapters(projectDir);
+}
+
+export function executeClaudeCommandsPlan(plan: OperatorAdaptersPlan): string {
+  return executeOperatorAdapters(plan).summary;
+}
+
+/** Claude-surface overrides only — see the note above. */
+export function skippedClaudeCommands(plan: OperatorAdaptersPlan): AdapterEntry[] {
+  return operatorAdapterOverrides(plan).filter((e) => e.surface === "claude-command");
+}
+
+export function warnSkippedClaudeCommands(plan: OperatorAdaptersPlan): void {
+  warnOperatorAdapterOverrides(plan);
+}
+
+function describeClaudeCommandsPlan(plan: OperatorAdaptersPlan): string {
+  if (plan.action === "skipped") return "skipped (--no-install-hooks)";
+  const d = adapterDecisions(plan);
+  const counts = new Map<AdapterDecision, number>();
+  for (const x of d) counts.set(x.decision, (counts.get(x.decision) ?? 0) + 1);
+  const parts: string[] = [];
+  for (const kind of ["install", "refresh", "migrate", "already-current", "override"] as const) {
+    const n = counts.get(kind);
+    if (n) parts.push(`${n} ${kind}`);
+  }
+  return parts.join(", ") || "no-op";
+}
+
+/** The Claude slash-command file names forge renders. Derived from the renderer,
+ *  so it cannot name a file the installer does not write. */
 export function forgeSlashCommands(): readonly string[] {
-  return FORGE_SLASH_COMMANDS;
+  return renderedAdapterTargets("probe")
+    .filter((t) => t.surface === "claude-command")
+    .map((t) => basename(t.relPath));
+}
+
+/** Every repo-relative path forge writes. Exported so a test — and the worktree
+ *  exemption in step 10 — can name the whole write set without re-deriving it. */
+export function forgeAdapterPaths(): readonly string[] {
+  return renderedAdapterTargets("probe").map((t) => t.relPath);
+}
+
+/** No rendered path is under a deprecated Codex custom-prompt directory. Checked
+ *  rather than asserted in a comment. */
+export function adapterPathsAvoidDeprecatedCodexPrompts(): boolean {
+  return forgeAdapterPaths().every(
+    (p) => !CODEX_DEPRECATED_PROMPT_DIRS.some((d) => p === d || p.startsWith(`${d}/`)),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

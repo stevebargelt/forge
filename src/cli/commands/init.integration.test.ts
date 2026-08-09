@@ -15,7 +15,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { executeHookPlan, planCommitMsgHook } from "./init.js";
+import { createHash } from "node:crypto";
+import { currentAdapterStamp, executeHookPlan, forgeAdapterPaths, planCommitMsgHook } from "./init.js";
+import { parseAdapterMarker } from "../../v2/operator-workflows.js";
 import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -473,6 +475,246 @@ test("integ FG-582: `forge init` migrates a stale legacy dev-path hook onto $FOR
     assert.notEqual(blocked.status, 0, "migrated hook must run r-1's promoted policy");
     const ok = commitAttempt(projectDir, "a perfectly clean message", "m2");
     assert.equal(ok.status, 0, `clean message must pass the migrated hook: ${ok.stderr}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FG-253: project-scoped operator adapters through the REAL `forge init` CLI.
+//
+// Every case builds its own project root AND its own $FORGE_HOME, so nothing
+// here reads or writes the developer's real ~/.forge, ~/.codex or ~/.claude.
+// The in-process assertions above cover classification; these prove the wiring
+// — that the command actually writes the four files, actually declines the ones
+// it does not own, and that --dry-run predicts what the run then does.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function disposableHome(): string {
+  return mkdtempSync(join(tmpdir(), "forge-home-fg253-"));
+}
+
+/** Run `forge init` (adapters ON — they are gated on the hook installer like the
+ *  slash commands were) against a disposable FORGE_HOME. */
+function runInit(home: string, extra: string[] = []) {
+  return runForge(["init", "--project", projectDir, ...extra], projectDir, { ...process.env, FORGE_HOME: home });
+}
+
+function projectPath(rel: string): string {
+  return join(projectDir, ...rel.split("/"));
+}
+
+function sha(bytes: string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** The per-file decision lines `forge init` prints, as {relPath → decision}. The
+ *  dry run and the real run print the same decisions with a different verb; this
+ *  normalizes the verb away so the two are directly comparable. */
+function printedDecisions(stdout: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of stdout.split("\n")) {
+    const m = /^ {4}(\S+): (.*)$/.exec(line);
+    if (!m) continue;
+    const rel = m[1] ?? "";
+    const rest = m[2] ?? "";
+    if (!forgeAdapterPaths().includes(rel)) continue;
+    const decision =
+      /install/i.test(rest)          ? "install"
+      : /refresh/i.test(rest)        ? "refresh"
+      : /migrate/i.test(rest)        ? "migrate"
+      : /already current/i.test(rest) ? "already-current"
+      : /override/i.test(rest)       ? "override"
+      : `unrecognized: ${rest}`;
+    out[rel] = decision;
+  }
+  return out;
+}
+
+test("integ FG-253: `forge init` writes exactly the four adapter files, each carrying the marker + stamp", () => {
+  const home = disposableHome();
+  try {
+    const init = runInit(home);
+    assert.equal(init.status, 0, `forge init failed: ${init.stderr}`);
+
+    for (const rel of forgeAdapterPaths()) {
+      const target = projectPath(rel);
+      assert.ok(existsSync(target), `${rel} should exist`);
+      assert.ok(!lstatSync(target).isSymbolicLink(), `${rel} must be materialized bytes, not a symlink`);
+      assert.equal(parseAdapterMarker(readFileSync(target, "utf8")), currentAdapterStamp(), `${rel} must carry this release's stamp`);
+    }
+    // EXACTLY four: no stray files in the dirs forge writes into.
+    assert.deepEqual(readdirSync(join(projectDir, ".claude", "commands")).sort(), ["handoff.md", "orient.md"]);
+    assert.deepEqual(readdirSync(join(projectDir, ".agents", "skills")).sort(), ["forge-handoff", "forge-orient"]);
+    // And the gitignore names the forge-owned skill dirs, not the tree.
+    const gitignore = readFileSync(join(projectDir, ".gitignore"), "utf8");
+    const entries = gitignore.split("\n").map((l) => l.trim()).filter(Boolean).filter((l) => !l.startsWith("#"));
+    assert.ok(entries.includes(".agents/skills/forge-orient/"));
+    assert.ok(entries.includes(".agents/skills/forge-handoff/"));
+    for (const tooBroad of [".agents/", ".agents/skills/", ".agents", ".agents/skills"]) {
+      assert.ok(!entries.includes(tooBroad), `.gitignore must not ignore ${tooBroad}`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("integ FG-253: a second `forge init` reports already-current and rewrites nothing", () => {
+  const home = disposableHome();
+  try {
+    assert.equal(runInit(home).status, 0);
+    const before = forgeAdapterPaths().map((rel) => sha(readFileSync(projectPath(rel), "utf8")));
+
+    const second = runInit(home);
+    assert.equal(second.status, 0, `second init failed: ${second.stderr}`);
+    for (const rel of forgeAdapterPaths()) {
+      assert.equal(printedDecisions(second.stdout)[rel], "already-current", `${rel} should report already-current`);
+    }
+    forgeAdapterPaths().forEach((rel, i) => {
+      assert.equal(sha(readFileSync(projectPath(rel), "utf8")), before[i], `${rel} must be byte-identical`);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("integ FG-253: unmarked files at adapter paths are project overrides — byte-identical, reported, exit 0", () => {
+  const home = disposableHome();
+  try {
+    const claudeRel = ".claude/commands/orient.md";
+    const codexRel = ".agents/skills/forge-orient/SKILL.md";
+    const mine: Record<string, string> = {
+      [claudeRel]: "# my own /orient\n\nforge must not touch this.\n",
+      [codexRel]: "---\nname: forge-orient\n---\n\nmy own skill body\n",
+    };
+    for (const [rel, bytes] of Object.entries(mine)) {
+      mkdirSync(dirname(projectPath(rel)), { recursive: true });
+      writeFileSync(projectPath(rel), bytes);
+    }
+
+    const init = runInit(home);
+    assert.equal(init.status, 0, "a project that owns its own adapters is not a failure");
+    const decisions = printedDecisions(init.stdout);
+    assert.equal(decisions[claudeRel], "override");
+    assert.equal(decisions[codexRel], "override");
+    assert.match(init.stderr + init.stdout, /NOT installed/, "the operator must be told which files were skipped");
+
+    for (const [rel, bytes] of Object.entries(mine)) {
+      assert.equal(readFileSync(projectPath(rel), "utf8"), bytes, `${rel} must be byte-identical`);
+    }
+    // The two forge does own still landed.
+    assert.equal(parseAdapterMarker(readFileSync(projectPath(".claude/commands/handoff.md"), "utf8")), currentAdapterStamp());
+    assert.equal(parseAdapterMarker(readFileSync(projectPath(".agents/skills/forge-handoff/SKILL.md"), "utf8")), currentAdapterStamp());
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("integ FG-253: a legacy absolute forge symlink at .claude/commands/handoff.md migrates to marked bytes", () => {
+  const home = disposableHome();
+  try {
+    const rel = ".claude/commands/handoff.md";
+    mkdirSync(dirname(projectPath(rel)), { recursive: true });
+    symlinkSync("/some/old/forge/checkout/scripts/claude-commands/handoff.md", projectPath(rel));
+
+    const init = runInit(home);
+    assert.equal(init.status, 0, `forge init failed: ${init.stderr}`);
+    assert.equal(printedDecisions(init.stdout)[rel], "migrate");
+    assert.ok(!lstatSync(projectPath(rel)).isSymbolicLink(), "the dead legacy link must be replaced by bytes");
+    assert.equal(parseAdapterMarker(readFileSync(projectPath(rel), "utf8")), currentAdapterStamp());
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("integ FG-253: AGENTS.md, Codex config, an operator's own skill and CLAUDE.md prose survive init byte-for-byte", () => {
+  const home = disposableHome();
+  try {
+    // A CLAUDE.md whose forge block is already present, with project prose after
+    // it — the region forge must never rewrite.
+    const claudeMd = [
+      "# my project",
+      "",
+      "<!-- forge:orchestrator-start -->",
+      "# forge orchestrator",
+      "old body",
+      "<!-- forge:orchestrator-end -->",
+      "",
+      "## Stack + project context",
+      "",
+      "Prose forge does not own.",
+      "",
+    ].join("\n");
+    writeFileSync(join(projectDir, "CLAUDE.md"), claudeMd);
+
+    const protectedFiles: Record<string, string> = {
+      "AGENTS.md": "# operator-owned agents doc\n\nFG-347 is deferred: forge writes nothing here.\n",
+      ".codex/config.toml": "model = \"my-model\"\nsandbox_mode = \"workspace-write\"\n",
+      ".agents/skills/my-own-skill/SKILL.md": "---\nname: my-own-skill\n---\n\nmine, not forge's.\n",
+    };
+    for (const [rel, bytes] of Object.entries(protectedFiles)) {
+      mkdirSync(dirname(projectPath(rel)), { recursive: true });
+      writeFileSync(projectPath(rel), bytes);
+    }
+
+    assert.equal(runInit(home).status, 0);
+    assert.equal(runInit(home).status, 0, "a second cycle must be just as inert");
+
+    for (const [rel, bytes] of Object.entries(protectedFiles)) {
+      assert.equal(readFileSync(projectPath(rel), "utf8"), bytes, `${rel} must be byte-identical after a full init cycle`);
+    }
+    // The operator's skill dir is untouched and still sits beside forge's.
+    assert.deepEqual(readdirSync(join(projectDir, ".agents", "skills")).sort(), ["forge-handoff", "forge-orient", "my-own-skill"]);
+    // CLAUDE.md: the forge block was refreshed; the prose after it is verbatim.
+    const after = readFileSync(join(projectDir, "CLAUDE.md"), "utf8");
+    assert.ok(after.includes("# my project"), "head prose preserved");
+    assert.ok(after.includes("## Stack + project context\n\nProse forge does not own.\n"), "tail prose preserved verbatim");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("integ FG-253: --dry-run prints the same per-file decisions the real run takes, and writes nothing", () => {
+  const home = disposableHome();
+  try {
+    // A mixed project so the comparison is over more than one decision kind.
+    mkdirSync(projectPath(".claude/commands"), { recursive: true });
+    const mine = "# my own /orient\n";
+    writeFileSync(projectPath(".claude/commands/orient.md"), mine);
+    symlinkSync("/old/forge/scripts/claude-commands/handoff.md", projectPath(".claude/commands/handoff.md"));
+
+    const dry = runInit(home, ["--dry-run"]);
+    assert.equal(dry.status, 0, `dry run failed: ${dry.stderr}`);
+    const predicted = printedDecisions(dry.stdout);
+    assert.equal(Object.keys(predicted).length, 4, `dry run must name every adapter: ${dry.stdout}`);
+    // Nothing was written by the dry run.
+    assert.ok(!existsSync(projectPath(".agents")), ".agents/ must not be created by a dry run");
+    assert.equal(readFileSync(projectPath(".claude/commands/orient.md"), "utf8"), mine);
+    assert.ok(lstatSync(projectPath(".claude/commands/handoff.md")).isSymbolicLink(), "dry run must not migrate anything");
+
+    const real = runInit(home);
+    assert.equal(real.status, 0, `real run failed: ${real.stderr}`);
+    assert.deepEqual(printedDecisions(real.stdout), predicted, "the real run must take exactly the predicted decisions");
+    // …and the filesystem delta matches those decisions.
+    assert.equal(readFileSync(projectPath(".claude/commands/orient.md"), "utf8"), mine, "override → untouched");
+    assert.ok(!lstatSync(projectPath(".claude/commands/handoff.md")).isSymbolicLink(), "migrate → bytes");
+    for (const rel of [".agents/skills/forge-orient/SKILL.md", ".agents/skills/forge-handoff/SKILL.md"]) {
+      assert.equal(parseAdapterMarker(readFileSync(projectPath(rel), "utf8")), currentAdapterStamp(), `install → ${rel}`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("integ FG-253: `forge init` reports the generic surface honestly — no files, the CLI is the interface", () => {
+  const home = disposableHome();
+  try {
+    const init = runInit(home);
+    assert.equal(init.status, 0);
+    assert.match(init.stdout, /generic: no files/, "init must name the documented absence");
+    assert.match(init.stdout, /forge CLI is the interface/);
+    // A documented absence is an absence: no fourth adapter file anywhere.
+    assert.equal(readdirSync(join(projectDir, ".agents", "skills")).length, 2);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
