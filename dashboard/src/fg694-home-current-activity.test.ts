@@ -48,6 +48,7 @@ import {
   activityPhase,
   activityUnavailable,
   ciCompactSummary,
+  createActivityReader,
   homeActivityView,
   homeCiSummaries,
   isCurrentActivityPayload,
@@ -884,6 +885,161 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       const none = payload({ requiredCi: ciSection([observation({ contexts: [], state: "not_running", outcome: "success" })]) } as never);
       assert.equal(isCurrentActivityPayload(none), true);
       assert.match(collapsed(activityFromBody(none)), new RegExp(CI_NOT_STARTED_LABEL));
+    });
+  });
+
+  // ─── RF-2 / RF-4: the poll must let a read finish saying what happened to it ───
+  //
+  // One defect from two sides. RF-4: a HUNG request never reached the unavailable
+  // timeout state, because the poll started a NEW sequenced read every 2s while the read
+  // timeout is 8s, so every read was superseded before its own timeout could be applied.
+  // RF-2 is the steady state of the same thing: ANY response slower than the poll
+  // interval can never apply its result — success, timeout or unavailable — so Home stays
+  // in `loading` forever. AC7 names an initial load that never answers as a case that MUST
+  // render the explicit unavailable state with its Retry, and a permanent `loading`
+  // renders neither that banner nor the activity.
+  //
+  // WHY THERE IS NO CLOCK HERE. The defect is about ORDER — a poll tick landing while a
+  // read is in flight — not about durations, and the unit tier may not sleep on a real
+  // clock. So each fetch returns a promise this suite settles BY HAND: the poll ticks are
+  // the synchronous `poll()` calls, and "the request finally answered" is a `settle()`.
+  // Everything from the response (or the AbortError the internal timer raises at
+  // CURRENT_ACTIVITY_TIMEOUT_MS) to the load state is still the shipped
+  // `readCurrentActivity` — only WHEN the answer arrives is the test's to choose. That
+  // the internal timer exists, and fires, is what the `never answers` mode above pins.
+  describe("FG-694 AC7 (RF-2/RF-4) — a read slower than the poll interval still lands", () => {
+    const URL = "/api/current-activity";
+    const ABORTED = Object.assign(new Error("aborted"), { name: "AbortError" });
+
+    /** A fetch whose every call hangs until this suite answers it. `settle(i, …)` plays
+     *  the answer the browser would eventually get — including the AbortError the read's
+     *  own timeout raises on a request that never came back. */
+    function hangingFetch() {
+      const calls: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+      const fetchImpl = (): Promise<unknown> => new Promise((resolve, reject) => {
+        calls.push({ resolve, reject });
+      });
+      return {
+        calls,
+        read: (url: string) => readCurrentActivity(url, fetchImpl as never),
+        timeout: (i: number) => calls[i]!.reject(ABORTED),
+        answer: (i: number, body: unknown) => calls[i]!.resolve({ ok: true, status: 200, json: async () => body }),
+      };
+    }
+
+    test("NOT vacuous: the PRE-FIX loop — a new sequenced read every tick — drops the answer when it comes", async () => {
+      // main.js:114 as it shipped: increment a sequence, start a read, accept the result
+      // only while it owns the newest sequence. Four ticks pass while read #0 is still in
+      // flight, so by the time its timeout lands it has been superseded three times over.
+      const net = hangingFetch();
+      const applied: unknown[] = [];
+      let seq = 0;
+      const reads: Array<Promise<void>> = [];
+      for (let i = 0; i < 4; i++) {
+        const mine = ++seq;
+        reads.push(net.read(URL).then((load) => { if (mine === seq) applied.push(load); }));
+      }
+      assert.equal(net.calls.length, 4, "the pre-fix loop starts a read per tick");
+
+      net.timeout(0);
+      await reads[0];
+      assert.deepEqual(applied, [], "the hung read's timeout is discarded — this IS the permanent `loading`");
+
+      // …and `loading` shows the operator neither the activity nor the AC7 banner.
+      const text = collapsed(ACTIVITY_LOADING);
+      assert.doesNotMatch(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
+      assert.equal(elements(home(ACTIVITY_LOADING)).filter((el) => el.type === "button").length, 0, "no Retry either");
+    });
+
+    test("RF-4: a HUNG request reaches `Current activity unavailable` with its Retry, and claims none of the four", async () => {
+      const net = hangingFetch();
+      const applied: unknown[] = [];
+      const reader = createActivityReader((load) => applied.push(load), net.read);
+
+      const inFlight = reader.poll(URL);
+      for (let i = 0; i < 3; i++) {
+        assert.equal(reader.poll(URL), null, "a tick over a read in flight must not supersede it");
+      }
+      net.timeout(0);
+      await inFlight;
+
+      assert.equal(applied.length, 1, "the hung read's own timeout lands, rather than being cancelled by its successor");
+      const load = applied[0];
+      assert.equal(activityPhase(load), "unavailable");
+      assert.equal((load as { reason: string }).reason, "timeout");
+
+      const text = collapsed(load);
+      assert.match(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
+      for (const claim of OBSERVATION_CLAIMS) {
+        assert.doesNotMatch(text, new RegExp(claim), `a timed-out read may not claim "${claim}"`);
+      }
+      const buttons = elements(home(load)).filter((el) => el.type === "button");
+      assert.equal(buttons.length, 1, "the operator's only recovery must not be a page reload");
+    });
+
+    test("RF-2: a SLOW but successful response applies its payload instead of being superseded forever", async () => {
+      const net = hangingFetch();
+      const applied: unknown[] = [];
+      const reader = createActivityReader((load) => applied.push(load), net.read);
+
+      const inFlight = reader.poll(URL);
+      for (let i = 0; i < 5; i++) reader.poll(URL);
+      net.answer(0, payload({ agents: [agent] }));
+      await inFlight;
+
+      assert.equal(applied.length, 1, "a response slower than the poll interval still reaches the surface");
+      assert.equal(activityPhase(applied[0]), "ready");
+      assert.match(collapsed(applied[0]), /frontend-specialist/);
+    });
+
+    test("one read per URL is in flight — six ticks over one slow read make ONE request, not six", async () => {
+      const net = hangingFetch();
+      const reader = createActivityReader(() => {}, net.read);
+      const first = reader.poll(URL);
+      for (let i = 0; i < 5; i++) reader.poll(URL);
+      assert.equal(net.calls.length, 1);
+
+      // …and once it has answered, the next tick reads again: this throttles the read, it
+      // does not stop it. A surface that polled once and never again would be its own bug.
+      net.answer(0, payload());
+      await first;
+      reader.poll(URL);
+      assert.equal(net.calls.length, 2);
+    });
+
+    test("a SCOPE change is a different read and does supersede — the old scope's answer may not win", async () => {
+      const net = hangingFetch();
+      const applied: unknown[] = [];
+      const reader = createActivityReader((load) => applied.push(load), net.read);
+
+      const first = reader.poll(URL);
+      const second = reader.poll(`${URL}?project=b`);
+      assert.equal(net.calls.length, 2, "a new scope is not the read already in flight");
+
+      // The superseded scope answers LAST, which is exactly the race the sequence token
+      // exists for: its payload may not overwrite the scope the operator is now looking at.
+      net.answer(1, payload());
+      net.answer(0, payload({ agents: [agent] }));
+      await Promise.all([first, second]);
+
+      assert.equal(applied.length, 1, "the superseded scope's read is dropped, not applied over the new one");
+      assert.match(collapsed(applied[0]), new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
+      assert.doesNotMatch(collapsed(applied[0]), /frontend-specialist/, "the old scope's agents are not the new scope's");
+    });
+
+    test("Retry supersedes an in-flight read, and shows `loading` while the fresh one runs", async () => {
+      const net = hangingFetch();
+      const applied: unknown[] = [];
+      const reader = createActivityReader((load) => applied.push(load), net.read);
+
+      reader.poll(URL);
+      const retried = reader.retry(URL);
+      assert.equal(activityPhase(applied[0]), "loading", "the failure copy does not linger over a read already in flight");
+      assert.equal(net.calls.length, 2, "Retry always starts a fresh read");
+
+      net.timeout(1);
+      await retried;
+      assert.equal(activityPhase(applied[applied.length - 1]), "unavailable", "and the retried read still reaches a verdict");
     });
   });
 

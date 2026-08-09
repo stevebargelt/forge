@@ -158,6 +158,17 @@ export const RENDER_DEREFERENCE_CONTRACT: Readonly<{
 export function isRenderableEntry(kind: string, value: unknown): boolean;
 export function isCurrentActivityPayload(value: unknown): boolean;
 export function activityFromBody(body: unknown): ActivityLoad;
+/** The poll-side reader (FG-694/RF-2/RF-4). ONE read per URL is in flight at a time, so
+ *  a read slower than the poll interval is no longer superseded before its own result —
+ *  success, timeout or unavailable — can be applied. `poll` returns null when it left an
+ *  in-flight read for the same URL alone; `retry` always starts a fresh one. */
+export function createActivityReader(
+  apply: (load: ActivityLoad) => void,
+  read?: (url: string) => Promise<ActivityLoad>,
+): {
+  poll(url: string): Promise<void> | null;
+  retry(url: string): Promise<void>;
+};
 export function activityPhase(load: unknown): "loading" | "ready" | "unavailable";
 export function activityUnavailableDetail(load: unknown): string;
 export function caElapsedText(startedAt: string | null | undefined, now: number): string;

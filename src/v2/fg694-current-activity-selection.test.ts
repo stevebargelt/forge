@@ -497,6 +497,140 @@ describe("FG-694 RF-4 — a terminal REVIEW retires its observation even while t
   });
 });
 
+describe("FG-694 RF-5/RF-1/RF-3 — the ANCHOR applies the same terminality rule the observation filter does", () => {
+  // One defect, reported from three sides. RF-5 is the root cause: `hasCurrentAnchor`
+  // counted every active run, a strictly WEAKER test than the observation filter, so a
+  // run whose review was over kept the anchor after every observation it declared had
+  // been correctly retired. RF-1 is that stated from the no-observation side; RF-3 is
+  // the operator-visible symptom — the literal string `CI not observed` for work nobody
+  // is checking. All three close on the anchor rule, so all three are pinned here.
+
+  /** The PRE-FIX anchor rule, restated verbatim, so each fixture below is shown to be
+   *  non-vacuous: it must reach a DIFFERENT answer than the derivation now does. */
+  function legacyHasAnchor(runId?: string, projectDirs?: string[]): boolean {
+    const activeRuns = db.prepare(`SELECT id, project_dir FROM runs WHERE status = 'active'`)
+      .all() as Array<{ id: string; project_dir: string | null }>;
+    const openReviews = (db.prepare(`SELECT run_id, workspace_dir, state FROM reviews`)
+      .all() as Array<{ run_id: string | null; workspace_dir: string | null; state: string | null }>)
+      .filter((r) => !isTerminalReviewState(r.state ?? ""));
+    if (runId !== undefined) return activeRuns.some((r) => r.id === runId) || openReviews.some((r) => r.run_id === runId);
+    if (projectDirs !== undefined) {
+      return activeRuns.some((r) => r.project_dir !== null && projectDirs.includes(r.project_dir))
+        || openReviews.some((r) => r.workspace_dir !== null && projectDirs.includes(r.workspace_dir));
+    }
+    return activeRuns.length > 0 || openReviews.length > 0;
+  }
+
+  for (const state of REVIEW_STATES.filter(isTerminalReviewState)) {
+    test(`RF-1: an ACTIVE run whose review is \`${state}\` and which has NO ci_observed event reads \`no_current_candidate\``, () => {
+      addRun("run-live", "active");
+      addReview({ id: "review-over", state, runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+
+      assert.equal(legacyHasAnchor(), true, "NOT vacuous: the pre-fix anchor rule counted this run");
+
+      const activity = deriveCurrentActivity(db, { now: NOW });
+      assert.equal(activity.requiredCi.state, "no_current_candidate");
+      assert.equal(activity.requiredCi.label, CI_NO_CANDIDATE_LABEL);
+      assert.doesNotMatch(renderCurrentActivityLines(activity).join("\n"), /CI not observed/);
+    });
+  }
+
+  test("RF-3: the direct reproduction — active run, settled review, FRESH ci event — renders `no current CI candidate`, not `CI not observed`", () => {
+    addRun("run-live", "active");
+    addReview({ id: "review-settled", state: "settled", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+    assert.equal(legacyNewestPerPair(db).length, 1, "NOT vacuous: the row IS the newest for its pair");
+    assert.equal(legacyHasAnchor(), true, "NOT vacuous: the pre-fix anchor survived the observation being excluded");
+
+    const activity = deriveCurrentActivity(db, { now: NOW });
+    assert.deepEqual(activity.requiredCi.observations, []);
+    assert.equal(activity.requiredCi.state, "no_current_candidate");
+    assert.equal(activity.requiredCi.label, CI_NO_CANDIDATE_LABEL);
+
+    const rendered = renderCurrentActivityLines(activity).join("\n");
+    assert.doesNotMatch(rendered, /CI not observed/, "the terminal review already excluded the observation");
+    assert.match(rendered, /\(no current CI candidate\)/);
+  });
+
+  test("RF-5: every scope agrees — run-scoped, project-scoped and host-wide give the SAME answer for the same run", () => {
+    addRun("run-live", "active");
+    addReview({ id: "review-settled", state: "settled", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+    for (const scope of [{}, { runId: "run-live" }, { projectDirs: [PROJECT] }]) {
+      assert.equal(
+        deriveCurrentActivity(db, { now: NOW, scope }).requiredCi.state,
+        "no_current_candidate",
+        JSON.stringify(scope),
+      );
+    }
+    assert.equal(legacyHasAnchor("run-live"), true, "NOT vacuous: run scope");
+    assert.equal(legacyHasAnchor(undefined, [PROJECT]), true, "NOT vacuous: project scope");
+  });
+
+  test("the anchor and the observation filter answer identically for EVERY review state — that agreement IS the fix", () => {
+    // The invariant the three findings share: `not_observed` is reachable only with a
+    // real current anchor. So for each state, "the anchor says there is a candidate"
+    // and "the observation survives the filter" must be the same boolean — no state may
+    // retire the observation while keeping the anchor, which is precisely RF-1's shape.
+    for (const state of REVIEW_STATES) {
+      const fresh = makeInMemoryDb();
+      const previous = db;
+      db = fresh;
+      try {
+        addRun("run-live", "active");
+        addReview({ id: `review-${state}`, state, runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+        addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+        const activity = deriveCurrentActivity(db, { now: NOW });
+        const observationSurvived = activity.requiredCi.observations.length > 0;
+        const anchored = activity.requiredCi.state !== "no_current_candidate";
+        assert.equal(anchored, observationSurvived, `review state \`${state}\`: anchor and observation filter disagree`);
+        assert.equal(observationSurvived, !isTerminalReviewState(state), `review state \`${state}\``);
+        // …and the string RF-3 named is unreachable in either direction here.
+        assert.doesNotMatch(renderCurrentActivityLines(activity).join("\n"), /CI not observed/, state);
+      } finally {
+        db = previous;
+        fresh.close();
+      }
+    }
+  });
+
+  test("NOT over-broad: a terminal review retires ITS run's anchor and no other", () => {
+    addRun("run-over", "active");
+    addReview({ id: "review-over", state: "settled", runId: "run-over", ticketId: "FG-686", workspaceDir: PROJECT });
+    addRun("run-live", "active");
+
+    // Host-wide there IS still a candidate — the second run — so the absence must be
+    // `not_observed`, not `no_current_candidate`. Retiring a live run would be a current
+    // candidate vanishing, which Home renders as observed absence.
+    assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.state, "not_observed");
+    // …and run-scoped, each run answers for itself.
+    assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-live" } }).requiredCi.state, "not_observed");
+    assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-over" } }).requiredCi.state, "no_current_candidate");
+  });
+
+  test("NOT over-broad: an OPEN review on the same run outranks the terminal one, anchor included", () => {
+    addRun("run-live", "active");
+    addReview({ id: "review-old", state: "settled", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addReview({ id: "review-new", state: "rechecking", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.state, "not_observed");
+  });
+
+  test("NOT over-broad: an active run with no review at all still anchors — CI is observed before a review exists", () => {
+    addRun("run-live", "active");
+    assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.state, "not_observed");
+    assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-live" } }).requiredCi.state, "not_observed");
+  });
+
+  test("an open review anchors its run even after the run row closes, so the run scope still has a candidate", () => {
+    addRun("run-closed", "complete");
+    addReview({ id: "review-open", state: "verifying", runId: "run-closed", ticketId: "FG-694", workspaceDir: PROJECT });
+    assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-closed" } }).requiredCi.state, "not_observed");
+  });
+});
+
 describe("FG-694 RF-2 — the 500-row window is narrowed BY the scope, never spent on it", () => {
   const FLOOD = 600;
 

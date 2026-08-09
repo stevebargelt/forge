@@ -381,6 +381,58 @@ export async function readCurrentActivity(url, fetchImpl, timeoutMs = CURRENT_AC
   }
 }
 
+/** The POLL side of AC7, and the other half of `readCurrentActivity`.
+ *
+ *  The defect (FG-694/RF-2/RF-4): the poll started a NEW sequenced read every tick and
+ *  accepted a result only from the newest sequence, while the read timeout
+ *  (CURRENT_ACTIVITY_TIMEOUT_MS, 8s) is four polls long (POLL_MS, 2s). A read that was
+ *  slow — or hung — was therefore always superseded before its own success, timeout or
+ *  unavailable result could be applied, and each replacement was just as slow. The
+ *  surface never left `loading`: no activity, and never the AC7 unavailable state with
+ *  its Retry. Which is the same failure AC7 exists to remove, reached by waiting instead
+ *  of by claiming.
+ *
+ *  The reconciliation is to stop racing the read against itself: ONE read per URL is in
+ *  flight at a time, and a poll that finds one already running for the same URL leaves
+ *  it alone so its outcome — whatever it is — reaches the surface. Nothing waits longer
+ *  than the timeout, because the timeout is now allowed to land.
+ *
+ *  A DIFFERENT url (the operator changed the project scope) is not the same read and
+ *  does supersede — a stale-scope answer may not overwrite the new scope's, which is
+ *  what the sequence token still guards.
+ *
+ *  Lives here rather than in main.js for the reason this module exists: the failure it
+ *  fixes is only observable across several poll ticks, and a test must drive the code
+ *  that ships rather than a re-implementation of the loop. */
+export function createActivityReader(apply, read = readCurrentActivity) {
+  let inFlight = null;
+  let seq = 0;
+
+  const start = (url) => {
+    inFlight = url;
+    const mine = ++seq;
+    return Promise.resolve(read(url)).then((load) => {
+      // A superseded read does not clear `inFlight`: the read that replaced it owns it.
+      if (mine !== seq) return;
+      inFlight = null;
+      apply(load);
+    });
+  };
+
+  return {
+    /** One poll tick. Returns null when it deliberately left a read in flight alone. */
+    poll(url) {
+      return inFlight === url ? null : start(url);
+    },
+    /** The Retry affordance: always a fresh read, superseding anything in flight, and
+     *  back to `loading` first so the failure copy does not linger over it. */
+    retry(url) {
+      apply(ACTIVITY_LOADING);
+      return start(url);
+    },
+  };
+}
+
 export function activityPhase(load) {
   if (!load || typeof load !== "object") return "loading";
   if (load.phase === "ready" && isCurrentActivityPayload(load.activity)) return "ready";

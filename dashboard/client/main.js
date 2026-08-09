@@ -15,7 +15,7 @@ import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
 } from "./verification-render.js";
-import { ACTIVITY_LOADING, readCurrentActivity } from "./current-activity-render.js";
+import { ACTIVITY_LOADING, createActivityReader } from "./current-activity-render.js";
 import { CurrentActivitySection } from "./current-activity-view.js";
 import { formatDuration } from "./duration.js";
 
@@ -96,10 +96,13 @@ function App() {
   // three different things to say, and collapsing them into "payload or null" is what
   // made a failed read render as an observed absence.
   const [activityLoad, setActivityLoad] = useState(ACTIVITY_LOADING);
-  // Sequence token for the current-activity read — the timeout is longer than the
-  // poll interval, so a slow request can resolve after a later one. Only the newest
-  // read may write the state. Same guard as runtimeSeq/queueSeq.
-  const activitySeq = useRef(0);
+  // FG-694/RF-4: the read timeout is FOUR polls long, so a poll that started a fresh
+  // read every tick superseded every slow read before its own timeout could land and
+  // the surface stayed in `loading` forever. The reader owns that reconciliation — one
+  // read per URL in flight — rather than a sequence token here that only ever decided
+  // which answer wins a race the poll should not have started.
+  const activityReader = useRef(null);
+  if (activityReader.current === null) activityReader.current = createActivityReader(setActivityLoad);
   // FG-576: the project-scoped orchestrator read. Null until a project is selected —
   // /api/orchestrators has no cross-project form, because it is the one route that
   // can carry a live remote-control credential.
@@ -111,10 +114,7 @@ function App() {
     // used to abandon the whole batch, which left the Current-activity surface
     // showing its last payload as though it were still current; this read owns its
     // own outcome — including its own failure — and always lands.
-    const activityRead = ++activitySeq.current;
-    readCurrentActivity(`/api/current-activity${q}`).then((load) => {
-      if (activityRead === activitySeq.current) setActivityLoad(load);
-    });
+    activityReader.current.poll(`/api/current-activity${q}`);
     try {
       const reqs = [
         view === "activity" ? fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`) : Promise.resolve(null),
@@ -143,13 +143,12 @@ function App() {
     }
   }, [view, projectFilter, checkoutFilter, projects.length]);
 
-  // The retry affordance behind AC7. Back to `loading` first, so the operator sees
-  // the click do something and the stale failure copy does not linger over a read
-  // that is already in flight.
+  // The retry affordance behind AC7. It supersedes whatever is in flight and goes back
+  // to `loading` first, so the operator sees the click do something and the stale
+  // failure copy does not linger over a read that is already running.
   const retryCurrentActivity = useCallback(() => {
-    setActivityLoad(ACTIVITY_LOADING);
-    poll();
-  }, [poll]);
+    activityReader.current.retry(`/api/current-activity${projectScopeQuery(projectFilter, checkoutFilter)}`);
+  }, [projectFilter, checkoutFilter]);
 
   const pollPlanUsage = useCallback(async () => {
     setPlanUsageLoading(true);

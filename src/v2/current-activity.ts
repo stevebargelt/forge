@@ -73,9 +73,9 @@ export const CI_NOT_OBSERVED_LABEL = "CI not observed";
 export const CI_NOT_RUNNING_LABEL = "CI not running";
 export const CI_RUNNING_LABEL = "CI running";
 
-/** FG-694: the THIRD absence, and the one the pre-fix surface could not say. There
- *  is no active run and no open review in scope, so there is nothing that could be
- *  waiting on required checks — which is a different fact from "we have a current
+/** FG-694: the THIRD absence, and the one the pre-fix surface could not say. Nothing
+ *  in scope is still open — no anchored run, no open review — so there is nothing that
+ *  could be waiting on required checks, which is a different fact from "we have a current
  *  candidate and have observed no CI for it" (`CI not observed`). Collapsing the two
  *  is the same class of error as the stale-row defect, pointed the other way: one
  *  invents currency, the other invents an observation. */
@@ -186,9 +186,9 @@ export type RequiredCiObservation = {
 export type RequiredCiSection = {
   /** THREE facts, not two, and none substitutes for another:
    *  `no_current_candidate` — nothing in scope could be waiting on required checks:
-   *    no active run, no open review. The consumer omits the CI row entirely; it must
-   *    NOT report that CI was not observed, because nothing was owed an observation
-   *    (FG-694).
+   *    no anchored run (`runIsAnchored`), no open review. The consumer omits the CI row
+   *    entirely; it must NOT report that CI was not observed, because nothing was owed
+   *    an observation (FG-694).
    *  `not_observed` — there IS current work in scope and no observation exists for
    *    it, which is a fact about the OBSERVER and a different fact from "CI is not
    *    running" (BD-8).
@@ -370,14 +370,17 @@ type ReviewAnchor = { runId: string | null; ticketId: string | null; workspaceDi
  *  row for a pair. */
 type CiCurrency = {
   activeRunIds: ReadonlySet<string>;
-  openReviewRunIds: ReadonlySet<string>;
   openReviews: readonly ReviewAnchor[];
   /** Reviews that are OVER, carried for the same reason the open ones are. AC2 names
    *  a terminal run OR a terminal review, and those are not the same fact: a run stays
    *  `active` through its docs and close-out phases, so "this run is active" cannot
    *  answer "is the review of this work over" (FG-694/RF-4). */
   terminalReviews: readonly ReviewAnchor[];
-  terminalReviewRunIds: ReadonlySet<string>;
+  /** The runs that could currently be waiting on required checks — `runIsAnchored`
+   *  applied to every run an active row or an open review names. The ONE run-level
+   *  currency answer: it decides which rows the event window is spent on AND whether
+   *  there is a current candidate at all, so those two can no longer disagree. */
+  anchorRunIds: ReadonlySet<string>;
   /** True when SOMETHING in scope could currently be waiting on required checks.
    *  Distinguishes `no_current_candidate` from `not_observed` — see RequiredCiSection. */
   hasCurrentAnchor: boolean;
@@ -419,24 +422,29 @@ function readCiCurrency(db: DatabaseInstance, scope: CurrentActivityScope): CiCu
     (isTerminalReviewState(r.state ?? "") ? terminalReviews : openReviews).push(anchor);
   }
 
-  const runIdsOf = (anchors: readonly ReviewAnchor[]): Set<string> =>
-    new Set(anchors.map((r) => r.runId).filter((id): id is string => id !== null && id !== ""));
   const activeRunIds = new Set(activeRuns.map((r) => r.id));
-  const openReviewRunIds = runIdsOf(openReviews);
-  const terminalReviewRunIds = runIdsOf(terminalReviews);
+  const openReviewRunIds = new Set(
+    openReviews.map((r) => r.runId).filter((id): id is string => id !== null && id !== ""),
+  );
+  // Every run any row NAMES as possibly-live, put through the same terminality test the
+  // observation filter uses. An open review's run is included even when its run row has
+  // closed — the work is still being reviewed.
+  const anchorRunIds = new Set(
+    [...activeRunIds, ...openReviewRunIds].filter((id) => runIsAnchored(id, activeRunIds, openReviews, terminalReviews)),
+  );
 
   let hasCurrentAnchor: boolean;
   if (scope.runId !== undefined) {
-    hasCurrentAnchor = activeRunIds.has(scope.runId) || openReviewRunIds.has(scope.runId);
+    hasCurrentAnchor = anchorRunIds.has(scope.runId);
   } else if (scope.projectDirs !== undefined) {
     hasCurrentAnchor =
-      activeRuns.some((r) => inProjectScope(r.project_dir, scope.projectDirs)) ||
+      activeRuns.some((r) => anchorRunIds.has(r.id) && inProjectScope(r.project_dir, scope.projectDirs)) ||
       openReviews.some((r) => inProjectScope(r.workspaceDir, scope.projectDirs));
   } else {
-    hasCurrentAnchor = activeRuns.length > 0 || openReviews.length > 0;
+    hasCurrentAnchor = anchorRunIds.size > 0 || openReviews.length > 0;
   }
 
-  return { activeRunIds, openReviewRunIds, openReviews, terminalReviews, terminalReviewRunIds, hasCurrentAnchor };
+  return { activeRunIds, openReviews, terminalReviews, anchorRunIds, hasCurrentAnchor };
 }
 
 /** Does this review anchor NAME the work an observation declares?
@@ -458,6 +466,33 @@ function reviewNamesWork(
   if (ticketId === null || ticketId === "") return false;
   return anchor.ticketId === ticketId
     && (anchor.workspaceDir === null || projectDir === null || anchor.workspaceDir === projectDir);
+}
+
+/** Could this RUN currently be waiting on required checks?
+ *
+ *  The same question `observationIsCurrent` asks of an observation, asked of the run
+ *  itself and answered in the same order by the same predicate. That symmetry is the
+ *  whole of FG-694/RF-5. The anchor test used to be `the run row is active` — strictly
+ *  WEAKER than the observation filter — so a run whose review was over kept the anchor
+ *  after every one of its observations had been correctly retired, and the section fell
+ *  to `not_observed`: `CI not observed` for work nobody is checking (RF-1), rendered as
+ *  exactly that string (RF-3). Two absences that must stay mutually unreachable were
+ *  reachable from one another through the gap between these two rules.
+ *
+ *  A run row DECLARES no ticket, so `reviewNamesWork` is asked with none — and that cuts
+ *  both ways deliberately: a review anchored only to a ticket does not name a run, so it
+ *  neither keeps nor retires a run's anchor. It still decides the OBSERVATIONS that
+ *  declare its ticket, which is where the ticket is actually declared. */
+function runIsAnchored(
+  runId: string,
+  activeRunIds: ReadonlySet<string>,
+  openReviews: readonly ReviewAnchor[],
+  terminalReviews: readonly ReviewAnchor[],
+): boolean {
+  const named = (r: ReviewAnchor): boolean => reviewNamesWork(r, runId, null, null);
+  if (openReviews.some(named)) return true;
+  if (terminalReviews.some(named)) return false;
+  return activeRunIds.has(runId);
 }
 
 /** Is the work this observation NAMES still open? The observation declares its own
@@ -521,10 +556,11 @@ function readNewestCiObservations(
   // The JS checks below are NOT removed: the payload parsed there stays the authority
   // for what a row says, and these clauses only decide which rows the window spends
   // itself on.
-  const eligibleRunIds = [...new Set([...currency.activeRunIds, ...currency.openReviewRunIds])]
-    // A run whose only reviews are terminal can produce no current observation
-    // (observationIsCurrent rejects every row it declares), so it may not hold a slot.
-    .filter((id) => currency.openReviewRunIds.has(id) || !currency.terminalReviewRunIds.has(id))
+  // `anchorRunIds` already excludes a run whose only reviews are terminal — it can
+  // produce no current observation (observationIsCurrent rejects every row it declares),
+  // so it may not hold a slot. It is the SAME set that decided `hasCurrentAnchor` above,
+  // which is what stops the window rule and the absence rule drifting apart (RF-5).
+  const eligibleRunIds = [...currency.anchorRunIds]
     .filter((id) => scope.runId === undefined || id === scope.runId);
 
   const clauses: string[] = [];
