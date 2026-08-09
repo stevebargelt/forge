@@ -13,7 +13,12 @@ import {
   ADAPTER_MARKER_NOTICE,
   ADAPTER_MARKER_VERSION,
   ADAPTER_STAMP_PATTERN,
+  MAINTAINED_PROSE,
+  OPERATOR_SURFACE_REGIONS,
   OPERATOR_SURFACES,
+  REGION_OWNERS,
+  regionsForSurface,
+  regionsOwning,
   OPERATOR_WORKFLOWS,
   OPERATOR_WORKFLOW_IDS,
   OPERATOR_WORKFLOW_RULE_COVERAGE,
@@ -27,8 +32,11 @@ import {
   workflowClaims,
   type OperatorWorkflowDefinition,
   type OperatorWorkflowId,
+  type SurfaceRegion,
 } from "./operator-workflows.js";
 import { ORCHESTRATOR_ADAPTER_IDS } from "./orchestrator-capabilities.js";
+import { CLAUDE_COMMANDS_DIR, claudeCommandPath } from "./render-claude-commands.js";
+import { CODEX_SKILLS_ROOT, codexSkillTargetPath } from "./render-codex-skills.js";
 
 // ---- Membership ------------------------------------------------------------
 
@@ -346,4 +354,135 @@ test("definitions are shared data, and the same definition object is returned ev
   const a: OperatorWorkflowDefinition = operatorWorkflow("orient");
   const b: OperatorWorkflowDefinition = operatorWorkflow("orient");
   assert.equal(a, b);
+});
+
+// ---- The ownership inventory (FG-253, absorbing FG-347) ---------------------
+//
+// The requirement is "no prose without an explicit maintenance owner", and the
+// only way to make that enforceable rather than aspirational is TOTALITY: a
+// surface added later without an owner must fail to compile (the
+// `_allSurfacesOwned` check inside the module) or fail here. So every assertion
+// below iterates a PRODUCER — the renderers' own path functions, the declared
+// owner set, the surface list — never a copied list of paths, which would keep
+// passing after a renderer moved a file out from under its owner.
+
+test("every file forge renders is owned by exactly one forge-generated region", () => {
+  const rendered = [
+    ...OPERATOR_WORKFLOW_IDS.map((id) => ({ path: claudeCommandPath(id), surface: "claude-code" as const })),
+    ...OPERATOR_WORKFLOW_IDS.map((id) => ({ path: codexSkillTargetPath(id), surface: "codex" as const })),
+  ];
+  assert.ok(rendered.length >= 4, "the scrape below would check almost nothing");
+  for (const { path, surface } of rendered) {
+    const owning = regionsOwning(path);
+    assert.equal(owning.length, 1, `${path} is owned by ${owning.length} regions — expected exactly one`);
+    const region = owning[0]!;
+    assert.equal(region.owner, "forge-generated", `${path} is rendered by forge but owned by '${region.owner}'`);
+    assert.equal(region.discipline, "refuse-foreign-preserve");
+    assert.ok(
+      (region.surfaces as readonly string[]).includes(surface),
+      `${path} is rendered for '${surface}' but its region does not claim that surface`,
+    );
+  }
+});
+
+test("the inventory's generated-path roots are the renderers' roots, not a copy that can drift", () => {
+  const claudeRegion = regionsOwning(claudeCommandPath("orient"))[0]!;
+  assert.ok(claudeRegion.path.startsWith(`${CLAUDE_COMMANDS_DIR}/`), `${claudeRegion.path} left CLAUDE_COMMANDS_DIR`);
+  const codexRegion = regionsOwning(codexSkillTargetPath("orient"))[0]!;
+  assert.ok(codexRegion.path.startsWith(`${CODEX_SKILLS_ROOT}/`), `${codexRegion.path} left CODEX_SKILLS_ROOT`);
+});
+
+test("every region is well-formed, and every declared owner is actually used", () => {
+  const ids = OPERATOR_SURFACE_REGIONS.map((r) => r.id);
+  assert.equal(new Set(ids).size, ids.length, "duplicate region id");
+  for (const r of OPERATOR_SURFACE_REGIONS) {
+    assert.ok(r.path.length > 0, `${r.id}: empty path`);
+    assert.ok(r.why.trim().length > 0, `${r.id}: no reason given for its owner`);
+    assert.ok(r.surfaces.length > 0, `${r.id}: belongs to no surface`);
+    assert.ok((REGION_OWNERS as readonly string[]).includes(r.owner), `${r.id}: undeclared owner`);
+  }
+  for (const owner of REGION_OWNERS) {
+    assert.ok(
+      OPERATOR_SURFACE_REGIONS.some((r) => r.owner === owner),
+      `no region is owned by '${owner}' — an owner class nothing uses is a class that does not exist`,
+    );
+  }
+});
+
+test("every provider surface has at least one owned region", () => {
+  for (const surface of OPERATOR_SURFACES) {
+    assert.ok(
+      regionsForSurface(surface.id).length > 0,
+      `surface '${surface.id}' has no ownership region — its prose has no owner`,
+    );
+    // A surface that renders files must own them; one that renders nothing must
+    // own no generated region, or the documented absence is not an absence.
+    const generated = regionsForSurface(surface.id).filter((r) => r.owner === "forge-generated");
+    assert.equal(
+      generated.length > 0,
+      !isDocumentedAbsence(surface),
+      `surface '${surface.id}': generated regions and rendered files disagree`,
+    );
+  }
+});
+
+test("a mixed file is labelled region-by-region — the two halves partition it", () => {
+  const byPath = new Map<string, SurfaceRegion[]>();
+  for (const r of OPERATOR_SURFACE_REGIONS as readonly SurfaceRegion[]) {
+    byPath.set(r.path, [...(byPath.get(r.path) ?? []), r]);
+  }
+  let mixed = 0;
+  for (const [path, regions] of byPath) {
+    if (regions.length === 1) {
+      assert.equal(regions[0]!.scope, "whole-file", `${path} has one region, so it must claim the whole file`);
+      continue;
+    }
+    mixed++;
+    assert.deepEqual(
+      regions.map((r) => r.scope).sort(),
+      ["forge-region", "outside-forge-region"],
+      `${path} is split into ${regions.length} regions that do not partition it into forge's part and the rest`,
+    );
+    for (const r of regions) {
+      assert.ok(r.regionLabel && r.regionLabel.trim().length > 0, `${r.id}: a partial region must name its part`);
+    }
+  }
+  assert.ok(mixed >= 1, "no mixed file is inventoried — CLAUDE.md is one, so this test has lost its subject");
+  // CLAUDE.md by name: it is the file FG-347 was opened about, and an inventory
+  // that labelled it with one owner would not have answered the ticket.
+  const claudeMd = regionsOwning("CLAUDE.md");
+  assert.equal(claudeMd.length, 2, "CLAUDE.md must be inventoried as two regions, not one file");
+  const block = claudeMd.find((r) => r.owner === "forge-generated");
+  const prose = claudeMd.find((r) => r.owner === "orchestrator");
+  assert.ok(block && prose, "CLAUDE.md needs a forge-generated block region AND an orchestrator-owned region");
+  // The two Forge disciplines are NOT the same refusal, and the inventory says so.
+  assert.equal(block.discipline, "deterministic-re-render");
+  assert.equal(regionsOwning(claudeCommandPath("orient"))[0]!.discipline, "refuse-foreign-preserve");
+});
+
+test("the maintained-prose document is owned by the documentation-maintainer, and the link is one place", () => {
+  const owning = regionsOwning(MAINTAINED_PROSE.path);
+  assert.equal(owning.length, 1, `${MAINTAINED_PROSE.path} is owned by ${owning.length} regions`);
+  assert.equal(owning[0]!.owner, "documentation-maintainer");
+  assert.equal(owning[0]!.owner, MAINTAINED_PROSE.owner, "the link's declared owner and the inventory disagree");
+  // Both workflows carry the SAME link object — two copies could drift apart, and
+  // the renderers derive the path from here rather than hardcoding it.
+  for (const def of OPERATOR_WORKFLOWS) assert.equal(def.maintainedProse, MAINTAINED_PROSE);
+  assert.ok(MAINTAINED_PROSE.statement.includes(MAINTAINED_PROSE.path), "the rendered sentence must name the path");
+});
+
+test("operator-owned surfaces are external, including a skill dir forge knows nothing about", () => {
+  for (const path of ["AGENTS.md", ".agents/skills/somebody-elses/SKILL.md", ".codex/prompts/orient.md"]) {
+    const owning = regionsOwning(path);
+    assert.equal(owning.length, 1, `${path} is owned by ${owning.length} regions`);
+    assert.equal(owning[0]!.owner, "external", `${path} must be operator-owned`);
+    assert.equal(owning[0]!.discipline, "byte-untouched");
+  }
+  // The exclusion is what keeps the two apart: forge's own skill dir sits under
+  // the same parent and is NOT external.
+  assert.equal(regionsOwning(codexSkillTargetPath("orient"))[0]!.owner, "forge-generated");
+});
+
+test("an unowned path is reported as unowned rather than defaulted to somebody", () => {
+  assert.deepEqual(regionsOwning("src/v2/operator-workflows.ts"), []);
 });

@@ -256,12 +256,34 @@ it is **always advisory**: the session launches regardless, no exit code moves, 
 misleading guidance, not a mis-run. Every line of this advisory also repeats that installed bytes are not evidence
 a provider loaded them — see [The capability/parity matrix](#the-capabilityparity-matrix) above.
 
-**FG-347 is deferred by this ticket (FG-253), not answered.** FG-253 renders and installs `/orient` and `/handoff`
-as described above; it does not introduce marker-based ownership anywhere else. Operator-owned regions stay
-byte-untouched — no marker discipline is introduced into `AGENTS.md`, `CLAUDE.md` prose outside the fenced
-orchestrator block is never read or spliced, and the documentation-maintainer's correction path over prose outside
-generated regions is unchanged. Whether `AGENTS.md` or other operator-owned surfaces should ever gain the same
-generated/marked-region treatment these two files have is FG-347's question, not this one's.
+**Every provider-specific instruction/command surface has an explicit owner — FG-253 (which absorbed FG-347)
+completes that boundary, it does not defer it.** Three ownership shapes, no unowned prose left over:
+
+- **Forge-generated regions** are owned by the renderer, not hand-edited: the fenced
+  `<!-- forge:orchestrator-start -->` block in `CLAUDE.md`, the rendered `/orient` and `/handoff` command bodies,
+  and the Codex `forge-orient` / `forge-handoff` skills. `forge init` / `forge upgrade` own writing these and
+  **refuse foreign or hand-authored content rather than overwriting it** — a region they don't recognize as their
+  own render is left alone and reported, never silently replaced.
+- **Volatile, repo-specific hand-authored prose** — what forge is, house conventions, auth modes, the `src/`
+  layout, what not to touch — lives in [`docs/repo-guide.md`](repo-guide.md), which the documentation-maintainer
+  owns and can correct like any other durable doc. `CLAUDE.md` keeps only its own orchestrator policy (the title,
+  the no-attribution rule, the session-start rule, and the rendered block) and links to the guide rather than
+  hand-carrying this prose inline — that link is what gives it a routed correction path instead of drifting with
+  no owner (the FG-347 defect).
+- **External/user-owned surfaces** are byte-untouched by forge: `AGENTS.md`, `.codex/` (including the deprecated
+  custom-prompt dirs), and any non-Forge skill under `.claude/skills/` or `.agents/skills/`. Forge never reads,
+  splices, or renders into them. `.claude/settings.local.json` is the one mixed structured file: `forge init` /
+  `forge upgrade` rewrite **their own** heartbeat hook entries there and merge them in, preserving every other key
+  and every hook entry that is not forge's — so the file's forge entries are generated and the rest is yours.
+
+The machine-readable form of this table is `OPERATOR_SURFACE_REGIONS` in `src/v2/operator-workflows.ts` — one
+region per owner, with the mixed files (`CLAUDE.md`, `.claude/settings.local.json`) split into a forge-owned region
+and an operator-owned one. It is the single source; this section describes it rather than restating it, and a
+surface added without an owner fails the build.
+
+No marker discipline was introduced into `AGENTS.md` or `CLAUDE.md` prose to make this work — that was one of the
+options FG-347 raised and explicitly the one *not* taken. The relocation arm (moving the orphaned prose into a
+maintainer-owned document and linking to it) is what gives it an owner instead.
 
 ## Failure behavior before spawn
 

@@ -230,7 +230,14 @@ test("orientation renders no notes block — it is a read, and it applies nothin
 /** Every string the definition contributes. Built from the definition itself, so
  *  the check below stays honest as the definition grows. */
 function definitionStrings(def: OperatorWorkflowDefinition): Set<string> {
-  const out = new Set<string>([def.purpose, def.boundedCli.statement, def.boundedCli.drillIn, def.boundedCli.rationale]);
+  const out = new Set<string>([
+    def.purpose,
+    def.maintainedProse.path,
+    def.maintainedProse.statement,
+    def.boundedCli.statement,
+    def.boundedCli.drillIn,
+    def.boundedCli.rationale,
+  ]);
   for (const p of def.boundedCli.forbiddenDirectAccess) out.add(p);
   for (const p of def.probes) {
     out.add(p.command);

@@ -156,6 +156,7 @@ export function codexStructureTokens(skillName: string): readonly string[] {
     "## Rules",
     "## Do not",
     "## Notes block",
+    "## Maintained prose",
   ];
 }
 
@@ -266,6 +267,13 @@ export function codexSkillBodyParts(id: OperatorWorkflowId, stamp: AdapterStamp)
       p.push(NL);
     }
   }
+
+  // The maintainer-owned document, from the definition — the same link the Claude
+  // rendering carries, because both derive it from step 1 rather than each
+  // hardcoding a path that can drift apart.
+  p.push(NL);
+  p.push(...heading("## Maintained prose"));
+  p.push(DEF(def.maintainedProse.statement), NL);
 
   return p;
 }

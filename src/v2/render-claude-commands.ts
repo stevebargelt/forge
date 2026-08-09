@@ -114,6 +114,7 @@ export function claudeMechanics(def: OperatorWorkflowDefinition): readonly { id:
     { id: "section:report", text: "## Report" },
     { id: "section:rules", text: "## Rules" },
     { id: "section:prohibitions", text: "## Prohibitions" },
+    { id: "section:maintained-prose", text: "## Maintained prose" },
   ];
   // Orientation is a read; only a workflow with a durable write renders an apply
   // section, so this chrome exists exactly where the definition has content for it.
@@ -242,6 +243,13 @@ export function claudeCommandSegments(id: OperatorWorkflowId, stamp: AdapterStam
       ),
     );
   }
+
+  // 8. Where the durable, maintainer-owned prose lives. The link comes from the
+  //    definition, not from this renderer, so the Codex rendering points at the
+  //    same document — a path hardcoded per renderer is the duplicated-claim
+  //    defect this ticket removes, one level down.
+  segments.push(mechanics(def, "section:maintained-prose"));
+  segments.push(fromDefinition(def.maintainedProse.statement, [def.maintainedProse.statement]));
 
   return segments;
 }

@@ -20,12 +20,18 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { OPERATOR_WORKFLOW_IDS, isDocumentedAbsence, operatorSurface } from "../../v2/operator-workflows.js";
-import { CLAUDE_COMMANDS_DIR, claudeCommandPath } from "../../v2/render-claude-commands.js";
-import { codexSkillName, codexSkillTargetPath } from "../../v2/render-codex-skills.js";
+import {
+  MAINTAINED_PROSE,
+  OPERATOR_WORKFLOW_IDS,
+  REGION_OWNERS,
+  isDocumentedAbsence,
+  operatorSurface,
+} from "../../v2/operator-workflows.js";
+import { CLAUDE_COMMANDS_DIR, claudeCommandPath, renderClaudeCommand } from "../../v2/render-claude-commands.js";
+import { codexSkillName, codexSkillTargetPath, renderCodexSkill } from "../../v2/render-codex-skills.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -146,17 +152,71 @@ test("FG-253: docs/how-to-orchestrator-launcher.md never claims Codex skill acti
   assertActivationAlwaysUnverified(LAUNCHER);
 });
 
-// ─── FG-347 is named as DEFERRED, not answered, with the specific scope stated ──
+// ─── the ownership boundary FG-253 actually shipped, as the launcher doc states it ──
+//
+// This replaces an assertion that pinned "FG-347 is deferred by this ticket".
+// That claim stopped being true the moment the relocation arm landed, and a test
+// pinning it would have DEFENDED the stale sentence — the failure mode the whole
+// docs-parity file exists to prevent, inverted.
 
-test("FG-253 step 11: the launcher doc states FG-347 is deferred (not answered) and names what stays untouched", () => {
+test("FG-253: the launcher doc states the ownership boundary as answered, not deferred", () => {
   const text = doc(LAUNCHER);
   const at = text.indexOf("FG-347");
   assert.ok(at >= 0, `${LAUNCHER} never names FG-347`);
-  const window = text.slice(Math.max(0, at - 400), at + 900);
-  assert.match(window, /deferred/i, "the FG-347 mention is not described as deferred");
-  assert.match(window, /AGENTS\.md/, "the FG-347 mention does not name AGENTS.md staying untouched");
-  assert.match(window, /marker discipline/i, "the FG-347 mention does not say no marker discipline is introduced");
-  assert.match(window, /documentation-maintainer/i, "the FG-347 mention does not name the documentation-maintainer's correction path");
+  const window = text.slice(Math.max(0, at - 400), at + 2600);
+  assert.match(window, /absorb/i, "the FG-347 mention does not say FG-253 absorbed it");
+  assert.match(window, /complet/i, "the FG-347 mention does not say the boundary is completed");
+  assert.ok(
+    !/FG-347 is deferred/i.test(text),
+    `${LAUNCHER} still claims FG-347 is deferred — the relocation arm answered it`,
+  );
+  assert.match(window, /AGENTS\.md/, "the ownership boundary does not name AGENTS.md staying untouched");
+  assert.match(
+    window,
+    /no marker discipline/i,
+    "the ownership boundary does not say marker discipline was NOT introduced — the arm not taken is the point",
+  );
+  assert.match(window, /documentation-maintainer/i, "the ownership boundary does not name the maintainer's correction path");
+});
+
+test("FG-253: the launcher doc names every owner class the inventory declares, and the maintained document", () => {
+  const text = doc(LAUNCHER);
+  for (const owner of REGION_OWNERS) {
+    assert.ok(
+      text.toLowerCase().includes(owner),
+      `${LAUNCHER} never names the '${owner}' ownership class, so an operator cannot tell who maintains that region`,
+    );
+  }
+  assert.ok(
+    text.includes(MAINTAINED_PROSE.path),
+    `${LAUNCHER} never names ${MAINTAINED_PROSE.path} — the relocated prose's owner is unstated`,
+  );
+});
+
+// ─── the adapters link to a document that EXISTS ──────────────────────────────
+
+test("FG-253: every rendered adapter links to the maintainer-owned document, and that document exists", () => {
+  const stamp = "fg253-docs-parity";
+  for (const id of OPERATOR_WORKFLOW_IDS) {
+    for (const [surface, bytes] of [
+      ["claude", renderClaudeCommand(id, stamp)],
+      ["codex", renderCodexSkill(id, stamp)],
+    ] as const) {
+      assert.ok(
+        bytes.includes(MAINTAINED_PROSE.path),
+        `the ${surface} rendering of '${id}' never names ${MAINTAINED_PROSE.path}`,
+      );
+      assert.ok(
+        bytes.includes(MAINTAINED_PROSE.statement),
+        `the ${surface} rendering of '${id}' drops the maintained-prose statement`,
+      );
+    }
+  }
+  // A renamed or deleted guide would otherwise orphan the link silently: the
+  // adapters would keep pointing an operator at prose that is not there.
+  const abs = join(repoRoot, MAINTAINED_PROSE.path);
+  assert.ok(existsSync(abs), `the adapters link to ${MAINTAINED_PROSE.path}, which does not exist in the repo`);
+  assert.ok(read(MAINTAINED_PROSE.path).trim().length > 0, `${MAINTAINED_PROSE.path} is empty`);
 });
 
 // ─── docs/how-to-upgrade.md names the whole-adapter-set --json fields ─────────
