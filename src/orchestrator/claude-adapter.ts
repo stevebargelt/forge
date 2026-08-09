@@ -39,10 +39,14 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { assetRoot, executionMode } from "../v2/asset-root.js";
+import { currentAdapterStamp } from "../cli/commands/init.js";
+import { inspectProjectAdapters } from "../v2/seed-drift.js";
+import { claudeSlashCommand } from "../v2/render-claude-commands.js";
+import type { AdapterStamp, OperatorWorkflowId } from "../v2/operator-workflows.js";
 import {
   awsConfigDir,
   describeExpiredSsoSession,
@@ -673,8 +677,12 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
 // ---------------------------------------------------------------------------
 
 /** The project-shape warnings `forge claude` has always printed. Non-blocking: the
- *  operator can still launch into a half-configured session on purpose. */
-export function claudeProjectPreflight(projectRoot: string): string[] {
+ *  operator can still launch into a half-configured session on purpose.
+ *
+ *  `stamp` is the generation this launch resolved. It is a parameter rather than a
+ *  read so the check can be exercised against a fixture generation, and so a caller
+ *  that already resolved one does not resolve a second, possibly different, answer. */
+export function claudeProjectPreflight(projectRoot: string, stamp: AdapterStamp = currentAdapterStamp()): string[] {
   const warnings: string[] = [];
 
   const claudeMd = join(projectRoot, "CLAUDE.md");
@@ -693,32 +701,75 @@ export function claudeProjectPreflight(projectRoot: string): string[] {
     warnings.push(`.claude/settings.local.json missing (heartbeats won't fire). Run \`forge init\`.`);
   }
 
-  const commandsDir = join(projectRoot, ".claude", "commands");
-  if (existsSync(commandsDir)) {
-    let names: string[] = [];
-    try {
-      names = readdirSync(commandsDir);
-    } catch {
-      names = [];
-    }
-    for (const name of ["orient.md", "handoff.md"]) {
-      if (!names.includes(name)) continue;
-      const target = join(commandsDir, name);
-      try {
-        if (!lstatSync(target).isSymbolicLink()) continue;
-        const linkTarget = readlinkSync(target);
-        if (linkTarget.endsWith(`/scripts/claude-commands/${name}`) && !existsSync(target)) {
-          warnings.push(`.claude/commands/${name} → ${linkTarget} (target missing). Run \`forge upgrade\` to repoint.`);
-        }
-      } catch {
-        /* skip */
-      }
-    }
-  } else {
-    warnings.push(`.claude/commands/ missing (/orient, /handoff unavailable). Run \`forge init\`.`);
-  }
+  warnings.push(...claudeAdapterGenerationAdvisories(projectRoot, stamp));
 
   return warnings;
+}
+
+/** FG-253 step 8 — the Claude operator-adapter check, as a signal that can still fire.
+ *
+ *  WHAT THIS REPLACES. Until step 4, `/orient` and `/handoff` were absolute SYMLINKS
+ *  into the release's `scripts/claude-commands/`, so the only thing a preflight could
+ *  see was a link whose target had moved, and that is what it checked. Step 4 installs
+ *  MATERIALIZED BYTES: nothing forge writes is a symlink any more, so that check can
+ *  no longer fire on a forge install at all. A check that always passes reads like
+ *  evidence and is not one — it is worse than no check, because it occupies the slot.
+ *
+ *  WHAT IT CHECKS INSTEAD. Forge owns `$FORGE_HOME`; it does not own the consumer
+ *  repo. So the sha-pinned generation a launch resolves and the project-scoped adapter
+ *  files can go out of agreement, and no ordering makes the two writes atomic. What is
+ *  buyable is DETECTABILITY, so this reports the three ways they can disagree — a
+ *  different generation, absent while the surface advertises them, present with no
+ *  resolvable generation — and NAMES BOTH generations when there are two.
+ *
+ *  ADVISORY, ALWAYS. Every line here is a warning; the session launches either way and
+ *  no exit code moves. Installing bytes is also never claimed as activation: nothing on
+ *  this path probes whether a provider loaded anything — the capability matrix names
+ *  that gap outright for Codex (skills/commands activation UNVERIFIED) and forge runs
+ *  no discovery probe on the Claude path either — so the closing line says so. */
+export function claudeAdapterGenerationAdvisories(projectRoot: string, stamp: AdapterStamp): string[] {
+  const entries = inspectProjectAdapters(projectRoot, stamp).filter((e) => e.surface === "claude-code");
+
+  // Keyed on the STAMP the bytes carry, not on byte equality: this boundary reports
+  // the release split. A hand-edited file under the right stamp is real drift, but it
+  // is `forge doctor`'s to report — saying it here would name the wrong remedy.
+  const missing = entries.filter((e) => e.status === "missing");
+  const elsewhere = entries.filter((e) => e.stamp !== null && e.stamp !== stamp);
+  const unresolvable = entries.filter((e) => e.status !== "missing" && e.stamp === null);
+
+  const warnings: string[] = [];
+  if (missing.length > 0) {
+    warnings.push(
+      `${adapterPaths(missing)} not installed (${slashCommands(missing)}), but this session resolved forge ` +
+        `generation ${stamp}, which renders them. Run \`forge init\`.`,
+    );
+  }
+  for (const e of elsewhere) {
+    warnings.push(
+      `${e.path} carries forge generation ${e.stamp}, but this session resolved generation ${stamp} — ` +
+        `${claudeSlashCommand(e.workflow)} in this project came from a different release than the orchestrator ` +
+        `launching against it. Run \`forge upgrade\` (or \`forge init\`) in ${projectRoot} to converge it.`,
+    );
+  }
+  if (unresolvable.length > 0) {
+    warnings.push(
+      `${adapterPaths(unresolvable)} carry no forge ownership marker, so no generation resolves for them and forge cannot ` +
+        `tell whether they agree with this session's ${stamp}. Forge never overwrites them — delete one and re-run ` +
+        `\`forge init\` to hand it back.`,
+    );
+  }
+  if (warnings.length > 0) {
+    warnings.push("Installed is not active: bytes on disk are not evidence this session loaded them.");
+  }
+  return warnings;
+}
+
+function adapterPaths(entries: readonly { path: string }[]): string {
+  return entries.map((e) => e.path).join(", ");
+}
+
+function slashCommands(entries: readonly { workflow: OperatorWorkflowId }[]): string {
+  return entries.map((e) => claudeSlashCommand(e.workflow)).join(", ");
 }
 
 /** The STS / SSO findings `forge claude` reports for a bedrock launch. ADVISORY ONLY

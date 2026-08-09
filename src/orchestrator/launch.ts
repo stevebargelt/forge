@@ -77,6 +77,9 @@ import {
   type OrchestratorRefusal,
   type OrchestratorSessionOperation,
 } from "../v2/orchestrator-resolve.js";
+import { currentAdapterStamp } from "../cli/commands/init.js";
+import { inspectProjectAdapters, type ProjectAdapterEntry } from "../v2/seed-drift.js";
+import { operatorSurface, type AdapterStamp } from "../v2/operator-workflows.js";
 import { createClaudeAdapter } from "./claude-adapter.js";
 import { createCodexAdapter } from "./codex-adapter.js";
 import {
@@ -175,6 +178,94 @@ export function guardPassthrough(adapter: OrchestratorAdapter, tokens: readonly 
 }
 
 // ---------------------------------------------------------------------------
+// FG-253 step 8 — the host/project generation split, made DETECTABLE
+// ---------------------------------------------------------------------------
+//
+// Forge owns `$FORGE_HOME` and does NOT own a consumer repo. The sha-pinned
+// generation a launch resolves lives in the first; the orientation/handoff adapters
+// live in the second. There is no ordering of two writes across that boundary that
+// makes them atomic — a project can be cloned, a release promoted, a checkout moved,
+// all without forge being run — so agreement is not something this launcher can
+// guarantee. What it can do is REFUSE TO BE SILENT about disagreement.
+//
+// This is a reported state and never a refusal. A session whose adapters are from
+// another release still launches, with the same exit code it would otherwise have:
+// stale orientation prose is misleading guidance, not a mis-run, and refusing a
+// session over it would trade a warning for an outage. The report lands in two
+// places — the operator's console via the adapter preflight, and DURABLY on the
+// session record here, so `forge show` can still answer the question after the fact.
+
+/** What the launch resolved vs what the project has installed, on the ONE surface the
+ *  resolved adapter renders. Judged from the stamp the bytes carry, not from byte
+ *  equality: this boundary reports the RELEASE SPLIT. Byte drift under an agreeing
+ *  stamp is real, but it is `forge doctor`'s report (FG-253 step 6) and naming it here
+ *  would name the wrong remedy. */
+export type AdapterGenerationSplit = {
+  /** The generation this launch resolved — what the running forge would install. */
+  resolved: AdapterStamp;
+  /** Installed, marked, and naming a DIFFERENT generation. */
+  fromAnotherGeneration: ProjectAdapterEntry[];
+  /** Advertised by the resolved surface, absent from the project. */
+  missing: ProjectAdapterEntry[];
+  /** Present, but carrying no marker, so no generation resolves for them at all. */
+  unresolvable: ProjectAdapterEntry[];
+};
+
+/** `currentAdapterStamp` is deliberately the INSTALLER's (src/cli/commands/init.ts):
+ *  the question here is "which forge rendered the bytes in this project?", and the
+ *  only answer that can be compared against them is the one the writer uses. Note
+ *  that src/v2/seed-drift.ts exports a same-named resolver that agrees inside a
+ *  release (both are the manifest id) and DISAGREES on a dev checkout, where it
+ *  derives from rendered content rather than the checkout path. Reading that one here
+ *  would report every dev-mode launch as split from adapters its own `forge init` had
+ *  just written — a warning that fires when nothing is wrong, which is how a signal
+ *  gets trained out of an operator. */
+export function inspectLaunchAdapterGeneration(
+  projectDir: string,
+  adapterId: OrchestratorAdapterId,
+  resolved: AdapterStamp = currentAdapterStamp(),
+): AdapterGenerationSplit {
+  // "Advertised" is the surface's own claim about what it renders, so a surface that
+  // deliberately renders nothing (the generic fallback) reports no absence.
+  const advertised = new Set(operatorSurface(adapterId).renders);
+  const entries = inspectProjectAdapters(projectDir, resolved).filter(
+    (e) => e.surface === adapterId && advertised.has(e.workflow),
+  );
+  return {
+    resolved,
+    fromAnotherGeneration: entries.filter((e) => e.stamp !== null && e.stamp !== resolved),
+    missing: entries.filter((e) => e.status === "missing"),
+    unresolvable: entries.filter((e) => e.status !== "missing" && e.stamp === null),
+  };
+}
+
+/** The split as a capability limitation, or null when the project and the launch
+ *  agree. A limitation because that is the receipt's vocabulary for "this session is
+ *  running, and here is what it could not establish" — the same slot `--continue`'s
+ *  unknown identity and an unbound instruction carrier already use. */
+export function describeAdapterGenerationSplit(split: AdapterGenerationSplit): CapabilityLimitation | null {
+  const parts: string[] = [];
+  for (const e of split.fromAnotherGeneration) {
+    parts.push(`${e.path} carries generation ${e.stamp}`);
+  }
+  if (split.missing.length > 0) {
+    parts.push(`${split.missing.map((e) => e.path).join(", ")} absent`);
+  }
+  if (split.unresolvable.length > 0) {
+    parts.push(`${split.unresolvable.map((e) => e.path).join(", ")} carry no forge ownership marker`);
+  }
+  if (parts.length === 0) return null;
+  return {
+    capability: "operator-adapters",
+    note:
+      `this session resolved forge generation ${split.resolved}, but the project's operator adapters do not agree: ` +
+      `${parts.join("; ")}. The session was launched anyway — forge does not own this repo, so the two can only be ` +
+      `reported apart, never held together. Installation is not activation either: these are bytes on disk, not ` +
+      `evidence the provider loaded them.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Planning (no spawn, no writes — the surface step 9 asserts argument closure on)
 // ---------------------------------------------------------------------------
 
@@ -216,6 +307,10 @@ export function planLaunch(adapter: OrchestratorAdapter, ctx: AdapterLaunchConte
   const argvResult = adapter.buildArgv(ctx, { readiness, carrier, operation });
   if (!argvResult.ok) return { ok: false, refusal: argvResult.refusal };
 
+  const adapterSplit = describeAdapterGenerationSplit(
+    inspectLaunchAdapterGeneration(ctx.projectDir, ctx.decision.adapter),
+  );
+
   return {
     ok: true,
     plan: {
@@ -235,6 +330,7 @@ export function planLaunch(adapter: OrchestratorAdapter, ctx: AdapterLaunchConte
         ...readiness.limitations,
         ...carrier.limitations,
         ...operation.limitations,
+        ...(adapterSplit ? [adapterSplit] : []),
       ],
     },
   };
