@@ -56,6 +56,45 @@ export const REVIEW_STATES = [
 ] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 
+/** Which of those states END a review, classified EXHAUSTIVELY and at the one place
+ *  the vocabulary is defined. A `Record<ReviewState, …>` is the point: a twelfth
+ *  state cannot be added above without deciding here whether it is terminal, and the
+ *  compiler is what says so.
+ *
+ *  FG-694/RF-1: currency was decided elsewhere by a hand-written `["settled",
+ *  "failed"]`, so any state added later would silently have read as OPEN in that
+ *  module while reading as terminal here. Terminality is a property of the state, so
+ *  it lives with the states.
+ *
+ *  `blocked_environment` is OPEN on purpose — a stuck review is stuck, not over. */
+export const REVIEW_STATE_TERMINALITY: Readonly<Record<ReviewState, "open" | "terminal">> = {
+  confirming_contract: "open",
+  discovering: "open",
+  awaiting_disposition: "open",
+  fixing: "open",
+  documenting: "open",
+  verifying: "open",
+  rechecking: "open",
+  shipping_review: "open",
+  settled: "terminal",
+  blocked_environment: "open",
+  failed: "terminal",
+};
+
+export const TERMINAL_REVIEW_STATES: readonly ReviewState[] =
+  REVIEW_STATES.filter((s) => REVIEW_STATE_TERMINALITY[s] === "terminal");
+export const OPEN_REVIEW_STATES: readonly ReviewState[] =
+  REVIEW_STATES.filter((s) => REVIEW_STATE_TERMINALITY[s] === "open");
+
+/** Terminality of a state read back from a store, which may carry a string this
+ *  binary's vocabulary does not contain. An unknown state is NOT terminal: hiding
+ *  live work is the harm pointing the other way, and the freshness cutoff still
+ *  stops a stale row claiming anything about now. */
+export function isTerminalReviewState(state: string): boolean {
+  return Object.hasOwn(REVIEW_STATE_TERMINALITY, state)
+    && REVIEW_STATE_TERMINALITY[state as ReviewState] === "terminal";
+}
+
 export const DISPOSITIONS = [
   "fix_now",
   "accepted_risk",

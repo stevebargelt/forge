@@ -188,6 +188,11 @@ let served: Activity = base({});
 /** FG-694 AC7: the STATUS the fixture answers with. 404 is the reproduced version
  *  skew — a dashboard server that predates the route. */
 let currentActivityStatus = 200;
+/** FG-694 AC7 (RF-3): a 200 body served VERBATIM. A structurally malformed payload —
+ *  an entry that is `null` where a row belongs — has to reach the client exactly as a
+ *  partial write or a skewed server would produce it, rather than being normalized by
+ *  the fixture's own typing on the way out. */
+let servedRawBody: string | null = null;
 
 let server: Server;
 let browser: Browser;
@@ -468,6 +473,46 @@ test("FG-679 BD-8 / FG-694 AC6+AC7: no-candidate, not-observed, settled, stale a
   }
 });
 
+test("FG-694 AC7 (RF-3): a 200 whose ENTRIES are malformed renders the unavailable state — the surface never breaks mid-render", async () => {
+  // A syntactically valid 200 carrying `agents: [null]`. The container-only validator
+  // called this `ready`, and the row build then threw on `a.taskId` — leaving the
+  // operator with neither the activity nor the explicit unavailable state and its
+  // Retry. A thrown render is the one outcome AC7 has no state for.
+  servedRawBody = JSON.stringify({
+    generatedAt: NOW,
+    scope: { runId: null, projectDirs: null },
+    agents: [null],
+    hostVerification: [],
+    requiredCi: { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
+    unassociated: [],
+  });
+  try {
+    // Not `open()`: the listener has to be attached BEFORE the first render, which is
+    // where the throw happened.
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1200 }, reducedMotion: "reduce" });
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    await page.goto(`${baseUrl}/`);
+    await page.locator("section.current-activity").waitFor();
+    await page.locator(".ca-unavailable").waitFor();
+
+    const text = await page.locator("section.current-activity").innerText();
+    assert.match(text, /Current activity unavailable/);
+    assert.match(text, /could not read/, "the detail is about the READ, never about the work");
+    for (const claim of ["No agent task in flight", "No host launch observed", "CI not observed", "Nothing currently running"]) {
+      assert.doesNotMatch(text, new RegExp(claim), `a malformed read may not claim "${claim}"`);
+    }
+    assert.equal(await page.locator(".ca-retry").count(), 1, "the operator's recovery is not a page reload");
+    assert.equal(await page.locator(".ca-agent-row").count(), 0, "no row was built from the malformed entry");
+    assert.deepEqual(errors, [], "the render did not throw");
+
+    await page.screenshot({ path: join(SHOTS, "fg694-rf3-malformed-entry.png"), fullPage: true });
+    await page.close();
+  } finally {
+    servedRawBody = null;
+  }
+});
+
 test("FG-679 BD-3/BD-14: an unassociated launch is LABELED, and a host-level bucket renders separately", async () => {
   served = base({
     hostVerification: [launch({ launchId: "launch-cwd-ffffff", associationKind: "cwd", unassociated: true, placement: "project", runId: null })],
@@ -585,7 +630,8 @@ function createFixtureServer(): Server {
         res.writeHead(currentActivityStatus, { "Content-Type": "text/plain" }).end("not found");
         return;
       }
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(served));
+      res.writeHead(200, { "Content-Type": "application/json" })
+        .end(servedRawBody ?? JSON.stringify(served));
       return;
     }
     if (url.pathname === "/api/usage/limits") {

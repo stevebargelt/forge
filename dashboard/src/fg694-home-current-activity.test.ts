@@ -489,6 +489,100 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
     assert.match(collapsed(load), new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
   });
 
+  // ── RF-3: a structurally malformed ENTRY is a failed read, not renderable data ──
+  //
+  // The container check alone said `ready` for a 200 whose `agents` array held a
+  // `null`, and the render then threw building the row — showing the operator neither
+  // the activity nor the unavailable state with its Retry. AC7 enumerates exactly this
+  // case, so the validator has to reject the entries, not just their containers.
+  describe("FG-694 AC7 (RF-3) — malformed entries resolve to `unavailable`, never to a thrown render", () => {
+    /** The PRE-FIX rule, restated, so each fixture below is shown to be non-vacuous:
+     *  every one of them is a body the shipped validator called `ready`. */
+    const containerOnlyAccepted = (v: unknown): boolean => {
+      const o = v as Record<string, unknown> | null;
+      if (!o || typeof o !== "object" || Array.isArray(o)) return false;
+      if (!Array.isArray(o.agents) || !Array.isArray(o.hostVerification)) return false;
+      const ci = o.requiredCi as Record<string, unknown> | undefined;
+      if (!ci || typeof ci !== "object" || Array.isArray(ci)) return false;
+      if (typeof ci.state !== "string" || ci.state === "") return false;
+      return Array.isArray(ci.observations);
+    };
+
+    const MALFORMED: Array<{ name: string; body: unknown }> = [
+      { name: "agents: [null] — the reported case; the row build reads `a.taskId`", body: payload({ agents: [null] } as never) },
+      { name: "an agent entry with no taskId", body: payload({ agents: [{ ...agent, taskId: undefined }] } as never) },
+      { name: "an agent entry with no status — AgentRow calls `entry.status.replace`", body: payload({ agents: [{ ...agent, status: undefined }] } as never) },
+      { name: "agents: [[]] — an array where an entry belongs", body: payload({ agents: [[]] } as never) },
+      { name: "hostVerification: [null] — LaunchRow reads `entry.name || entry.launchId`", body: payload({ hostVerification: [null] } as never) },
+      { name: "unassociated: [null] — the same rows, the host-level bucket", body: payload({ unassociated: [null] } as never) },
+      {
+        name: "a CI observation that is not an object",
+        body: payload({ requiredCi: { state: "observed", label: "1 observed", observations: ["c0ffee"] } } as never),
+      },
+      {
+        name: "a CI observation carrying no candidate sha",
+        body: payload({ requiredCi: { state: "observed", label: "1 observed", observations: [{ ...observation(), candidateSha: "" }] } } as never),
+      },
+    ];
+
+    for (const { name, body } of MALFORMED) {
+      test(`${name} → unavailable + retry, and none of the four claims`, async () => {
+        assert.equal(containerOnlyAccepted(body), true, "NOT vacuous: the pre-fix container check accepted this body");
+        assert.equal(isCurrentActivityPayload(body), false);
+
+        // Through the shipping read path, not a hand-built load.
+        const load = await readCurrentActivity(
+          "/api/current-activity",
+          (async () => stubResponse({ json: async () => body })) as never,
+        );
+        assert.equal(activityPhase(load), "unavailable");
+        assert.equal((load as { reason: string }).reason, "malformed");
+
+        const text = collapsed(load);
+        assert.match(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
+        for (const claim of OBSERVATION_CLAIMS) {
+          assert.doesNotMatch(text, new RegExp(claim), `a malformed read may not claim "${claim}"`);
+        }
+        const buttons = elements(home(load)).filter((el) => el.type === "button");
+        assert.equal(buttons.length, 1, "the operator can retry");
+      });
+    }
+
+    test("a `ready` load holding a malformed payload renders the unavailable state rather than throwing", () => {
+      // The other door into the renderer: a load object that claims `ready`. The phase
+      // is re-derived from the payload, so the claim alone cannot get a bad entry into
+      // a row — which is what makes this a rendered-output guarantee and not just a
+      // property of the fetch path.
+      const load = { phase: "ready", activity: payload({ agents: [null] } as never) };
+      assert.equal(activityPhase(load), "unavailable");
+      assert.doesNotThrow(() => collapsed(load));
+      assert.match(collapsed(load), new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
+    });
+
+    test("NOT vacuous: a payload whose entries are WELL formed still reaches `ready` and renders them", () => {
+      const good = payload({
+        agents: [agent],
+        hostVerification: [launch],
+        unassociated: [],
+        requiredCi: { state: "observed", label: "1 observed", observations: [observation()] },
+      });
+      assert.equal(isCurrentActivityPayload(good), true);
+      const text = collapsed({ phase: "ready", activity: good });
+      assert.match(text, /frontend-specialist/);
+      assert.match(text, /worktree-tier/);
+      assert.match(text, /FG-253/);
+    });
+
+    test("an entry missing only COSMETIC fields is still a payload — the validator guards the crash surface, not a schema", () => {
+      // `runTitle`, `phase`, `agentRole`, `projectLabel` render as nothing when absent.
+      // Rejecting over those would turn tolerable drift from an older server into a
+      // permanent error banner, which is the opposite of AC7's intent.
+      const sparse = payload({ agents: [{ taskId: "task-1", status: "running" }] } as never);
+      assert.equal(isCurrentActivityPayload(sparse), true);
+      assert.doesNotThrow(() => collapsed({ phase: "ready", activity: sparse }));
+    });
+  });
+
   test("the payload validator accepts an OLDER server's payload and rejects a non-payload", () => {
     // A server that predates FG-694 has only two `requiredCi.state` values. Rejecting
     // it would turn a working dashboard into a permanent error banner.

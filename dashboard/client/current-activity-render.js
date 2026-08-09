@@ -198,22 +198,63 @@ export function activityUnavailable(reason, status = null) {
   return Object.freeze({ phase: "unavailable", reason, status: typeof status === "number" ? status : null });
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value !== "";
+}
+
+function isArrayOf(value, valid) {
+  return Array.isArray(value) && value.every(valid);
+}
+
+/** The fields the ROW COMPONENTS dereference without asking — `entry.status.replace`
+ *  in AgentRow, `entry.name || entry.launchId` in LaunchRow. An entry missing one of
+ *  them is not sparse data to render around; it throws mid-render, and a thrown render
+ *  is the one thing AC7 has no state for. Deliberately NOT a full field-by-field
+ *  schema: `runTitle`, `phase`, `agentRole` and friends render as nothing when absent,
+ *  and rejecting a whole payload over a cosmetic gap would turn tolerable drift from an
+ *  older server into `Current activity unavailable`. */
+function isAgentEntry(value) {
+  return isPlainObject(value) && isNonEmptyString(value.taskId) && isNonEmptyString(value.status);
+}
+
+function isLaunchEntry(value) {
+  return isPlainObject(value) && isNonEmptyString(value.launchId);
+}
+
+function isCiObservationEntry(value) {
+  return isPlainObject(value) && isNonEmptyString(value.candidateSha);
+}
+
 /** Is this actually a current-activity payload? A 200 carrying an HTML error page,
  *  an empty object, or a truncated body is NOT missing data we can render around —
  *  it is a read that failed, and saying so is the whole of AC7.
  *
- *  Deliberately shape-only, and deliberately tolerant of a payload from an OLDER
- *  server: `requiredCi.state` is not checked against the three known values, so a
- *  server that predates FG-694's `no_current_candidate` still reads as valid. The
+ *  The ENTRIES are validated, not just their containers (FG-694/RF-3). `agents: [null]`
+ *  is a syntactically valid 200 that used to read as `ready` and then throw on
+ *  `a.taskId` while building the row — and a crashed render shows the operator neither
+ *  the activity nor the explicit unavailable state with its Retry, which is precisely
+ *  the malformed-response case AC7 enumerates.
+ *
+ *  Still deliberately tolerant of a payload from an OLDER server: `requiredCi.state` is
+ *  not checked against the three known values, so a server that predates FG-694's
+ *  `no_current_candidate` still reads as valid, and `unassociated` may be absent. The
  *  renderer treats an unrecognized state conservatively. */
 export function isCurrentActivityPayload(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  if (!Array.isArray(value.agents)) return false;
-  if (!Array.isArray(value.hostVerification)) return false;
+  if (!isPlainObject(value)) return false;
+  if (!isArrayOf(value.agents, isAgentEntry)) return false;
+  if (!isArrayOf(value.hostVerification, isLaunchEntry)) return false;
+  // Only ever checked AS an array: `homeActivityView` already substitutes `[]` for a
+  // missing or non-array `unassociated`, so tightening past the crash surface here
+  // would reject payloads the surface renders correctly today.
+  if (Array.isArray(value.unassociated) && !value.unassociated.every(isLaunchEntry)) return false;
   const ci = value.requiredCi;
-  if (!ci || typeof ci !== "object" || Array.isArray(ci)) return false;
-  if (typeof ci.state !== "string" || ci.state === "") return false;
-  return Array.isArray(ci.observations);
+  if (!isPlainObject(ci)) return false;
+  if (!isNonEmptyString(ci.state)) return false;
+  return isArrayOf(ci.observations, isCiObservationEntry);
 }
 
 /** A parsed response body → a load state. The ONLY door from a network read into

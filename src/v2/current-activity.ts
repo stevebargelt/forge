@@ -49,6 +49,7 @@ import {
   type LaunchObservation,
   type LaunchObservationRow,
 } from "../store/launch-observations.js";
+import { isTerminalReviewState } from "../store/reviews.js";
 
 /** Re-exported so a second consumer (the dashboard) validates a launch id against
  *  the SAME definition `launchDir` uses, and renders the status through the SAME
@@ -86,13 +87,15 @@ export const CI_NO_CANDIDATE_LABEL = "no current CI candidate";
  *  through a NOT-IN list that predates it. */
 const ACTIVE_RUN_STATUS = "active";
 
-/** Reviews are selected NEGATIVELY, the opposite way round and deliberately: the
- *  ledger has nine open states and gains more, so a state this binary has not heard
- *  of must read as OPEN (surfacing live work) rather than as finished (hiding it).
- *  `blocked_environment` is open on purpose — the review is stuck, not over; the
- *  freshness cutoff, not this filter, is what stops a stuck review claiming CI is
- *  running now. */
-const TERMINAL_REVIEW_STATES = ["settled", "failed"] as const;
+/** Review terminality is NOT enumerated here. It is a property of the review state
+ *  vocabulary, so it is decided at the one place that vocabulary is defined
+ *  (`REVIEW_STATE_TERMINALITY` in src/store/reviews.ts), exhaustively and under the
+ *  compiler. FG-694/RF-1: this module used to carry its own `["settled", "failed"]`,
+ *  which is an allowlist of two names pretending to be an open-ended terminal set —
+ *  a twelfth state would have been added over there and silently read as an OPEN
+ *  anchor here. Every review row is now classified through `isTerminalReviewState`,
+ *  which still reads a state it does not recognize as OPEN (surfacing live work
+ *  rather than hiding it) — but a state that EXISTS can no longer go unclassified. */
 
 export const CI_OBSERVED_EVENT_TYPE = "review_loop.ci_observed";
 
@@ -369,6 +372,12 @@ type CiCurrency = {
   activeRunIds: ReadonlySet<string>;
   openReviewRunIds: ReadonlySet<string>;
   openReviews: readonly ReviewAnchor[];
+  /** Reviews that are OVER, carried for the same reason the open ones are. AC2 names
+   *  a terminal run OR a terminal review, and those are not the same fact: a run stays
+   *  `active` through its docs and close-out phases, so "this run is active" cannot
+   *  answer "is the review of this work over" (FG-694/RF-4). */
+  terminalReviews: readonly ReviewAnchor[];
+  terminalReviewRunIds: ReadonlySet<string>;
   /** True when SOMETHING in scope could currently be waiting on required checks.
    *  Distinguishes `no_current_candidate` from `not_observed` — see RequiredCiSection. */
   hasCurrentAnchor: boolean;
@@ -395,17 +404,26 @@ function readCiCurrency(db: DatabaseInstance, scope: CurrentActivityScope): CiCu
   // review open here", and the honest reading of that is "no review anchor available"
   // — not a crash, and not an invented anchor.
   const reviewsUsable = ["run_id", "ticket_id", "workspace_dir", "state"].every((c) => cols.has(c));
-  const openReviews: ReviewAnchor[] = reviewsUsable
+  // Every review row, open and terminal alike, classified in ONE place by
+  // terminality. The state is no longer a WHERE clause: a query that filtered by two
+  // names could only ever answer "not one of these two", which is what RF-1 is about.
+  const reviewRows = reviewsUsable
     ? (db.prepare(`
-        SELECT run_id, ticket_id, workspace_dir
-          FROM reviews
-         WHERE state NOT IN (${TERMINAL_REVIEW_STATES.map(() => "?").join(",")})
-      `).all(...TERMINAL_REVIEW_STATES) as Array<{ run_id: string | null; ticket_id: string | null; workspace_dir: string | null }>)
-      .map((r) => ({ runId: r.run_id, ticketId: r.ticket_id, workspaceDir: r.workspace_dir }))
+        SELECT run_id, ticket_id, workspace_dir, state FROM reviews
+      `).all() as Array<{ run_id: string | null; ticket_id: string | null; workspace_dir: string | null; state: string | null }>)
     : [];
+  const openReviews: ReviewAnchor[] = [];
+  const terminalReviews: ReviewAnchor[] = [];
+  for (const r of reviewRows) {
+    const anchor: ReviewAnchor = { runId: r.run_id, ticketId: r.ticket_id, workspaceDir: r.workspace_dir };
+    (isTerminalReviewState(r.state ?? "") ? terminalReviews : openReviews).push(anchor);
+  }
 
+  const runIdsOf = (anchors: readonly ReviewAnchor[]): Set<string> =>
+    new Set(anchors.map((r) => r.runId).filter((id): id is string => id !== null && id !== ""));
   const activeRunIds = new Set(activeRuns.map((r) => r.id));
-  const openReviewRunIds = new Set(openReviews.map((r) => r.runId).filter((id): id is string => id !== null && id !== ""));
+  const openReviewRunIds = runIdsOf(openReviews);
+  const terminalReviewRunIds = runIdsOf(terminalReviews);
 
   let hasCurrentAnchor: boolean;
   if (scope.runId !== undefined) {
@@ -418,7 +436,28 @@ function readCiCurrency(db: DatabaseInstance, scope: CurrentActivityScope): CiCu
     hasCurrentAnchor = activeRuns.length > 0 || openReviews.length > 0;
   }
 
-  return { activeRunIds, openReviewRunIds, openReviews, hasCurrentAnchor };
+  return { activeRunIds, openReviewRunIds, openReviews, terminalReviews, terminalReviewRunIds, hasCurrentAnchor };
+}
+
+/** Does this review anchor NAME the work an observation declares?
+ *
+ *  A review that recorded a RUN speaks for that run and no other. A review that
+ *  recorded none — a standalone review-loop round — speaks for its ticket, in its
+ *  workspace when it declared one. That distinction is load-bearing in both
+ *  directions: it is what lets a settled review retire the observation of the run it
+ *  reviewed (RF-4), and what stops the previous attempt's settled review retiring the
+ *  LIVE attempt of a ticket that was re-run under a new run id. */
+function reviewNamesWork(
+  anchor: ReviewAnchor,
+  runId: string | null,
+  projectDir: string | null,
+  ticketId: string | null,
+): boolean {
+  const anchorRun = anchor.runId === null || anchor.runId === "" ? null : anchor.runId;
+  if (anchorRun !== null) return anchorRun === (runId === "" ? null : runId);
+  if (ticketId === null || ticketId === "") return false;
+  return anchor.ticketId === ticketId
+    && (anchor.workspaceDir === null || projectDir === null || anchor.workspaceDir === projectDir);
 }
 
 /** Is the work this observation NAMES still open? The observation declares its own
@@ -430,21 +469,23 @@ function observationIsCurrent(
   ticketId: string | null,
   currency: CiCurrency,
 ): boolean {
-  if (runId !== null && runId !== "") {
-    // A DECLARED run is the strongest anchor there is, and it is decisive in BOTH
-    // directions: if that run is finished and no open review carries it, the
-    // observation is history. This single `false` is the FG-694 fix — it is the thing
-    // the newest-per-pair rule had no way to say.
-    return currency.activeRunIds.has(runId) || currency.openReviewRunIds.has(runId);
-  }
-  // A standalone review-loop round records no run. The only remaining authority is an
-  // OPEN review naming the same ticket, in the same workspace when the review declares
-  // one. A review with no recorded workspace (opened before FG-649) cannot narrow by
-  // project, so it does not pretend to.
-  if (ticketId === null || ticketId === "") return false;
-  return currency.openReviews.some(
-    (r) => r.ticketId === ticketId && (r.workspaceDir === null || projectDir === null || r.workspaceDir === projectDir),
-  );
+  const named = (r: ReviewAnchor): boolean => reviewNamesWork(r, runId, projectDir, ticketId);
+
+  // The REVIEW answers first, and it answers in both directions. An open review naming
+  // this work keeps it current even after its run row closes; a review that is OVER
+  // retires it even while its run row is still `active` — the run has other phases
+  // after the review, and AC2 names a terminal run OR a terminal review (FG-694/RF-4).
+  if (currency.openReviews.some(named)) return true;
+  if (currency.terminalReviews.some(named)) return false;
+
+  // No review names this work at all — CI observed before a review was opened. A
+  // DECLARED run is then the only anchor there is, and it is decisive both ways: a
+  // finished run makes its newest observation history, which is the thing the
+  // newest-per-pair rule had no way to say.
+  if (runId !== null && runId !== "") return currency.activeRunIds.has(runId);
+  // A standalone review-loop round records no run, so with no review naming its
+  // ticket there is nothing left to anchor it.
+  return false;
 }
 
 /** The newest CURRENT `review_loop.ci_observed` per (runId, projectDir), and nothing
@@ -468,25 +509,58 @@ function readNewestCiObservations(
   // depend on the event history at all.
   if (!currency.hasCurrentAnchor) return [];
 
-  // The eligible run ids are pushed INTO the query so the 500-row window covers rows
-  // that could still be current, rather than being consumed by historical noise from
-  // finished runs — the exact shape of the 2026-08-08 report, where ten terminal runs'
-  // observations were the ten newest rows for their pairs. Rows with no run id stay in:
-  // their anchor is a review, resolved per row below.
+  // EVERY narrowing the caller asked for is pushed INTO the query, because the 500-row
+  // window is applied by SQLite and anything filtered afterwards has already spent it.
+  // That is one defect with two faces: historical noise from finished runs evicting the
+  // live candidate (the 2026-08-08 report), and — the same eviction pointed at a
+  // narrower read — 500 newer rows from OTHER projects evicting the requested project's
+  // current observation, so Home renders no CI row for work that IS waiting on checks
+  // (RF-2). A missing current candidate reads as observed absence, which is exactly what
+  // this surface may not do.
+  //
+  // The JS checks below are NOT removed: the payload parsed there stays the authority
+  // for what a row says, and these clauses only decide which rows the window spends
+  // itself on.
   const eligibleRunIds = [...new Set([...currency.activeRunIds, ...currency.openReviewRunIds])]
+    // A run whose only reviews are terminal can produce no current observation
+    // (observationIsCurrent rejects every row it declares), so it may not hold a slot.
+    .filter((id) => currency.openReviewRunIds.has(id) || !currency.terminalReviewRunIds.has(id))
     .filter((id) => scope.runId === undefined || id === scope.runId);
-  const runClause = eligibleRunIds.length === 0
-    ? "AND run_id IS NULL"
-    : `AND (run_id IS NULL OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`;
+
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (scope.runId !== undefined) {
+    // A run-scoped read wants that run's rows and nothing else — not the no-run rows a
+    // host-wide read has to consider, which were dropped AFTER the limit before.
+    if (eligibleRunIds.length === 0) return [];
+    clauses.push("AND run_id = ?");
+    params.push(scope.runId);
+  } else if (eligibleRunIds.length === 0) {
+    // Rows with no run id stay in: their anchor is a review, resolved per row below.
+    clauses.push("AND run_id IS NULL");
+  } else {
+    clauses.push(`AND (run_id IS NULL OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`);
+    params.push(...eligibleRunIds);
+  }
+  if (scope.projectDirs !== undefined) {
+    if (scope.projectDirs.length === 0) return [];
+    // The project home lives in the payload, so the window is narrowed by reading it
+    // there. CASE, not `json_valid(...) AND json_extract(...)`: only CASE is guaranteed
+    // not to evaluate its branch, and json_extract raises on malformed JSON. An
+    // unreadable payload yields NULL here and is dropped — the same outcome the JSON
+    // parse below reaches for it, and never a thrown query.
+    clauses.push(`AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.projectDir') END) IN (${scope.projectDirs.map(() => "?").join(",")})`);
+    params.push(...scope.projectDirs);
+  }
 
   const rows = db.prepare(`
     SELECT run_id, payload, created_at
       FROM events
      WHERE event_type = ?
-     ${runClause}
+     ${clauses.join("\n     ")}
      ORDER BY created_at DESC, id DESC
      LIMIT 500
-  `).all(CI_OBSERVED_EVENT_TYPE, ...eligibleRunIds) as Array<{ run_id: string | null; payload: string | null; created_at: string }>;
+  `).all(CI_OBSERVED_EVENT_TYPE, ...params) as Array<{ run_id: string | null; payload: string | null; created_at: string }>;
 
   const newest = new Map<string, RequiredCiObservation>();
   /** Pairs whose newest in-scope row has already been DECIDED — kept separate from

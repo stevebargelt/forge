@@ -36,6 +36,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, makeInMemoryDb } from "../store/db.js";
 import { SCHEMA_SQL } from "../store/schema.js";
+import { REVIEW_STATES, REVIEW_STATE_TERMINALITY, isTerminalReviewState } from "../store/reviews.js";
 import {
   CI_NOT_OBSERVED_LABEL,
   CI_NO_CANDIDATE_LABEL,
@@ -397,6 +398,166 @@ describe("FG-694 AC9 — one derivation, so both surfaces select the same thing"
     assert.match(rendered, /^ {2}Host verification$/m);
     assert.match(rendered, /^ {2}Required CI$/m);
     assert.match(rendered, /\(no agent task in flight\)/);
+  });
+});
+
+// ─────────────────── the review-disposition findings (RF-1, RF-4) ───────────────────
+
+describe("FG-694 RF-1 — terminality is a property of the review vocabulary, not a local list", () => {
+  test("EVERY review state is classified, so a state added later cannot silently read as open", () => {
+    // The defect this replaces was a hand-written `["settled", "failed"]` in the
+    // derivation: an allowlist of two names standing in for an open-ended terminal
+    // set. Exhaustiveness over REVIEW_STATES is what makes that unrepeatable — the
+    // twelfth state does not compile until someone decides what it means.
+    assert.deepEqual([...REVIEW_STATES].sort(), Object.keys(REVIEW_STATE_TERMINALITY).sort());
+  });
+
+  test("each state decides currency exactly as its classification says — all eleven, not two", () => {
+    // Each run is FINISHED, so the review is the only thing that can keep its
+    // observation current. Whatever the classification says must be what the
+    // derivation does, state by state.
+    for (const state of REVIEW_STATES) {
+      addRun(`run-${state}`, "complete");
+      addReview({ id: `review-${state}`, state, runId: `run-${state}`, ticketId: `T-${state}`, workspaceDir: PROJECT });
+      addCi({ runId: `run-${state}`, ticketId: `T-${state}`, sha: state.padEnd(40, "0"), observedAt: ago(30_000) });
+    }
+
+    const current = new Set(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.map((o) => o.runId));
+    for (const state of REVIEW_STATES) {
+      assert.equal(
+        current.has(`run-${state}`),
+        !isTerminalReviewState(state),
+        `a review in state \`${state}\` is ${isTerminalReviewState(state) ? "terminal" : "open"}`,
+      );
+    }
+    // Non-vacuous in both directions: the split is real, not "everything is open".
+    assert.ok(current.size > 0 && current.size < REVIEW_STATES.length);
+  });
+
+  test("a state this binary's vocabulary does not contain is not terminal", () => {
+    assert.equal(isTerminalReviewState("a_state_added_after_this_release"), false);
+    assert.equal(isTerminalReviewState(""), false);
+    assert.equal(isTerminalReviewState("toString"), false, "prototype keys are not review states");
+  });
+});
+
+describe("FG-694 RF-4 — a terminal REVIEW retires its observation even while the run is active", () => {
+  // AC2 names a terminal run OR a terminal review, and they are not the same fact: a
+  // run stays `active` through the phases that follow its review, so "the run is
+  // active" cannot answer "is the review of this work over".
+  for (const state of ["settled", "failed"] as const) {
+    test(`an active run whose review is \`${state}\` — the review recorded the run — is not current`, () => {
+      addRun("run-live", "active");
+      addReview({ id: "review-over", state, runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+      addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+      assert.equal(legacyNewestPerPair(db).length, 1, "the row IS the newest for its pair");
+      assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.length, 0);
+    });
+
+    test(`…and when the \`${state}\` review recorded no run, anchored by ticket alone`, () => {
+      addRun("run-live", "active");
+      addReview({ id: "review-over", state, runId: null, ticketId: "FG-694", workspaceDir: PROJECT });
+      addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+      assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.length, 0);
+    });
+  }
+
+  test("an active run with NO review at all stays current — CI is observed before a review exists", () => {
+    addRun("run-live", "active");
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+    assert.deepEqual(
+      deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.map((o) => o.candidateSha),
+      [CURRENT_SHA],
+    );
+  });
+
+  test("NOT over-broad: the previous attempt's settled review does not retire the LIVE attempt of a re-run ticket", () => {
+    // The mirror harm, and the reason a review that recorded a run speaks for that run
+    // alone: retiring the live attempt would be a current candidate vanishing, which
+    // Home renders as observed absence.
+    addRun("run-attempt-1", "failed");
+    addReview({ id: "review-1", state: "settled", runId: "run-attempt-1", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-attempt-1", ticketId: "FG-694", sha: "a".repeat(40), observedAt: ago(60_000) });
+    addRun("run-attempt-2", "active");
+    addCi({ runId: "run-attempt-2", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+    assert.deepEqual(
+      deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.map((o) => o.candidateSha),
+      [CURRENT_SHA],
+    );
+  });
+
+  test("an OPEN review outranks a terminal one naming the same work — a reopened review is open", () => {
+    addRun("run-live", "active");
+    addReview({ id: "review-old", state: "settled", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addReview({ id: "review-new", state: "rechecking", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+    assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.length, 1);
+  });
+});
+
+describe("FG-694 RF-2 — the 500-row window is narrowed BY the scope, never spent on it", () => {
+  const FLOOD = 600;
+
+  /** The pre-fix window: event type + eligible run ids, and nothing else, with the
+   *  limit applied before any project or run narrowing. Restated so each fixture below
+   *  is shown to reach a different answer than the shipped code did. */
+  function windowMisses(sha: string, runIds: string[]): boolean {
+    const clause = runIds.length === 0 ? "" : `AND (run_id IS NULL OR run_id IN (${runIds.map(() => "?").join(",")}))`;
+    const rows = db.prepare(`
+      SELECT payload FROM events WHERE event_type = ? ${clause} ORDER BY created_at DESC, id DESC LIMIT 500
+    `).all(CI_OBSERVED_EVENT_TYPE, ...runIds) as Array<{ payload: string }>;
+    return !rows.some((r) => r.payload.includes(sha));
+  }
+
+  test("a project-scoped read still returns its own current observation behind 600 newer rows from another active project", () => {
+    addRun("run-here", "active", PROJECT);
+    addCi({ runId: "run-here", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(10 * 60_000) });
+    addRun("run-there", "active", OTHER_PROJECT);
+    for (let i = 0; i < FLOOD; i++) {
+      addCi({
+        runId: "run-there",
+        ticketId: "FG-700",
+        sha: "b".repeat(40),
+        observedAt: ago(9 * 60_000 - i * 500),
+        projectDir: OTHER_PROJECT,
+      });
+    }
+
+    assert.ok(windowMisses(CURRENT_SHA, ["run-here", "run-there"]), "NOT vacuous: the pre-fix window never reached this project's row");
+
+    const here = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
+    assert.equal(here.requiredCi.state, "observed", "work IS waiting on checks; reporting nothing would be observed absence");
+    assert.deepEqual(here.requiredCi.observations.map((o) => o.candidateSha), [CURRENT_SHA]);
+  });
+
+  test("a run-scoped read is not evicted by 600 newer rows that declare no run", () => {
+    addRun("run-here", "active", PROJECT);
+    addCi({ runId: "run-here", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(10 * 60_000) });
+    addReview({ id: "review-standalone", state: "verifying", runId: null, ticketId: "FG-700", workspaceDir: PROJECT });
+    for (let i = 0; i < FLOOD; i++) {
+      addCi({ runId: null, ticketId: "FG-700", sha: "b".repeat(40), observedAt: ago(9 * 60_000 - i * 500) });
+    }
+
+    assert.ok(windowMisses(CURRENT_SHA, ["run-here"]), "NOT vacuous: the no-run rows consumed the pre-fix window");
+
+    const scoped = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-here" } });
+    assert.deepEqual(scoped.requiredCi.observations.map((o) => o.candidateSha), [CURRENT_SHA]);
+  });
+
+  test("an unreadable payload is dropped by the narrowed query exactly as the JSON parse drops it — the query never throws", () => {
+    addRun("run-live", "active", PROJECT);
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(60_000) });
+    // Newer than the good row and sharing its pair: if this decided the pair, the
+    // current candidate would disappear.
+    db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`)
+      .run("run-live", CI_OBSERVED_EVENT_TYPE, "{not json at all", ago(10_000));
+
+    for (const scope of [{}, { projectDirs: [PROJECT] }, { runId: "run-live" }]) {
+      const activity = deriveCurrentActivity(db, { now: NOW, scope });
+      assert.deepEqual(activity.requiredCi.observations.map((o) => o.candidateSha), [CURRENT_SHA], JSON.stringify(scope));
+    }
   });
 });
 
