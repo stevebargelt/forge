@@ -66,9 +66,12 @@ Both workflows hard-code "use the `forge backlog` CLI, do NOT read backlog files
 cloned, and forge gets reinstalled at new paths, so an install-time memory would mis-fire on the copy. Every
 rendered file opens with an HTML-comment ownership marker (`renderAdapterMarker` / `parseAdapterMarker` /
 `isForgeOwnedAdapter` in `operator-workflows.ts`) carrying a release/content **stamp**: a file that carries it is
-forge's and is freely refreshed; forge's own pre-FG-253 symlinks into `scripts/claude-commands/<name>.md` are
-recognized by shape and migrated to bytes in place; anything else at an adapter path — a regular file with no
-marker, a foreign symlink — is a **project override**: reported, never overwritten, never a failure. `forge init`
+forge's and is freely refreshed; forge's own pre-FG-253 artifact — an **absolute, dangling** symlink into
+`scripts/claude-commands/<name>.md`, on the Claude-command surface only — is recognized by that shape and migrated
+to bytes in place. A symlink that still resolves is pointing at real bytes somebody maintains, not forge's deleted
+migration source, and a relative link or one found on the Codex surface was never forge's to begin with (forge
+never wrote a symlink there); anything else at an adapter path — a regular file with no marker, a foreign symlink —
+is a **project override**: reported, never overwritten, never a failure. `forge init`
 and `forge upgrade` both install/refresh the whole set (Claude commands and Codex skills alike) from the same two
 renderers, so the two commands cannot disagree about what "installed and current" means, and a stale rendering
 (the stamp on disk names a different release) is detected the same way — see `forge doctor` and

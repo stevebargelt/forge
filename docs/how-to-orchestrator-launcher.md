@@ -243,18 +243,31 @@ each provider surface — Claude Code slash commands under `.claude/commands/`, 
 [Operator adapters](concepts.md#operator-adapters-orient-handoff) in `docs/concepts.md` for the full
 rendering/ownership model, and `docs/quick-start.md` §3 for what `forge init` installs.
 
-Forge owns `$FORGE_HOME`; it does not own the project repo, so the sha-pinned generation a launch resolves and the
+Forge owns `$FORGE_HOME`; it does not own the project repo, so the generation a launch is judged against and the
 adapter files installed in the project can go out of agreement — a clone, a promoted release, or a moved checkout
 can each happen without forge being run in between, and nothing makes the two writes atomic. What Forge can do is
 refuse to be silent about it: every launch (whether started as `forge claude` or as `forge orchestrator` resolving
-to either adapter) checks whether the project's installed adapters agree with the generation this session resolved
-and records the disagreement — a different stamp, a file the surface advertises but doesn't find, a file with no
-forge ownership marker at all — as a capability limitation on the launch receipt, so `forge show` can still answer
-the question after the session ends. A **Claude Code** launch additionally prints it as a console advisory before
-the banner, naming exactly how the two disagree; a Codex launch today only records it on the receipt. Either way
-it is **always advisory**: the session launches regardless, no exit code moves, and stale orientation prose is
-misleading guidance, not a mis-run. Every line of this advisory also repeats that installed bytes are not evidence
-a provider loaded them — see [The capability/parity matrix](#the-capabilityparity-matrix) above.
+to either adapter) checks whether the project's installed adapters agree with the generation this session is
+**bound** to and records the disagreement — a different stamp, a file the surface advertises but doesn't find, a
+file with no forge ownership marker at all — as a capability limitation on the launch receipt, so `forge show` can
+still answer the question after the session ends. A **Claude Code** launch additionally prints it as a console
+advisory before the banner, naming exactly how the two disagree; a Codex launch today only records it on the
+receipt. Either way it is **always advisory**: the session launches regardless, no exit code moves, and stale
+orientation prose is misleading guidance, not a mis-run. Every line of this advisory also repeats that installed
+bytes are not evidence a provider loaded them — see [The capability/parity matrix](#the-capabilityparity-matrix)
+above.
+
+**The bound generation is not always the running one.** Claude Code reads the running tree's own
+`seeds/orchestrator-template.md` at launch, so its bound generation is always the running assets. Codex binds its
+instruction carrier out of the **published** seed generation instead, which a failed or deferred `forge upgrade`
+can leave behind the forge that is actually executing — comparing the project against the running assets in that
+state would report agreement (or disagreement) with a generation the session was never bound to. Each adapter
+declares what it bound (`OrchestratorAdapter.declareBoundAssetRoot`); the launcher resolves the generation from
+that, not from `currentAdapterStamp()` unconditionally. When the bound tree is a dev checkout this process cannot
+name — its only identity is content, and the only content this process can render is its own — the binding has no
+nameable stamp at all. Adapters that are installed and marked in that state are reported as a fourth, distinct
+outcome, **unverifiable**, rather than folded into agreement or disagreement: the check genuinely cannot decide
+either way, and says so instead of guessing.
 
 **Every provider-specific instruction/command surface has an explicit owner — FG-253 (which absorbed FG-347)
 completes that boundary, it does not defer it.** Three ownership shapes, no unowned prose left over:
