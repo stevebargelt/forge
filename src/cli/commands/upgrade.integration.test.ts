@@ -1552,7 +1552,7 @@ test("FG-577 (cell 1): a FAILED git pull is unresolved on every surface", () => 
 
 import { lstatSync, realpathSync } from "node:fs";
 import { isForgeOwnedAdapter } from "../../v2/operator-workflows.js";
-import { forgeAdapterPaths } from "./init.js";
+import { currentAdapterStamp, forgeAdapterPaths, renderedAdapterTargets } from "./init.js";
 
 /** `assetTree`'s template is a bare marker string, which the block splice writes in
  *  place of the fence — so a project refreshed by it stops looking like a forge
@@ -1704,6 +1704,58 @@ test("FG-253 step 5: --json reports adapterSurfaces plus a NAMED override list w
     assert.equal(parsed.ok, true);
     assert.deepEqual(parsed.unresolved, []);
     assert.equal(exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-253 step 5: future and malformed ownership markers are refused as operator overrides without clobbering either provider surface", () => {
+  const assets = assetTree("fg253-up-marker-refusal-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg253-up-marker-refusal-proj-", { legacyLinks: false });
+  try {
+    const targets = renderedAdapterTargets(currentAdapterStamp());
+    const future = targets.find((t) => t.surface === "claude-command" && t.workflow === "orient");
+    const malformed = targets.find((t) => t.surface === "codex-skill" && t.workflow === "orient");
+    assert.ok(future && malformed, "fixture precondition: Claude and Codex orient targets exist");
+
+    // Both files look Forge-shaped to a human, but neither is a v1 ownership
+    // marker Forge understands. A future marker must be safe against an older
+    // Forge, and a malformed marker must never be upgraded into ownership.
+    const futureBytes = "<!-- forge:operator-adapter v2 stamp=future-release -->\n# newer provider instructions\n";
+    const malformedBytes = "<!-- forge:operator-adapter v1 stamp=has whitespace -->\n# ambiguous provider instructions\n";
+    for (const [target, bytes] of [[future, futureBytes], [malformed, malformedBytes]] as const) {
+      const path = join(project, ...target.relPath.split("/"));
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, bytes);
+    }
+
+    let stdout = "";
+    const exitCode = captureExit(() => {
+      stdout = captureLog(() => upgradeIn(project, () => runUpgrade(
+        { skipGit: true, skipNpm: true, json: true },
+        { mode: "dev", assetsDir: assets, devDir: assets },
+      )));
+    });
+    const result = JSON.parse(stdout) as { ok: boolean; adapterSurfaces: string; adapterOverrides: string[] };
+
+    assert.equal(readFileSync(join(project, ...future.relPath.split("/")), "utf8"), futureBytes);
+    assert.equal(readFileSync(join(project, ...malformed.relPath.split("/")), "utf8"), malformedBytes);
+    assert.equal(result.adapterSurfaces, "user-override");
+    assert.equal(result.adapterOverrides.length, 2);
+    for (const target of [future, malformed]) {
+      const override = result.adapterOverrides.find((entry) => entry.includes(target.relPath));
+      assert.ok(override, `--json must name the refused ${target.relPath}`);
+      assert.match(override, /no forge ownership marker/);
+    }
+    assert.equal(result.ok, true, "an intentional override is visible but not a permanent upgrade failure");
+    assert.equal(exitCode, undefined);
+
+    // Refusal is per target, not a failed batch: the other workflows still
+    // receive this release's renderings.
+    for (const target of targets.filter((t) => t.workflow === "handoff")) {
+      assert.equal(readFileSync(join(project, ...target.relPath.split("/")), "utf8"), target.bytes);
+    }
   } finally {
     for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
   }
