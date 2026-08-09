@@ -569,34 +569,6 @@ describe("FG-694 RF-5/RF-1/RF-3 — the ANCHOR applies the same terminality rule
     assert.equal(legacyHasAnchor(undefined, [PROJECT]), true, "NOT vacuous: project scope");
   });
 
-  test("the anchor and the observation filter answer identically for EVERY review state — that agreement IS the fix", () => {
-    // The invariant the three findings share: `not_observed` is reachable only with a
-    // real current anchor. So for each state, "the anchor says there is a candidate"
-    // and "the observation survives the filter" must be the same boolean — no state may
-    // retire the observation while keeping the anchor, which is precisely RF-1's shape.
-    for (const state of REVIEW_STATES) {
-      const fresh = makeInMemoryDb();
-      const previous = db;
-      db = fresh;
-      try {
-        addRun("run-live", "active");
-        addReview({ id: `review-${state}`, state, runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
-        addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
-
-        const activity = deriveCurrentActivity(db, { now: NOW });
-        const observationSurvived = activity.requiredCi.observations.length > 0;
-        const anchored = activity.requiredCi.state !== "no_current_candidate";
-        assert.equal(anchored, observationSurvived, `review state \`${state}\`: anchor and observation filter disagree`);
-        assert.equal(observationSurvived, !isTerminalReviewState(state), `review state \`${state}\``);
-        // …and the string RF-3 named is unreachable in either direction here.
-        assert.doesNotMatch(renderCurrentActivityLines(activity).join("\n"), /CI not observed/, state);
-      } finally {
-        db = previous;
-        fresh.close();
-      }
-    }
-  });
-
   test("NOT over-broad: a terminal review retires ITS run's anchor and no other", () => {
     addRun("run-over", "active");
     addReview({ id: "review-over", state: "settled", runId: "run-over", ticketId: "FG-686", workspaceDir: PROJECT });
@@ -628,6 +600,121 @@ describe("FG-694 RF-5/RF-1/RF-3 — the ANCHOR applies the same terminality rule
     addRun("run-closed", "complete");
     addReview({ id: "review-open", state: "verifying", runId: "run-closed", ticketId: "FG-694", workspaceDir: PROJECT });
     assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-closed" } }).requiredCi.state, "not_observed");
+  });
+});
+
+// ───────── the SHAPE × STATE matrix (RF-1, RF-2 — the third report of one asymmetry) ─────────
+
+describe("FG-694 RF-1/RF-2 — the anchor and the observation filter agree for every review SHAPE, not just every state", () => {
+  // Reviews 1 and 2 closed this defect one input-shape at a time: first terminal reviews
+  // leaked through the observation filter, then the anchor applied no terminality at all,
+  // then the anchor applied it for run-anchored reviews and not for ticket-only ones. The
+  // quantifier kept ranging over review STATE while the counterexample moved along the
+  // review SHAPE axis. So the matrix below crosses both, and it asserts the property the
+  // findings actually share: for the SAME work, "the anchor says there is a candidate"
+  // and "the observation survives the filter" are ONE boolean, in every cell.
+  //
+  // A review row has three shapes that can name work — it recorded a run, it recorded a
+  // ticket, or it recorded both — and `reviewNamesWork` treats them differently ON
+  // PURPOSE. That asymmetry is correct; what is not correct is one CALLER seeing it and
+  // another not, which is what happens when the two paths are handed different inputs.
+  const SHAPES = [
+    { name: "run-anchored", runId: "run-live" as string | null, ticketId: null as string | null },
+    { name: "ticket-only", runId: null as string | null, ticketId: "FG-694" as string | null },
+    { name: "both", runId: "run-live" as string | null, ticketId: "FG-694" as string | null },
+  ];
+
+  /** The anchor rule AT THE CANDIDATE SHA, restated: the run-level question asked with
+   *  the ticket DROPPED (`reviewNamesWork(r, runId, null, null)`). Every ticket-only cell
+   *  below must reach a DIFFERENT answer than this, or the matrix is decorative. */
+  function anchorRuleAtCandidateSha(runId: string): boolean {
+    const reviews = db.prepare(`SELECT run_id, state FROM reviews`)
+      .all() as Array<{ run_id: string | null; state: string | null }>;
+    const named = (r: { run_id: string | null }): boolean => r.run_id !== null && r.run_id !== "" && r.run_id === runId;
+    if (reviews.filter((r) => !isTerminalReviewState(r.state ?? "")).some(named)) return true;
+    if (reviews.filter((r) => isTerminalReviewState(r.state ?? "")).some(named)) return false;
+    return (db.prepare(`SELECT id FROM runs WHERE status = 'active'`).all() as Array<{ id: string }>)
+      .some((r) => r.id === runId);
+  }
+
+  for (const shape of SHAPES) {
+    for (const state of REVIEW_STATES) {
+      test(`shape \`${shape.name}\` × state \`${state}\`: the anchor and the observation filter are ONE answer`, () => {
+        addRun("run-live", "active");
+        addReview({ id: `review-${state}`, state, runId: shape.runId, ticketId: shape.ticketId, workspaceDir: PROJECT });
+        addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+        const terminal = isTerminalReviewState(state);
+        // Every shape NAMES this observation: two by the run they recorded, the third by
+        // the ticket it recorded in this workspace. So terminality alone decides it.
+        for (const scope of [{}, { runId: "run-live" }, { projectDirs: [PROJECT] }]) {
+          const activity = deriveCurrentActivity(db, { now: NOW, scope });
+          const where = `${shape.name}/${state}/${JSON.stringify(scope)}`;
+          const observationSurvived = activity.requiredCi.observations.length > 0;
+          const anchored = activity.requiredCi.state !== "no_current_candidate";
+          assert.equal(anchored, observationSurvived, `${where}: anchor and observation filter disagree`);
+          assert.equal(observationSurvived, !terminal, where);
+          // …and the string RF-3 named is unreachable in either direction, in every cell.
+          assert.doesNotMatch(renderCurrentActivityLines(activity).join("\n"), /CI not observed/, where);
+        }
+
+        if (shape.name === "ticket-only" && terminal) {
+          // NOT vacuous, and this is the cell RF-1 demonstrated end to end: the shipped
+          // rule kept the active run's anchor while the filter retired its observation.
+          assert.equal(anchorRuleAtCandidateSha("run-live"), true, "the candidate-sha anchor rule kept this run");
+          assert.equal(legacyNewestPerPair(db).length, 1, "and the row IS the newest for its pair");
+        }
+      });
+    }
+  }
+
+  test("a terminal run-anchored review does not hide work an OPEN ticket-only review keeps current", () => {
+    // The mirror cell, and the reason the run-level question quantifies the ticket it
+    // cannot see instead of assuming it absent: at the candidate sha the terminal review
+    // dropped this run from the event window outright, so the row an open review made
+    // current was never read — `CI not observed` for work that IS being checked.
+    addRun("run-live", "active");
+    addReview({ id: "review-over", state: "settled", runId: "run-live", ticketId: "FG-686", workspaceDir: PROJECT });
+    addReview({ id: "review-open", state: "verifying", runId: null, ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+    for (const scope of [{}, { runId: "run-live" }, { projectDirs: [PROJECT] }]) {
+      const activity = deriveCurrentActivity(db, { now: NOW, scope });
+      assert.deepEqual(
+        activity.requiredCi.observations.map((o) => o.candidateSha),
+        [CURRENT_SHA],
+        JSON.stringify(scope),
+      );
+      assert.equal(activity.requiredCi.state, "observed", JSON.stringify(scope));
+    }
+  });
+
+  test("a run whose declared work is over is not resurrected by an open review of OTHER work", () => {
+    // The declaration is what answers for the run, so an open review that names nothing
+    // of this run's work leaves it retired — otherwise `no_current_candidate` would be
+    // one unrelated open review away from becoming `CI not observed` again.
+    addRun("run-live", "active");
+    addReview({ id: "review-over", state: "settled", runId: null, ticketId: "FG-694", workspaceDir: PROJECT });
+    addReview({ id: "review-elsewhere", state: "verifying", runId: null, ticketId: "FG-700", workspaceDir: OTHER_PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+    const scoped = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
+    assert.deepEqual(scoped.requiredCi.observations, []);
+    assert.equal(scoped.requiredCi.state, "no_current_candidate");
+    assert.doesNotMatch(renderCurrentActivityLines(scoped).join("\n"), /CI not observed/);
+  });
+
+  test("a run the store declares NO CI work for still anchors — the ticket is unknown, not absent", () => {
+    // The other half of "answer the declaration": with nothing declared there is nothing
+    // to answer, so the run-level question stands and an active run is still owed an
+    // observation. `not_observed` must stay REACHABLE, or the fix would have collapsed
+    // the two absences the other way.
+    addRun("run-live", "active");
+    addReview({ id: "review-elsewhere", state: "settled", runId: null, ticketId: "FG-700", workspaceDir: PROJECT });
+
+    for (const scope of [{}, { runId: "run-live" }, { projectDirs: [PROJECT] }]) {
+      assert.equal(deriveCurrentActivity(db, { now: NOW, scope }).requiredCi.state, "not_observed", JSON.stringify(scope));
+    }
   });
 });
 
