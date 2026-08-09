@@ -63,6 +63,8 @@ import { atomicSymlinkSwap, realpathContains } from "./promote.js";
 import { assetRoot as executingAssetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
 import { COVERED_ROLES } from "./review-contract.js";
+import { OPERATOR_WORKFLOW_IDS, operatorSurface, operatorWorkflow } from "./operator-workflows.js";
+import { CODEX_ACTIVATION_PHRASES, codexSkillName, codexSkillTargetPath } from "./render-codex-skills.js";
 
 // Resolved LIVE from the environment, matching loader.ts's forgeHome() — the seed
 // pointer resolvers and the loaders that consume them MUST agree on which home they
@@ -120,6 +122,22 @@ export const CODEX_CARRIER_SOURCE_REL = "codex/orchestrator-instructions.md";
 /** The ONE point in the scaffolding where the canonical policy is spliced. */
 export const CODEX_CARRIER_SPLICE_MARKER = "<!-- forge:codex-policy -->";
 
+/** FG-253 — the SECOND splice point: where the carrier's statement about the
+ *  orientation/handoff surface is rendered in.
+ *
+ *  WHY IT IS A SPLICE AND NOT PROSE. Until FG-253 this scaffolding carried a
+ *  hand-written paragraph asserting "No Forge skills or slash commands", and it was
+ *  true. Forge now renders repository-scoped Codex skills from the provider-neutral
+ *  operator-workflow definition, which makes any hand-written statement here a second,
+ *  independently-editable copy of a fact that lives elsewhere — the exact defect this
+ *  ticket exists to remove. Rendering the region from the SAME definition and the SAME
+ *  owned-skill set the installer writes means a carrier that advertises orientation
+ *  skills and the skills Forge actually renders cannot come apart: add a workflow and
+ *  this region names it on the next publish, with no edit here.
+ *
+ *  Same exactly-once refusal discipline as the policy marker, for the same reason. */
+export const CODEX_CARRIER_ORIENTATION_MARKER = "<!-- forge:codex-orientation -->";
+
 const ORCHESTRATOR_TEMPLATE_REL = "orchestrator-template.md";
 const TEMPLATE_START_MARKER = "<!-- forge:orchestrator-start -->";
 const TEMPLATE_END_MARKER = "<!-- forge:orchestrator-end -->";
@@ -128,22 +146,42 @@ const TEMPLATE_END_MARKER = "<!-- forge:orchestrator-end -->";
  *  paths — so `same input → identical bytes` is a property of the function rather than
  *  of the caller's discipline (AC8).
  *
- *  Both gates below are publication-refusing on purpose, and the marker one is not
- *  hypothetical: it fired during development on a header comment in the scaffolding
- *  that quoted the marker literally, which would have shipped a carrier split at the
- *  wrong point — scaffolding truncated mid-sentence, the policy spliced into a comment
- *  — while still being a perfectly valid-looking markdown file. "Exactly once" is what
- *  makes the splice point unambiguous; "at least once" would have shipped it. */
+ *  Every gate below is publication-refusing on purpose, and the marker ones are not
+ *  hypothetical: the policy gate fired during development on a header comment in the
+ *  scaffolding that quoted the marker literally, which would have shipped a carrier
+ *  split at the wrong point — scaffolding truncated mid-sentence, the policy spliced
+ *  into a comment — while still being a perfectly valid-looking markdown file. "Exactly
+ *  once" is what makes the splice point unambiguous; "at least once" would have shipped
+ *  it. FG-253's orientation marker is held to the same standard, plus a placement check
+ *  the count alone cannot make. */
 export function renderCodexCarrier(scaffold: string, template: string): string {
   const occurrences = scaffold.split(CODEX_CARRIER_SPLICE_MARKER).length - 1;
   if (occurrences !== 1) {
     throw new Error(
-      `forge seed: the Codex carrier scaffolding must carry the splice marker EXACTLY once, found ${occurrences}.\n` +
+      `forge seed: the Codex carrier scaffolding must carry the policy splice marker EXACTLY once, found ${occurrences}.\n` +
         `  marker: ${CODEX_CARRIER_SPLICE_MARKER}\n` +
         `A scaffolding with no marker has nowhere to splice the canonical orchestrator policy; one with two ` +
         `splices at whichever comes first, silently truncating the rest of the scaffolding into the policy. ` +
         `Fix: leave the marker on the last line of seeds/${CODEX_CARRIER_SOURCE_REL} and nowhere else — not even ` +
         `quoted in a comment.`,
+    );
+  }
+
+  // FG-253 — the orientation marker gets the SAME gate, and it is not ceremony: with
+  // no marker the carrier ships silent about a surface Forge does install (the
+  // capability matrix says `partial`, the carrier would say nothing), and with two the
+  // region is rendered twice, so a session reads a duplicated claim.
+  const orientationOccurrences = scaffold.split(CODEX_CARRIER_ORIENTATION_MARKER).length - 1;
+  if (orientationOccurrences !== 1) {
+    throw new Error(
+      `forge seed: the Codex carrier scaffolding must carry the orientation splice marker EXACTLY once, found ` +
+        `${orientationOccurrences}.\n` +
+        `  marker: ${CODEX_CARRIER_ORIENTATION_MARKER}\n` +
+        `The orientation region is RENDERED from the provider-neutral operator-workflow definition and the skill ` +
+        `names Forge actually installs, so the carrier's claim about orientation cannot drift from the adapters. ` +
+        `With no marker the carrier says nothing about a surface Forge does install; with two, a session reads the ` +
+        `same claim twice. Fix: place the marker once in seeds/${CODEX_CARRIER_SOURCE_REL}, above the policy ` +
+        `marker, and nowhere else — not even quoted in a comment.`,
     );
   }
 
@@ -162,7 +200,63 @@ export function renderCodexCarrier(scaffold: string, template: string): string {
   const policy = template.slice(bodyStart < 0 ? startIdx + TEMPLATE_START_MARKER.length : bodyStart + 1, endIdx).trim();
 
   const body = stripAuthoringHeader(scaffold.slice(0, scaffold.indexOf(CODEX_CARRIER_SPLICE_MARKER)));
-  return `${body.trimEnd()}\n\n${policy}\n`;
+  // The orientation marker survived the two edits above only if it sits inside the
+  // scaffolding half AND outside the authoring header. Anywhere else it would be
+  // dropped on the floor and the carrier would publish, silently, without the region —
+  // the one failure the exactly-once count cannot see.
+  if (!body.includes(CODEX_CARRIER_ORIENTATION_MARKER)) {
+    throw new Error(
+      `forge seed: the Codex carrier scaffolding's orientation splice marker is not in the scaffolding body.\n` +
+        `  marker: ${CODEX_CARRIER_ORIENTATION_MARKER}\n` +
+        `It sits below the policy splice marker, or inside the leading authoring comment — either way the rendered ` +
+        `carrier would carry no orientation region at all, while publication reported success. Fix: put it in the ` +
+        `instructions themselves in seeds/${CODEX_CARRIER_SOURCE_REL}, above ${CODEX_CARRIER_SPLICE_MARKER}.`,
+    );
+  }
+  const withOrientation = body.replace(CODEX_CARRIER_ORIENTATION_MARKER, () => renderCodexOrientationRegion());
+  return `${withOrientation.trimEnd()}\n\n${policy}\n`;
+}
+
+/** FG-253 — the carrier's orientation/handoff region, DERIVED. Pure and argument-free:
+ *  everything it says comes from the provider-neutral definition
+ *  (src/v2/operator-workflows.ts) and the Codex skill identity the installer and the
+ *  drift detector use (src/v2/render-codex-skills.ts), so the same release always
+ *  renders the same bytes and no fact here is maintained twice.
+ *
+ *  What it deliberately does NOT say: that the skills are active. Forge wrote files; a
+ *  build without repository-scoped skill discovery ignores them silently, and there is
+ *  no probe. The region states the fallback instead, which is the same CLI the skills
+ *  drive. */
+export function renderCodexOrientationRegion(): string {
+  const lines: string[] = [
+    "## Forge orientation and handoff",
+    "",
+    `Forge renders one repository-scoped Codex skill per operator workflow from its own provider-neutral ` +
+      `definition — the same definition the Claude orchestrator's slash commands are rendered from — and ` +
+      `\`forge init\` / \`forge upgrade\` install them into the project you are running in. ` +
+      operatorSurface("codex").operatorAnswer,
+    "",
+    `A skill FILE existing is not evidence this build loaded it: repository-scoped skill discovery is ` +
+      `version-coupled, and a build without it ignores the directory silently. If a skill is absent or does not ` +
+      `activate, run the workflow yourself through the \`forge\` CLI — that is what the skill drives, and it is the ` +
+      `interface either way.`,
+  ];
+
+  for (const id of OPERATOR_WORKFLOW_IDS) {
+    const def = operatorWorkflow(id);
+    const skill = codexSkillName(id);
+    const phrases = CODEX_ACTIVATION_PHRASES[id].map((p) => `"${p}"`).join(", ");
+    lines.push(
+      "",
+      `- **${skill}** — ${def.title}, installed at \`${codexSkillTargetPath(id)}\`.`,
+      `  ${def.purpose}`,
+      `  Invoke it explicitly by name as \`${skill}\`; it also activates from natural language such as ${phrases}.`,
+      `  ${def.boundedCli.statement} The skill file carries the workflow in full — the probe set, the report order, ` +
+        `and the prohibitions.`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 /** Drop a LEADING html comment from the scaffolding. It is the authoring note — who
@@ -174,6 +268,9 @@ export function renderCodexCarrier(scaffold: string, template: string): string {
 function stripAuthoringHeader(scaffold: string): string {
   const text = scaffold.trimStart();
   if (!text.startsWith("<!--")) return scaffold;
+  // A splice marker IS an html comment. A scaffolding that opens on one is opening on
+  // content, not on an authoring note, and eating it would drop the region silently.
+  if (text.startsWith(CODEX_CARRIER_ORIENTATION_MARKER)) return scaffold;
   const end = text.indexOf("-->");
   return end < 0 ? scaffold : text.slice(end + "-->".length).trimStart();
 }

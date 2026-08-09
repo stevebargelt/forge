@@ -24,7 +24,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb } from "../store/db.js";
 import { persistPendingOrchestratorReceipt } from "../store/orchestrator-receipts.js";
+import { FORGE_OWNED_CODEX_SKILL_DIRS } from "../v2/render-codex-skills.js";
 import {
+  CODEX_CARRIER_ORIENTATION_MARKER,
   CODEX_CARRIER_SOURCE_REL,
   CODEX_CARRIER_SPLICE_MARKER,
   GENERATION_CODEX_CARRIER,
@@ -140,7 +142,18 @@ function publishCarrierGeneration(opts: { withCarrier?: boolean } = {}): SeedGen
     mkdirSync(join(seeds, "codex"), { recursive: true });
     writeFileSync(
       join(seeds, CODEX_CARRIER_SOURCE_REL),
-      ["# Forge orchestrator — Codex CLI", "", "SCAFFOLDING: shell, edits, when to ask.", "", CODEX_CARRIER_SPLICE_MARKER, ""].join("\n"),
+      [
+        "# Forge orchestrator — Codex CLI",
+        "",
+        "SCAFFOLDING: shell, edits, when to ask.",
+        "",
+        // FG-253: publication refuses a scaffolding without this marker, and the
+        // region below it is rendered from Forge's own workflow definition.
+        CODEX_CARRIER_ORIENTATION_MARKER,
+        "",
+        CODEX_CARRIER_SPLICE_MARKER,
+        "",
+      ].join("\n"),
     );
   }
   publishSeedGeneration({ home, assetsDir: release, trustedAssetRoot: () => release });
@@ -244,6 +257,15 @@ test("FG-576 AC8/AC1: a probed-supported build binds the generation's carrier pe
   const bytes = readFileSync(codexCarrierPath(gen), "utf8");
   assert.match(bytes, /Route work through the RACI/);
   assert.doesNotMatch(bytes, /PROJECT TAIL/);
+
+  // FG-253: the instruction surface a session is actually BOUND to names the skills
+  // Forge installs — iterated from the installer's own owned-skill set — and states
+  // that their activation is unverified. Binding the carrier is evidence about the
+  // carrier; it is never evidence a skill loaded.
+  for (const skill of FORGE_OWNED_CODEX_SKILL_DIRS) {
+    assert.ok(bytes.includes(skill), `the bound carrier does not name the installed skill '${skill}'`);
+  }
+  assert.match(bytes, /activation is unverified/i);
 });
 
 test("FG-576 AC8 REGRESSION: a build without the instructions-file capability is refused BEFORE spawn, with a named remedy", () => {

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CODEX_CARRIER_SOURCE_REL, CODEX_CARRIER_SPLICE_MARKER, publishSeedGeneration } from "../v2/seed-generation.js";
+import { CODEX_CARRIER_ORIENTATION_MARKER, CODEX_CARRIER_SOURCE_REL, CODEX_CARRIER_SPLICE_MARKER, publishSeedGeneration } from "../v2/seed-generation.js";
 import { stageAgentProtocols } from "../v2/seed-generation.testkit.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -31,7 +31,7 @@ function setup(): Roots {
   writeFileSync(join(release, "seeds", "workflows", "feature.yml"), "name: feature\nsteps: []\n"); writeFileSync(join(release, "seeds", "runtimes", "claude.yml"), "kind: claude\n");
   stageAgentProtocols(join(release, "seeds"));
   writeFileSync(join(release, "seeds", "orchestrator-template.md"), "<!-- forge:orchestrator-start -->\npolicy\n<!-- forge:orchestrator-end -->\n");
-  writeFileSync(join(release, "seeds", CODEX_CARRIER_SOURCE_REL), `# carrier\n${CODEX_CARRIER_SPLICE_MARKER}\n`);
+  writeFileSync(join(release, "seeds", CODEX_CARRIER_SOURCE_REL), `# carrier\n${CODEX_CARRIER_ORIENTATION_MARKER}\n${CODEX_CARRIER_SPLICE_MARKER}\n`);
   publishSeedGeneration({ home, assetsDir: release, trustedAssetRoot: () => release });
   return { base, home, project, bin, state, db: join(home, "forge.db"), record: join(base, "record.json") };
 }

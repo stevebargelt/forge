@@ -43,6 +43,7 @@ import {
 } from "../store/orchestrator-receipts.js";
 import { sha256OfBytes } from "../util/content-digest.js";
 import {
+  CODEX_CARRIER_ORIENTATION_MARKER,
   CODEX_CARRIER_SOURCE_REL,
   CODEX_CARRIER_SPLICE_MARKER,
   codexCarrierPath,
@@ -191,7 +192,7 @@ function publishCarrierGeneration(): SeedGeneration {
   mkdirSync(join(seeds, "codex"), { recursive: true });
   writeFileSync(
     join(seeds, CODEX_CARRIER_SOURCE_REL),
-    ["# Forge orchestrator — Codex CLI", "", "SCAFFOLDING: shell, edits, when to ask.", "", CODEX_CARRIER_SPLICE_MARKER, ""].join("\n"),
+    ["# Forge orchestrator — Codex CLI", "", "SCAFFOLDING: shell, edits, when to ask.", "", CODEX_CARRIER_ORIENTATION_MARKER, "", CODEX_CARRIER_SPLICE_MARKER, ""].join("\n"),
   );
   publishSeedGeneration({ home: roots.home, assetsDir: release, trustedAssetRoot: () => release });
   const gen = resolveSeedGeneration(roots.home);

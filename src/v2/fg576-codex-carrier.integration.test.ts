@@ -40,7 +40,10 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
+import { OPERATOR_WORKFLOW_IDS, operatorWorkflow } from "./operator-workflows.js";
+import { CODEX_ACTIVATION_PHRASES, FORGE_OWNED_CODEX_SKILL_DIRS, codexSkillTargetPath } from "./render-codex-skills.js";
 import {
+  CODEX_CARRIER_ORIENTATION_MARKER,
   CODEX_CARRIER_SOURCE_REL,
   CODEX_CARRIER_SPLICE_MARKER,
   GENERATION_CODEX_CARRIER,
@@ -115,9 +118,14 @@ function releaseTree(marker: string, spec: ReleaseSpec = {}): string {
           "",
           "SCAFFOLDING: how you use the shell, how you edit files, when to ask.",
           "",
+          // FG-253: the orientation region is RENDERED here, not written here. A
+          // fixture that hand-wrote the claim would be testing the copy, not the
+          // splice.
+          CODEX_CARRIER_ORIENTATION_MARKER,
+          "",
           "## Provider capability gaps",
           "",
-          "- No Forge skills or slash commands.",
+          "- No Forge hooks.",
           "",
           "---",
           "",
@@ -198,6 +206,8 @@ test("FG-576: the scaffolding's authoring header is stripped — the carrier say
     "",
     "SCAFFOLDING <!-- a deliberate inline note -->",
     "",
+    CODEX_CARRIER_ORIENTATION_MARKER,
+    "",
     CODEX_CARRIER_SPLICE_MARKER,
     "",
   ].join("\n");
@@ -229,12 +239,18 @@ test("FG-576: this release's own carrier renders clean — no authoring header, 
   assert.match(text, /# forge orchestrator/, "…and the canonical Forge policy is spliced in below them");
   assert.ok(!text.includes("Stack + project context"), "the template's project tail is not Forge policy");
   assert.ok(!text.includes("SOURCE of the Forge-owned Codex instruction carrier"), "the authoring header stays in the seed");
+
+  // FG-253, on the REAL seed rather than a fixture: the shipped carrier advertises the
+  // skills this release actually renders, and carries none of the paragraph it replaced.
+  assert.match(text, /## Forge orientation and handoff/);
+  for (const skill of FORGE_OWNED_CODEX_SKILL_DIRS) assert.ok(text.includes(skill), `the shipped carrier omits '${skill}'`);
+  assert.doesNotMatch(text, /No Forge skills or slash commands/i, "the shipped carrier still denies a surface Forge installs");
 });
 
 test("FG-576: the render is deterministic — same input, identical bytes", () => {
   // Pinned at the pure function first, so determinism is a property of the render and
   // not of two publishes happening to agree.
-  const scaffold = `HEAD\n\n${CODEX_CARRIER_SPLICE_MARKER}\n`;
+  const scaffold = `HEAD\n\n${CODEX_CARRIER_ORIENTATION_MARKER}\n\n${CODEX_CARRIER_SPLICE_MARKER}\n`;
   const template = "<!-- forge:orchestrator-start -->\nBODY\n<!-- forge:orchestrator-end -->\nTAIL\n";
   assert.equal(renderCodexCarrier(scaffold, template), renderCodexCarrier(scaffold, template));
 
@@ -330,10 +346,13 @@ test("FG-576: a scaffolding carrying the splice marker twice refuses publication
     `<!-- edit this file, not the rendered one. The marker ${CODEX_CARRIER_SPLICE_MARKER} is spliced once. -->`,
     "# Forge orchestrator — Codex CLI",
     "SCAFFOLDING",
+    // Well-formed on the orientation half, so the refusal below is unambiguously
+    // about the POLICY marker.
+    CODEX_CARRIER_ORIENTATION_MARKER,
     CODEX_CARRIER_SPLICE_MARKER,
     "",
   ].join("\n");
-  assert.throws(() => publish(home, releaseTree("bad", { scaffold: doubled })), /EXACTLY once, found 2/);
+  assert.throws(() => publish(home, releaseTree("bad", { scaffold: doubled })), /policy splice marker EXACTLY once, found 2/);
 
   const after = resolved(home);
   assert.equal(after.root, before.root, "a refused publish commits nothing and leaves the current generation selectable");
@@ -342,11 +361,128 @@ test("FG-576: a scaffolding carrying the splice marker twice refuses publication
 
 test("FG-576: a scaffolding with NO splice marker refuses publication", () => {
   const home = tempDir("fg576-carrier-home-");
+  const scaffold = `# Forge orchestrator — Codex CLI\n\n${CODEX_CARRIER_ORIENTATION_MARKER}\n\nSCAFFOLDING ONLY\n`;
+  assert.throws(() => publish(home, releaseTree("bad", { scaffold })), /policy splice marker EXACTLY once, found 0/);
+  assert.equal(resolveSeedGeneration(home), null, "nothing was published");
+});
+
+// ─── FG-253: the orientation region is spliced, not written ──────────────────
+//
+// The carrier every Codex session reads asserted, until this ticket, that Forge
+// installs no skills. Forge now installs two. The region that replaced that
+// paragraph is RENDERED from the same definition and the same owned-skill set the
+// installer writes, so the carrier's claim and the files on disk cannot come apart —
+// and the marker gets the policy marker's refusal discipline for the same reason:
+// a silently-absent region ships a carrier that is mute about a surface Forge does
+// install, and a doubled one ships the claim twice.
+
+test("FG-253: a scaffolding with NO orientation marker refuses publication, by name", () => {
+  const home = tempDir("fg253-carrier-home-");
+  const scaffold = `# Forge orchestrator — Codex CLI\n\nSCAFFOLDING\n\n${CODEX_CARRIER_SPLICE_MARKER}\n`;
   assert.throws(
-    () => publish(home, releaseTree("bad", { scaffold: "# Forge orchestrator — Codex CLI\n\nSCAFFOLDING ONLY\n" })),
-    /EXACTLY once, found 0/,
+    () => publish(home, releaseTree("no-orient", { scaffold })),
+    /orientation splice marker EXACTLY once, found 0/,
   );
   assert.equal(resolveSeedGeneration(home), null, "nothing was published");
+});
+
+test("FG-253: a scaffolding carrying the orientation marker TWICE refuses, leaving the prior generation intact", () => {
+  const home = tempDir("fg253-carrier-home-");
+  publish(home, releaseTree("v1", { policy: "POLICY ONE" }));
+  const before = resolved(home);
+
+  const doubled = [
+    "# Forge orchestrator — Codex CLI",
+    "",
+    CODEX_CARRIER_ORIENTATION_MARKER,
+    "",
+    "SCAFFOLDING",
+    "",
+    CODEX_CARRIER_ORIENTATION_MARKER,
+    "",
+    CODEX_CARRIER_SPLICE_MARKER,
+    "",
+  ].join("\n");
+  assert.throws(
+    () => publish(home, releaseTree("twice", { scaffold: doubled })),
+    /orientation splice marker EXACTLY once, found 2/,
+  );
+
+  const after = resolved(home);
+  assert.equal(after.root, before.root, "a refused publish commits nothing");
+  assert.match(carrierBytes(after), /POLICY ONE/);
+});
+
+test("FG-253: an orientation marker the splice could never reach refuses rather than publishing a mute carrier", () => {
+  const home = tempDir("fg253-carrier-home-");
+
+  // Below the policy marker: the count says exactly once, but the scaffolding half is
+  // everything ABOVE that marker, so the region would be discarded and publication
+  // would report success on a carrier that says nothing about orientation.
+  const below = `# Codex CLI\n\nSCAFFOLDING\n\n${CODEX_CARRIER_SPLICE_MARKER}\n${CODEX_CARRIER_ORIENTATION_MARKER}\n`;
+  assert.throws(() => publish(home, releaseTree("below", { scaffold: below })), /not in the scaffolding body/);
+
+  // Quoted inside the leading authoring comment: same silent-loss shape, since that
+  // comment is stripped from the artifact.
+  const inHeader = [
+    `<!-- authoring note: the region renders at ${CODEX_CARRIER_ORIENTATION_MARKER} -->`,
+    "",
+    "# Codex CLI",
+    "",
+    "SCAFFOLDING",
+    "",
+    CODEX_CARRIER_SPLICE_MARKER,
+    "",
+  ].join("\n");
+  assert.throws(() => publish(home, releaseTree("hdr-quote", { scaffold: inHeader })), /not in the scaffolding body/);
+  assert.equal(resolveSeedGeneration(home), null, "neither shape published anything");
+});
+
+test("FG-253: the rendered orientation region names EXACTLY the skills Forge installs, derived from the definition", () => {
+  const home = tempDir("fg253-carrier-home-");
+  publish(home, releaseTree("orient"));
+  const text = carrierBytes(resolved(home));
+
+  assert.ok(!text.includes(CODEX_CARRIER_ORIENTATION_MARKER), "the marker is consumed by the splice, not shipped");
+  assert.match(text, /## Forge orientation and handoff/);
+
+  // Iterated from step 3's owned-skill set, not a literal: adding a workflow there
+  // must make this carrier name it without an edit to the seed or to this test.
+  assert.ok(FORGE_OWNED_CODEX_SKILL_DIRS.length > 0, "the owned-skill set is empty — this check would be vacuous");
+  for (const skill of FORGE_OWNED_CODEX_SKILL_DIRS) {
+    assert.ok(text.includes(skill), `the carrier does not name the installed skill '${skill}'`);
+  }
+  // …and names no OTHER forge-* skill: a carrier advertising a skill the installer
+  // does not write sends a session after a file that will never be there.
+  const advertised = new Set([...text.matchAll(/\bforge-[a-z][a-z0-9-]*/g)].map((m) => m[0]));
+  assert.deepEqual([...advertised].sort(), [...FORGE_OWNED_CODEX_SKILL_DIRS].sort());
+
+  for (const id of OPERATOR_WORKFLOW_IDS) {
+    const def = operatorWorkflow(id);
+    assert.ok(text.includes(def.purpose), `the region does not carry the '${id}' purpose from the definition`);
+    assert.ok(text.includes(def.title), `the region does not carry the '${id}' title from the definition`);
+    assert.ok(text.includes(codexSkillTargetPath(id)), `the region does not name where '${id}' installs`);
+    for (const phrase of CODEX_ACTIVATION_PHRASES[id]) {
+      assert.ok(text.includes(phrase), `the region omits the '${phrase}' activation phrase`);
+    }
+  }
+});
+
+test("FG-253: the carrier no longer claims Forge installs no skills, and never claims activation", () => {
+  const home = tempDir("fg253-carrier-home-");
+  publish(home, releaseTree("claims"));
+  const text = carrierBytes(resolved(home));
+
+  assert.doesNotMatch(
+    text,
+    /no forge skills or slash commands|has no codex equivalent/i,
+    "the carrier still carries the claim FG-253 makes false — every Codex session would read it",
+  );
+  // The other direction is the second failure mode in the threat model: a write is
+  // not a load. The region has to say so itself, since nothing probes it.
+  assert.match(text, /not evidence this build loaded it/i);
+  assert.match(text, /activation is unverified/i);
+  assert.doesNotMatch(text, /skills are (?:active|loaded|available and active)/i);
 });
 
 test("FG-576: scaffolding without the canonical policy it is rendered from refuses publication", () => {

@@ -24,6 +24,13 @@
   Do not quote the splice marker anywhere in this file except on the last line:
   it is spliced exactly once and publication REFUSES a source that carries it any
   other number of times.
+
+  FG-253 added a SECOND splice point, tagged forge:codex-orientation, under the same
+  exactly-once discipline. The orientation/handoff region is RENDERED there from the
+  provider-neutral operator-workflow definition (src/v2/operator-workflows.ts) and the
+  Codex skill names Forge actually installs (src/v2/render-codex-skills.ts) — so what
+  this carrier tells a session about orientation and what `forge init` writes into the
+  project cannot drift apart. Do not hand-write that region back into this file.
 -->
 
 # Forge orchestrator — Codex CLI
@@ -63,16 +70,14 @@ you, and it maintains a liveness record for the session while it runs. The opera
 see that record with `forge show`. You do not write it and you do not need to maintain
 it.
 
+<!-- forge:codex-orientation -->
+
 ## Provider capability gaps — what Forge could NOT give this session
 
 Forge names what it cannot supply rather than letting you discover it as a failure.
 These are gaps in the **Codex** adapter specifically; the Claude Code orchestrator has
 them supplied.
 
-- **No Forge skills or slash commands.** The `forge-*` skills that a Claude orchestrator
-  gets are Claude Code surfaces and have no Codex equivalent. Forge does not translate
-  them into guessed Codex commands. Anything a skill would have done, do explicitly with
-  the `forge` CLI — it is the same CLI, and `forge <command> --help` is authoritative.
 - **No Forge hooks.** There is no session-stop hook, so Forge cannot learn from the
   provider that this session ended. The launcher owns liveness instead; a session that
   disappears is reported honestly as launcher-loss, never as a clean exit you did not
