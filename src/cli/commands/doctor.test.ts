@@ -7,7 +7,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -442,8 +442,13 @@ function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
   };
 }
 
+// realpathSync because one of these tests chdir's into the fixture and compares
+// the dir against what doctor read from process.cwd(). On darwin os.tmpdir() is
+// /var/folders/... — a symlink to /private/var/folders/... — so the raw mkdtemp
+// path does not survive a chdir round-trip and the equality assertion fails on
+// the host while passing in a Linux container.
 function adapterProject(): { dir: string; cleanup: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "fg253-doctor-proj-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg253-doctor-proj-")));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
