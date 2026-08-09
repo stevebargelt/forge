@@ -516,9 +516,9 @@ test("FG-253 lifecycle: a stamp-bumped release refreshes the bytes AND clears th
 
 test("FG-253 lifecycle: `forge doctor` prints no adapter section for a converged project, and names the file when one is edited", async () => {
   const root = disposable("fg253-lifecycle-doctor-");
-  // Installed at the stamp DOCTOR resolves, so the two commands are talking about
-  // the same release — the property under test is convergence, not stamp
-  // resolution (see the step 9 result notes for the resolver finding).
+  // Installed through the planner rather than `forge init`, because what this test
+  // is about is what doctor SAYS about an edited file. That init and doctor resolve
+  // the same stamp in the first place is section 6a's job, below.
   installAt(root, doctorAdapterStamp());
 
   const clean = await forgeDoctor(root);
@@ -542,6 +542,73 @@ test("FG-253 lifecycle: `forge doctor` prints no adapter section for a converged
   };
   assert.equal(json.projectAdapters.projectDir, root);
   assert.deepEqual(json.projectAdapters.stale.map((e) => e.path), [edited]);
+  assertHostIsolated();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6a. init and doctor agree about WHICH FORGE rendered the bytes (FG-253-step9-F1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The regression. `currentAdapterStamp()` was implemented twice: the installer
+// derived a dev stamp from realpath(assetRoot()) — a PATH identity — and the drift
+// detector derived one from the rendered bytes — a CONTENT identity. They did not
+// even share a separator (`dev-` vs `dev.`). Under a release both read the manifest
+// id and agreed, so every test above passed; on a dev checkout, which is how this
+// repo is normally run, `forge init` wrote one identity and `forge doctor`
+// immediately judged it against the other, reported all four adapters drifted, and
+// named `forge upgrade` as the remedy — which rewrote the same bytes with the same
+// disagreeing stamp, so the report was permanent.
+//
+// This asserts CONVERGENCE, not a single clean read: a resolver that disagreed
+// would still be caught by the first doctor call, but the fixed point is what the
+// operator experiences, so the sequence is run to a fixed point and every pass is
+// asserted.
+test("FG-253 lifecycle: on a dev checkout, `forge init` → `forge doctor` reports NO drift and `forge upgrade` converges", async () => {
+  assert.equal(
+    currentAdapterStamp,
+    doctorAdapterStamp,
+    "the installer and the drift detector must be calling ONE function, not two that agree",
+  );
+  if (executionMode() === "dev") {
+    // The identity a dev tree resolves is the identity of its rendered BYTES.
+    assert.match(currentAdapterStamp(), /^dev\.[0-9a-f]{12}$/, currentAdapterStamp());
+  }
+
+  const root = disposable("fg253-lifecycle-devstamp-");
+  await forgeInit(root);
+
+  // What init wrote is what doctor expects — checked at the marker, so a stamp
+  // disagreement fails here as a stamp disagreement rather than as a byte diff.
+  const installed = detectProjectAdapterDrift(root);
+  assert.equal(installed.expectedStamp, currentAdapterStamp());
+  for (const e of installed.entries) {
+    assert.equal(e.status, "current", `${e.path}: ${e.status} (stamp on disk ${e.stamp})`);
+    assert.equal(e.stamp, currentAdapterStamp(), `${e.path} carries a stamp doctor does not expect`);
+  }
+  assert.deepEqual(installed.stale, []);
+
+  const clean = await forgeDoctor(root);
+  assert.ok(
+    !clean.includes("Project orientation/handoff adapters"),
+    `a freshly initialized project must produce no adapter section:\n${clean}`,
+  );
+
+  // The remedy doctor would name has to CONVERGE. Twice, because a rewrite-every-run
+  // resolver reaches a fixed point on pass two if it is going to reach one at all.
+  const before = adapterSnapshot(root);
+  for (const pass of [1, 2]) {
+    const { result } = forgeUpgrade(root);
+    assert.equal(result.adapterSurfaces, "already-current", `upgrade pass ${pass} found work to do`);
+    const after = adapterSnapshot(root);
+    for (const [rel, b] of before) assert.ok(same(b, after.get(rel)!), `${rel} rewritten by upgrade pass ${pass}`);
+    assert.deepEqual(detectProjectAdapterDrift(root).stale, [], `drift reported after upgrade pass ${pass}`);
+  }
+
+  const afterUpgrades = await forgeDoctor(root);
+  assert.ok(
+    !afterUpgrades.includes("Project orientation/handoff adapters"),
+    `doctor must stay silent after upgrade converges:\n${afterUpgrades}`,
+  );
   assertHostIsolated();
 });
 

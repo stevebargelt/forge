@@ -27,6 +27,7 @@ import {
   skippedClaudeCommands,
 } from "./init.js";
 import { isValidAdapterStamp, operatorSurface, parseAdapterMarker } from "../../v2/operator-workflows.js";
+import { currentAdapterStamp as driftAdapterStamp } from "../../v2/seed-drift.js";
 import { CODEX_DEPRECATED_PROMPT_DIRS } from "../../v2/render-codex-skills.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
@@ -799,6 +800,14 @@ test("FG-253: no rendered adapter path is under a deprecated Codex custom-prompt
 
 test("FG-253 currentAdapterStamp: is a stamp the marker renderer will actually accept", () => {
   assert.ok(isValidAdapterStamp(currentAdapterStamp()), `invalid stamp: ${currentAdapterStamp()}`);
+});
+
+// The installer writes the stamp; the drift detector judges it. Identity of the
+// FUNCTION, not equality of today's two values: two resolvers that happen to agree
+// under a release are exactly what shipped, and on a dev checkout they did not.
+test("FG-253 currentAdapterStamp: the installer and the drift detector share ONE resolver", () => {
+  assert.equal(currentAdapterStamp, driftAdapterStamp, "two resolvers are two answers");
+  assert.equal(currentAdapterStamp(), driftAdapterStamp());
 });
 
 test("FG-253 planOperatorAdapters: a fresh project plans install for all four targets", () => {

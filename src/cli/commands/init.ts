@@ -1,5 +1,4 @@
 import type { Command } from "commander";
-import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +11,6 @@ import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH, currentLinkIn } from "../..
 // to overwrite what.
 import {
   isDocumentedAbsence,
-  isValidAdapterStamp,
   parseAdapterMarker,
   OPERATOR_SURFACES,
   operatorSurface,
@@ -20,6 +18,7 @@ import {
   type OperatorSurface,
   type OperatorWorkflowId,
 } from "../../v2/operator-workflows.js";
+import { currentAdapterStamp } from "../../v2/adapter-stamp.js";
 import { renderClaudeCommands } from "../../v2/render-claude-commands.js";
 import {
   CODEX_DEPRECATED_PROMPT_DIRS,
@@ -27,8 +26,6 @@ import {
   FORGE_OWNED_CODEX_SKILL_DIRS,
   renderCodexSkills,
 } from "../../v2/render-codex-skills.js";
-import { assetRoot } from "../../v2/asset-root.js";
-import { readReleaseManifest } from "../../v2/release.js";
 // FG-685: the bundled-hook source resolution moved to src/util so the clone
 // substrate (src/v2/worktree-lifecycle.ts) and this installer answer "where are
 // the hook bytes" the same way. What the operator's primary checkout installs is
@@ -867,36 +864,16 @@ export type OperatorAdaptersPlan =
 
 // ── The release stamp embedded in every rendered adapter ─────────────────────
 
-/** The identity of the forge that rendered a project's adapters.
+/** The identity of the forge that rendered a project's adapters. Re-exported from
+ *  the one resolver rather than computed here: the drift detector (step 6) and the
+ *  launch-boundary check (step 8) must answer "which forge rendered this?" the same
+ *  way this installer does, and for a while they did not — see ./adapter-stamp.ts.
  *
- *  Inside a release that is the release manifest's id. On a dev checkout there is
- *  no manifest, so it is derived from the checkout's own physical path — stable
- *  across runs of THAT tree and different for any other, because the one thing a
- *  stamp must never do is make two unrelated trees compare equal. A dev stamp
- *  does not change when the checkout's content changes, which is why
- *  already-current is decided by comparing BYTES (below) and not stamps: editing
- *  the definition and re-running `forge init` still refreshes the files, the way
- *  the old symlink propagated an edit.
- *
- *  Exported because the drift detector (step 6) and the launch-boundary stamp
- *  check (step 8) must answer "which release rendered this?" the same way this
- *  installer does — two resolvers would be two answers. */
-export function currentAdapterStamp(): AdapterStamp {
-  const root = assetRoot();
-  const found = readReleaseManifest(root);
-  if (found) {
-    const id = found.manifest.id;
-    // A manifest id is a plain token by construction; hash rather than throw if
-    // one ever is not, so an odd id degrades to an opaque-but-distinct stamp
-    // instead of making `forge init` unusable.
-    return isValidAdapterStamp(id) ? id : `release-${shortHash(id)}`;
-  }
-  return `dev-${shortHash(safeRealpath(root))}`;
-}
-
-function shortHash(s: string): string {
-  return createHash("sha256").update(s).digest("hex").slice(0, 12);
-}
+ *  A stamp does NOT change when only the checkout's content changes under a
+ *  release, which is why already-current is decided by comparing BYTES (below) and
+ *  not stamps: editing the definition and re-running `forge init` still refreshes
+ *  the files, the way the old symlink propagated an edit. */
+export { currentAdapterStamp };
 
 function safeRealpath(p: string): string {
   try { return realpathSync(p); } catch { return resolve(p); }

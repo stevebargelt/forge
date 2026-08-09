@@ -38,17 +38,16 @@ import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSyn
 import { basename, join, relative } from "node:path";
 import { CLAUDE_SKILLS_DIR, FORGE_HOME } from "../util/paths.js";
 import { assetRoot } from "./asset-root.js";
-import { sha256OfBytes, sha256OfString } from "../util/content-digest.js";
+import { sha256OfBytes } from "../util/content-digest.js";
 import { inspectAgentProtocols, type ProtocolInspectOptions } from "./agent-protocol.js";
+import { currentAdapterStamp } from "./adapter-stamp.js";
 import {
-  isValidAdapterStamp,
   parseAdapterMarker,
   type AdapterStamp,
   type OperatorWorkflowId,
 } from "./operator-workflows.js";
 import { renderClaudeCommands } from "./render-claude-commands.js";
 import { renderCodexSkills } from "./render-codex-skills.js";
-import { readReleaseManifest } from "./release.js";
 
 export type SeedStatus = "current" | "drifted" | "missing";
 
@@ -360,29 +359,10 @@ export function isLegacyForgeSlashCommandLink(linkTarget: string, fileName: stri
   return linkTarget.endsWith(`/scripts/claude-commands/${fileName}`);
 }
 
-/** A stamp for a tree that carries no release manifest (a dev checkout / npm-link).
- *  Derived from the rendered adapter bytes themselves, NOT a constant: a bare "dev"
- *  would make two unrelated trees compare EQUAL, which is the single comparison the
- *  stamp exists to get right. Two checkouts rendering the same semantics ARE the
- *  same adapter, and changing a rule changes this stamp. */
-function devAdapterStamp(): AdapterStamp {
-  const probe = "stamp-probe";
-  const rendered = [
-    ...renderClaudeCommands(probe).map((c) => `${c.path}\n${c.bytes}`),
-    ...renderCodexSkills(probe).map((s) => `${s.path}\n${s.contents}`),
-  ].join("\n");
-  return `dev.${sha256OfString(rendered).slice(0, 12)}`;
-}
-
-/** The stamp the RUNNING release renders adapters with. A release names itself by
- *  its manifest id; a dev checkout has no such name, so it falls back to the
- *  content identity above. A manifest id that could not survive the marker's HTML
- *  comment falls back too — a sanitized stamp would claim a release the bytes did
- *  not come from. */
-export function currentAdapterStamp(): AdapterStamp {
-  const id = readReleaseManifest(assetRoot())?.manifest.id;
-  return id && isValidAdapterStamp(id) ? id : devAdapterStamp();
-}
+/** Re-exported, not reimplemented: this detector and the installer that writes the
+ *  bytes it judges must resolve the stamp with the SAME function. See
+ *  ./adapter-stamp.ts for what happened when they each had their own. */
+export { currentAdapterStamp };
 
 type AdapterBaseline = { surface: ProjectAdapterSurface; workflow: OperatorWorkflowId; path: string; bytes: string };
 
