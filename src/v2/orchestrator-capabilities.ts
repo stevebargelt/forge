@@ -106,11 +106,19 @@ export const ORCHESTRATOR_CAPABILITIES: readonly CapabilityRow[] = [
         behavior: "Forge-installed skills and slash commands are available in the session (`forge init` publishes them).",
       },
       codex: {
-        support: "unsupported",
-        behavior: "The session runs with whatever the operator's own Codex configuration provides; Forge adds nothing.",
+        support: "partial",
+        behavior:
+          "The SAME provider-neutral orientation and handoff workflows are rendered into repository-scoped Codex " +
+          "skills (`forge-orient`, `forge-handoff`) under the project's own `.agents/skills/` root and installed by " +
+          "`forge init` / `forge upgrade`; the Codex instruction carrier advertises them from that same definition. " +
+          "Deprecated Codex custom prompts are not used, and the operator's own skills are never touched.",
         limitation:
-          "Codex has no equivalent to Claude skills or slash commands. This gap is NAMED rather than synthesized — " +
-          "Forge does not translate Claude commands into guessed Codex equivalents.",
+          "Installing the files is NOT evidence the running build loaded them: repository-scoped skill discovery is " +
+          "version-coupled, and a build without it ignores the directory silently — the same failure shape as a bare " +
+          "`-c` override that is accepted and then ignored. Forge has no positive probe for skill discovery, so " +
+          "activation is UNVERIFIED rather than claimed; a session that cannot activate a skill runs the workflow " +
+          "through the `forge` CLI, which is the interface either way. Nothing is synthesized from Claude's surface — " +
+          "both renderings derive from one definition and add only invocation mechanics.",
       },
     },
   },

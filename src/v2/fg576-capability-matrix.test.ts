@@ -105,10 +105,38 @@ test("remote control is evidence-gated for Claude and explicitly NOT claimed for
   assert.match(codex.limitation ?? "", /no independently supported evidence|claims NO Codex remote control/i);
 });
 
-test("skills/commands are named as a Codex gap, not synthesized", () => {
+test("FG-253: Codex skills/commands are PARTIAL — Forge installs them, and the gap is still named", () => {
+  // FG-253 moved this cell off `unsupported`: Forge now renders repository-scoped
+  // orient/handoff skills for Codex from the same provider-neutral definition the
+  // Claude slash commands come from. The row must NOT become `supported` — that
+  // would be a claim about the provider having loaded them, which nothing here
+  // establishes — and it must keep naming its gap.
   const codex = capabilityCell("skills-commands", "codex");
-  assert.equal(codex.support, "unsupported");
-  assert.match(codex.limitation ?? "", /does not translate|not.*synthesiz/i);
+  assert.equal(codex.support, "partial");
+  assert.notEqual(codex.support, "supported");
+  assert.ok((codex.limitation ?? "").trim().length > 0, "a non-supported cell that names no gap is the defect AC9 forbids");
+  // Still not synthesized from Claude's surface: one definition, two renderings.
+  assert.match(codex.limitation ?? "", /synthesiz|one definition/i);
+  assert.match(codex.behavior, /forge-orient/);
+  assert.match(codex.behavior, /forge-handoff/);
+  assert.equal(capabilityCell("skills-commands", "claude-code").support, "supported");
+});
+
+test("FG-253: the skills/commands limitation names activation as UNVERIFIED, never as claimed", () => {
+  // The failure mode this guards is the one the ticket's threat model puts second:
+  // reporting a successful filesystem write as if the provider had loaded the skill.
+  // The limitation has to say the opposite, in the operator's own words.
+  const limitation = capabilityCell("skills-commands", "codex").limitation ?? "";
+  assert.match(limitation, /not evidence/i, "the limitation must say installing is not evidence of loading");
+  assert.match(limitation, /unverified/i, "the limitation must call activation unverified");
+  assert.match(limitation, /version-coupled/i, "the limitation must name WHY a build can ignore the skills silently");
+  assert.doesNotMatch(
+    limitation,
+    /\bactivation is (?:claimed|verified|proven|confirmed)\b/i,
+    "activation must never be claimed from an install",
+  );
+  // And the honest fallback is named rather than left to the reader.
+  assert.match(limitation, /forge` CLI|forge CLI/);
 });
 
 // ---- limitationsForAdapter: what the launcher copies onto the receipt ----

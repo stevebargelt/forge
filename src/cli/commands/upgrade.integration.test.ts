@@ -1535,3 +1535,253 @@ test("FG-577 (cell 1): a FAILED git pull is unresolved on every surface", () => 
     rmSync(assets, { recursive: true, force: true });
   }
 });
+
+// ─────────── FG-253 step 5: `forge upgrade` UPDATES an existing project ───────────
+//
+// `forge init` onboards a NEW project; `forge upgrade` is what an already-onboarded
+// one runs. Until this step the adapter set reached only the init path, so every
+// project onboarded by an older forge kept whatever it was given — dead symlinks
+// included — and no amount of upgrading refreshed it. Every cell here drives the
+// REAL `runUpgrade` project-provisioning branch against a disposable project.
+//
+// DARWIN CANONICALIZATION: the project root is realpath'd at creation. On macOS
+// os.tmpdir() is /var/folders/… , a SYMLINK to /private/var/folders/… , and this
+// fixture's path IS compared against a process.chdir/process.cwd() value (the
+// branch reads process.cwd()) and against realpathSync() inside the installer's
+// containment check. An un-canonicalized root passes on Linux and fails here.
+
+import { lstatSync, realpathSync } from "node:fs";
+import { isForgeOwnedAdapter } from "../../v2/operator-workflows.js";
+import { currentAdapterStamp, forgeAdapterPaths, renderedAdapterTargets } from "./init.js";
+
+/** `assetTree`'s template is a bare marker string, which the block splice writes in
+ *  place of the fence — so a project refreshed by it stops looking like a forge
+ *  project and a SECOND upgrade would provision nothing. The shipped template is
+ *  marker-fenced (seeds/orchestrator-template.md), so use that shape here: these
+ *  cells are about repeated upgrades of a real project, not about the block. */
+function fenceTemplate(assetsDir: string): void {
+  writeFileSync(join(assetsDir, "seeds", "orchestrator-template.md"), [
+    "<!-- forge:orchestrator-start -->",
+    "",
+    "# forge orchestrator",
+    "",
+    "CLEAN TEMPLATE",
+    "",
+    "<!-- forge:orchestrator-end -->",
+    "",
+  ].join("\n"));
+}
+
+/** A project as an OLDER forge left it: an orchestrator block in CLAUDE.md, the
+ *  two Claude commands as pre-FG-253 SYMLINKS into a forge checkout's
+ *  `scripts/claude-commands/` (dangling on every host today, which is the point),
+ *  and no Codex surface at all. */
+function legacyProject(prefix: string, opts: { legacyLinks?: boolean } = {}): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  writeFileSync(join(dir, "CLAUDE.md"), [
+    "# my project",
+    "",
+    "<!-- forge:orchestrator-start -->",
+    "STALE BLOCK",
+    "<!-- forge:orchestrator-end -->",
+    "",
+  ].join("\n"));
+  if (opts.legacyLinks !== false) {
+    mkdirSync(join(dir, ".claude", "commands"), { recursive: true });
+    for (const name of ["orient.md", "handoff.md"]) {
+      symlinkSync(`/some/older/forge/scripts/claude-commands/${name}`, join(dir, ".claude", "commands", name));
+    }
+  }
+  return dir;
+}
+
+/** Drive the real action from inside `project`, restoring cwd whatever happens —
+ *  a leaked chdir into a directory this test then deletes breaks every later test
+ *  in the process. */
+function upgradeIn<T>(project: string, fn: () => T): T {
+  const cwdBefore = process.cwd();
+  process.chdir(project);
+  try { return fn(); } finally { process.chdir(cwdBefore); }
+}
+
+test("FG-253 step 5: upgrade in a project onboarded by an OLDER shape installs/refreshes all four adapter files and exits 0", () => {
+  const assets = assetTree("fg253-up-assets-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg253-up-legacy-");
+  try {
+    const paths = forgeAdapterPaths();
+    assert.equal(paths.length, 4, "fixture precondition: the write set is the four adapter files");
+
+    const r = upgradeIn(project, () => drive(
+      { skipGit: true, skipNpm: true },
+      { mode: "dev", assetsDir: assets, devDir: assets },
+    ));
+
+    for (const rel of paths) {
+      const abs = join(project, ...rel.split("/"));
+      assert.ok(existsSync(abs), `${rel} must exist after an upgrade`);
+      assert.equal(lstatSync(abs).isFile(), true, `${rel} must be MATERIALIZED BYTES, not the legacy symlink`);
+      assert.ok(isForgeOwnedAdapter(readFileSync(abs, "utf8")), `${rel} must carry the forge ownership marker`);
+    }
+
+    // The step is reported in its own right, on both consumer surfaces.
+    assert.equal(r.result.adapterSurfaces, "installed");
+    assert.match(
+      r.stdout, /migrated legacy symlink → bytes/,
+      "forge's own pre-FG-253 artifact is recognized as forge's, not reported as a project override forever",
+    );
+    assert.deepEqual(r.result.adapterOverrides, [], "the project owned none of them");
+    assert.match(r.stdout, /operator adapters: /, "the human surface names the step");
+    assert.match(r.stdout, /\.agents\/skills\/forge-orient\/SKILL\.md/, "…and the Codex half by path, not only the Claude half");
+
+    // Nothing refused, nothing failed: the whole point is that an existing project
+    // can be brought current WITHOUT this becoming a permanent red light.
+    assert.equal(r.exitCode, undefined, "an upgrade that did exactly what was asked keeps the inherited success code");
+    assert.match(r.stdout, /Upgrade complete\./);
+    assert.deepEqual(r.result.unresolved, []);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-253 step 5: a second upgrade reports `already-current` — the refresh converges instead of rewriting forever", () => {
+  const assets = assetTree("fg253-up-idem-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg253-up-idem-proj-");
+  try {
+    const first = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(first.result.adapterSurfaces, "installed");
+    const second = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(second.result.adapterSurfaces, "already-current");
+    assert.equal(second.result.slashCommands, "already-current");
+    assert.equal(second.exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-253 step 5: --json reports adapterSurfaces plus a NAMED override list when a foreign file is present", () => {
+  const assets = assetTree("fg253-up-override-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg253-up-override-proj-", { legacyLinks: false });
+  try {
+    // The project owns its own Codex skill — a regular file with no forge marker.
+    // Deliberately the CODEX half only: it proves the two surfaces are read
+    // independently. Inferring one from the other would either report a slash
+    // command override that never happened, or hide this one entirely.
+    mkdirSync(join(project, ".agents", "skills", "forge-orient"), { recursive: true });
+    writeFileSync(join(project, ".agents", "skills", "forge-orient", "SKILL.md"), "# our own forge-orient\n");
+
+    let stdout = "";
+    const exitCode = captureExit(() => {
+      stdout = captureLog(() => upgradeIn(project, () => runUpgrade(
+        { skipGit: true, skipNpm: true, json: true },
+        { mode: "dev", assetsDir: assets, devDir: assets },
+      )));
+    });
+
+    const parsed = JSON.parse(stdout) as {
+      ok: boolean; unresolved: string[];
+      adapterSurfaces: string; adapterOverrides: string[];
+      slashCommands: string; slashCommandOverrides: string[];
+    };
+
+    assert.equal(parsed.adapterSurfaces, "user-override");
+    assert.equal(parsed.adapterOverrides.length, 1, `one override, got ${JSON.stringify(parsed.adapterOverrides)}`);
+    assert.match(parsed.adapterOverrides[0]!, /forge-orient/, "named by the label an operator types");
+    assert.match(parsed.adapterOverrides[0]!, /\.agents\/skills\/forge-orient\/SKILL\.md/, "…and by the path forge declined to write");
+    assert.match(parsed.adapterOverrides[0]!, /no forge ownership marker/, "…and by WHY forge declined");
+
+    // The Claude half is untouched by the Codex override — that is the whole
+    // "one surface's state is not inferred from the other's" requirement.
+    assert.equal(parsed.slashCommands, "installed");
+    assert.deepEqual(parsed.slashCommandOverrides, [], "a Codex skill is not a slash-command override");
+    assert.ok(existsSync(join(project, ".claude", "commands", "orient.md")), "…and the Claude files really were installed");
+    assert.equal(readFileSync(join(project, ".agents", "skills", "forge-orient", "SKILL.md"), "utf8"), "# our own forge-orient\n", "the project's own file is never clobbered");
+
+    // RESOLVED: forge declining to clobber a file it does not own is the command
+    // working. An exit code that fired here would fire forever on this project.
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.unresolved, []);
+    assert.equal(exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-253 step 5: future and malformed ownership markers are refused as operator overrides without clobbering either provider surface", () => {
+  const assets = assetTree("fg253-up-marker-refusal-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg253-up-marker-refusal-proj-", { legacyLinks: false });
+  try {
+    const targets = renderedAdapterTargets(currentAdapterStamp());
+    const future = targets.find((t) => t.surface === "claude-command" && t.workflow === "orient");
+    const malformed = targets.find((t) => t.surface === "codex-skill" && t.workflow === "orient");
+    assert.ok(future && malformed, "fixture precondition: Claude and Codex orient targets exist");
+
+    // Both files look Forge-shaped to a human, but neither is a v1 ownership
+    // marker Forge understands. A future marker must be safe against an older
+    // Forge, and a malformed marker must never be upgraded into ownership.
+    const futureBytes = "<!-- forge:operator-adapter v2 stamp=future-release -->\n# newer provider instructions\n";
+    const malformedBytes = "<!-- forge:operator-adapter v1 stamp=has whitespace -->\n# ambiguous provider instructions\n";
+    for (const [target, bytes] of [[future, futureBytes], [malformed, malformedBytes]] as const) {
+      const path = join(project, ...target.relPath.split("/"));
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, bytes);
+    }
+
+    let stdout = "";
+    const exitCode = captureExit(() => {
+      stdout = captureLog(() => upgradeIn(project, () => runUpgrade(
+        { skipGit: true, skipNpm: true, json: true },
+        { mode: "dev", assetsDir: assets, devDir: assets },
+      )));
+    });
+    const result = JSON.parse(stdout) as { ok: boolean; adapterSurfaces: string; adapterOverrides: string[] };
+
+    assert.equal(readFileSync(join(project, ...future.relPath.split("/")), "utf8"), futureBytes);
+    assert.equal(readFileSync(join(project, ...malformed.relPath.split("/")), "utf8"), malformedBytes);
+    assert.equal(result.adapterSurfaces, "user-override");
+    assert.equal(result.adapterOverrides.length, 2);
+    for (const target of [future, malformed]) {
+      const override = result.adapterOverrides.find((entry) => entry.includes(target.relPath));
+      assert.ok(override, `--json must name the refused ${target.relPath}`);
+      assert.match(override, /no forge ownership marker/);
+    }
+    assert.equal(result.ok, true, "an intentional override is visible but not a permanent upgrade failure");
+    assert.equal(exitCode, undefined);
+
+    // Refusal is per target, not a failed batch: the other workflows still
+    // receive this release's renderings.
+    for (const target of targets.filter((t) => t.workflow === "handoff")) {
+      assert.equal(readFileSync(join(project, ...target.relPath.split("/")), "utf8"), target.bytes);
+    }
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-253 step 5: --dry-run reports `would-install` and writes nothing", () => {
+  const assets = assetTree("fg253-up-dry-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg253-up-dry-proj-", { legacyLinks: false });
+  try {
+    const r = upgradeIn(project, () => drive(
+      { skipGit: true, skipNpm: true, dryRun: true },
+      { mode: "dev", assetsDir: assets, devDir: assets },
+    ));
+
+    assert.equal(r.result.adapterSurfaces, "would-install", "a dry run FORECASTS — it never claims");
+    assert.equal(r.result.slashCommands, "would-install");
+    assert.match(r.stdout, /WOULD install/, "the per-file forecast is what the real run would execute");
+
+    for (const rel of forgeAdapterPaths()) {
+      assert.equal(existsSync(join(project, ...rel.split("/"))), false, `${rel} must NOT be written by a dry run`);
+    }
+    // …and the forecast is not itself a refusal: the run still completes.
+    assert.deepEqual(r.result.unresolved, []);
+    assert.equal(r.exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});

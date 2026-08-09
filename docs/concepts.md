@@ -26,20 +26,74 @@ Example: a run created via `cd ~/code/my-app && forge new feature "add login" --
 
 The cwd of the human running `forge`. For most runs the workspace equals the project (you're in `~/code/my-app` and the run drives changes to `~/code/my-app`). They diverge when an orchestrator session in one directory drives runs against a different project — e.g. `~/code/audit-workspace` orchestrating runs whose `projectDir` is `~/code/forge`. `forge new` and `forge invoke` stamp the workspace into `metadata.workspace` (default: cwd; override with `--workspace`). `forge status` filters by workspace (matching either `projectDir == cwd` or `metadata.workspace == cwd`) by default; use `--all` to see runs across every project on the host.
 
-## Slash commands
+## Operator adapters (`/orient`, `/handoff`)
 
-Custom Claude Code commands forge installs into each project's `.claude/commands/`. Invoked as `/<name>` inside a Claude Code session. Two ship today:
+Start-of-session orientation and end-of-session handoff, defined **once** as provider-neutral data in
+`src/v2/operator-workflows.ts` (the bounded-CLI rule, the probe set, the report shape, the reconciliation rules,
+the notes-block apply discipline) and **rendered** onto each provider surface that has one — never hand-authored
+per provider, so a rule added to the definition can't exist on one surface and not the other:
 
-- **`/orient`** — start-of-session orientation. Runs `forge backlog notes show` + `forge backlog list --status active` + git state + `forge projects show <project>` in parallel, reports a compact state-of-play, ends with "What's the priority?" Never re-states the orchestrator role (the CLAUDE.md block already does); performing the start-of-session protocol IS the demonstration.
-- **`/handoff`** — end-of-session ritual. Drafts the backlog notes block in the forward-looking shape (where-we-left-off / picked-up-next / external state / decisions worth not relitigating / shipped-for-reference), applies via `forge backlog notes replace` without a review pause, and reports unpushed-commit count.
+- **Claude Code** (`src/v2/render-claude-commands.ts`) — `/orient` and `/handoff` slash commands, materialized at
+  `.claude/commands/orient.md` and `.claude/commands/handoff.md`. Typed explicitly as `/orient` / `/handoff` inside
+  a session.
+- **Codex CLI** (`src/v2/render-codex-skills.ts`) — the same two workflows as repository-scoped skills at
+  `.agents/skills/forge-orient/SKILL.md` and `.agents/skills/forge-handoff/SKILL.md`. Invoked explicitly by name
+  (`forge-orient`, `forge-handoff`) or from natural language ("orient me", "hand off", …). **That the file exists
+  is not evidence the running Codex build loaded it**: repository-scoped skill discovery is version-coupled, and
+  an older build ignores the directory silently. Forge runs no positive activation probe, so every rendered skill
+  says activation is **unverified**, never claimed, and names the CLI fallback below.
+- **Every other provider** (the generic fallback) — Forge writes **no files**. This is a documented absence, not a
+  missing feature: the `forge` CLI (`forge backlog notes show`, `forge backlog list --status active`, …) is the
+  interface either way, and it's what the rendered adapters themselves fall back to when activation doesn't happen.
 
-Both commands hard-code "use the `forge backlog` CLI, do NOT read backlog files directly." The CLI is the bounded interface that protects orchestrator context cost; projects store notes at `backlog/notes.md` and tickets under `backlog/{stories,epics,ideas,done}/` (in the default markdown storage mode — see **Backlog storage mode** below).
+`/orient` — start-of-session orientation. Runs the probe set (`forge backlog notes show` + `forge backlog list
+--status active` + `forge backlog list --status done` + git state + `forge projects show <project>` + `forge ops
+check`) as one parallel batch, reports a compact state-of-play, ends with exactly one question — "What do we forge
+next?" Never re-states the orchestrator role (the CLAUDE.md block already does); performing the start-of-session
+protocol IS the demonstration.
+
+`/handoff` — end-of-session ritual. Drafts the backlog notes block in the forward-looking shape
+(where-we-left-off / picked-up-next / external state / decisions worth not relitigating / shipped-for-reference),
+applies it immediately via a quoted-heredoc `forge backlog notes replace -` (no review pause — the quoted
+delimiter is what lets backticks/`$`/quotes in the block land verbatim), and asks before pushing any unpushed
+commits rather than pushing automatically.
+
+Both workflows hard-code "use the `forge backlog` CLI, do NOT read backlog files directly." The CLI is the bounded interface that protects orchestrator context cost; projects store notes at `backlog/notes.md` and tickets under `backlog/{stories,epics,ideas,done}/` (in the default markdown storage mode — see **Backlog storage mode** below).
 
 `forge backlog close <id>` marks a ticket done and records a `closed` date. Pass `--commit <sha>` to also stamp the closing commit, tying the ticket to the exact commit that shipped it. In markdown mode that means moving the file to `backlog/done/` and setting `status: done` / `closed:` / `closed_commit:` in its frontmatter; in db mode the same fields are columns on the ticket row and no file moves.
 
-Installed by `forge init` as symlinks into the local forge clone (so `forge upgrade` propagates template edits to all projects without per-project re-copy). `--no-install-hooks` bypasses installation. Project-local overrides (a regular file at `.claude/commands/<name>.md`) are detected as `exists-other` and left alone. Stale forge symlinks pointing at a different/old forge clone path are detected and replaced in place on upgrade. The `commit-msg` git hook `forge init` installs alongside them is the one exception to this dev-clone pinning: it symlinks *through* `$FORGE_HOME/current`, so a new commit runs the currently promoted release's bytes (a check already in flight stays anchored to the bytes it started with) and the installed hook follows a promotion without re-init — falling back to the dev checkout only when no `current` pointer exists, with an idempotent re-install that re-points only a provably Forge-owned hook and never clobbers a regular file, a foreign symlink, or any non-Forge-owned hook. That symlink-through-`current` installer covers only the operator's primary checkout; a Forge-provisioned task clone gets the same hook through a structurally different installer, covered under [Private writable Git for mutating agents](#private-writable-git-for-mutating-agents).
+**Ownership is decided from the bytes on disk, never from a record of what forge previously wrote** — projects get
+cloned, and forge gets reinstalled at new paths, so an install-time memory would mis-fire on the copy. Every
+rendered file opens with an HTML-comment ownership marker (`renderAdapterMarker` / `parseAdapterMarker` /
+`isForgeOwnedAdapter` in `operator-workflows.ts`) carrying a release/content **stamp**: a file that carries it is
+forge's and is freely refreshed; forge's own pre-FG-253 artifact — an **absolute, dangling** symlink into
+`scripts/claude-commands/<name>.md`, on the Claude-command surface only — is recognized by that shape and migrated
+to bytes in place. A symlink that still resolves is pointing at real bytes somebody maintains, not forge's deleted
+migration source, and a relative link or one found on the Codex surface was never forge's to begin with (forge
+never wrote a symlink there); anything else at an adapter path — a regular file with no marker, a foreign symlink —
+is a **project override**: reported, never overwritten, never a failure. `forge init`
+and `forge upgrade` both install/refresh the whole set (Claude commands and Codex skills alike) from the same two
+renderers, so the two commands cannot disagree about what "installed and current" means, and a stale rendering
+(the stamp on disk names a different release) is detected the same way — see `forge doctor` and
+[Durable launch](#durable-launch).
 
-**Portability convention (`.claude/commands/` is per-developer):** the symlinks contain machine-absolute paths to *this developer's* forge clone, so they're not portable across contributors. `forge init` adds `.claude/commands/` to the project's `.gitignore`. Each contributor runs `forge init` once after cloning to bootstrap their local copies — same shape as `npm install` reconstructing `node_modules/`.
+**Installed bytes are not active bytes.** Nothing forge writes proves a provider loaded it — Claude Code runs no
+discovery probe either — so "installed" and "active" are always reported as two separate questions, never
+conflated into one.
+
+**Portability convention (per-developer, gitignored):** `.claude/commands/` and each of
+`.agents/skills/forge-orient/` / `.agents/skills/forge-handoff/` hold machine-local, per-developer artifacts, so
+`forge init` adds them to the project's `.gitignore` **individually** — never the shared `.agents/skills/` parent,
+which may hold skills forge knows nothing about. `--no-install-hooks` bypasses installation of all of them. Each
+contributor runs `forge init` once after cloning to bootstrap their own copies — same shape as `npm install`
+reconstructing `node_modules/`. The `commit-msg` git hook `forge init` installs alongside them is pinned
+differently: it symlinks *through* `$FORGE_HOME/current`, so a new commit runs the currently promoted release's
+bytes (a check already in flight stays anchored to the bytes it started with) and the installed hook follows a
+promotion without re-init — falling back to the dev checkout only when no `current` pointer exists, with an
+idempotent re-install that re-points only a provably Forge-owned hook and never clobbers a regular file, a foreign
+symlink, or any non-Forge-owned hook. That symlink-through-`current` installer covers only the operator's primary
+checkout; a Forge-provisioned task clone gets the same hook through a structurally different installer, covered
+under [Private writable Git for mutating agents](#private-writable-git-for-mutating-agents).
 
 ## Backlog storage mode
 
@@ -149,7 +203,7 @@ Decisions D1–D13 — the dashboard-mutation premise, the capacity scope, the c
 
 ## Orchestrator heartbeat
 
-A liveness signal for the Claude Code session that's currently acting as a project's orchestrator. `forge init` installs three Claude Code session hooks (SessionStart / Stop / SessionEnd) into `<project>/.claude/settings.local.json` (per-developer, gitignored — see Slash commands above for the portability rationale); those hooks invoke `scripts/claude-hooks/orchestrator-heartbeat`, which maintains a JSON file at `~/.forge/orchestrators/<session-id>.json` containing `{sessionId, projectDir, startedAt, lastSeen}`. SessionStart writes it, Stop touches `lastSeen` after every assistant turn, SessionEnd deletes it. A heartbeat whose `lastSeen` is within the last 15 minutes is considered live; older ones are stale (likely a crashed session). `forge projects list` shows live projects with a ● and floats them to the top.
+A liveness signal for the Claude Code session that's currently acting as a project's orchestrator. `forge init` installs three Claude Code session hooks (SessionStart / Stop / SessionEnd) into `<project>/.claude/settings.local.json` (per-developer, gitignored — see Operator adapters above for the portability rationale); those hooks invoke `scripts/claude-hooks/orchestrator-heartbeat`, which maintains a JSON file at `~/.forge/orchestrators/<session-id>.json` containing `{sessionId, projectDir, startedAt, lastSeen}`. SessionStart writes it, Stop touches `lastSeen` after every assistant turn, SessionEnd deletes it. A heartbeat whose `lastSeen` is within the last 15 minutes is considered live; older ones are stale (likely a crashed session). `forge projects list` shows live projects with a ● and floats them to the top.
 
 Projects installed before this convention shipped had forge hooks in `<project>/.claude/settings.json` (the committed file). `forge upgrade` migrates those automatically — strips the forge entries from `settings.json` (preserving any other user keys + hooks) and writes a fresh `settings.local.json`.
 

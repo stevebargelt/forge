@@ -12,9 +12,11 @@ When you `git commit`, `gh pr create`, `gh issue create`, or post any other mess
 
 Write as a human author would. AI tooling is implementation detail, not public record. This rule is enforced as a force-level constraint at `seeds/constraints/no-ai-attribution.md` for forge agents; this section captures it for Claude Code sessions working ON forge.
 
-## What forge is
+## Repo guide — what forge is, layout, conventions, auth modes
 
-A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Wine & Spirits/obsidian/stevieb-sgws/Harness Spine Sketch.md`.
+**[`docs/repo-guide.md`](docs/repo-guide.md)** — what forge is, the `src/` layout, conventions, auth modes, what not to touch without a learnings entry, and the documentation map.
+
+That content used to live in this file, where it had no maintenance owner and drifted (FG-347 → FG-253): the documentation-maintainer declines `CLAUDE.md` because of the rendered block below, and `forge-dev upgrade` only re-renders that block, never the prose above it. The guide lives in `docs/**`, which the documentation-maintainer owns and routinely corrects. Keep it there — describing the codebase in this file reintroduces the drift.
 
 ## Session start: use `forge backlog`, don't read backlog files whole
 
@@ -36,60 +38,6 @@ This repo **cut over to the DB store on 2026-07-29** (FG-608; flip recorded by r
 Sticky numbers (e.g. `#33`, `#41`) are stable across sessions and referenced from commit messages and ADRs. New tasks land via `forge backlog file "<title>"` (auto-assigns the next sticky); never renumber.
 
 The TaskCreate harness tool is for ephemeral within-session working state. The durable record is the structured backlog (via `forge backlog`).
-
-## Conventions
-
-- TypeScript with strict mode and `noUncheckedIndexedAccess`. Run `npm run typecheck` before committing source changes.
-- Module type is ES modules (`"type": "module"` in `package.json`). Always use `.js` import suffixes from TypeScript files.
-- Workflow definitions are YAML files under `seeds/workflows/` (installed to `~/.forge/workflows/`). Loaded by `src/v2/loader.ts` with Zod validation. Per-project overrides go in `<project>/.forge/workflows/<name>.yml`.
-- Agents always run in containers. Forge itself never runs in a container. **One documented exception:** the design phase runs on the host via `forge design` — the user launches an interactive session with Pencil MCP in a separate terminal (FORGE-DEC-014). Forge's role is to author the prompt (`prompt-author` agent in a normal container), then hand off to the tracked `forge design` session. There is no agent-led UI design phase.
-- Red agents always get read-only project mounts (`-v <project>:/project:ro`). This is OS-level enforcement; never relax it to a prompt instruction.
-- Three similar functions are better than a premature base class. Don't introduce abstractions beyond what the spine sketch specifies.
-- Default to no comments. Add a comment only when the WHY is non-obvious.
-- **Don't estimate work in human-hours, days, or weeks.** I'm doing the work, not a human team — the unit doesn't apply and the framing leads to bad scoping. Talk about scope (small / medium / large change, isolated vs cross-cutting), risk (reversible vs not, schema change required), and dependencies between tasks. Never "this is a 2-week project" — that's noise.
-
-## Auth modes (FORGE-DEC-007, updated by FORGE-DEC-013)
-
-Three modes, auto-selected by env at run time:
-- **bedrock**: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_PROFILE` set. Containers mount `~/.aws` read-only and read SSO cache directly; STS env vars are NOT snapshotted. A detached host-side watchdog (`scripts/run-sso-watchdog.sh`) keeps the SSO cache fresh. Source `. ./scripts/use-bedrock.sh` to arm. See FORGE-DEC-013.
-- **anthropic-apikey**: `ANTHROPIC_API_KEY` set. Escape hatch.
-- **anthropic-oauth** (default): credentials live in docker volume `forge-claude-oauth`, populated by `forge auth login`. Personal-Mac default; supports Opus 4.7 via Claude Pro.
-
-The vault's DEC-006 (host file mount) does NOT work on macOS — Claude Code stores OAuth in the keychain there. The named-volume approach replaces it for forge.
-
-## File layout
-
-```
-src/
-├── cli/            CLI entry + commands (new, next, gate, show, status, auth, backlog, invoke, watch, route, ...)
-├── v2/             YAML-driven runner: dispatch, spawn, next, gate, reconcile, loader, compose, constraints, docs-impact
-├── store/          SQLite schema + accessors per table (runs, tasks, events, gates, verdicts, model-calls)
-├── raci/           Routing policy: RACI parse/compile, route validate/explain, propose/apply, governance
-├── ops/            Operational incident detection + repair (orphan reconcile candidates)
-├── notify/         Milestone notifications: ntfy + twilio delivery, consent, formatting
-├── backlog/        Backlog accessors: structured + legacy parse, serialize, config
-├── types/          Authoritative TypeScript types (matches the sketch)
-└── util/           paths, ids, creds, auth-profiles, git-root, run-lock, heartbeats
-
-seeds/              Agent dirs, constraints, workflows, runtimes → ~/.forge/ via install-seeds.sh;
-                    agent-protocols/ has no flat copy — only forge upgrade publishes it (FG-654)
-docker/             Agent image
-docs/               How-tos and concepts
-learnings/          ADRs and patterns for forge itself
-```
-
-## What not to touch without a learnings entry
-
-- The state-machine status values in `tasks.status` (`pending|running|awaiting_gate|awaiting_red|complete|failed|blocked_by_red`). Adding a new status is a schema change and an ADR.
-- The verdict aggregation rule in `gate.ts`: pass if all reds pass; fail if any authoritative; inconclusive otherwise. Specialist fails warn but don't block without rationale.
-- The Docker invocation pattern in `spawn.ts`. Read DEC-004 (orchestrator on host, agents in containers), DEC-005 (Ubuntu base), DEC-006 (OAuth file mount), DEC-009 (UID 1000) before changing any of it.
-- **Don't add a designer agent that runs Pencil headlessly.** FORGE-DEC-014 documents three independent reasons this fails in Pencil 0.2.5. Design runs via `forge design` — a tracked host-side session the user drives interactively with Pencil MCP. Revisit only if Pencil ships auto-save AND a headless persistence path.
-
-## Documentation
-
-`README.md` is one-screen orientation. `docs/quick-start.md` is end-to-end. The `how-to-*.md` files cover starting each workflow type, adding new agents/workflows, and writing/running tests (`docs/how-to-testing.md`). `docs/concepts.md` is the glossary.
-
-If you change a CLI flag or rename a primitive, update the relevant doc in the same commit.
 
 <!-- forge:orchestrator-start -->
 
@@ -127,7 +75,7 @@ You behave like a tech lead in a dev team. The user is the product owner; you co
 - Session handoff notes and very small status notes
 - Routing instructions / task briefs (the prompts you author *for* agents)
 - Temporary scratch notes and drafts you create as session artifacts
-- **Orchestrator-policy surfaces** — this template (`seeds/orchestrator-template.md`) and the marker-managed orchestrator block in `CLAUDE.md`. These are your own operating rules; you author them directly. Edit the SEED, then re-render with **`forge-dev upgrade`** — **not** `forge upgrade` (the maintainer can't run the re-render and skips hand-authored CLAUDE.md regions — FG-347). Since FG-577 the installer resolves the template from **the forge that is executing**, so from a promoted release `forge upgrade` installs the RELEASE's template and your seed edit silently does not land. `forge-dev` always runs the live checkout, so it is correct in both modes.
+- **Orchestrator-policy surfaces** — this template (`seeds/orchestrator-template.md`) and the marker-managed orchestrator block in `CLAUDE.md`. These are your own operating rules; you author them directly. Edit the SEED, then re-render with **`forge-dev upgrade`** — **not** `forge upgrade` (the maintainer can't run the re-render, and declines `CLAUDE.md` entirely because of the rendered block — which is why FG-253 relocated the repo's descriptive prose out to the maintainer-owned `docs/repo-guide.md` rather than teaching it to edit around markers; FG-347). Since FG-577 the installer resolves the template from **the forge that is executing**, so from a promoted release `forge upgrade` installs the RELEASE's template and your seed edit silently does not land. `forge-dev` always runs the live checkout, so it is correct in both modes.
 
 **Routes to the documentation-maintainer** (durable operator-/engineer-facing prose):
 - `docs/**` — concepts, how-tos, quick-start, operator guides

@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-07
+**Last revised:** 2026-08-09
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -18,20 +18,13 @@ pending dependency — see the retirement rule at the end.
 
 ## Current objective
 
-**FG-688 — a terminally-failed ordered wave has no adopt-preserving re-drive.**
-Promoted 2026-08-07 by operator decision, on its third reproduction. FG-576's build
-wave lost one child to `result_missing`; that terminated the fanout parent
-`prerequisite_blocked` with EIGHT of nine children already completed and merged
-(+12,685 lines, including the single heaviest step). `forge recover --re-drive`
-would have discarded all of it — `recover.ts:498-508` says so in its own comment —
-so the work was salvaged by hand instead.
-
-The same incident exposed a second defect in the same surface: the read-only
-inspector RECOMMENDS `--re-drive`, but `performReDrive` refuses unless the failure
-kind is `fanout_wave_orphaned`, which `prerequisite_blocked` is not. Following
-forge's own printed advice is refused. Treat both as ONE gap: recovery cannot
-preserve completed ordered-wave work, and the surface advising the operator does
-not know what the recovery path will accept.
+**FG-253 — provider-neutral orientation and handoff adapters.** Promoted
+2026-08-09 by operator decision, TEMPORARILY ahead of FG-688: a fresh Codex
+dogfood found no installed orientation workflow at all, because the orientation
+and handoff semantics exist only as Claude-shaped prose and nothing installs an
+equivalent surface for any other provider. Getting a session oriented is
+upstream of the recovery work, so the adapter ticket goes first; FG-688 keeps
+its promotion and resumes as the objective once FG-253 ships.
 
 ## Recently completed
 
@@ -48,12 +41,23 @@ not know what the recovery path will accept.
 
 ## Now
 
-1. **FG-688 — adopt-preserving re-drive for a terminally-failed ordered wave**, plus the
-   inspector recommending a verb its own failure-kind guard rejects. One gap, two halves.
+1. **FG-253 — provider-neutral orientation and handoff adapters**, defined once over the
+   Forge-owned CLI and state primitives and rendered per provider, with a CLI-only fallback
+   where no provider surface applies.
 
 ## Next
 
-1. **FG-682 — a correction found after the docs stage has no supported amendment path.**
+1. **FG-688 — adopt-preserving re-drive for a terminally-failed ordered wave**, plus the
+   inspector recommending a verb its own failure-kind guard rejects. One gap, two halves.
+   Promoted 2026-08-07 on its third reproduction: FG-576's build wave lost one child to
+   `result_missing`, which terminated the fanout parent `prerequisite_blocked` with EIGHT of
+   nine children already completed and merged, and `forge recover --re-drive` would have
+   discarded all of it — `recover.ts:498-508` says so in its own comment — so that work was
+   salvaged by hand. The second half is the same surface lying about itself: the read-only
+   inspector RECOMMENDS `--re-drive`, but `performReDrive` refuses unless the failure kind is
+   `fanout_wave_orphaned`, which `prerequisite_blocked` is not. Displaced by FG-253 only for
+   sequencing; nothing about it was descoped.
+2. **FG-682 — a correction found after the docs stage has no supported amendment path.**
    No longer theoretical: FG-576 hit it and paid a documented tip-equality override, and
    re-running shipping refused `blocked_environment (candidate_not_checked_out)`. Scoped as
    a BOUNDED late amendment, never a general re-anchor: declared paths only, undeclared
@@ -61,13 +65,13 @@ not know what the recovery path will accept.
    verification invalidated and CI required at the new candidate, plus a bounded delta
    check rather than full re-discovery. Adjacent to FG-688 — both are review/recovery
    control-plane gaps.
-2. **FG-681 — the host integration tier is broadly red on darwin while CI is green** (~76
+3. **FG-681 — the host integration tier is broadly red on darwin while CI is green** (~76
    tests across 13+ files; the dominant signature is a pre-container refusal, not assertion
    drift). Root-cause the shared harness from the smallest `fg381` and largest `fg628`
    reproductions; do not patch, skip or allowlist individual symptoms. Newly urgent: three
    of FG-576's five defects were darwin-only and invisible to CI and to the Linux agent
    containers, so the split is now costing real defects rather than only noise.
-3. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA contrast),
+4. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA contrast),
    now also carrying the FG-576 finding that dashboard orchestrator rows are mouse-only.
 
 `Next` is deliberately short. Ordering here expresses current operator intent;

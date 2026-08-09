@@ -34,12 +34,20 @@
 // this taxonomy; fg578-ownership-agreement.test.ts fails if the installer's
 // AUTHORED_EXEMPT ever disagrees with it.
 
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
+import { basename, join, relative } from "node:path";
 import { CLAUDE_SKILLS_DIR, FORGE_HOME } from "../util/paths.js";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
 import { inspectAgentProtocols, type ProtocolInspectOptions } from "./agent-protocol.js";
+import { currentAdapterStamp } from "./adapter-stamp.js";
+import {
+  parseAdapterMarker,
+  type AdapterStamp,
+  type OperatorWorkflowId,
+} from "./operator-workflows.js";
+import { renderClaudeCommands } from "./render-claude-commands.js";
+import { renderCodexSkills } from "./render-codex-skills.js";
 
 export type SeedStatus = "current" | "drifted" | "missing";
 
@@ -266,5 +274,253 @@ export function renderSeedDrift(report: SeedDriftReport): string {
     lines.push("  refresh them and this warning will persist while your edits stand. If the drift is unintended,");
     lines.push(`  diff against ${defaultRepoSeedsDir()} and merge by hand.`);
   }
+  return lines.join("\n");
+}
+
+// ─── project-scoped operator adapters (FG-253) ──────────────────────────────
+//
+// The orientation/handoff adapters forge renders into a PROJECT — the Claude
+// slash commands and the Codex repository-scoped skills. They are a third root
+// alongside `forge-home` and `claude-skills`, and they reuse the SAME
+// {ownership × coupling} vocabulary the seed taxonomy above is built on rather
+// than starting a second one:
+//
+//   forge-owned + prose — a stale orientation adapter is MISLEADING GUIDANCE, not
+//   a silent mis-run. It reads as a [warn] that `forge upgrade` genuinely
+//   converges (ownership decides the remedy), and readiness stays a function of
+//   COUPLING, so prose-only adapter drift never moves doctor's exit code.
+//
+// They get their OWN report rather than entries in SeedDriftReport for one
+// reason: SeedDriftReport measures $FORGE_HOME against seeds/ on this host, and
+// its remedy prose says so. These live in whatever project doctor was invoked in,
+// have no seeds/ source at all (their baseline is RENDERED), and a foreign file at
+// an adapter path is the operator's — three claims the seed section cannot make
+// without lying about the other half of its own report.
+
+/** Which provider surface an adapter path belongs to. */
+export type ProjectAdapterSurface = "claude-code" | "codex";
+
+/** What is at an adapter path, decided from the BYTES ON DISK and nothing else —
+ *  never from a record of what forge previously wrote, because projects are cloned
+ *  and forge is reinstalled at new paths.
+ *
+ *  `operator-owned` is the load-bearing one: an unmarked file at an adapter path is
+ *  a deliberate project override. It is reported, never named as drift forge will
+ *  fix, and never listed under the `forge upgrade` remedy. */
+export type ProjectAdapterStatus =
+  /** rendered bytes for THIS release are installed. */
+  | "current"
+  /** carries the forge marker, but the bytes are not this release's. */
+  | "drifted"
+  /** nothing at the path. */
+  | "missing"
+  /** forge's own pre-FG-253 symlink into scripts/claude-commands/ — forge's to migrate. */
+  | "legacy-symlink"
+  /** present, no forge marker (or unreadable): the operator's file. */
+  | "operator-owned";
+
+export type ProjectAdapterEntry = {
+  surface: ProjectAdapterSurface;
+  workflow: OperatorWorkflowId;
+  /** repo-relative, POSIX-separated — the same identity the renderers export. */
+  path: string;
+  status: ProjectAdapterStatus;
+  ownership: SeedOwnership;
+  coupling: SeedCoupling;
+  /** the stamp carried by the bytes on disk; null when absent or unmarked. */
+  stamp: AdapterStamp | null;
+  /** why this entry reads the way it does, when the status alone does not say. */
+  detail?: string;
+};
+
+export type ProjectAdapterReport = {
+  /** the ONE project this report describes. doctor runs with projectDir: cwd(),
+   *  so it can honestly report this project and nothing else. */
+  projectDir: string;
+  /** the stamp the running release renders adapters with. */
+  expectedStamp: AdapterStamp;
+  entries: ProjectAdapterEntry[];
+  /** the actionable subset: every entry whose status is not "current". */
+  stale: ProjectAdapterEntry[];
+  /** Readiness, keyed on COUPLING exactly as detectSeedDrift's is. Adapters are
+   *  prose, so this is true even when they are stale — a stale orientation adapter
+   *  misleads a session, it does not silently mis-run one. Computed rather than
+   *  hardcoded so the rule stays the taxonomy's, not this call site's. */
+  ok: boolean;
+};
+
+/** forge's own pre-FG-253 artifact: an ABSOLUTE, now-DANGLING symlink into the
+ *  release's `scripts/claude-commands/<name>.md`.
+ *
+ *  Exported so the installer's migration and this detector share one predicate — a
+ *  project whose adapters upgrade converges must not be reported here as the
+ *  operator's, and a link the installer replaces must not be reported here as theirs.
+ *
+ *  ALL THREE CONDITIONS ARE LOAD-BEARING, and the tail alone is not one of them. The
+ *  tail is necessary because the head is whatever path forge happened to be installed
+ *  at when the link was made, so it cannot be checked. But a tail match is not
+ *  ownership: an operator's own link into an unrelated tree that happens to end
+ *  `/scripts/claude-commands/orient.md` is theirs, and classifying it as forge's
+ *  legacy artifact hands forge a directory entry it never created. So:
+ *
+ *   - ABSOLUTE: the pre-FG-253 installer resolved its source module-relative and
+ *     symlinked the absolute result. A relative link at an adapter path was written by
+ *     somebody else.
+ *   - DANGLING: forge deleted `scripts/claude-commands/` when this ticket replaced the
+ *     symlinks with rendered bytes, so the legacy link's target does not exist in any
+ *     forge tree on any host — that is the state the migration exists to clear. A link
+ *     that RESOLVES is pointing at real bytes somebody maintains; forge replacing that
+ *     directory entry would take an operator's live link away from them. Refusing here
+ *     costs only a reported override the operator can clear by deleting the link;
+ *     accepting costs them the link, which is the invariant this predicate guards. */
+export function isLegacyForgeSlashCommandLink(linkTarget: string, fileName: string): boolean {
+  if (!linkTarget.startsWith("/")) return false;
+  if (!linkTarget.endsWith(`/scripts/claude-commands/${fileName}`)) return false;
+  // existsSync FOLLOWS the link target's own components, which is what "does this
+  // resolve to something" means here.
+  return !existsSync(linkTarget);
+}
+
+/** Re-exported, not reimplemented: this detector and the installer that writes the
+ *  bytes it judges must resolve the stamp with the SAME function. See
+ *  ./adapter-stamp.ts for what happened when they each had their own. */
+export { currentAdapterStamp };
+
+type AdapterBaseline = { surface: ProjectAdapterSurface; workflow: OperatorWorkflowId; path: string; bytes: string };
+
+/** What this release WOULD install, from the one producer each surface has. The
+ *  installer, this detector and the launch-boundary check therefore cannot
+ *  disagree about what "installed and current" means. */
+export function projectAdapterBaseline(stamp: AdapterStamp): readonly AdapterBaseline[] {
+  return [
+    ...renderClaudeCommands(stamp).map((c) => ({
+      surface: "claude-code" as const,
+      workflow: c.workflow,
+      path: c.path,
+      bytes: c.bytes,
+    })),
+    ...renderCodexSkills(stamp).map((s) => ({
+      surface: "codex" as const,
+      workflow: s.workflow,
+      path: s.path,
+      bytes: s.contents,
+    })),
+  ];
+}
+
+function inspectOne(projectDir: string, base: AdapterBaseline): ProjectAdapterEntry {
+  const absolute = join(projectDir, ...base.path.split("/"));
+  const forgeOwned = (status: ProjectAdapterStatus, stamp: AdapterStamp | null, detail?: string): ProjectAdapterEntry => ({
+    surface: base.surface,
+    workflow: base.workflow,
+    path: base.path,
+    status,
+    ownership: "forge-owned",
+    coupling: "prose",
+    stamp,
+    ...(detail ? { detail } : {}),
+  });
+  const theirs = (detail: string): ProjectAdapterEntry => ({
+    surface: base.surface,
+    workflow: base.workflow,
+    path: base.path,
+    status: "operator-owned",
+    ownership: "operator-authored",
+    coupling: "prose",
+    stamp: null,
+    detail,
+  });
+
+  // lstat, never stat: a dangling symlink must read as the link it is, not as an
+  // absence forge would then write over.
+  let st;
+  try {
+    st = lstatSync(absolute);
+  } catch {
+    return forgeOwned("missing", null);
+  }
+
+  if (st.isSymbolicLink()) {
+    let linkTarget = "";
+    try {
+      linkTarget = readlinkSync(absolute);
+    } catch {
+      /* unreadable link — falls through to the operator-owned branch below */
+    }
+    // Claude-surface only, exactly as the installer's migration is: forge never wrote
+    // a symlink on any other surface, so a link there is somebody else's by definition.
+    if (linkTarget && base.surface === "claude-code" && isLegacyForgeSlashCommandLink(linkTarget, basename(base.path))) {
+      return forgeOwned("legacy-symlink", null, `symlink → ${linkTarget}`);
+    }
+    // forge renders BYTES now and never writes a symlink, so any other link at an
+    // adapter path was put there by somebody else. Reported, never overwritten.
+    return theirs(linkTarget ? `symlink → ${linkTarget}` : "unreadable symlink");
+  }
+
+  if (!st.isFile()) return theirs(`not a regular file`);
+
+  let bytes: string;
+  try {
+    bytes = readFileSync(absolute, "utf8");
+  } catch (e) {
+    // Bytes forge cannot even READ are bytes it cannot honestly claim to converge.
+    return theirs(`unreadable: ${(e as Error).message}`);
+  }
+
+  const stamp = parseAdapterMarker(bytes);
+  if (stamp === null) return theirs("no forge ownership marker");
+  if (bytes === base.bytes) return forgeOwned("current", stamp);
+  return forgeOwned("drifted", stamp);
+}
+
+/** Inspect one project's adapter files: installed? marked? which stamp? foreign?
+ *  Exported for the launch boundary (FG-253 step 8), which asks the same question
+ *  against the generation a launch actually resolved rather than against the
+ *  running release — hence `stamp` is a parameter, not an assumption. */
+export function inspectProjectAdapters(
+  projectDir: string,
+  stamp: AdapterStamp = currentAdapterStamp(),
+): ProjectAdapterEntry[] {
+  return projectAdapterBaseline(stamp).map((base) => inspectOne(projectDir, base));
+}
+
+export function detectProjectAdapterDrift(
+  projectDir: string,
+  stamp: AdapterStamp = currentAdapterStamp(),
+): ProjectAdapterReport {
+  const entries = inspectProjectAdapters(projectDir, stamp);
+  const stale = entries.filter((e) => e.status !== "current");
+  return { projectDir, expectedStamp: stamp, entries, stale, ok: !stale.some((e) => e.coupling === "executable") };
+}
+
+/** Human-readable project-adapter section. Empty when every adapter is current,
+ *  so doctor prints nothing when there is nothing to say. */
+export function renderProjectAdapterDrift(report: ProjectAdapterReport): string {
+  if (report.stale.length === 0) return "";
+  const lines: string[] = [`Project orientation/handoff adapters (this project only — ${report.projectDir}):`];
+  for (const e of report.stale) {
+    // Same rule as renderSeedDrift: the mark derives from COUPLING. Adapters are
+    // prose, so a stale one warns and never fails readiness.
+    const mark = e.coupling === "executable" ? "FAIL" : "warn";
+    const detail = e.detail ? ` — ${e.detail}` : e.stamp && e.stamp !== report.expectedStamp ? ` — stamp ${e.stamp}` : "";
+    lines.push(`  [${mark}] ${e.status.padEnd(14)} ${e.path}${detail}`);
+  }
+  // The remedy names ONLY what forge converges. An operator's own /orient must
+  // never appear under a "forge upgrade fixes this" line: forge will not touch it,
+  // and a remedy that converges nothing is the defect FG-578 removed from the seed
+  // half of this report.
+  const converges = report.stale.filter((e) => e.ownership === "forge-owned").map((e) => e.path);
+  if (converges.length > 0) {
+    lines.push(`  Forge-owned adapters above are not this release's (stamp ${report.expectedStamp}).`);
+    lines.push(`  Fix: forge upgrade (or forge init) in ${report.projectDir} — converges: ${converges.join(", ")}.`);
+  }
+  const theirs = report.stale.filter((e) => e.ownership === "operator-authored").map((e) => e.path);
+  if (theirs.length > 0) {
+    lines.push(`  These carry no forge ownership marker, so they are YOURS: ${theirs.join(", ")}.`);
+    lines.push("  forge never overwrites them and forge upgrade will NOT converge them, so this line persists while");
+    lines.push("  your files stand. To hand one back to forge, delete it and re-run forge init.");
+  }
+  lines.push("  Installed is not active: these bytes on disk are not evidence the provider loaded them.");
+  lines.push(`  Scope: only the project forge was invoked in (${report.projectDir}) — no other checkout on this host was read.`);
   return lines.join("\n");
 }

@@ -20,8 +20,11 @@ import { closeDb } from "../store/db.js";
 import { persistPendingOrchestratorReceipt } from "../store/orchestrator-receipts.js";
 import { resolveOrchestratorLaunch, type OrchestratorDecision, type OrchestratorSessionOperation } from "../v2/orchestrator-resolve.js";
 import type { AuthProbe } from "../v2/provider-doctor.js";
+import { currentAdapterStamp } from "../cli/commands/init.js";
+import { projectAdapterBaseline } from "../v2/seed-drift.js";
 import {
   buildClaudeChildEnv,
+  claudeAdapterGenerationAdvisories,
   claudeProjectPreflight,
   createClaudeAdapter,
   resolveClaudeBedrockProfile,
@@ -463,4 +466,80 @@ test("integ FG-576: the plan's advisories are warnings only — a half-configure
   assert.ok(planned.ok, "advisory preflight findings must never block a launch (FG-499)");
   assert.ok(planned.plan.advisories.length > 0);
   assert.equal(existsSync(join(projectDir, ".claude")), false, "preflight must not create anything it warns about");
+});
+
+// ---------------------------------------------------------------------------
+// FG-253 step 8 — the preflight's adapter check, after the symlink model is gone
+// ---------------------------------------------------------------------------
+//
+// The check this replaces looked for a DANGLING SYMLINK at .claude/commands/<id>.md,
+// because that is what the pre-FG-253 install was. Step 4 installs materialized bytes,
+// so on a forge install that condition is now unreachable: the old warning is a check
+// that can only pass, which is indistinguishable from a check that works. These
+// exercise the live signal that took its place.
+
+/** Install what this release renders for `stamp`, from the same producer the
+ *  installer uses, so the fixture cannot drift from `forge init`. */
+function installAdapters(stamp: string): void {
+  for (const base of projectAdapterBaseline(stamp)) {
+    const target = join(projectDir, ...base.path.split("/"));
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, base.bytes, "utf8");
+  }
+}
+
+test("integ FG-253: a bytes install of the resolved generation produces no adapter advisory at all", () => {
+  const stamp = currentAdapterStamp();
+  installAdapters(stamp);
+
+  assert.deepEqual(claudeAdapterGenerationAdvisories(projectDir, stamp), []);
+
+  // And specifically NOT the dead one: there is no symlink here to dangle.
+  const warnings = claudeProjectPreflight(projectDir, stamp).join("\n");
+  assert.doesNotMatch(warnings, /repoint/i);
+  assert.doesNotMatch(warnings, /target missing/i);
+});
+
+test("integ FG-253: adapters from another generation are named with BOTH stamps and remain advisory", () => {
+  const other = "release-fg253-othergen-0001";
+  installAdapters(other);
+  const resolved = currentAdapterStamp();
+
+  const warnings = claudeAdapterGenerationAdvisories(projectDir, resolved);
+  const joined = warnings.join("\n");
+  assert.match(joined, new RegExp(other.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(joined, new RegExp(resolved.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(joined, /\.claude\/commands\/orient\.md/);
+  assert.match(joined, /\.claude\/commands\/handoff\.md/);
+
+  // Advisory means advisory: a split project still produces a plan.
+  const planned = planLaunch(adapterWithHelp(HELP_WITH_FILE_FLAG), contextFor(decisionFor()));
+  assert.ok(planned.ok, "an adapter generation split must never refuse a launch");
+  assert.ok(planned.plan.limitations.some((l) => l.capability === "operator-adapters"));
+});
+
+test("integ FG-253: the advisory claims installation only — a written file is never called activation", () => {
+  installAdapters("release-fg253-othergen-0001");
+
+  const lines = claudeAdapterGenerationAdvisories(projectDir, currentAdapterStamp());
+  const disclaimer = "Installed is not active: bytes on disk are not evidence this session loaded them.";
+  assert.ok(lines.includes(disclaimer), lines.join("\n"));
+
+  // The ONLY line allowed to use activation vocabulary is the one that denies it. This
+  // path observes nothing but the filesystem — forge runs no skill-discovery probe on
+  // either adapter — so any other mention would be a claim it has no evidence for.
+  for (const line of lines.filter((l) => l !== disclaimer)) {
+    assert.doesNotMatch(line, /\b(active|activated|loaded|in effect)\b/i, line);
+  }
+});
+
+test("integ FG-253: an unmarked file at an adapter path is reported as the operator's, not as forge's to fix", () => {
+  const mine = join(projectDir, ".claude", "commands", "orient.md");
+  mkdirSync(dirname(mine), { recursive: true });
+  writeFileSync(mine, "# mine\n", "utf8");
+
+  const joined = claudeAdapterGenerationAdvisories(projectDir, currentAdapterStamp()).join("\n");
+  assert.match(joined, /no forge ownership marker/);
+  assert.match(joined, /never overwrites/);
+  assert.equal(readFileSync(mine, "utf8"), "# mine\n", "the preflight is a read — it must change nothing");
 });

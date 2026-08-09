@@ -16,12 +16,23 @@ import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.
 import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
 import { validateRoutePolicyFile } from "./route.js";
-import { detectSeedDrift, renderSeedDrift, detectProtocolDrift, renderProtocolDrift } from "../../v2/seed-drift.js";
-import { inspectSeedInstall } from "../../v2/seed-generation.js";
+import {
+  detectSeedDrift,
+  renderSeedDrift,
+  detectProtocolDrift,
+  renderProtocolDrift,
+  detectProjectAdapterDrift,
+  renderProjectAdapterDrift,
+  type SeedDriftReport,
+  type ProtocolDriftReport,
+  type ProjectAdapterReport,
+} from "../../v2/seed-drift.js";
+import { inspectSeedInstall, type SeedInstallState } from "../../v2/seed-generation.js";
 import {
   buildReleaseReport,
   renderReleaseReport,
   type ReleaseInputs,
+  type ReleaseReport,
   type CliInputs,
   type AuthInputs,
   type ImageInputs,
@@ -291,46 +302,95 @@ export function gatherReleaseInputs(
   };
 }
 
+/** Everything `forge doctor` gathered, before it is rendered. Split out so the
+ *  human section, the --json payload and the exit code are three pure functions of
+ *  ONE value — a doctor whose JSON and prose could report different things is a
+ *  doctor a script and an operator can disagree about. */
+export type DoctorFindings = {
+  report: ReleaseReport;
+  seedDrift: SeedDriftReport;
+  protocolDrift: ProtocolDriftReport;
+  seedInstall: SeedInstallState;
+  /** FG-253: the orientation/handoff adapters in the project doctor was invoked in. */
+  projectAdapters: ProjectAdapterReport;
+};
+
+export function gatherDoctorFindings(projectDir: string = process.cwd(), imageName = DEFAULT_IMAGE): DoctorFindings {
+  return {
+    report: buildReleaseReport(gatherReleaseInputs(imageName, { projectDir })),
+    seedDrift: detectSeedDrift(), // FG-335: installed ~/.forge seeds vs running code
+    // FG-654: the Forge-owned protocol, read out of the published seed generation.
+    // Separate from `seedDrift` on purpose — the operator's own agent prose stays a warn
+    // while an unresolvable protocol is a readiness fail, because dispatch refuses on it.
+    protocolDrift: detectProtocolDrift(),
+    // FG-583: dispatch reads ONLY a published seed generation — there is no flat
+    // dispatch fallback. So ONLY `healthy` (a complete generation is published) is
+    // ready. `incomplete` (torn/mid-publish) AND `no-generation` (nothing published
+    // — a fresh/pre-migration host) are both NAMED not-ready readiness findings with
+    // the `forge upgrade` remedy: on either, dispatch refuses at the loader.
+    seedInstall: inspectSeedInstall(),
+    // FG-253: doctor already runs with projectDir: cwd(), so this is honestly ONE
+    // project's adapters — the rendered section says so rather than reading as a
+    // host-wide inventory.
+    projectAdapters: detectProjectAdapterDrift(projectDir),
+  };
+}
+
+export function doctorJson(f: DoctorFindings): unknown {
+  return {
+    ...f.report,
+    seedDrift: f.seedDrift,
+    protocolDrift: f.protocolDrift,
+    seedInstall: f.seedInstall,
+    projectAdapters: f.projectAdapters,
+  };
+}
+
+export function renderDoctor(f: DoctorFindings): string {
+  const out: string[] = [renderReleaseReport(f.report)];
+  const push = (section: string): void => {
+    if (section) out.push(`\n${section}`);
+  };
+  push(renderSeedDrift(f.seedDrift));
+  push(renderProtocolDrift(f.protocolDrift));
+  push(renderProjectAdapterDrift(f.projectAdapters));
+  if (f.seedInstall.kind === "incomplete") {
+    out.push(
+      `\nSeed install: INCOMPLETE (repairable) — ${f.seedInstall.reason}\n` +
+        `  A partial host-seed install can expose a mixed/torn workflow set — dispatch refuses.\n` +
+        `  Fix: forge upgrade (republishes a complete atomic seed generation).`,
+    );
+  } else if (f.seedInstall.kind === "no-generation") {
+    out.push(
+      `\nSeed install: NOT INSTALLED — no complete seed generation is published for this $FORGE_HOME.\n` +
+        `  Dispatch refuses until a generation is published; the flat pre-migration layout is never dispatched.\n` +
+        `  Fix: forge upgrade (publishes a complete atomic seed generation).`,
+    );
+  }
+  return out.join("\n");
+}
+
+/** FG-654: protocolDrift.ok joins the readiness conjunction. A covered role whose
+ *  protocol does not resolve is a host that cannot review, so it goes red here even
+ *  though the operator's own agent prose stays a warn via seedDrift.ok.
+ *  FG-253: projectAdapters.ok is keyed on COUPLING like every other member — adapters
+ *  are prose, so adapter drift alone never moves the exit code. It is in the
+ *  conjunction structurally rather than omitted, so the day an adapter becomes
+ *  executable the readiness follows without anyone remembering to add it. */
+export function doctorReady(f: DoctorFindings): boolean {
+  return (
+    f.report.ok && f.seedDrift.ok && f.protocolDrift.ok && f.projectAdapters.ok && f.seedInstall.kind === "healthy"
+  );
+}
+
 export function registerDoctor(program: Command): void {
   program
     .command("doctor")
     .description("Read-only release-readiness check: agent image, in-image runtime CLIs, provider auth, model/routing policy")
     .option("--json", "emit JSON instead of a human summary")
     .action((opts: { json?: boolean }) => {
-      const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
-      const drift = detectSeedDrift(); // FG-335: installed ~/.forge seeds vs running code
-      // FG-654: the Forge-owned protocol, read out of the published seed generation.
-      // Separate from `drift` on purpose — the operator's own agent prose stays a warn
-      // while an unresolvable protocol is a readiness fail, because dispatch refuses on it.
-      const protocolDrift = detectProtocolDrift();
-      // FG-583: dispatch reads ONLY a published seed generation — there is no flat
-      // dispatch fallback. So ONLY `healthy` (a complete generation is published) is
-      // ready. `incomplete` (torn/mid-publish) AND `no-generation` (nothing published
-      // — a fresh/pre-migration host) are both NAMED not-ready readiness findings with
-      // the `forge upgrade` remedy: on either, dispatch refuses at the loader.
-      const seedInstall = inspectSeedInstall();
-      const seedInstallOk = seedInstall.kind === "healthy";
-      if (opts.json) {
-        console.log(JSON.stringify({ ...report, seedDrift: drift, protocolDrift, seedInstall }, null, 2));
-      } else {
-        console.log(renderReleaseReport(report));
-        const driftSection = renderSeedDrift(drift);
-        if (driftSection) console.log(`\n${driftSection}`);
-        const protocolSection = renderProtocolDrift(protocolDrift);
-        if (protocolSection) console.log(`\n${protocolSection}`);
-        if (seedInstall.kind === "incomplete") {
-          console.log(`\nSeed install: INCOMPLETE (repairable) — ${seedInstall.reason}`);
-          console.log(`  A partial host-seed install can expose a mixed/torn workflow set — dispatch refuses.`);
-          console.log(`  Fix: forge upgrade (republishes a complete atomic seed generation).`);
-        } else if (seedInstall.kind === "no-generation") {
-          console.log(`\nSeed install: NOT INSTALLED — no complete seed generation is published for this $FORGE_HOME.`);
-          console.log(`  Dispatch refuses until a generation is published; the flat pre-migration layout is never dispatched.`);
-          console.log(`  Fix: forge upgrade (publishes a complete atomic seed generation).`);
-        }
-      }
-      // FG-654: protocolDrift.ok joins the readiness conjunction. A covered role whose
-      // protocol does not resolve is a host that cannot review, so it goes red here even
-      // though the operator's own agent prose stays a warn via drift.ok.
-      process.exitCode = report.ok && drift.ok && protocolDrift.ok && seedInstallOk ? 0 : 1;
+      const findings = gatherDoctorFindings(process.cwd());
+      console.log(opts.json ? JSON.stringify(doctorJson(findings), null, 2) : renderDoctor(findings));
+      process.exitCode = doctorReady(findings) ? 0 : 1;
     });
 }

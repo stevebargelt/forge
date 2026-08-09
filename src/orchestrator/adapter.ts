@@ -229,6 +229,19 @@ export type OrchestratorAdapter = {
 
   declareInstructionCarrier(ctx: AdapterLaunchContext, readiness: AdapterReadiness): AdapterCarrier;
 
+  /** The asset root that RENDERED the Forge-owned instruction surface this launch
+   *  bound, when that is not the running assets. Null (or an adapter that does not
+   *  implement it) means the running assets, which is the default the launcher assumes.
+   *
+   *  This exists because the two adapters answer differently and the launch-boundary
+   *  generation check (FG-253 step 8) must judge the project against the forge this
+   *  session is ACTUALLY bound to. Claude reads the running tree's
+   *  `seeds/orchestrator-template.md`, so it declares nothing. Codex binds out of the
+   *  PUBLISHED seed generation, which a failed or deferred publication leaves behind
+   *  the running release — and a drift report that compares against the running assets
+   *  in that state reports agreement the session does not have. */
+  declareBoundAssetRoot?(readiness: AdapterReadiness): string | null;
+
   /** The adapter's CAPABILITY, from the parity matrix — what it can do at best, not
    *  what this particular launch achieved. */
   declareSessionIdentityStrength(): AdapterIdentityCapability;

@@ -169,7 +169,13 @@ test("FG-576 AC9: Codex's named gaps are NOT smoothed over — every one of its 
 test("FG-576: skills/commands, hooks, usage evidence and remote control are each named as Codex gaps, not smoothed over", () => {
   // The step's own required-coverage list, checked by literal phrase rather than by
   // capability id, because these are the specific promises AC15 makes to the reader.
-  assert.match(launcherDoc, /no equivalent surface/i, "no statement that Codex has no skills/slash-command equivalent");
+  //
+  // FG-253 moved the skills-commands cell off `unsupported` onto `partial` — Codex now
+  // gets rendered repository-scoped skills — so the doc's gap-statement changed from "no
+  // equivalent surface" to "installed is not active": activation is unverified, never
+  // claimed, because repository-scoped skill discovery is version-coupled and an older
+  // Codex build ignores the directory silently.
+  assert.match(launcherDoc, /activation is[^.]*unverified/i, "no statement that Codex skill/command activation is unverified");
   assert.match(launcherDoc, /no hook/i, "no statement that Codex supplies no heartbeat/interaction hook");
   assert.match(launcherDoc, /no equivalent authoritative usage evidence/i, "no statement that Codex exposes no usage evidence");
   assert.match(launcherDoc, /no remote-control link is captured/i, "no statement that Codex gets no remote-control link");

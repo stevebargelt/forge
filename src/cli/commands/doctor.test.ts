@@ -7,13 +7,33 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { gatherPolicy, gatherProfileAuth, gatherReleaseInputs, newestBuildInputMtime, type DoctorProbes } from "./doctor.js";
-import { buildReleaseReport, type ImageInputs } from "../../v2/release-doctor.js";
+import { dirname, join } from "node:path";
+import {
+  doctorJson,
+  doctorReady,
+  registerDoctor,
+  gatherPolicy,
+  gatherProfileAuth,
+  gatherReleaseInputs,
+  newestBuildInputMtime,
+  renderDoctor,
+  type DoctorFindings,
+  type DoctorProbes,
+} from "./doctor.js";
+import { buildReleaseReport, type ImageInputs, type ReleaseReport } from "../../v2/release-doctor.js";
+import { Command } from "commander";
 import { assetRoot } from "../../v2/asset-root.js";
-import { detectProtocolDrift, renderProtocolDrift, detectSeedDrift, renderSeedDrift } from "../../v2/seed-drift.js";
+import {
+  currentAdapterStamp,
+  detectProtocolDrift,
+  renderProtocolDrift,
+  detectSeedDrift,
+  renderSeedDrift,
+  detectProjectAdapterDrift,
+  projectAdapterBaseline,
+} from "../../v2/seed-drift.js";
 import { protocolRelPath } from "../../v2/agent-protocol.js";
 import { publishTestGeneration } from "../../v2/seed-generation.testkit.js";
 
@@ -400,4 +420,189 @@ test("FG-654: OPERATOR-side prose in ~/.forge/agents stays a warn — readiness 
   assert.equal(entry?.coupling, "prose", "the file as a whole is still prose-coupled → warn");
   assert.match(renderSeedDrift(seedDrift), /\[warn\]\s+drifted\s+agents\/red-wide/);
   rmSync(home, { recursive: true, force: true });
+});
+
+// ─────────── FG-253: the project-adapter section in `forge doctor` ───────────
+//
+// doctor already runs with projectDir: process.cwd(), so it can honestly report the
+// adapters of the project it was invoked in and nothing else. These tests drive the
+// three pure faces of the command (human section, --json payload, exit code) over a
+// synthetic findings value, so no host state and no docker are involved.
+
+const OK_REPORT: ReleaseReport = { checks: [{ name: "probe", status: "ok", detail: "fine" }], ok: true };
+
+function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
+  return {
+    report: OK_REPORT,
+    seedDrift: { entries: [], stale: [], ok: true },
+    protocolDrift: { entries: [], stale: [], ok: true },
+    seedInstall: { kind: "healthy", generation: "/tmp/gen" },
+    projectAdapters: { projectDir: "/tmp/p", expectedStamp: "release-x", entries: [], stale: [], ok: true },
+    ...over,
+  };
+}
+
+// realpathSync because one of these tests chdir's into the fixture and compares
+// the dir against what doctor read from process.cwd(). On darwin os.tmpdir() is
+// /var/folders/... — a symlink to /private/var/folders/... — so the raw mkdtemp
+// path does not survive a chdir round-trip and the equality assertion fails on
+// the host while passing in a Linux container.
+function adapterProject(): { dir: string; cleanup: () => void } {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg253-doctor-proj-")));
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("FG-253 doctor: no project-adapter section when every adapter is current", () => {
+  const { dir, cleanup } = adapterProject();
+  try {
+    const stamp = "release-abc1234-deadbeef";
+    for (const base of projectAdapterBaseline(stamp)) {
+      const abs = join(dir, ...base.path.split("/"));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, base.bytes);
+    }
+    const f = findings({ projectAdapters: detectProjectAdapterDrift(dir, stamp) });
+    assert.ok(!renderDoctor(f).includes("Project orientation/handoff adapters"));
+    assert.equal(doctorReady(f), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("FG-253 doctor: a non-current adapter renders a section naming the inspected project", () => {
+  const { dir, cleanup } = adapterProject();
+  try {
+    const f = findings({ projectAdapters: detectProjectAdapterDrift(dir, "release-abc1234-deadbeef") });
+    const human = renderDoctor(f);
+    assert.match(human, /Project orientation\/handoff adapters/);
+    assert.ok(human.includes(dir), "the section names the project doctor inspected");
+    // The release readiness block is still first — the new section is additive.
+    assert.match(human, /^Release readiness:/);
+  } finally {
+    cleanup();
+  }
+});
+
+// Readiness is keyed on COUPLING for every member of the conjunction. Adapters are
+// prose, so a project with none installed is still a ready host: an exit code that
+// fired on missing project adapters would fire forever on every project that owns
+// its own /orient, which is noise, not signal.
+test("FG-253 doctor: prose-only adapter drift does not move the exit code", () => {
+  const { dir, cleanup } = adapterProject();
+  try {
+    const adapters = detectProjectAdapterDrift(dir, "release-abc1234-deadbeef");
+    assert.ok(adapters.stale.length > 0, "fixture precondition: the adapters are absent");
+    assert.equal(doctorReady(findings({ projectAdapters: adapters })), true);
+    // ... and the conjunction is structural, not omitted: an executable-coupled
+    // adapter WOULD move it, so the rule follows the taxonomy rather than a comment.
+    assert.equal(doctorReady(findings({ projectAdapters: { ...adapters, ok: false } })), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("FG-253 doctor --json: carries the same adapter entries the human section renders", () => {
+  const { dir, cleanup } = adapterProject();
+  try {
+    const adapters = detectProjectAdapterDrift(dir, "release-abc1234-deadbeef");
+    const f = findings({ projectAdapters: adapters });
+    const payload = JSON.parse(JSON.stringify(doctorJson(f))) as { projectAdapters: typeof adapters };
+    assert.deepEqual(payload.projectAdapters, JSON.parse(JSON.stringify(adapters)));
+    const human = renderDoctor(f);
+    for (const e of payload.projectAdapters.stale) {
+      assert.ok(human.includes(e.path), `${e.path} appears in both the JSON and the human section`);
+    }
+    assert.equal(payload.projectAdapters.projectDir, dir);
+  } finally {
+    cleanup();
+  }
+});
+
+// An operator's own /orient must be visible in BOTH renderings and named in
+// neither remedy — forge declining to clobber a file it does not own is the
+// command working, not a finding to fix.
+test("FG-253 doctor: an operator-owned adapter is reported, and never under a forge upgrade remedy", () => {
+  const { dir, cleanup } = adapterProject();
+  try {
+    const stamp = "release-abc1234-deadbeef";
+    for (const base of projectAdapterBaseline(stamp)) {
+      const abs = join(dir, ...base.path.split("/"));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, base.bytes);
+    }
+    const mine = projectAdapterBaseline(stamp)[0]!.path;
+    writeFileSync(join(dir, ...mine.split("/")), "# mine\n");
+
+    const adapters = detectProjectAdapterDrift(dir, stamp);
+    const f = findings({ projectAdapters: adapters });
+    const human = renderDoctor(f);
+    assert.ok(human.includes(mine));
+    for (const line of human.split("\n").filter((l) => l.includes("forge upgrade"))) {
+      assert.ok(!line.includes(mine), `operator-owned file named in a remedy: ${line}`);
+    }
+    assert.equal(doctorReady(f), true);
+    const payload = doctorJson(f) as { projectAdapters: typeof adapters };
+    assert.equal(payload.projectAdapters.entries.find((e) => e.path === mine)?.ownership, "operator-authored");
+  } finally {
+    cleanup();
+  }
+});
+
+// The acceptance is about `forge doctor`, not only its pure faces — so drive the
+// REAL registered action (same shape as fg583-doctor-seed-install), with cwd
+// pointed at a disposable project. Docker probes fail gracefully in-container; the
+// adapter assertions are independent of the image/policy checks. Operates only on
+// the disposable $FORGE_HOME from src/test-setup.ts.
+async function runRegisteredDoctor(cwd: string, args: string[]): Promise<{ out: string; exitCode: number | undefined }> {
+  const program = new Command();
+  program.exitOverride();
+  registerDoctor(program);
+  const lines: string[] = [];
+  const realLog = console.log;
+  const savedExit = process.exitCode;
+  const savedCwd = process.cwd();
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+  process.exitCode = undefined;
+  process.chdir(cwd);
+  try {
+    await program.parseAsync(["node", "forge", "doctor", ...args]);
+    return { out: lines.join("\n"), exitCode: process.exitCode };
+  } finally {
+    process.chdir(savedCwd);
+    console.log = realLog;
+    process.exitCode = savedExit;
+  }
+}
+
+test("FG-253 `forge doctor`: the real action reports THIS project's adapters, human and --json alike", async () => {
+  const { dir, cleanup } = adapterProject();
+  try {
+    const human = await runRegisteredDoctor(dir, []);
+    assert.match(human.out, /Project orientation\/handoff adapters/);
+    assert.ok(human.out.includes(dir), "the section names the project doctor was invoked in");
+    assert.match(human.out, /no other checkout on this host was read/);
+
+    const json = await runRegisteredDoctor(dir, ["--json"]);
+    const payload = JSON.parse(json.out) as {
+      projectAdapters: { projectDir: string; entries: Array<{ path: string; status: string }> };
+    };
+    assert.equal(payload.projectAdapters.projectDir, dir);
+    for (const e of payload.projectAdapters.entries) {
+      assert.equal(e.status, "missing");
+      assert.ok(human.out.includes(e.path), `${e.path} is in both renderings`);
+    }
+    // Installing exactly what this release renders silences the section entirely.
+    for (const base of projectAdapterBaseline(currentAdapterStamp())) {
+      const abs = join(dir, ...base.path.split("/"));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, base.bytes);
+    }
+    const after = await runRegisteredDoctor(dir, []);
+    assert.ok(!after.out.includes("Project orientation/handoff adapters"));
+    // Adapter state never moved the exit code in either direction: readiness is a
+    // function of coupling, and these are prose.
+    assert.equal(after.exitCode, human.exitCode);
+  } finally {
+    cleanup();
+  }
 });

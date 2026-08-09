@@ -564,6 +564,14 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): Orchestrator
       };
     },
 
+    declareBoundAssetRoot(readiness: AdapterReadiness): string | null {
+      // The release that rendered the generation this session's carrier came from —
+      // recorded by probeReadiness from the generation's own provenance manifest, not
+      // re-resolved here, so the answer describes the carrier actually bound rather
+      // than whatever the `current` pointer says by the time the plan is assembled.
+      return readiness.evidence["carrierRelease"] ?? null;
+    },
+
     declareSessionIdentityStrength() {
       return "correlated";
     },
