@@ -8,7 +8,8 @@
 //
 //   - the suite FILENAMES (a rename or a delete-plus-add keeps `length >= 5`);
 //   - the per-file test counts (deleting three tests from one suite and adding three
-//     elsewhere keeps `total >= 18`);
+//     elsewhere keeps `total >= 18`) — declared once, in browser-tier-census.ts, which
+//     both this pin and the fail-first behavior proof read;
 //   - every `chromium.launch()` in the tier takes its `executablePath` from the
 //     shared resolver — the launch site is where a private path would come back;
 //   - no tier file reads a CHROME-ish env var directly (the resolver owns
@@ -20,81 +21,77 @@
 // The remaining way to re-darken the tier — calling the resolver and then SWALLOWING
 // its precondition — is not decidable from a text scan, so it is proven by behavior
 // instead: dashboard/src/fg642-browser-tier-fail-first.integration.test.ts runs the
-// real tier with the override pointed at nothing and requires 18 failures, 0 skips.
+// real tier with the override pointed at nothing and requires every one of the tier's
+// tests to fail with 0 skips. That "every" is the same census this file uses — see
+// browser-tier-census.ts for why the number lives in exactly one place now.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  DECLARED_TIER_SUITES,
+  DECLARED_TIER_TOTAL,
+  TIER_TESTS,
+  countTierTests,
+  tierSource,
+  tierSuites as tierFiles,
+  tierTestTotal,
+} from "./browser-tier-census.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const TIER_DIR = join(ROOT, "dashboard", "browser-tests");
 const RESOLVER = join("src", "util", "chrome-bin.ts");
-
-// The tier as FG-642 restored it (5 suites, 18 tests), plus the two FG-648 runtime
-// suites — `agent-runtime` grown by the FG-648 review fixes to cover the weekly
-// resolution, the width band a viewport breakpoint left illegible, contrast,
-// reduced motion, the error state, out-of-order responses and the role write-back;
-// `agent-runtime-legibility` added by the reopened ticket's verify phase to attack
-// AC8-AC10 (axis truthfulness at the scale edges, mean-and-count pairing swept
-// across twelve widths, UTC disclosure on the plot rather than only the caption).
-// FG-661 then added one test to `agent-runtime` for the stale-read affordance
-// (RF-15) and re-pointed the timezone tests in both suites at the Local/UTC toggle.
-// FG-591 then added `fg591-queue-board` (6 tests): the operator work-queue board as an
-// operator drives it — a real browser drag-reorder that reaches the durable rank through
-// the CLI, the same move by keyboard, a stale-version refusal surfaced rather than
-// swallowed, a not-ready enqueue's concrete refinement proposal on screen, blocked vs.
-// waiting-to-overlap kept visibly distinct, and the CLI-only dispatcher panel.
-// FG-679 added `fg679-current-activity` (9 tests): the rendered Current activity
-// surface — three distinct sections, the four BD-4 launch statuses as four distinct
-// strings, `unobserved since <t>`, per-context required CI, old-sha evidence
-// disappearing, and the no-host-path/read-only guarantees.
-// FG-694 grew that suite to 12: the compact hierarchy under the reported historical
-// noise, and one test per malformed-payload depth AC7 has to survive in a real
-// browser — a null AGENT entry (RF-3) and a null CI CONTEXT inside a valid-looking
-// observation (RF-5). Both used to throw mid-render, which leaves the operator a
-// blank surface rather than the unavailable state and its Retry.
-// Growing or pruning the tier is fine — update this map in the same commit, on purpose.
-const TIER_TESTS: Readonly<Record<string, number>> = {
-  "agent-runtime-legibility.test.ts": 12,
-  "agent-runtime.test.ts": 18,
-  "backlog-count.test.ts": 2,
-  "fg591-queue-board.test.ts": 6,
-  "fg679-current-activity.test.ts": 12,
-  "fg608-backlog-cutover.test.ts": 3,
-  "inactive-checkouts.test.ts": 3,
-  "offline-boot.test.ts": 2,
-  "usage-limits.test.ts": 8,
-};
-
-const tierFiles = (): string[] => readdirSync(TIER_DIR).filter((f) => f.endsWith(".test.ts")).sort();
-const tierSource = (file: string): string => readFileSync(join(TIER_DIR, file), "utf8");
+const CENSUS = join("src", "util", "browser-tier-census.ts");
+const FAIL_FIRST = join("dashboard", "src", "fg642-browser-tier-fail-first.integration.test.ts");
+const SELF = join("src", "util", "fg642-browser-tier-consistency.test.ts");
 
 test("FG-642 (exact set): the browser tier is exactly the suites TIER_TESTS names", () => {
   assert.deepEqual(
     tierFiles(),
-    Object.keys(TIER_TESTS).sort(),
+    DECLARED_TIER_SUITES,
     "the tier's suite set must match exactly — a `>= 5` bound lets a suite be renamed away or deleted alongside an addition, which is precisely how this tier's coverage went missing before"
   );
 });
 
-test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 66", () => {
-  let total = 0;
+test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps every declared test", () => {
+  const found = countTierTests();
   for (const [file, expected] of Object.entries(TIER_TESTS)) {
-    const found = (tierSource(file).match(/^test\(/gm) ?? []).length;
     assert.equal(
-      found,
+      found[file],
       expected,
-      `${file} declares ${found} top-level tests, expected ${expected} — if the tier legitimately changed, update TIER_TESTS in the same commit so the change is deliberate rather than silent`
+      `${file} declares ${found[file]} top-level tests, expected ${expected} — if the tier legitimately changed, update TIER_TESTS in ${CENSUS} in the same commit so the change is deliberate rather than silent`
     );
-    total += found;
   }
   assert.equal(
-    total,
-    66,
-    "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added, FG-679's 10 (plus FG-694/RF-3's malformed-entry render and FG-694/RF-5's malformed-context render) and FG-591's 6"
+    tierTestTotal(),
+    DECLARED_TIER_TOTAL,
+    `the tier carries ${tierTestTotal()} real-browser tests but ${CENSUS} declares ${DECLARED_TIER_TOTAL} — the declaration is the tripwire, so move it deliberately`
   );
+});
+
+// FG-694: the count above and the one the fail-first proof needs used to be two
+// hand-kept literals in two files. Adding the FG-694 browser tests moved one of them,
+// nobody knew the other existed, and CI went red on the stale copy. This is the guard
+// that the coupling is gone: the number is DERIVED from the tier in both places, so
+// adding a browser test edits exactly one thing — TIER_TESTS.
+test("FG-694 (one source of truth): both browser-tier guards derive the count from the census — neither restates it", () => {
+  const total = tierTestTotal();
+  for (const rel of [SELF, FAIL_FIRST]) {
+    const src = readFileSync(join(ROOT, rel), "utf8");
+    assert.match(
+      src,
+      /from "[^"]*browser-tier-census\.js"/,
+      `${rel} guards the browser tier's size but does not read ${CENSUS} — a second, hand-synchronised copy of the count is the defect FG-694 hit`
+    );
+    // Prose is exempt: both files narrate the tier's history, and a count named in a
+    // comment is not a second thing to keep in sync. Code is not exempt.
+    assert.doesNotMatch(
+      src.replace(/^\s*\/\/.*$/gm, ""),
+      new RegExp(`\\b${total}\\b`),
+      `${rel} restates the tier's test count (${total}) as a literal — it must derive it from ${CENSUS} (or by counting the tier), so a new browser test never has to be reflected in two files`
+    );
+  }
 });
 
 test("FG-642 (launch site): every chromium.launch() in the tier takes executablePath from the shared resolver", () => {

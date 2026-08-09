@@ -23,13 +23,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWN_CHROME_LOCATIONS } from "../../src/util/chrome-bin.js";
+import { DECLARED_TIER_SUITES, tierSuites, tierTestTotal } from "../../src/util/browser-tier-census.js";
 
 const DASHBOARD = join(dirname(fileURLToPath(import.meta.url)), "..");
-const TIER_DIR = join(DASHBOARD, "browser-tests");
 const BOGUS = "/nonexistent/forge-fg642/deliberately-absent/chromium";
 
 /** node:test marks its own children with NODE_TEST_CONTEXT, and a runner that sees it
@@ -49,8 +49,12 @@ function total(output: string, label: string): number {
 }
 
 test("FG-642: a Chrome-less run of the real browser tier FAILS every test with the named precondition — it never skips to green", () => {
-  const suites = readdirSync(TIER_DIR).filter((f) => f.endsWith(".test.ts")).sort();
-  assert.equal(suites.length, 9, `the tier must be its nine suites (found ${suites.join(", ")})`);
+  const suites = tierSuites();
+  assert.deepEqual(
+    suites,
+    DECLARED_TIER_SUITES,
+    "this proof must spawn the whole declared tier — a suite missing from the run is a suite whose Chrome-less behavior nothing here proves"
+  );
 
   assert.ok(!existsSync(BOGUS), "the override must point at a path that genuinely does not exist");
   const realChrome = KNOWN_CHROME_LOCATIONS.find(existsSync);
@@ -85,10 +89,13 @@ test("FG-642: a Chrome-less run of the real browser tier FAILS every test with t
   assert.ok(output.includes("Set FORGE_CHROME_BIN to its path"), "the failure must name the remedy");
   assert.ok(output.includes("must FAIL this tier, never skip to green"), "the failure must name the rule it enforces");
 
-  // Every one of the 64 tests is RED and none is skipped — a file-wide `before` hook
-  // failure, not one gating test with 59 passes behind it.
-  assert.equal(total(output, "tests"), 64, "all 64 tier tests must be accounted for");
-  assert.equal(total(output, "fail"), 64, "every tier test must fail without a browser");
+  // Every test in the tier is RED and none is skipped — a file-wide `before` hook
+  // failure, not one gating test with the rest passing behind it. The size comes from
+  // counting the tier (src/util/browser-tier-census.ts); this file used to pin its own
+  // literal, FG-694 grew the tier, and this copy is the one that went stale.
+  const expected = tierTestTotal();
+  assert.equal(total(output, "tests"), expected, `all ${expected} tier tests must be accounted for`);
+  assert.equal(total(output, "fail"), expected, "every tier test must fail without a browser");
   assert.equal(total(output, "pass"), 0, "no tier test may pass without a browser");
   assert.equal(total(output, "skipped"), 0, "a skip is the exact regression FG-642 closed — the tier must go red, not quiet");
   assert.equal(total(output, "todo"), 0);
