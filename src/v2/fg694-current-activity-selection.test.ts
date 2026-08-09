@@ -497,6 +497,112 @@ describe("FG-694 RF-4 — a terminal REVIEW retires its observation even while t
   });
 });
 
+describe("FG-694 (post-ship) — TICKET CLOSURE retires a review that never reached a terminal state", () => {
+  // The residue the live reproduction after d55a29aa found, and the reason the two
+  // preceding rules did not catch it: closing a ticket does not drive its review row to
+  // `settled`. Eight rows sat at `verifying` / `rechecking` / `fixing` for tickets that
+  // had SHIPPED, each one holding its (run, project) pair's newest CI observation
+  // current, and Home rendered all eight under `Current activity`.
+  const addTicket = (ticketId: string, status: string, projectKey = "pk-forge"): void => {
+    db.prepare(`
+      INSERT INTO tickets (project_key, ticket_id, type, status, title, body, imported_at)
+      VALUES (?, ?, 'story', ?, ?, '', ?)
+    `).run(projectKey, ticketId, status, `ticket ${ticketId}`, ago(30 * 24 * 3_600_000));
+  };
+
+  test("the reported shape: eight unfinished reviews for CLOSED tickets, one live ticket — only the live one is current", () => {
+    const done = ["FG-686", "FG-576", "MG-51", "FG-591", "FG-689", "FG-584", "FG-685", "FG-610"];
+    const openStates = ["verifying", "rechecking", "fixing", "discovering", "documenting", "shipping_review", "awaiting_disposition", "confirming_contract"];
+    done.forEach((ticket, i) => {
+      const runId = `run-${ticket.toLowerCase()}`;
+      addRun(runId, "active");
+      addTicket(ticket, "done");
+      addReview({ id: `review-${ticket}`, state: openStates[i]!, runId, ticketId: ticket, workspaceDir: PROJECT });
+      addCi({ runId, ticketId: ticket, sha: `${i}`.repeat(2).padEnd(40, "a"), observedAt: ago(2 * 3_600_000 + i * 60_000) });
+    });
+    addRun("run-live", "active");
+    addTicket("FG-694", "active");
+    addReview({ id: "review-live", state: "verifying", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+
+    // Non-vacuous: every one of the nine IS the newest row for its pair, and every
+    // review state above is OPEN by the review vocabulary — neither prior rule excludes them.
+    assert.equal(legacyNewestPerPair(db).length, 9);
+    for (const state of openStates) assert.equal(isTerminalReviewState(state), false, `${state} is an OPEN review state`);
+
+    const activity = deriveCurrentActivity(db, { now: NOW });
+    assert.deepEqual(activity.requiredCi.observations.map((o) => o.ticketId), ["FG-694"]);
+    const rendered = renderCurrentActivityLines(activity).join("\n");
+    for (const ticket of done) assert.doesNotMatch(rendered, new RegExp(ticket), `${ticket} shipped — its CI is history, not current activity`);
+  });
+
+  test("closure retires a ticket-only review too — the shape that records no run", () => {
+    addTicket("FG-694", "done");
+    addReview({ id: "review-standalone", state: "fixing", runId: null, ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: null, ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+    const activity = deriveCurrentActivity(db, { now: NOW });
+    assert.equal(activity.requiredCi.observations.length, 0);
+    // …and the absence it reports is `no current candidate`, never `CI not observed`:
+    // nothing was owed an observation, so claiming one went missing invents an observer.
+    assert.equal(activity.requiredCi.state, "no_current_candidate");
+    assert.equal(activity.requiredCi.label, CI_NO_CANDIDATE_LABEL);
+  });
+
+  test("NOT over-broad: an OPEN ticket's unfinished review still anchors its observation", () => {
+    addRun("run-live", "active");
+    addTicket("FG-694", "active");
+    addReview({ id: "review-live", state: "verifying", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+    assert.deepEqual(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.map((o) => o.candidateSha), [CURRENT_SHA]);
+  });
+
+  test("`deferred` is not closure — deferred work is work nobody is doing, not work that shipped", () => {
+    addRun("run-live", "active");
+    addTicket("FG-694", "deferred");
+    addReview({ id: "review-live", state: "verifying", runId: "run-live", ticketId: "FG-694", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-694", sha: CURRENT_SHA, observedAt: ago(30_000) });
+    assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.length, 1);
+  });
+
+  test("a ticket id ACTIVE in any project is read as open — a cross-project collision surfaces live work rather than hiding it", () => {
+    // `tickets` is keyed by (project_key, ticket_id) and this derivation may not shell
+    // `git` to resolve a project_key from a workspace path, so the id is matched alone.
+    // The conservative direction is the only safe one: retiring a live candidate is a
+    // current wait vanishing, which Home renders as observed absence.
+    addRun("run-live", "active");
+    addTicket("FG-1", "done", "pk-forge");
+    addTicket("FG-1", "active", "pk-other");
+    addReview({ id: "review-live", state: "verifying", runId: "run-live", ticketId: "FG-1", workspaceDir: PROJECT });
+    addCi({ runId: "run-live", ticketId: "FG-1", sha: CURRENT_SHA, observedAt: ago(30_000) });
+    assert.equal(deriveCurrentActivity(db, { now: NOW }).requiredCi.observations.length, 1);
+  });
+
+  test("a store with NO tickets table answers as it always did, rather than throwing", () => {
+    // The read-model fixtures that predate FG-606 carry runs/tasks/events and no
+    // `tickets`. A closure lookup that took the surface down would be a worse defect
+    // than the residue it removes.
+    const aged = makeInMemoryDb();
+    try {
+      aged.exec(`DROP TABLE tickets`);
+      aged.prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-live','feature','live','active',?,?)`)
+        .run(ago(3_600_000), PROJECT);
+      aged.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`)
+        .run("run-live", CI_OBSERVED_EVENT_TYPE, JSON.stringify({
+          attemptId: "attempt-1", ticketId: "FG-694", projectDir: PROJECT, candidateSha: CURRENT_SHA,
+          observedAt: ago(30_000), outcome: "pending", unavailableReason: null,
+          contexts: contexts("pending", ago(30_000)),
+        }), ago(30_000));
+
+      assert.deepEqual(
+        deriveCurrentActivity(aged, { now: NOW }).requiredCi.observations.map((o) => o.candidateSha),
+        [CURRENT_SHA],
+      );
+    } finally {
+      aged.close();
+    }
+  });
+});
+
 describe("FG-694 RF-5/RF-1/RF-3 — the ANCHOR applies the same terminality rule the observation filter does", () => {
   // One defect, reported from three sides. RF-5 is the root cause: `hasCurrentAnchor`
   // counted every active run, a strictly WEAKER test than the observation filter, so a

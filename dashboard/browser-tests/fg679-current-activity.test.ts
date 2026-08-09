@@ -34,6 +34,13 @@
 //     of AC5 — the evidence MOVED, it was not deleted — and this test is what proves
 //     it: every field FG-679 required is still here, one click away.
 //
+// The FG-694 POST-SHIP CORRECTION then moved this panel OFF HOME. Home has one
+// activity surface — `In flight` — and folds only the compact host/CI WAITS into it;
+// what is asserted here is the DIAGNOSTIC panel, which lives on the Activity view.
+// Every BD above still holds of it, unchanged, which is what makes "the evidence moved,
+// it was not deleted" a checkable claim rather than a reassurance. Home's own shape is
+// asserted in fg694-home-in-flight.test.ts.
+//
 // `forge status` (renderCurrentActivityLines) is unchanged and remains the surface
 // where the three sections are a fixed shape read top to bottom.
 
@@ -218,9 +225,17 @@ async function sectionHeadings(page: Page): Promise<string[]> {
   return page.locator("section.current-activity .ca-heading").evaluateAll((els) => els.map((e) => e.textContent ?? ""));
 }
 
+/** The view the `Current activity` panel lives on since the FG-694 post-ship
+ *  correction. It was on Home, above `In flight`; Home now has ONE activity surface and
+ *  folds only the compact waits into it (dashboard/browser-tests/fg694-home-in-flight),
+ *  so the diagnostic panel every assertion here is about renders on Activity. Nothing
+ *  below changed except WHERE it is read — which is exactly what "the evidence moved,
+ *  it was not deleted" has to mean if it means anything. */
+const ACTIVITY_VIEW = "#activity";
+
 async function open(): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 }, reducedMotion: "reduce" });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/${ACTIVITY_VIEW}`);
   await page.locator("section.current-activity").waitFor();
   return page;
 }
@@ -492,7 +507,7 @@ test("FG-694 AC7 (RF-3): a 200 whose ENTRIES are malformed renders the unavailab
     const page = await browser.newPage({ viewport: { width: 1280, height: 1200 }, reducedMotion: "reduce" });
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(String(e)));
-    await page.goto(`${baseUrl}/`);
+    await page.goto(`${baseUrl}/${ACTIVITY_VIEW}`);
     await page.locator("section.current-activity").waitFor();
     await page.locator(".ca-unavailable").waitFor();
 
@@ -535,7 +550,7 @@ test("FG-694 AC7 (RF-5): a 200 whose CI CONTEXTS are malformed renders the unava
     const page = await browser.newPage({ viewport: { width: 1280, height: 1200 }, reducedMotion: "reduce" });
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(String(e)));
-    await page.goto(`${baseUrl}/`);
+    await page.goto(`${baseUrl}/${ACTIVITY_VIEW}`);
     await page.locator("section.current-activity").waitFor();
     await page.locator(".ca-unavailable").waitFor();
 

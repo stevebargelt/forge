@@ -583,6 +583,106 @@ export function homeCiSummaries(section) {
  *
  *  `sections` carries ONLY non-empty sections (AC6): an empty section's heading is
  *  not rendered, because three permanently-empty subsections were the noise. */
+// ──────────────── FG-694 (post-ship correction): Home has ONE activity surface ──────
+//
+// The compact rewrite above still shipped a SECOND top-level panel on Home — `Right
+// now / Current activity` above `In flight` — and the live reproduction after d55a29aa
+// measured it at 810.5px in an 862px viewport: agents duplicated between the two
+// panels, eight historical CI candidates, and every launch carrying its argv and its
+// full identity line. So Home keeps the ONE surface it already had, `In flight`, and
+// what gets folded into it is only what an operator is WAITING ON:
+//
+//   - agents are NOT folded in. They are already there, from /api/in-flight. Rendering
+//     the derivation's `agents` alongside them is the duplication the panel introduced.
+//   - a host launch qualifies only while it is OBSERVED and RUNNING, and only when the
+//     submitter ASSOCIATED it with current work (`--run` / `--task` / `--ticket`).
+//     `exited 143`, `owner gone` and `unobserved since <t>` are dispositions and
+//     history — four distinct facts that still render in full on the diagnostic
+//     surfaces (the Activity view's Current activity panel, and `forge status`), which
+//     is where they are read. An UNASSOCIATED launch — cwd-only or host-level, the
+//     dashboard server itself being the standing example — is running host activity
+//     that nobody is waiting on; it belongs to those same diagnostic surfaces, and
+//     folding it into Home put a permanent row under every operator's In flight.
+//   - a CI candidate qualifies only while checks are PENDING. `CI passed`, `CI failed`
+//     and `CI status unavailable` are outcomes to read on the run/review detail, not
+//     waits to watch on Home.
+//
+// Everything the compact row leaves out — the sha, the per-context states, the check
+// URLs, the observation times, the argv — is unchanged on those surfaces. It is not
+// duplicated onto Home, and it is not deleted anywhere.
+
+/** The copy for a read that FAILED, in the In-flight surface's own terms. Home's
+ *  In-flight section otherwise says only what /api/in-flight observed; without this the
+ *  section would silently imply it had also looked at host launches and required checks
+ *  and found none — the AC7 error, reached through a different surface. */
+export const IN_FLIGHT_WAITS_UNAVAILABLE_LABEL = "Host and CI waits unavailable";
+
+const declared = (v) => typeof v === "string" && v !== "";
+
+/** Did the SUBMITTER associate this launch with current work? The three ids the store
+ *  treats as placement authority (`hasPlacementAuthority`) and no others —
+ *  `campaignId`/`itemId` are provenance there and are provenance here. Read POSITIVELY
+ *  off the declared ids rather than off the `unassociated` label, so a payload that
+ *  omits the label cannot promote a cwd-only launch onto Home by default. */
+export function launchIsAssociatedWait(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  return declared(entry.runId) || declared(entry.taskId) || declared(entry.ticketId);
+}
+
+/** Is this launch something an operator is WAITING ON right now? Three facts, all
+ *  required and all different: `fresh` is about the observer still looking, `running`
+ *  is about the process still going, and the association is about the launch being
+ *  part of the work in flight at all. A stale row is not evidence about now (BD-12), a
+ *  terminal one is history, and an unassociated one is host activity nobody is waiting
+ *  on — a background server started from a cwd is the case that put a permanent row on
+ *  Home. All three still render in full on the diagnostic surfaces. */
+export function launchIsCurrentWait(entry) {
+  if (!launchIsAssociatedWait(entry)) return false;
+  if (entry.observation !== "fresh") return false;
+  const status = entry.status;
+  return status !== null && typeof status === "object" && status.state === "running";
+}
+
+/** How a host-verification wait is NAMED on Home: the ticket it declared, else the
+ *  launch's own name, else its id. Never the argv — a command line is context, and
+ *  dumping it per row is what made the panel taller than the viewport. */
+export function launchWaitIdentity(e) {
+  if (!e || typeof e !== "object") return "";
+  if (typeof e.ticketId === "string" && e.ticketId !== "") return e.ticketId;
+  if (typeof e.name === "string" && e.name !== "") return e.name;
+  return e.launchId;
+}
+
+/** What Home's In-flight surface folds in, as data. Two lists and a failure, and never
+ *  an agent: `agents` is deliberately not read here, so duplication is unrepresentable
+ *  rather than merely avoided. The host-level `unassociated` bucket is not read here
+ *  either, for the same structural reason — it is diagnostic activity, and no rendering
+ *  change can put it back on Home.
+ *
+ *  A read that has not landed yet contributes nothing — In flight already renders what
+ *  /api/in-flight observed, and a surface that says nothing about waits claims nothing
+ *  about them either. A read that FAILED contributes the one honest line it can. */
+export function homeInFlightActivity(load) {
+  const phase = activityPhase(load);
+  if (phase !== "ready") {
+    return {
+      phase,
+      hostVerification: [],
+      ci: [],
+      message: phase === "unavailable" ? IN_FLIGHT_WAITS_UNAVAILABLE_LABEL : null,
+      detail: phase === "unavailable" ? activityUnavailableDetail(load) : null,
+    };
+  }
+  const activity = load.activity;
+  return {
+    phase,
+    hostVerification: activity.hostVerification.filter(launchIsCurrentWait),
+    ci: (homeCiSummaries(activity.requiredCi) ?? []).filter((s) => s.state === "running"),
+    message: null,
+    detail: null,
+  };
+}
+
 export function homeActivityView(load) {
   const phase = activityPhase(load);
   if (phase === "loading") return { phase, message: CURRENT_ACTIVITY_LOADING_LABEL, sections: [], ci: null, empty: false };

@@ -149,11 +149,13 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 1);
   assert.equal(await page.getByRole("heading", { name: "In flight" }).count(), 1);
   assert.equal(await page.getByRole("heading", { name: "Operations" }).count(), 1);
-  // FG-679 added the `Current activity` surface (kicker "Right now") above the task
-  // panel: the three-section Agents / Host verification / Required CI projection that
-  // answers "is something happening?" for work that is not a task row.
-  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Right now", "Tasks", "Forge activity"]);
-  assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 1);
+  // FG-679 added a `Current activity` surface (kicker "Right now") above the task panel.
+  // The FG-694 post-ship correction took it back off Home: two top-level activity
+  // surfaces duplicated every agent between them, and the panel measured 810.5px in an
+  // 862px viewport. Home has ONE — `In flight` — and the compact host/CI waits are rows
+  // inside it. The full panel is on the Activity view, asserted below.
+  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Tasks", "Forge activity"]);
+  assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 0);
   assert.equal(await page.locator(".home-in-flight-group > .in-flight > h2").count(), 0, "Home heading belongs above the panel");
   assert.deepEqual(await page.locator(".home-ops-summary .stat-num").allTextContents(), ["85%", "1157", "2269", "3", "67", "13", "41"]);
   assert.match(await page.locator(".home-ops-summary").innerText(), /30d/);
@@ -169,6 +171,8 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   await page.getByRole("heading", { name: "Recent agent outputs" }).waitFor();
   assert.equal(new URL(page.url()).hash, "#activity");
   assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 0);
+  // …and this is where the panel went. It is off Home, not deleted.
+  assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 1);
 
   await page.getByRole("button", { name: "home", exact: true }).click();
   await page.getByRole("heading", { name: "Plan limits & windows" }).waitFor();
@@ -416,6 +420,21 @@ function createFixtureServer(): Server {
     }
     if (url.pathname === "/api/in-flight") {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inFlightFixture));
+      return;
+    }
+    // A CURRENT server with nothing to wait on. Without it this fixture answers `[]`
+    // for the route, which is a malformed payload — and since FG-694 a failed read is
+    // an explicit row on Home rather than a silent absence, so this suite would be
+    // measuring that row instead of the in-flight work it is about.
+    if (url.pathname === "/api/current-activity") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+        generatedAt: new Date(0).toISOString(),
+        scope: { runId: null, projectDirs: null },
+        agents: [],
+        hostVerification: [],
+        requiredCi: { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
+        unassociated: [],
+      }));
       return;
     }
     if (url.pathname === "/api/projects") {

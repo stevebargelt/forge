@@ -17,3 +17,13 @@ export type CurrentActivityProps = {
 };
 
 export function CurrentActivitySection(props: CurrentActivityProps): unknown;
+
+export type InFlightActivityWaitsProps = {
+  load: ActivityLoad | null | undefined;
+  now: number;
+  onRetry?: (() => void) | undefined;
+};
+
+/** The compact host-verification and required-check waits Home folds into its existing
+ *  `In flight` section. Renders nothing when there is nothing to wait on. */
+export function InFlightActivityWaits(props: InFlightActivityWaitsProps): unknown;

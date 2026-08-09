@@ -32,6 +32,9 @@
 //     (FG-694). "Newest for its (run, project) pair" was never a claim of currency:
 //     a pair whose run completed months ago has a newest row forever, and ten of
 //     them rendered at once under the heading `Current activity` on 2026-08-08.
+//     Nor one whose only anchor is a review of a CLOSED ticket: closure never drives
+//     the review row terminal, so eight unfinished rows for shipped tickets were still
+//     presenting their CI as current after the first fix landed.
 //   - It never consults a launch name, argv, log text, or the quarantined
 //     `forgeIds`. Placement is authorized by the persisted association alone — the
 //     DECLARED submission ids and `project_dir` (BD-2/BD-15).
@@ -86,6 +89,12 @@ export const CI_NO_CANDIDATE_LABEL = "no current CI candidate";
  *  a status this binary does not know reads as "not current" rather than leaking
  *  through a NOT-IN list that predates it. */
 const ACTIVE_RUN_STATUS = "active";
+
+/** The one ticket status that means the work is OVER. The `tickets` CHECK vocabulary
+ *  is exactly active/done/deferred, and only `done` is closure: a deferred ticket is
+ *  work nobody is doing right now, which is not the same as work that shipped, and
+ *  reading it as closure would retire a review an operator may still be driving. */
+const CLOSED_TICKET_STATUS = "done";
 
 /** Review terminality is NOT enumerated here. It is a property of the review state
  *  vocabulary, so it is decided at the one place that vocabulary is defined
@@ -418,6 +427,36 @@ function reviewColumns(db: DatabaseInstance): ReadonlySet<string> {
   return new Set((db.prepare(`PRAGMA table_info(reviews)`).all() as Array<{ name: string }>).map((c) => c.name));
 }
 
+/** Ticket ids this host records as CLOSED, and nothing else.
+ *
+ *  FG-694 (post-ship correction): a review row is not driven to `settled` by ticket
+ *  closure — an operator closes the ticket and the row stays `verifying` forever. Those
+ *  rows are the anchors the live reproduction found: eight historical CI candidates,
+ *  each held current by an unfinished review of a ticket that shipped weeks ago. So
+ *  closure retires the review, the way a terminal review state does.
+ *
+ *  Matched on the ticket id ALONE, across every project row that carries it, and
+ *  deliberately in the CONSERVATIVE direction: the id is closed only when EVERY row for
+ *  it says `done`. `tickets` is keyed by (project_key, ticket_id) and this module cannot
+ *  resolve a project_key from a workspace path without shelling `git`, which it may not
+ *  do (BD-7/BD-18). One row still active is therefore read as open — a collision between
+ *  two projects' `FG-1` surfaces live work rather than hiding it, which is the direction
+ *  every FG-694 rule leans. */
+function readClosedTicketIds(db: DatabaseInstance): ReadonlySet<string> {
+  // PRAGMA on a missing table returns zero rows rather than throwing (db.ts's
+  // shape-probe rule), so this doubles as the table-existence check: `tickets` is an
+  // FG-606 table and the read-model fixtures that predate it carry no such table.
+  const cols = new Set((db.prepare(`PRAGMA table_info(tickets)`).all() as Array<{ name: string }>).map((c) => c.name));
+  if (!cols.has("ticket_id") || !cols.has("status")) return new Set();
+  const rows = db.prepare(`
+    SELECT ticket_id
+      FROM tickets
+     GROUP BY ticket_id
+    HAVING SUM(CASE WHEN status = ? THEN 0 ELSE 1 END) = 0
+  `).all(CLOSED_TICKET_STATUS) as Array<{ ticket_id: string | null }>;
+  return new Set(rows.map((r) => r.ticket_id).filter((id): id is string => id !== null && id !== ""));
+}
+
 function readCiCurrency(db: DatabaseInstance): CiCurrency {
   const activeRuns = db.prepare(`
     SELECT id, project_dir FROM runs WHERE status = ?
@@ -437,11 +476,19 @@ function readCiCurrency(db: DatabaseInstance): CiCurrency {
         SELECT run_id, ticket_id, workspace_dir, state FROM reviews
       `).all() as Array<{ run_id: string | null; ticket_id: string | null; workspace_dir: string | null; state: string | null }>)
     : [];
+  const closedTickets = readClosedTicketIds(db);
   const openReviews: ReviewAnchor[] = [];
   const terminalReviews: ReviewAnchor[] = [];
   for (const r of reviewRows) {
     const anchor: ReviewAnchor = { runId: r.run_id, ticketId: r.ticket_id, workspaceDir: r.workspace_dir };
-    (isTerminalReviewState(r.state ?? "") ? terminalReviews : openReviews).push(anchor);
+    // TWO ways a review stops anchoring current work, and neither implies the other. A
+    // terminal STATE is the review saying it is over. A closed TICKET is the operator
+    // saying the work is over — and the review row is never driven to a terminal state
+    // by that, so an unfinished row for a shipped ticket kept its CI observation current
+    // indefinitely. Closure is the second answer, not a substitute for the first.
+    const over = isTerminalReviewState(r.state ?? "")
+      || (r.ticket_id !== null && r.ticket_id !== "" && closedTickets.has(r.ticket_id));
+    (over ? terminalReviews : openReviews).push(anchor);
   }
 
   const activeRunIds = new Set(activeRuns.map((r) => r.id));

@@ -15,8 +15,8 @@ import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
 } from "./verification-render.js";
-import { ACTIVITY_LOADING, createActivityReader } from "./current-activity-render.js";
-import { CurrentActivitySection } from "./current-activity-view.js";
+import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
+import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
 import { formatDuration } from "./duration.js";
 
 const html = htm.bind(h);
@@ -584,7 +584,6 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
         refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
-      <${CurrentActivitySection} load=${activityLoad} now=${now} onTaskClick=${onTaskClick} onRetry=${onRetryActivity} />
       <div class="home-in-flight-group">
         <div class="home-section-heading">
           <div>
@@ -602,6 +601,8 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
           onTaskClick=${onTaskClick}
           showHeading=${false}
           labelledBy="home-in-flight-heading"
+          activityLoad=${activityLoad}
+          onRetryActivity=${onRetryActivity}
         />
       </div>
       <section class="home-ops-summary" aria-labelledby="home-ops-heading">
@@ -1474,7 +1475,12 @@ function OrchestratorRow({ entry, onTaskClick }) {
   `;
 }
 
-function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null }) {
+// `activityLoad` is supplied ONLY by Home (FG-694 post-ship correction): Home has one
+// activity surface, so the compact host-verification and required-check waits are rows
+// in this section rather than a second top-level panel above it. The Activity view
+// passes none — it renders the full `Current activity` diagnostic panel instead, and
+// showing the same waits twice on one page is the duplication this correction removes.
+function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null, activityLoad = null, onRetryActivity = null }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
   const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
   // FG-576 (AC7): "N orchestrators active" counts LIVENESS, not a DB row. A task
@@ -1501,7 +1507,12 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   const knownRunIds = new Set(inFlight.map((t) => t.runId));
   const standalone = (verifications || []).filter((v) => !v.runId || !knownRunIds.has(v.runId));
 
-  const nothingLive = work.length === 0 && activeOrchestrators.length === 0 && standalone.length === 0;
+  // The waits are live rows too, so `No live tasks.` may not be printed over them.
+  const waits = activityLoad ? homeInFlightActivity(activityLoad) : null;
+  const anyWaits = waits !== null
+    && (waits.hostVerification.length > 0 || waits.ci.length > 0 || waits.message !== null);
+
+  const nothingLive = work.length === 0 && activeOrchestrators.length === 0 && standalone.length === 0 && !anyWaits;
 
   return html`
     <section class="in-flight" aria-labelledby=${labelledBy || undefined}>
@@ -1529,6 +1540,9 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
         ? (standalone.length > 0 ? null : html`<div class="empty">No agent work in flight.</div>`)
         : work.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} reviewLoopPhase=${phaseByRunId.get(t.runId)} onClick=${() => onTaskClick(t.taskId)} />`)
       }
+      ${activityLoad
+        ? html`<${InFlightActivityWaits} load=${activityLoad} now=${now} onRetry=${onRetryActivity} />`
+        : null}
     </section>
   `;
 }
