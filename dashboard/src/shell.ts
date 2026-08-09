@@ -533,7 +533,35 @@ section.current-activity { margin-top: 28px; }
   color: var(--fg-dim);
   border-bottom: 1px solid var(--border);
 }
-.ca-empty { padding: 12px 14px; color: var(--fg-faint); font-style: italic; }
+/* FG-694 — Home says one thing at a time. Loading, "Nothing currently running." and
+   "Current activity unavailable" are three MUTUALLY EXCLUSIVE states; the pre-fix
+   surface rendered its loading line alongside three empty sections and so said all
+   of them at once. There is no empty-section style any more, because an empty
+   section does not render (AC6). */
+.ca-loading, .ca-nothing { padding: 12px 14px; color: var(--fg-faint); font-style: italic; }
+.ca-unavailable {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  margin-top: 10px;
+}
+.ca-unavailable-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ca-unavailable-detail { margin-top: 4px; font-size: 12px; color: var(--fg-dim); }
+.ca-retry {
+  flex: none;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ca-retry:hover { border-color: var(--accent); }
+.ca-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ca-section .item.ca-row {
   display: grid;
   grid-template-columns: minmax(0, auto) 1fr auto;
@@ -558,6 +586,32 @@ section.current-activity { margin-top: 28px; }
   color: var(--fg-dim);
 }
 .ca-sha { word-break: break-all; }
+
+/* FG-694 AC4/AC5 — the compact CI line and the drill-down that keeps the evidence.
+   A native <details>: the disclosure is keyboard-operable and announced without a
+   hand-rolled aria-expanded that can drift out of sync with the state it names. The
+   marker is kept (and given a visible focus ring) because a disclosure nobody can
+   see is a detail nobody reaches. */
+.ca-ci-item { border-bottom: 1px solid var(--border); }
+.ca-ci-item:last-child { border-bottom: none; }
+.ca-ci-summary { padding: 10px 14px; cursor: pointer; list-style-position: inside; }
+.ca-ci-summary::marker { color: var(--fg-dim); font-size: 11px; }
+.ca-ci-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ca-ci-summary:hover { background: rgba(154, 154, 163, 0.06); }
+.ca-ci-line { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+.ca-ci-detail-text { color: var(--fg-dim); font-size: 12px; }
+.ca-ci-evidence { padding: 0 14px 12px 14px; }
+.ca-ci-candidate { font-size: 11px; display: flex; flex-wrap: wrap; gap: 8px; }
+.ca-ci-observed { color: var(--fg-faint); }
+/* One class per compact state. The unavailable state is deliberately not coloured as
+   a failure: not knowing is not a red check. */
+.badge.ci-compact-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.badge.ci-compact-failed { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.ci-compact-passed { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.badge.ci-compact-not_started { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.ci-compact-not_running { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.ci-compact-unavailable { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+
 .ca-ci-contexts { margin-top: 4px; display: flex; flex-direction: column; gap: 3px; }
 .ca-ci-context { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 11px; }
 .ca-ctx-name { color: var(--fg); }

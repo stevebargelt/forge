@@ -20,6 +20,22 @@
 // Screenshots of the populated, empty and stale states are written to
 // FG679_SCREENSHOT_DIR (default: the OS temp dir) and named in the assertions'
 // failure output, so the visual change is attachable.
+//
+// FG-694 (wave B) RESHAPED HOME, and this suite moved with it — every BD above is
+// still asserted, through the surface as it is now:
+//
+//   - an EMPTY section does not render at all (AC6), so the assertions read the
+//     sections that exist rather than counting on three fixed slots. `No agent task
+//     in flight.` is gone from Home on purpose; it is a claim Home now only makes by
+//     saying `Nothing currently running.` after a successful read.
+//   - a current CI candidate is ONE compact line (AC4); the exact sha, the per-context
+//     state, the check URLs and the observation times are behind a <details>
+//     disclosure. So the BD-5 assertions OPEN the disclosure first. That is the point
+//     of AC5 — the evidence MOVED, it was not deleted — and this test is what proves
+//     it: every field FG-679 required is still here, one click away.
+//
+// `forge status` (renderCurrentActivityLines) is unchanged and remains the surface
+// where the three sections are a fixed shape read top to bottom.
 
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
@@ -100,12 +116,18 @@ const base = (over: Partial<Activity>): Activity => ({
   scope: { runId: "run-fg679", projectDirs: null },
   agents: over.agents ?? [],
   hostVerification: over.hostVerification ?? [],
-  requiredCi: over.requiredCi ?? { state: "not_observed", label: "CI not observed", observations: [] },
+  // FG-694: the honest default for a fixture that declares no CI at all is "nothing
+  // in scope could be waiting on required checks" — not "we observed no CI", which
+  // is a claim about an observer that was never asked.
+  requiredCi: over.requiredCi ?? { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
   unassociated: over.unassociated ?? [],
 });
 
 /** The payload the fixture server serves for /api/current-activity. */
 let served: Activity = base({});
+/** FG-694 AC7: the STATUS the fixture answers with. 404 is the reproduced version
+ *  skew — a dashboard server that predates the route. */
+let currentActivityStatus = 200;
 
 let server: Server;
 let browser: Browser;
@@ -138,7 +160,15 @@ async function open(): Promise<Page> {
   return page;
 }
 
-test("FG-679 BD-1: ONE Current activity surface with three DISTINCT sections; a host launch renders under Host verification and NO agent reads as running", async () => {
+/** FG-694: the per-context evidence lives behind a disclosure. Opening it is what an
+ *  operator does to diagnose, and what AC5 says must still be possible. */
+async function openCiDetails(page: Page): Promise<void> {
+  await page.locator(".ca-ci-summary").first().waitFor();
+  await page.locator("details.ca-ci-item").evaluateAll((els) => els.forEach((e) => ((e as HTMLDetailsElement).open = true)));
+  await page.locator(".ca-ci-evidence").first().waitFor();
+}
+
+test("FG-679 BD-1: ONE Current activity surface with DISTINCT sections; a host launch renders under Host verification and NO agent reads as running", async () => {
   served = base({ hostVerification: [launch({ launchId: "launch-worktree-8pagjk" })] });
   const page = await open();
 
@@ -146,19 +176,23 @@ test("FG-679 BD-1: ONE Current activity surface with three DISTINCT sections; a 
   // textContent, not innerText: the shell uppercases headings via CSS
   // `text-transform`, and the assertion is about the words the surface carries.
   assert.equal(await page.locator("#current-activity-heading").textContent(), "Current activity");
-  assert.deepEqual(await sectionHeadings(page), ["Agents", "Host verification", "Required CI"], "three distinct sections, in order");
+  // FG-694 AC6: only the POPULATED section renders. The launch is host verification
+  // and is labeled as such — that is BD-1's claim, and it does not need two empty
+  // siblings to make it.
+  assert.deepEqual(await sectionHeadings(page), ["Host verification"]);
 
-  // The launch is under Host verification — and only there.
-  const hostSection = page.locator("section.current-activity section.ca-section").nth(1);
+  const hostSection = page.locator("section.current-activity section.ca-section").first();
   await hostSection.locator(".ca-launch-row").first().waitFor();
   assert.match(await hostSection.innerText(), /launch-worktree-8pagjk/);
   assert.match(await hostSection.innerText(), /npm run test:worktree/);
 
-  // The Agents section says so explicitly rather than being silently empty, and NO
-  // agent task is rendered as running.
-  const agentSection = page.locator("section.current-activity section.ca-section").nth(0);
-  assert.match(await agentSection.innerText(), /No agent task in flight\./);
-  assert.equal(await agentSection.locator(".ca-row").count(), 0);
+  // NO agent task is rendered as running — a launch is never represented as one.
+  assert.equal(await page.locator(".ca-agent-row").count(), 0);
+  // …and Home does not claim it LOOKED and found no agent, either: with a launch in
+  // flight there is nothing to say about agents (FG-694 AC6/AC7).
+  const surface = await page.locator("section.current-activity").innerText();
+  assert.doesNotMatch(surface, /No agent task in flight/);
+  assert.doesNotMatch(surface, /Nothing currently running/, "something IS running");
 
   await page.screenshot({ path: join(SHOTS, "fg679-populated.png"), fullPage: true });
   await page.close();
@@ -167,7 +201,7 @@ test("FG-679 BD-1: ONE Current activity surface with three DISTINCT sections; a 
 test("FG-679 BD-4: four launch statuses render four DISTINCT strings, byte-identical to statusLine, and NONE is a generic `failed` badge", async () => {
   served = base({ hostVerification: FOUR.map((f) => launch({ launchId: f.id, status: f.status as never })) });
   const page = await open();
-  const hostSection = page.locator("section.current-activity section.ca-section").nth(1);
+  const hostSection = page.locator("section.current-activity section.ca-section").first();
   await hostSection.locator(".ca-launch-row").nth(3).waitFor();
 
   const badges = hostSection.locator(".ca-launch-row > .badge");
@@ -229,11 +263,24 @@ test("FG-679 BD-12: a stale observation renders literally `unobserved since <t>`
   await page.close();
 });
 
-test("FG-679 BD-5: the Required CI section names the exact candidate sha and enumerates EVERY context with state, URL and observation time", async () => {
+test("FG-679 BD-5 / FG-694 AC4-AC5: Home shows ONE compact line, and opening it names the exact sha and EVERY context with state, URL and observation time", async () => {
   served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_OLD, "running", "CI running")] } });
   const page = await open();
-  const ciSection = page.locator("section.current-activity section.ca-section").nth(2);
-  await ciSection.locator(".ca-ci-row").waitFor();
+  const ciSection = page.locator("section.current-activity section.ca-section").first();
+  await ciSection.locator(".ca-ci-summary").waitFor();
+
+  // AC4: ONE compact line, and no audit payload on the summary.
+  assert.equal(await ciSection.locator(".ca-ci-summary").count(), 1);
+  const compact = await ciSection.locator(".ca-ci-summary").innerText();
+  assert.match(compact, /FG-679/, "the candidate is named by its ticket");
+  assert.match(compact, /CI running/);
+  assert.doesNotMatch(compact, new RegExp(SHA_OLD), "the full sha is drill-down detail");
+  assert.doesNotMatch(compact, /example\.invalid/, "check URLs are drill-down detail");
+  assert.doesNotMatch(compact, /2026-08-05T11:59:30/, "raw observation timestamps are drill-down detail");
+
+  // AC5: the evidence MOVED, it was not deleted. Everything BD-5 requires is one
+  // disclosure away.
+  await openCiDetails(page);
   const text = await ciSection.innerText();
 
   assert.match(text, new RegExp(SHA_OLD), "the FULL candidate sha is named");
@@ -252,45 +299,100 @@ test("FG-679 BD-5: the Required CI section names the exact candidate sha and enu
 test("FG-679 BD-6: when the candidate moves, the old-sha evidence DISAPPEARS from the surface", async () => {
   served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_OLD, "running", "CI running")] } });
   const page = await open();
-  await page.locator(".ca-ci-row").waitFor();
+  await openCiDetails(page);
   assert.match(await page.locator("section.current-activity").innerText(), new RegExp(SHA_OLD));
 
   // The observer declares a NEWER candidate; the reader presents only the newest.
   served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_NEW, "running", "CI running")] } });
   await page.waitForFunction((sha) => document.querySelector("section.current-activity")?.textContent?.includes(sha), SHA_NEW, { timeout: 10_000 });
 
+  // Read the WHOLE surface with the disclosure open — a superseded sha hidden behind
+  // a collapsed <details> would still be carried forward, which is what BD-6 forbids.
+  await openCiDetails(page);
   const text = await page.locator("section.current-activity").innerText();
   assert.match(text, new RegExp(SHA_NEW));
   assert.doesNotMatch(text, new RegExp(SHA_OLD), "the superseded sha must be GONE — never carried forward, never relabeled");
   await page.close();
 });
 
-test("FG-679 BD-8: `CI not observed`, `CI not running` and `stale` are three DIFFERENT rendered facts", async () => {
-  served = base({});
+// The FIVE absences this surface can be in, asserted together and deliberately in
+// ONE test: they are only meaningful against each other, and `forge` pins this
+// suite's test count in src/util/fg642-browser-tier-consistency.test.ts, so a new
+// top-level test here is a change to the browser tier's shape rather than to its
+// coverage. Nothing current / current-but-unobserved / settled / stale / could-not-read.
+test("FG-679 BD-8 / FG-694 AC6+AC7: no-candidate, not-observed, settled, stale and could-not-read stay DIFFERENT rendered facts", async () => {
+  // (a) NOTHING current at all. One calm statement, and no empty subsections — the
+  //     state that used to render three of them plus `CI not observed` (AC6).
+  served = base({ requiredCi: { state: "no_current_candidate", label: "no current CI candidate", observations: [] } });
   let page = await open();
-  await page.locator(".ca-ci-empty").waitFor();
-  const notObserved = await page.locator(".ca-ci-empty").innerText();
-  assert.equal(notObserved, "CI not observed");
+  await page.locator(".ca-nothing").waitFor();
+  assert.equal(await page.locator(".ca-nothing").innerText(), "Nothing currently running.");
+  assert.deepEqual(await sectionHeadings(page), [], "the headings themselves must not render when empty");
   await page.screenshot({ path: join(SHOTS, "fg679-empty.png"), fullPage: true });
   await page.close();
 
-  served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_NEW, "not_running", "CI not running")] } });
+  // (b) There IS current work owed an observation, and none exists. Home says the
+  //     STATUS is unavailable. `CI not observed` was, host-wide, reading as a claim
+  //     about the checks — it stays on the diagnostic surface (`forge status`).
+  served = base({ requiredCi: { state: "not_observed", label: "CI not observed", observations: [] } });
   page = await open();
   await page.locator(".ca-ci-row > .badge").waitFor();
-  const notRunning = await page.locator(".ca-ci-row > .badge").innerText();
-  assert.equal(notRunning, "CI not running");
-  assert.notEqual(notRunning, notObserved, "not-observed and not-running are different facts");
+  const notObserved = await page.locator(".ca-ci-row > .badge").innerText();
+  assert.equal(notObserved, "CI status unavailable");
+  assert.doesNotMatch(await page.locator("section.current-activity").innerText(), /CI not observed/);
+  assert.doesNotMatch(await page.locator("section.current-activity").innerText(), /Nothing currently running/);
+  assert.equal(await page.locator("details.ca-ci-item").count(), 0, "nothing was observed, so there is nothing to open");
   await page.close();
 
+  // (c) The observer's newest look found every required context settled.
+  served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_NEW, "not_running", "CI not running")] } });
+  page = await open();
+  await page.locator(".ca-ci-summary .badge").waitFor();
+  const settled = await page.locator(".ca-ci-summary .badge").innerText();
+  assert.equal(settled, "CI passed");
+  assert.notEqual(settled, notObserved, "not-observed and a settled candidate are different facts");
+  await openCiDetails(page);
+  assert.deepEqual(await page.locator(".ca-ctx-state").allInnerTexts(), ["success", "success"], "the per-context evidence survives");
+  await page.close();
+
+  // (d) The newest observation is too old to be evidence about NOW. Compact, that is
+  //     "we do not know" — and the disclosure still carries WHEN we last knew, which
+  //     is the distinction BD-8 is about and the place diagnosis happens.
   served = base({ requiredCi: { state: "observed", label: "1 observed", observations: [ci(SHA_NEW, "stale", "stale — CI last observed 2026-08-05T09:00:00.000Z")] } });
   page = await open();
-  await page.locator(".ca-ci-row > .badge").waitFor();
-  const stale = await page.locator(".ca-ci-row > .badge").innerText();
-  assert.match(stale, /^stale — CI last observed /);
-  assert.notEqual(stale, notRunning);
-  assert.notEqual(stale, notObserved);
-  assert.match(await page.locator(".ca-ci-row > .badge").getAttribute("class") ?? "", /ci-state-stale/);
+  await page.locator(".ca-ci-summary .badge").waitFor();
+  const stale = await page.locator(".ca-ci-summary .badge").innerText();
+  assert.equal(stale, "CI status unavailable");
+  assert.notEqual(stale, settled);
+  assert.match(await page.locator(".ca-ci-summary .badge").getAttribute("class") ?? "", /ci-compact-unavailable/);
+  await openCiDetails(page);
+  assert.match(await page.locator(".ca-ci-evidence").innerText(), /observed 2026-08-05T11:59:40\.000Z/,
+    "stale and never-observed are told apart by the evidence, which is still there");
   await page.close();
+
+  // (e) FG-694 AC7 — the reproduced version skew: a dashboard server started before
+  //     FG-679 serves this client and 404s /api/current-activity. The client used to
+  //     ignore that and render `loading…`, `No agent task in flight`, `No host launch
+  //     observed in flight` AND `CI not observed` simultaneously, while `forge status`
+  //     showed an active orchestrator task. A read that FAILED has observed nothing.
+  currentActivityStatus = 404;
+  try {
+    page = await open();
+    await page.locator(".ca-unavailable").waitFor();
+    const text = await page.locator("section.current-activity").innerText();
+    assert.match(text, /Current activity unavailable/);
+    assert.match(text, /predates the route/);
+    for (const claim of ["No agent task in flight", "No host launch observed", "CI not observed", "Nothing currently running"]) {
+      assert.doesNotMatch(text, new RegExp(claim), `a failed read may not claim "${claim}"`);
+    }
+    assert.notEqual(text, notObserved, "could-not-read is not the same fact as observed-nothing");
+    assert.equal(await page.locator(".ca-retry").count(), 1, "the operator's recovery is not a page reload");
+    assert.equal(await page.locator(".ca-heading").count(), 0);
+    await page.screenshot({ path: join(SHOTS, "fg694-unavailable.png"), fullPage: true });
+    await page.close();
+  } finally {
+    currentActivityStatus = 200;
+  }
 });
 
 test("FG-679 BD-3/BD-14: an unassociated launch is LABELED, and a host-level bucket renders separately", async () => {
@@ -302,8 +404,10 @@ test("FG-679 BD-3/BD-14: an unassociated launch is LABELED, and a host-level buc
   await page.locator(".ca-assoc-badge").first().waitFor();
 
   assert.equal(await page.locator(".ca-assoc-badge").first().textContent(), "unassociated");
-  assert.deepEqual(await sectionHeadings(page), ["Agents", "Host verification", "Required CI", "Unassociated activity"]);
-  const bucket = page.locator("section.current-activity section.ca-section").nth(3);
+  // FG-694 AC6: the two POPULATED sections, in order. The host-level bucket is still
+  // its own section — an unassociated launch is never folded into the main one.
+  assert.deepEqual(await sectionHeadings(page), ["Host verification", "Unassociated activity"]);
+  const bucket = page.locator("section.current-activity section.ca-section").nth(1);
   assert.match(await bucket.innerText(), /launch-orphan-gggggg/);
   assert.match(await bucket.innerText(), /will not guess an owner from a launch name, its argv, or its log/);
   await page.close();
@@ -328,7 +432,8 @@ test("FG-679 BD-10: no host filesystem path is rendered or linked, and the surfa
     assert.match(href, /^https?:\/\//, `a rendered link must not address a host path: ${href}`);
   }
 
-  // Read-only: no start/stop/retry affordance anywhere in the surface.
+  // Read-only: no start/stop/cancel affordance anywhere in the surface. FG-694 adds
+  // exactly one control, Retry, and only in the unavailable state — it re-READS.
   assert.equal(await page.locator("section.current-activity button").count(), 0, "the surface exposes no action buttons");
   await page.close();
 });
@@ -376,7 +481,7 @@ test("FG-679: an agent row is reachable and activatable BY KEYBOARD, not by mous
 });
 
 test("FG-679: the screenshots for the populated, empty and stale states exist", () => {
-  for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png"]) {
+  for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png", "fg694-unavailable.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);
   }
   console.log(`FG-679 screenshots: ${SHOTS}`);
@@ -403,6 +508,10 @@ function createFixtureServer(): Server {
       return;
     }
     if (url.pathname === "/api/current-activity") {
+      if (currentActivityStatus !== 200) {
+        res.writeHead(currentActivityStatus, { "Content-Type": "text/plain" }).end("not found");
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(served));
       return;
     }
