@@ -592,8 +592,9 @@ export function homeCiSummaries(section) {
 // full identity line. So Home keeps the ONE surface it already had, `In flight`, and
 // what gets folded into it is only what an operator is WAITING ON:
 //
-//   - agents are NOT folded in. They are already there, from /api/in-flight. Rendering
-//     the derivation's `agents` alongside them is the duplication the panel introduced.
+//   - agents are NOT folded in OR rendered by the dashboard diagnostic projection.
+//     They are already there, from /api/in-flight. Rendering the derivation's `agents`
+//     alongside them is the duplication the panel introduced.
 //   - a host launch qualifies only while it is OBSERVED and RUNNING, and only when the
 //     submitter ASSOCIATED it with current work (`--run` / `--task` / `--ticket`).
 //     `exited 143`, `owner gone` and `unobserved since <t>` are dispositions and
@@ -700,12 +701,10 @@ export function homeActivityView(load) {
   const activity = load.activity;
   const ci = homeCiSummaries(activity.requiredCi);
   const sections = [];
-  const agents = activity.agents;
   const launches = activity.hostVerification;
   const unassociated = Array.isArray(activity.unassociated) ? activity.unassociated : [];
-  if (agents.length > 0) sections.push({ kind: "agents", heading: "Agents", entries: agents });
   if (launches.length > 0) sections.push({ kind: "hostVerification", heading: "Host verification", entries: launches });
-  if (ci !== null) sections.push({ kind: "requiredCi", heading: "Required CI", entries: ci });
+  if (ci !== null) sections.push({ kind: "requiredCi", heading: "CI checks", entries: ci });
   if (unassociated.length > 0) sections.push({ kind: "unassociated", heading: "Unassociated activity", entries: unassociated });
   return {
     phase,

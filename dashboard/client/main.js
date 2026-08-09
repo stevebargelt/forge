@@ -540,15 +540,6 @@ function App() {
             onRefreshPlanUsage=${refreshPlanUsage}
           />`
         : html`
-          <${CurrentActivitySection}
-            load=${activityLoad}
-            now=${now}
-            onTaskClick=${(id) => setSelectedTaskId(id)}
-            onRetry=${retryCurrentActivity}
-          />
-
-          <${OrchestratorSection} data=${orchestrators} onTaskClick=${(id) => setSelectedTaskId(id)} />
-
           <${InFlightSection}
             inFlight=${inFlight}
             verifications=${inProgressVerifications}
@@ -557,7 +548,20 @@ function App() {
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
             onTaskClick=${(id) => setSelectedTaskId(id)}
+            activityLoad=${activityLoad}
+            onRetryActivity=${retryCurrentActivity}
           />
+
+          <details class="activity-diagnostics">
+            <summary>Diagnostics</summary>
+            <${OrchestratorSection} data=${orchestrators} onTaskClick=${(id) => setSelectedTaskId(id)} />
+            <${CurrentActivitySection}
+              load=${activityLoad}
+              now=${now}
+              onTaskClick=${(id) => setSelectedTaskId(id)}
+              onRetry=${retryCurrentActivity}
+            />
+          </details>
 
           <section class="feed">
             <h2>Recent agent outputs</h2>
@@ -1475,11 +1479,10 @@ function OrchestratorRow({ entry, onTaskClick }) {
   `;
 }
 
-// `activityLoad` is supplied ONLY by Home (FG-694 post-ship correction): Home has one
-// activity surface, so the compact host-verification and required-check waits are rows
-// in this section rather than a second top-level panel above it. The Activity view
-// passes none — it renders the full `Current activity` diagnostic panel instead, and
-// showing the same waits twice on one page is the duplication this correction removes.
+// Both Home and Activity have one visible owner for live work: In flight. The compact
+// host-verification and CI-check waits are rows here as well. Activity keeps the full
+// persisted evidence under an explicit Diagnostics disclosure; it is never a second
+// visible activity summary and it never owns agent rows.
 function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null, activityLoad = null, onRetryActivity = null }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
   const work = inFlight.filter((t) => t.agentRole !== "orchestrator");

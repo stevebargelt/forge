@@ -330,11 +330,11 @@ describe("FG-694 AC5 — opening the drill-down restores every piece of FG-679's
 
 // ────────────────────── AC6 — no empty sections, one calm line ───────────────────
 
-describe("FG-694 AC6 — nothing current renders ONE statement and no empty subsections", () => {
-  test("no agents, no host verification, no current candidate → `Nothing currently running.` and NO headings", () => {
+describe("FG-694 AC6 — empty diagnostics render nothing; In flight owns the empty state", () => {
+  test("no host verification or current candidate → no diagnostic surface or headings", () => {
     const load = ready();
     const text = collapsed(load);
-    assert.match(text, new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
+    assert.equal(text, "");
     assert.equal(withClass(home(load), "ca-heading").length, 0, "the headings themselves must not render when empty");
     for (const heading of ["Agents", "Host verification", "Required CI"]) {
       assert.doesNotMatch(text, new RegExp(`\\b${heading}\\b`), `${heading} is an empty subsection and must not render`);
@@ -342,19 +342,17 @@ describe("FG-694 AC6 — nothing current renders ONE statement and no empty subs
     assert.equal(homeActivityView(load).sections.length, 0);
   });
 
-  test("`Nothing currently running.` is said ONCE, not once per section", () => {
-    const text = collapsed(ready());
-    assert.equal(text.split(NOTHING_RUNNING_LABEL).length - 1, 1);
+  test("the old global empty claim is not emitted by a diagnostic-only component", () => {
+    assert.doesNotMatch(collapsed(ready()), new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
   });
 
-  test("an agent in flight renders the Agents heading and NOTHING for the two empty sections", () => {
+  test("an agent in flight renders nowhere in the diagnostic projection — In flight owns it", () => {
     const load = ready({ agents: [agent] });
     const headings = withClass(home(load), "ca-heading").map((el) => textOf(children(el.props), false));
-    assert.deepEqual(headings, ["Agents"]);
+    assert.deepEqual(headings, []);
     const text = collapsed(load);
-    assert.match(text, /frontend-specialist/);
-    assert.doesNotMatch(text, new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")), "something IS running");
-    for (const claim of OBSERVATION_CLAIMS) assert.doesNotMatch(text, new RegExp(claim));
+    assert.doesNotMatch(text, /frontend-specialist/);
+    assert.equal(text, "", "the separate In flight surface owns the agent and its empty state");
   });
 
   test("sections render in a fixed order, and only the populated ones", () => {
@@ -365,13 +363,13 @@ describe("FG-694 AC6 — nothing current renders ONE statement and no empty subs
       unassociated: [{ ...launch, launchId: "launch-orphan-gggggg", unassociated: true, runId: null }],
     });
     assert.deepEqual(homeActivityView(load).sections.map((s) => s.heading),
-      ["Agents", "Host verification", "Required CI", "Unassociated activity"]);
+      ["Host verification", "CI checks", "Unassociated activity"]);
   });
 
   test("`no_current_candidate` omits the CI row entirely — it does NOT report CI as unobserved", () => {
     assert.equal(homeCiSummaries({ state: "no_current_candidate", label: "no current CI candidate", observations: [] }), null);
     const text = collapsed(ready({ agents: [agent] }));
-    assert.doesNotMatch(text, /Required CI/);
+    assert.doesNotMatch(text, /CI checks/);
     assert.doesNotMatch(text, /CI not observed/);
     assert.doesNotMatch(text, /CI/, "with no candidate, the surface says nothing about CI at all");
   });
@@ -529,7 +527,8 @@ describe("FG-694 correction — Home's In flight folds in waits only, and never 
   test("the CI wait is ONE line and carries no sha, no URL, no timestamp and no context dump", () => {
     const text = waitsText(ready({ requiredCi: ciSection([sevenOfTen]) as never }));
     assert.match(text, /FG-253/, "the candidate is named by its ticket");
-    assert.match(text, new RegExp(CI_RUNNING_LABEL));
+    assert.match(text, /CI checks/);
+    assert.match(text, /in progress/);
     assert.match(text, /7\/10 complete/);
     assert.doesNotMatch(text, new RegExp(SHA), "the full sha is detail, on the diagnostic surface");
     assert.doesNotMatch(text, /example\.invalid/, "check URLs are detail");
@@ -688,15 +687,16 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
     const load = await readCurrentActivity("/api/current-activity", (async () => stubResponse({ json: async () => activity })) as never);
     assert.equal(activityPhase(load), "ready");
     const text = collapsed(load);
-    assert.match(text, /frontend-specialist/);
+    assert.doesNotMatch(text, /frontend-specialist/, "In flight is the only dashboard owner for agent rows");
+    assert.match(text, /CI checks/);
     assert.match(text, /CI running/);
     assert.doesNotMatch(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
   });
 
-  test("NOT vacuous: `Nothing currently running.` IS reachable — from a successful read of an empty payload", async () => {
+  test("a successful empty payload stays ready but renders no diagnostic panel", async () => {
     const load = await readCurrentActivity("/api/current-activity", (async () => stubResponse({})) as never);
     assert.equal(activityPhase(load), "ready");
-    assert.match(collapsed(load), new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
+    assert.equal(collapsed(load), "");
   });
 
   // ── RF-3 / RF-5: a structurally malformed ENTRY is a failed read, at ANY depth ──
@@ -851,7 +851,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       });
       assert.equal(isCurrentActivityPayload(good), true);
       const text = collapsed({ phase: "ready", activity: good });
-      assert.match(text, /frontend-specialist/);
+      assert.doesNotMatch(text, /frontend-specialist/, "agent rows belong only to In flight");
       assert.match(text, /worktree-tier/);
       assert.match(text, /FG-253/);
     });
@@ -1059,7 +1059,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       assert.equal(isCurrentActivityPayload(stripped), true, "a guarded field must be optional in fact, not only by declaration");
       const text = collapsed({ phase: "ready", activity: stripped });
       assert.doesNotMatch(text, new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
-      assert.match(text, /task-build-aef6ae/, "the agent row still renders");
+      assert.doesNotMatch(text, /task-build-aef6ae/, "In flight is the only dashboard owner for agent rows");
       assert.match(text, /launch-worktree-8pagjk/, "the launch row still renders");
     });
 
@@ -1197,7 +1197,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
 
       assert.equal(applied.length, 1, "a response slower than the poll interval still reaches the surface");
       assert.equal(activityPhase(applied[0]), "ready");
-      assert.match(collapsed(applied[0]), /frontend-specialist/);
+      assert.equal(collapsed(applied[0]), "", "the successful read lands; its agent row belongs to In flight");
     });
 
     test("one read per URL is in flight — six ticks over one slow read make ONE request, not six", async () => {
@@ -1231,7 +1231,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       await Promise.all([first, second]);
 
       assert.equal(applied.length, 1, "the superseded scope's read is dropped, not applied over the new one");
-      assert.match(collapsed(applied[0]), new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")));
+      assert.equal(collapsed(applied[0]), "", "the new scope's empty diagnostics supersede the old scope without making a global activity claim");
       assert.doesNotMatch(collapsed(applied[0]), /frontend-specialist/, "the old scope's agents are not the new scope's");
     });
 

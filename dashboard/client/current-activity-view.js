@@ -3,9 +3,10 @@
 // SINCE THE FG-694 POST-SHIP CORRECTION IT IS NOT ON HOME. Home has exactly one
 // activity surface — `In flight` — and folds in only the compact waits below
 // (`InFlightActivityWaits`). This component is the DIAGNOSTIC rendering, on the
-// Activity view: three sections, the four BD-4 launch facts, and the per-context CI
-// evidence behind its disclosure. Everything AC4-AC7 below still holds of it, which is
-// the point — the detail moved off Home, it was not deleted.
+// Activity view: host/CI diagnostics, the four BD-4 launch facts, and the per-context
+// CI evidence behind its disclosure. Agent work has exactly one dashboard owner:
+// `In flight`. Everything AC4-AC7 below still holds of the diagnostic evidence, which
+// is the point — the detail moved behind disclosure, it was not deleted.
 //
 // Lives outside main.js since FG-694 for the reason current-activity-render.js was
 // split out in the first place: main.js calls `render()` at module scope, so nothing
@@ -54,6 +55,11 @@ function caRowKey(event, activate) {
 
 export function CurrentActivitySection({ load, now, onTaskClick, onRetry }) {
   const view = homeActivityView(load);
+  // The dashboard's live-work owner is In flight. Once agent rows moved there, an
+  // empty diagnostic projection no longer means "nothing is running"; it means only
+  // that there is no host/CI detail to disclose. Render nothing instead of making a
+  // broader claim than this component can support.
+  if (view.phase === "ready" && view.empty) return null;
   return html`
     <section class="current-activity" aria-labelledby="current-activity-heading">
       <div class="home-section-heading">
@@ -66,9 +72,7 @@ export function CurrentActivitySection({ load, now, onTaskClick, onRetry }) {
         ? html`<div class="ca-loading" role="status">${view.message}</div>`
         : view.phase === "unavailable"
           ? html`<${CurrentActivityUnavailable} view=${view} onRetry=${onRetry} />`
-          : view.empty
-            ? html`<div class="ca-nothing">${view.message}</div>`
-            : view.sections.map((section) => html`
+          : view.sections.map((section) => html`
               <${CurrentActivityBlock}
                 key=${section.kind}
                 section=${section}
@@ -141,9 +145,10 @@ function HostWaitRow({ entry, now }) {
 function CiWaitRow({ summary }) {
   return html`
     <div class="item ca-wait-row ca-ci-wait-row">
-      <span class="badge ${summary.class}">${summary.label}</span>
+      <span class="badge ${summary.class}">CI checks</span>
       <div>
         ${summary.identity ? html`<strong>${summary.identity}</strong>` : null}
+        <span class="faint"> · in progress</span>
         ${summary.detail ? html`<span class="faint"> · </span><span class="ca-ci-detail-text">${summary.detail}</span>` : null}
       </div>
       <div></div>
