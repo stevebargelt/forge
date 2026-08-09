@@ -42,6 +42,7 @@ import {
   CI_RUNNING_LABEL,
   CI_STATUS_UNAVAILABLE_LABEL,
   CURRENT_ACTIVITY_UNAVAILABLE_LABEL,
+  IN_FLIGHT_WAITS_UNAVAILABLE_LABEL,
   NOTHING_RUNNING_LABEL,
   OBSERVATION_CLAIMS,
   activityFromBody,
@@ -51,11 +52,12 @@ import {
   createActivityReader,
   homeActivityView,
   homeCiSummaries,
+  homeInFlightActivity,
   isCurrentActivityPayload,
   isRenderableEntry,
   readCurrentActivity,
 } from "../client/current-activity-render.js";
-import { CurrentActivitySection } from "../client/current-activity-view.js";
+import { CurrentActivitySection, InFlightActivityWaits } from "../client/current-activity-view.js";
 import type { CurrentActivityPayload, RequiredCiObservationEntry } from "../client/current-activity-render.js";
 
 const NOW = Date.parse("2026-08-08T12:00:00.000Z");
@@ -380,6 +382,132 @@ describe("FG-694 AC6 — nothing current renders ONE statement and no empty subs
     assert.match(text, new RegExp(CI_STATUS_UNAVAILABLE_LABEL));
     assert.doesNotMatch(text, /CI not observed/, "host-wide, that string read as a claim about the checks");
     assert.doesNotMatch(text, new RegExp(NOTHING_RUNNING_LABEL.replace(".", "\\.")), "there IS current work — it is CI we cannot speak to");
+  });
+});
+
+// ──────── the post-ship correction — Home has ONE activity surface, In flight ─────
+//
+// What the compact rewrite above did NOT fix. `Right now / Current activity` was still
+// a second top-level panel on Home, above `In flight`; the live reproduction after
+// d55a29aa measured it at 810.5px in an 862px viewport, with every agent rendered twice
+// (once per panel) and eight historical CI candidates under it. Home now folds only the
+// WAITS into the section it already had, and every one of the assertions below is about
+// what may NOT appear there.
+
+describe("FG-694 correction — Home's In flight folds in waits only, and never a second panel", () => {
+  const wait = (over: Record<string, unknown> = {}) => homeInFlightActivity(ready(over as never));
+
+  const waitsText = (load: unknown): string =>
+    textOf(h(InFlightActivityWaits as never, { load, now: NOW, onRetry: () => {} }) as unknown as Vnode, false);
+
+  test("agents are NEVER folded in — they already render from /api/in-flight", () => {
+    const waits = wait({ agents: [agent] });
+    assert.deepEqual(waits.hostVerification, []);
+    assert.deepEqual(waits.ci, []);
+    const text = waitsText(ready({ agents: [agent] }));
+    assert.doesNotMatch(text, /frontend-specialist/, "an agent rendered here is the same agent rendered twice");
+    assert.doesNotMatch(text, /task-build-aef6ae/);
+    // The claim is structural, not incidental: the decision function does not read the
+    // field at all, so duplication cannot come back through a rendering change.
+    const source = readFileSync(new URL("../client/current-activity-render.js", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function homeInFlightActivity("));
+    assert.doesNotMatch(body.slice(0, body.indexOf("\n}")), /\.agents\b/,
+      "homeInFlightActivity must not read `agents` — that is what makes the duplication unrepresentable");
+  });
+
+  test("a host launch is folded in only while it is OBSERVED and RUNNING", () => {
+    assert.equal(wait({ hostVerification: [launch] }).hostVerification.length, 1);
+    for (const over of [
+      { observation: "unobserved" },
+      { status: { state: "exited_ok" } },
+      { status: { state: "owner_gone" } },
+      { status: { state: "unknown" } },
+    ]) {
+      const waits = wait({ hostVerification: [{ ...launch, ...over }] });
+      assert.deepEqual(waits.hostVerification, [], `${JSON.stringify(over)} is history or a disposition, not a wait`);
+    }
+  });
+
+  test("an unassociated launch is still a wait, and keeps its label rather than being attributed", () => {
+    const orphan = { ...launch, launchId: "launch-orphan-gggggg", unassociated: true, runId: null, ticketId: null, name: null };
+    const waits = wait({ unassociated: [orphan] });
+    assert.equal(waits.hostVerification.length, 1);
+    const text = waitsText(ready({ unassociated: [orphan] }));
+    assert.match(text, /launch-orphan-gggggg/, "with no ticket and no name, the id is the only honest identity");
+    assert.match(text, /unassociated/);
+  });
+
+  test("a CI candidate is folded in only while its required checks are PENDING", () => {
+    assert.equal(wait({ requiredCi: ciSection([sevenOfTen]) as never }).ci.length, 1);
+    const notWaits: Array<[string, unknown]> = [
+      ["passed", observation({ contexts: [context("test", "success")], state: "not_running", outcome: "success" })],
+      ["failed", observation({ contexts: [context("test", "failure")], state: "not_running", outcome: "failure" })],
+      ["stale", observation({ state: "stale" })],
+      ["not started", observation({ contexts: [], state: "not_running", outcome: "success" })],
+    ];
+    for (const [name, o] of notWaits) {
+      assert.deepEqual(wait({ requiredCi: ciSection([o]) as never }).ci, [], `${name} is an outcome to read on the detail, not a wait`);
+    }
+    // …and `not_observed`, which synthesizes a row with no observation behind it, is
+    // not a wait either — a permanent `CI status unavailable` line under every active
+    // run is the empty subsection this correction removes.
+    assert.deepEqual(wait({ requiredCi: { state: "not_observed", label: "CI not observed", observations: [] } as never }).ci, []);
+  });
+
+  test("the CI wait is ONE line and carries no sha, no URL, no timestamp and no context dump", () => {
+    const text = waitsText(ready({ requiredCi: ciSection([sevenOfTen]) as never }));
+    assert.match(text, /FG-253/, "the candidate is named by its ticket");
+    assert.match(text, new RegExp(CI_RUNNING_LABEL));
+    assert.match(text, /7\/10 complete/);
+    assert.doesNotMatch(text, new RegExp(SHA), "the full sha is detail, on the diagnostic surface");
+    assert.doesNotMatch(text, /example\.invalid/, "check URLs are detail");
+    assert.doesNotMatch(text, new RegExp(OBSERVED_AT.replace(/[.]/g, "\\.")), "raw observation timestamps are detail");
+    assert.doesNotMatch(text, /check-0/, "the per-context enumeration is detail");
+    assert.equal(withClass(h(InFlightActivityWaits as never,
+      { load: ready({ requiredCi: ciSection([sevenOfTen]) as never }), now: NOW }) as unknown as Vnode, "ca-ci-item").length, 0,
+      "no disclosure on Home — opening one would put the whole payload back");
+  });
+
+  test("the host wait is ONE line and carries no argv, no launch identity dump and no observation time", () => {
+    const text = waitsText(ready({ hostVerification: [launch] }));
+    assert.match(text, /FG-694/, "the wait is named by the ticket it declared");
+    assert.doesNotMatch(text, /npm run test:worktree/, "the argv is context, and per-row context is what overflowed the viewport");
+    assert.doesNotMatch(text, /run-fg694/, "the run/task identity line is diagnostic detail");
+    assert.doesNotMatch(text, /2026-08-08T11:59:00/, "the observation time is diagnostic detail");
+  });
+
+  test("nothing to wait on renders NOTHING — not a heading, not an empty row", () => {
+    assert.equal(waitsText(ready()), "");
+    assert.equal(waitsText(ready({ agents: [agent] })), "", "an agent is not a wait, and does not summon an empty waits block");
+  });
+
+  test("a read that has not landed says nothing; a read that FAILED says so, and claims no absence", () => {
+    assert.equal(waitsText(ACTIVITY_LOADING), "", "In flight already renders what /api/in-flight observed");
+
+    const failed = activityUnavailable("http", 404);
+    assert.equal(homeInFlightActivity(failed).message, IN_FLIGHT_WAITS_UNAVAILABLE_LABEL);
+    const text = waitsText(failed);
+    assert.match(text, new RegExp(IN_FLIGHT_WAITS_UNAVAILABLE_LABEL));
+    assert.match(text, /predates the route/, "the detail is about the READ");
+    for (const claim of OBSERVATION_CLAIMS) {
+      assert.doesNotMatch(text, new RegExp(claim), `a failed read may not claim "${claim}"`);
+    }
+    assert.doesNotMatch(text, /No host launch/, "…and may not imply it looked at launches either");
+  });
+
+  test("Home's own surface carries no `Current activity` heading and no `Right now` kicker", () => {
+    // The panel is gone from main.js's HomeView, and it is the ONE place the heading was
+    // authored. Read the source: the assertion is about what Home renders, and HomeView
+    // cannot be imported (main.js calls render() at module scope).
+    const main = readFileSync(new URL("../client/main.js", import.meta.url), "utf8");
+    const start = main.indexOf("function HomeView(");
+    assert.notEqual(start, -1, "HomeView is gone — re-audit where Home's activity surfaces are composed");
+    const homeView = main.slice(start, main.indexOf("\n}", start));
+    assert.doesNotMatch(homeView, /CurrentActivitySection/,
+      "Home renders ONE activity surface; the Current activity panel is the diagnostic rendering, on the Activity view");
+    assert.match(homeView, /home-in-flight-heading/, "…and that one surface is still In flight");
+    assert.equal((main.match(/In flight<\/h2>/g) ?? []).length, 2,
+      "the two In flight headings are Home's and the Activity view's — a third means a second surface came back");
   });
 });
 
@@ -807,6 +935,12 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       { file: "current-activity-render.js", fn: "launchIdentityLine", receiver: "entry", kind: "launch",
         guarded: ["runId", "taskId", "ticketId", "campaignId", "projectLabel"] },
       { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: [] },
+      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: [] },
+      { file: "current-activity-render.js", fn: "launchIsCurrentWait", receiver: "entry", kind: "launch",
+        guarded: ["observation", "status"] },
+      { file: "current-activity-render.js", fn: "launchWaitIdentity", receiver: "e", kind: "launch",
+        guarded: ["ticketId", "name"] },
+      { file: "current-activity-view.js", fn: "HostWaitRow", receiver: "entry", kind: "launch", guarded: ["startedAt"] },
     ];
 
     test("every field the render path dereferences is either validated by the contract or declared guarded", () => {

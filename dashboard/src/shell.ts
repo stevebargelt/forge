@@ -637,6 +637,15 @@ section.current-activity { margin-top: 28px; }
 .badge.ci-state-not_running { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
 .badge.ci-state-stale { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
 .badge.ci-state-not_observed { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+
+/* FG-694 post-ship correction — the host/CI waits folded into Home's In flight list.
+   They borrow section.in-flight .item's grid deliberately: a wait is part of the same
+   list an operator is already reading, not a second visual language stacked above it.
+   No cursor, because unlike a task row they navigate nowhere. */
+section.in-flight .item.ca-wait-row { cursor: default; align-items: baseline; }
+section.in-flight .item.ca-wait-row:hover { background: none; }
+.ca-wait-unavailable { align-items: center; }
+.ca-wait-unavailable .ca-retry { justify-self: end; }
 .home-ops-summary { margin-top: 28px; }
 .home-section-heading {
   display: flex;

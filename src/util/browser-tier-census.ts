@@ -55,12 +55,20 @@ export const BROWSER_TIER_DIR = join(
 // a null AGENT entry (RF-3) and a null CI CONTEXT inside a valid-looking observation
 // (RF-5). Both used to throw mid-render, which leaves the operator a blank surface
 // rather than the unavailable state and its Retry.
+// The FG-694 POST-SHIP CORRECTION then added `fg694-home-in-flight` (8 tests): Home's
+// own shape, which the suite above no longer asserts because the `Current activity`
+// panel moved off Home onto the Activity view. One activity surface, no agent rendered
+// twice, compact host/CI waits with no sha/URL/timestamp/argv, no CI from a closed
+// ticket's unfinished review, the In-flight surface inside the 862px viewport the
+// reported 810.5px panel overflowed, and the failed-read line that keeps the section
+// from implying it looked at launches and checks.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
   "fg591-queue-board.test.ts": 6,
   "fg679-current-activity.test.ts": 12,
+  "fg694-home-in-flight.test.ts": 8,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,

@@ -1,4 +1,11 @@
-// FG-679 / FG-694: the ONE `Current activity` surface, as a component.
+// FG-679 / FG-694: the `Current activity` surface, as a component.
+//
+// SINCE THE FG-694 POST-SHIP CORRECTION IT IS NOT ON HOME. Home has exactly one
+// activity surface — `In flight` — and folds in only the compact waits below
+// (`InFlightActivityWaits`). This component is the DIAGNOSTIC rendering, on the
+// Activity view: three sections, the four BD-4 launch facts, and the per-context CI
+// evidence behind its disclosure. Everything AC4-AC7 below still holds of it, which is
+// the point — the detail moved off Home, it was not deleted.
 //
 // Lives outside main.js since FG-694 for the reason current-activity-render.js was
 // split out in the first place: main.js calls `render()` at module scope, so nothing
@@ -30,6 +37,7 @@ import htm from "htm";
 import {
   launchBadge, launchAssociationLabel, launchIdentityLine,
   ciContextRows, caElapsedText, homeActivityView,
+  homeInFlightActivity, launchWaitIdentity,
 } from "./current-activity-render.js";
 
 const html = htm.bind(h);
@@ -69,6 +77,74 @@ export function CurrentActivitySection({ load, now, onTaskClick, onRetry }) {
               />
             `)}
     </section>
+  `;
+}
+
+// FG-694 (post-ship correction): the host-verification and required-check waits, as
+// rows INSIDE Home's existing `In flight` section. There is no heading, no kicker and
+// no section of its own — that second top-level panel is what this correction removes.
+//
+// It renders NOTHING when there is nothing to wait on, which is what keeps `In flight`
+// the size of the work in flight. `homeInFlightActivity` decides what qualifies; this
+// renders it, and adds no decision of its own.
+export function InFlightActivityWaits({ load, now, onRetry }) {
+  const waits = homeInFlightActivity(load);
+  if (waits.message !== null) {
+    return html`
+      <div class="item ca-wait-row ca-wait-unavailable" role="status">
+        <span class="badge launch-state-unknown">waits unavailable</span>
+        <div>
+          <div>${waits.message}</div>
+          <div class="faint" style="font-size: 11px;">${waits.detail}</div>
+        </div>
+        <button type="button" class="ca-retry" onClick=${() => onRetry && onRetry()}>Retry</button>
+      </div>
+    `;
+  }
+  if (waits.hostVerification.length === 0 && waits.ci.length === 0) return null;
+  return html`
+    ${waits.hostVerification.map((entry) => html`<${HostWaitRow} key=${entry.launchId} entry=${entry} now=${now} />`)}
+    ${waits.ci.map((summary) => html`<${CiWaitRow} key=${ciWaitKey(summary)} summary=${summary} />`)}
+  `;
+}
+
+function ciWaitKey(summary) {
+  const o = summary.observation;
+  return o ? `${o.candidateSha}:${o.attemptId}` : `ci-${summary.identity ?? ""}`;
+}
+
+// ONE line. The argv, the launch id, the run and task ids and the observation time are
+// all still on the Activity view's Current activity panel and in `forge status`; here
+// the operator gets what they are waiting on and how long it has been.
+function HostWaitRow({ entry, now }) {
+  const assoc = launchAssociationLabel(entry);
+  return html`
+    <div class="item ca-wait-row ca-host-wait-row">
+      <span class="badge launch-state-running">host verification</span>
+      <div>
+        <strong>${launchWaitIdentity(entry)}</strong>
+        ${assoc ? html`<span class="ca-assoc-badge">${assoc}</span>` : null}
+      </div>
+      <div class="muted mono" style="font-size: 11px;" title="time since the launch started">
+        ${caElapsedText(entry.startedAt, now)}
+      </div>
+    </div>
+  `;
+}
+
+// `FG-253 · CI running · 7/10 complete`, and no drill-down: opening one here would put
+// the sha, every context and every check URL back on Home. They are one view away, on
+// the surface whose job is diagnosis.
+function CiWaitRow({ summary }) {
+  return html`
+    <div class="item ca-wait-row ca-ci-wait-row">
+      <span class="badge ${summary.class}">${summary.label}</span>
+      <div>
+        ${summary.identity ? html`<strong>${summary.identity}</strong>` : null}
+        ${summary.detail ? html`<span class="faint"> · </span><span class="ca-ci-detail-text">${summary.detail}</span>` : null}
+      </div>
+      <div></div>
+    </div>
   `;
 }
 

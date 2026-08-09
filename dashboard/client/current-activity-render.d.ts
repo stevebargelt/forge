@@ -209,3 +209,27 @@ export type HomeActivityView = {
 };
 
 export function homeActivityView(load: unknown): HomeActivityView;
+
+// ───────── FG-694 post-ship correction: Home's ONE activity surface ─────────
+
+export const IN_FLIGHT_WAITS_UNAVAILABLE_LABEL: string;
+/** Observed AND running. A stale row is not evidence about now; a terminal one is
+ *  history. Both still render in full on the diagnostic surfaces. */
+export function launchIsCurrentWait(entry: Partial<HostLaunchEntry> | null | undefined): boolean;
+/** Ticket id, else the launch name, else the launch id. Never the argv. */
+export function launchWaitIdentity(entry: Partial<HostLaunchEntry> | null | undefined): string;
+
+export type HomeInFlightActivity = {
+  phase: "loading" | "ready" | "unavailable";
+  /** Only launches that are observed and running. */
+  hostVerification: HostLaunchEntry[];
+  /** Only candidates whose required checks are still pending. */
+  ci: CiCompactSummary[];
+  /** Non-null ONLY when the read failed — In flight may not imply it looked. */
+  message: string | null;
+  detail: string | null;
+};
+
+/** What Home's `In flight` section folds in. Never agents: they are already rendered
+ *  from /api/in-flight, and reading them here is the duplication this removes. */
+export function homeInFlightActivity(load: unknown): HomeInFlightActivity;
