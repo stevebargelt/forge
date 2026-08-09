@@ -223,7 +223,7 @@ constructing an argument is never treated as evidence a capability was honored.
 | Capability | Claude Code | Codex CLI |
 | --- | --- | --- |
 | **Instruction source** | Forge's orchestrator policy is **appended** to Claude's own base instructions via `--append-system-prompt-file`; your `CLAUDE.md` is never spliced. | **Evidence-gated.** A Forge-owned carrier is bound per launch via a Codex config override, **substituting** (not appending to) the base instruction surface — and only after a positive pre-spawn probe proves the installed `codex` build honors it (AC8). Constructing the flag is not evidence it worked; see `adapter-not-ready` below. |
-| **Skills and slash commands** | Forge-installed skills and slash commands are available (`forge init` publishes them). | **Unsupported.** Codex has no equivalent surface. Forge does not translate Claude commands into guessed Codex equivalents — the session runs with whatever the operator's own Codex configuration provides. |
+| **Skills and slash commands** | Forge-installed skills and slash commands are available (`forge init` publishes them). | **Partial.** The same provider-neutral `/orient` / `/handoff` definition is rendered into repository-scoped Codex skills (`forge-orient`, `forge-handoff`) under the project's own `.agents/skills/`, installed and refreshed by `forge init` / `forge upgrade`; the Codex instruction carrier advertises them from that same definition. But writing the file is not evidence the running Codex build loaded it — repository-scoped skill discovery is version-coupled, and an older build ignores the directory silently, the same failure shape as a `-c` override that is accepted and then ignored. Forge has no positive probe for skill discovery, so activation is **unverified, never claimed**; a session that cannot activate the skill runs the workflow through the `forge` CLI directly, which is the interface either way. |
 | **Permission / approval mode** | Operator-owned. Claude's own permission mode / `.claude/settings*.json` decide; Forge reads but never overwrites them. | Operator-owned the same way. Codex's own approval/sandbox mode decides; Forge never writes into the operator's Codex config root. |
 | **Authentication** | `anthropic` only — OAuth subscription, API key, or Bedrock, each with its own preflight. | `openai` only — the ChatGPT-subscription credential. **Partial:** an API-key Codex profile has no availability probe and resolves as `unknown` rather than `available`. A Codex credential is never evidence Claude may launch, and the inverse also holds. |
 | **New / continue / resume** | **Supported** — session identity is **asserted** pre-spawn via `--session-id`. | **Partial** — session identity is **correlated** after spawn (or `ambiguous` when two sessions overlap), because Codex cannot be told its session id before spawn. |
@@ -234,6 +234,34 @@ constructing an argument is never treated as evidence a capability was honored.
 
 `forge orchestrator --explain` and the receipt itself carry the same limitations, in the operator's own terms, for
 whichever adapter is selected.
+
+### Orientation/handoff adapters, and the generation-split advisory
+
+`/orient` and `/handoff` are defined once, provider-neutrally, in `src/v2/operator-workflows.ts` and rendered onto
+each provider surface — Claude Code slash commands under `.claude/commands/`, Codex repository-scoped skills under
+`.agents/skills/forge-orient/` and `.agents/skills/forge-handoff/`. See
+[Operator adapters](concepts.md#operator-adapters-orient-handoff) in `docs/concepts.md` for the full
+rendering/ownership model, and `docs/quick-start.md` §3 for what `forge init` installs.
+
+Forge owns `$FORGE_HOME`; it does not own the project repo, so the sha-pinned generation a launch resolves and the
+adapter files installed in the project can go out of agreement — a clone, a promoted release, or a moved checkout
+can each happen without forge being run in between, and nothing makes the two writes atomic. What Forge can do is
+refuse to be silent about it: every launch (whether started as `forge claude` or as `forge orchestrator` resolving
+to either adapter) checks whether the project's installed adapters agree with the generation this session resolved
+and records the disagreement — a different stamp, a file the surface advertises but doesn't find, a file with no
+forge ownership marker at all — as a capability limitation on the launch receipt, so `forge show` can still answer
+the question after the session ends. A **Claude Code** launch additionally prints it as a console advisory before
+the banner, naming exactly how the two disagree; a Codex launch today only records it on the receipt. Either way
+it is **always advisory**: the session launches regardless, no exit code moves, and stale orientation prose is
+misleading guidance, not a mis-run. Every line of this advisory also repeats that installed bytes are not evidence
+a provider loaded them — see [The capability/parity matrix](#the-capabilityparity-matrix) above.
+
+**FG-347 is deferred by this ticket (FG-253), not answered.** FG-253 renders and installs `/orient` and `/handoff`
+as described above; it does not introduce marker-based ownership anywhere else. Operator-owned regions stay
+byte-untouched — no marker discipline is introduced into `AGENTS.md`, `CLAUDE.md` prose outside the fenced
+orchestrator block is never read or spliced, and the documentation-maintainer's correction path over prose outside
+generated regions is unchanged. Whether `AGENTS.md` or other operator-owned surfaces should ever gain the same
+generated/marked-region treatment these two files have is FG-347's question, not this one's.
 
 ## Failure behavior before spawn
 
