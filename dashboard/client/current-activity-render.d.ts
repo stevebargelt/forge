@@ -58,7 +58,13 @@ export type RequiredCiObservationEntry = {
 };
 
 export type RequiredCiSectionEntry = {
-  state: "not_observed" | "observed";
+  /** FG-694 added the third value. `no_current_candidate` means nothing in scope
+   *  could be waiting on required checks — no active run, no open review — which is
+   *  a different fact from `not_observed` ("current work exists and no CI observation
+   *  has been recorded for it"). The renderer omits the CI row entirely for the
+   *  former; it must never report it as CI having gone unobserved. Mirrors
+   *  RequiredCiSection in src/v2/current-activity.ts, which is what the API serves. */
+  state: "no_current_candidate" | "not_observed" | "observed";
   label: string;
   observations: RequiredCiObservationEntry[];
 };

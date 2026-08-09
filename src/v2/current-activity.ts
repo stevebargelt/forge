@@ -8,8 +8,9 @@
 //
 // WHAT IT READS: persisted state ONLY — task/run rows, the `launch_observations`
 // table (FG-679), and the newest `review_loop.ci_observed` event per
-// (runId, projectDir). It makes NO outbound call of any kind: no tmux, no
-// `readLaunch`/`listLaunches`, no `git`, no `gh`, no shell, no Forge CLI (BD-7/BD-12).
+// (runId, projectDir) THAT IS STILL ANCHORED TO CURRENT WORK (FG-694). It makes NO
+// outbound call of any kind: no tmux, no `readLaunch`/`listLaunches`, no `git`, no
+// `gh`, no shell, no Forge CLI (BD-7/BD-12).
 // The database handle is INJECTED because the dashboard opens its own read-only
 // connection; the derivation itself owns no handle and mints no store.
 //
@@ -24,7 +25,13 @@
 //   - It never computes what the candidate sha IS. The observer DECLARES the sha it
 //     probed; this reader presents only the NEWEST observation, so an observation
 //     bound to a superseded candidate simply stops being the newest and disappears
-//     rather than being carried forward or relabeled (BD-6).
+//     rather than being carried forward or relabeled (BD-6). FG-694 does NOT relax
+//     this: it narrows which observations are CURRENT, by asking the persisted run
+//     and review rows whether the work is still open — never by re-deriving a sha.
+//   - It never presents a CI observation whose only anchor is FINISHED work
+//     (FG-694). "Newest for its (run, project) pair" was never a claim of currency:
+//     a pair whose run completed months ago has a newest row forever, and ten of
+//     them rendered at once under the heading `Current activity` on 2026-08-08.
 //   - It never consults a launch name, argv, log text, or the quarantined
 //     `forgeIds`. Placement is authorized by the persisted association alone — the
 //     DECLARED submission ids and `project_dir` (BD-2/BD-15).
@@ -64,6 +71,28 @@ export const CI_OBSERVATION_FRESH_MS = 15 * 60_000;
 export const CI_NOT_OBSERVED_LABEL = "CI not observed";
 export const CI_NOT_RUNNING_LABEL = "CI not running";
 export const CI_RUNNING_LABEL = "CI running";
+
+/** FG-694: the THIRD absence, and the one the pre-fix surface could not say. There
+ *  is no active run and no open review in scope, so there is nothing that could be
+ *  waiting on required checks — which is a different fact from "we have a current
+ *  candidate and have observed no CI for it" (`CI not observed`). Collapsing the two
+ *  is the same class of error as the stale-row defect, pointed the other way: one
+ *  invents currency, the other invents an observation. */
+export const CI_NO_CANDIDATE_LABEL = "no current CI candidate";
+
+/** A run row that is not `active` is finished, by any of the three names the
+ *  vocabulary gives it (`complete`, `failed`, `abandoned`). Selected POSITIVELY, so
+ *  a status this binary does not know reads as "not current" rather than leaking
+ *  through a NOT-IN list that predates it. */
+const ACTIVE_RUN_STATUS = "active";
+
+/** Reviews are selected NEGATIVELY, the opposite way round and deliberately: the
+ *  ledger has nine open states and gains more, so a state this binary has not heard
+ *  of must read as OPEN (surfacing live work) rather than as finished (hiding it).
+ *  `blocked_environment` is open on purpose — the review is stuck, not over; the
+ *  freshness cutoff, not this filter, is what stops a stuck review claiming CI is
+ *  running now. */
+const TERMINAL_REVIEW_STATES = ["settled", "failed"] as const;
 
 export const CI_OBSERVED_EVENT_TYPE = "review_loop.ci_observed";
 
@@ -152,9 +181,16 @@ export type RequiredCiObservation = {
 };
 
 export type RequiredCiSection = {
-  /** `not_observed` — no observation exists at all, which is a different fact from
-   *  "CI is not running" (BD-8). */
-  state: "not_observed" | "observed";
+  /** THREE facts, not two, and none substitutes for another:
+   *  `no_current_candidate` — nothing in scope could be waiting on required checks:
+   *    no active run, no open review. The consumer omits the CI row entirely; it must
+   *    NOT report that CI was not observed, because nothing was owed an observation
+   *    (FG-694).
+   *  `not_observed` — there IS current work in scope and no observation exists for
+   *    it, which is a fact about the OBSERVER and a different fact from "CI is not
+   *    running" (BD-8).
+   *  `observed` — at least one current observation, each carrying its own state. */
+  state: "no_current_candidate" | "not_observed" | "observed";
   label: string;
   observations: RequiredCiObservation[];
 };
@@ -322,20 +358,141 @@ function parseContexts(raw: unknown): RequiredCiContext[] {
   return out;
 }
 
-/** The newest `review_loop.ci_observed` per (runId, projectDir), and nothing else.
- *  Presenting only the newest IS the BD-6 supersession rule: an observation bound to
- *  a sha the candidate has moved past is not the newest, so it disappears. Nothing
- *  here derives, compares, or "carries forward" a sha. */
-function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivityScope, nowMs: number): RequiredCiObservation[] {
+/** One open review, reduced to the three fields that can anchor an observation. */
+type ReviewAnchor = { runId: string | null; ticketId: string | null; workspaceDir: string | null };
+
+/** What is still OPEN, read from the persisted run and review rows and nothing else.
+ *  This is the whole of FG-694's selection authority: an observation is current
+ *  because the work it names is current, never because it happens to be the newest
+ *  row for a pair. */
+type CiCurrency = {
+  activeRunIds: ReadonlySet<string>;
+  openReviewRunIds: ReadonlySet<string>;
+  openReviews: readonly ReviewAnchor[];
+  /** True when SOMETHING in scope could currently be waiting on required checks.
+   *  Distinguishes `no_current_candidate` from `not_observed` — see RequiredCiSection. */
+  hasCurrentAnchor: boolean;
+};
+
+function reviewColumns(db: DatabaseInstance): ReadonlySet<string> {
+  // PRAGMA table_info on a MISSING table returns zero rows rather than throwing
+  // (db.ts's shape-probe rule), so this doubles as the table-existence check. It has
+  // to: `reviews` is an FG-638 table, and the read-model fixtures that predate it —
+  // and any store opened by an older binary — carry runs/tasks/events/launch_
+  // observations and no `reviews` at all. A bare prepare() would throw at parse time
+  // and take the whole surface down with it.
+  return new Set((db.prepare(`PRAGMA table_info(reviews)`).all() as Array<{ name: string }>).map((c) => c.name));
+}
+
+function readCiCurrency(db: DatabaseInstance, scope: CurrentActivityScope): CiCurrency {
+  const activeRuns = db.prepare(`
+    SELECT id, project_dir FROM runs WHERE status = ?
+  `).all(ACTIVE_RUN_STATUS) as Array<{ id: string; project_dir: string | null }>;
+
+  const cols = reviewColumns(db);
+  // Every column below arrived by ALTER (FG-638/FG-649), so an aged store can carry a
+  // `reviews` table without them. Missing any one means this store cannot answer "is a
+  // review open here", and the honest reading of that is "no review anchor available"
+  // — not a crash, and not an invented anchor.
+  const reviewsUsable = ["run_id", "ticket_id", "workspace_dir", "state"].every((c) => cols.has(c));
+  const openReviews: ReviewAnchor[] = reviewsUsable
+    ? (db.prepare(`
+        SELECT run_id, ticket_id, workspace_dir
+          FROM reviews
+         WHERE state NOT IN (${TERMINAL_REVIEW_STATES.map(() => "?").join(",")})
+      `).all(...TERMINAL_REVIEW_STATES) as Array<{ run_id: string | null; ticket_id: string | null; workspace_dir: string | null }>)
+      .map((r) => ({ runId: r.run_id, ticketId: r.ticket_id, workspaceDir: r.workspace_dir }))
+    : [];
+
+  const activeRunIds = new Set(activeRuns.map((r) => r.id));
+  const openReviewRunIds = new Set(openReviews.map((r) => r.runId).filter((id): id is string => id !== null && id !== ""));
+
+  let hasCurrentAnchor: boolean;
+  if (scope.runId !== undefined) {
+    hasCurrentAnchor = activeRunIds.has(scope.runId) || openReviewRunIds.has(scope.runId);
+  } else if (scope.projectDirs !== undefined) {
+    hasCurrentAnchor =
+      activeRuns.some((r) => inProjectScope(r.project_dir, scope.projectDirs)) ||
+      openReviews.some((r) => inProjectScope(r.workspaceDir, scope.projectDirs));
+  } else {
+    hasCurrentAnchor = activeRuns.length > 0 || openReviews.length > 0;
+  }
+
+  return { activeRunIds, openReviewRunIds, openReviews, hasCurrentAnchor };
+}
+
+/** Is the work this observation NAMES still open? The observation declares its own
+ *  run, project and ticket; this asks the run and review rows about them and answers
+ *  from those alone. Nothing is inferred from a sha, a label, or a timestamp. */
+function observationIsCurrent(
+  runId: string | null,
+  projectDir: string | null,
+  ticketId: string | null,
+  currency: CiCurrency,
+): boolean {
+  if (runId !== null && runId !== "") {
+    // A DECLARED run is the strongest anchor there is, and it is decisive in BOTH
+    // directions: if that run is finished and no open review carries it, the
+    // observation is history. This single `false` is the FG-694 fix — it is the thing
+    // the newest-per-pair rule had no way to say.
+    return currency.activeRunIds.has(runId) || currency.openReviewRunIds.has(runId);
+  }
+  // A standalone review-loop round records no run. The only remaining authority is an
+  // OPEN review naming the same ticket, in the same workspace when the review declares
+  // one. A review with no recorded workspace (opened before FG-649) cannot narrow by
+  // project, so it does not pretend to.
+  if (ticketId === null || ticketId === "") return false;
+  return currency.openReviews.some(
+    (r) => r.ticketId === ticketId && (r.workspaceDir === null || projectDir === null || r.workspaceDir === projectDir),
+  );
+}
+
+/** The newest CURRENT `review_loop.ci_observed` per (runId, projectDir), and nothing
+ *  else. Presenting only the newest IS the BD-6 supersession rule: an observation
+ *  bound to a sha the candidate has moved past is not the newest, so it disappears.
+ *  Nothing here derives, compares, or "carries forward" a sha.
+ *
+ *  FG-694 adds the half the pair rule never carried. A pair claims its slot the moment
+ *  its newest in-scope row is seen, and if that row is not anchored to open work the
+ *  pair contributes NOTHING: the older rows behind it are not promoted in its place,
+ *  which would carry a superseded candidate forward under a fresher label — exactly
+ *  what AC3 forbids. */
+function readNewestCiObservations(
+  db: DatabaseInstance,
+  scope: CurrentActivityScope,
+  nowMs: number,
+  currency: CiCurrency,
+): RequiredCiObservation[] {
+  // Nothing in scope is open, so no event in the table can be current. Skipping the
+  // scan is not merely an optimization: it is the statement that the answer does not
+  // depend on the event history at all.
+  if (!currency.hasCurrentAnchor) return [];
+
+  // The eligible run ids are pushed INTO the query so the 500-row window covers rows
+  // that could still be current, rather than being consumed by historical noise from
+  // finished runs — the exact shape of the 2026-08-08 report, where ten terminal runs'
+  // observations were the ten newest rows for their pairs. Rows with no run id stay in:
+  // their anchor is a review, resolved per row below.
+  const eligibleRunIds = [...new Set([...currency.activeRunIds, ...currency.openReviewRunIds])]
+    .filter((id) => scope.runId === undefined || id === scope.runId);
+  const runClause = eligibleRunIds.length === 0
+    ? "AND run_id IS NULL"
+    : `AND (run_id IS NULL OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`;
+
   const rows = db.prepare(`
     SELECT run_id, payload, created_at
       FROM events
      WHERE event_type = ?
+     ${runClause}
      ORDER BY created_at DESC, id DESC
      LIMIT 500
-  `).all(CI_OBSERVED_EVENT_TYPE) as Array<{ run_id: string | null; payload: string | null; created_at: string }>;
+  `).all(CI_OBSERVED_EVENT_TYPE, ...eligibleRunIds) as Array<{ run_id: string | null; payload: string | null; created_at: string }>;
 
   const newest = new Map<string, RequiredCiObservation>();
+  /** Pairs whose newest in-scope row has already been DECIDED — kept separate from
+   *  `newest` so a pair rejected as historical stays rejected, instead of falling
+   *  through to the next-oldest row for the same pair. */
+  const decided = new Set<string>();
   for (const row of rows) {
     let payload: CiPayload;
     try {
@@ -345,10 +502,16 @@ function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivitySc
     }
     const projectDir = typeof payload.projectDir === "string" ? payload.projectDir : null;
     const key = `${row.run_id ?? ""} ${projectDir ?? ""}`;
-    if (newest.has(key)) continue; // rows arrive newest-first
+    if (decided.has(key)) continue; // rows arrive newest-first
     if (typeof payload.candidateSha !== "string" || payload.candidateSha === "") continue;
     if (scope.runId !== undefined && row.run_id !== scope.runId) continue;
     if (!inProjectScope(projectDir, scope.projectDirs)) continue;
+
+    // This row IS the newest in-scope observation for its pair. Whatever is decided
+    // about it is decided about the pair.
+    decided.add(key);
+    const ticketId = typeof payload.ticketId === "string" ? payload.ticketId : null;
+    if (!observationIsCurrent(row.run_id, projectDir, ticketId, currency)) continue;
 
     const observedAt = typeof payload.observedAt === "string" ? payload.observedAt : row.created_at;
     const contexts = parseContexts(payload.contexts);
@@ -365,7 +528,7 @@ function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivitySc
       projectDir,
       projectLabel: projectLabelOf(projectDir),
       attemptId: typeof payload.attemptId === "string" ? payload.attemptId : "",
-      ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
+      ticketId,
       candidateSha: payload.candidateSha,
       observedAt,
       outcome,
@@ -428,7 +591,15 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
       .map((o) => toHostLaunch(o, "host", nowMs))
     : [];
 
-  const observations = readNewestCiObservations(db, scope, nowMs);
+  // FG-694: what is OPEN is read once, and it decides two different things — which
+  // observations are current, and which of the three CI absences is the true one.
+  const currency = readCiCurrency(db, scope);
+  const observations = readNewestCiObservations(db, scope, nowMs, currency);
+  // The three-way choice the trap in FG-694 is about. `not_observed` is only ever
+  // reachable when there IS current work owed an observation; with nothing open,
+  // "we observed no CI" would be a claim about an observer that was never asked.
+  const ciState: RequiredCiSection["state"] =
+    observations.length > 0 ? "observed" : currency.hasCurrentAnchor ? "not_observed" : "no_current_candidate";
 
   return {
     generatedAt: now.toISOString(),
@@ -439,8 +610,12 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
     agents: readAgents(db, scope),
     hostVerification,
     requiredCi: {
-      state: observations.length === 0 ? "not_observed" : "observed",
-      label: observations.length === 0 ? CI_NOT_OBSERVED_LABEL : `${observations.length} observed`,
+      state: ciState,
+      label: ciState === "observed"
+        ? `${observations.length} observed`
+        : ciState === "not_observed"
+          ? CI_NOT_OBSERVED_LABEL
+          : CI_NO_CANDIDATE_LABEL,
       observations,
     },
     unassociated,
@@ -466,7 +641,14 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   }
 
   lines.push("  Required CI");
-  if (activity.requiredCi.state === "not_observed") {
+  if (activity.requiredCi.state === "no_current_candidate") {
+    // Parenthesised like the other two empty-section lines, and deliberately NOT
+    // `CI not observed`: nothing was waiting on required checks, so there was no
+    // observation to miss. The heading stays — `forge status` is the diagnostic
+    // surface, where the three sections are a fixed shape an operator reads down
+    // (FG-694 narrows HOME; it does not delete evidence structure here).
+    lines.push(`    (${CI_NO_CANDIDATE_LABEL})`);
+  } else if (activity.requiredCi.state === "not_observed") {
     lines.push(`    ${CI_NOT_OBSERVED_LABEL}`);
   } else {
     for (const ci of activity.requiredCi.observations) {
