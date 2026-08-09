@@ -10,12 +10,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
-  classifyStep, unresolvedReasons,
+  classifyStep, unresolvedReasons, classifyAdapterEntries,
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
   type AuthoredRetentionOutcome, type UpgradeStepOutcomes, type SeedGenerationOutcome,
+  type AdapterSurfacesOutcome,
   parseRetainedLine,
 } from "./upgrade.js";
+import type { AdapterDecision } from "./init.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
 
@@ -387,6 +389,19 @@ const AUTHORED_RETENTION: Record<AuthoredRetentionOutcome, Verdict> = {
   "not-run": "resolved",
 };
 
+// FG-253 step 5: the WHOLE adapter set (Claude commands + Codex skills) as its own
+// step. `user-override` is resolved for the same reason it is under SLASH_COMMANDS
+// — forge declining to clobber a file it does not own is the command working, and
+// an exit code that fires forever on every project that owns its own /orient is
+// noise, not signal. Visible in --json (`adapterSurfaces` + `adapterOverrides`).
+const ADAPTER_SURFACES: Record<AdapterSurfacesOutcome, Verdict> = {
+  installed: "resolved",
+  "already-current": "resolved",
+  "would-install": "resolved",
+  "user-override": "resolved",
+  "not-run": "resolved",
+};
+
 const IMAGE_REBUILD: Record<ImageRebuildOutcome, Verdict> = {
   ran: "resolved",
   "would-rebuild": "resolved",
@@ -420,6 +435,7 @@ const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K
   routingPolicy: ROUTING_POLICY,
   projectInit: PROJECT_INIT,
   slashCommands: SLASH_COMMANDS,
+  adapterSurfaces: ADAPTER_SURFACES,
   imageRebuild: IMAGE_REBUILD,
   releaseCheck: RELEASE_CHECK,
 };
@@ -440,7 +456,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 8 + 5 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 8 + 5 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -450,7 +466,7 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
     seedGeneration: "published",
     authoredRetention: "none", routingPolicy: "recompiled", projectInit: "refreshed",
-    slashCommands: "installed", imageRebuild: "ran", releaseCheck: "ran",
+    slashCommands: "installed", adapterSurfaces: "installed", imageRebuild: "ran", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(allClean), []);
 
@@ -465,9 +481,70 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     // FG-578: `retained` sits in the all-broken row deliberately — even here it
     // must not contribute a reason. The count below is the assertion.
     authoredRetention: "retained", routingPolicy: "failed", projectInit: "needs-markers",
-    slashCommands: "user-override", imageRebuild: "failed", releaseCheck: "failed",
+    // FG-253 step 5: `user-override` sits in the all-broken row on BOTH surfaces
+    // deliberately — even here neither may contribute a reason. The count is the
+    // assertion.
+    slashCommands: "user-override", adapterSurfaces: "user-override",
+    imageRebuild: "failed", releaseCheck: "failed",
   };
   assert.equal(unresolvedReasons(allBroken).length, 8);
+});
+
+// ─────────── FG-253 step 5: adapters as their own step ───────────
+
+test("FG-253 step 5: an adapter `user-override` is RESOLVED, and contributes no unresolved reason", () => {
+  assert.equal(classifyStep({ step: "adapterSurfaces", outcome: "user-override" }).kind, "resolved");
+
+  // The acceptance, stated as the surface an operator actually feels: an outcome
+  // set whose ONLY notable state is a project override yields an EMPTY reason
+  // list — so exit 0, `ok: true`, and "Upgrade complete." A project that
+  // deliberately owns its own /orient (or its own forge-orient skill) is not a
+  // broken project, and a red light that fires forever on it is noise.
+  const withOverride: UpgradeStepOutcomes = {
+    gitPull: "skipped", npmInstall: "skipped", assetInstall: "installed",
+    seedGeneration: "published", authoredRetention: "none", routingPolicy: "no-raci",
+    projectInit: "already-current", slashCommands: "user-override",
+    adapterSurfaces: "user-override", imageRebuild: "skipped", releaseCheck: "ran",
+  };
+  assert.deepEqual(unresolvedReasons(withOverride), []);
+
+  // The guard: the row above is not vacuously empty — one genuine failure in the
+  // same set still reports, so the emptiness is about the override specifically.
+  assert.deepEqual(
+    unresolvedReasons({ ...withOverride, assetInstall: "failed" }),
+    ["install-seeds.sh FAILED"],
+  );
+});
+
+test("FG-253 step 5: each surface is classified from its OWN entries — neither is inferred from the other", () => {
+  const claude = (decision: AdapterDecision) => ({ surface: "claude-command" as const, decision });
+  const codex = (decision: AdapterDecision) => ({ surface: "codex-skill" as const, decision });
+
+  // The bug this replaces: `slashCommands` mixed the Claude-only override list
+  // with the WHOLE plan's action, so a Codex skill needing an install made the
+  // slash-command step claim an install that touched no slash command.
+  const codexNeedsWork = [claude("already-current"), claude("already-current"), codex("install"), codex("install")];
+  assert.equal(classifyAdapterEntries(codexNeedsWork.filter((e) => e.surface === "claude-command"), false), "already-current");
+  assert.equal(classifyAdapterEntries(codexNeedsWork, false), "installed");
+
+  // And the mirror: a Codex-only override must not be reported as a slash-command
+  // override, while the whole-set step must still see it.
+  const codexOverridden = [claude("already-current"), claude("already-current"), codex("override"), codex("already-current")];
+  assert.equal(classifyAdapterEntries(codexOverridden.filter((e) => e.surface === "claude-command"), false), "already-current");
+  assert.equal(classifyAdapterEntries(codexOverridden, false), "user-override");
+});
+
+test("FG-253 step 5: classifyAdapterEntries reaches every outcome it can name", () => {
+  assert.equal(classifyAdapterEntries([], false), "not-run", "nobody looked — not 'already current'");
+  assert.equal(classifyAdapterEntries([{ decision: "already-current" }], false), "already-current");
+  assert.equal(classifyAdapterEntries([{ decision: "install" }], false), "installed");
+  assert.equal(classifyAdapterEntries([{ decision: "migrate" }], false), "installed", "a legacy symlink migrated to bytes is an install");
+  assert.equal(classifyAdapterEntries([{ decision: "refresh" }], false), "installed");
+  assert.equal(classifyAdapterEntries([{ decision: "install" }], true), "would-install", "a dry run forecasts, never claims");
+  // An override outranks work still to do: it is the state an operator must SEE,
+  // and a run that also installed two files should not hide it behind "installed".
+  assert.equal(classifyAdapterEntries([{ decision: "install" }, { decision: "override" }], false), "user-override");
+  assert.equal(classifyAdapterEntries([{ decision: "override" }], true), "user-override", "…on a dry run too — the override is decided by what is already on disk");
 });
 
 test("FG-577 (cell 3): a dirty dev checkout is NOT an operator-requested skip", () => {

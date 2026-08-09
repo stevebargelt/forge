@@ -3,18 +3,22 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
+  adapterOutcomeLines,
+  adapterReportLines,
   applyOrchestratorBlock,
   looksLikeForgeProject,
-  executeClaudeCommandsPlan,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
   executeHookPlan,
-  planClaudeCommands,
+  executeOperatorAdapters,
+  operatorAdapterOverrides,
+  planOperatorAdapters,
   skippedClaudeCommands,
   planClaudeHooks,
   planCommitMsgHook,
   planGitignoreEntries,
-  warnSkippedClaudeCommands,
+  warnOperatorAdapterOverrides,
+  type AdapterDecision,
 } from "./init.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
@@ -204,6 +208,19 @@ export type SlashCommandsOutcome =
   | "user-override"
   | "not-run";
 
+/** FG-253 step 5: the WHOLE project-scoped adapter file set — Claude commands AND
+ *  Codex skills — as its own reported step, so an EXISTING project is updated by
+ *  `forge upgrade` and not only by `forge init`. Same five states `slashCommands`
+ *  has, because they are the same five facts about a file set; the two are
+ *  computed from disjoint reads of one plan (see `classifyAdapterEntries`) rather
+ *  than one being inferred from the other. */
+export type AdapterSurfacesOutcome =
+  | "installed"
+  | "already-current"
+  | "would-install"
+  | "user-override"
+  | "not-run";
+
 export type ReleaseCheckOutcome = "ran" | "skipped-dry-run" | "skipped-asset-install" | "failed";
 
 export type UpgradeStepOutcomes = {
@@ -215,6 +232,7 @@ export type UpgradeStepOutcomes = {
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
   slashCommands: SlashCommandsOutcome;
+  adapterSurfaces: AdapterSurfacesOutcome;
   imageRebuild: ImageRebuildOutcome;
   releaseCheck: ReleaseCheckOutcome;
 };
@@ -333,6 +351,19 @@ const SLASH_COMMANDS: Record<SlashCommandsOutcome, Resolution> = {
   "not-run": resolved,
 };
 
+// FG-253 step 5: the same reasoning SLASH_COMMANDS states, applied to the whole
+// adapter set. A project override is RESOLVED — forge declining to clobber a file
+// it does not own is the command working, and an exit code that fires forever on
+// every project that owns its own /orient is noise, not signal. Seeing it is what
+// `adapterSurfaces` + the named `adapterOverrides` list are for.
+const ADAPTER_SURFACES: Record<AdapterSurfacesOutcome, Resolution> = {
+  installed: resolved,
+  "already-current": resolved,
+  "would-install": resolved,
+  "user-override": resolved,
+  "not-run": resolved,
+};
+
 const IMAGE_REBUILD: Record<ImageRebuildOutcome, Resolution> = {
   ran: resolved,
   "would-rebuild": resolved,
@@ -363,6 +394,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
     case "projectInit": return PROJECT_INIT[step.outcome];
     case "slashCommands": return SLASH_COMMANDS[step.outcome];
+    case "adapterSurfaces": return ADAPTER_SURFACES[step.outcome];
     case "imageRebuild": return IMAGE_REBUILD[step.outcome];
     case "releaseCheck": return RELEASE_CHECK[step.outcome];
     default: {
@@ -381,6 +413,28 @@ export function unresolvedReasons(outcomes: UpgradeStepOutcomes): string[] {
     if (res.kind === "unresolved") reasons.push(res.reason);
   }
   return reasons;
+}
+
+/** FG-253 step 5: classify ONE surface's planned decisions.
+ *
+ *  Called once per reported surface over that surface's OWN entries, never over a
+ *  superset: `slashCommands` reads the claude-command entries and
+ *  `adapterSurfaces` reads all of them, so a Codex skill a project overrides can
+ *  no longer make the slash-command step report an override that never touched a
+ *  slash command — nor the reverse. Before this, `slashCommands` mixed the
+ *  Claude-only override list with the WHOLE plan's action, which is exactly that
+ *  cross-surface inference.
+ *
+ *  An empty entry list is `not-run`, not `already-current`: nobody looked. An
+ *  override outranks the rest because it is the state an operator must SEE. */
+export function classifyAdapterEntries(
+  entries: readonly { decision: AdapterDecision }[],
+  dryRun: boolean,
+): AdapterSurfacesOutcome {
+  if (entries.length === 0) return "not-run";
+  if (entries.some((e) => e.decision === "override")) return "user-override";
+  if (entries.every((e) => e.decision === "already-current")) return "already-current";
+  return dryRun ? "would-install" : "installed";
 }
 
 export type UpgradeOptions = {
@@ -439,6 +493,14 @@ export type UpgradeResult = {
   /** The commands forge did NOT install because the project already owns that
    *  path — the same set the human ⚠ names, so a script sees it too. */
   slashCommandOverrides: string[];
+  /** FG-253 step 5: the same fact for the WHOLE adapter set, Codex skills
+   *  included. Reported alongside `slashCommandOverrides` rather than inside it —
+   *  a Codex skill reported under a field named for slash commands would put a
+   *  claim about one surface into a field that means another. */
+  adapterSurfaces: AdapterSurfacesOutcome;
+  /** Every adapter target forge left alone, named by the label an operator types
+   *  and the repo-relative path — the same set the human ⚠ names. */
+  adapterOverrides: string[];
   imageRebuild: ImageRebuildOutcome;
   releaseCheck: ReleaseCheckOutcome;
   releaseProblems: string[] | null;
@@ -768,6 +830,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       let projectInit: ProjectInitOutcome;
       let slashCommands: SlashCommandsOutcome = "not-run";
       let slashCommandOverrides: string[] = [];
+      let adapterSurfaces: AdapterSurfacesOutcome = "not-run";
+      let adapterOverrides: string[] = [];
       if (!isForgeProject) {
         // #231 follow-up: flag the never-initialized case loudly + actionably,
         // instead of a terse "skipped". upgrade is for EXISTING projects; a
@@ -818,34 +882,48 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           }
         }
 
-        // Hook / command / gitignore plans — idempotent (already-linked → no-op).
+        // Hook / adapter / gitignore plans — idempotent (already-current → no-op).
         const commitMsg = planCommitMsgHook(cwd);
         const claudeHooks = planClaudeHooks(cwd);
-        const slashCmds = planClaudeCommands(cwd);
+        // FG-253 step 5: the step-4 planner/executor, driven here so an EXISTING
+        // project is UPDATED — the whole adapter set, Claude commands and Codex
+        // skills alike, refreshed from this release's rendered bytes and migrated
+        // off the pre-FG-253 symlinks. Planned ONCE: two plans would be two reads
+        // of the filesystem, free to disagree about what is on disk.
+        const adapters = planOperatorAdapters(cwd);
         const gitignore = planGitignoreEntries(cwd);
-        const overrides = skippedClaudeCommands(slashCmds);
-        slashCommandOverrides = overrides.map((e) => `${"/" + e.name.replace(/\.md$/, "")} NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"})`);
-        slashCommands = overrides.length > 0 ? "user-override"
-          : slashCmds.action === "already-current" ? "already-current"
-          : dryRun ? "would-install"
-          : "installed";
+        const adapterEntries = adapters.action === "skipped" ? [] : adapters.entries;
+        slashCommandOverrides = skippedClaudeCommands(adapters).map(
+          (e) => `${"/" + e.name.replace(/\.md$/, "")} NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"})`,
+        );
+        adapterOverrides = operatorAdapterOverrides(adapters).map(
+          (e) => `${e.label} NOT installed — ${e.relPath} already exists (${e.details ?? "unknown reason"})`,
+        );
+        slashCommands = classifyAdapterEntries(adapterEntries.filter((e) => e.surface === "claude-command"), dryRun);
+        adapterSurfaces = classifyAdapterEntries(adapterEntries, dryRun);
         if (dryRun) {
-          say(`        commit-msg hook: ${commitMsg.action}`);
-          say(`        claude hooks:    ${claudeHooks.action}`);
-          say(`        slash commands:  ${slashCmds.action}`);
-          say(`        .gitignore:      ${gitignore.action}`);
+          say(`        commit-msg hook:   ${commitMsg.action}`);
+          say(`        claude hooks:      ${claudeHooks.action}`);
+          say(`        operator adapters: ${adapters.action}`);
+          for (const line of adapterReportLines(adapters)) say(`    ${line}`);
+          say(`        .gitignore:        ${gitignore.action}`);
         } else {
-          say(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
-          say(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
-          say(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
-          say(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
+          say(`        commit-msg hook:   ${executeHookPlan(commitMsg)}`);
+          say(`        claude hooks:      ${executeClaudeHooksPlan(claudeHooks)}`);
+          // The REAL run reports per-OUTCOME, not per planned decision: a target
+          // that changed between plan and execute is skipped, and a report read
+          // back off the plan would claim an install forge deliberately did not do.
+          const applied = executeOperatorAdapters(adapters);
+          say(`        operator adapters: ${applied.summary}`);
+          for (const line of adapterOutcomeLines(adapters, applied.outcomes)) say(`    ${line}`);
+          say(`        .gitignore:        ${executeGitignoreEntriesPlan(gitignore)}`);
         }
-        // The ⚠ is a RENDER of the `slashCommands` / `slashCommandOverrides` state
+        // The ⚠ is a RENDER of the `adapterSurfaces` / `adapterOverrides` state
         // above, so it is ordered like one: suppressed under --json rather than
         // written straight to the console beside a document that claims to be the
         // whole answer, and printed on a dry run too — the override is decided by
         // what is already on disk, which a dry run predicts exactly.
-        if (!json) warnSkippedClaudeCommands(slashCmds);
+        if (!json) warnOperatorAdapterOverrides(adapters);
       }
 
       // #229: rebuild the agent image only when explicitly asked (the one
@@ -902,6 +980,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         routingPolicy,
         projectInit,
         slashCommands,
+        adapterSurfaces,
         imageRebuild,
         releaseCheck,
       };
@@ -948,6 +1027,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         projectInit,
         slashCommands,
         slashCommandOverrides,
+        adapterSurfaces,
+        adapterOverrides,
         imageRebuild,
         releaseCheck,
         releaseProblems,
