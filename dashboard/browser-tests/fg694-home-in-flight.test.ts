@@ -13,8 +13,11 @@
 //   1. Home has ONE activity surface, `In flight`. No `Current activity` heading, no
 //      `Right now` kicker, no agent rendered twice. The compact host-verification and
 //      required-check WAITS are rows inside it, and only while they are actually waits:
-//      an observed-running launch, a candidate whose checks are still pending. Nothing
-//      to wait on renders nothing — not a heading, not an empty subsection.
+//      a launch that is observed, running AND associated with current work; a candidate
+//      whose checks are still pending. A background launch nobody associated — the
+//      dashboard server started from a cwd — is running host activity, not a wait, and
+//      belongs to the Activity view. Nothing to wait on renders nothing at all: not a
+//      heading, not an empty subsection.
 //   2. Ticket CLOSURE retires the residue. Closing a ticket never drives its review row
 //      terminal, so the eight unfinished rows kept their CI current; the fixture below
 //      builds that exact shape through the REAL derivation rather than serving an
@@ -48,6 +51,9 @@ const PROJECT = "/repos/forge";
 const CURRENT_SHA = "c".repeat(40);
 const LIVE_TASK = "task-build-aef6ae";
 const LIVE_TICKET = "FG-694";
+/** A background launch nobody is waiting on — the dashboard server, started from a cwd
+ *  with no `--run`, `--task` or `--ticket`. */
+const UNASSOCIATED_LAUNCH = "launch-dashboard-hhhhhh";
 /** The eight the reproduction showed: every one CLOSED, every one still carrying an
  *  unfinished review row, every one the newest CI observation for its pair. */
 const SHIPPED = ["FG-686", "FG-576", "MG-51", "FG-591", "FG-689", "FG-584", "FG-685", "FG-610"];
@@ -113,6 +119,18 @@ function reportedShape(): CurrentActivity {
   `).run(
     "launch-worktree-8pagjk", "worktree-tier", JSON.stringify(["npm", "run", "test:worktree"]),
     PROJECT, PROJECT, LIVE_TICKET, ago(900_000), ago(30_000),
+  );
+  // The dashboard server itself: running, freshly observed, placed by its cwd and
+  // associated with nothing. It is host activity to read on the Activity view, not a
+  // wait — folding it in put a permanent `host verification` row under In flight.
+  db.prepare(`
+    INSERT INTO launch_observations (
+      launch_id, name, command, cwd, project_dir, association_kind, run_id, task_id, ticket_id,
+      campaign_id, item_id, started_at, observed_at, state, exit_code, signal, terminal
+    ) VALUES (?, ?, ?, ?, ?, 'cwd', NULL, NULL, NULL, NULL, NULL, ?, ?, 'running', NULL, NULL, 0)
+  `).run(
+    UNASSOCIATED_LAUNCH, "dashboard", JSON.stringify(["forge", "dashboard"]),
+    PROJECT, PROJECT, ago(4 * 3_600_000), ago(15_000),
   );
 
   try {
@@ -240,6 +258,30 @@ test("FG-694: the host-verification and CI waits are ONE compact line each — n
   await page.close();
 });
 
+test("FG-694: a running launch nobody associated is NOT a wait — the dashboard server stays off Home", async () => {
+  served = reportedShape();
+  inFlight = IN_FLIGHT;
+  // Non-vacuous at the source: the derivation DOES carry it, fresh and running, so only
+  // the missing association can have kept it off Home.
+  const orphan = served.hostVerification.find((l) => l.launchId === UNASSOCIATED_LAUNCH);
+  assert.ok(orphan, "the derivation carries the cwd-placed launch");
+  assert.equal(orphan.unassociated, true);
+  assert.equal(orphan.observation, "fresh");
+  assert.equal(orphan.status.state, "running");
+
+  const page = await openHome();
+  await page.locator(".ca-host-wait-row").waitFor();
+  assert.equal(await page.locator(".ca-host-wait-row").count(), 1,
+    "the associated verification is the only host wait — the background launch is diagnostic activity");
+  const home = await page.locator("section.home-view").innerText();
+  assert.doesNotMatch(home, new RegExp(UNASSOCIATED_LAUNCH));
+  assert.doesNotMatch(home, /unassociated/i, "nothing on Home is unassociated, so nothing wears the badge");
+  assert.match(await page.locator(".ca-host-wait-row").innerText(), new RegExp(LIVE_TICKET),
+    "…and the associated one renders compactly, named by the ticket it declared");
+  await page.screenshot({ path: join(SHOTS, "fg694-home-associated-waits-only.png"), fullPage: true });
+  await page.close();
+});
+
 test("FG-694: a CLOSED ticket's unfinished review contributes NO current CI to Home", async () => {
   served = reportedShape();
   inFlight = IN_FLIGHT;
@@ -338,7 +380,7 @@ test("FG-694: a failed read says the WAITS are unavailable and claims no absence
 });
 
 test("FG-694: the Home screenshots exist", () => {
-  for (const name of ["fg694-home-one-surface.png", "fg694-home-compact.png", "fg694-home-waits-unavailable.png"]) {
+  for (const name of ["fg694-home-one-surface.png", "fg694-home-compact.png", "fg694-home-waits-unavailable.png", "fg694-home-associated-waits-only.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);
   }
   console.log(`FG-694 Home screenshots: ${SHOTS}`);

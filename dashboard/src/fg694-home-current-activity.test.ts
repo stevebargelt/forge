@@ -428,13 +428,85 @@ describe("FG-694 correction — Home's In flight folds in waits only, and never 
     }
   });
 
-  test("an unassociated launch is still a wait, and keeps its label rather than being attributed", () => {
-    const orphan = { ...launch, launchId: "launch-orphan-gggggg", unassociated: true, runId: null, ticketId: null, name: null };
-    const waits = wait({ unassociated: [orphan] });
-    assert.equal(waits.hostVerification.length, 1);
-    const text = waitsText(ready({ unassociated: [orphan] }));
-    assert.match(text, /launch-orphan-gggggg/, "with no ticket and no name, the id is the only honest identity");
-    assert.match(text, /unassociated/);
+  // ── the correction's own regression: an UNASSOCIATED launch is not a wait ──
+  //
+  // The first cut of this correction folded the host-level `unassociated` bucket into
+  // Home's waits alongside `hostVerification`, and read only "observed and running".
+  // Every launch that is merely running in a project — the dashboard server itself
+  // being the standing example, started from a cwd with no `--run`, `--task` or
+  // `--ticket` — then held a permanent `host verification` row under In flight. Running
+  // is not the same fact as being WAITED ON: Home carries only host verification the
+  // submitter associated with current work, and the rest stays on the diagnostic
+  // Activity panel and in `forge status`, where it still renders in full.
+
+  test("a running launch nobody associated is NOT a wait — the dashboard server does not live under In flight", () => {
+    const server = {
+      ...launch,
+      launchId: "launch-dashboard-hhhhhh",
+      name: "dashboard",
+      command: ["forge", "dashboard"],
+      commandLine: "forge dashboard",
+      associationKind: "cwd" as const,
+      unassociated: true,
+      placement: "project" as const,
+      runId: null,
+      taskId: null,
+      ticketId: null,
+    };
+    // Non-vacuous: it is fresh and running, so ONLY the missing association excludes it.
+    assert.equal(server.observation, "fresh");
+    assert.deepEqual(server.status, { state: "running" });
+
+    assert.deepEqual(wait({ hostVerification: [server] }).hostVerification, [],
+      "a cwd-placed launch reaches `hostVerification` at project scope, and is still not a wait");
+    assert.deepEqual(wait({ unassociated: [server] }).hostVerification, [],
+      "…and neither is the host-level bucket");
+
+    const text = waitsText(ready({ hostVerification: [server], unassociated: [server] }));
+    assert.equal(text, "", "nothing to wait on renders nothing at all — not a row, not a badge");
+    assert.doesNotMatch(text, /dashboard/);
+
+    // Structural, like the `agents` claim above: the bucket is not read, so no rendering
+    // change can put diagnostic activity back on Home.
+    const source = readFileSync(new URL("../client/current-activity-render.js", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function homeInFlightActivity("));
+    assert.doesNotMatch(body.slice(0, body.indexOf("\n}")), /\.unassociated\b/,
+      "homeInFlightActivity must not read `unassociated` — the host-level bucket is diagnostic activity");
+  });
+
+  test("an ASSOCIATED running verification still renders, compactly, on any one of the three ids", () => {
+    for (const [field, over] of [
+      ["ticketId", { runId: null, taskId: null, ticketId: "FG-694" }],
+      ["runId", { runId: "run-fg694", taskId: null, ticketId: null, name: "worktree-tier" }],
+      ["taskId", { runId: null, taskId: "task-build-aef6ae", ticketId: null, name: "worktree-tier" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const waits = wait({ hostVerification: [{ ...launch, ...over }] });
+      assert.equal(waits.hostVerification.length, 1, `a launch that declared ${field} is current work`);
+    }
+
+    const associated = { ...launch, unassociated: false };
+    const text = waitsText(ready({ hostVerification: [associated] }));
+    assert.match(text, /FG-694/, "the wait is named by the ticket it declared");
+    assert.doesNotMatch(text, /npm run test:worktree/, "compact: the argv stays on the diagnostic surface");
+    assert.doesNotMatch(text, /launch-worktree-8pagjk/, "compact: so does the launch id, once something better names it");
+    assert.doesNotMatch(text, /unassociated/, "there is no association badge on Home — every row here is associated");
+  });
+
+  test("campaign/item provenance is not an association — it authorizes placement nowhere", () => {
+    // The launcher's own documented case: a campaign drive-item launch knows its
+    // campaign and its item and has no run at all. `hasPlacementAuthority` reads the
+    // same three ids and calls it unassociated; Home must not disagree with the store.
+    const driveItem = {
+      ...launch,
+      launchId: "launch-campaign-iiiiii",
+      unassociated: true,
+      runId: null,
+      taskId: null,
+      ticketId: null,
+      campaignId: "campaign-mg51",
+      itemId: "item-7",
+    };
+    assert.deepEqual(wait({ hostVerification: [driveItem] }).hostVerification, []);
   });
 
   test("a CI candidate is folded in only while its required checks are PENDING", () => {
@@ -936,6 +1008,8 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
         guarded: ["runId", "taskId", "ticketId", "campaignId", "projectLabel"] },
       { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: [] },
       { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: [] },
+      { file: "current-activity-render.js", fn: "launchIsAssociatedWait", receiver: "entry", kind: "launch",
+        guarded: ["runId", "taskId", "ticketId"] },
       { file: "current-activity-render.js", fn: "launchIsCurrentWait", receiver: "entry", kind: "launch",
         guarded: ["observation", "status"] },
       { file: "current-activity-render.js", fn: "launchWaitIdentity", receiver: "e", kind: "launch",

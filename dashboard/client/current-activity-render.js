@@ -594,10 +594,15 @@ export function homeCiSummaries(section) {
 //
 //   - agents are NOT folded in. They are already there, from /api/in-flight. Rendering
 //     the derivation's `agents` alongside them is the duplication the panel introduced.
-//   - a host launch qualifies only while it is OBSERVED and RUNNING. `exited 143`,
-//     `owner gone` and `unobserved since <t>` are dispositions and history — four
-//     distinct facts that still render in full on the diagnostic surfaces (the Activity
-//     view's Current activity panel, and `forge status`), which is where they are read.
+//   - a host launch qualifies only while it is OBSERVED and RUNNING, and only when the
+//     submitter ASSOCIATED it with current work (`--run` / `--task` / `--ticket`).
+//     `exited 143`, `owner gone` and `unobserved since <t>` are dispositions and
+//     history — four distinct facts that still render in full on the diagnostic
+//     surfaces (the Activity view's Current activity panel, and `forge status`), which
+//     is where they are read. An UNASSOCIATED launch — cwd-only or host-level, the
+//     dashboard server itself being the standing example — is running host activity
+//     that nobody is waiting on; it belongs to those same diagnostic surfaces, and
+//     folding it into Home put a permanent row under every operator's In flight.
 //   - a CI candidate qualifies only while checks are PENDING. `CI passed`, `CI failed`
 //     and `CI status unavailable` are outcomes to read on the run/review detail, not
 //     waits to watch on Home.
@@ -612,12 +617,27 @@ export function homeCiSummaries(section) {
  *  and found none — the AC7 error, reached through a different surface. */
 export const IN_FLIGHT_WAITS_UNAVAILABLE_LABEL = "Host and CI waits unavailable";
 
-/** Is this launch something an operator is WAITING ON right now? Both halves are
- *  required and they are different facts: `fresh` is about the observer still looking,
- *  `running` is about the process still going. A stale row is not evidence about now
- *  (BD-12), and a terminal one is history. */
-export function launchIsCurrentWait(entry) {
+const declared = (v) => typeof v === "string" && v !== "";
+
+/** Did the SUBMITTER associate this launch with current work? The three ids the store
+ *  treats as placement authority (`hasPlacementAuthority`) and no others —
+ *  `campaignId`/`itemId` are provenance there and are provenance here. Read POSITIVELY
+ *  off the declared ids rather than off the `unassociated` label, so a payload that
+ *  omits the label cannot promote a cwd-only launch onto Home by default. */
+export function launchIsAssociatedWait(entry) {
   if (!entry || typeof entry !== "object") return false;
+  return declared(entry.runId) || declared(entry.taskId) || declared(entry.ticketId);
+}
+
+/** Is this launch something an operator is WAITING ON right now? Three facts, all
+ *  required and all different: `fresh` is about the observer still looking, `running`
+ *  is about the process still going, and the association is about the launch being
+ *  part of the work in flight at all. A stale row is not evidence about now (BD-12), a
+ *  terminal one is history, and an unassociated one is host activity nobody is waiting
+ *  on — a background server started from a cwd is the case that put a permanent row on
+ *  Home. All three still render in full on the diagnostic surfaces. */
+export function launchIsCurrentWait(entry) {
+  if (!launchIsAssociatedWait(entry)) return false;
   if (entry.observation !== "fresh") return false;
   const status = entry.status;
   return status !== null && typeof status === "object" && status.state === "running";
@@ -635,7 +655,9 @@ export function launchWaitIdentity(e) {
 
 /** What Home's In-flight surface folds in, as data. Two lists and a failure, and never
  *  an agent: `agents` is deliberately not read here, so duplication is unrepresentable
- *  rather than merely avoided.
+ *  rather than merely avoided. The host-level `unassociated` bucket is not read here
+ *  either, for the same structural reason — it is diagnostic activity, and no rendering
+ *  change can put it back on Home.
  *
  *  A read that has not landed yet contributes nothing — In flight already renders what
  *  /api/in-flight observed, and a surface that says nothing about waits claims nothing
@@ -652,10 +674,9 @@ export function homeInFlightActivity(load) {
     };
   }
   const activity = load.activity;
-  const unassociated = Array.isArray(activity.unassociated) ? activity.unassociated : [];
   return {
     phase,
-    hostVerification: [...activity.hostVerification, ...unassociated].filter(launchIsCurrentWait),
+    hostVerification: activity.hostVerification.filter(launchIsCurrentWait),
     ci: (homeCiSummaries(activity.requiredCi) ?? []).filter((s) => s.state === "running"),
     message: null,
     detail: null,

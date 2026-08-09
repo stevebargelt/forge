@@ -116,14 +116,17 @@ function ciWaitKey(summary) {
 // ONE line. The argv, the launch id, the run and task ids and the observation time are
 // all still on the Activity view's Current activity panel and in `forge status`; here
 // the operator gets what they are waiting on and how long it has been.
+//
+// No `unassociated` badge: `homeInFlightActivity` only ever hands this row a launch the
+// submitter associated with current work, so a badge here could only ever say the same
+// thing twice. The label still renders on the Activity view, where unassociated launches
+// still appear.
 function HostWaitRow({ entry, now }) {
-  const assoc = launchAssociationLabel(entry);
   return html`
     <div class="item ca-wait-row ca-host-wait-row">
       <span class="badge launch-state-running">host verification</span>
       <div>
         <strong>${launchWaitIdentity(entry)}</strong>
-        ${assoc ? html`<span class="ca-assoc-badge">${assoc}</span>` : null}
       </div>
       <div class="muted mono" style="font-size: 11px;" title="time since the launch started">
         ${caElapsedText(entry.startedAt, now)}
