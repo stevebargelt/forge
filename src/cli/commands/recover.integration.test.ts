@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
-import { insertRun, getRun } from "../../store/runs.js";
+import { insertRun, getRun, failRun, completeRun, updateRunStatus } from "../../store/runs.js";
 import { insertTask, getTask, markTaskComplete, tasksForRun } from "../../store/tasks.js";
-import { eventsForTask, logEvent } from "../../store/events.js";
+import { eventsForTask, eventsForRun, logEvent } from "../../store/events.js";
 import { taskDir } from "../../util/paths.js";
 import { reconcileRun } from "../../v2/reconcile.js";
 import { computeReadyQueue } from "../../v2/ready-queue.js";
@@ -706,7 +706,12 @@ test("recover --re-drive: mints a fresh pending primary for a failed fanout pare
   assert.equal(outcome.kind, "re-drive-done");
   if (outcome.kind !== "re-drive-done") return;
 
-  const newTask = getTask(outcome.newTaskId)!;
+  // FG-688: the unordered lane still mints, so dispatchTaskId === newTaskId here.
+  // (`newTaskId` is optional on the outcome now — the ordered lane mints nothing —
+  // so this reads the always-present field. Behaviour asserted is unchanged.)
+  assert.equal(outcome.lane, "unordered_fresh_primary");
+  assert.equal(outcome.newTaskId, outcome.dispatchTaskId);
+  const newTask = getTask(outcome.dispatchTaskId)!;
   assert.equal(newTask.status, "pending");
   assert.equal(newTask.parentId, undefined);
   assert.equal(newTask.phase, "build");
@@ -786,6 +791,288 @@ test("recover --re-drive: refuses a failed fanout parent whose failure kind isn'
   if (outcome.kind === "re-drive-refused") assert.match(outcome.reason, /gate_rejected/);
   assert.equal(getTask("parent-redrive-wrongkind")!.status, "failed", "no mutation on refusal");
   assert.equal(tasksForRun(RUN.id).length, before, "no new pending primary minted");
+});
+
+// ── FG-688: --re-drive's adopt-preserving ORDERED lane ───────────────────────
+//
+// The fixture is the FG-576 shape: an ordered wave where one item failed, its
+// transitive dependents never dispatched, and the independent items completed and
+// were captured. The wave's ORDERED-ness is read off the same durable event
+// runOrderedWave writes before dispatching any child — the one thing
+// isOrderedFanoutWave consults — so these fixtures differ from the unordered ones
+// by evidence, not by a test-only flag.
+
+function buildFailedWave(
+  parentId: string,
+  failureKind: string,
+  opts: { ordered?: boolean; phase?: string; parentCreatedAt?: string } = {},
+): void {
+  const phase = opts.phase ?? "build";
+  insertTask(mkTask(parentId, { status: "failed", phase, createdAt: opts.parentCreatedAt ?? "2026-06-01T00:00:00Z" }));
+  if (opts.ordered !== false) {
+    logEvent("integration.worktree_created", { runId: RUN.id, taskId: parentId, payload: { ordered: true } });
+  }
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId: parentId,
+    payload: { failure_kind: failureKind, error: "item A failed; B and D never dispatched" },
+  });
+  // A (failed, must re-dispatch) and E/F (complete + captured, must be adopted).
+  insertTask(mkTask(`${parentId}-a`, { parentId, phase, status: "failed" }));
+  insertTask(mkTask(`${parentId}-e`, { parentId, phase, status: "complete" }));
+  insertTask(mkTask(`${parentId}-f`, { parentId, phase, status: "complete" }));
+}
+
+function reactivationEvents(runId: string) {
+  return eventsForRun(runId).filter((e) => e.eventType === "run.reactivated");
+}
+
+/** Settle the run the way an accepted ordered-wave failure does — the status write
+ *  and its `run.failed` event in one transaction (finalizeRunIfSettled's shape,
+ *  logSource "runNext-wave-complete"). failRun alone writes no event. */
+function settleRunFailed(): void {
+  const applied = failRun(RUN.id, {
+    onApplied: () => logEvent("run.failed", { runId: RUN.id, payload: { via: "runNext-wave-complete" } }),
+  });
+  assert.equal(applied, true, "sanity: the wave failure settled the run too");
+}
+
+test("FG-688 --re-drive: an ORDERED prerequisite_blocked parent on a failed run is reopened IN PLACE — same row, no new primary, run reactivated", () => {
+  buildFailedWave("parent-ordered-pb", "prerequisite_blocked");
+  settleRunFailed();
+  const runBefore = getRun(RUN.id)!;
+  assert.ok(runBefore.completedAt, "sanity: a failed run carries completed_at");
+  const taskCountBefore = tasksForRun(RUN.id).length;
+
+  const outcome = performReDrive("parent-ordered-pb");
+  assert.equal(outcome.kind, "re-drive-done");
+  if (outcome.kind !== "re-drive-done") return;
+
+  // The lane, and the row it reuses.
+  assert.equal(outcome.lane, "ordered_reopened_in_place");
+  assert.equal(outcome.parentId, "parent-ordered-pb");
+  assert.equal(outcome.dispatchTaskId, "parent-ordered-pb", "the REUSED parent dispatches, not a fresh primary");
+  assert.equal(outcome.newTaskId, undefined, "the ordered lane mints nothing, so it claims no newTaskId");
+  assert.equal(outcome.authorizingFailureKind, "prerequisite_blocked");
+  assert.equal(outcome.runReactivated, true);
+
+  // The parent row itself came back to pending, keeping its children attached —
+  // which is the whole point: runOrderedWave recomputes adoption from THIS
+  // parent's children, so reusing the row is what keeps the captured work reachable.
+  const parent = getTask("parent-ordered-pb")!;
+  assert.equal(parent.status, "pending");
+  assert.equal(parent.completedAt, undefined, "completed_at is cleared — the row is no longer settled");
+  assert.equal(parent.parentId, undefined);
+  assert.equal(tasksForRun(RUN.id).length, taskCountBefore, "NO new primary row was inserted");
+  const children = tasksForRun(RUN.id).filter((t) => t.parentId === "parent-ordered-pb");
+  assert.equal(children.length, 3, "the captured children stay attached to the reused parent");
+  assert.equal(getTask("parent-ordered-pb-e")!.status, "complete", "captured work untouched");
+  assert.equal(getTask("parent-ordered-pb-f")!.status, "complete", "captured work untouched");
+
+  // The failure survives into the wave it authorized (markTaskRunning clears `error`).
+  assert.deepEqual(parent.taskPackage.inputs["previous_failure"], {
+    kind: "prerequisite_blocked",
+    error: null,
+    failedTaskId: "parent-ordered-pb",
+  });
+
+  // The run row came back with it — without this the reopened parent would never
+  // dispatch, because both `forge next` entry points refuse a non-active run.
+  const runAfter = getRun(RUN.id)!;
+  assert.equal(runAfter.status, "active");
+  assert.equal(runAfter.completedAt, undefined);
+
+  // Reactivation NULLs completed_at, so this event is the ONLY durable record
+  // that the run ever failed.
+  const reactivated = reactivationEvents(RUN.id);
+  assert.equal(reactivated.length, 1, "exactly one run.reactivated event");
+  const payload = reactivated[0]!.payload as Record<string, unknown>;
+  assert.equal(payload["source"], "recover --re-drive", "named distinctly from the retry/invoke sources");
+  assert.equal(payload["from"], "failed");
+  assert.equal(payload["completedAtCleared"], runBefore.completedAt);
+  assert.equal(payload["authorizingTaskId"], "parent-ordered-pb");
+  assert.equal(payload["failure_kind"], "prerequisite_blocked");
+
+  // The earlier run.failed is never amended: run.failed -> run.reactivated reads back.
+  assert.equal(eventsForRun(RUN.id).filter((e) => e.eventType === "run.failed").length, 1);
+
+  // The reopened row is actually DISPATCHABLE — the precondition AC1 rests on.
+  // computeReadyQueue admits the phase because a pending primary exists among its
+  // attempts, and dispatchFanoutStep's existingParent lookup then finds this exact
+  // row (phase + parentId undefined + pending) and reuses it, children attached.
+  const wf: Workflow = { name: "wf", description: "wf", review_mode: "legacy_verdict", inputs: [], steps: [{ id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }] };
+  const ready = computeReadyQueue(wf, tasksForRun(RUN.id));
+  assert.equal(ready.length, 1, "the build step is ready exactly once");
+  assert.equal(ready[0]!.id, "build");
+
+  // The task-level audit says the row really went back to pending.
+  const reconciled = eventsForTask("parent-ordered-pb").filter((e) => e.eventType === "task.reconciled");
+  assert.equal(reconciled.length, 1);
+  const rp = reconciled[0]!.payload as Record<string, unknown>;
+  assert.equal(rp["to"], "pending");
+  assert.equal(rp["reason"], "ordered_wave_redriven_in_place");
+  assert.equal(rp["failure_kind"], "prerequisite_blocked");
+});
+
+test("FG-688 --re-drive: the UNORDERED fanout_wave_orphaned lane still mints a fresh primary, and now ALSO reactivates the failed run", () => {
+  buildFailedWave("parent-unordered", "fanout_wave_orphaned", { ordered: false });
+  settleRunFailed();
+
+  const outcome = performReDrive("parent-unordered");
+  assert.equal(outcome.kind, "re-drive-done");
+  if (outcome.kind !== "re-drive-done") return;
+
+  assert.equal(outcome.lane, "unordered_fresh_primary");
+  assert.ok(outcome.newTaskId, "the unordered lane mints");
+  assert.equal(outcome.dispatchTaskId, outcome.newTaskId);
+  assert.notEqual(outcome.newTaskId, "parent-unordered", "a FRESH primary, not the reused row");
+
+  // Old parent stays terminal as an audit record — byte-for-byte the pre-FG-688 shape.
+  assert.equal(getTask("parent-unordered")!.status, "failed");
+  const minted = getTask(outcome.dispatchTaskId)!;
+  assert.equal(minted.status, "pending");
+  assert.equal(minted.parentId, undefined);
+  assert.equal(minted.phase, "build");
+
+  // The one addition: the run comes back so the minted primary can dispatch.
+  assert.equal(outcome.runReactivated, true);
+  assert.equal(getRun(RUN.id)!.status, "active");
+  assert.equal(reactivationEvents(RUN.id).length, 1);
+});
+
+test("FG-688 --re-drive: refuses a kind outside the enumeration, and FAILS CLOSED on an unrecognized kind string", () => {
+  for (const kind of ["plan_dependency_invalid", "integration_failed", "kind_from_a_future_build"]) {
+    const parentId = `parent-ordered-${kind}`;
+    buildFailedWave(parentId, kind, { phase: `build-${kind}` });
+    settleRunFailed();
+
+    const before = getTask(parentId)!;
+    const runBefore = getRun(RUN.id)!;
+    const eventCount = eventsForRun(RUN.id).length;
+
+    const outcome = performReDrive(parentId);
+    assert.equal(outcome.kind, "re-drive-refused", `${kind} must be refused`);
+    if (outcome.kind === "re-drive-refused") assert.match(outcome.reason, new RegExp(kind));
+
+    assert.deepEqual(getTask(parentId), before, `${kind}: parent row untouched`);
+    assert.deepEqual(getRun(RUN.id), runBefore, `${kind}: run row untouched — the run is NOT reactivated by a refused verb`);
+    assert.equal(eventsForRun(RUN.id).length, eventCount, `${kind}: no events written`);
+    updateRunStatus(RUN.id, "active"); // reset for the next iteration
+  }
+});
+
+test("FG-688 --re-drive: refuses a SUPERSEDED parent — AC3's verb-level half — writing nothing", () => {
+  buildFailedWave("parent-ordered-superseded", "prerequisite_blocked");
+  // A later parent-less primary in the SAME phase: exactly what `forge gate
+  // request-changes` mints. It owns the phase now, so the old parent is a dead
+  // lineage and reopening it would put two live parents in one phase.
+  insertTask(mkTask("parent-ordered-live", { status: "running", phase: "build", createdAt: "2026-06-02T00:00:00Z" }));
+  settleRunFailed();
+
+  const oldBefore = getTask("parent-ordered-superseded")!;
+  const liveBefore = getTask("parent-ordered-live")!;
+  const runBefore = getRun(RUN.id)!;
+  const taskCount = tasksForRun(RUN.id).length;
+  const eventCount = eventsForRun(RUN.id).length;
+
+  const outcome = performReDrive("parent-ordered-superseded");
+  assert.equal(outcome.kind, "re-drive-refused");
+  if (outcome.kind === "re-drive-refused") {
+    assert.match(outcome.reason, /SUPERSEDED by parent-ordered-live/);
+    assert.match(outcome.reason, /forge next/, "points at the live wave");
+  }
+
+  // Whole rows, not selected fields — a future partial write cannot slip through.
+  assert.deepEqual(getTask("parent-ordered-superseded"), oldBefore);
+  assert.deepEqual(getTask("parent-ordered-live"), liveBefore);
+  assert.deepEqual(getRun(RUN.id), runBefore);
+  assert.equal(tasksForRun(RUN.id).length, taskCount);
+  assert.equal(eventsForRun(RUN.id).length, eventCount);
+});
+
+test("FG-688 --re-drive: refuses on a COMPLETE run and on an ABANDONED run, writing nothing", () => {
+  for (const [runStatus, parentId] of [
+    ["complete", "parent-ordered-runcomplete"],
+    ["abandoned", "parent-ordered-runabandoned"],
+  ] as const) {
+    const db2 = makeInMemoryDb();
+    const prev2 = setDbForTest(db2);
+    try {
+      insertRun({ ...RUN });
+      buildFailedWave(parentId, "prerequisite_blocked");
+      if (runStatus === "complete") completeRun(RUN.id);
+      else updateRunStatus(RUN.id, "abandoned");
+      assert.equal(getRun(RUN.id)!.status, runStatus, "sanity");
+
+      const parentBefore = getTask(parentId)!;
+      const runBefore = getRun(RUN.id)!;
+      const eventCount = eventsForRun(RUN.id).length;
+
+      const outcome = performReDrive(parentId);
+      assert.equal(outcome.kind, "re-drive-refused", `a ${runStatus} run must refuse`);
+      if (outcome.kind === "re-drive-refused") assert.match(outcome.reason, new RegExp(runStatus));
+
+      assert.deepEqual(getTask(parentId), parentBefore, `${runStatus}: parent row untouched`);
+      assert.deepEqual(getRun(RUN.id), runBefore, `${runStatus}: run row untouched`);
+      assert.equal(eventsForRun(RUN.id).length, eventCount, `${runStatus}: no events written`);
+    } finally {
+      setDbForTest(prev2 as DatabaseInstance);
+      db2.close();
+    }
+  }
+});
+
+test("FG-688 --re-drive: an already-ACTIVE run re-drives successfully with NO run.reactivated event (idempotent, not an error)", () => {
+  buildFailedWave("parent-ordered-runactive", "integration_gate_timeout");
+  assert.equal(getRun(RUN.id)!.status, "active", "sanity: only one phase's wave failed, the run never settled");
+
+  const outcome = performReDrive("parent-ordered-runactive");
+  assert.equal(outcome.kind, "re-drive-done");
+  if (outcome.kind !== "re-drive-done") return;
+  assert.equal(outcome.lane, "ordered_reopened_in_place");
+  assert.equal(outcome.runReactivated, false, "no run-level write was needed");
+
+  assert.equal(getTask("parent-ordered-runactive")!.status, "pending");
+  assert.equal(getRun(RUN.id)!.status, "active");
+  assert.equal(reactivationEvents(RUN.id).length, 0, "no run.reactivated event over a run that never left active");
+});
+
+test("FG-688 --re-drive ATOMICITY: the run CAS losing its race rolls the parent reopen back — neither write lands", () => {
+  buildFailedWave("parent-ordered-race", "prerequisite_blocked");
+  settleRunFailed();
+
+  // Simulate the race the transaction exists to survive: the run row is moved off
+  // 'failed' by another writer AFTER this verb's eligibility read and INSIDE the
+  // transaction — here, deterministically, by a trigger that fires on the parent
+  // reopen itself. reactivateFailedRun's CAS then matches zero rows.
+  //
+  // This is the dangerous direction: parent-moved-but-run-not is a PERMANENT wedge
+  // (the ready queue keeps the phase active, so the run can neither settle nor
+  // dispatch), which is why the reopen must roll back with it.
+  db.exec(`
+    CREATE TRIGGER race_run_off_failed AFTER UPDATE OF status ON tasks
+    WHEN NEW.id = 'parent-ordered-race' AND NEW.status = 'pending'
+    BEGIN
+      UPDATE runs SET status = 'complete' WHERE id = '${RUN.id}';
+    END;
+  `);
+
+  const parentBefore = getTask("parent-ordered-race")!;
+  const runBefore = getRun(RUN.id)!;
+  const eventCount = eventsForRun(RUN.id).length;
+
+  const outcome = performReDrive("parent-ordered-race");
+  assert.equal(outcome.kind, "re-drive-refused");
+  if (outcome.kind === "re-drive-refused") {
+    // The in-transaction accept-set re-check is what caught it — not a pre-lock
+    // read, which saw a 'failed' run and passed.
+    assert.match(outcome.reason, /run run-recover is 'complete'/);
+    assert.match(outcome.reason, /Nothing was written/);
+  }
+
+  assert.deepEqual(getTask("parent-ordered-race"), parentBefore, "the parent reopen rolled back — still failed");
+  assert.deepEqual(getRun(RUN.id), runBefore, "the run row is still failed — the trigger's own write rolled back too");
+  assert.equal(eventsForRun(RUN.id).length, eventCount, "no run.reactivated, no task.reconciled — a rolled-back verb emits nothing");
 });
 
 // ── performRecover dispatcher ────────────────────────────────────────────────
