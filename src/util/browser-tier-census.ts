@@ -65,10 +65,23 @@ export const BROWSER_TIER_DIR = join(
 // correction: a running launch nobody associated with current work — the dashboard
 // server, placed by its cwd — is host activity to read on the Activity view, not a wait
 // to watch on Home.
+// FG-683 added `completed-runs` (8 tests): the runtime panel's metric selector and
+// the count chart behind it — both metrics offered with the duration one still the
+// default, an integer runs axis that cannot be read as the duration chart, zero
+// buckets drawn as observed zeros, a dense window's label thinning and fallback
+// list, the Local/UTC toggle proven to move labels and nothing a count is read off,
+// the duration chart restored untouched on the way back, the count read's own
+// error, and containment at 390px.
+// FG-683 verification also adds `completed-runs-real-store` (2 tests): it takes
+// the selector through the real dashboard server and production schema, including
+// canonical checkout scope, dedupe against related records and a phone-to-desktop
+// count-chart legibility sweep.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
+  "completed-runs.test.ts": 8,
+  "completed-runs-real-store.test.ts": 2,
   "fg591-queue-board.test.ts": 6,
   "fg679-current-activity.test.ts": 12,
   "fg694-home-in-flight.test.ts": 9,

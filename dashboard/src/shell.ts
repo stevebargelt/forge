@@ -1015,7 +1015,7 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
   flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.runtime-window-btns, .runtime-tz-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.runtime-window-btns, .runtime-tz-btns, .runtime-metric-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .runtime-selector {
   display: flex;
   align-items: center;
@@ -1049,9 +1049,22 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 }
 .runtime-chart svg { display: block; width: 100%; height: auto; }
 .runtime-bar { transition: height 0.2s ease, y 0.2s ease; }
+.runs-bar { transition: height 0.2s ease, y 0.2s ease; }
 @media (prefers-reduced-motion: reduce) {
   .runtime-bar { transition: none; }
+  .runs-bar { transition: none; }
 }
+/* FG-683: the completed-runs metric. A zero bucket is an observed zero, so it
+ * draws on the baseline rather than not drawing at all. */
+.runs-bar-zero { fill: var(--fg-faint); opacity: 0.5; }
+.runs-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.runs-total-num { font-size: 24px; font-weight: 600; color: var(--fg); }
+.runs-total-note { font-size: 12px; }
 /* No font-size rule for the chart's labels here on purpose. The chart scales its
  * 1000-unit viewBox down to the column width, which would shrink the labels with
  * it; a viewport breakpoint only fixes the widths it samples, so client/main.js
