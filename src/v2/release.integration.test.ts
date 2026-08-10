@@ -18,15 +18,15 @@
 // build a release from a dirty BUILDER — and this file will not commit them for you. See
 // assertBuilderCheckoutIsCommitted below.
 
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
-import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
+import { basename, join, sep } from "node:path";
+import { buildRelease, assertReleaseCloses, disposeReleaseWorkspace, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
 import { interpreterPath, storedIdentityOf, validatedInterpreter } from "./runtime-store.js";
 import { findGitRoot } from "../util/git-root.js";
 
@@ -45,6 +45,15 @@ let built: BuildReleaseResult;
 /** The invoking repository's git state at suite start — the AC baseline the last test
  *  in this file compares against. */
 let checkoutStateBefore: GitState;
+/** FG-698 (AC4) — the top-level names under `workspace` that are SHARED and must outlive
+ *  every test: `buildRoot`'s isolated source, the one release the file builds in before(),
+ *  and the disposable forge home. Snapshotted at the end of before(); everything else that
+ *  appears at the top level of the workspace belongs to ONE test and is disposed of by the
+ *  afterEach below, so peak temporary space is bounded by "the shared set + the fixtures of
+ *  the test currently running" instead of accumulating across ~30 builds. Undefined until
+ *  before() completes — the hooks below tolerate that, because a before() that threw must
+ *  not be reported as a teardown crash. */
+let pinned: Set<string> | undefined;
 
 type GitState = { head: string; branch: string; status: string; stash: string };
 
@@ -178,14 +187,51 @@ before(() => {
   // The one full build the whole file shares (copying node_modules is the slow part).
   // outDir is OUTSIDE buildRoot so the copy never recurses into itself.
   built = buildFromIsolatedSource(buildRoot, join(workspace, "release"));
+  // FG-698 (AC4): everything that exists here is SHARED — buildRoot, the shared release,
+  // forge-home. Anything a test mints afterwards is that test's own and is freed at its end.
+  pinned = new Set(readdirSync(workspace));
+});
+
+/** FG-698 (AC4) — free each test's temporary space AT THE END OF THAT TEST rather than
+ *  letting ~30 builds' worth (each carrying its own 93 MB node_modules copy) accumulate
+ *  until after().
+ *
+ *  It sweeps by LIFETIME, not by name: every top-level entry under `workspace` that was not
+ *  in the shared set is this test's. That deliberately covers the fixtures no per-site edit
+ *  would catch — the renamed-away `${fullSrc}.GONE` source, every `mkdtempSync(join(workspace, …))`,
+ *  every refused build's `outDir` — and it cannot be forgotten by whoever adds fixture 31.
+ *  None of the ~30 build call sites is touched, and the per-test try/finally fixtures that
+ *  already clean up after themselves are unaffected: the sweep is idempotent over a path
+ *  that is already gone, and the outside-the-workspace guard's own fixture is out of reach
+ *  by construction.
+ *
+ *  Ordering is already safe: afterEach runs after the test body's own `finally`, so the two
+ *  dashboard tests have SIGKILL'd their detached process group before the release they booted
+ *  from is removed. Disposal never throws and reports residue on stderr, so a teardown fault
+ *  can never redden a test — that inversion (an environment mechanism read as product
+ *  breakage) is the failure shape this ticket exists because of. */
+afterEach(() => {
+  if (!workspace || !pinned) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(workspace);
+  } catch {
+    return; // The workspace is gone or unreadable; after() reports whatever survives.
+  }
+  for (const name of entries) {
+    if (pinned.has(name)) continue;
+    disposeReleaseWorkspace(join(workspace, name), `release.integration.test.ts per-test fixture ${name}`);
+  }
 });
 
 after(() => {
-  // The releases built under this workspace are FROZEN (read-only directories), so a
-  // recursive unlink can't traverse them — restore write bits across the whole tree
-  // first. (thawReleaseTree is idempotent on the non-frozen scratch dirs alongside them.)
-  thawReleaseTree(workspace);
-  rmSync(workspace, { recursive: true, force: true });
+  // FG-698 (AC1): the releases built under this workspace are FROZEN (read-only directories),
+  // so a recursive unlink can't traverse them — the tree has to be made removable first. That
+  // preparation used to be a strict thawReleaseTree(), which throws on the first entry it
+  // cannot chmod or stat and so skipped the removal entirely, stranding the whole multi-GB
+  // workspace. Disposal makes what it can removable, removes regardless, never throws, and
+  // reports on stderr anything that genuinely survived.
+  disposeReleaseWorkspace(workspace, "release.integration.test.ts workspace");
 });
 
 test("FG-569 (finding): an --out path INSIDE the source tree is REFUSED before any staging dir is created — else the copy recurses into itself", () => {
@@ -1135,11 +1181,45 @@ test("FG-575 (guard): commitSource REFUSES a root outside the disposable workspa
 });
 
 test("FG-575: the whole suite left the INVOKING repository's git state completely unchanged", () => {
-  // Declared last, so it covers every test above it. A regression fails HERE, loudly, instead
-  // of being discovered by an operator whose branch moved under them.
+  // Declared after every test that builds anything, so it covers all of them. (Only the
+  // FG-698 lifetime guard below it is later, and that one runs no git command and creates
+  // no fixture.) A regression fails HERE, loudly, instead of being discovered by an operator
+  // whose branch moved under them.
   assert.deepEqual(
     gitState(checkoutRoot),
     checkoutStateBefore,
     `running this suite must leave ${checkoutRoot} on the same HEAD and branch, with no new or rewritten commits, no stash entries, and no modified or untracked files`,
   );
+});
+
+test("FG-698 (AC4, lifetime guard): every fixture this file built was freed at the end of its own test — only the SHARED set survives the whole run", () => {
+  // Declared LAST, so it observes the workspace after every test above it has run and been
+  // swept. The bound on peak temporary space is expressed STRUCTURALLY — as this lifetime
+  // invariant — not as a byte threshold: a megabyte number depends on the host, the installed
+  // dependency tree and how many builds a future edit adds, so it would degrade into a flaky
+  // figure that gets raised until it means nothing. What actually has to hold is that nothing
+  // a test creates outlives it, and that the shared set stays exactly these three fixtures.
+  //
+  // It fails in both directions on purpose. A fixture that leaks past its test shows up as an
+  // extra name. A new SHARED fixture pinned in before() shows up as a missing name — which is
+  // the point: growing the set that lives for the whole file is a deliberate decision about
+  // peak disk, and it should be made here rather than discovered as silent growth.
+  assert.ok(pinned, "before() completed and snapshotted the shared set");
+  const expected = [...pinned!].sort();
+  assert.deepEqual(
+    readdirSync(workspace).sort(),
+    expected,
+    `only the shared fixtures may survive the run; anything else was created by a test and should have been freed at its end (expected exactly ${expected.join(", ")})`,
+  );
+  // And name what the shared set IS, so the invariant above cannot be satisfied by an empty
+  // or wrong `pinned` — it is exactly buildRoot's isolated source, the shared release, and
+  // the disposable forge home, the three fixtures every test in this file reads.
+  assert.deepEqual(
+    expected,
+    ["forge-home", "release", basename(buildRoot)].sort(),
+    "the shared set is exactly the isolated build source, the one shared release, and the disposable forge home",
+  );
+  for (const p of [buildRoot, built.releaseDir, buildHome]) {
+    assert.ok(existsSync(p), `${p} is shared and survived to the end of the file`);
+  }
 });
