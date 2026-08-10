@@ -9,7 +9,8 @@ import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { retry, RetryNotAllowedError, FanoutChildRetryError, reapRetainedContainer } from "./retry.js";
-import { retryPolicy } from "./retry-policy.js";
+import { retryPolicy, RE_DRIVABLE_FAILURE_KINDS, isReDrivableFailureKind } from "./retry-policy.js";
+import type { FailureKind } from "./failure-kind.js";
 import type { Run, Task } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
 import { protocolRelPath } from "./agent-protocol.js";
@@ -107,6 +108,92 @@ test("retryPolicy: auth kinds are retryable but carry resolve-auth advice", () =
 test("retryPolicy: undefined / unknown label → retryable", () => {
   assert.equal(retryPolicy(undefined).retryable, true);
   assert.equal(retryPolicy("some_new_kind").retryable, true);
+});
+
+// ── FG-688: isReDrivableFailureKind — the shared re-drive enumeration ──
+
+// Every FailureKind this build declares, written out ONCE here so the runtime
+// key-set assertion below has something to compare against (the union is a type,
+// not a value). The two type-level checks that follow make this list itself
+// exhaustive: adding a kind to FailureKind without adding it here fails to
+// COMPILE, so the runtime assertion can never silently check a stale subset.
+const ALL_FAILURE_KINDS = [
+  "cancelled", "orphaned", "orphaned_work_may_persist", "oom_killed", "fanout_wave_orphaned",
+  "orphaned_needs_finalize", "container_crash", "idle_timeout", "result_missing", "result_malformed",
+  "work_not_persisted", "merge_conflict", "capture_failed", "integration_failed", "integration_gate_timeout",
+  "integration_gate_crashed", "publish_base_churn", "dirty_publish_target", "publication_refused",
+  "lane_taken_over", "auth_missing", "auth_expired", "auth_injection_failed", "model_error", "tool_error",
+  "red_blocked", "gate_rejected", "verification_environment_unavailable", "agent_reported_failure",
+  "pre_container_crash", "plan_dependency_invalid", "ordered_fanout_unavailable", "integration_blocked",
+  "prerequisite_blocked", "unknown",
+] as const;
+
+// Compile-time exhaustiveness, both directions: nothing in FailureKind may be
+// missing from the list, and nothing in the list may name a kind that no longer
+// exists. Written as `AssertNever<Exclude<…>>` rather than the tempting
+// `const x: Exclude<…>[] = []` — an EMPTY ARRAY is assignable to any element
+// type, so that form silently passes and proves nothing.
+type AssertNever<T extends never> = T;
+type _MissingKinds = AssertNever<Exclude<FailureKind, (typeof ALL_FAILURE_KINDS)[number]>>;
+type _StaleKinds = AssertNever<Exclude<(typeof ALL_FAILURE_KINDS)[number], FailureKind>>;
+
+const RE_DRIVABLE = new Set<string>([
+  "fanout_wave_orphaned",
+  "prerequisite_blocked",
+  "integration_gate_timeout",
+  "integration_gate_crashed",
+  "verification_environment_unavailable",
+  "integration_blocked",
+]);
+
+// The map is Record<FailureKind, boolean>, so a new kind cannot be added to the
+// union without deciding this question — that guarantee is a COMPILE-time one
+// and lives in retry-policy.ts. This asserts the value agrees with it: no key
+// the union doesn't declare, and no kind the map forgot.
+test("RE_DRIVABLE_FAILURE_KINDS: key set is exactly the FailureKind union", () => {
+  assert.deepEqual(
+    Object.keys(RE_DRIVABLE_FAILURE_KINDS).sort(),
+    [...ALL_FAILURE_KINDS].sort(),
+  );
+});
+
+test("isReDrivableFailureKind: true for the six accepted kinds, false for every other declared kind", () => {
+  for (const kind of ALL_FAILURE_KINDS) {
+    assert.equal(
+      isReDrivableFailureKind(kind),
+      RE_DRIVABLE.has(kind),
+      `${kind} should ${RE_DRIVABLE.has(kind) ? "" : "NOT "}be re-drivable`,
+    );
+  }
+  // Spelled out rather than left implicit in the loop: these six are the
+  // authored membership, and a change to it should break a named assertion.
+  assert.deepEqual(
+    Object.entries(RE_DRIVABLE_FAILURE_KINDS).filter(([, v]) => v).map(([k]) => k).sort(),
+    [...RE_DRIVABLE].sort(),
+  );
+});
+
+// The load-bearing divergence: retryPolicy is ADVISORY and defaults an unknown
+// kind OPEN (retryable); this is a MUTATION guard and defaults CLOSED. Asserted
+// side by side in one test so the contrast is recorded in the suite, not only in
+// a comment that a future edit could quietly contradict.
+test("isReDrivableFailureKind: fails CLOSED on undefined and on a kind from a future build — unlike retryPolicy", () => {
+  assert.equal(isReDrivableFailureKind(undefined), false);
+  assert.equal(isReDrivableFailureKind("kind_from_a_future_build"), false);
+  assert.equal(isReDrivableFailureKind(""), false);
+
+  // Same two inputs through the advisory surface: permissive, on purpose.
+  assert.equal(retryPolicy("kind_from_a_future_build").retryable, true);
+  assert.equal(retryPolicy(undefined).retryable, true);
+});
+
+// A prototype-chain key ("toString", "constructor") must not read back as a
+// re-drivable kind. The map is an object literal, so a bare `map[k]` truthiness
+// check would have accepted these; the `=== true` comparison is what refuses.
+test("isReDrivableFailureKind: inherited Object.prototype keys are refused", () => {
+  for (const k of ["toString", "constructor", "hasOwnProperty", "__proto__", "valueOf"]) {
+    assert.equal(isReDrivableFailureKind(k), false, `${k} must not be re-drivable`);
+  }
 });
 
 // ── retry() ──
