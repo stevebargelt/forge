@@ -1161,6 +1161,160 @@ export function thawReleaseTree(dir: string): void {
   }
 }
 
+/** One path a disposal could not remove, with the OS reason it survived. */
+export type ReleaseWorkspaceResidue = { path: string; reason: string };
+
+/** FG-698 — TOLERANT DISPOSAL of a (possibly frozen, possibly half-broken) scratch tree.
+ *  "Make this tree REMOVABLE, remove it, report what survived." It NEVER throws, so a
+ *  teardown fault can never decide a test's or a suite's verdict, and it always reaches
+ *  the removal attempt.
+ *
+ *  WHY THIS IS A SECOND FUNCTION AND MUST NOT BE MERGED WITH thawReleaseTree: the thaw is
+ *  a PRODUCTION operation with a fail-loud contract. promote.ts:935 thaws the STAGING unit
+ *  before validateCandidate and before forge authors its trusted exec descriptor into it;
+ *  buildRelease's own catch (:1379) thaws so a refused build leaves no release behind. Both
+ *  must THROW on a tree they cannot fully prepare — a promotion that proceeds on a
+ *  half-prepared staging unit is a trust-boundary break, not a tidiness problem. Making the
+ *  thaw error-tolerant to serve teardown would silently delete that contract. So: strict
+ *  thaw for production preparation, tolerant disposal for teardown. Do not "simplify" them
+ *  into one function.
+ *
+ *  Nor is disposal just "thaw in a try/catch". The two do different work:
+ *
+ *  - It chmods DIRECTORIES ONLY, pre-order, to `mode | 0o700` BEFORE reading each one. A
+ *    recursive unlink needs read + search + WRITE on every parent directory; freezeReleaseFiles
+ *    clears only write, and thawReleaseTree restores only write (`| 0o200`), so a tree whose
+ *    directories also lost r/x — however that happened — cannot be traversed by a thaw that
+ *    half-fixed it, and the rmSync behind it throws too.
+ *  - It does NOT chmod files at all. `unlink` needs write on the PARENT directory, never on
+ *    the file. Skipping files is both correct and materially cheaper: the fixtures this runs
+ *    over carry a 93 MB node_modules copy each.
+ *  - It never follows a symlink (`isSymbolicLink()` checked FIRST, as freeze does — that
+ *    predicate is false for `isDirectory()` on a link-to-directory), so a link's out-of-tree
+ *    target is never chmod'd. `rmSync` unlinks the link itself, which is what we want. The
+ *    check is re-stated immediately before AND after each chmod, because a Dirent classified
+ *    one instant is not evidence about the pathname resolved at the next one.
+ *  - Every chmod/readdir failure is caught and recorded, and the walk CONTINUES to siblings:
+ *    one unreachable corner must not cost the other 3.4 GB.
+ *
+ *  Blast radius is deliberately unchanged from the `rmSync(dir, { recursive: true, force: true })`
+ *  it replaces: it removes exactly the path it is handed, with no containment guard, no retry
+ *  loop, and no chmod outside that path. That last part is why residue is a real outcome — a
+ *  fixture root inside an unwritable PARENT cannot be unlinked, and disposal must report that
+ *  rather than reach outside its own tree to fix it.
+ *
+ *  Returns the surviving paths, empty when the tree is gone. A recorded fault whose path is
+ *  PROVABLY gone (lstat says ENOENT) is NOT residue: preparation can fail on a corner rmSync
+ *  then removes anyway, and reporting a path that is provably gone would train readers to
+ *  ignore the report. A path that cannot be lstat'ed at all — a fixture root whose parent lost
+ *  search — is reported: "could not verify" is not "removed", and stranding it silently is the
+ *  defect this exists to end rather than a tidier report. When
+ *  residue is non-empty it also writes ONE block to STDERR naming `label` and each path +
+ *  reason. Never stdout: fg644-dirty-tree-execution.integration.test.ts parses an inner run's
+ *  stdout as TAP, and a diagnostic there corrupts the grading of which tests executed. */
+export function disposeReleaseWorkspace(dir: string, label: string): ReleaseWorkspaceResidue[] {
+  const faults: ReleaseWorkspaceResidue[] = [];
+  const describe = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  const record = (path: string, e: unknown): void => {
+    if (!faults.some((f) => f.path === path)) faults.push({ path, reason: describe(e) });
+  };
+  // ENOENT is the ONLY lstat failure that proves a path is gone. Any other (EACCES from a
+  // parent that lost search, ELOOP, EIO) means survival could not be disproven — and a
+  // recorded fault whose survival cannot be disproven must be REPORTED, not filtered out.
+  // Treating "cannot verify" as "removed" is the silent stranding this function exists to end.
+  const present = (p: string): boolean => {
+    try {
+      lstatSync(p);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+  };
+
+  // PRE-ORDER: a directory is made traversable+writable before it is read, and before its
+  // children are visited, so the walk can reach what a freeze (or a hostile chmod) closed off.
+  //
+  // The lstat IMMEDIATELY before the chmod and the identity check IMMEDIATELY after it are
+  // what hold "never follows a symlink, never chmods outside its input" against a concurrent
+  // writer (in practice a still-running test fixture, not an adversary). Classification and
+  // chmod resolve the same PATHNAME at two instants; without these, a directory swapped for a
+  // symlink after the root lstat — or after a child's Dirent classification, which is a whole
+  // readdir and any number of sibling subtrees earlier — has its target chmod'd and walked.
+  //
+  // RESIDUAL, stated rather than claimed closed: node exposes no fd-bound or nofollow chmod
+  // usable here. An O_NOFOLLOW open would bind the operation to the entry, but a directory
+  // this walk exists to recover has lost r/x (mode 0o000) and cannot be opened at all, while
+  // chmod on a pathname needs no read permission. So a swap landing inside the lstat→chmod
+  // window still lands ONE chmod on the link's target; the check after it sees the entry is no
+  // longer the inode that was classified, abandons it and records it, so the target's contents
+  // are never read, walked or chmod'd. Narrowing this class properly is FG-697's, repo-wide —
+  // deliberately no retry loop and no containment guard here.
+  const makeRemovable = (d: string): void => {
+    let before;
+    try {
+      before = lstatSync(d);
+    } catch (e) {
+      record(d, e);
+      return;
+    }
+    if (before.isSymbolicLink() || !before.isDirectory()) {
+      record(d, new Error("not the directory this walk classified — not followed"));
+      return;
+    }
+    try {
+      chmodSync(d, before.mode | 0o700);
+      const after = lstatSync(d);
+      if (after.isSymbolicLink() || !after.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) {
+        record(d, new Error("replaced during disposal — abandoned without reading it"));
+        return;
+      }
+    } catch (e) {
+      record(d, e);
+      // Fall through: the readdir may still succeed (the bits we wanted may already be set),
+      // and if it does not, that failure is recorded on its own.
+    }
+    let ents;
+    try {
+      ents = readdirSync(d, { withFileTypes: true });
+    } catch (e) {
+      record(d, e);
+      return;
+    }
+    for (const ent of ents) {
+      if (ent.isSymbolicLink()) continue;
+      if (ent.isDirectory()) makeRemovable(join(d, ent.name));
+    }
+  };
+
+  let rootIsDir = false;
+  try {
+    rootIsDir = lstatSync(dir).isDirectory();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    // Anything else (EACCES on a parent, ELOOP, …): skip the walk, still attempt the remove,
+    // and let rmSync report the reason it actually fails with.
+  }
+  if (rootIsDir) makeRemovable(dir);
+
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    record(dir, e);
+  }
+  if (present(dir)) record(dir, new Error("still present after rmSync(recursive, force)"));
+
+  const residue = faults.filter((f) => present(f.path));
+  if (residue.length > 0) {
+    process.stderr.write(
+      `forge: could not fully dispose of a scratch tree — ${label}\n` +
+        residue.map((f) => `  ${f.path}: ${f.reason}\n`).join("") +
+        `  (reported, not thrown: a teardown fault never decides a verdict. This space is ` +
+        `reclaimed when the container exits.)\n`,
+    );
+  }
+  return residue;
+}
+
 /** True when `child` is `parent` itself or a path nested under it. Both must already be
  *  resolved absolute paths. Used to keep the release out dir out of the source tree. */
 function isWithin(parent: string, child: string): boolean {

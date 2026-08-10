@@ -14,11 +14,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, copyFileSync, chmodSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, copyFileSync, chmodSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildWrapperCommand, parseRecorderRuntime, type RecorderRuntime } from "./launch.js";
-import { buildRelease, thawReleaseTree, type BuildReleaseResult } from "./release.js";
+import { buildRelease, disposeReleaseWorkspace, type BuildReleaseResult } from "./release.js";
 import { findGitRoot } from "../util/git-root.js";
 
 let scratch: string;
@@ -36,9 +36,13 @@ before(() => {
 
 after(() => {
   // FG-569 freezes release trees read-only at rest; force:true ignores ENOENT but
-  // cannot traverse a read-only parent. Restore write bits across scratch first.
-  thawReleaseTree(scratch);
-  rmSync(scratch, { recursive: true, force: true });
+  // cannot traverse a read-only parent, so scratch must be made REMOVABLE first.
+  // FG-698: the disposal does that walk tolerantly and then removes — a chmod or
+  // readdir fault on one corner no longer throws out of this hook before the
+  // removal is ever attempted, stranding the whole multi-GB tree. Residue it
+  // genuinely cannot remove is reported on stderr; it never throws, so teardown
+  // cannot decide this suite's verdict.
+  disposeReleaseWorkspace(scratch, "launch-r2.integration.test.ts scratch");
 });
 
 /** EXECUTE the real recorder: run its wrapper command through /bin/sh, exactly

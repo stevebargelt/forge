@@ -18,15 +18,15 @@
 // build a release from a dirty BUILDER — and this file will not commit them for you. See
 // assertBuilderCheckoutIsCommitted below.
 
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync, spawn, execFileSync } from "node:child_process";
+import { spawnSync, spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
-import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
+import { basename, join, sep } from "node:path";
+import { buildRelease, assertReleaseCloses, disposeReleaseWorkspace, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
 import { interpreterPath, storedIdentityOf, validatedInterpreter } from "./runtime-store.js";
 import { findGitRoot } from "../util/git-root.js";
 
@@ -45,6 +45,15 @@ let built: BuildReleaseResult;
 /** The invoking repository's git state at suite start — the AC baseline the last test
  *  in this file compares against. */
 let checkoutStateBefore: GitState;
+/** FG-698 (AC4) — the top-level names under `workspace` that are SHARED and must outlive
+ *  every test: `buildRoot`'s isolated source, the one release the file builds in before(),
+ *  and the disposable forge home. Snapshotted at the end of before(); everything else that
+ *  appears at the top level of the workspace belongs to ONE test and is disposed of by the
+ *  afterEach below, so peak temporary space is bounded by "the shared set + the fixtures of
+ *  the test currently running" instead of accumulating across ~30 builds. Undefined until
+ *  before() completes — the hooks below tolerate that, because a before() that threw must
+ *  not be reported as a teardown crash. */
+let pinned: Set<string> | undefined;
 
 type GitState = { head: string; branch: string; status: string; stash: string };
 
@@ -178,14 +187,53 @@ before(() => {
   // The one full build the whole file shares (copying node_modules is the slow part).
   // outDir is OUTSIDE buildRoot so the copy never recurses into itself.
   built = buildFromIsolatedSource(buildRoot, join(workspace, "release"));
+  // FG-698 (AC4): everything that exists here is SHARED — buildRoot, the shared release,
+  // forge-home. Anything a test mints afterwards is that test's own and is freed at its end.
+  pinned = new Set(readdirSync(workspace));
+});
+
+/** FG-698 (AC4) — free each test's temporary space AT THE END OF THAT TEST rather than
+ *  letting ~30 builds' worth (each carrying its own 93 MB node_modules copy) accumulate
+ *  until after().
+ *
+ *  It sweeps by LIFETIME, not by name: every top-level entry under `workspace` that was not
+ *  in the shared set is this test's. That deliberately covers the fixtures no per-site edit
+ *  would catch — the renamed-away `${fullSrc}.GONE` source, every `mkdtempSync(join(workspace, …))`,
+ *  every refused build's `outDir` — and it cannot be forgotten by whoever adds fixture 31.
+ *  None of the ~30 build call sites is touched, and the per-test try/finally fixtures that
+ *  already clean up after themselves are unaffected: the sweep is idempotent over a path
+ *  that is already gone, and the outside-the-workspace guard's own fixture is out of reach
+ *  by construction.
+ *
+ *  Ordering is safe because the sweep never runs against a LIVE writer: afterEach runs after
+ *  the test body's own `finally`, and the two dashboard tests do not merely SIGKILL their
+ *  detached process group there — they WAIT for it to be gone (killGroupAndAwaitExit), because
+ *  signalling is not exit observation and a still-running server would otherwise race disposal
+ *  of the release it booted from. Disposal never throws and reports residue on stderr, so a
+ *  teardown fault can never redden a test — that inversion (an environment mechanism read as
+ *  product breakage) is the failure shape this ticket exists because of. */
+afterEach(() => {
+  if (!workspace || !pinned) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(workspace);
+  } catch {
+    return; // The workspace is gone or unreadable; after() reports whatever survives.
+  }
+  for (const name of entries) {
+    if (pinned.has(name)) continue;
+    disposeReleaseWorkspace(join(workspace, name), `release.integration.test.ts per-test fixture ${name}`);
+  }
 });
 
 after(() => {
-  // The releases built under this workspace are FROZEN (read-only directories), so a
-  // recursive unlink can't traverse them — restore write bits across the whole tree
-  // first. (thawReleaseTree is idempotent on the non-frozen scratch dirs alongside them.)
-  thawReleaseTree(workspace);
-  rmSync(workspace, { recursive: true, force: true });
+  // FG-698 (AC1): the releases built under this workspace are FROZEN (read-only directories),
+  // so a recursive unlink can't traverse them — the tree has to be made removable first. That
+  // preparation used to be a strict thawReleaseTree(), which throws on the first entry it
+  // cannot chmod or stat and so skipped the removal entirely, stranding the whole multi-GB
+  // workspace. Disposal makes what it can removable, removes regardless, never throws, and
+  // reports on stderr anything that genuinely survived.
+  disposeReleaseWorkspace(workspace, "release.integration.test.ts workspace");
 });
 
 test("FG-569 (finding): an --out path INSIDE the source tree is REFUSED before any staging dir is created — else the copy recurses into itself", () => {
@@ -775,6 +823,85 @@ async function pollGet(url: string, timeoutMs: number): Promise<{ status: number
   throw new Error(`pollGet timed out for ${url}: ${String(lastErr)}`);
 }
 
+/** Members of process group `pgid` that can still RUN. A member that is already reaped, or
+ *  that is defunct waiting for a parent that will never reap it (this container's pid 1 does
+ *  not), cannot write anything and so is not a writer teardown has to wait for — which is why
+ *  this counts states, not the existence a `kill(-pgid, 0)` probe would report. `ps -e -o
+ *  pgid=,stat=` is spelled the same for procps and BSD ps; if ps cannot be read at all this
+ *  reports zero, leaving the caller with the group leader's own exit, which it observes
+ *  directly either way. */
+function liveGroupMembers(pgid: number): number {
+  let out: string;
+  try {
+    out = execFileSync("ps", ["-e", "-o", "pgid=,stat="], { encoding: "utf8" });
+  } catch {
+    return 0;
+  }
+  return out.split("\n").filter((line) => {
+    const m = /^\s*(\d+)\s+(\S+)/.exec(line);
+    return m !== null && Number(m[1]) === pgid && !m[2]!.startsWith("Z");
+  }).length;
+}
+
+/** FG-698 (AC4) — SIGKILL a detached child's whole process GROUP and then WAIT until nothing
+ *  in it can still run. Signalling is not exit observation: kill() returns as soon as the
+ *  signal is queued, so a `finally` that only signals hands control straight back to the
+ *  file-level afterEach — which begins disposing this test's release tree while the dashboard
+ *  server may still be writing into it. Two observations, in order: node's own `exit` (the
+ *  group leader is dead AND reaped), then no runnable member of the group left behind.
+ *
+ *  It never throws. A teardown fault must not decide this test's verdict, so a group that
+ *  outlives the deadline is REPORTED on stderr and the test's own assertions still stand —
+ *  the same discipline disposal applies to residue. */
+async function killGroupAndAwaitExit(child: ChildProcess, label: string): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) return; // spawn never produced a process; nothing to wait for
+  const exited = new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once("exit", () => resolve());
+  });
+  try { process.kill(-pid, "SIGKILL"); } catch { /* group already gone */ }
+  await exited;
+  const deadline = Date.now() + 5000;
+  while (liveGroupMembers(pid) > 0) {
+    if (Date.now() >= deadline) {
+      process.stderr.write(`forge test: process group ${pid} (${label}) still had a RUNNABLE member 5s after SIGKILL — disposal may race it\n`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+test("FG-698 (AC4): the dashboard teardown WAITS for the signalled process group to stop running — signalling is not exit observation", async () => {
+  // What the file-level afterEach sweep depends on, stated directly: when a test body's
+  // `finally` returns, nothing it spawned can still be writing into the release tree that
+  // sweep is about to dispose of. A `finally` that only calls process.kill(-pid, "SIGKILL")
+  // does not give that — the signal is merely queued, and the child is provably NOT reaped
+  // the instant kill() returns, which is the first assertion below.
+  //
+  // Two members in the group on purpose: killing the leader is not killing the group.
+  const child = spawn("/bin/sh", ["-c", "sleep 30 & sleep 30"], { detached: true, stdio: "ignore" });
+  const pid = child.pid;
+  assert.ok(pid !== undefined, "the fixture process must spawn");
+
+  // INDUCTION: the group must actually come up — `detached` means the child setsid()s after
+  // spawn() returns — else tearing it down would prove nothing.
+  const upBy = Date.now() + 2000;
+  while (liveGroupMembers(pid) < 2 && Date.now() < upBy) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(
+    liveGroupMembers(pid) >= 2,
+    "the fixture's process GROUP (leader + a second member) must be running before the teardown under test does anything",
+  );
+
+  await killGroupAndAwaitExit(child, "FG-698 AC4 self-check");
+
+  assert.ok(
+    child.exitCode !== null || child.signalCode !== null,
+    "teardown returned only after the child was actually reaped — a queued signal is not an exit",
+  );
+  assert.equal(liveGroupMembers(pid), 0, "and no member of the signalled group can still run when it returns");
+});
+
 test("FG-580 (dashboard bundled, EXECUTED, NO node on PATH): the release ships the complete dashboard closure and `forge dashboard start` boots under the release's pinned runtime, offline", async () => {
   // (1) The release carries the whole dashboard runtime — entry, tsconfig (the runtime
   // @forge/* resolver), a representative static asset, and every VENDORED client lib
@@ -821,7 +948,7 @@ test("FG-580 (dashboard bundled, EXECUTED, NO node on PATH): the release ships t
     assert.equal(lib.status, 200, "the vendored preact serves first-party from the release closure");
     assert.match(lib.contentType ?? "", /javascript/, "the vendored lib serves as executable JS (module MIME)");
   } finally {
-    try { process.kill(-child.pid!, "SIGKILL"); } catch { /* group already gone */ }
+    await killGroupAndAwaitExit(child, "FG-580 dashboard server");
   }
 });
 
@@ -1057,7 +1184,7 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands �
     assert.equal(lib.status, 200, "the vendored preact serves first-party from the release closure, source gone");
     assert.match(lib.contentType ?? "", /javascript/, "the vendored lib serves as executable JS (module MIME)");
   } finally {
-    try { process.kill(-dashChild.pid!, "SIGKILL"); } catch { /* group already gone */ }
+    await killGroupAndAwaitExit(dashChild, "FG-569 dashboard server, source renamed away");
   }
 });
 
@@ -1135,11 +1262,45 @@ test("FG-575 (guard): commitSource REFUSES a root outside the disposable workspa
 });
 
 test("FG-575: the whole suite left the INVOKING repository's git state completely unchanged", () => {
-  // Declared last, so it covers every test above it. A regression fails HERE, loudly, instead
-  // of being discovered by an operator whose branch moved under them.
+  // Declared after every test that builds anything, so it covers all of them. (Only the
+  // FG-698 lifetime guard below it is later, and that one runs no git command and creates
+  // no fixture.) A regression fails HERE, loudly, instead of being discovered by an operator
+  // whose branch moved under them.
   assert.deepEqual(
     gitState(checkoutRoot),
     checkoutStateBefore,
     `running this suite must leave ${checkoutRoot} on the same HEAD and branch, with no new or rewritten commits, no stash entries, and no modified or untracked files`,
   );
+});
+
+test("FG-698 (AC4, lifetime guard): every fixture this file built was freed at the end of its own test — only the SHARED set survives the whole run", () => {
+  // Declared LAST, so it observes the workspace after every test above it has run and been
+  // swept. The bound on peak temporary space is expressed STRUCTURALLY — as this lifetime
+  // invariant — not as a byte threshold: a megabyte number depends on the host, the installed
+  // dependency tree and how many builds a future edit adds, so it would degrade into a flaky
+  // figure that gets raised until it means nothing. What actually has to hold is that nothing
+  // a test creates outlives it, and that the shared set stays exactly these three fixtures.
+  //
+  // It fails in both directions on purpose. A fixture that leaks past its test shows up as an
+  // extra name. A new SHARED fixture pinned in before() shows up as a missing name — which is
+  // the point: growing the set that lives for the whole file is a deliberate decision about
+  // peak disk, and it should be made here rather than discovered as silent growth.
+  assert.ok(pinned, "before() completed and snapshotted the shared set");
+  const expected = [...pinned!].sort();
+  assert.deepEqual(
+    readdirSync(workspace).sort(),
+    expected,
+    `only the shared fixtures may survive the run; anything else was created by a test and should have been freed at its end (expected exactly ${expected.join(", ")})`,
+  );
+  // And name what the shared set IS, so the invariant above cannot be satisfied by an empty
+  // or wrong `pinned` — it is exactly buildRoot's isolated source, the shared release, and
+  // the disposable forge home, the three fixtures every test in this file reads.
+  assert.deepEqual(
+    expected,
+    ["forge-home", "release", basename(buildRoot)].sort(),
+    "the shared set is exactly the isolated build source, the one shared release, and the disposable forge home",
+  );
+  for (const p of [buildRoot, built.releaseDir, buildHome]) {
+    assert.ok(existsSync(p), `${p} is shared and survived to the end of the file`);
+  }
 });
