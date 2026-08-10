@@ -25,11 +25,23 @@
 #   forge-test --worktree             # npm run test:worktree
 #   forge-test --extended             # npm run test:extended (integration + worktree, slow, CI tier — FG-495)
 #   forge-test --all                  # npm run test:all (canonical CI gate: unit + dashboard, fast — FG-495)
+#   forge-test --unit src/a.test.ts   # NARROW the unit tier to those files (same for
+#                                     # --integration / --worktree)
 #   forge-test src/spine/foo.test.ts  # run a single test file directly with tsx
 #   forge-test --test pattern         # any flags passed to tsx/node:test
 #
-# Tier flags are the first argument only; --test and file paths are passthroughs
-# to the underlying runner (tsx/jest/vitest) and are unaffected.
+# A tier flag is the first argument only. Paths AFTER one narrow that tier's run to
+# exactly those files, with the tier's own runner (preloads included) — and only if
+# every path is a member of that tier's own file set. A non-member path, any other
+# flag, or a tier whose file set this script cannot reproduce is REFUSED with a
+# diagnostic. FG-695: a tier flag used to discard its remaining arguments silently
+# and run the whole tier, so an agent that asked for one integration file got all of
+# them and reported the result as evidence for the narrow run it thought it made.
+# `--extended` and `--all` chain other tiers (and the dashboard workspace), so they
+# have no single file set to narrow: a path after either is refused, never widened.
+#
+# With NO tier flag, --test and file paths are passthroughs to the underlying runner
+# (tsx/jest/vitest) and are unaffected.
 #
 # Exit code: forwarded from the test runner.
 #
@@ -48,14 +60,121 @@ WORK_DIR="${FORGE_WORK_DIR:-/tmp/forge-work}"
 # in the scratch that has no source counterpart, which would include this marker.
 DEPS_MARKER="${WORK_DIR%/}.deps"
 
-# Returns 0 if the named npm script exists in the given package.json file.
-_pkg_has_script() {
+# Prints the named npm script's command line from the given package.json; returns 1
+# if the file or the script is absent.
+_pkg_script() {
   node -e "
     try {
       const p = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
-      process.exit((p.scripts && p.scripts[process.argv[2]]) ? 0 : 1);
+      const s = p.scripts && p.scripts[process.argv[2]];
+      if (!s) process.exit(1);
+      process.stdout.write(s);
     } catch(e) { process.exit(1); }
   " "$1" "$2" 2>/dev/null
+}
+
+# Returns 0 if the named npm script exists in the given package.json file.
+_pkg_has_script() {
+  _pkg_script "$1" "$2" >/dev/null
+}
+
+# ── TIER FLAGS ──────────────────────────────────────────────────────────────
+# One definition of what a tier flag is and what it resolves to, shared by
+# PRINT-CMD mode and the real run below. They used to carry a copy each, so a fix
+# to one graded a code path the other did not take (FG-695).
+_is_tier_flag() {
+  case "$1" in
+    --unit|--integration|--worktree|--extended|--all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The files a tier runs, one per line, derived from the tier's OWN selection so the
+# two cannot drift: the unit/worktree scripts embed a `$(find ...)`, and the
+# integration script lists its selection under FORGE_INTEGRATION_LIST_ONLY=1.
+# Returns 1 for a selection this script cannot reproduce — the caller must then
+# refuse, never fall back to the whole tier.
+_tier_files() {
+  local root="$1" script="$2" expr
+  case "$script" in
+    *'$(find '*)
+      # Anything after the substitution would be dropped by the narrowing below.
+      [[ -z "${script##*\)}" ]] || return 1
+      expr="${script#*\$(}"
+      expr="${expr%%)*}"
+      ( cd "$root" && eval "$expr" )
+      ;;
+    *run-integration-tests.sh*)
+      [[ -f "$root/scripts/run-integration-tests.sh" ]] || return 1
+      FORGE_INTEGRATION_LIST_ONLY=1 bash "$root/scripts/run-integration-tests.sh"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# The tier's runner with its file list removed, word-split into _TIER_CMD.
+_tier_runner() {
+  local script="$1"
+  case "$script" in
+    *'$(find '*) read -ra _TIER_CMD <<<"${script%%\$(find*}" ;;
+    # scripts/run-integration-tests.sh's own exec line, which this cannot invoke
+    # (that script selects its files itself). Kept honest by a test in
+    # src/v2/forge-test-wrapper.test.ts that fails if the two ever diverge.
+    *run-integration-tests.sh*) _TIER_CMD=(node --import tsx --import ./src/test-setup.ts --test) ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve a tier flag plus its (optional) path arguments into _TIER_CMD. Returns 1
+# with a diagnostic on stderr for any combination that cannot be honoured exactly
+# as asked.
+_resolve_tier_cmd() {
+  local root="$1" flag="$2"; shift 2
+  local tier="${flag#--}" name="test:${flag#--}" script files rel arg
+  script=$(_pkg_script "$root/package.json" "$name") || {
+    echo "forge-test: no \"$name\" script in $root/package.json" >&2
+    return 1
+  }
+
+  if [[ $# -eq 0 ]]; then
+    _TIER_CMD=(npm run "$name")
+    return 0
+  fi
+
+  for arg in "$@"; do
+    if [[ "$arg" == -* ]]; then
+      echo "forge-test: $flag $arg is not supported — a tier flag takes file paths, not other flags." >&2
+      echo "forge-test: run \`forge-test $flag\` for the whole tier, or \`forge-test $arg ...\` to pass flags straight to the runner." >&2
+      return 1
+    fi
+  done
+
+  if [[ "$tier" == "extended" || "$tier" == "all" ]]; then
+    echo "forge-test: $flag does not accept file paths — \"$name\" is \`$script\`, which chains other tiers, so there is no single file set to narrow." >&2
+    echo "forge-test: run \`forge-test --unit|--integration|--worktree <path>\` to narrow the tier that owns those files, or \`forge-test $flag\` for the whole thing." >&2
+    return 1
+  fi
+
+  if ! files=$(_tier_files "$root" "$script"); then
+    echo "forge-test: cannot narrow $flag — this script cannot reproduce which files \"$name\" (\`$script\`) selects, and will not run the whole tier when you asked for $# file(s)." >&2
+    echo "forge-test: run \`forge-test <path>...\` to run those files directly, or \`forge-test $flag\` for the whole tier." >&2
+    return 1
+  fi
+
+  local narrowed=()
+  for arg in "$@"; do
+    rel="${arg#./}"
+    rel="${rel#"$root"/}"
+    if ! grep -Fxq -- "$rel" <<<"$files"; then
+      echo "forge-test: $rel is not part of the $tier tier (\"$name\" does not select it), so $flag cannot run it." >&2
+      echo "forge-test: run it under the tier that owns it, or as \`forge-test $rel\` to run the file directly." >&2
+      return 1
+    fi
+    narrowed+=("$rel")
+  done
+
+  _tier_runner "$script" || return 1
+  _TIER_CMD+=("${narrowed[@]}")
 }
 
 # ── PRINT-CMD MODE ──────────────────────────────────────────────────────────
@@ -67,16 +186,9 @@ if [[ "${FORGE_TEST_PRINT_CMD:-}" == "1" ]]; then
     else
       echo "npm test"
     fi
-  elif [[ "$1" == "--unit" ]]; then
-    echo "npm run test:unit"
-  elif [[ "$1" == "--integration" ]]; then
-    echo "npm run test:integration"
-  elif [[ "$1" == "--worktree" ]]; then
-    echo "npm run test:worktree"
-  elif [[ "$1" == "--extended" ]]; then
-    echo "npm run test:extended"
-  elif [[ "$1" == "--all" ]]; then
-    echo "npm run test:all"
+  elif _is_tier_flag "$1"; then
+    _resolve_tier_cmd "$SRC_DIR" "$@" || exit 2
+    echo "${_TIER_CMD[*]}"
   else
     echo "tsx --test $*"
   fi
@@ -378,17 +490,9 @@ _has_script() {
 }
 
 # ── TIER FLAGS (first arg only) ─────────────────────────────────────────────
-if [[ $# -ge 1 ]]; then
-  case "$1" in
-    --unit|--integration|--worktree|--extended|--all)
-      _npm_script="test:${1#--}"
-      if ! _has_script "$_npm_script"; then
-        echo "forge-test: no \"$_npm_script\" script in $WORK_DIR/package.json" >&2
-        exit 2
-      fi
-      exec npm run "$_npm_script"
-      ;;
-  esac
+if [[ $# -ge 1 ]] && _is_tier_flag "$1"; then
+  _resolve_tier_cmd "$WORK_DIR" "$@" || exit 2
+  exec "${_TIER_CMD[@]}"
 fi
 
 # ── NO-ARGS DEFAULT ──────────────────────────────────────────────────────────
