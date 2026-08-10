@@ -32,11 +32,13 @@
 #
 # A tier flag is the first argument only. Paths AFTER one narrow that tier's run to
 # exactly those files, with the tier's own runner (preloads included) — and only if
-# every path is a member of that tier's own file set. A non-member path, any other
-# flag, or a tier whose file set this script cannot reproduce is REFUSED with a
-# diagnostic. FG-695: a tier flag used to discard its remaining arguments silently
-# and run the whole tier, so an agent that asked for one integration file got all of
-# them and reported the result as evidence for the narrow run it thought it made.
+# every path is a member of that tier's own file set. Such a path may be relative to
+# the project root or absolute under either the source checkout or the scratch; all
+# three name the same file. A non-member path, any other flag, or a tier whose file
+# set this script cannot reproduce is REFUSED with a diagnostic. FG-695: a tier flag
+# used to discard its remaining arguments silently and run the whole tier, so an
+# agent that asked for one integration file got all of them and reported the result
+# as evidence for the narrow run it thought it made.
 # `--extended` and `--all` chain other tiers (and the dashboard workspace), so they
 # have no single file set to narrow: a path after either is refused, never widened.
 #
@@ -125,6 +127,27 @@ _tier_runner() {
   esac
 }
 
+# A caller's path, made relative to the tier's file list (which the tier's own
+# selection produces relative to the project root).
+#
+# FG-695: both roots are stripped, not just the one the tier was resolved against.
+# The production call site resolves against the SCRATCH, but an agent in a container
+# naturally names a file under the /project mount it is editing — and stripping only
+# the scratch prefix left that path absolute, so membership failed and the run was
+# refused with a diagnostic saying the file was not in the tier. It was. The two
+# roots are the same tree, so a path under either strips to the same relative path.
+_tier_rel() {
+  local arg="${1#./}" root
+  for root in "$SRC_DIR" "$WORK_DIR"; do
+    root="${root%/}"
+    if [[ "$arg" == "$root"/* ]]; then
+      printf '%s' "${arg#"$root"/}"
+      return 0
+    fi
+  done
+  printf '%s' "$arg"
+}
+
 # Resolve a tier flag plus its (optional) path arguments into _TIER_CMD. Returns 1
 # with a diagnostic on stderr for any combination that cannot be honoured exactly
 # as asked.
@@ -163,10 +186,10 @@ _resolve_tier_cmd() {
 
   local narrowed=()
   for arg in "$@"; do
-    rel="${arg#./}"
-    rel="${rel#"$root"/}"
+    rel=$(_tier_rel "$arg")
     if ! grep -Fxq -- "$rel" <<<"$files"; then
-      echo "forge-test: $rel is not part of the $tier tier (\"$name\" does not select it), so $flag cannot run it." >&2
+      echo "forge-test: $arg is not part of the $tier tier (\"$name\" does not select it), so $flag cannot run it." >&2
+      echo "forge-test: paths resolve against the source checkout ($SRC_DIR) and the scratch ($WORK_DIR)." >&2
       echo "forge-test: run it under the tier that owns it, or as \`forge-test $rel\` to run the file directly." >&2
       return 1
     fi

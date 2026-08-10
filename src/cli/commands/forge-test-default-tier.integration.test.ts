@@ -144,6 +144,9 @@ test("FG-695: --integration <path> narrows to that file, not the whole tier", ()
 });
 
 test("FG-695: leading ./ and absolute paths narrow the same way", () => {
+  // PRINT-CMD resolves against SRC_DIR, so the source/scratch divergence that broke
+  // absolute paths in production cannot be expressed here — the production fixture
+  // below is what actually guards it. This case only covers the argument forms.
   const expected = `${tierRunner("unit")} ${UNIT_FILE}`;
   assert.equal(runRaw(["--unit", `./${UNIT_FILE}`], REPO_ROOT).stdout, expected);
   assert.equal(runRaw(["--unit", join(REPO_ROOT, UNIT_FILE)], REPO_ROOT).stdout, expected);
@@ -237,32 +240,69 @@ function withProductionFixture<T>(runFixture: (fixture: ProductionFixture) => T)
   }
 }
 
+function runProduction(fixture: ProductionFixture, path: string) {
+  return spawnSync("bash", [SCRIPT, "--unit", path], {
+    cwd: fixture.src,
+    // node:test marks child processes as recursive; remove that marker because
+    // this is intentionally a second, real test execution.
+    env: {
+      ...process.env,
+      NODE_TEST_CONTEXT: undefined,
+      FORGE_SRC_DIR: fixture.src,
+      FORGE_WORK_DIR: fixture.work,
+    },
+    encoding: "utf8",
+  });
+}
+
+// Every form names the SAME file, so every form must narrow to it. The absolute
+// ones are the regression: production resolves the tier against the SCRATCH, and
+// the membership check used to strip only that root — so a path under the source
+// checkout (what an agent editing /project naturally types) stayed absolute, missed
+// the tier's relative file list, and was refused with "is not part of the unit
+// tier". It was part of it. Fail-safe, but a false statement about a valid path.
+//
+// This only bites where SRC_DIR and WORK_DIR genuinely DIFFER, which is exactly
+// production and exactly what PRINT-CMD (SRC_DIR for both) cannot express.
+const PATH_FORMS: [string, (f: ProductionFixture) => string][] = [
+  ["relative to the project root", (f) => f.requested],
+  ["with a leading ./", (f) => `./${f.requested}`],
+  ["absolute under the source checkout", (f) => join(f.src, f.requested)],
+  ["absolute under the scratch", (f) => join(f.work, f.requested)],
+];
+
 test("FG-695: the production path executes only the requested unit test file", () => {
   let base = "";
   withProductionFixture((fixture) => {
     base = fixture.base;
-    const result = spawnSync("bash", [SCRIPT, "--unit", fixture.requested], {
-      cwd: fixture.src,
-      // node:test marks child processes as recursive; remove that marker because
-      // this is intentionally a second, real test execution.
-      env: {
-        ...process.env,
-        NODE_TEST_CONTEXT: undefined,
-        FORGE_SRC_DIR: fixture.src,
-        FORGE_WORK_DIR: fixture.work,
-      },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 0, result.stderr);
-    const output = `${result.stdout}${result.stderr}`;
-    assert.match(output, /REQUESTED_UNIT_TEST_DID_RUN/);
-    assert.doesNotMatch(
-      output,
-      /UNRELATED_UNIT_TEST_DID_RUN/,
-      "a production narrowed run must not execute an unrelated test or the whole tier",
-    );
+    for (const [description, form] of PATH_FORMS) {
+      const path = form(fixture);
+      const result = runProduction(fixture, path);
+      assert.equal(result.status, 0, `${description} (${path}) must narrow, not refuse: ${result.stderr}`);
+      const output = `${result.stdout}${result.stderr}`;
+      assert.match(output, /REQUESTED_UNIT_TEST_DID_RUN/, `${description} must run the requested file`);
+      assert.doesNotMatch(
+        output,
+        /UNRELATED_UNIT_TEST_DID_RUN/,
+        `${description}: a production narrowed run must not execute an unrelated test or the whole tier`,
+      );
+    }
   });
   assert.equal(existsSync(base), false, "the disposable source and scratch must be removed");
+});
+
+test("FG-695: the production path still refuses a path under neither root, naming both", () => {
+  withProductionFixture((fixture) => {
+    const result = runProduction(fixture, join(fixture.base, "elsewhere", "requested.test.ts"));
+    assert.notEqual(result.status, 0, "a path outside both roots must refuse");
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /DID_RUN/, "and must run nothing at all");
+    // The old refusal named only the tier, which misdirects when the real problem is
+    // which root the path was resolved against.
+    assert.ok(
+      result.stderr.includes(fixture.src) && result.stderr.includes(fixture.work),
+      `the refusal must name both roots, got: ${result.stderr}`,
+    );
+  });
 });
 
 test("FG-695: the production fixture is removed when an assertion fails", () => {
