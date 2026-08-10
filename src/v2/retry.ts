@@ -17,14 +17,20 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { Run, Task } from "../types/index.js";
-import { getTask, insertTask } from "../store/tasks.js";
+import { getTask, insertTask, tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { newTaskId, nowIso } from "../util/ids.js";
 import { taskDir } from "../util/paths.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { publicationAttemptsForTask } from "../store/publications.js";
-import { retryPolicy, type RetryDisposition } from "./retry-policy.js";
+import { retryPolicy, isReDrivableFailureKind, type RetryDisposition } from "./retry-policy.js";
+import {
+  fanoutRecommendation,
+  reDriveDisposition,
+  renderRecommendation,
+  type ReDriveDisposition,
+} from "./re-drive-eligibility.js";
 import { taskDispatchKind } from "./run-kind.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
@@ -86,6 +92,116 @@ export class FanoutChildRetryError extends Error {
     );
     this.name = "FanoutChildRetryError";
   }
+}
+
+// FG-688: the OTHER misadvising surface, and the one the ticket says an operator
+// is actually left with. `forge retry` mints a fresh PRIMARY with parentId unset
+// (see the PRIMARY note on the new row below), while adoption is scoped to the
+// CURRENT parent — `adoptablePlanItemChildren`'s `t.parentId === parentId`
+// filter, the FG-584 RF-3b guard this ticket deliberately does NOT widen. So a
+// retried ordered wave cannot reach the old parent's captured, already-integrated
+// children: it re-resolves its base from the last publication receipt and re-runs
+// every item from scratch. That discard is the whole subject of FG-688 — measured
+// on FG-576 at 8 of 9 children already completed and merged into the candidate,
+// including a 64-minute build step.
+//
+// `forge recover <parent> --re-drive` reopens THIS parent row in place, so
+// runOrderedWave recomputes readiness and adoption from durable git ancestry at
+// the top of every dependency group and dispatches only the items that never
+// completed. Refused without --force, mirroring the fanout-CHILD refusal above:
+// the operator's explicit override is preserved, because an operator who
+// genuinely wants a clean re-run from a fresh parent is entitled to one.
+//
+// Extends RetryNotAllowedError rather than standing alone as its own Error: the
+// `forge retry` CLI already renders that class with its advice line, so this
+// refusal reaches the operator as a message instead of a stack trace without
+// needing a new catch arm. It IS a retry-policy refusal — a failure kind whose
+// forward verb is a different command — so the inheritance is the honest shape,
+// not a shortcut.
+export class OrderedFanoutParentRetryError extends RetryNotAllowedError {
+  constructor(
+    public readonly parentTaskId: string,
+    public readonly failureKind: string,
+  ) {
+    super(parentTaskId, {
+      retryable: false,
+      reason:
+        `it is an ORDERED fan-out wave's parent that failed as '${failureKind}', a kind the adopt-preserving re-drive ` +
+        `accepts. \`forge retry\` mints a fresh primary with no parentId, and adoption is scoped to the current parent — ` +
+        `so the retried wave could not reach this parent's already-captured, already-integrated children, and every ` +
+        `completed item would be re-dispatched from scratch`,
+      advice:
+        `use \`forge recover ${parentTaskId} --re-drive\`, which reopens this parent in place: it adopts the items whose ` +
+        `captured commits are already ancestors of the wave's candidate and dispatches only the items that did not complete`,
+    });
+    this.name = "OrderedFanoutParentRetryError";
+  }
+}
+
+// FG-688 (build review, finding 1): the redirect above may only be thrown when
+// `forge recover <parent> --re-drive` would ACTUALLY be accepted — otherwise it
+// bounces the operator between two refusals with no accepted verb named, which is
+// the very defect this ticket exists to close.
+//
+// The first cut tested four things (parent-less, re-drivable kind, has children,
+// provably ordered) and consulted neither supersession nor the run's status, while
+// the re-drive guard refuses on both — so two concretely reachable states advised
+// a verb that immediately refused: a parent superseded by a later primary (minted
+// by `forge retry <parent> --force` or `gate request-changes`), and a parent whose
+// run was cancelled to `abandoned`.
+//
+// So the live-state clauses are not restated here: this reads
+// `reDriveDisposition`, the SAME predicate the recover surface's recommendation
+// and (modulo ordering) performReDrive's own conjunction consult. Two predicates
+// drift; one cannot.
+export class OrderedWaveReDriveUnavailableError extends RetryNotAllowedError {
+  constructor(
+    public readonly parentTaskId: string,
+    public readonly failureKind: string,
+    public readonly reDrive: ReDriveDisposition,
+    /** The verb(s) that WILL be accepted, from the same recommendation builder the
+     *  `forge recover` surface prints — never `--re-drive`, which would refuse. */
+    public readonly recommendationCommands: string[],
+    recommendationLine: string,
+  ) {
+    super(parentTaskId, {
+      retryable: false,
+      reason:
+        `it is an ORDERED fan-out wave's parent that failed as '${failureKind}', and the adopt-preserving ` +
+        `\`forge recover ${parentTaskId} --re-drive\` — the verb that would keep this wave's already-integrated children — ` +
+        `would REFUSE it right now: ${reDrive.why}. A plain retry mints a fresh primary with no parentId, and adoption is ` +
+        `scoped to the current parent, so every completed item would be re-dispatched from scratch`,
+      advice:
+        `run ${recommendationLine}; or, to mint that fresh primary anyway and accept the discard, ` +
+        `\`forge retry ${parentTaskId} --force\``,
+    });
+    this.name = "OrderedWaveReDriveUnavailableError";
+  }
+}
+
+/** FG-688: the re-drive guard's answer for `task`, or undefined when `task` is not
+ *  an ORDERED fan-out wave's parent the redirect has anything to say about.
+ *
+ *  The clauses that gate the LOOKUP (as opposed to the answer) are here, and each
+ *  rules out a case where consulting the re-drive at all would be wrong:
+ *   - parent-less with children: the same shape `recover.ts`'s `isFanoutParent`
+ *     tests. A fanout CHILD is caught by FanoutChildRetryError above; an ordinary
+ *     primary is not a wave at all.
+ *   - an accepted failure kind: the ONE shared enumeration the re-drive's mutation
+ *     guard consults. Fails closed on an unrecognized kind, so a kind from a future
+ *     build routes to the ordinary retry policy rather than to either refusal.
+ *   - provably ordered: read off the parent's durable `integration.worktree_created`
+ *     evidence, via the disposition's own `ordered` field. This is what keeps the
+ *     pre-existing UNORDERED `fanout_wave_orphaned` refusal untouched — an unordered
+ *     wave never carries `ordered: true`, so it falls through to retry-policy.ts's
+ *     entry exactly as before. */
+function orderedWaveReDriveDisposition(task: Task, run: Run | undefined, failureKind: string | undefined): ReDriveDisposition | undefined {
+  if (task.parentId !== undefined) return undefined;
+  if (!isReDrivableFailureKind(failureKind)) return undefined;
+  const allTasks = tasksForRun(task.runId);
+  if (!allTasks.some((t) => t.parentId === task.id)) return undefined;
+  const disposition = reDriveDisposition(task, allTasks, run, failureKind);
+  return disposition.ordered ? disposition : undefined;
 }
 
 /** FG-425 (AC5): this task's candidate is ALREADY on the publish target — a durable
@@ -431,6 +547,42 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   // rejection, red block) would just re-run identical work — refuse unless --force.
   const failureKind = failureKindForTask(taskId);
   const disposition = retryPolicy(failureKind, taskId);
+
+  // Read here rather than just before planRetryDispatch below: the FG-688 redirect
+  // needs the run row too — its status is one of the live-state clauses the
+  // re-drive guard enforces — and one read serves both.
+  const run = getRun(task.runId);
+
+  // FG-688: checked BEFORE the generic policy refusal below, so an ordered wave
+  // parent gets the message that names its actual forward verb rather than the
+  // kind's generic advice. This matters in both directions: `prerequisite_blocked`
+  // is retryable:true and would otherwise sail straight through to minting the
+  // discarding primary, while `integration_blocked` is retryable:false and would
+  // otherwise refuse with per-kind advice that says nothing about the captured
+  // items sitting in the candidate.
+  //
+  // Build-review finding 1: WHICH refusal depends on the same live state the
+  // re-drive guard reads. Eligible -> point at `--re-drive`, the verb that adopts
+  // the captured children. Ineligible (superseded, or a run no recovery verb
+  // reopens) -> point at whatever the shared recommendation names instead, so the
+  // operator is never handed a verb that will refuse. `--force` still proceeds
+  // through BOTH: an operator who wants the fresh-primary discard is entitled to it.
+  // The `!== undefined` is TS narrowing for the throw, not a second policy check:
+  // isReDrivableFailureKind already refuses `undefined` (it fails closed), so this
+  // can never widen what the guard accepts.
+  const reDrive = failureKind !== undefined ? orderedWaveReDriveDisposition(task, run, failureKind) : undefined;
+  if (reDrive && failureKind !== undefined && !opts?.force) {
+    if (reDrive.eligible) throw new OrderedFanoutParentRetryError(taskId, failureKind);
+    const recommendation = fanoutRecommendation(task, reDrive, failureKind);
+    throw new OrderedWaveReDriveUnavailableError(
+      taskId,
+      failureKind,
+      reDrive,
+      recommendation.commands,
+      renderRecommendation(recommendation),
+    );
+  }
+
   if (!disposition.retryable && !opts?.force) {
     throw new RetryNotAllowedError(taskId, disposition);
   }
@@ -440,7 +592,6 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   // that would answer the question won't load) throw here, so neither ever
   // inserts the pending row it could not have dispatched. This is the ONE place
   // taskDispatchKind's `unknown` is interpreted.
-  const run = getRun(task.runId);
   const adHoc = run ? planRetryDispatch(task, run) : undefined;
 
   // Build a fresh task row — same phase/role/inputs/agentAlias/agentModel, NEW id

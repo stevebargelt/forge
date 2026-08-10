@@ -232,6 +232,53 @@ export function failRun(id: string, opts?: { onApplied?: () => void }): boolean 
   return true;
 }
 
+// FG-688: compare-and-set that reactivates a run ONLY out of 'failed' — the exact
+// MIRROR of failRun in the other direction, and nothing more. The adopt-preserving
+// re-drive reopens a terminally-failed ordered wave's parent task, and a reopened
+// parent on a settled run would never dispatch (both `forge next` entry points
+// refuse a non-active run), so the run row has to come back with it.
+//
+// CAS from 'failed' means it equally refuses complete->active (a run that already
+// succeeded is never reopened), abandoned->active (a human's `forge cancel` is
+// authoritatively terminal, AWN-2), and active->active (the caller must handle the
+// no-op explicitly rather than read a true it did not earn). Returns true iff this
+// call moved the row.
+//
+// Three deliberate omissions, each load-bearing:
+//   (a) NO notification. Every existing reactivation is silent (updateRunStatus
+//       only notifies on terminal targets), and a post-commit side effect here
+//       could escape a caller's rollback.
+//   (b) NO re-drive-shaped exemption, allowlist, or caller-identity check. The CAS
+//       on status='failed' is the same universal shape completeRun/failRun already
+//       use (`AND status = 'active'`) — a transition, not a policy table. The
+//       FG-585 terminal-crossing backstop in updateRunStatus is untouched: 'active'
+//       is not in TERMINAL_RUN_STATES, so failed->active was already permitted.
+//       WHICH failures may be re-driven is decided at the verb, never here.
+//   (c) NO schema change. runs.status, runs.completed_at and the `run.reactivated`
+//       EventType all already exist, so no migration runs and an aged
+//       ~/.forge/forge.db needs no different handling from a fresh one.
+//
+// Deliberately NOT reused: reactivateTerminalRun (src/v2/invoke.ts) — its
+// accept-set includes 'complete' and 'abandoned', and its status write and audit
+// event sit in two unsynchronized transactions, so a crash between them loses the
+// only record that the run was ever reactivated (the write itself nulls
+// completed_at, erasing the row's own trace of the failure).
+//
+// opts.onApplied runs INSIDE the same transaction as the status write, before
+// commit — the same FG-463 seam completeRun/failRun expose, so the caller's
+// `run.reactivated` audit event commits atomically with the status flip. A throw
+// from onApplied rolls the status write back with it.
+export function reactivateFailedRun(id: string, opts?: { onApplied?: () => void }): boolean {
+  return writeTransaction(() => {
+    const info = getDb()
+      .prepare(`UPDATE runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'failed'`)
+      .run(id);
+    const applied = info.changes === 1;
+    if (applied) opts?.onApplied?.();
+    return applied;
+  });
+}
+
 const TERMINAL_RUN_STATES: ReadonlySet<RunStatus> = new Set(["complete", "failed", "abandoned"]);
 
 export function updateRunStatus(id: string, status: RunStatus): void {

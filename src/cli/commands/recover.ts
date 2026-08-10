@@ -8,8 +8,16 @@ import type { Command } from "commander";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Task, Run } from "../../types/index.js";
-import { getTask, tasksForRun, markTaskRecovered, insertTask } from "../../store/tasks.js";
-import { getRun } from "../../store/runs.js";
+import {
+  getTask,
+  tasksForRun,
+  markTaskRecovered,
+  insertTask,
+  reopenFailedFanoutParentForReDrive,
+  updateTaskPackageInputs,
+} from "../../store/tasks.js";
+import { getRun, reactivateFailedRun } from "../../store/runs.js";
+import { writeTransaction } from "../../store/db.js";
 import { logEvent, eventsForTask } from "../../store/events.js";
 import { ensureForgeDirs, taskDir } from "../../util/paths.js";
 import { acquireRunLock, releaseRunLock } from "../../util/run-lock.js";
@@ -17,8 +25,19 @@ import { newTaskId, nowIso } from "../../util/ids.js";
 import { failureKindForTask, getOrphanEvidenceFromEvents } from "../../v2/failure-kind.js";
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import type { OrphanEvidence } from "../../v2/failure-kind.js";
-import { retryPolicy } from "../../v2/retry-policy.js";
-import { changedWorktreeFiles, defaultContainerAlive, reconcileRun } from "../../v2/reconcile.js";
+import { retryPolicy, isReDrivableFailureKind } from "../../v2/retry-policy.js";
+// FG-688 (build review, finding 1): the re-drive's eligibility predicate and the
+// recommendation built from it live in v2 so `forge retry` reads the SAME answer
+// this verb enforces — see the header of re-drive-eligibility.ts.
+import {
+  fanoutRecommendation,
+  reDriveDisposition,
+  renderRecommendation,
+  supersedingPrimary,
+  type Recommendation,
+  type ReDriveDisposition,
+} from "../../v2/re-drive-eligibility.js";
+import { changedWorktreeFiles, defaultContainerAlive, reconcileRun, isOrderedFanoutWave } from "../../v2/reconcile.js";
 import type { ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { analyzeProviderFailure } from "../../v2/provider-failure.js";
@@ -154,14 +173,6 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
 // That is `invoke` AND `invoke_chain` (campaign quick lanes chain plain
 // invokes); run-kind.ts owns the one definition shared with reconcile.ts.
 
-// A recommended next step: the command(s) to run, and why. Rendered as
-// `cmd [&& cmd]  (note)` — the `&&` chain is literal, copy-pasteable shell.
-type Recommendation = { commands: string[]; note: string };
-
-function renderRecommendation(r: Recommendation): string {
-  return r.commands.join(" && ") + (r.note ? `  (${r.note})` : "");
-}
-
 // FG-455 p4 review finding 2: only recommend --continue for a failure_kind
 // performContinue will actually accept (CONTINUABLE_KINDS) — otherwise this
 // recommended a command performContinue then refused (e.g. a container_crash
@@ -271,6 +282,8 @@ function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): Ta
   };
 }
 
+export type { ReDriveDisposition, ReDriveDispositionCode } from "../../v2/re-drive-eligibility.js";
+
 export type FanoutParentView = {
   parentId: string;
   runId: string;
@@ -279,6 +292,10 @@ export type FanoutParentView = {
   failureKind?: string;
   children: { id: string; status: string }[];
   recommendation: string;
+  /** The recommendation as discrete commands, mirroring TaskEvidenceView. */
+  recommendationCommands: string[];
+  /** FG-688: the re-drive guard's answer for this parent, and why. */
+  reDrive: ReDriveDisposition;
 };
 
 function isFanoutParent(task: Task, allTasks: Task[]): boolean {
@@ -286,12 +303,18 @@ function isFanoutParent(task: Task, allTasks: Task[]): boolean {
 }
 
 // Is this a fanout parent in a state piece-2 reconcile would act on (settle) or
-// has already settled into fanout_wave_orphaned? A `running` parent whose
-// children aren't all terminal yet is left alone by reconcile too — the wave
-// may still be in flight — so it's not listed as recoverable here either.
+// has already settled into a failure kind `--re-drive` accepts? A `running`
+// parent whose children aren't all terminal yet is left alone by reconcile too —
+// the wave may still be in flight — so it's not listed as recoverable here either.
+//
+// FG-688: the failed arm listed ONLY `fanout_wave_orphaned`, so a run-level
+// `forge recover <runId>` reported "no recoverable tasks" for exactly the
+// terminally-failed ordered waves this ticket makes recoverable. It now reads the
+// SAME shared enumeration the mutation guard and the recommendation consult, so
+// the three surfaces cannot disagree about which parents are recoverable.
 function fanoutParentRecoverable(task: Task, allTasks: Task[]): boolean {
   if (!isFanoutParent(task, allTasks)) return false;
-  if (task.status === "failed") return failureKindForTask(task.id) === "fanout_wave_orphaned";
+  if (task.status === "failed") return isReDrivableFailureKind(failureKindForTask(task.id));
   if (task.status === "running") {
     if (eventsForTask(task.id).some((e) => e.eventType === "container.started")) return false;
     const children = allTasks.filter((t) => t.parentId === task.id);
@@ -300,20 +323,29 @@ function fanoutParentRecoverable(task: Task, allTasks: Task[]): boolean {
   return false;
 }
 
-function buildFanoutView(task: Task, allTasks: Task[]): FanoutParentView {
+function buildFanoutView(task: Task, allTasks: Task[], run: Run | undefined): FanoutParentView {
   const children = allTasks.filter((t) => t.parentId === task.id).map((c) => ({ id: c.id, status: c.status }));
+  const failureKind = failureKindForTask(task.id);
+  const reDrive = reDriveDisposition(task, allTasks, run, failureKind);
+  const recommendation = fanoutRecommendation(task, reDrive, failureKind);
   return {
     parentId: task.id,
     runId: task.runId,
     phase: task.phase,
     status: task.status,
-    failureKind: failureKindForTask(task.id),
+    failureKind,
     children,
-    recommendation: `forge recover ${task.id} --re-drive`,
+    recommendation: renderRecommendation(recommendation),
+    recommendationCommands: recommendation.commands,
+    reDrive,
   };
 }
 
 export type AdoptedFrom = "result_json" | "stream_recovered" | "stdout_inferred" | "diff_adopted";
+
+/** FG-688: the two shapes a `--re-drive` can take. Chosen by the wave's DURABLE
+ *  shape (isOrderedFanoutWave), never by its failure kind. */
+export type ReDriveLane = "ordered_reopened_in_place" | "unordered_fresh_primary";
 
 export type RecoverOutcome =
   | { kind: "inspect-task"; task: TaskEvidenceView }
@@ -321,7 +353,29 @@ export type RecoverOutcome =
   | { kind: "inspect-run"; runId: string; tasks: TaskEvidenceView[]; fanoutParents: FanoutParentView[] }
   | { kind: "continued"; taskId: string; runId: string; adoptedFrom: AdoptedFrom; result: unknown }
   | { kind: "continue-refused"; id: string; reason: string }
-  | { kind: "re-drive-done"; parentId: string; runId: string; newTaskId: string }
+  | {
+      kind: "re-drive-done";
+      parentId: string;
+      runId: string;
+      /** FG-688: WHICH lane ran. `ordered_reopened_in_place` reuses the parent
+       *  row so runOrderedWave can adopt the children whose commits are already
+       *  integrated; `unordered_fresh_primary` is the pre-FG-688 mint path. */
+      lane: ReDriveLane;
+      /** The task `forge next` will dispatch — the REUSED parent on the ordered
+       *  lane, the freshly minted primary on the unordered one. Always set, so a
+       *  consumer that only needs "what runs next" never has to branch on lane. */
+      dispatchTaskId: string;
+      /** Set ONLY by the unordered lane. The ordered lane reports the reused
+       *  parent id via `dispatchTaskId`/`parentId` and mints nothing, so naming a
+       *  `newTaskId` here would be a claim it did not earn. */
+      newTaskId?: string;
+      /** true iff THIS call moved the run row failed -> active (and therefore
+       *  wrote the one `run.reactivated` event). false when the run was already
+       *  active — an idempotent no-op, not an error. */
+      runReactivated: boolean;
+      /** The failure kind that authorized the mutation, for the audit trail. */
+      authorizingFailureKind: string;
+    }
   | { kind: "re-drive-refused"; id: string; reason: string }
   | { kind: "bad-usage"; id: string; reason: string }
   | { kind: "unknown"; id: string };
@@ -335,7 +389,7 @@ export function performInspect(id: string, containerAlive: ContainerAlive = defa
     if (!run) return { kind: "unknown", id };
     const allTasks = tasksForRun(task.runId);
     if (isFanoutParent(task, allTasks)) {
-      return { kind: "inspect-fanout-parent", parent: buildFanoutView(task, allTasks) };
+      return { kind: "inspect-fanout-parent", parent: buildFanoutView(task, allTasks, run) };
     }
     return { kind: "inspect-task", task: buildTaskView(task, run, containerAlive) };
   }
@@ -348,7 +402,7 @@ export function performInspect(id: string, containerAlive: ContainerAlive = defa
     const tasks = allTasks
       .filter((t) => t.status === "failed" && RUN_INSPECT_KINDS.has(failureKindForTask(t.id) ?? ""))
       .map((t) => buildTaskView(t, run, containerAlive));
-    const fanoutParents = allTasks.filter((t) => fanoutParentRecoverable(t, allTasks)).map((t) => buildFanoutView(t, allTasks));
+    const fanoutParents = allTasks.filter((t) => fanoutParentRecoverable(t, allTasks)).map((t) => buildFanoutView(t, allTasks, run));
     return { kind: "inspect-run", runId: run.id, tasks, fanoutParents };
   }
 
@@ -495,17 +549,164 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
   return { kind: "continued", taskId: task.id, runId: task.runId, adoptedFrom: adopted.adoptedFrom, result: adopted.result };
 }
 
-// ── --re-drive: clean in-run re-drive of an orphaned fanout wave ────────────
+// ── --re-drive: in-run re-drive of a failed fanout wave ─────────────────────
 //
-// Mechanism: mint a fresh pending PRIMARY task (parentId undefined) in the
-// SAME phase as the fanout step — byte-for-byte the same shape gate.ts's
-// request-changes already uses to re-drive a step, a pattern dispatchFanoutStep
-// is proven to reuse cleanly (its existingParent lookup finds the lone pending
-// primary in the phase and dispatches a fresh wave). The old parent and its
-// children are left in place as an audit trail (same convention as `forge
-// retry` elsewhere) — dispatchFanoutStep always mints brand-new child rows on
-// dispatch, so there is no "resume only the failed children" mechanism to hook
-// into without deep dispatchFanoutStep surgery; this re-drives the FULL wave.
+// ONE shared eligibility conjunction, then TWO lanes.
+//
+// Eligibility: (i) the task is a fan-out PARENT, (ii) its status is `failed`,
+// (iii) `isReDrivableFailureKind(failureKindForTask(parent))` — the ONE shared
+// enumeration the recommendation surface also consults, exhaustive at compile
+// time and fail-closed at runtime — and (iv) the parent is NOT SUPERSEDED.
+//
+// They are EVALUATED in the order (i), (iv), run accept-set, (ii), (iii) — the
+// durable-state clauses first, because the only mutating step in the pre-lock
+// section is the reconcile a `running` parent needs, and a refusal must never
+// land after a write. See the RF-1 comment at that reconcile.
+//
+// ORDERED lane (FG-688). The parent ROW IS REUSED: reopened `failed` -> `pending`
+// in place, keeping its children attached. That is the WHOLE mechanism, and the
+// reason is that nothing downstream needs teaching. runOrderedWave recomputes
+// readiness AND adoption from durable state (two task rows and two git refs) at
+// the top of every dependency group, skips a merge whose commit is already an
+// ancestor of the candidate, and adopts an existing candidate branch by rewinding
+// it to its prerequisites; dispatchFanoutStep already prefers a pending primary
+// and already carves ordered waves out of its `pendingHasChildren` early return.
+// So an item whose captured commit is already integrated is never re-dispatched —
+// regardless of WHY the wave stopped, because git ancestry does not record why.
+//
+// This supersedes what this comment used to say — that resuming only the failed
+// children would need "deep dispatchFanoutStep surgery". It needs NONE: that
+// claim predated FG-584's ordered lane, which made readiness recomputable. The
+// surgery was a verb that returns the parent row to `pending` and the run row to
+// `active`; it is below.
+//
+// UNORDERED lane. Unchanged: mint a fresh pending PRIMARY (parentId undefined) in
+// the SAME phase — byte-for-byte the shape gate.ts's request-changes uses, which
+// dispatchFanoutStep reuses cleanly. The old parent and children stay as an audit
+// trail, and the fresh wave re-runs every item. Reopening an unordered parent in
+// place would WEDGE (dispatchFanoutStep returns early for
+// `pendingHasChildren && !graph.ordered`), which is exactly why the lane is chosen
+// by the wave's durable SHAPE and why isOrderedFanoutWave answers false when it
+// cannot prove ordering: an ordered wave misread as unordered discards work (todays
+// behaviour, safe), while an unordered wave misread as ordered strands the run.
+//
+// BOTH lanes take the run-level `failed` -> `active` transition. That is a
+// PRE-EXISTING hole in this verb, not one the widened accept-set opens: an accepted
+// wave failure settles the RUN to `failed` too, and both `forge next` entry points
+// refuse a non-active run, so a reopened-or-minted primary would never dispatch.
+// `forge retry` has reactivated since FG-585; this verb never did.
+//
+// ATOMICITY is load-bearing, not tidy, and the asymmetry is why: run-moved-but-
+// parent-not merely writes a redundant `run.failed` on the next command, while
+// parent-moved-but-run-not is a PERMANENT wedge — the ready queue keeps the phase
+// active, classifyRunTerminalState returns null forever, and the run can neither
+// settle nor dispatch without hand surgery on the DB. So the parent reopen, the run
+// reactivation and BOTH audit events commit in ONE writeTransaction, taken inside
+// the run lock this verb already holds. Every write is a CAS against a status read
+// inside that transaction; if either CAS matches zero rows the whole transaction
+// rolls back and the verb returns a refusal with NO state written and NO events
+// emitted. Deliberately NOT composed from completeRun/failRun/reactivateTerminalRun:
+// their notifications and event writes sit OUTSIDE their own transaction and would
+// escape the rollback.
+
+/** Thrown inside the re-drive transaction to roll it back and surface the reason
+ *  as a refusal. Never escapes performReDrive. */
+class ReDriveRollback extends Error {
+  constructor(readonly refusal: string) {
+    super(refusal);
+    this.name = "ReDriveRollback";
+  }
+}
+
+/** FG-688 (build review, finding 2): the supersession half of the re-drive
+ *  transaction, and the third eligibility clause to get a compare-and-set
+ *  backstop — the architect's constraint ("every write in this design is a CAS on
+ *  the expected prior status, read inside the transaction") applied to the one
+ *  clause that was still resting on a pre-lock read.
+ *
+ *  The window it closes: performReDrive evaluates supersession BEFORE
+ *  acquireRunLock, and both verbs that can mint a competing parent-less primary —
+ *  `forge retry <parent> --force` (retry.ts, under withRunLock) and `forge gate
+ *  request-changes` (gate.ts, likewise) — serialize on that same run lock. So one
+ *  of them can take the lock, mint the primary and release it entirely inside the
+ *  window between this verb's eligibility read and its own acquireRunLock. The
+ *  parent row would still be 'failed' and the run row still 'failed', so both
+ *  existing CASes would apply and the wave would be reopened beside a live
+ *  primary in the same phase — the cross-wave adoption hazard AC3 and FG-584's
+ *  RF-3b parent-scoping exist to prevent, reached through the recovery door.
+ *
+ *  MUST be called from inside the enclosing writeTransaction: tasksForRun reads
+ *  the writable handle, so the re-read there sees every primary committed before
+ *  BEGIN IMMEDIATE took the write lock. Throws ReDriveRollback — rolling every
+ *  other write in the transaction back with it — exactly like the parent CAS and
+ *  the run CAS beside it. No new lock, no nonce, no generation counter: the fix is
+ *  a read moved inside a critical section that was already being taken. */
+function refuseIfSupersededInTransaction(parent: Task): void {
+  const superseding = supersedingPrimary(parent, tasksForRun(parent.runId));
+  if (!superseding) return;
+  throw new ReDriveRollback(
+    `${parent.id} was SUPERSEDED by ${superseding.id} (status=${superseding.status}) after this re-drive's eligibility check ` +
+      `and before it took the run lock — a later primary now owns phase '${parent.phase}', and reopening a dead lineage would ` +
+      `put two live parents in one phase. Run \`forge next ${parent.runId}\` to drive the live wave instead. Nothing was written.`,
+  );
+}
+
+/** The run-level half of the re-drive transaction. MUST be called from inside the
+ *  enclosing writeTransaction: it re-reads the run status there (getRun uses the
+ *  writable handle, so it sees this transaction's own uncommitted writes) and
+ *  throws ReDriveRollback — rolling the parent reopen back with it — on anything
+ *  outside the accept-set.
+ *
+ *  Accept-set, enforced HERE at the verb and never as an exemption in the store:
+ *    failed    -> reactivate, and write the one `run.reactivated` audit event
+ *    active    -> no run-level write; proceed (idempotent — only one phase's wave failed)
+ *    complete  -> REFUSE always (a run that already succeeded is never reopened)
+ *    abandoned -> REFUSE always (AWN-2: a human's `forge cancel` is authoritatively
+ *                 terminal; retry.ts's ad-hoc carve-out is scoped to an explicit
+ *                 per-task retry and deliberately does not extend here)
+ *    anything else -> REFUSE, fail closed.
+ *
+ *  Returns true iff this call moved the run row. */
+function reactivateRunForReDrive(parent: Task, failureKind: string, lane: ReDriveLane): boolean {
+  const run = getRun(parent.runId);
+  if (!run) throw new ReDriveRollback(`run ${parent.runId} not found for fanout parent ${parent.id} — nothing written`);
+  if (run.status === "active") return false;
+  if (run.status !== "failed") {
+    throw new ReDriveRollback(
+      `run ${parent.runId} is '${run.status}', and --re-drive only reopens a 'failed' run (an 'active' one it leaves alone) — ` +
+        `a ${run.status} run is never reopened by a recovery verb. Nothing was written.`,
+    );
+  }
+  // Captured BEFORE the write: reactivation NULLs completed_at, so after it the
+  // row carries no trace that the run ever failed. This event is the sole durable
+  // record — which is why it commits in the same transaction as the flip, and why
+  // the earlier `run.failed` event is never amended or deleted. The readable
+  // history is run.failed -> run.reactivated -> (later) run.completed | run.failed.
+  const completedAtCleared = run.completedAt ?? null;
+  const applied = reactivateFailedRun(parent.runId, {
+    onApplied: () =>
+      logEvent("run.reactivated", {
+        runId: parent.runId,
+        payload: {
+          // Distinct from invoke.ts's "retry"/"invoke" sources so this verb is
+          // identifiable in the log without joining against anything.
+          source: "recover --re-drive",
+          from: "failed",
+          completedAtCleared,
+          authorizingTaskId: parent.id,
+          failure_kind: failureKind,
+          lane,
+        },
+      }),
+  });
+  if (!applied) {
+    throw new ReDriveRollback(
+      `run ${parent.runId} was concurrently moved off 'failed' while re-driving ${parent.id} — refusing rather than ` +
+        "reopening a task on a run that settled underneath it. Nothing was written.",
+    );
+  }
+  return true;
+}
 
 export function performReDrive(id: string, opts: { containerAlive?: ContainerAlive } = {}): RecoverOutcome {
   const anchor = getTask(id);
@@ -520,11 +721,83 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
     parent = anchor;
   }
 
-  if (!isFanoutParent(parent, tasksForRun(parent.runId))) {
+  const allTasks = tasksForRun(parent.runId);
+  if (!isFanoutParent(parent, allTasks)) {
     return { kind: "re-drive-refused", id, reason: `${parent.id} is not a fanout parent (no children) — --re-drive only applies to a fanout wave` };
   }
 
+  // FG-688 (build review, RF-1): every clause decidable from DURABLE state is
+  // evaluated BEFORE the reconcile below, because reconcileRun mutates — it moves
+  // rows and writes events — and this verb's contract is that a refusal writes
+  // nothing at all. The order is now reDriveDisposition's own (supersession, then
+  // the run accept-set, then the parent's status), which is also why the two
+  // surfaces can no longer disagree about which clause decided a parent.
+  //
+  // (iv) Supersession — see supersedingPrimary in v2/re-drive-eligibility.ts. This
+  // is AC3's verb-level half. An EARLY refusal only: the binding one is the
+  // re-read inside the transaction below, which is what closes the window between
+  // this read and the lock.
+  const superseding = supersedingPrimary(parent, allTasks);
+  if (superseding) {
+    return {
+      kind: "re-drive-refused",
+      id,
+      reason:
+        superseding.status === "pending"
+          ? `a re-drive is already pending as ${superseding.id} — run \`forge next ${parent.runId}\` to dispatch it instead of re-driving again`
+          : `${parent.id} has been SUPERSEDED by ${superseding.id} (status=${superseding.status}), a later primary that now owns phase ` +
+            `'${parent.phase}' — reopening a dead lineage would put two live parents in one phase and let one wave adopt another's ` +
+            `children. Run \`forge next ${parent.runId}\` to drive the live wave instead.`,
+    };
+  }
+
+  // The run accept-set, read here so an ineligible run refuses BEFORE any write is
+  // attempted. Re-checked authoritatively inside the transaction
+  // (reactivateRunForReDrive), which is what actually binds.
+  const run = getRun(parent.runId);
+  if (!run) return { kind: "re-drive-refused", id, reason: `run ${parent.runId} not found for fanout parent ${parent.id}` };
+  if (run.status !== "failed" && run.status !== "active") {
+    return {
+      kind: "re-drive-refused",
+      id,
+      reason:
+        `run ${parent.runId} is '${run.status}' — --re-drive only reopens a 'failed' run (an 'active' one it leaves alone). ` +
+        (run.status === "abandoned"
+          ? "An abandoned run is a human's decision and is authoritatively terminal; no recovery verb resurrects it."
+          : "A run that already completed is never reopened."),
+    };
+  }
+
+  // The lane is chosen by the wave's DURABLE shape, never by its failure kind.
+  const lane: ReDriveLane = isOrderedFanoutWave(parent.id) ? "ordered_reopened_in_place" : "unordered_fresh_primary";
+
   if (parent.status === "running") {
+    // FG-688 RF-1, the demonstrated case: an ORDERED wave stranded by a crash is
+    // not a re-drive at all. reconcile returns THIS row to `pending`
+    // (ordered_fanout_resumable) and the controller resumes it there, adopting
+    // every captured item — so reconciling here would perform that transition and
+    // then refuse the `pending` row it had just made, reporting a refusal that had
+    // already written a task row and a task.reconciled event, with a status
+    // message that told the operator nothing about either. Decided from durable
+    // state alone, no container probe: stranded or genuinely live, the answer is
+    // the same refusal, and it names the verb that works in both cases.
+    if (lane === "ordered_reopened_in_place") {
+      return {
+        kind: "re-drive-refused",
+        id,
+        reason:
+          `${parent.id} is an ORDERED wave whose parent row is still 'running' — an ordered wave is RESUMED in place, never ` +
+          `re-driven. If its process is gone, reconcile returns this same row to 'pending' (ordered_fanout_resumable) and the wave ` +
+          `resumes there, adopting every item whose commit is already integrated: run \`forge next ${parent.runId}\`. If a container ` +
+          `is genuinely still live the wave is already being driven — let it settle, or \`forge cancel ${parent.id}\` first. ` +
+          "Nothing was written.",
+      };
+    }
+    // UNORDERED: the settle IS this lane's first step rather than a pre-check —
+    // both of reconcile's landings for this shape stamp `fanout_wave_orphaned`,
+    // which the guard below accepts, so this reconcile precedes an ACCEPT. It is
+    // also why the failure-kind clause cannot move above it: a `running` parent
+    // has no failure kind until reconcile stamps one.
     reconcileRun(parent.runId, opts.containerAlive ?? defaultContainerAlive);
     const reloaded = getTask(parent.id);
     if (reloaded) parent = reloaded;
@@ -544,62 +817,145 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
     return { kind: "re-drive-refused", id, reason: `${parent.id} is in status '${parent.status}', not a recoverable failed fanout parent` };
   }
 
+  // (iii) The shared, compile-time-exhaustive, fail-closed enumeration. An
+  // unrecognized kind string — one written by a build this one does not know —
+  // lands here too and is refused, deliberately unlike retryPolicy's permissive
+  // advisory default.
   const parentFailureKind = failureKindForTask(parent.id);
-  if (parentFailureKind !== "fanout_wave_orphaned") {
+  if (!isReDrivableFailureKind(parentFailureKind)) {
     return {
       kind: "re-drive-refused",
       id,
-      reason: `${parent.id} failed as ${parentFailureKind}, not fanout_wave_orphaned — --re-drive only re-drives an orphaned fanout wave; use forge retry / forge recover --continue as appropriate`,
+      reason:
+        `${parent.id} failed as ${parentFailureKind ?? "none"}, which --re-drive does not accept — a re-drive re-reads the same plan and ` +
+        `re-gates the same tree, so it would fail identically. Use \`forge retry ${parent.id}\` / \`forge recover ${parent.id} --continue\` as appropriate.`,
     };
   }
 
-  const allTasks = tasksForRun(parent.runId);
-  const dupePending = allTasks.find((t) => t.phase === parent.phase && t.parentId === undefined && t.status === "pending");
-  if (dupePending) {
-    return {
-      kind: "re-drive-refused",
-      id,
-      reason: `a re-drive is already pending as ${dupePending.id} — run \`forge next ${parent.runId}\` to dispatch it instead of re-driving again`,
-    };
-  }
+  // isReDrivableFailureKind returns false for `undefined`, so past the guard above
+  // the kind is necessarily a recognized string. Narrowed once, here, rather than
+  // cast at each of the four places the audit trail carries it.
+  const authorizingKind: string = parentFailureKind as string;
 
   acquireRunLock(parent.runId, "recover --re-drive");
-  let newId: string;
   try {
-    newId = newTaskId(parent.phase);
-    const newTask: Task = {
-      id: newId,
-      runId: parent.runId,
-      phase: parent.phase,
-      agentRole: parent.agentRole,
-      status: "pending",
-      taskPackage: {
-        ...parent.taskPackage,
-        taskId: newId,
-        inputs: {
-          ...parent.taskPackage.inputs,
-          previous_failure: { kind: "fanout_wave_orphaned", error: parent.error ?? null, failedTaskId: parent.id },
+    if (lane === "ordered_reopened_in_place") {
+      const runReactivated = writeTransaction(() => {
+        // (a) The parent row, in place. CAS from 'failed' only — a second named
+        // terminal exit, not a relaxation of setTaskStatus's structural guard.
+        if (!reopenFailedFanoutParentForReDrive(parent.id)) {
+          throw new ReDriveRollback(
+            `${parent.id} was concurrently moved off 'failed' — refusing rather than reopening a row another process just ` +
+              "settled. Nothing was written.",
+          );
+        }
+        // (a2) Supersession, re-read INSIDE the transaction. Ordered after the
+        // parent CAS rather than before it only because the two are independent
+        // and this keeps the cheap row-level CAS first; either order refuses the
+        // same interleavings, because both reads happen under the same write lock.
+        refuseIfSupersededInTransaction(parent);
+        // (b) Stamp the failure onto the reopened row's inputs, mirroring the mint
+        // lane. markTaskRunning clears `error` when the row is actually
+        // re-dispatched, so without this the reason for the re-drive would not
+        // survive into the wave it authorized.
+        updateTaskPackageInputs(parent.id, {
+          previous_failure: { kind: authorizingKind, error: parent.error ?? null, failedTaskId: parent.id },
+        });
+        // (c) The run row + its audit event, same transaction.
+        const reactivated = reactivateRunForReDrive(parent, authorizingKind, lane);
+        // (d) The task-level audit event, same transaction. `to: "pending"` — the
+        // row really is back to pending, unlike the mint lane's "redriven", which
+        // describes a parent left terminal.
+        logEvent("task.reconciled", {
+          runId: parent.runId,
+          taskId: parent.id,
+          payload: {
+            from: "failed",
+            to: "pending",
+            reason: "ordered_wave_redriven_in_place",
+            via: "forge recover --re-drive",
+            failure_kind: authorizingKind,
+            runReactivated: reactivated,
+          },
+        });
+        return reactivated;
+      });
+      return {
+        kind: "re-drive-done",
+        parentId: parent.id,
+        runId: parent.runId,
+        lane,
+        dispatchTaskId: parent.id,
+        runReactivated,
+        authorizingFailureKind: authorizingKind,
+      };
+    }
+
+    // UNORDERED lane — the pre-FG-688 mint path, byte-for-byte, now wrapped in the
+    // same transaction as the run reactivation so a refused run CAS leaves no
+    // orphaned pending primary behind.
+    const newId = newTaskId(parent.phase);
+    const runReactivated = writeTransaction(() => {
+      // Same in-transaction supersession CAS as the ordered lane, but it must run
+      // BEFORE the mint: this lane's own new row is itself a later parent-less
+      // primary in the parent's phase, so checking after the insert would refuse
+      // every unordered re-drive on its own write.
+      refuseIfSupersededInTransaction(parent);
+      const newTask: Task = {
+        id: newId,
+        runId: parent.runId,
+        phase: parent.phase,
+        agentRole: parent.agentRole,
+        status: "pending",
+        taskPackage: {
+          ...parent.taskPackage,
+          taskId: newId,
+          inputs: {
+            ...parent.taskPackage.inputs,
+            previous_failure: { kind: authorizingKind, error: parent.error ?? null, failedTaskId: parent.id },
+          },
+          composedSystemPrompt: "",
         },
-        composedSystemPrompt: "",
-      },
-      createdAt: nowIso(),
+        createdAt: nowIso(),
+      };
+      insertTask(newTask);
+      const reactivated = reactivateRunForReDrive(parent, authorizingKind, lane);
+      logEvent("task.created", {
+        runId: parent.runId,
+        taskId: newId,
+        payload: { fanoutParent: true, from: "forge recover --re-drive", previousParentId: parent.id },
+      });
+      logEvent("task.reconciled", {
+        runId: parent.runId,
+        taskId: parent.id,
+        payload: {
+          from: "failed",
+          to: "redriven",
+          reason: "fanout_wave_redriven",
+          via: "forge recover --re-drive",
+          newTaskId: newId,
+          failure_kind: authorizingKind,
+          runReactivated: reactivated,
+        },
+      });
+      return reactivated;
+    });
+    return {
+      kind: "re-drive-done",
+      parentId: parent.id,
+      runId: parent.runId,
+      lane,
+      dispatchTaskId: newId,
+      newTaskId: newId,
+      runReactivated,
+      authorizingFailureKind: authorizingKind,
     };
-    insertTask(newTask);
-    logEvent("task.created", {
-      runId: parent.runId,
-      taskId: newId,
-      payload: { fanoutParent: true, from: "forge recover --re-drive", previousParentId: parent.id },
-    });
-    logEvent("task.reconciled", {
-      runId: parent.runId,
-      taskId: parent.id,
-      payload: { from: "failed", to: "redriven", reason: "fanout_wave_redriven", via: "forge recover --re-drive", newTaskId: newId },
-    });
+  } catch (e) {
+    if (e instanceof ReDriveRollback) return { kind: "re-drive-refused", id, reason: e.refusal };
+    throw e;
   } finally {
     releaseRunLock(parent.runId);
   }
-
-  return { kind: "re-drive-done", parentId: parent.id, runId: parent.runId, newTaskId: newId };
 }
 
 export type RecoverOpts = { json?: boolean; continueTask?: boolean; reDrive?: boolean; force?: boolean };
@@ -635,6 +991,7 @@ function renderFanoutView(v: FanoutParentView): string[] {
   const lines: string[] = [];
   lines.push(`  ${v.parentId}  [${v.phase}]  status=${v.status}  failure_kind=${v.failureKind ?? "none"}`);
   lines.push(`    children: ${v.children.map((c) => `${c.id}(${c.status})`).join(", ") || "(none)"}`);
+  lines.push(`    re-drive: ${v.reDrive.eligible ? "eligible" : `not eligible (${v.reDrive.disposition})`} — ${v.reDrive.why}`);
   lines.push(`    next:     ${v.recommendation}`);
   return lines;
 }
@@ -647,7 +1004,10 @@ export function registerRecover(program: Command): void {
       "Operator-safe recovery for a task/run left behind by a lost container. Read-only by default — inspects persisted diff/result and recommends a next command. --continue adopts persisted work and completes the task; --re-drive re-dispatches an orphaned fanout wave in-run.",
     )
     .option("--continue", "adopt the orphaned task's persisted result and mark it complete")
-    .option("--re-drive", "re-drive an orphaned fanout wave in-run instead of stranding a detached primary")
+    .option(
+      "--re-drive",
+      "re-drive a failed fanout wave in-run: an ORDERED wave is reopened in place, adopting the items already integrated; an unordered orphaned one is re-driven as a fresh primary",
+    )
     .option("--force", "acknowledge an ambiguous shared-directory diff (or other refusal) and proceed anyway")
     .option("--json", "emit structured JSON (the primary orchestrator surface)")
     .action((id: string, opts: { continue?: boolean; reDrive?: boolean; force?: boolean; json?: boolean }) => {
@@ -697,7 +1057,15 @@ export function registerRecover(program: Command): void {
           process.exit(1);
           break;
         case "re-drive-done":
-          console.log(`Re-drove fanout parent ${outcome.parentId} — new pending primary ${outcome.newTaskId} created.`);
+          if (outcome.lane === "ordered_reopened_in_place") {
+            console.log(
+              `Re-drove ordered fanout parent ${outcome.parentId} in place (failure_kind=${outcome.authorizingFailureKind}) — ` +
+                "reopened to pending, keeping its captured children. Items whose commits are already integrated will be adopted, not re-run.",
+            );
+          } else {
+            console.log(`Re-drove fanout parent ${outcome.parentId} — new pending primary ${outcome.newTaskId} created.`);
+          }
+          if (outcome.runReactivated) console.log(`Run ${outcome.runId} reactivated (failed → active).`);
           console.log(`Next:\n  forge next ${outcome.runId}`);
           break;
         case "re-drive-refused":

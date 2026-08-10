@@ -296,6 +296,35 @@ export function reopenFailedTaskForRecovery(id: string): boolean {
   return info.changes === 1;
 }
 
+// FG-688: the SECOND named terminal -> non-terminal transition, and the only one
+// that returns a row to `pending`. `forge recover <parent> --re-drive` reopens a
+// terminally-failed ORDERED fanout parent in place — reusing the row rather than
+// minting a fresh primary — so that runOrderedWave's per-group recomputation can
+// adopt the children whose commits are already integrated instead of re-running
+// them. Narrowed like reopenFailedTaskForRecovery above: exactly one source status
+// (`failed`) and exactly one target (`pending`), named so it cannot be reached by
+// accident, and NOT achieved by relaxing setTaskStatus's terminal guard — that
+// guard being structural is the FG-676/BD-3 property, and a second named exit is
+// the sanctioned shape.
+//
+// completed_at is NULLed because the row is no longer settled; `error` and `result`
+// are deliberately LEFT STANDING. markTaskRunning already clears both when the row
+// is actually re-dispatched, and clearing them here would erase the failure evidence
+// for a re-drive whose enclosing transaction then rolls back.
+//
+// The caller must already have proven the terminal state was NOT a human's decision
+// — this writer cannot tell the difference, which is why `cancelled` is outside the
+// re-drive's accepted failure kinds.
+//
+// Returns true iff this call moved the row. Callers MUST branch on it: emitting a
+// status event over a refused CAS makes the event stream disagree with the row.
+export function reopenFailedFanoutParentForReDrive(id: string): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = 'pending', completed_at = NULL WHERE id = ? AND status = 'failed'`)
+    .run(id);
+  return info.changes === 1;
+}
+
 export function setTaskParentId(id: string, parentId: string): void {
   getDb().prepare(`UPDATE tasks SET parent_id = ? WHERE id = ?`).run(parentId, id);
 }

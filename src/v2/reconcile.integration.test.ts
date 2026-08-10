@@ -10,7 +10,7 @@ import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { insertTask, getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
-import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo, attachedExitEvidence } from "./reconcile.js";
+import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo, attachedExitEvidence, isOrderedFanoutWave } from "./reconcile.js";
 import type { ReconcileWriters } from "./reconcile.js";
 import type { OrphanEvidence } from "./failure-kind.js";
 import { getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
@@ -860,6 +860,92 @@ test("FG-455 p2: fanout parent stuck running, a child still has a LIVE container
   assert.equal(r.taskChanges.filter((c) => c.taskId === "fanout-parent-c").length, 0);
   assert.equal(getTask("fanout-parent-c")!.status, "running", "parent left alone — wave may still be in progress");
   assert.equal(getTask("fanout-child-c2")!.status, "running", "live child untouched too");
+});
+
+// ── FG-688 step 4: the ordered-wave shape predicate, extracted ───────────────
+//
+// `isOrderedFanoutWave` lived inside reconcileRun until FG-688 gave the
+// adopt-preserving re-drive verb the same question to ask. It reads exactly ONE
+// durable fact — the `ordered` flag on the parent's own
+// `integration.worktree_created` event — and the two callers must never disagree
+// about a wave's shape, so it is pinned directly here as well as through
+// reconcile's ordered_fanout_resumable arm below.
+
+test("FG-688: isOrderedFanoutWave is TRUE for a parent whose integration.worktree_created carries ordered:true", () => {
+  insertTask(mkTask("ord-true", { status: "running" }));
+  logEvent("integration.worktree_created", {
+    runId: RUN.id, taskId: "ord-true",
+    payload: { integrationPath: "/tmp/x", branch: "b", ordered: true, adopted: 0, groups: 2, itemCount: 3 },
+  });
+  assert.equal(isOrderedFanoutWave("ord-true"), true);
+});
+
+test("FG-688: isOrderedFanoutWave is FALSE for ordered:false, for the key absent, and for a parent with no such event at all", () => {
+  // Explicitly not ordered.
+  insertTask(mkTask("ord-false", { status: "running" }));
+  logEvent("integration.worktree_created", {
+    runId: RUN.id, taskId: "ord-false", payload: { integrationPath: "/tmp/x", branch: "b", ordered: false },
+  });
+  assert.equal(isOrderedFanoutWave("ord-false"), false);
+
+  // The UNORDERED writer (runNext.ts dispatchFanoutStep) omits the key entirely —
+  // absent must read the same as false, never as unknown-so-assume-ordered.
+  insertTask(mkTask("ord-absent", { status: "running" }));
+  logEvent("integration.worktree_created", {
+    runId: RUN.id, taskId: "ord-absent", payload: { integrationPath: "/tmp/x", branch: "b", childCount: 2 },
+  });
+  assert.equal(isOrderedFanoutWave("ord-absent"), false);
+
+  // No payload at all — a truthiness read would throw or misjudge; this must not.
+  insertTask(mkTask("ord-nopayload", { status: "running" }));
+  logEvent("integration.worktree_created", { runId: RUN.id, taskId: "ord-nopayload" });
+  assert.equal(isOrderedFanoutWave("ord-nopayload"), false);
+
+  // No integration.worktree_created event whatsoever: not provably ordered. This
+  // predicate gates a MUTATION (FG-688's re-drive lane), so absence of evidence
+  // is a refusal, not a default.
+  insertTask(mkTask("ord-none", { status: "running" }));
+  assert.equal(isOrderedFanoutWave("ord-none"), false);
+
+  // And a task with NO rows in the events table at all.
+  assert.equal(isOrderedFanoutWave("ord-never-existed"), false);
+});
+
+test("FG-688: isOrderedFanoutWave reads the PARENT's own stream — a sibling parent's ordered event does not leak", () => {
+  insertTask(mkTask("ord-sib-a", { status: "running" }));
+  insertTask(mkTask("ord-sib-b", { status: "running" }));
+  logEvent("integration.worktree_created", { runId: RUN.id, taskId: "ord-sib-a", payload: { ordered: true } });
+  assert.equal(isOrderedFanoutWave("ord-sib-a"), true);
+  assert.equal(isOrderedFanoutWave("ord-sib-b"), false, "one wave's shape must never answer for another's");
+});
+
+// Behaviour-preservation for the extraction: reconcile's two fanout-parent
+// landings still split on exactly the same fact. Ordered → resumed in place on
+// its own row (`pending`); unordered → failed closed as fanout_wave_orphaned
+// (covered by the FG-455 p2 cases above).
+test("FG-688: extraction is behaviour-preserving — an ORDERED stuck parent still reconciles running → pending (ordered_fanout_resumable)", () => {
+  insertTask(mkTask("ord-resume-parent", { status: "running" }));
+  logEvent("integration.worktree_created", {
+    runId: RUN.id, taskId: "ord-resume-parent", payload: { branch: "cand", ordered: true, groups: 2, itemCount: 2 },
+  });
+  insertTask(mkTask("ord-resume-c1", { parentId: "ord-resume-parent", status: "complete" }));
+  insertTask(mkTask("ord-resume-c2", { parentId: "ord-resume-parent", status: "failed" }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+
+  assert.deepEqual(
+    r.taskChanges.find((c) => c.taskId === "ord-resume-parent"),
+    { taskId: "ord-resume-parent", from: "running", to: "pending", reason: "ordered_fanout_resumable" },
+  );
+  assert.equal(getTask("ord-resume-parent")!.status, "pending", "resumed on its own row — never failed closed");
+  const reconciled = eventsForTask("ord-resume-parent").find(
+    (e) => e.eventType === "task.reconciled" && (e.payload as Record<string, unknown>).reason === "ordered_fanout_resumable",
+  )!;
+  assert.deepEqual((reconciled.payload as Record<string, unknown>).childSummary, { total: 2, complete: 1 });
+  assert.ok(
+    !eventsForTask("ord-resume-parent").some((e) => e.eventType === "task.failed"),
+    "an ordered wave must not land on fanout_wave_orphaned — its re-drive verb mints a fresh parent that cannot adopt these children",
+  );
 });
 
 test("FG-455 p2: a running task with NO children at all is never treated as a fanout parent (regression)", () => {

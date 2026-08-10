@@ -13,6 +13,7 @@ import {
   markTaskFailedIfNotTerminal,
   setTaskStatus,
   reopenFailedTaskForRecovery,
+  reopenFailedFanoutParentForReDrive,
   restoreTaskFailed,
   pendingTasksForRun,
   tasksForRunPhase,
@@ -222,6 +223,60 @@ test("reopenFailedTaskForRecovery is the ONE deliberate terminal exit — failed
   markTaskComplete("task-reopen-c", { status: "complete" });
   assert.equal(reopenFailedTaskForRecovery("task-reopen-c"), false, "a complete row is not reopenable");
   assert.equal(getTask("task-reopen-c")!.status, "complete");
+});
+
+// FG-688: the second named terminal exit, for the adopt-preserving re-drive. Same
+// shape as reopenFailedTaskForRecovery above — one source status, one target — so
+// that widening it takes a deliberate edit here rather than a new caller of
+// setTaskStatus.
+test("reopenFailedFanoutParentForReDrive moves a failed row to pending and clears completed_at", () => {
+  insertTask(task({ id: "task-redrive", status: "running" }));
+  markTaskFailed("task-redrive", "prerequisite_blocked: step 7 blocked by item 3");
+  assert.ok(getTask("task-redrive")!.completedAt, "the failure settled the row");
+
+  assert.equal(reopenFailedFanoutParentForReDrive("task-redrive"), true);
+  const t = getTask("task-redrive")!;
+  assert.equal(t.status, "pending");
+  assert.equal(t.completedAt, undefined, "the row is no longer settled");
+  assert.equal(
+    t.error,
+    "prerequisite_blocked: step 7 blocked by item 3",
+    "the failure evidence survives the reopen — markTaskRunning clears it at re-dispatch",
+  );
+});
+
+test("reopenFailedFanoutParentForReDrive REFUSES every status but failed, and never fires twice", () => {
+  insertTask(task({ id: "task-redrive-c", status: "running" }));
+  markTaskComplete("task-redrive-c", { status: "complete" });
+  assert.equal(
+    reopenFailedFanoutParentForReDrive("task-redrive-c"),
+    false,
+    "a complete row is not re-drivable",
+  );
+  assert.equal(getTask("task-redrive-c")!.status, "complete");
+
+  for (const status of ["pending", "running", "awaiting_gate", "awaiting_recovery"] as const) {
+    const id = `task-redrive-${status}`;
+    insertTask(task({ id, status }));
+    assert.equal(
+      reopenFailedFanoutParentForReDrive(id),
+      false,
+      `a ${status} row is refused — this writer is a terminal exit, not a general reset`,
+    );
+    assert.equal(getTask(id)!.status, status, "and the row is unchanged");
+  }
+
+  // Not idempotent by design: the second caller did not move the row, and a caller
+  // that emitted a status event off a `true` here would disagree with the row.
+  insertTask(task({ id: "task-redrive-twice", status: "running" }));
+  markTaskFailed("task-redrive-twice", "prerequisite_blocked");
+  assert.equal(reopenFailedFanoutParentForReDrive("task-redrive-twice"), true);
+  assert.equal(
+    reopenFailedFanoutParentForReDrive("task-redrive-twice"),
+    false,
+    "a second call reports it did not move the row",
+  );
+  assert.equal(getTask("task-redrive-twice")!.status, "pending");
 });
 
 test("restoreTaskFailed reinstates a terminal row only from the status the caller observed", () => {

@@ -12,6 +12,7 @@ import {
   updateRunStatus,
   completeRun,
   failRun,
+  reactivateFailedRun,
 } from "./runs.js";
 import { insertTask } from "./tasks.js";
 import type { Run, Task } from "../types/index.js";
@@ -456,6 +457,104 @@ test("updateRunStatus: ALLOWS complete->active and failed->active — the reacti
   assert.equal(fromFailed?.status, "active", "failed->active reactivation must be allowed");
   assert.equal(fromFailed?.completedAt, undefined, "reactivating clears completedAt");
 });
+
+// ── reactivateFailedRun (FG-688) ─────────────────────────────────────────────
+// The mirror of failRun in the other direction: the adopt-preserving re-drive
+// reopens a terminally-failed ordered wave's parent task, and the run row has to
+// come back with it or the reopened parent never dispatches. The accept-set is
+// exactly {failed}; everything else — including a run a human abandoned (AWN-2)
+// and one that already succeeded — is refused at the store.
+
+test("reactivateFailedRun: moves a failed run back to active, returns true, and clears completedAt", () => {
+  insertRun({ ...RUN, id: "run-redrive-failed", status: "active" });
+  failRun("run-redrive-failed");
+  assert.ok(getRun("run-redrive-failed")?.completedAt, "failRun should have stamped completedAt");
+
+  assert.equal(reactivateFailedRun("run-redrive-failed"), true, "failed->active must apply");
+
+  const run = getRun("run-redrive-failed");
+  assert.equal(run?.status, "active");
+  assert.equal(run?.completedAt, undefined, "reactivation must null completed_at");
+});
+
+test("reactivateFailedRun: refuses a complete run — the accept-set cannot be widened by accident at the store", () => {
+  insertRun({ ...RUN, id: "run-redrive-complete", status: "active" });
+  completeRun("run-redrive-complete");
+  const completedAt = getRun("run-redrive-complete")?.completedAt;
+
+  assert.equal(reactivateFailedRun("run-redrive-complete"), false, "a run that already succeeded is never reopened");
+
+  const run = getRun("run-redrive-complete");
+  assert.equal(run?.status, "complete", "status must be unchanged");
+  assert.equal(run?.completedAt, completedAt, "completedAt must be unchanged");
+});
+
+test("reactivateFailedRun: refuses an abandoned run — a human's `forge cancel` is authoritatively terminal (AWN-2)", () => {
+  insertRun({ ...RUN, id: "run-redrive-abandoned", status: "active" });
+  updateRunStatus("run-redrive-abandoned", "abandoned");
+  const abandonedAt = getRun("run-redrive-abandoned")?.completedAt;
+
+  assert.equal(reactivateFailedRun("run-redrive-abandoned"), false, "an abandoned run is never resurrected");
+
+  const run = getRun("run-redrive-abandoned");
+  assert.equal(run?.status, "abandoned", "status must stay abandoned");
+  assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged");
+});
+
+test("reactivateFailedRun: refuses an already-active run — callers must handle the no-op explicitly", () => {
+  insertRun({ ...RUN, id: "run-redrive-active", status: "active" });
+
+  assert.equal(reactivateFailedRun("run-redrive-active"), false, "active->active must not read back as applied");
+  assert.equal(getRun("run-redrive-active")?.status, "active");
+});
+
+test("reactivateFailedRun: onApplied runs exactly once, and only when the CAS applied", () => {
+  insertRun({ ...RUN, id: "run-redrive-hook", status: "active" });
+  failRun("run-redrive-hook");
+
+  let calls = 0;
+  assert.equal(reactivateFailedRun("run-redrive-hook", { onApplied: () => calls++ }), true);
+  assert.equal(calls, 1, "onApplied fires once on the applied write");
+
+  // The run is 'active' now, so the CAS refuses — and the hook must not fire.
+  assert.equal(reactivateFailedRun("run-redrive-hook", { onApplied: () => calls++ }), false);
+  assert.equal(calls, 1, "a refused CAS must never run onApplied");
+});
+
+test("reactivateFailedRun: a throw from onApplied rolls the status write back — the run is still failed", () => {
+  insertRun({ ...RUN, id: "run-redrive-rollback", status: "active" });
+  failRun("run-redrive-rollback");
+  const failedAt = getRun("run-redrive-rollback")?.completedAt;
+
+  assert.throws(
+    () =>
+      reactivateFailedRun("run-redrive-rollback", {
+        onApplied: () => {
+          throw new Error("audit event write failed");
+        },
+      }),
+    /audit event write failed/,
+  );
+
+  const run = getRun("run-redrive-rollback");
+  assert.equal(run?.status, "failed", "the status write must roll back with the caller's event write");
+  assert.equal(run?.completedAt, failedAt, "completedAt must survive the rollback");
+});
+
+test(
+  "reactivateFailedRun: fires NO notification — reactivation is silent, matching every existing reactivation path",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-redrive-silent", status: "active" });
+    failRun("run-redrive-silent");
+    await new Promise((r) => setImmediate(r));
+    fetchMock.mock.resetCalls(); // discard failRun's own notification
+
+    assert.equal(reactivateFailedRun("run-redrive-silent"), true);
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 0, "no post-commit side effect may escape a caller's rollback");
+  }),
+);
 
 test("updateRunStatus: ALLOWS active->failed and active->complete — the normal finalize path is untouched", () => {
   insertRun({ ...RUN, id: "run-active-to-failed", status: "active" });
