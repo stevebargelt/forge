@@ -20,12 +20,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { findGitRoot } from "../util/git-root.js";
+import { disposeReleaseWorkspace, type ReleaseWorkspaceResidue } from "./release.js";
 
 const repoRoot = findGitRoot(process.cwd());
 
@@ -37,7 +38,7 @@ const SHIPPED = ["src", "bin", "seeds", "scripts", "docker", "dashboard", "packa
 const MARKER_REL = join("src", "fg644-in-flight-marker.ts");
 const MARKER_BODY = `export const FG644_IN_FLIGHT = "uncommitted at build time";\n`;
 
-type Fixture = { base: string; parent: string; checkout: string; scratch: string };
+type Fixture = { base: string; parent: string; checkout: string; scratch: string; tmp: string };
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8" });
@@ -53,14 +54,25 @@ function depsFingerprint(root: string): string {
 }
 
 /** A checkout with the two properties that broke these suites: its parent is not
- *  writable (so nothing can be created BESIDE it), and its working tree is dirty. */
+ *  writable (so nothing can be created BESIDE it), and its working tree is dirty.
+ *
+ *  FG-698 AC5: plus a `tmp` sibling that owns every inner run's temporary space. It sits
+ *  under `base`, NOT under `parent` (chmod 0o555 — nothing may be created beside the
+ *  checkout) and NOT inside `checkout` or `scratch` (the tests assert the scratch is a
+ *  CLEAN candidate and that the checkout's only dirt is the in-flight marker). Both spawns
+ *  point TMPDIR at it, so `os.tmpdir()` in every inner process — including the release
+ *  suites' `mkdtempSync(join(tmpdir(), "fg569-rel-"))` — allocates INSIDE this fixture and
+ *  is reclaimed by destroy(). An inner run killed by a timeout runs no teardown of its own;
+ *  ownership, not the dead run's cooperation, is what frees its multi-GB workspace. */
 function agentShapedFixture(): Fixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "fg644-")));
   const parent = join(base, "ro");
   const checkout = join(parent, "checkout");
   const scratch = join(parent, "scratch");
+  const tmp = join(base, "tmp");
   mkdirSync(checkout, { recursive: true });
   mkdirSync(scratch, { recursive: true });
+  mkdirSync(tmp, { recursive: true });
 
   for (const rel of SHIPPED) cpSync(join(repoRoot, rel), join(checkout, rel), { recursive: true });
   symlinkSync(join(repoRoot, "node_modules"), join(checkout, "node_modules"));
@@ -77,14 +89,25 @@ function agentShapedFixture(): Fixture {
   writeFileSync(`${scratch}.deps`, depsFingerprint(checkout));
 
   chmodSync(parent, 0o555);
-  return { base, parent, checkout, scratch };
+  return { base, parent, checkout, scratch, tmp };
 }
 
 /** node:test marks its own children with NODE_TEST_CONTEXT, and a runner that sees it
  *  refuses to run files ("run() is being called recursively"). This file's whole job
- *  is to run real suites as children, so it hands them a clean context. */
-function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env = { ...process.env, ...extra };
+ *  is to run real suites as children, so it hands them a clean context.
+ *
+ *  FG-698 AC5: it also points TMPDIR at the fixture's own `tmp`, so an inner run's
+ *  temporary space belongs to the outer fixture and dies with it — a killed inner run
+ *  (these spawns kill on an 800s/500s timeout) never reaches its own after() hook, so
+ *  nothing else would free the multi-GB release workspaces it minted. Passed per fixture
+ *  rather than hardcoded: each fixture owns a different directory.
+ *
+ *  Deliberately NOT the same knob as src/test-setup.ts's TMUX_TMPDIR, which stays
+ *  hardcoded under /tmp: a unix socket path has a ~104-char limit, so that directory has
+ *  to stay short, and it holds kilobytes of sockets rather than gigabytes of release
+ *  closures. It is not this ticket's problem. */
+function childEnv(tmpDir: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmpDir, ...extra };
   delete env["NODE_TEST_CONTEXT"];
   return env;
 }
@@ -109,9 +132,22 @@ function agentShapedPath(): string {
   return path;
 }
 
-function destroy(f: Fixture): void {
-  chmodSync(f.parent, 0o755);
-  rmSync(f.base, { recursive: true, force: true });
+/** Tear the whole fixture down, INCLUDING whatever the inner runs left under `f.tmp`.
+ *
+ *  FG-698: that residue is FROZEN — a release closure's directories have no write bit, so
+ *  a recursive unlink cannot traverse them and the plain rmSync this used to be would
+ *  throw EACCES out of a `finally`, replacing the test's real verdict with a teardown
+ *  fault AND stranding the tree it failed to remove. disposeReleaseWorkspace makes the
+ *  tree removable pre-order, removes it, and REPORTS what it could not remove instead of
+ *  throwing. Returns that residue so a test can assert on it; empty means fully removed. */
+function destroy(f: Fixture): ReleaseWorkspaceResidue[] {
+  try {
+    chmodSync(f.parent, 0o755);
+  } catch {
+    // Not the last word, and not worth throwing over from a `finally`: the disposal below
+    // chmods every directory under f.base pre-order anyway, this one included.
+  }
+  return disposeReleaseWorkspace(f.base, `fg644 agent-shaped fixture ${f.base}`);
 }
 
 type TapResult = "pass" | "fail" | "skip";
@@ -193,7 +229,7 @@ test("FG-644: the release suite EXECUTES from a dirty checkout, against a candid
       [join(repoRoot, "docker", "forge-test.sh"), "--test-reporter=tap", "src/v2/release.integration.test.ts"],
       {
         encoding: "utf8",
-        env: childEnv({ FORGE_SRC_DIR: f.checkout, FORGE_WORK_DIR: f.scratch, PATH: agentShapedPath() }),
+        env: childEnv(f.tmp, { FORGE_SRC_DIR: f.checkout, FORGE_WORK_DIR: f.scratch, PATH: agentShapedPath() }),
         timeout: 800_000,
         maxBuffer: 64 * 1024 * 1024,
       },
@@ -245,7 +281,7 @@ test("FG-644: the FG-612 self-host suites EXECUTE from a checkout whose parent i
         "src/cli/fg612-self-host-cli.integration.test.ts",
         "src/v2/fg612-self-host-dispatch.integration.test.ts",
       ],
-      { cwd: f.checkout, encoding: "utf8", env: childEnv(), timeout: 500_000, maxBuffer: 64 * 1024 * 1024 },
+      { cwd: f.checkout, encoding: "utf8", env: childEnv(f.tmp), timeout: 500_000, maxBuffer: 64 * 1024 * 1024 },
     );
     const report = innerReport(r);
 
@@ -257,5 +293,79 @@ test("FG-644: the FG-612 self-host suites EXECUTE from a checkout whose parent i
     assertExecuted("FG-612 suites beside an unwritable parent", parseTap(r.stdout ?? ""), FG612_TESTS, report);
   } finally {
     destroy(f);
+  }
+});
+
+/** An inner run shaped like the release suites' worst case: it mints a workspace under its
+ *  OWN os.tmpdir(), FREEZES it the way a release closure is frozen (file read-only, then
+ *  the directory's write bit cleared — post-order, root last), reports where it put it,
+ *  and then sleeps forever. It registers no cleanup at all, which is the honest simulation:
+ *  the two heavy tests above kill their inner run on an 800s/500s timeout, and a SIGKILLed
+ *  process runs no after() hook, no exit handler and no signal handler. writeSync(1, …)
+ *  rather than console.log because a SIGKILL flushes nothing that is still buffered. */
+const KILLED_INNER_RUN = [
+  `const { chmodSync, mkdtempSync, writeFileSync, writeSync } = require("node:fs");`,
+  `const { tmpdir } = require("node:os");`,
+  `const { join } = require("node:path");`,
+  `const d = mkdtempSync(join(tmpdir(), "fg569-rel-"));`,
+  `writeFileSync(join(d, "closure.txt"), "release bytes");`,
+  `chmodSync(join(d, "closure.txt"), 0o444);`,
+  `chmodSync(d, 0o555);`,
+  `writeSync(1, d + "\\n");`,
+  `setInterval(() => {}, 1000);`,
+].join("\n");
+
+test("FG-698 (AC5): a KILLED inner run's release workspace lands INSIDE the outer fixture, and the outer teardown removes it", { timeout: 300_000 }, () => {
+  const f = agentShapedFixture();
+  let inner: string | undefined;
+  let destroyed = false;
+  try {
+    // .cjs so the child's module system is decided by the extension, not by whichever
+    // package.json happens to be above it.
+    const script = join(f.base, "fg698-inner-run.cjs");
+    writeFileSync(script, KILLED_INNER_RUN);
+
+    const r = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: childEnv(f.tmp),
+      timeout: 5_000,
+      killSignal: "SIGKILL",
+    });
+    // The premise, proven rather than assumed: the child died where it stood, so nothing
+    // inside the inner run can be responsible for what happens to what it left behind.
+    assert.equal(r.signal, "SIGKILL", `the inner run must be KILLED, not exit on its own\n${innerReport(r)}`);
+
+    inner = (r.stdout ?? "").trim();
+    assert.match(inner, /fg569-rel-/, `the inner run must report the workspace it minted\n${innerReport(r)}`);
+
+    // AC5 itself: os.tmpdir() inside the inner process resolved INSIDE the outer fixture.
+    // Asserted on the path the child actually chose — snapshotting /tmp for strays would be
+    // racy, since sibling integration files mint /tmp/fg569-rel-* concurrently under one
+    // `node --test` and fg644 spawns further inner runs of its own.
+    assert.ok(
+      inner.startsWith(f.tmp + sep),
+      `a killed inner run's temporary space must be OWNED by the outer fixture (${f.tmp}), got ${inner} — TMPDIR is not reaching the inner process, so this residue is outside anything the fixture can free`,
+    );
+    assert.ok(
+      existsSync(join(inner, "closure.txt")),
+      "fixture: the residue must really be on disk before teardown is asked to remove it",
+    );
+
+    const residue = destroy(f);
+    destroyed = true;
+    // And the outer teardown owns it: a FROZEN inner tree is exactly what the old
+    // chmod-parent-then-rmSync destroy() was never written for — it would have thrown
+    // EACCES out of a `finally` and stranded the tree it failed to remove.
+    assert.deepEqual(residue, [], "the outer teardown must fully remove a killed inner run's FROZEN workspace");
+    assert.equal(existsSync(inner), false, "the killed run's workspace must be gone");
+    assert.equal(existsSync(f.base), false, "and so must the fixture that owned it");
+  } finally {
+    if (!destroyed) destroy(f);
+    // Red path: with the TMPDIR wiring removed the workspace is outside the fixture, where
+    // destroy() cannot reach it. This test must not strand the thing it proves gets
+    // stranded — narrowly, only a path this run was told about that still looks like one.
+    if (inner !== undefined && !inner.startsWith(f.base + sep) && dirname(inner) === tmpdir() && basename(inner).startsWith("fg569-rel-")) {
+      disposeReleaseWorkspace(inner, "fg644 killed-inner-run workspace that landed OUTSIDE the fixture");
+    }
   }
 });
