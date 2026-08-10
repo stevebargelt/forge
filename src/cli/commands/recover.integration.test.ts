@@ -991,6 +991,84 @@ test("FG-688 --re-drive: refuses a SUPERSEDED parent — AC3's verb-level half �
   assert.equal(eventsForRun(RUN.id).length, eventCount);
 });
 
+// ── FG-688 RF-1: a refusal may not reconcile on its way to refusing ──────────
+//
+// performReDrive used to call reconcileRun on ANY running parent before reading
+// the status it refuses on. For the shape below — an ordered wave stranded by a
+// crash — that reconcile is precisely reconcile's ordered_fanout_resumable arm:
+// it moved the row running -> pending and wrote a task.reconciled event, after
+// which the verb refused the pending row it had just created. The command
+// reported `re-drive-refused` having written both a task row and an event, which
+// is the invariant this section pins: refusal writes NOTHING.
+
+function orderedRunningWave(parentId: string, childStatuses: Task["status"][]): void {
+  insertTask(mkTask(parentId, { status: "running", phase: "build" }));
+  logEvent("integration.worktree_created", { runId: RUN.id, taskId: parentId, payload: { ordered: true } });
+  childStatuses.forEach((status, i) => {
+    insertTask(mkTask(`${parentId}-c${i}`, { parentId, phase: "build", status }));
+  });
+}
+
+test("FG-688 RF-1 --re-drive: a crash-stranded ORDERED wave is refused WITHOUT being reconciled — nothing written, and the refusal names `forge next`", () => {
+  orderedRunningWave("parent-ordered-stranded", ["complete", "failed"]);
+
+  const parentBefore = getTask("parent-ordered-stranded")!;
+  const runBefore = getRun(RUN.id)!;
+  const eventCount = eventsForRun(RUN.id).length;
+
+  const outcome = performReDrive("parent-ordered-stranded", { containerAlive: () => false });
+  assert.equal(outcome.kind, "re-drive-refused");
+  if (outcome.kind === "re-drive-refused") {
+    assert.match(outcome.reason, new RegExp(`forge next ${RUN.id}`), "names the verb that resumes this wave");
+    assert.match(outcome.reason, /ordered_fanout_resumable/, "says what happens to the row instead of a bare status");
+  }
+
+  // Whole rows: the reconcile that used to run here is what this asserts absent.
+  assert.deepEqual(getTask("parent-ordered-stranded"), parentBefore, "the parent row was NOT moved to pending by a refusing verb");
+  assert.deepEqual(getRun(RUN.id), runBefore);
+  assert.equal(eventsForRun(RUN.id).length, eventCount, "no event — not even the task.reconciled the old order wrote");
+
+  // And the transition itself is not lost: it is reconcile's to make, and `forge
+  // next` still makes it, which is exactly what the refusal points at.
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask("parent-ordered-stranded")!.status, "pending");
+});
+
+test("FG-688 RF-1 --re-drive: a still-live ORDERED wave keeps its wait-or-cancel advice, decided without any container probe", () => {
+  orderedRunningWave("parent-ordered-inflight", ["complete", "running"]);
+
+  const outcome = performReDrive("parent-ordered-inflight", {
+    containerAlive: () => {
+      throw new Error("a running ORDERED wave is refused from durable state — no container probe");
+    },
+  });
+  assert.equal(outcome.kind, "re-drive-refused");
+  if (outcome.kind === "re-drive-refused") {
+    assert.match(outcome.reason, /forge cancel parent-ordered-inflight/, "the live-wave advice is preserved");
+  }
+  assert.equal(getTask("parent-ordered-inflight")!.status, "running");
+});
+
+test("FG-688 RF-1 --re-drive: a durable-state clause refuses a RUNNING parent before the reconcile sweep runs at all", () => {
+  // Unordered, so the old order would have reconciled — settling the dead child
+  // and writing its events — and only then refused on the run's status.
+  insertTask(mkTask("parent-unordered-abandoned", { status: "running", phase: "build" }));
+  insertContainerized(mkTask("child-unordered-abandoned", { parentId: "parent-unordered-abandoned", phase: "build", status: "running" }));
+  updateRunStatus(RUN.id, "abandoned");
+
+  const parentBefore = getTask("parent-unordered-abandoned")!;
+  const childBefore = getTask("child-unordered-abandoned")!;
+  const eventCount = eventsForRun(RUN.id).length;
+
+  const outcome = performReDrive("parent-unordered-abandoned", { containerAlive: () => false });
+  assert.equal(outcome.kind, "re-drive-refused");
+  if (outcome.kind === "re-drive-refused") assert.match(outcome.reason, /abandoned/);
+
+  assert.deepEqual(getTask("parent-unordered-abandoned"), parentBefore);
+  assert.deepEqual(getTask("child-unordered-abandoned"), childBefore, "the sweep never ran — the dead child was not settled either");
+  assert.equal(eventsForRun(RUN.id).length, eventCount);
+});
+
 test("FG-688 --re-drive: refuses on a COMPLETE run and on an ABANDONED run, writing nothing", () => {
   for (const [runStatus, parentId] of [
     ["complete", "parent-ordered-runcomplete"],

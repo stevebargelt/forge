@@ -558,6 +558,11 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
 // enumeration the recommendation surface also consults, exhaustive at compile
 // time and fail-closed at runtime — and (iv) the parent is NOT SUPERSEDED.
 //
+// They are EVALUATED in the order (i), (iv), run accept-set, (ii), (iii) — the
+// durable-state clauses first, because the only mutating step in the pre-lock
+// section is the reconcile a `running` parent needs, and a refusal must never
+// land after a write. See the RF-1 comment at that reconcile.
+//
 // ORDERED lane (FG-688). The parent ROW IS REUSED: reopened `failed` -> `pending`
 // in place, keeping its children attached. That is the WHOLE mechanism, and the
 // reason is that nothing downstream needs teaching. runOrderedWave recomputes
@@ -716,11 +721,83 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
     parent = anchor;
   }
 
-  if (!isFanoutParent(parent, tasksForRun(parent.runId))) {
+  const allTasks = tasksForRun(parent.runId);
+  if (!isFanoutParent(parent, allTasks)) {
     return { kind: "re-drive-refused", id, reason: `${parent.id} is not a fanout parent (no children) — --re-drive only applies to a fanout wave` };
   }
 
+  // FG-688 (build review, RF-1): every clause decidable from DURABLE state is
+  // evaluated BEFORE the reconcile below, because reconcileRun mutates — it moves
+  // rows and writes events — and this verb's contract is that a refusal writes
+  // nothing at all. The order is now reDriveDisposition's own (supersession, then
+  // the run accept-set, then the parent's status), which is also why the two
+  // surfaces can no longer disagree about which clause decided a parent.
+  //
+  // (iv) Supersession — see supersedingPrimary in v2/re-drive-eligibility.ts. This
+  // is AC3's verb-level half. An EARLY refusal only: the binding one is the
+  // re-read inside the transaction below, which is what closes the window between
+  // this read and the lock.
+  const superseding = supersedingPrimary(parent, allTasks);
+  if (superseding) {
+    return {
+      kind: "re-drive-refused",
+      id,
+      reason:
+        superseding.status === "pending"
+          ? `a re-drive is already pending as ${superseding.id} — run \`forge next ${parent.runId}\` to dispatch it instead of re-driving again`
+          : `${parent.id} has been SUPERSEDED by ${superseding.id} (status=${superseding.status}), a later primary that now owns phase ` +
+            `'${parent.phase}' — reopening a dead lineage would put two live parents in one phase and let one wave adopt another's ` +
+            `children. Run \`forge next ${parent.runId}\` to drive the live wave instead.`,
+    };
+  }
+
+  // The run accept-set, read here so an ineligible run refuses BEFORE any write is
+  // attempted. Re-checked authoritatively inside the transaction
+  // (reactivateRunForReDrive), which is what actually binds.
+  const run = getRun(parent.runId);
+  if (!run) return { kind: "re-drive-refused", id, reason: `run ${parent.runId} not found for fanout parent ${parent.id}` };
+  if (run.status !== "failed" && run.status !== "active") {
+    return {
+      kind: "re-drive-refused",
+      id,
+      reason:
+        `run ${parent.runId} is '${run.status}' — --re-drive only reopens a 'failed' run (an 'active' one it leaves alone). ` +
+        (run.status === "abandoned"
+          ? "An abandoned run is a human's decision and is authoritatively terminal; no recovery verb resurrects it."
+          : "A run that already completed is never reopened."),
+    };
+  }
+
+  // The lane is chosen by the wave's DURABLE shape, never by its failure kind.
+  const lane: ReDriveLane = isOrderedFanoutWave(parent.id) ? "ordered_reopened_in_place" : "unordered_fresh_primary";
+
   if (parent.status === "running") {
+    // FG-688 RF-1, the demonstrated case: an ORDERED wave stranded by a crash is
+    // not a re-drive at all. reconcile returns THIS row to `pending`
+    // (ordered_fanout_resumable) and the controller resumes it there, adopting
+    // every captured item — so reconciling here would perform that transition and
+    // then refuse the `pending` row it had just made, reporting a refusal that had
+    // already written a task row and a task.reconciled event, with a status
+    // message that told the operator nothing about either. Decided from durable
+    // state alone, no container probe: stranded or genuinely live, the answer is
+    // the same refusal, and it names the verb that works in both cases.
+    if (lane === "ordered_reopened_in_place") {
+      return {
+        kind: "re-drive-refused",
+        id,
+        reason:
+          `${parent.id} is an ORDERED wave whose parent row is still 'running' — an ordered wave is RESUMED in place, never ` +
+          `re-driven. If its process is gone, reconcile returns this same row to 'pending' (ordered_fanout_resumable) and the wave ` +
+          `resumes there, adopting every item whose commit is already integrated: run \`forge next ${parent.runId}\`. If a container ` +
+          `is genuinely still live the wave is already being driven — let it settle, or \`forge cancel ${parent.id}\` first. ` +
+          "Nothing was written.",
+      };
+    }
+    // UNORDERED: the settle IS this lane's first step rather than a pre-check —
+    // both of reconcile's landings for this shape stamp `fanout_wave_orphaned`,
+    // which the guard below accepts, so this reconcile precedes an ACCEPT. It is
+    // also why the failure-kind clause cannot move above it: a `running` parent
+    // has no failure kind until reconcile stamps one.
     reconcileRun(parent.runId, opts.containerAlive ?? defaultContainerAlive);
     const reloaded = getTask(parent.id);
     if (reloaded) parent = reloaded;
@@ -759,45 +836,6 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
   // the kind is necessarily a recognized string. Narrowed once, here, rather than
   // cast at each of the four places the audit trail carries it.
   const authorizingKind: string = parentFailureKind as string;
-
-  // (iv) Supersession — see supersedingPrimary in v2/re-drive-eligibility.ts. This
-  // is AC3's verb-level half. An EARLY refusal only: the binding one is the
-  // re-read inside the transaction below, which is what closes the window between
-  // this read and the lock.
-  const allTasks = tasksForRun(parent.runId);
-  const superseding = supersedingPrimary(parent, allTasks);
-  if (superseding) {
-    return {
-      kind: "re-drive-refused",
-      id,
-      reason:
-        superseding.status === "pending"
-          ? `a re-drive is already pending as ${superseding.id} — run \`forge next ${parent.runId}\` to dispatch it instead of re-driving again`
-          : `${parent.id} has been SUPERSEDED by ${superseding.id} (status=${superseding.status}), a later primary that now owns phase ` +
-            `'${parent.phase}' — reopening a dead lineage would put two live parents in one phase and let one wave adopt another's ` +
-            `children. Run \`forge next ${parent.runId}\` to drive the live wave instead.`,
-    };
-  }
-
-  // The run accept-set, read here so an ineligible run refuses BEFORE the lock is
-  // taken and before any write is attempted. Re-checked authoritatively inside the
-  // transaction (reactivateRunForReDrive), which is what actually binds.
-  const run = getRun(parent.runId);
-  if (!run) return { kind: "re-drive-refused", id, reason: `run ${parent.runId} not found for fanout parent ${parent.id}` };
-  if (run.status !== "failed" && run.status !== "active") {
-    return {
-      kind: "re-drive-refused",
-      id,
-      reason:
-        `run ${parent.runId} is '${run.status}' — --re-drive only reopens a 'failed' run (an 'active' one it leaves alone). ` +
-        (run.status === "abandoned"
-          ? "An abandoned run is a human's decision and is authoritatively terminal; no recovery verb resurrects it."
-          : "A run that already completed is never reopened."),
-    };
-  }
-
-  // The lane is chosen by the wave's DURABLE shape, never by its failure kind.
-  const lane: ReDriveLane = isOrderedFanoutWave(parent.id) ? "ordered_reopened_in_place" : "unordered_fresh_primary";
 
   acquireRunLock(parent.runId, "recover --re-drive");
   try {
