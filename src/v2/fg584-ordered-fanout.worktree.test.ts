@@ -38,6 +38,7 @@ import { allPublicationAttempts, publicationAttemptsForTask } from "../store/pub
 import { performReDrive } from "../cli/commands/recover.js";
 import { startRun } from "./startRun.js";
 import { runNext, analyzePlanItems, type DockerExecFn } from "./runNext.js";
+import { retry } from "./retry.js";
 import { reconcileRun } from "./reconcile.js";
 import { setCrashHookForTest } from "./crash-points.js";
 import type { Workflow } from "./schema.js";
@@ -1917,4 +1918,249 @@ test("fg688 (AC1/AC2/AC4): a prerequisite_blocked ordered wave is RE-DRIVEN IN P
   for (const f of ["a.ts", "b.ts", "d.ts", "e.ts", "f.ts"]) {
     assert.ok(existsSync(join(repo, "src", f)), `${f} must be on the publish target — including the adopted items' work`);
   }
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FG-688 (AC3) — CROSS-PARENT ADOPTION STAYS CLOSED, and the refusal that keeps
+// it closed writes NOTHING.
+//
+// FG-584's RF-3b review closed a real hazard by scoping adoption to the CURRENT
+// parent (`adoptablePlanItemChildren`'s `t.parentId === parentId` filter). FG-688
+// makes a terminally-failed wave re-drivable, and decision (a) — reuse the parent
+// row rather than mint a lineage key — was taken precisely so that guard never has
+// to move. These two cells assert the property SURVIVED this ticket's change
+// rather than assuming it, on real waves over real git:
+//
+//   (i)  a genuinely different wave under a FRESH parent adopts nothing from the
+//        superseded lineage — the DISPATCH-side half;
+//   (ii) a re-drive of the superseded parent is refused, with a whole-row
+//        before/after comparison proving no state was written — the RECOVERY-side
+//        half, which is the enforcement point decision (a) needed.
+//
+// BOTH build the fresh parent from a FAILED wave, via `forge retry <parent>
+// --force` — the one path that still mints a fresh primary for an ordered wave
+// after FG-688 (a bare retry now redirects to the re-drive; see retry.ts's
+// OrderedFanoutParentRetryError). That is not incidental to cell (i): it is the
+// only shape in which the hazard is REACHABLE at all. A wave that ran to
+// completion publishes, which moves HEAD, which lets the FG-356 reap dispose every
+// captured child branch — and adoption requires a resolvable captured tip, so a
+// completed lineage cannot be adopted across parents whatever the scoping says.
+// A wave that failed as `prerequisite_blocked` published nothing and RETAINS its
+// captured branches, so a phase-scoped `adoptablePlanItemChildren` really would
+// reach them. Cell (i) is therefore a live guard rather than a vacuous one: widen
+// runNext.ts's `t.parentId === parentId` to the phase and it fails.
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("fg688 (AC3): a FRESH parent adopts NOTHING from the superseded lineage — every item is re-dispatched and its base carries the redone work, not the abandoned wave's", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg688-rf3b-crossparent" });
+  const { runId } = startRun({ workflow: wf, title: "fg688 rf3b", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  // The two waves write DIFFERENT bodies. That is what makes "did anything cross
+  // the parent boundary?" answerable from the TREE and not only from the row
+  // accounting: a base carrying `= 1` is a base composed out of the abandoned
+  // wave's captured commits.
+  let revision = 1;
+  let aFails = true;
+  const exec = makeExec(
+    FG688_ITEMS,
+    ({ item, workspace }) => {
+      if (item === "A" && aFails) return { ok: false };
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item.toLowerCase()}.ts`), `export const ${item} = ${revision};\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  const superseded = buildParent(runId)!;
+  assert.equal(superseded.status, "failed", "the first wave died on its blocked prerequisite");
+  assert.deepEqual(runs.map((r) => r.planItemId).sort(), ["A", "E", "F"], "A failed; E and F completed and were captured");
+
+  // The abandoned lineage's captured work, read while it is still resolvable —
+  // this is the state a phase-scoped adoption would reach across into.
+  const abandonedChildren = buildChildren(runId);
+  const abandonedIds = new Set(abandonedChildren.map((t) => t.id));
+  const abandonedTips = new Map<string, string>();
+  for (const item of ["E", "F"] as const) {
+    const row = abandonedChildren.find((t) => planItemIdOf(t) === item)!;
+    assert.equal(row.status, "complete", `${item}'s row is 'complete' — half of what adoption keys on`);
+    const tip = capturedBranchTip(repo, runId, row.id);
+    assert.ok(tip, `…and ${item}'s captured branch still RESOLVES — the other half, and the reason this cell is not vacuous`);
+    abandonedTips.set(item, tip!);
+  }
+
+  // A FRESH PARENT — a genuinely different wave. `--force` is the operator's
+  // explicit override of FG-688's redirect, and the only remaining way to mint one
+  // for an ordered wave; the discard it causes is precisely what makes the
+  // adoption question live.
+  revision = 2;
+  aFails = false;
+  const fresh = (await retry(superseded.id, { force: true })).newTask;
+  assert.equal(fresh.parentId, undefined, "the retry minted a parent-less PRIMARY in the same phase");
+  const firstWaveRuns = runs.length;
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  // (a) NOTHING WAS ADOPTED ACROSS THE BOUNDARY — asserted over the WHOLE run's
+  //     event stream, so an adoption logged against either parent is caught.
+  const adoptedAnywhere = eventsForRun(runId)
+    .filter((e) => e.eventType === "fanout.item_adopted")
+    .map((e) => e.payload as { item: string; childTaskId: string });
+  assert.deepEqual(
+    adoptedAnywhere.filter((a) => abandonedIds.has(a.childTaskId)),
+    [],
+    "no adoption anywhere in the run names a child of the SUPERSEDED parent",
+  );
+  assert.deepEqual(
+    eventsForTask(fresh.id).filter((e) => e.eventType === "fanout.item_adopted"),
+    [],
+    "…and the fresh wave adopted nothing at all: a new parent means a new wave",
+  );
+
+  // (b) EVERY ITEM GOT A NEW CHILD ROW UNDER THE NEW PARENT, and spent a real
+  //     container doing it. Rows alone would not prove it — an adopted item keeps
+  //     its row and simply never dispatches, which is what the ChildRun list sees.
+  const freshChildren = tasksForRun(runId).filter((t) => t.parentId === fresh.id && !t.agentRole.startsWith("red-"));
+  assert.deepEqual(
+    freshChildren.map(planItemIdOf).sort(),
+    ["A", "B", "D", "E", "F"],
+    "the fresh wave dispatched all five items itself",
+  );
+  for (const t of freshChildren) {
+    assert.equal(abandonedIds.has(t.id), false, `${planItemIdOf(t)}'s row is NEW, not one carried over from the abandoned wave`);
+  }
+  const secondWaveItems = runs.slice(firstWaveRuns).map((r) => r.planItemId).sort();
+  assert.deepEqual(
+    secondWaveItems,
+    ["A", "B", "D", "E", "F"],
+    "…as five real containers. E and F re-ran, which is the DISCARD this ticket exists to remove — but a discard is the correct " +
+      "outcome for a foreign parent, and removing it is the re-drive's job, never adoption's",
+  );
+
+  // (c) THE FRESH WAVE'S BASES ARE ITS OWN. Readiness is git ancestry in THIS
+  //     parent's refs, so an abandoned parent's captured commit appearing in them
+  //     is the cross-candidate crossing RF-3b closed — visible in the tree, not
+  //     just in the log. Read off the durable child rows, which outlive the refs.
+  const freshBase = (item: string): string => {
+    const base = freshChildren.find((t) => planItemIdOf(t) === item)!.baseSha;
+    assert.ok(base, `${item}'s row records the base it was cut from`);
+    return base!;
+  };
+  for (const [item, tip] of abandonedTips) {
+    for (const dependent of ["F", "B", "D"] as const) {
+      assert.equal(
+        isCommitIntegrated(repo, tip, freshBase(dependent)),
+        false,
+        `${item}'s ABANDONED commit is absent from the fresh wave's base for ${dependent}`,
+      );
+    }
+  }
+  assert.match(
+    git(repo, "show", `${freshBase("F")}:src/e.ts`),
+    /export const E = 2;/,
+    "F was cut from the REDONE E — a phase-scoped adoption would have handed it the abandoned wave's `= 1`",
+  );
+  git(repo, "cat-file", "-e", `${freshBase("B")}:src/a.ts`);
+
+  // (d) …and the abandoned lineage is retained as an audit record. Closing
+  //     adoption across parents must not mean destroying what it refused to adopt.
+  const rowNow = (id: string) => tasksForRun(runId).find((t) => t.id === id)!;
+  assert.equal(rowNow(superseded.id).status, "failed", "the superseded primary is still there, still failed");
+  for (const item of ["E", "F"] as const) {
+    const row = abandonedChildren.find((t) => planItemIdOf(t) === item)!;
+    assert.equal(rowNow(row.id).status, "complete", `${item}'s abandoned row is retained as the audit trail`);
+  }
+});
+
+test("fg688 (AC3): a re-drive of a SUPERSEDED parent is refused — on both arms of the guard, and neither refusal writes anything at all", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg688-superseded-redrive" });
+  const { runId } = startRun({ workflow: wf, title: "fg688 superseded", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const exec = makeExec(
+    FG688_ITEMS,
+    ({ item, workspace }) => {
+      if (item === "A") return { ok: false };
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item.toLowerCase()}.ts`), `export const ${item} = 1;\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  const parent = buildParent(runId)!;
+  assert.equal(parent.status, "failed");
+  assert.equal(
+    eventsForTask(parent.id)
+      .filter((e) => e.eventType === "task.failed")
+      .map((e) => (e.payload as Record<string, unknown>)["failure_kind"])
+      .pop(),
+    "prerequisite_blocked",
+    "the parent failed on a kind the re-drive guard ACCEPTS — so nothing but supersession can be doing the refusing below",
+  );
+
+  // Whole rows, not selected fields: a future partial write must not be able to
+  // slip through a hand-picked field list. Events are append-only, so comparing the
+  // serialized stream catches an emitted event as surely as a mutated row.
+  const snapshot = () =>
+    JSON.stringify({
+      tasks: tasksForRun(runId),
+      run: getRun(runId),
+      events: eventsForRun(runId),
+      taskCount: tasksForRun(runId).length,
+      eventCount: eventsForRun(runId).length,
+    });
+
+  // ── ARM 1: the superseding primary is still PENDING ─────────────────────────
+  // The `dupePending` case, folded into the supersession guard rather than left
+  // beside it, keeping its "run forge next instead" advice.
+  const fresh = (await retry(parent.id, { force: true })).newTask;
+  assert.equal(fresh.parentId, undefined, "…as a parent-less PRIMARY in the same phase");
+  assert.equal(fresh.phase, parent.phase);
+  assert.ok(fresh.createdAt >= parent.createdAt, "…created after the parent it supersedes");
+  assert.equal(tasksForRun(runId).find((t) => t.id === fresh.id)!.status, "pending");
+
+  const beforePending = snapshot();
+  const pendingOutcome = performReDrive(parent.id, { containerAlive: () => false });
+  assert.equal(
+    pendingOutcome.kind,
+    "re-drive-refused",
+    `a superseded parent must never be re-driven; got: ${JSON.stringify(pendingOutcome)}`,
+  );
+  const pendingReason = pendingOutcome.kind === "re-drive-refused" ? pendingOutcome.reason : "";
+  assert.ok(pendingReason.includes(fresh.id), `the refusal names the pending primary that owns the phase: ${pendingReason}`);
+  assert.match(pendingReason, new RegExp(`forge next ${runId}`), "…and the verb that WILL be accepted");
+  assert.equal(snapshot(), beforePending, "the refusal wrote NOTHING — not a task row, not the run row, not one event");
+
+  // ── ARM 2: the superseding primary is no longer pending ─────────────────────
+  // Drive it. It fails on the same blocked prerequisite (the operator fixed
+  // nothing), so the phase is now owned by a live-but-FAILED later primary — the
+  // arm a pending-only check would miss entirely, and the one that matters: two
+  // failed parents in one phase is exactly where a re-drive could reopen the dead
+  // lineage beside the live one and let one wave adopt the other's children.
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const freshNow = tasksForRun(runId).find((t) => t.id === fresh.id)!;
+  assert.equal(freshNow.status, "failed", "the fresh wave failed the same way — and is still the live lineage");
+  assert.notEqual(freshNow.status, "pending", "…so ARM 2 is genuinely not the dupePending case");
+
+  const beforeSuperseded = snapshot();
+  const outcome = performReDrive(parent.id, { containerAlive: () => false });
+  assert.equal(outcome.kind, "re-drive-refused", `still refused; got: ${JSON.stringify(outcome)}`);
+  const reason = outcome.kind === "re-drive-refused" ? outcome.reason : "";
+  assert.match(reason, /SUPERSEDED/, "…and the refusal says WHY, in the operator's own vocabulary");
+  assert.ok(reason.includes(fresh.id), `…naming the live primary (${fresh.id}) that owns the phase now: ${reason}`);
+  assert.match(reason, new RegExp(`forge next ${runId}`), "…and the verb that WILL be accepted");
+  assert.equal(snapshot(), beforeSuperseded, "…and this refusal wrote nothing either");
 });
