@@ -60,6 +60,13 @@ export type OpsCheckOptions = {
 // not mistake that expected failure for an orphan or inconsistency.
 const TERMINAL_RUN_STATES = ["complete", "failed", "abandoned"];
 
+// A completed run shipped, and an abandoned run was explicitly set aside. In
+// both cases persisted-work evidence on an old failed child is audit history,
+// not live operational work. A FAILED run is deliberately absent: its failed
+// task may be the unresolved work that caused the run to fail, so suppressing it
+// would make a fresh invoke failure invisible to ops check.
+const SETTLED_RUN_STATES = ["complete", "abandoned"];
+
 type OrphanRow = { taskId: string; runId: string; phase: string; runStatus: string };
 
 /** A pending task under a terminal run (#232). `forge next` won't dispatch it
@@ -231,7 +238,8 @@ const WORK_MAY_PERSIST_KINDS = new Set([
 // clean-exit-no-result task, is never "just retry it").
 const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing"]);
 
-/** A FAILED task classified `orphaned_work_may_persist` or `oom_killed` (FG-455):
+/** A FAILED task under an ACTIVE run classified `orphaned_work_may_persist` or
+ *  `oom_killed` (FG-455):
  *  reconcile found the container gone with no recoverable result, but changed
  *  files sat in the task's worktree — real work that might otherwise be silently
  *  discarded. db-confirmed: the classification + evidence already live on the
@@ -263,9 +271,15 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
          LIMIT 1
        )
        WHERE t.status = 'failed'
+         AND r.status NOT IN (${SETTLED_RUN_STATES.map(() => "?").join(",")})
          AND (? IS NULL OR r.project_dir = ?)`
     )
-    .all(opts.projectDir ?? null, opts.projectDir ?? null) as FailedRow[];
+    // Opposite polarity from detectRetryOrphan: a complete/abandoned parent
+    // makes persisted-work evidence on an already-failed child historical. A
+    // failed parent does NOT settle the incident — the child may be the reason
+    // the run failed, and fresh invoke failures must remain visible. The durable
+    // task.failed event remains available for audit in every case.
+    .all(...SETTLED_RUN_STATES, opts.projectDir ?? null, opts.projectDir ?? null) as FailedRow[];
 
   const incidents: Incident[] = [];
   for (const row of rows) {
