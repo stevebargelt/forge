@@ -170,13 +170,89 @@ TAP.
 
 ## AC4 measurement — before/after peak temporary space
 
-> **PLACEHOLDER — filled in by FG-698 step 8.** Both figures must come from
-> `scripts/fg698-measure-temp-peak.sh` at the same sampling interval, in the same container, over
-> the same file, with the exact commands recorded; plus the caveat that the figure measures ONE FILE
-> IN ISOLATION while `node --test` runs files in parallel, so shard composition (FG-624's
-> bin-packing) — not this file alone — decides whether the tier's peak retires ENOSPC. If the
-> "before" run could not be completed (headroom or wall time), say so explicitly here and state what
-> was measured instead; do not present a partial or cross-method figure as the before/after evidence.
+Measured 2026-08-10 inside the agent container, both arms with the SAME method
+(`scripts/fg698-measure-temp-peak.sh`), the SAME sampling interval (**1 s**), on the SAME file
+(`src/v2/release.integration.test.ts`), in the SAME container session, with the container otherwise
+idle. Headroom confirmed first: `df -kP /tmp` → `overlay  110G total, 20 GB available, 82% used` —
+the before arm deliberately reproduces the accumulation, so it needed room to.
+
+### Result
+
+| Arm | Checkout | Peak − baseline | Samples | Wall | Suite |
+|---|---|---|---|---|---|
+| **Before** | `0b6f8c43` (last commit WITHOUT this run's change to the file) | **4996.1 MiB** (5,116,036 KiB) | 35 @ 1 s | 34 s | 36 pass / 0 fail / **0 skipped**, exit 0 |
+| **After** | `d36a4ee6` (this change, committed) | **1000.0 MiB** (1,024,100 KiB) | 36 @ 1 s | 35 s | 37 pass / 0 fail / **0 skipped**, exit 0 |
+| After (repeat) | `d36a4ee6` | 905.0 MiB (926,744 KiB) | 34 @ 1 s | 32 s | 37 pass / 0 fail / **0 skipped**, exit 0 |
+
+**Peak temporary space for one release-tier file fell from ~5.0 GB to ~0.9–1.0 GB — roughly 80%,
+and from "grows with the number of fixtures" to "the size of one fixture generation."** The 37th
+test in the after arm is the new pinned-set lifetime guard; the number is not bought with a
+weakened or skipped suite in either arm.
+
+The before figure is *higher* than the ~3.5 GB this ticket estimated from the single-build 398 MB
+datapoint. The estimate was a floor, not a ceiling.
+
+### Exact commands
+
+Before — a clone at the pre-change commit, so the only tree difference between the two arms is
+`src/v2/release.integration.test.ts` itself (verified: `git diff --stat 0b6f8c43 HEAD` is that one
+file, 90 insertions / 10 deletions, and `disposeReleaseWorkspace` already exists in `release.ts` at
+`0b6f8c43`, so the seam is NOT what is being measured — only the per-test disposal is):
+
+```
+git clone --no-hardlinks /project /tmp/fg698-before
+cd /tmp/fg698-before && git checkout 0b6f8c43
+ln -s /project/node_modules /tmp/fg698-before/node_modules
+# then, from inside the clone:
+bash /project/scripts/fg698-measure-temp-peak.sh --interval 1 -- \
+  node --import tsx --import ./src/test-setup.ts --test src/v2/release.integration.test.ts
+```
+
+`node_modules` is a SYMLINK on purpose: the fixtures `cpSync(..., { dereference: true })`, so the
+copy is of real bytes and no inode is ever shared with the invoking checkout — `freezeReleaseFiles`
+must never be able to reach an operator's real dependency tree (FG-575).
+
+After — the identical command, run from `/project` at the committed change (the suite refuses a
+dirty builder, and `git status --porcelain` was empty before and after):
+
+```
+bash /project/scripts/fg698-measure-temp-peak.sh --interval 1 -- \
+  node --import tsx --import ./src/test-setup.ts --test src/v2/release.integration.test.ts
+```
+
+### What the figure is not
+
+- **It is ONE FILE IN ISOLATION.** `scripts/run-integration-tests.sh:57` execs a single
+  `node --test "${FILES[@]}"` over a whole shard and `node --test` runs files in PARALLEL (14 CPUs
+  here), while at least a dozen sibling files build releases under their own temp roots and
+  `fg644-dirty-tree-execution` spawns further inner runs. **Shard composition — FG-624's
+  bin-packing — not this file alone, decides whether the tier's peak retires ENOSPC.** An 80%
+  reduction on the largest single contributor moves that a long way; it does not by itself prove a
+  bound for a shard.
+- **It is a LOWER BOUND, at 1 s granularity.** A fixture built and freed between two samples is
+  invisible to the sampler. The interval is quoted with every figure for exactly this reason.
+- **`df` measures the whole filesystem**, not this process. Read the delta as "peak growth of the
+  overlay while this command ran." Control: the same wrapper over an idle `bash -c 'sleep 35'`
+  reported a 0.0 MiB peak delta, so ambient drift is not what either figure is made of.
+- **Neither arm stranded a workspace.** No `/tmp/fg569-rel-*` survived either run. Both arms did
+  leave ~17 MiB of unattributed filesystem growth behind (16.8 MiB before, 28.9 / 16.7 MiB after);
+  it is not a fixture workspace, it recurs on repeat runs rather than being one-time cache warming,
+  and it is the same in both arms, so it does not touch the comparison. It is small enough that
+  chasing it was not worth the wall time; noted rather than hidden.
+
+### The enforced bound is structural, not numeric
+
+**No byte threshold is asserted anywhere in the suite**, and this measurement does not become one.
+The figure above is evidence that the change worked; it is not the regression guard. The guard is
+the lifetime invariant from `release.integration.test.ts`: the last-declared test asserts the
+workspace's top-level entries still equal the set pinned at the end of `before()`, so a fixture that
+outlives its test — or a new shared fixture pinned without thought — fails a test instead of showing
+up as silent growth.
+
+A byte threshold was rejected deliberately: it is host- and dependency-dependent (it moves when
+`node_modules` grows, when the dashboard gains a vendored lib, when a runner's filesystem differs),
+so it degrades into a flaky number that gets raised each time it fires until it means nothing. The
+structural invariant has no such drift — it is exact, and it names what actually regressed.
 
 ---
 
