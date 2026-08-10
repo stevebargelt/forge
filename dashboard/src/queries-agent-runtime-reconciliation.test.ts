@@ -56,7 +56,13 @@ type TaskRow = {
   completed: string;
   /** failure_kind on the task's latest task.failed event, when it has one. */
   failureKind?: string;
-  /** an attached-exit event at this timestamp, if the supervisor logged one. */
+  /** an attached-exit event at this timestamp, if the supervisor logged one.
+   *  FG-690: it comes with a container.started at the row's started_at, because
+   *  a supervisor observing a container stop entails a container that started —
+   *  including for `container.dependency_provisioning_failed`, whose in-container
+   *  install-failure producer runs after the start. The no-start shape the FG-664
+   *  gate refusal and a failed `docker run` produce is its own suite,
+   *  queries-agent-runtime-start-evidence. */
   exitedAt?: string;
   exitEvent?: string;
   /** task.reconciled audit rows, in insertion order. */
@@ -91,6 +97,7 @@ function withTasks<T>(tasks: TaskRow[], fn: () => T): T {
     const status = row.status ?? (row.failureKind ? "failed" : "complete");
     insertTask.run(row.id, runId, row.phase === undefined ? "implementation" : row.phase, row.role, status, null, row.started, row.completed);
     if (row.exitedAt) {
+      insertEvent.run(runId, row.id, "container.started", JSON.stringify({ containerName: `forge-${row.id}` }), row.started);
       insertEvent.run(runId, row.id, row.exitEvent ?? "container.exited", JSON.stringify({ containerName: `forge-${row.id}`, exitCode: 0 }), row.exitedAt);
     }
     if (row.failureKind) {

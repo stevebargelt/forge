@@ -16,6 +16,11 @@
 //   - the derived `all` start over HTTP being the oldest SURVIVING observation's
 //     week, with a much older artifact in the same scope.
 //
+// FG-690 adds the start-evidence half to the same fixture: an EXISTS over
+// `container.started`, bounded at started_at, against the real events table. The
+// failed-Docker-start row below is seeded INSIDE the window and among the real
+// rows precisely so that it must change none of the assertions above.
+//
 // Mirrors routes-agent-runtime-edges.integration.test.ts: real server, real
 // schema, one clock reading for the whole fixture.
 
@@ -82,9 +87,12 @@ const OLDEST_SURVIVING_MS = SEEDED_AT - 3 * DAY;
     insertEvent.run(runId, taskId, "task.failed", JSON.stringify({ failure_kind: kind, error: kind }), ago(msAgo));
 
   // Real supervised runs — the baseline the corrected chart is supposed to show.
+  // FG-690: each carries the container.started that authorizes reading its exit.
   task("t-real", "r-recon", "engineer", "complete", 2 * HOUR, 10 * MINUTE);
+  insertEvent.run("r-recon", "t-real", "container.started", JSON.stringify({ containerName: "forge-t-real" }), ago(2 * HOUR + 10 * MINUTE));
   insertEvent.run("r-recon", "t-real", "container.exited", JSON.stringify({ exitCode: 0 }), ago(2 * HOUR));
   task("t-crash", "r-recon", "engineer", "failed", 4 * HOUR, 5 * MINUTE);
+  insertEvent.run("r-recon", "t-crash", "container.started", JSON.stringify({ containerName: "forge-t-crash" }), ago(4 * HOUR + 5 * MINUTE));
   insertEvent.run("r-recon", "t-crash", "container.exited", JSON.stringify({ exitCode: 1 }), ago(4 * HOUR));
   failedEvent("r-recon", "t-crash", "container_crash", 4 * HOUR);
 
@@ -96,8 +104,18 @@ const OLDEST_SURVIVING_MS = SEEDED_AT - 3 * DAY;
   // Ran 20 minutes 5 days ago; the gate rejection rewrote completed_at two days
   // later. Counts, at 20 minutes, in the bucket its completed_at falls in.
   task("t-late-reject", "r-recon", "tech-lead", "failed", 3 * DAY, 2 * DAY);
+  insertEvent.run("r-recon", "t-late-reject", "container.started", JSON.stringify({ containerName: "forge-t-late-reject" }), ago(5 * DAY));
   insertEvent.run("r-recon", "t-late-reject", "container.exited", JSON.stringify({ exitCode: 0 }), ago(5 * DAY - 20 * MINUTE));
   failedEvent("r-recon", "t-late-reject", "gate_rejected", 3 * DAY);
+
+  // FG-690: `docker run` never produced a container, but runContainer still logged
+  // container.exited after 5h21m of an unresolved Docker connect. No
+  // container.started, so nothing here is agent runtime — and, its terminal being
+  // a SUPERVISED kind, layer 2 would return the same interval if the row fell
+  // through to it rather than being dropped.
+  task("t-phantom", "r-recon", "red-narrow", "failed", 90 * MINUTE, 5 * HOUR + 21 * MINUTE);
+  insertEvent.run("r-recon", "t-phantom", "container.exited", JSON.stringify({ exitCode: 1 }), ago(90 * MINUTE));
+  failedEvent("r-recon", "t-phantom", "container_crash", 90 * MINUTE);
 
   // `forge cancel` logs container.killed around a blind docker kill. It is not
   // agent-observed evidence, so this row — and its whole role — must be gone.
@@ -181,6 +199,20 @@ test("the correlated exit/failure subqueries resolve against the production sche
   ]);
   assert.deepEqual(body.byRole.map((series) => series.role), ["engineer", "tech-lead"]);
   assert.equal(totalSamples(body.overall), 3, "three observations survive; three rows contributed nothing");
+});
+
+test("a failed Docker start reaches the wire as no observation at all", async () => {
+  const { body } = await get(`?window=7d&projectDir=${PROJECT}`);
+  assert.ok(
+    !body.byRole.some((series) => series.role === "red-narrow"),
+    "the phantom's role has no observations, so it is absent from the payload entirely",
+  );
+  assert.ok(!body.roleSummary.some((entry) => entry.role === "red-narrow"));
+
+  // Its own bucket holds only the genuine engineer run that finished 2 hours ago.
+  const today = at(body.overall, dayBucket(SEEDED_AT - 90 * MINUTE));
+  assert.ok(today.sampleCount <= 2, "the 5h21m wait is not among the day's samples");
+  assert.ok((today.averageMs ?? 0) <= 10 * MINUTE, `a pre-container wait cannot inflate the average: ${today.averageMs}`);
 });
 
 test("the exit-derived duration lands in the completed_at bucket and leaves the exit's own day empty", async () => {
