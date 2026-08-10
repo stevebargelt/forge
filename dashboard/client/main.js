@@ -25,6 +25,10 @@ const USAGE_POLL_MS = 30000;
 // Sentinel for the runtime chart's default "All agents" series. Not a role, so
 // it can never collide with a real agent_role coming back from the API.
 const RUNTIME_ALL_ROLES = "__all__";
+// FG-683: the two metrics the runtime panel can chart. Duration is the default
+// and is unchanged; completed runs is a COUNT OF RUNS off its own endpoint.
+const RUNTIME_METRIC_DURATION = "duration";
+const RUNTIME_METRIC_COMPLETED_RUNS = "completed-runs";
 
 function projectScopeQuery(project, checkoutDir = null) {
   if (!project) return "";
@@ -71,10 +75,16 @@ function App() {
   const [runtimeError, setRuntimeError] = useState(null);
   const [runtimeWindow, setRuntimeWindow] = useState("7d");
   const [runtimeRole, setRuntimeRole] = useState(RUNTIME_ALL_ROLES);
+  // FG-683: which metric the runtime panel charts. Duration is the default and
+  // the only thing that reads /api/agent-runtime.
+  const [runtimeMetric, setRuntimeMetric] = useState(RUNTIME_METRIC_DURATION);
+  const [completedRuns, setCompletedRuns] = useState(null);
+  const [completedRunsError, setCompletedRunsError] = useState(null);
   // Sequence token for the runtime read. The server cost varies sharply by
   // window, so a slower earlier request can resolve after a faster later one;
   // only the newest request may write the series it belongs to.
   const runtimeSeq = useRef(0);
+  const completedRunsSeq = useRef(0);
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
   const [queue, setQueue] = useState(null);
@@ -269,20 +279,48 @@ function App() {
     }
   }, [runtimeWindow, projectFilter, checkoutFilter]);
 
+  // FG-683: the throughput read, on its own endpoint and its own sequence token.
+  // Only the selected metric is polled — an operator reading counts does not pay
+  // for the duration query, which is by far the more expensive of the two.
+  const pollCompletedRuns = useCallback(async () => {
+    const seq = (completedRunsSeq.current += 1);
+    try {
+      const res = await fetch(appendScope(`/api/completed-runs?window=${runtimeWindow}`, projectFilter, checkoutFilter));
+      if (seq !== completedRunsSeq.current) return;
+      if (!res.ok) {
+        setCompletedRunsError(`completed runs unavailable — HTTP ${res.status}`);
+      } else {
+        setCompletedRuns(await res.json());
+        setCompletedRunsError(null);
+      }
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== completedRunsSeq.current) return;
+      setCompletedRunsError(String(e));
+      setError(String(e));
+    }
+  }, [runtimeWindow, projectFilter, checkoutFilter]);
+
   useEffect(() => {
     if (view !== "ops") return;
-    pollRuntime();
-    const id = setInterval(pollRuntime, USAGE_POLL_MS);
+    const read = runtimeMetric === RUNTIME_METRIC_COMPLETED_RUNS ? pollCompletedRuns : pollRuntime;
+    read();
+    const id = setInterval(read, USAGE_POLL_MS);
     return () => clearInterval(id);
-  }, [pollRuntime, view]);
+  }, [pollRuntime, pollCompletedRuns, runtimeMetric, view]);
 
   // Drop the stale series on a window change so the chart shows its loading
   // state rather than a grid that silently belongs to the previous window. The
   // seq bump retires whatever is still in flight for the window being left.
+  // Both metrics are dropped: the one not on screen is stale too, and switching
+  // metric afterwards would otherwise show the previous window's counts.
   const changeRuntimeWindow = (next) => {
     runtimeSeq.current += 1;
+    completedRunsSeq.current += 1;
     setRuntime(null);
     setRuntimeError(null);
+    setCompletedRuns(null);
+    setCompletedRunsError(null);
     setRuntimeWindow(next);
   };
 
@@ -523,6 +561,10 @@ function App() {
             onRuntimeWindowChange=${changeRuntimeWindow}
             runtimeRole=${runtimeRole}
             onRuntimeRoleChange=${setRuntimeRole}
+            runtimeMetric=${runtimeMetric}
+            onRuntimeMetricChange=${setRuntimeMetric}
+            completedRuns=${completedRuns}
+            completedRunsError=${completedRunsError}
           />`
         : view === "usage"
         ? html`<${UsageView}
@@ -644,7 +686,10 @@ function OpsSummary({ data }) {
 
 // RUN-3: operations summary — success rate, failure-kind mix, median durations,
 // operational counts. Reads /api/ops.
-function OpsView({ data, since, onSinceChange, runtime, runtimeError, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange }) {
+function OpsView({
+  data, since, onSinceChange, runtime, runtimeError, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange,
+  runtimeMetric, onRuntimeMetricChange, completedRuns, completedRunsError,
+}) {
   const trends = html`<${AgentRuntimeTrends}
     data=${runtime}
     error=${runtimeError}
@@ -652,6 +697,10 @@ function OpsView({ data, since, onSinceChange, runtime, runtimeError, runtimeWin
     onWindowChange=${onRuntimeWindowChange}
     role=${runtimeRole}
     onRoleChange=${onRuntimeRoleChange}
+    metric=${runtimeMetric}
+    onMetricChange=${onRuntimeMetricChange}
+    completedRuns=${completedRuns}
+    completedRunsError=${completedRunsError}
   />`;
   if (!data) return html`<section class="ops-view"><div class="muted">loading metrics…</div>${trends}</section>`;
   const maxKind = Math.max(1, ...data.failureKinds.map((k) => k.count));
@@ -899,9 +948,19 @@ function runtimeAxisScale(peakMs) {
   return { max, ticks };
 }
 
-function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange }) {
+// FG-683: the panel's two metrics. The labels are the operator-facing names, and
+// they are what the headings and the empty states are written from — a count
+// chart that could be mistaken for the duration chart is the defect this ticket
+// exists to avoid.
+const RUNTIME_METRICS = [
+  { metric: RUNTIME_METRIC_DURATION, label: "Average agent runtime", heading: "Average agent runtime over time" },
+  { metric: RUNTIME_METRIC_COMPLETED_RUNS, label: "Completed runs", heading: "Completed runs over time" },
+];
+
+function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange, metric, onMetricChange, completedRuns, completedRunsError }) {
   const [tzMode, setTzMode] = useState("local");
   const zone = runtimeZoneFor(tzMode);
+  const showRuns = metric === RUNTIME_METRIC_COMPLETED_RUNS;
   const roles = data ? data.roleSummary.map((r) => r.role) : [];
   const roleObserved = role === RUNTIME_ALL_ROLES || roles.includes(role);
   // The fallback to "All agents" is written back, not just displayed. Left in
@@ -914,6 +973,18 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
 
   const controls = html`
     <div class="runtime-controls">
+      <span class="muted" id="runtime-metric-label">metric:</span>
+      <div class="runtime-metric-btns" role="group" aria-labelledby="runtime-metric-label">
+        ${RUNTIME_METRICS.map(({ metric: option, label }) => html`
+          <button
+            key=${option}
+            type="button"
+            class=${"usage-dim-btn " + (metric === option ? "usage-dim-btn-active" : "")}
+            aria-pressed=${metric === option}
+            onClick=${() => onMetricChange(option)}
+          >${label}</button>
+        `)}
+      </div>
       <span class="muted" id="runtime-window-label">runtime window:</span>
       <div class="runtime-window-btns" role="group" aria-labelledby="runtime-window-label">
         ${RUNTIME_WINDOWS.map((w) => html`
@@ -946,25 +1017,53 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
   // to show) is unreachable and the operator watches frozen numbers believing they
   // are current. The series is kept — stale numbers beat no numbers — and said to
   // be stale, beside the chart still showing them.
-  const staleNotice = data && error ? html`
+  // The selected metric's own payload and its own read error — each metric is a
+  // separate read, so neither can be reported under the other's series.
+  const shownData = showRuns ? completedRuns : data;
+  const shownError = showRuns ? completedRunsError : error;
+
+  const staleNotice = shownData && shownError ? html`
     <div class="card runtime-stale" role="alert">
-      ${error}. Showing the last successful read — these numbers are stale. Retrying every 30s.
+      ${shownError}. Showing the last successful read — these numbers are stale. Retrying every 30s.
     </div>
   ` : null;
 
   const frame = (body) => html`
     <section class="runtime-view" aria-labelledby="runtime-heading">
-      <h2 id="runtime-heading">Average agent runtime over time</h2>
+      <h2 id="runtime-heading">${RUNTIME_METRICS.find((m) => m.metric === metric)?.heading ?? RUNTIME_METRICS[0].heading}</h2>
       ${controls}
       ${staleNotice}
       ${body}
     </section>
   `;
 
-  if (!data) {
-    return frame(error
-      ? html`<div class="card runtime-error" role="alert">${error}. Retrying every 30s.</div>`
-      : html`<div class="card muted runtime-loading" role="status">loading agent runtime…</div>`);
+  if (!shownData) {
+    return frame(shownError
+      ? html`<div class="card runtime-error" role="alert">${shownError}. Retrying every 30s.</div>`
+      : html`<div class="card muted runtime-loading" role="status">${showRuns ? "loading completed runs…" : "loading agent runtime…"}</div>`);
+  }
+
+  if (showRuns) {
+    const total = completedRuns.totalCompletedRuns;
+    return frame(html`
+      <div class="runs-total">
+        <span class="runs-total-num">${total}</span>
+        <span class="muted runs-total-note">completed ${total === 1 ? "run" : "runs"} in ${window}</span>
+      </div>
+      ${completedRuns.buckets.length === 0
+        ? html`<div class="card runtime-empty runs-empty">
+            No completed runs in this window. Widen the window, or wait for a run to finish.
+          </div>`
+        : html`<${CompletedRunsChart}
+            buckets=${completedRuns.buckets}
+            total=${total}
+            resolution=${completedRuns.resolution}
+            window=${window}
+            bucketMs=${completedRuns.bucketMs}
+            zone=${zone}
+            mode=${tzMode}
+          />`}
+    `);
   }
 
   const activeRole = roleObserved ? role : RUNTIME_ALL_ROLES;
@@ -1216,6 +1315,187 @@ function RuntimeChart({ buckets, label, resolution, window, bucketMs, zone, mode
                 <th scope="row">${rangeTexts[i]}${b.partial ? " (partial)" : ""}</th>
                 <td>${b.sampleCount === 0 ? "no runs" : opsFmtMs(b.averageMs)}</td>
                 <td>${b.sampleCount}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </div>
+    </figure>
+  `;
+}
+
+// FG-683: the throughput chart. A COUNT of completed forge runs per bucket, on
+// the same UTC-aligned grid the duration chart uses and sharing its period
+// labelling — and nothing else. It carries no duration unit, no mean, no role
+// series and no agent-task sample note, because none of those are what it counts.
+// An integer axis, drawn against whole runs. `1.5` runs is not a reading, so the
+// axis steps are whole numbers at every scale and the top is the next one at or
+// above the peak.
+function runsAxisScale(peak) {
+  const rough = Math.max(1, peak) / RUNTIME_TICK_TARGET;
+  const magnitude = Math.max(1, 10 ** Math.floor(Math.log10(rough)));
+  const step = [1, 2, 5, 10].map((m) => m * magnitude).find((candidate) => candidate >= rough) ?? magnitude * 10;
+  const max = Math.max(step, Math.ceil(peak / step) * step);
+  const ticks = [];
+  for (let value = 0; value <= max; value += step) ticks.push(value);
+  return { max, ticks };
+}
+
+function CompletedRunsChart({ buckets, total, resolution, window, bucketMs, zone, mode }) {
+  const VW = 1000;
+  const svgRef = useRef(null);
+  const widthPx = useRenderedWidthPx(svgRef);
+  const fontUnits = widthPx > 0 ? (RUNTIME_AXIS_TARGET_PX * VW) / widthPx : RUNTIME_AXIS_TARGET_PX;
+  const peak = Math.max(...buckets.map((b) => b.completedRuns), 1);
+  const scale = runsAxisScale(peak);
+  const tickTexts = scale.ticks.map(String);
+  const PAD_LEFT = fontUnits * runtimeAxisGutterEm(tickTexts);
+  const PAD_RIGHT = fontUnits * 0.8;
+  // FG-683: the `runs` axis unit gets a band RESERVED FOR IT at the top of the
+  // viewBox, drawn on a baseline inside that band — not hung above the plot by a
+  // negative dy off the y=PAD_TOP edge. Hanging it off an edge made containment a
+  // function of the font's ascent (and, at x=0, of its left side bearing), so the
+  // same markup fitted on one machine's resolved font and escaped on another's.
+  // Inside the band it is contained by the geometry: the baseline sits
+  // UNIT_BASELINE_EM below the top of the viewBox, so the glyph box escapes only
+  // if the font's ascent exceeds 1.8x the font size, and it starts UNIT_INSET_EM
+  // in from the left edge, so it escapes sideways only on a side bearing more
+  // negative than half an em. Neither is reachable for a text font — real UI sans
+  // ascents top out near 1.07em (Noto Sans) and side bearings on `r` are positive.
+  // UNIT_BAND_EM leaves 0.8em under the baseline for the descent before the band
+  // ends, and the plot's own 1.7em top gutter after that.
+  const UNIT_BASELINE_EM = 1.8;
+  const UNIT_BAND_EM = 2.6;
+  const UNIT_INSET_EM = 0.5;
+  const PAD_TOP = fontUnits * (UNIT_BAND_EM + 1.7);
+  const PAD_BOTTOM = fontUnits * 2.2;
+  const chartH = fontUnits * (RUNTIME_PLOT_TARGET_PX / RUNTIME_AXIS_TARGET_PX);
+  const VH = PAD_TOP + chartH + PAD_BOTTOM;
+  const plotW = VW - PAD_LEFT - PAD_RIGHT;
+  const baseY = VH - PAD_BOTTOM;
+  const n = buckets.length;
+  const slot = plotW / n;
+  const barW = Math.min(slot * 0.68, 56);
+  const partialIdx = buckets.findIndex((b) => b.partial);
+  const unit = RUNTIME_RESOLUTION_WORD[resolution] ?? resolution;
+  const periodTexts = runtimeAxisLabels(buckets, resolution, zone);
+  const rangeTexts = buckets.map((b) => runtimeBucketRange(b.bucketStart, bucketMs, zone));
+  const barH = (b) => (b.completedRuns === 0 ? 0 : Math.max(fontUnits * 0.25, Math.round((b.completedRuns / scale.max) * chartH)));
+  const xAt = (i) => PAD_LEFT + slot * i + slot / 2;
+
+  // A zero bucket still draws — as a bar of zero height sitting ON the baseline,
+  // labelled `0`. Zero completions is something the store observed, not a period
+  // it has nothing to say about, and the duration chart's missing-sample gap
+  // would say the wrong thing about it.
+  const bars = buckets.map((b, i) => {
+    const h = barH(b);
+    const x = xAt(i) - barW / 2;
+    return html`<rect
+      key=${b.bucketStart}
+      class=${"runs-bar" + (b.completedRuns === 0 ? " runs-bar-zero" : "") + (b.partial ? " runs-bar-partial" : "")}
+      x=${x} y=${baseY - h} width=${barW} height=${Math.max(h, 1)}
+      fill=${b.partial ? "url(#runs-partial-hatch)" : "var(--accent)"}
+      stroke=${b.partial ? "var(--accent)" : "none"}
+      stroke-dasharray=${b.partial ? "4 3" : null}
+    ><title>${rangeTexts[i]}: ${b.completedRuns} completed ${b.completedRuns === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}</title></rect>`;
+  });
+
+  const placeLabel = (i, text) => {
+    const glyphs = fontUnits * RUNTIME_GLYPH_EM * text.length;
+    const pad = (fontUnits * RUNTIME_LABEL_MARGIN_EM) / 2;
+    const x = xAt(i);
+    const anchor = x - glyphs / 2 < 0 ? "start" : x + glyphs / 2 > VW ? "end" : "middle";
+    const left = anchor === "start" ? x : anchor === "end" ? x - glyphs : x - glyphs / 2;
+    return { anchor, left: left - pad, right: left + glyphs + pad };
+  };
+
+  const thin = (texts) => {
+    const spans = texts.map((text, i) => placeLabel(i, text));
+    const kept = [];
+    for (let i = 0; i < n - 1; i += 1) {
+      if (kept.length === 0 || spans[i].left >= spans[kept[kept.length - 1]].right) kept.push(i);
+    }
+    while (kept.length > 0 && spans[n - 1].left < spans[kept[kept.length - 1]].right) kept.pop();
+    kept.push(n - 1);
+    return kept;
+  };
+
+  const valueTexts = buckets.map((b) => String(b.completedRuns));
+  const periodIdxs = thin(periodTexts);
+  // A count label sits above its own bar and is bounded only by the viewBox, so
+  // beside a much taller neighbour it would land on that neighbour's fill.
+  const valueClearsBars = (i) => {
+    const span = placeLabel(i, valueTexts[i]);
+    const baseline = baseY - barH(buckets[i]) - fontUnits * 0.45;
+    return buckets.every((b, j) => {
+      if (j === i) return true;
+      const barLeft = xAt(j) - barW / 2;
+      if (span.right <= barLeft || span.left >= barLeft + barW) return true;
+      return baseY - barH(b) >= baseline;
+    });
+  };
+  const valueIdxs = thin(valueTexts).filter(valueClearsBars);
+  const labelledEveryBucket = periodIdxs.length === n && valueIdxs.length === n;
+
+  const summaryText = `Completed runs by ${unit}, over ${window}. `
+    + buckets.map((b, i) => `${periodTexts[i]} ${b.completedRuns}${b.partial ? " (partial)" : ""}`).join(", ")
+    + `. Total ${total} completed ${total === 1 ? "run" : "runs"}.`;
+  const zoneLabel = mode === "utc" ? "UTC" : `your local time (${zone})`;
+
+  return html`
+    <figure class="runtime-chart runs-chart">
+      <svg ref=${svgRef} viewBox="0 0 ${VW} ${VH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label=${summaryText}>
+        <defs>
+          <pattern id="runs-partial-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="6" height="6" fill="var(--bg-elev-2)" />
+            <line x1="0" y1="0" x2="0" y2="6" stroke="var(--accent)" stroke-width="3" />
+          </pattern>
+        </defs>
+        ${scale.ticks.map((value, tick) => {
+          const y = baseY - (value / scale.max) * chartH;
+          return html`<g key=${value}>
+            <line class="runtime-gridline" x1=${PAD_LEFT} y1=${y} x2=${VW - PAD_RIGHT} y2=${y} stroke="var(--border)" stroke-width="1" opacity=${value === 0 ? 1 : 0.6} />
+            <text class="runs-y-tick" x=${PAD_LEFT - fontUnits * RUNTIME_TICK_INSET_EM} y=${y} dy="0.32em" text-anchor="end" font-size=${fontUnits} fill="var(--fg-dim)">${tickTexts[tick]}</text>
+          </g>`;
+        })}
+        <text class="runs-axis-unit" x=${fontUnits * UNIT_INSET_EM} y=${fontUnits * UNIT_BASELINE_EM} text-anchor="start" font-size=${fontUnits} fill="var(--fg-dim)">runs</text>
+        ${bars}
+        ${valueIdxs.map((i) => html`
+          <text class="runs-value" key=${buckets[i].bucketStart} x=${xAt(i)} y=${baseY - barH(buckets[i])} dy="-0.45em"
+            text-anchor=${placeLabel(i, valueTexts[i]).anchor} font-size=${fontUnits} fill="var(--fg)">${valueTexts[i]}</text>
+        `)}
+        ${periodIdxs.map((i) => html`
+          <text class="runs-x-tick" key=${buckets[i].bucketStart} x=${xAt(i)} y=${VH} dy=${RUNTIME_AXIS_LABEL_DY}
+            text-anchor=${placeLabel(i, periodTexts[i]).anchor} font-size=${fontUnits} fill="var(--fg-dim)">${periodTexts[i]}</text>
+        `)}
+      </svg>
+      ${labelledEveryBucket ? null : html`
+        <ul class="runtime-bucket-values runs-bucket-values" aria-hidden="true">
+          ${buckets.map((b, i) => html`
+            <li key=${b.bucketStart}>
+              <span class="mono">${rangeTexts[i]}</span>
+              ${` ${b.completedRuns} ${b.completedRuns === 1 ? "run" : "runs"}`}
+            </li>
+          `)}
+        </ul>
+      `}
+      <figcaption class="runtime-caption runs-caption">
+        Completed forge runs per ${unit}, counted once each and bucketed by run completion time. Interactive orchestrator
+        sessions are excluded; a run that started earlier still counts in the ${unit} it finished in.
+        ${html` <span class="runtime-zone-note">The bucket grid is UTC-aligned; periods are shown in ${zoneLabel}.</span>`}
+        ${partialIdx >= 0
+          ? html` <span class="runtime-partial-note">The last ${unit} (${periodTexts[partialIdx]}) is hatched — it is still in progress and its count can still rise.</span>`
+          : null}
+      </figcaption>
+      <div class="sr-only">
+        <table class="runs-text-equivalent">
+          <caption>${`Completed runs by ${unit} over ${window} — ${total} in total`}</caption>
+          <thead><tr><th scope="col">${unit}</th><th scope="col">completed runs</th></tr></thead>
+          <tbody>
+            ${buckets.map((b, i) => html`
+              <tr key=${b.bucketStart}>
+                <th scope="row">${rangeTexts[i]}${b.partial ? " (partial)" : ""}</th>
+                <td>${b.completedRuns}</td>
               </tr>
             `)}
           </tbody>

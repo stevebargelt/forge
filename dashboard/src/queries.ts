@@ -1031,6 +1031,122 @@ export function agentRuntimeTrends(
   };
 }
 
+// FG-683: completed-run throughput over time. The sibling metric of
+// agentRuntimeTrends and deliberately its own function rather than a mode of it:
+// that one observes agent TASKS and reports a mean duration, this one observes
+// RUNS and reports a count. They share the window choices and the UTC-aligned
+// bucket grid above, and nothing else.
+export type CompletedRunsBucket = {
+  bucketStart: string;
+  /** Completed runs whose completed_at lands in this bucket. Always a number —
+   *  zero completions is an observed throughput value, not the missing sample
+   *  the duration metric reports as a null averageMs. */
+  completedRuns: number;
+  partial: boolean;
+};
+
+export type CompletedRunTrends = {
+  window: AgentRuntimeWindow;
+  resolution: AgentRuntimeResolution;
+  bucketMs: number;
+  rangeStart: string | null;
+  rangeEnd: string;
+  buckets: CompletedRunsBucket[];
+  /** The sum of every bucket's count, the current partial bucket included. */
+  totalCompletedRuns: number;
+};
+
+export function completedRunTrends(
+  window: AgentRuntimeWindow,
+  scope?: ProjectScope,
+  nowMs: number = Date.now(),
+): CompletedRunTrends {
+  const resolution = AGENT_RUNTIME_RESOLUTION[window];
+  const bucketMs = RESOLUTION_MS[resolution];
+  const floor = (ms: number) => floorToResolution(ms, resolution);
+
+  const windowDays = window === "all" ? null : parseInt(window, 10);
+  const cutoffStart = windowDays === null ? null : floor(nowMs - windowDays * 86_400_000);
+
+  const params: unknown[] = [];
+  let clause = "";
+  if (cutoffStart !== null) {
+    clause += " AND r.completed_at >= ?";
+    params.push(new Date(cutoffStart).toISOString());
+  }
+  clause += " AND r.completed_at <= ?";
+  params.push(new Date(nowMs).toISOString());
+  const project = scopeSql("r.project_dir", scope);
+  clause += ` ${project.clause}`;
+  params.push(...project.params);
+
+  // One row per RUN, and nothing joined to it. A run's tasks, retries, fanout
+  // children, gates and host_verifications rows are all rows ABOUT the same
+  // single completion, so any join to them multiplies this count by however many
+  // the run happens to carry.
+  // `r.workflow IS NOT 'orchestrator'` — SQLite's null-safe inequality. With plain
+  // `!=` a NULL workflow makes the comparison NULL and drops a run that is not an
+  // orchestrator session. What this excludes is the interactive orchestrator's own
+  // instrumentation run (launch.ts writes it with workflow 'orchestrator'); every
+  // workflow an operator actually runs — feature, invoke, review — counts.
+  const rows = db().prepare(`
+    SELECT r.completed_at AS completed
+    FROM runs r
+    WHERE r.status = 'complete'
+      AND r.completed_at IS NOT NULL
+      AND r.workflow IS NOT 'orchestrator'
+      ${clause}
+  `).all(...params) as Array<{ completed: string }>;
+
+  const completions: number[] = [];
+  let earliest = Infinity;
+  for (const row of rows) {
+    // An uninterpretable completed_at places no run in any bucket. The SQL range
+    // comparison above is lexical and cannot be trusted to have dropped it.
+    const completedMs = Date.parse(row.completed);
+    if (!Number.isFinite(completedMs)) continue;
+    completions.push(completedMs);
+    if (completedMs < earliest) earliest = completedMs;
+  }
+
+  // "all" begins at the earliest completion actually in scope; with nothing in
+  // scope there is no range and no grid, exactly as the duration metric reports it.
+  const gridStart = cutoffStart ?? (completions.length > 0 ? floor(earliest) : null);
+  const rangeEnd = new Date(nowMs).toISOString();
+  if (gridStart === null) {
+    return { window, resolution, bucketMs, rangeStart: null, rangeEnd, buckets: [], totalCompletedRuns: 0 };
+  }
+
+  const partialStart = floor(nowMs);
+  const bucketStarts: number[] = [];
+  for (let start = gridStart; start <= partialStart; start += bucketMs) bucketStarts.push(start);
+
+  const counts = new Array<number>(bucketStarts.length).fill(0);
+  for (const completedMs of completions) {
+    const index = Math.floor((completedMs - gridStart) / bucketMs);
+    if (index < 0 || index >= bucketStarts.length) continue;
+    counts[index] = counts[index]! + 1;
+  }
+
+  const buckets = bucketStarts.map((start, index) => ({
+    bucketStart: new Date(start).toISOString(),
+    completedRuns: counts[index]!,
+    partial: start === partialStart,
+  }));
+
+  return {
+    window,
+    resolution,
+    bucketMs,
+    rangeStart: new Date(gridStart).toISOString(),
+    rangeEnd,
+    buckets,
+    // Summed from what is PLOTTED, so the stated total and the bars can never
+    // disagree: a completion outside the grid is outside the total too.
+    totalCompletedRuns: buckets.reduce((total, b) => total + b.completedRuns, 0),
+  };
+}
+
 export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScope, limit = 50): UsageRollupRow[] {
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",

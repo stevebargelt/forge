@@ -11,6 +11,7 @@
 // - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
+// - GET /api/completed-runs               completed forge RUNS per bucket over the same window grid — a count, not a duration (FG-683)
 // - GET /api/queue                        the operator work-queue board: five projections + dispatcher panel + capacity context (?projectKey|?projectDir, FG-591)
 // - GET /api/orchestrators                interactive orchestrators for ONE project, liveness-joined; the only route that can carry a remote-control URL (?projectKey|?projectDir REQUIRED, FG-576)
 //
@@ -30,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
-  resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
+  resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
@@ -388,6 +389,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(agentRuntimeTrends(window, scopeFromUrl(url))));
+    return;
+  }
+
+  // FG-683: the throughput sibling of /api/agent-runtime — same windows, same
+  // scope, same UTC bucket grid, but a count of completed RUNS per bucket. A
+  // separate route rather than a mode of that one, so the duration response shape
+  // and its default behaviour are untouched for every existing caller.
+  if (path === "/api/completed-runs") {
+    const window = url.searchParams.get("window") ?? "7d";
+    if (!isAgentRuntimeWindow(window)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(
+        JSON.stringify({ error: `invalid window; expected one of ${AGENT_RUNTIME_WINDOWS.join(", ")}` }),
+      );
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(completedRunTrends(window, scopeFromUrl(url))));
     return;
   }
 
