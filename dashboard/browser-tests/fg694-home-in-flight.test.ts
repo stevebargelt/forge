@@ -240,7 +240,8 @@ test("FG-694: the host-verification and CI waits are ONE compact line each — n
 
   const ci = await page.locator(".ca-ci-wait-row").innerText();
   assert.match(ci, new RegExp(LIVE_TICKET), "the candidate is named by its ticket");
-  assert.match(ci, /CI running/);
+  assert.match(ci, /CI checks/);
+  assert.match(ci, /in progress/);
   assert.match(ci, /7\/10 complete/);
 
   const waits = await page.locator(".ca-wait-row").allInnerTexts();

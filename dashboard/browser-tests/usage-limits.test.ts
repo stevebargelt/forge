@@ -171,8 +171,12 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   await page.getByRole("heading", { name: "Recent agent outputs" }).waitFor();
   assert.equal(new URL(page.url()).hash, "#activity");
   assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 0);
-  // …and this is where the panel went. It is off Home, not deleted.
-  assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 1);
+  // Activity has the same one visible In flight owner. Persisted host/CI evidence is
+  // retained under an explicit, closed Diagnostics disclosure — never a second
+  // visible Agents/Current activity panel.
+  assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 0);
+  assert.equal(await page.getByRole("heading", { name: "In flight" }).count(), 1);
+  assert.equal(await page.locator("details.activity-diagnostics").getAttribute("open"), null);
 
   await page.getByRole("button", { name: "home", exact: true }).click();
   await page.getByRole("heading", { name: "Plan limits & windows" }).waitFor();

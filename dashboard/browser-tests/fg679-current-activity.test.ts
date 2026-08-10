@@ -34,9 +34,10 @@
 //     of AC5 — the evidence MOVED, it was not deleted — and this test is what proves
 //     it: every field FG-679 required is still here, one click away.
 //
-// The FG-694 POST-SHIP CORRECTION then moved this panel OFF HOME. Home has one
-// activity surface — `In flight` — and folds only the compact host/CI WAITS into it;
-// what is asserted here is the DIAGNOSTIC panel, which lives on the Activity view.
+// The FG-694 POST-SHIP CORRECTION then moved this panel OFF HOME. Home and Activity
+// each have one visible activity surface — `In flight` — and fold only the compact
+// host/CI WAITS into it. What is asserted here is the DIAGNOSTIC panel behind
+// Activity's explicit disclosure; it never owns agent rows.
 // Every BD above still holds of it, unchanged, which is what makes "the evidence moved,
 // it was not deleted" a checkable claim rather than a reassurance. Home's own shape is
 // asserted in fg694-home-in-flight.test.ts.
@@ -236,7 +237,9 @@ const ACTIVITY_VIEW = "#activity";
 async function open(): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 }, reducedMotion: "reduce" });
   await page.goto(`${baseUrl}/${ACTIVITY_VIEW}`);
-  await page.locator("section.current-activity").waitFor();
+  await page.locator("details.activity-diagnostics > summary").click();
+  await page.locator("section.in-flight").first().waitFor();
+  await page.waitForFunction(() => document.querySelector(".ca-loading") === null);
   return page;
 }
 
@@ -358,8 +361,8 @@ test("FG-679 BD-5 / FG-694 AC4-AC5/AC8: the reported ten-run historical-noise sh
     hostVerification: [launch({ launchId: "launch-fg694-current", runId: "run-fg694", ticketId: "FG-694" })],
   };
   const page = await open();
-  assert.deepEqual(await sectionHeadings(page), ["Agents", "Host verification", "Required CI"], "only populated sections render, in their fixed hierarchy order");
-  const ciSection = page.locator("section.current-activity section.ca-section").nth(2);
+  assert.deepEqual(await sectionHeadings(page), ["Host verification", "CI checks"], "agent work belongs only to In flight; diagnostic sections retain their fixed order");
+  const ciSection = page.locator("section.current-activity section.ca-section").nth(1);
   await ciSection.locator(".ca-ci-summary").waitFor();
 
   // AC4/AC8: ONE compact line after the reported ten terminal rows were supplied
@@ -414,12 +417,12 @@ test("FG-679 BD-6: when the candidate moves, the old-sha evidence DISAPPEARS fro
 // top-level test here is a change to the browser tier's shape rather than to its
 // coverage. Nothing current / current-but-unobserved / settled / stale / could-not-read.
 test("FG-679 BD-8 / FG-694 AC6+AC7: no-candidate, not-observed, settled, stale and could-not-read stay DIFFERENT rendered facts", async () => {
-  // (a) NOTHING current at all. One calm statement, and no empty subsections — the
-  //     state that used to render three of them plus `CI not observed` (AC6).
+  // (a) NOTHING current at all. In flight owns the one calm empty state; the
+  //     diagnostic disclosure renders no empty panel or subsections.
   served = base({ requiredCi: { state: "no_current_candidate", label: "no current CI candidate", observations: [] } });
   let page = await open();
-  await page.locator(".ca-nothing").waitFor();
-  assert.equal(await page.locator(".ca-nothing").innerText(), "Nothing currently running.");
+  assert.equal(await page.locator("section.current-activity").count(), 0);
+  assert.match(await page.locator("section.in-flight").first().innerText(), /No live tasks/);
   assert.deepEqual(await sectionHeadings(page), [], "the headings themselves must not render when empty");
   await page.screenshot({ path: join(SHOTS, "fg679-empty.png"), fullPage: true });
   await page.close();
@@ -479,7 +482,7 @@ test("FG-679 BD-8 / FG-694 AC6+AC7: no-candidate, not-observed, settled, stale a
       assert.doesNotMatch(text, new RegExp(claim), `a failed read may not claim "${claim}"`);
     }
     assert.notEqual(text, notObserved, "could-not-read is not the same fact as observed-nothing");
-    assert.equal(await page.locator(".ca-retry").count(), 1, "the operator's recovery is not a page reload");
+    assert.equal(await page.locator("section.current-activity .ca-retry").count(), 1, "the diagnostic recovery is not a page reload");
     assert.equal(await page.locator(".ca-heading").count(), 0);
     await page.screenshot({ path: join(SHOTS, "fg694-unavailable.png"), fullPage: true });
     await page.close();
@@ -508,6 +511,7 @@ test("FG-694 AC7 (RF-3): a 200 whose ENTRIES are malformed renders the unavailab
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(String(e)));
     await page.goto(`${baseUrl}/${ACTIVITY_VIEW}`);
+    await page.locator("details.activity-diagnostics > summary").click();
     await page.locator("section.current-activity").waitFor();
     await page.locator(".ca-unavailable").waitFor();
 
@@ -517,7 +521,7 @@ test("FG-694 AC7 (RF-3): a 200 whose ENTRIES are malformed renders the unavailab
     for (const claim of ["No agent task in flight", "No host launch observed", "CI not observed", "Nothing currently running"]) {
       assert.doesNotMatch(text, new RegExp(claim), `a malformed read may not claim "${claim}"`);
     }
-    assert.equal(await page.locator(".ca-retry").count(), 1, "the operator's recovery is not a page reload");
+    assert.equal(await page.locator("section.current-activity .ca-retry").count(), 1, "the diagnostic recovery is not a page reload");
     assert.equal(await page.locator(".ca-agent-row").count(), 0, "no row was built from the malformed entry");
     assert.deepEqual(errors, [], "the render did not throw");
 
@@ -551,6 +555,7 @@ test("FG-694 AC7 (RF-5): a 200 whose CI CONTEXTS are malformed renders the unava
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(String(e)));
     await page.goto(`${baseUrl}/${ACTIVITY_VIEW}`);
+    await page.locator("details.activity-diagnostics > summary").click();
     await page.locator("section.current-activity").waitFor();
     await page.locator(".ca-unavailable").waitFor();
 
@@ -560,7 +565,7 @@ test("FG-694 AC7 (RF-5): a 200 whose CI CONTEXTS are malformed renders the unava
     for (const claim of ["No agent task in flight", "No host launch observed", "CI not observed", "Nothing currently running"]) {
       assert.doesNotMatch(text, new RegExp(claim), `a malformed read may not claim "${claim}"`);
     }
-    assert.equal(await page.locator(".ca-retry").count(), 1, "the operator's recovery is not a page reload");
+    assert.equal(await page.locator("section.current-activity .ca-retry").count(), 1, "the diagnostic recovery is not a page reload");
     assert.equal(await page.locator(".ca-ci-item").count(), 0, "no CI row was built from the malformed contexts");
     assert.equal(await page.locator(".ca-ci-context").count(), 0, "and no per-context row either");
     assert.deepEqual(errors, [], "the render did not throw");
@@ -615,9 +620,7 @@ test("FG-679 BD-10: no host filesystem path is rendered or linked, and the surfa
   await page.close();
 });
 
-test("FG-679: an agent row is reachable and activatable BY KEYBOARD, not by mouse only", async () => {
-  // The row navigates to its task, so it is a control. Shipping a new interactive
-  // surface that only a pointer can reach is a defect in the surface being shipped.
+test("FG-694 correction: agent rows have one dashboard owner — In flight, never Diagnostics", async () => {
   served = base({
     agents: [{
       runId: "run-fg679",
@@ -634,26 +637,9 @@ test("FG-679: an agent row is reachable and activatable BY KEYBOARD, not by mous
     }],
   });
   const page = await open();
-  const row = page.locator("section.current-activity .ca-agent-row").first();
-  await row.waitFor();
-
-  assert.equal(await row.getAttribute("role"), "button", "the row announces itself as a control");
-  assert.equal(await row.getAttribute("tabindex"), "0", "…and is in the tab order");
-  assert.match(await row.getAttribute("aria-label") ?? "", /task-build-aef6ae/, "…with a name that says where it goes");
-
-  // Reached by the KEYBOARD, from the document, not by a programmatic .focus().
-  await page.keyboard.press("Tab");
-  for (let i = 0; i < 40 && !(await row.evaluate((el) => el === document.activeElement)); i++) {
-    await page.keyboard.press("Tab");
-  }
-  assert.ok(await row.evaluate((el) => el === document.activeElement), "the row is reachable by tabbing");
-
-  assert.equal(await page.locator(".detail-overlay").count(), 0);
-  await page.keyboard.press("Enter");
-  await page.locator(".detail-overlay").waitFor({ timeout: 5000 });
-  assert.equal(await page.locator(".detail-overlay").count(), 1, "Enter does what a click does");
-
-  await page.screenshot({ path: join(SHOTS, "fg679-agent-row-keyboard.png"), fullPage: true });
+  assert.equal(await page.locator("section.in-flight").count(), 1, "Activity has one visible live-work surface");
+  assert.equal(await page.locator("section.current-activity .ca-agent-row").count(), 0);
+  assert.deepEqual(await sectionHeadings(page), [], "an agent-only payload does not create a diagnostic section");
   await page.close();
 });
 
