@@ -150,6 +150,62 @@ test("detectOrphanedWorkMayPersist: flags a failed task classified orphaned_work
   assert.match(i.evidence.join(" "), /changed-file\.txt|1 changed file/);
 });
 
+test("detectOrphanedWorkMayPersist: complete and abandoned parents retire historical persisted-work incidents", () => {
+  for (const status of ["complete", "abandoned"] as const) {
+    const runId = `run-owmp-${status}`;
+    const taskId = `task-owmp-${status}`;
+    insertRun(mkRun(runId, status));
+    insertTask(mkTask(taskId, runId, "failed"));
+    logEvent("task.failed", {
+      runId,
+      taskId,
+      payload: {
+        failure_kind: "orphaned_work_may_persist",
+        error: "historical work may have persisted",
+        evidence: {
+          containerName: `forge-${taskId}`,
+          containerLiveness: "gone",
+          resultState: "absent",
+          recoverableStdoutResult: false,
+          worktreePathChecked: "/historical/worktree",
+          changedFiles: ["M historical.ts"],
+          source: "worktree",
+        },
+      },
+    });
+  }
+
+  assert.deepEqual(
+    detectOrphanedWorkMayPersist(db),
+    [],
+    "complete and abandoned runs retain audit evidence without permanent HIGH incidents",
+  );
+});
+
+test("detectOrphanedWorkMayPersist: a failed parent does not hide the failure that may have caused it", () => {
+  insertRun(mkRun("run-owmp-failed", "failed"));
+  insertTask(mkTask("task-owmp-failed", "run-owmp-failed", "failed"));
+  logEvent("task.failed", {
+    runId: "run-owmp-failed",
+    taskId: "task-owmp-failed",
+    payload: {
+      failure_kind: "orphaned_work_may_persist",
+      error: "work may have persisted",
+      evidence: {
+        containerName: "forge-task-owmp-failed",
+        containerLiveness: "gone",
+        resultState: "absent",
+        recoverableStdoutResult: false,
+        worktreePathChecked: "/failed/worktree",
+        changedFiles: ["M unresolved.ts"],
+        source: "worktree",
+      },
+    },
+  });
+
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1);
+});
+
 test("detectOrphanedWorkMayPersist: ignores ordinary orphaned and non-failed tasks", () => {
   insertRun(mkRun("run-ord", "active"));
   insertTask(mkTask("task-ord", "run-ord", "failed"));
