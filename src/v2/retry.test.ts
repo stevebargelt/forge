@@ -6,9 +6,9 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
-import { insertTask, getTask } from "../store/tasks.js";
+import { insertTask, getTask, tasksForRun } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
-import { retry, RetryNotAllowedError, FanoutChildRetryError, reapRetainedContainer } from "./retry.js";
+import { retry, RetryNotAllowedError, FanoutChildRetryError, OrderedFanoutParentRetryError, reapRetainedContainer } from "./retry.js";
 import { retryPolicy, RE_DRIVABLE_FAILURE_KINDS, isReDrivableFailureKind } from "./retry-policy.js";
 import type { FailureKind } from "./failure-kind.js";
 import type { Run, Task } from "../types/index.js";
@@ -398,6 +398,157 @@ test("retry: --force lets a determined operator retry a fanout parent anyway", a
   assert.equal(out.newTask.status, "pending");
   const retried = eventsForTask("parent-orphaned-wave-force").find((e) => e.eventType === "task.retried")!;
   assert.equal((retried.payload as Record<string, unknown>).forced, true);
+});
+
+// ── FG-688: `forge retry <ordered fanout parent>` is the OTHER misadvising
+// surface. It mints a fresh PRIMARY with parentId unset, and adoption is scoped
+// to the CURRENT parent, so the retried wave cannot reach this parent's captured,
+// already-integrated children — it re-runs every completed item. The refusal
+// redirects to the verb that adopts them, and preserves --force. ──
+
+/** An ordered fan-out wave's parent: a parent-less failed row with children, plus
+ *  the durable `integration.worktree_created` evidence runOrderedWave writes before
+ *  any child is dispatched. `ordered: false` (or the event's absence) is what makes
+ *  the SAME fixture an unordered wave, which is how the tests below prove the flag
+ *  — not the shape — is what discriminates the two lanes. */
+function fanoutWaveParent(
+  id: string,
+  failureKind: string,
+  opts?: { ordered?: boolean | "no-event"; childStatus?: string },
+): void {
+  insertTask({
+    id, runId: RUN.id, phase: "build", agentRole: "engineer", status: "failed", error: "prerequisite blocked",
+    taskPackage: { taskId: id, runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-30T00:00:00Z",
+  });
+  for (const suffix of ["a", "b"]) {
+    insertTask({
+      id: `${id}-${suffix}`, runId: RUN.id, parentId: id, phase: "build", agentRole: "engineer",
+      status: (opts?.childStatus ?? "complete") as Task["status"],
+      taskPackage: { taskId: `${id}-${suffix}`, runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+      createdAt: "2026-05-30T00:00:00Z",
+    });
+  }
+  const ordered = opts?.ordered ?? true;
+  if (ordered !== "no-event") {
+    logEvent("integration.worktree_created", { runId: RUN.id, taskId: id, payload: { ordered } });
+  }
+  logEvent("task.failed", { runId: RUN.id, taskId: id, payload: { failure_kind: failureKind, error: "prerequisite blocked" } });
+}
+
+test("FG-688: a bare `forge retry` on an ordered fanout parent (prerequisite_blocked) is refused and names the re-drive", async () => {
+  fanoutWaveParent("ord-parent-blocked", "prerequisite_blocked");
+  const before = tasksForRun(RUN.id).length;
+
+  await assert.rejects(retry("ord-parent-blocked"), (e: unknown) => {
+    assert.ok(e instanceof OrderedFanoutParentRetryError, "the ordered lane gets its own named refusal");
+    assert.equal(e.failureKind, "prerequisite_blocked");
+    assert.match(e.message, /forge recover ord-parent-blocked --re-drive/);
+    // The refusal must say WHY retry is the wrong verb — that a fresh primary
+    // cannot adopt this parent's already-integrated children — not merely that
+    // another command exists.
+    assert.match(e.message, /adopt/i);
+    return true;
+  });
+
+  // The whole point of refusing BEFORE any write: no discarding primary exists.
+  assert.equal(tasksForRun(RUN.id).length, before, "no new task row was inserted");
+  assert.equal(eventsForTask("ord-parent-blocked").some((e) => e.eventType === "task.retried"), false);
+  assert.equal(getTask("ord-parent-blocked")!.status, "failed", "left untouched by the refusal");
+});
+
+test("FG-688: the CLI renders the ordered-parent refusal — it is a RetryNotAllowedError, so no new catch arm is needed", async () => {
+  fanoutWaveParent("ord-parent-render", "prerequisite_blocked");
+  await assert.rejects(retry("ord-parent-render"), (e: unknown) => {
+    assert.ok(e instanceof RetryNotAllowedError, "cli/commands/retry.ts catches this class and prints its message + advice");
+    assert.equal((e as RetryNotAllowedError).disposition.retryable, false);
+    assert.match((e as RetryNotAllowedError).disposition.advice ?? "", /forge recover ord-parent-render --re-drive/);
+    return true;
+  });
+});
+
+test("FG-688: --force still retries an ordered fanout parent — the operator's explicit override is preserved", async () => {
+  fanoutWaveParent("ord-parent-force", "prerequisite_blocked");
+  const out = await retry("ord-parent-force", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  assert.equal(out.newTask.parentId, undefined, "still mints a fresh primary — --force is the pre-FG-688 behaviour verbatim");
+  assert.equal(out.newTask.phase, "build");
+});
+
+test("FG-688: an UNORDERED fanout parent keeps its existing fanout_wave_orphaned behaviour exactly", async () => {
+  // Same rows, same children, same failure — only `ordered` differs. That is what
+  // proves the new lane is gated on the durable ordering flag and cannot swallow
+  // the pre-existing refusal.
+  fanoutWaveParent("unord-parent", "fanout_wave_orphaned", { ordered: false });
+
+  await assert.rejects(retry("unord-parent"), (e: unknown) => {
+    assert.ok(e instanceof RetryNotAllowedError);
+    assert.ok(!(e instanceof OrderedFanoutParentRetryError), "the unordered lane must not be rerouted");
+    // retry-policy.ts's own fanout_wave_orphaned entry, untouched by this ticket.
+    assert.match(e.message, /uncoordinated pending primary/);
+    return true;
+  });
+  assert.equal(getTask("unord-parent")!.status, "failed");
+});
+
+test("FG-688: a fanout parent with no integration.worktree_created event at all is not provably ordered — untouched", async () => {
+  // `fanout_wave_orphaned` is in the re-drive enumeration, so ONLY the ordering
+  // evidence stands between this row and the new lane. Absence must read as "not
+  // provably ordered", never as a default.
+  fanoutWaveParent("no-eviden-parent", "fanout_wave_orphaned", { ordered: "no-event" });
+  await assert.rejects(retry("no-eviden-parent"), (e: unknown) => {
+    assert.ok(!(e instanceof OrderedFanoutParentRetryError));
+    return true;
+  });
+});
+
+test("FG-688: a NON-fanout failed task with the same failure kind is unaffected", async () => {
+  // prerequisite_blocked is retryable:true, so an ordinary primary carrying it
+  // must retry cleanly — the redirect is scoped to wave PARENTS, not to the kind.
+  failedTask("t-blocked-primary", "prerequisite_blocked");
+  const out = await retry("t-blocked-primary");
+  assert.equal(out.newTask.status, "pending");
+  assert.equal(out.newTask.parentId, undefined);
+});
+
+test("FG-688: an ordered fanout parent whose kind the re-drive REFUSES is not redirected at it", async () => {
+  // plan_dependency_invalid is false in the enumeration: a re-drive re-reads the
+  // same plan and refuses at the same place, so pointing an operator there would
+  // reintroduce exactly the defect this ticket closes, in mirror image.
+  fanoutWaveParent("ord-parent-plan-invalid", "plan_dependency_invalid");
+  await assert.rejects(retry("ord-parent-plan-invalid"), (e: unknown) => {
+    assert.ok(e instanceof RetryNotAllowedError);
+    assert.ok(!(e instanceof OrderedFanoutParentRetryError), "the guard would reject this kind, so the advice must not name it");
+    assert.match(e.message, /request-changes/, "it keeps plan_dependency_invalid's own remediation");
+    return true;
+  });
+});
+
+test("FG-688: an ordered fanout parent carrying a kind from a FUTURE build is not redirected — fail closed", async () => {
+  fanoutWaveParent("ord-parent-future", "kind_from_a_future_build");
+  // Unrecognized → isReDrivableFailureKind false → no redirect. retryPolicy's
+  // opposite (advisory, permissive) default then lets the ordinary retry proceed.
+  const out = await retry("ord-parent-future");
+  assert.equal(out.newTask.status, "pending", "it falls through to the ordinary retry path, not to a verb that would refuse");
+});
+
+// The advice half of the same defect: retry-policy.ts is what `forge show` and
+// `forge retry` PRINT, and for these two kinds it named a verb that discards the
+// captured work.
+
+test("FG-688: prerequisite_blocked advice names `forge recover <id> --re-drive` with the placeholder substituted", () => {
+  const d = retryPolicy("prerequisite_blocked", "task-x");
+  assert.equal(d.retryable, true, "retryability was already right — the wave IS re-drivable");
+  assert.match(d.advice ?? "", /forge recover task-x --re-drive/);
+  assert.match(d.advice ?? "", /adopt/i, "and it must say the re-drive adopts the integrated items rather than re-running them");
+});
+
+test("FG-688: integration_blocked's final step is a re-drive, not `forge retry <id> --force`", () => {
+  const d = retryPolicy("integration_blocked", "task-y");
+  assert.match(d.advice ?? "", /forge recover task-y --re-drive/);
+  assert.doesNotMatch(d.advice ?? "", /forge retry task-y --force/);
+  // The rebase-the-worker remediation ahead of it is unchanged.
+  assert.match(d.advice ?? "", /rebase the worker's branch/);
 });
 
 test("retry: a RED reviewer child (parentId + same phase, agentRole prefixed red-) is not treated as a fanout child", async () => {
