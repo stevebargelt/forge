@@ -95,6 +95,22 @@ const day = (ms: number) => new Date(Math.floor(ms / DAY) * DAY).toISOString();
   started("retry-real", 4 * DAY + 45 * MINUTE);
   exited("retry-real", 4 * DAY);
 
+  // The other re-dispatch race: the PRIOR attempt's container tears down inside
+  // the new attempt's window, so its exit lands after the moved started_at while
+  // this attempt's own container starts later still. The stale exit must neither
+  // end the attempt nor be authorized by a start that follows it — and where the
+  // attempt then really runs, its own exit still supplies the duration.
+  addTask("stale-exit-late-start", "backend-specialist", 6 * DAY, 2 * HOUR, "failed");
+  started("stale-exit-late-start", 6 * DAY + 3 * HOUR);
+  exited("stale-exit-late-start", 6 * DAY + 2 * HOUR - 5 * MINUTE);
+  started("stale-exit-late-start", 6 * DAY + 2 * HOUR - 10 * MINUTE);
+  failed("stale-exit-late-start", 6 * DAY, "container_crash");
+  addTask("stale-exit-then-real", "frontend-specialist", 6 * DAY, 40 * MINUTE);
+  started("stale-exit-then-real", 6 * DAY + 90 * MINUTE);
+  exited("stale-exit-then-real", 6 * DAY + 40 * MINUTE - 5 * MINUTE);
+  started("stale-exit-then-real", 6 * DAY + 40 * MINUTE - 10 * MINUTE);
+  exited("stale-exit-then-real", 6 * DAY);
+
   // Four FG-654 lens failures share a Docker outage, alongside a genuine run.
   for (const role of ["red-wide", "red-narrow", "red-backend", "red-security"]) {
     addTask(`wave-${role}`, role, 5 * DAY, 5 * HOUR + 21 * MINUTE, "failed");
@@ -149,12 +165,13 @@ test("failed starts vanish consistently from every served aggregate while a same
   const body = await get(`?window=7d&projectDir=${PROJECT}`);
   assert.deepEqual(body.roleSummary, [
     { role: "engineer", averageMs: 6 * MINUTE, sampleCount: 2 },
+    { role: "frontend-specialist", averageMs: 40 * MINUTE, sampleCount: 1 },
     { role: "red-wide", averageMs: 84_000, sampleCount: 1 },
     { role: "tech-lead", averageMs: 40 * MINUTE, sampleCount: 1 },
     { role: "test-engineer", averageMs: 45 * MINUTE, sampleCount: 1 },
   ]);
   assert.deepEqual(body.byRole.map((series) => series.role), body.roleSummary.map((row) => row.role));
-  assert.equal(total(body.overall), 5, "no phantom survives in the overall series");
+  assert.equal(total(body.overall), 6, "no phantom survives in the overall series");
   for (const summary of body.roleSummary) {
     const series = body.byRole.find((candidate) => candidate.role === summary.role)!;
     assert.equal(total(series.buckets), summary.sampleCount, `${summary.role} series and summary agree`);
@@ -197,4 +214,21 @@ test("retries and the four-lens Docker outage cannot inflate the route, but genu
   assert.deepEqual(bucketAt(body.overall, outageDay), {
     bucketStart: outageDay, averageMs: 2 * MINUTE, sampleCount: 1, partial: false,
   }, "only the genuine execution in the FG-654 bucket remains");
+});
+
+test("a stale exit inside the new attempt's window is never its end, whether or not the attempt then runs", async () => {
+  const body = await get(`?window=7d&projectDir=${PROJECT}`);
+  assert.equal(
+    body.roleSummary.some((row) => row.role === "backend-specialist"), false,
+    "a start recorded after the exit does not authorize it, and the row does not fall back to completed_at",
+  );
+  assert.deepEqual(
+    body.roleSummary.find((row) => row.role === "frontend-specialist"),
+    { role: "frontend-specialist", averageMs: 40 * MINUTE, sampleCount: 1 },
+    "and the attempt's own exit still supplies its duration — not the 35 minutes the stale one would have",
+  );
+  const raceDay = day(NOW - 6 * DAY);
+  assert.deepEqual(bucketAt(body.overall, raceDay), {
+    bucketStart: raceDay, averageMs: 40 * MINUTE, sampleCount: 1, partial: false,
+  }, "one observation in that bucket, at the real duration");
 });

@@ -6,10 +6,17 @@
 // four of them — one per FG-654 review lens — moved a single day's `red-wide`
 // average to 1.79 hours against a real execution of about 1.4 minutes.
 //
-// The rule under test: layer 1 reads an attached-exit event only for an attempt
-// that ALSO carries a `container.started` at or after its own `started_at`.
-// Without one the row is dropped outright rather than falling through to layer 2,
-// which would hand back the very same pre-container interval.
+// The rule under test: layer 1 reads an attached-exit event only when a
+// `container.started` of the same attempt PRECEDES it — at or after the row's
+// own `started_at`, and at or before that exit. With no exit so authorized the
+// row is dropped outright rather than falling through to layer 2, which would
+// hand back the very same pre-container interval.
+//
+// The ordering half of that rule is not decoration. Bounding the start and the
+// exit independently at `started_at` admits an exit at 11:05 vouched for by a
+// start at 11:10 — an agent run measured to an end that precedes its own
+// container — and after an in-place re-dispatch that exit belongs to the
+// previous attempt entirely.
 //
 // The rule deliberately stops at layer 1, and the boundary is asserted here as
 // hard as the fix itself: `container.started` only reached ~98% coverage from
@@ -18,8 +25,8 @@
 // there would delete ~346 rows of real pre-instrumentation history from `all` —
 // a worse defect than the one being corrected.
 //
-// The absence of start evidence is the only thing asserted here; WHICH exit wins
-// once a container did start is the sibling agent-end suite's subject.
+// What start evidence admits is the subject here; which of SEVERAL authorized
+// exits wins once a container did start is the sibling agent-end suite's.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -356,6 +363,100 @@ test("a prior attempt's container.started cannot authorize the current attempt's
       const result = trends();
       assert.deepEqual(result.roleSummary, [], "attempt 1's start does not vouch for attempt 2");
       assert.equal(totalSamples(result.overall), 0, "and attempt 1's exit does not end it either");
+    },
+  );
+});
+
+test("a container.started recorded AFTER the exit authorizes nothing", () => {
+  // Existence alone is not evidence: the start has to precede the stop it
+  // vouches for. Here the only start lands after the exit, so the exit still
+  // bounds a window in which no container existed — and, `container_crash`
+  // being a supervised kind, layer 2 would hand back that very same interval,
+  // so the row must be dropped rather than fall through.
+  withTasks(
+    [
+      {
+        id: "start-after-exit", role: "engineer", status: "failed",
+        started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T14:21:24.000Z`,
+        events: [
+          exited(`${DAY}T14:21:24.000Z`),
+          started(`${DAY}T14:30:00.000Z`),
+          failedWith("container_crash", `${DAY}T14:21:24.000Z`),
+        ],
+      },
+    ],
+    () => {
+      const result = trends();
+      assert.deepEqual(result.roleSummary, [], "a start that follows the exit does not reach back to authorize it");
+      assert.equal(totalSamples(result.overall), 0, "and the row does not fall through to its completed_at either");
+    },
+  );
+});
+
+test("a start stamped exactly at the exit's instant is still evidence", () => {
+  // The upper bound is inclusive, matching the inclusive lower one: a container
+  // that started and stopped inside the same recorded millisecond is a
+  // zero-length execution, not a missing one.
+  withTasks(
+    [
+      {
+        id: "instant", role: "engineer", status: "failed",
+        started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T12:00:00.000Z`,
+        events: [started(`${DAY}T09:30:00.000Z`), exited(`${DAY}T09:30:00.000Z`), failedWith("container_crash", `${DAY}T12:00:00.000Z`)],
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 30 * MINUTE, sampleCount: 1 }]),
+  );
+});
+
+test("a stale prior-attempt exit landing after the new started_at cannot be ended by a later start", () => {
+  // The re-dispatch race, from the exit side. markTaskRunning moved started_at
+  // to 11:00 while the PREVIOUS attempt's container was still tearing down; its
+  // exit lands at 11:05, inside the new attempt's window, and the new container
+  // starts at 11:10. Bounding the two independently at started_at admits both
+  // and measures a 5-minute agent run that ended before its container existed.
+  withTasks(
+    [
+      {
+        id: "stale-exit-late-start", role: "engineer", status: "failed",
+        started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T13:00:00.000Z`,
+        events: [
+          started(`${DAY}T09:00:00.000Z`),
+          exited(`${DAY}T11:05:00.000Z`),
+          started(`${DAY}T11:10:00.000Z`),
+          failedWith("container_crash", `${DAY}T13:00:00.000Z`),
+        ],
+      },
+    ],
+    () => {
+      const result = trends();
+      assert.deepEqual(result.roleSummary, [], "the prior attempt's exit is not this attempt's end");
+      assert.equal(totalSamples(result.overall), 0, "and specifically not a 5-minute observation");
+    },
+  );
+});
+
+test("past a stale exit, the attempt is measured to the first exit its OWN start precedes", () => {
+  // The same race carried to its usual conclusion: the new container starts at
+  // 11:10 and stops at 11:40. The stale 11:05 exit is passed over — no start of
+  // this attempt precedes it — rather than deciding the row, so the execution
+  // that genuinely happened keeps its full duration from started_at instead of
+  // being dropped along with the exit it had nothing to do with.
+  withTasks(
+    [
+      {
+        id: "stale-exit-then-real", role: "engineer",
+        started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T11:40:00.000Z`,
+        events: [
+          started(`${DAY}T09:00:00.000Z`),
+          exited(`${DAY}T11:05:00.000Z`),
+          started(`${DAY}T11:10:00.000Z`),
+          exited(`${DAY}T11:40:00.000Z`),
+        ],
+      },
+    ],
+    () => {
+      assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 40 * MINUTE, sampleCount: 1 }]);
     },
   );
 });
