@@ -1191,7 +1191,9 @@ export type ReleaseWorkspaceResidue = { path: string; reason: string };
  *    over carry a 93 MB node_modules copy each.
  *  - It never follows a symlink (`isSymbolicLink()` checked FIRST, as freeze does — that
  *    predicate is false for `isDirectory()` on a link-to-directory), so a link's out-of-tree
- *    target is never chmod'd. `rmSync` unlinks the link itself, which is what we want.
+ *    target is never chmod'd. `rmSync` unlinks the link itself, which is what we want. The
+ *    check is re-stated immediately before AND after each chmod, because a Dirent classified
+ *    one instant is not evidence about the pathname resolved at the next one.
  *  - Every chmod/readdir failure is caught and recorded, and the walk CONTINUES to siblings:
  *    one unreachable corner must not cost the other 3.4 GB.
  *
@@ -1201,9 +1203,12 @@ export type ReleaseWorkspaceResidue = { path: string; reason: string };
  *  fixture root inside an unwritable PARENT cannot be unlinked, and disposal must report that
  *  rather than reach outside its own tree to fix it.
  *
- *  Returns the surviving paths, empty when the tree is gone. A recorded fault whose path no
- *  longer exists is NOT residue: preparation can fail on a corner rmSync then removes anyway,
- *  and reporting a path that is provably gone would train readers to ignore the report. When
+ *  Returns the surviving paths, empty when the tree is gone. A recorded fault whose path is
+ *  PROVABLY gone (lstat says ENOENT) is NOT residue: preparation can fail on a corner rmSync
+ *  then removes anyway, and reporting a path that is provably gone would train readers to
+ *  ignore the report. A path that cannot be lstat'ed at all — a fixture root whose parent lost
+ *  search — is reported: "could not verify" is not "removed", and stranding it silently is the
+ *  defect this exists to end rather than a tidier report. When
  *  residue is non-empty it also writes ONE block to STDERR naming `label` and each path +
  *  reason. Never stdout: fg644-dirty-tree-execution.integration.test.ts parses an inner run's
  *  stdout as TAP, and a diagnostic there corrupts the grading of which tests executed. */
@@ -1213,20 +1218,56 @@ export function disposeReleaseWorkspace(dir: string, label: string): ReleaseWork
   const record = (path: string, e: unknown): void => {
     if (!faults.some((f) => f.path === path)) faults.push({ path, reason: describe(e) });
   };
+  // ENOENT is the ONLY lstat failure that proves a path is gone. Any other (EACCES from a
+  // parent that lost search, ELOOP, EIO) means survival could not be disproven — and a
+  // recorded fault whose survival cannot be disproven must be REPORTED, not filtered out.
+  // Treating "cannot verify" as "removed" is the silent stranding this function exists to end.
   const present = (p: string): boolean => {
     try {
       lstatSync(p);
       return true;
-    } catch {
-      return false;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== "ENOENT";
     }
   };
 
   // PRE-ORDER: a directory is made traversable+writable before it is read, and before its
   // children are visited, so the walk can reach what a freeze (or a hostile chmod) closed off.
+  //
+  // The lstat IMMEDIATELY before the chmod and the identity check IMMEDIATELY after it are
+  // what hold "never follows a symlink, never chmods outside its input" against a concurrent
+  // writer (in practice a still-running test fixture, not an adversary). Classification and
+  // chmod resolve the same PATHNAME at two instants; without these, a directory swapped for a
+  // symlink after the root lstat — or after a child's Dirent classification, which is a whole
+  // readdir and any number of sibling subtrees earlier — has its target chmod'd and walked.
+  //
+  // RESIDUAL, stated rather than claimed closed: node exposes no fd-bound or nofollow chmod
+  // usable here. An O_NOFOLLOW open would bind the operation to the entry, but a directory
+  // this walk exists to recover has lost r/x (mode 0o000) and cannot be opened at all, while
+  // chmod on a pathname needs no read permission. So a swap landing inside the lstat→chmod
+  // window still lands ONE chmod on the link's target; the check after it sees the entry is no
+  // longer the inode that was classified, abandons it and records it, so the target's contents
+  // are never read, walked or chmod'd. Narrowing this class properly is FG-697's, repo-wide —
+  // deliberately no retry loop and no containment guard here.
   const makeRemovable = (d: string): void => {
+    let before;
     try {
-      chmodSync(d, lstatSync(d).mode | 0o700);
+      before = lstatSync(d);
+    } catch (e) {
+      record(d, e);
+      return;
+    }
+    if (before.isSymbolicLink() || !before.isDirectory()) {
+      record(d, new Error("not the directory this walk classified — not followed"));
+      return;
+    }
+    try {
+      chmodSync(d, before.mode | 0o700);
+      const after = lstatSync(d);
+      if (after.isSymbolicLink() || !after.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) {
+        record(d, new Error("replaced during disposal — abandoned without reading it"));
+        return;
+      }
     } catch (e) {
       record(d, e);
       // Fall through: the readdir may still succeed (the bits we wanted may already be set),

@@ -239,6 +239,57 @@ test("FG-698 AC2 (B): what disposal genuinely cannot remove is reported on stder
   }
 });
 
+// (B2) THE UNVERIFIABLE SURVIVOR — the same shape as (B) one notch harsher, and the case (B)
+// passes straight over. (B)'s 0o555 parent still grants SEARCH, so the surviving root can be
+// lstat'ed and the report is easy. Strip search too and the root cannot be observed from
+// outside at all: rmSync records EACCES, and a disposal that reads "cannot lstat" as "gone"
+// filters that fault away and writes NOTHING while the tree is still on disk. That is the
+// silent stranding FG-698 exists to eliminate, reintroduced inside its own fix — so the
+// distinction disposal already makes for the root lstat (ENOENT is gone; anything else is
+// not) has to be made here too.
+test("FG-698 AC2 (B2): a survivor whose parent lost SEARCH — unverifiable, not gone — is still reported", () => {
+  const base = mkdtempSync(join(tmpdir(), "fg698-"));
+  const parent = join(base, "parent");
+  const label = "FG-698 AC2 case B2";
+  try {
+    mkdirSync(parent);
+    const { root } = frozenTree(parent, "rel");
+
+    // INDUCTION: no write on the parent (so the root cannot be unlinked) and no search on it
+    // (so the root's survival cannot be observed). Both halves are asserted: without the
+    // second, this case would be (B) again and would prove nothing new.
+    chmodSync(parent, 0o600);
+    assert.throws(
+      () => lstatSync(root),
+      (e: unknown) => errCode(e) === "EACCES",
+      inductionMsg(`expected lstatSync(${root}) to fail with EACCES inside a 0o600 (no-search) parent`),
+    );
+
+    const { value: residue, stdout, stderr } = captureStreams(() =>
+      disposeReleaseWorkspace(root, label),
+    );
+
+    // The tree really did survive — provable only once the parent's search bit is back.
+    chmodSync(parent, 0o700);
+    assert.equal(existsSync(root), true, "the induction says this root cannot be unlinked");
+
+    assert.equal(residue.length, 1, `an unverifiable survivor IS residue, got ${JSON.stringify(residue)}`);
+    assert.equal(residue[0]?.path, root, "residue names the path that survived");
+    assert.match(
+      residue[0]?.reason ?? "",
+      /EACCES|EPERM/,
+      "residue carries the OS reason it survived, not a generic message",
+    );
+
+    assert.ok(stderr.includes(label), `the report must name the caller's label; got:\n${stderr}`);
+    assert.ok(stderr.includes(root), `the report must name the surviving path; got:\n${stderr}`);
+    assert.match(stderr, /EACCES|EPERM/, `the report must carry the reason; got:\n${stderr}`);
+    assert.equal(stdout, "", "teardown diagnostics must never touch stdout (fg644 parses it as TAP)");
+  } finally {
+    forceRemove(base);
+  }
+});
+
 // (C) HAPPY PATH — the ordinary teardown, which is what runs on every clean exit. A frozen
 // tree with no induced fault is removed completely, reports nothing, and returns no residue.
 test("FG-698 AC2 (C): a cleanly frozen tree is disposed of completely and reports nothing", () => {
@@ -299,6 +350,30 @@ test("FG-698: disposal is idempotent on a missing path and never follows a symli
       lstatSync(outsider).mode,
       modeBefore,
       "disposal must not chmod through a link into a directory outside the tree it was handed",
+    );
+
+    // The same must hold at DEPTH, which is where the walk actually recurses and where a link
+    // is far more likely to sit than at the top level. This target has its own subdirectory,
+    // so a walk that followed the link would chmod TWO directories outside the input path.
+    const deepOutsider = join(base, "deep-outsider");
+    const deepInterior = join(deepOutsider, "interior");
+    mkdirSync(deepInterior, { recursive: true });
+    writeFileSync(join(deepInterior, "keep.txt"), "keep\n");
+    chmodSync(deepInterior, 0o500);
+    chmodSync(deepOutsider, 0o500);
+    const deepModesBefore = [lstatSync(deepOutsider).mode, lstatSync(deepInterior).mode];
+
+    const nested = join(base, "nested");
+    mkdirSync(join(nested, "a", "b"), { recursive: true });
+    symlinkSync(deepOutsider, join(nested, "a", "b", "link-out"));
+
+    assert.deepEqual(disposeReleaseWorkspace(nested, "FG-698 nested symlink"), []);
+    assert.equal(existsSync(nested), false, "the tree, including the link nested two levels down, is removed");
+    assert.equal(existsSync(join(deepInterior, "keep.txt")), true, "the nested link's target must survive");
+    assert.deepEqual(
+      [lstatSync(deepOutsider).mode, lstatSync(deepInterior).mode],
+      deepModesBefore,
+      "disposal must not chmod through a link found DEEP inside the tree it was handed",
     );
   } finally {
     forceRemove(base);

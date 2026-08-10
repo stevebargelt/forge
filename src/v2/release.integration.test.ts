@@ -20,7 +20,7 @@
 
 import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync, spawn, execFileSync } from "node:child_process";
+import { spawnSync, spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -205,11 +205,13 @@ before(() => {
  *  that is already gone, and the outside-the-workspace guard's own fixture is out of reach
  *  by construction.
  *
- *  Ordering is already safe: afterEach runs after the test body's own `finally`, so the two
- *  dashboard tests have SIGKILL'd their detached process group before the release they booted
- *  from is removed. Disposal never throws and reports residue on stderr, so a teardown fault
- *  can never redden a test — that inversion (an environment mechanism read as product
- *  breakage) is the failure shape this ticket exists because of. */
+ *  Ordering is safe because the sweep never runs against a LIVE writer: afterEach runs after
+ *  the test body's own `finally`, and the two dashboard tests do not merely SIGKILL their
+ *  detached process group there — they WAIT for it to be gone (killGroupAndAwaitExit), because
+ *  signalling is not exit observation and a still-running server would otherwise race disposal
+ *  of the release it booted from. Disposal never throws and reports residue on stderr, so a
+ *  teardown fault can never redden a test — that inversion (an environment mechanism read as
+ *  product breakage) is the failure shape this ticket exists because of. */
 afterEach(() => {
   if (!workspace || !pinned) return;
   let entries: string[];
@@ -821,6 +823,85 @@ async function pollGet(url: string, timeoutMs: number): Promise<{ status: number
   throw new Error(`pollGet timed out for ${url}: ${String(lastErr)}`);
 }
 
+/** Members of process group `pgid` that can still RUN. A member that is already reaped, or
+ *  that is defunct waiting for a parent that will never reap it (this container's pid 1 does
+ *  not), cannot write anything and so is not a writer teardown has to wait for — which is why
+ *  this counts states, not the existence a `kill(-pgid, 0)` probe would report. `ps -e -o
+ *  pgid=,stat=` is spelled the same for procps and BSD ps; if ps cannot be read at all this
+ *  reports zero, leaving the caller with the group leader's own exit, which it observes
+ *  directly either way. */
+function liveGroupMembers(pgid: number): number {
+  let out: string;
+  try {
+    out = execFileSync("ps", ["-e", "-o", "pgid=,stat="], { encoding: "utf8" });
+  } catch {
+    return 0;
+  }
+  return out.split("\n").filter((line) => {
+    const m = /^\s*(\d+)\s+(\S+)/.exec(line);
+    return m !== null && Number(m[1]) === pgid && !m[2]!.startsWith("Z");
+  }).length;
+}
+
+/** FG-698 (AC4) — SIGKILL a detached child's whole process GROUP and then WAIT until nothing
+ *  in it can still run. Signalling is not exit observation: kill() returns as soon as the
+ *  signal is queued, so a `finally` that only signals hands control straight back to the
+ *  file-level afterEach — which begins disposing this test's release tree while the dashboard
+ *  server may still be writing into it. Two observations, in order: node's own `exit` (the
+ *  group leader is dead AND reaped), then no runnable member of the group left behind.
+ *
+ *  It never throws. A teardown fault must not decide this test's verdict, so a group that
+ *  outlives the deadline is REPORTED on stderr and the test's own assertions still stand —
+ *  the same discipline disposal applies to residue. */
+async function killGroupAndAwaitExit(child: ChildProcess, label: string): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) return; // spawn never produced a process; nothing to wait for
+  const exited = new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once("exit", () => resolve());
+  });
+  try { process.kill(-pid, "SIGKILL"); } catch { /* group already gone */ }
+  await exited;
+  const deadline = Date.now() + 5000;
+  while (liveGroupMembers(pid) > 0) {
+    if (Date.now() >= deadline) {
+      process.stderr.write(`forge test: process group ${pid} (${label}) still had a RUNNABLE member 5s after SIGKILL — disposal may race it\n`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+test("FG-698 (AC4): the dashboard teardown WAITS for the signalled process group to stop running — signalling is not exit observation", async () => {
+  // What the file-level afterEach sweep depends on, stated directly: when a test body's
+  // `finally` returns, nothing it spawned can still be writing into the release tree that
+  // sweep is about to dispose of. A `finally` that only calls process.kill(-pid, "SIGKILL")
+  // does not give that — the signal is merely queued, and the child is provably NOT reaped
+  // the instant kill() returns, which is the first assertion below.
+  //
+  // Two members in the group on purpose: killing the leader is not killing the group.
+  const child = spawn("/bin/sh", ["-c", "sleep 30 & sleep 30"], { detached: true, stdio: "ignore" });
+  const pid = child.pid;
+  assert.ok(pid !== undefined, "the fixture process must spawn");
+
+  // INDUCTION: the group must actually come up — `detached` means the child setsid()s after
+  // spawn() returns — else tearing it down would prove nothing.
+  const upBy = Date.now() + 2000;
+  while (liveGroupMembers(pid) < 2 && Date.now() < upBy) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(
+    liveGroupMembers(pid) >= 2,
+    "the fixture's process GROUP (leader + a second member) must be running before the teardown under test does anything",
+  );
+
+  await killGroupAndAwaitExit(child, "FG-698 AC4 self-check");
+
+  assert.ok(
+    child.exitCode !== null || child.signalCode !== null,
+    "teardown returned only after the child was actually reaped — a queued signal is not an exit",
+  );
+  assert.equal(liveGroupMembers(pid), 0, "and no member of the signalled group can still run when it returns");
+});
+
 test("FG-580 (dashboard bundled, EXECUTED, NO node on PATH): the release ships the complete dashboard closure and `forge dashboard start` boots under the release's pinned runtime, offline", async () => {
   // (1) The release carries the whole dashboard runtime — entry, tsconfig (the runtime
   // @forge/* resolver), a representative static asset, and every VENDORED client lib
@@ -867,7 +948,7 @@ test("FG-580 (dashboard bundled, EXECUTED, NO node on PATH): the release ships t
     assert.equal(lib.status, 200, "the vendored preact serves first-party from the release closure");
     assert.match(lib.contentType ?? "", /javascript/, "the vendored lib serves as executable JS (module MIME)");
   } finally {
-    try { process.kill(-child.pid!, "SIGKILL"); } catch { /* group already gone */ }
+    await killGroupAndAwaitExit(child, "FG-580 dashboard server");
   }
 });
 
@@ -1103,7 +1184,7 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands �
     assert.equal(lib.status, 200, "the vendored preact serves first-party from the release closure, source gone");
     assert.match(lib.contentType ?? "", /javascript/, "the vendored lib serves as executable JS (module MIME)");
   } finally {
-    try { process.kill(-dashChild.pid!, "SIGKILL"); } catch { /* group already gone */ }
+    await killGroupAndAwaitExit(dashChild, "FG-569 dashboard server, source renamed away");
   }
 });
 
