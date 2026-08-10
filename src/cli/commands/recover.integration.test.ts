@@ -13,6 +13,7 @@ import { taskDir } from "../../util/paths.js";
 import { reconcileRun } from "../../v2/reconcile.js";
 import { computeReadyQueue } from "../../v2/ready-queue.js";
 import type { Workflow } from "../../v2/schema.js";
+import { RE_DRIVABLE_FAILURE_KINDS, retryPolicy } from "../../v2/retry-policy.js";
 import { performInspect, performContinue, performReDrive, performRecover } from "./recover.js";
 import type { Run, Task } from "../../types/index.js";
 
@@ -1073,6 +1074,178 @@ test("FG-688 --re-drive ATOMICITY: the run CAS losing its race rolls the parent 
   assert.deepEqual(getTask("parent-ordered-race"), parentBefore, "the parent reopen rolled back — still failed");
   assert.deepEqual(getRun(RUN.id), runBefore, "the run row is still failed — the trigger's own write rolled back too");
   assert.equal(eventsForRun(RUN.id).length, eventCount, "no run.reactivated, no task.reconciled — a rolled-back verb emits nothing");
+});
+
+// ── FG-688: the inspector that misadvises ────────────────────────────────────
+//
+// The ticket's second half. `buildFanoutView` hardcoded `forge recover <id>
+// --re-drive` for EVERY fanout parent while the mutation guard accepts only an
+// enumerated set, so on a `prerequisite_blocked` parent — the exact case FG-688 is
+// about — following forge's own printed advice produced a refusal (FG-576).
+//
+// The invariant these cells hold the surface to is general, not this ticket's
+// kind: THE RECOMMENDATION CAN NEVER NAME A VERB THE MUTATION GUARD REJECTS.
+
+/** Every FailureKind this build knows, taken from the compile-time-exhaustive
+ *  re-drive enumeration — so a kind added later is automatically in this table
+ *  and cannot slip past the invariant. */
+const ALL_FAILURE_KINDS = Object.keys(RE_DRIVABLE_FAILURE_KINDS);
+
+test("FG-688 inspector: the recommendation NEVER names a verb --re-drive would reject — every failure kind, ordered and unordered", () => {
+  assert.ok(ALL_FAILURE_KINDS.length > 20, "sanity: the table really is the whole FailureKind union");
+
+  for (const ordered of [true, false]) {
+    for (const kind of ALL_FAILURE_KINDS) {
+      // One phase per case: supersession is per-phase, so distinct phases keep the
+      // cases independent (and keep a minted primary from superseding the next).
+      const phase = `build-${ordered ? "o" : "u"}-${kind}`;
+      const parentId = `parent-${phase}`;
+      buildFailedWave(parentId, kind, { ordered, phase });
+
+      const inspected = performInspect(parentId);
+      assert.equal(inspected.kind, "inspect-fanout-parent", `${phase}: a fanout parent inspects as one`);
+      if (inspected.kind !== "inspect-fanout-parent") continue;
+      const view = inspected.parent;
+      // The invariant is about the VERB recommended, so it is read off the
+      // discrete commands — a refusal's note may legitimately mention `--re-drive`
+      // while explaining why it is not being offered.
+      const recommendsReDrive = view.recommendationCommands.some((c) => c.includes("--re-drive"));
+      assert.equal(
+        view.recommendation.startsWith(view.recommendationCommands.join(" && ")),
+        true,
+        `${phase}: the rendered line and the discrete commands are the same advice`,
+      );
+
+      // The disposition is the SAME predicate the guard enforces, so it must
+      // agree with it — asserted below against the guard's own answer.
+      assert.equal(recommendsReDrive, view.reDrive.eligible, `${phase}: the printed verb matches the disposition`);
+      assert.ok(view.reDrive.why.length > 0, `${phase}: --json consumers get a WHY, not just a verb`);
+      assert.equal(view.reDrive.ordered, ordered, `${phase}: the durable wave shape is surfaced`);
+      assert.equal(view.recommendationCommands.length >= 1, true, `${phase}: discrete commands too`);
+
+      const outcome = performReDrive(parentId);
+
+      // Forward: a recommended --re-drive is never refused.
+      if (recommendsReDrive) {
+        assert.notEqual(outcome.kind, "re-drive-refused", `${phase}: recommended --re-drive must not be refused`);
+      }
+      // Converse: every kind the guard refuses gets a NON-re-drive recommendation,
+      // and that recommendation names a real forward verb.
+      if (outcome.kind === "re-drive-refused") {
+        assert.equal(recommendsReDrive, false, `${phase}: a refused kind must not be recommended --re-drive`);
+        assert.match(view.recommendation, /^forge (retry|next|show) /, `${phase}: the fallback names an accepted verb`);
+      }
+    }
+  }
+});
+
+test("FG-688 inspector: a re-drive-refused kind falls back to the retryPolicy-derived retry line, --force iff the policy needs it", () => {
+  // A refused kind that IS plainly retryable, and one that is not — the fallback
+  // is derived from retryPolicy rather than special-cased, so both come out right.
+  buildFailedWave("parent-fb-retryable", "idle_timeout", { phase: "build-fb-retryable" });
+  buildFailedWave("parent-fb-forced", "integration_failed", { phase: "build-fb-forced" });
+
+  assert.equal(retryPolicy("idle_timeout").retryable, true, "sanity");
+  assert.equal(retryPolicy("integration_failed").retryable, false, "sanity");
+
+  const retryable = performInspect("parent-fb-retryable");
+  assert.equal(retryable.kind, "inspect-fanout-parent");
+  if (retryable.kind !== "inspect-fanout-parent") return;
+  assert.deepEqual(retryable.parent.recommendationCommands, ["forge retry parent-fb-retryable"]);
+  assert.equal(retryable.parent.reDrive.disposition, "failure_kind_refused");
+
+  const forced = performInspect("parent-fb-forced");
+  assert.equal(forced.kind, "inspect-fanout-parent");
+  if (forced.kind !== "inspect-fanout-parent") return;
+  assert.deepEqual(forced.parent.recommendationCommands, ["forge retry parent-fb-forced --force"]);
+  assert.match(forced.parent.recommendation, /integration_failed/);
+});
+
+test("FG-688 inspector: the FG-576 reproduction — a prerequisite_blocked ordered parent's --json recommendation is --re-drive, AND that command succeeds", () => {
+  buildFailedWave("parent-fg576", "prerequisite_blocked");
+  settleRunFailed();
+
+  // Verbatim the operator's path: `forge recover <parent> --json`.
+  const inspected = performRecover("parent-fg576", { json: true });
+  assert.equal(inspected.kind, "inspect-fanout-parent");
+  if (inspected.kind !== "inspect-fanout-parent") return;
+  assert.deepEqual(inspected.parent.recommendationCommands, ["forge recover parent-fg576 --re-drive"]);
+  assert.equal(inspected.parent.failureKind, "prerequisite_blocked");
+  assert.equal(inspected.parent.reDrive.eligible, true);
+  assert.equal(inspected.parent.reDrive.disposition, "eligible");
+  assert.equal(inspected.parent.reDrive.ordered, true);
+
+  // Before FG-688 this is where the operator hit a refusal.
+  const outcome = performRecover("parent-fg576", { reDrive: true });
+  assert.equal(outcome.kind, "re-drive-done");
+  if (outcome.kind !== "re-drive-done") return;
+  assert.equal(outcome.lane, "ordered_reopened_in_place");
+  assert.equal(outcome.dispatchTaskId, "parent-fg576");
+});
+
+test("FG-688 inspector: a SUPERSEDED parent is pointed at `forge next <runId>`, never at --re-drive", () => {
+  buildFailedWave("parent-superseded-advice", "prerequisite_blocked");
+  insertTask(mkTask("parent-live-advice", { status: "running", phase: "build", createdAt: "2026-06-02T00:00:00Z" }));
+  settleRunFailed();
+
+  const inspected = performInspect("parent-superseded-advice");
+  assert.equal(inspected.kind, "inspect-fanout-parent");
+  if (inspected.kind !== "inspect-fanout-parent") return;
+  assert.deepEqual(inspected.parent.recommendationCommands, [`forge next ${RUN.id}`]);
+  assert.equal(inspected.parent.reDrive.eligible, false);
+  assert.equal(inspected.parent.reDrive.disposition, "superseded");
+  assert.equal(inspected.parent.reDrive.supersededBy, "parent-live-advice");
+  assert.match(inspected.parent.recommendation, /parent-live-advice/, "names the live primary");
+
+  // And the guard agrees — the point of routing both through one predicate.
+  assert.equal(performReDrive("parent-superseded-advice").kind, "re-drive-refused");
+});
+
+test("FG-688 inspector: a run whose status no recovery verb reopens gets a read-only recommendation, not --re-drive", () => {
+  buildFailedWave("parent-run-abandoned-advice", "prerequisite_blocked");
+  updateRunStatus(RUN.id, "abandoned");
+
+  const inspected = performInspect("parent-run-abandoned-advice");
+  assert.equal(inspected.kind, "inspect-fanout-parent");
+  if (inspected.kind !== "inspect-fanout-parent") return;
+  assert.equal(inspected.parent.reDrive.disposition, "run_not_reopenable");
+  // The recommended VERB is read-only; the note may still name `--re-drive` while
+  // explaining why an abandoned run is not reopened by it.
+  assert.deepEqual(inspected.parent.recommendationCommands, ["forge show parent-run-abandoned-advice"]);
+  assert.match(inspected.parent.recommendation, /abandoned/);
+  assert.equal(performReDrive("parent-run-abandoned-advice").kind, "re-drive-refused");
+});
+
+test("FG-688 inspector: a run-level `forge recover <runId>` lists an eligible ORDERED parent — and stays docker-free", () => {
+  buildFailedWave("parent-runlevel-ordered", "prerequisite_blocked");
+  settleRunFailed();
+
+  // Any container probe here is the bug: a run-level inspect must never reach
+  // docker. Only FAILED tasks are listed, and the fanout view reads durable state.
+  const outcome = performInspect(RUN.id, () => {
+    throw new Error("run-level inspect must not probe a container");
+  });
+  assert.equal(outcome.kind, "inspect-run");
+  if (outcome.kind !== "inspect-run") return;
+
+  const view = outcome.fanoutParents.find((f) => f.parentId === "parent-runlevel-ordered");
+  assert.ok(view, "the ordered parent FG-688 makes recoverable is listed, not reported as 'no recoverable tasks'");
+  assert.equal(view!.failureKind, "prerequisite_blocked");
+  assert.deepEqual(view!.recommendationCommands, ["forge recover parent-runlevel-ordered --re-drive"]);
+  assert.equal(view!.reDrive.eligible, true);
+});
+
+test("FG-688 inspector: a run-level listing still omits a fanout parent whose kind the guard refuses", () => {
+  buildFailedWave("parent-runlevel-refused", "gate_rejected");
+
+  const outcome = performInspect(RUN.id);
+  assert.equal(outcome.kind, "inspect-run");
+  if (outcome.kind !== "inspect-run") return;
+  assert.equal(
+    outcome.fanoutParents.some((f) => f.parentId === "parent-runlevel-refused"),
+    false,
+    "the widened listing is the shared enumeration, not 'every failed parent'",
+  );
 });
 
 // ── performRecover dispatcher ────────────────────────────────────────────────

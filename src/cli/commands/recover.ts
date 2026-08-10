@@ -279,6 +279,30 @@ function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): Ta
   };
 }
 
+/** FG-688: which clause of `--re-drive`'s eligibility conjunction decided this
+ *  parent — `eligible`, or the one that refused. Surfaced on the view so a
+ *  `--json` consumer reads WHY rather than inferring it from a rendered string. */
+export type ReDriveDispositionCode =
+  | "eligible"
+  | "superseded"
+  | "run_not_reopenable"
+  | "failure_kind_refused"
+  | "ordered_resumable_in_place"
+  | "wave_in_flight"
+  | "not_failed";
+
+export type ReDriveDisposition = {
+  /** Would `performReDrive` accept this parent right now? */
+  eligible: boolean;
+  disposition: ReDriveDispositionCode;
+  /** One sentence: the clause that decided it, in operator language. */
+  why: string;
+  /** The wave's DURABLE shape (isOrderedFanoutWave) — what picks the lane. */
+  ordered: boolean;
+  /** Set only for `superseded`: the later primary that owns the phase now. */
+  supersededBy?: string;
+};
+
 export type FanoutParentView = {
   parentId: string;
   runId: string;
@@ -287,6 +311,10 @@ export type FanoutParentView = {
   failureKind?: string;
   children: { id: string; status: string }[];
   recommendation: string;
+  /** The recommendation as discrete commands, mirroring TaskEvidenceView. */
+  recommendationCommands: string[];
+  /** FG-688: the re-drive guard's answer for this parent, and why. */
+  reDrive: ReDriveDisposition;
 };
 
 function isFanoutParent(task: Task, allTasks: Task[]): boolean {
@@ -294,12 +322,18 @@ function isFanoutParent(task: Task, allTasks: Task[]): boolean {
 }
 
 // Is this a fanout parent in a state piece-2 reconcile would act on (settle) or
-// has already settled into fanout_wave_orphaned? A `running` parent whose
-// children aren't all terminal yet is left alone by reconcile too — the wave
-// may still be in flight — so it's not listed as recoverable here either.
+// has already settled into a failure kind `--re-drive` accepts? A `running`
+// parent whose children aren't all terminal yet is left alone by reconcile too —
+// the wave may still be in flight — so it's not listed as recoverable here either.
+//
+// FG-688: the failed arm listed ONLY `fanout_wave_orphaned`, so a run-level
+// `forge recover <runId>` reported "no recoverable tasks" for exactly the
+// terminally-failed ordered waves this ticket makes recoverable. It now reads the
+// SAME shared enumeration the mutation guard and the recommendation consult, so
+// the three surfaces cannot disagree about which parents are recoverable.
 function fanoutParentRecoverable(task: Task, allTasks: Task[]): boolean {
   if (!isFanoutParent(task, allTasks)) return false;
-  if (task.status === "failed") return failureKindForTask(task.id) === "fanout_wave_orphaned";
+  if (task.status === "failed") return isReDrivableFailureKind(failureKindForTask(task.id));
   if (task.status === "running") {
     if (eventsForTask(task.id).some((e) => e.eventType === "container.started")) return false;
     const children = allTasks.filter((t) => t.parentId === task.id);
@@ -308,16 +342,168 @@ function fanoutParentRecoverable(task: Task, allTasks: Task[]): boolean {
   return false;
 }
 
-function buildFanoutView(task: Task, allTasks: Task[]): FanoutParentView {
+// ── FG-688: the fanout recommendation, held to the same rule as the task one ──
+//
+// `buildFanoutView` used to hardcode `forge recover <id> --re-drive` for EVERY
+// fanout parent regardless of failure kind, while the mutation guard accepts only
+// an enumerated set — so on the `prerequisite_blocked` parent this ticket is about
+// (FG-576), following forge's own printed advice produced a refusal. That is the
+// same defect `recommendationForKind` above already fixed once for --continue by
+// routing through CONTINUABLE_KINDS, and it is fixed the same way here: the
+// recommendation reads the SAME predicate the guard enforces, and every refusing
+// clause names a verb that WILL be accepted instead.
+//
+// The invariant, stated once: the printed recommendation may never name a verb
+// the mutation guard would reject — for ANY failure kind, not just this ticket's.
+// So the clauses below mirror performReDrive's conjunction and are deliberately at
+// least as STRICT as it: anything this predicate cannot decide from durable state
+// resolves to "not eligible", because a run-level inspect must stay docker-free
+// (no container probe) and a false --re-drive recommendation IS the defect.
+function reDriveDisposition(
+  parent: Task,
+  allTasks: Task[],
+  run: Run | undefined,
+  failureKind: string | undefined,
+): ReDriveDisposition {
+  const ordered = isOrderedFanoutWave(parent.id);
+
+  // Guard (iv), read first because a dead lineage is never re-driven whatever
+  // else is true. performReDrive checks status before this; checking it earlier
+  // only makes this predicate stricter, never looser, which is the safe direction.
+  const superseding = supersedingPrimary(parent, allTasks);
+  if (superseding) {
+    return {
+      eligible: false,
+      disposition: "superseded",
+      ordered,
+      supersededBy: superseding.id,
+      why:
+        `${superseding.id} (status=${superseding.status}) is a later primary in phase '${parent.phase}', so this parent is a ` +
+        "dead lineage — reopening it would put two live parents in one phase",
+    };
+  }
+
+  if (!run || (run.status !== "failed" && run.status !== "active")) {
+    return {
+      eligible: false,
+      disposition: "run_not_reopenable",
+      ordered,
+      why:
+        `run ${parent.runId} is '${run?.status ?? "missing"}' — --re-drive only reopens a 'failed' run (an 'active' one it ` +
+        "leaves alone), and no recovery verb resurrects a completed or abandoned one",
+    };
+  }
+
+  if (parent.status === "failed") {
+    if (!isReDrivableFailureKind(failureKind)) {
+      return {
+        eligible: false,
+        disposition: "failure_kind_refused",
+        ordered,
+        why:
+          `failure_kind=${failureKind ?? "none"} is not in the re-drivable enumeration (an unrecognized kind fails closed here ` +
+          "too) — a re-drive would re-read the same plan and re-gate the same tree",
+      };
+    }
+    return {
+      eligible: true,
+      disposition: "eligible",
+      ordered,
+      why: ordered
+        ? `failure_kind=${failureKind} is re-drivable and the wave is ORDERED — the parent is reopened in place`
+        : `failure_kind=${failureKind} is re-drivable — the wave is re-driven as a fresh pending primary`,
+    };
+  }
+
+  if (parent.status === "running") {
+    // An ordered wave stranded by a crash is NOT a re-drive case: reconcile puts
+    // the parent back to `pending` on its own row (ordered_fanout_resumable) and
+    // the controller resumes it. --re-drive would then refuse a `pending` parent.
+    if (ordered) {
+      return {
+        eligible: false,
+        disposition: "ordered_resumable_in_place",
+        ordered,
+        why:
+          "a crash-stranded ORDERED wave is put back to pending on its own row by reconcile (ordered_fanout_resumable) — it is " +
+          "resumed automatically, not re-driven",
+      };
+    }
+    // The unordered shape reconcile settles: no container of its own, every child
+    // terminal. --re-drive reconciles first, and BOTH of reconcile's landings for
+    // this shape stamp `fanout_wave_orphaned`, which the guard accepts — so this
+    // stays eligible, exactly as it was before FG-688.
+    const waveSettleable =
+      !eventsForTask(parent.id).some((e) => e.eventType === "container.started") &&
+      allTasks.filter((t) => t.parentId === parent.id).every((c) => TERMINAL.has(c.status));
+    if (waveSettleable) {
+      return {
+        eligible: true,
+        disposition: "eligible",
+        ordered,
+        why:
+          "every child is terminal and the parent never had a container of its own — --re-drive settles the wave to " +
+          "fanout_wave_orphaned first, then re-drives it",
+      };
+    }
+    return {
+      eligible: false,
+      disposition: "wave_in_flight",
+      ordered,
+      why: "a child is still non-terminal, so the wave may still be in flight — --re-drive refuses a running wave",
+    };
+  }
+
+  return { eligible: false, disposition: "not_failed", ordered, why: `the parent is '${parent.status}', not a failed fanout parent` };
+}
+
+function fanoutRecommendation(parent: Task, d: ReDriveDisposition, failureKind: string | undefined): Recommendation {
+  if (d.eligible) {
+    return {
+      commands: [`forge recover ${parent.id} --re-drive`],
+      note: d.ordered
+        ? "reopens this parent in place — adopts the items whose captured commits are already integrated and dispatches only the ones that did not complete"
+        : "",
+    };
+  }
+  switch (d.disposition) {
+    case "superseded":
+      return { commands: [`forge next ${parent.runId}`], note: `${d.why}; drive the live wave (${d.supersededBy}) instead` };
+    // The general fallback the ticket asks for: name what the OTHER mutation verb
+    // will accept, derived from retryPolicy rather than special-cased per kind, so
+    // a kind added by a later build gets a correct line without editing this.
+    case "failure_kind_refused": {
+      const policy = retryPolicy(failureKind);
+      return policy.retryable
+        ? { commands: [`forge retry ${parent.id}`], note: `${d.why}; it IS retryable without --force` }
+        : { commands: [`forge retry ${parent.id} --force`], note: `${d.why}, and retryPolicy needs --force for this kind` };
+    }
+    case "ordered_resumable_in_place":
+      return { commands: [`forge next ${parent.runId}`], note: `${d.why} — drive the run` };
+    case "not_failed":
+      return parent.status === "pending"
+        ? { commands: [`forge next ${parent.runId}`], note: "this wave's parent is already pending — dispatch it" }
+        : { commands: [`forge show ${parent.id}`], note: d.why };
+    default:
+      return { commands: [`forge show ${parent.id}`], note: d.why };
+  }
+}
+
+function buildFanoutView(task: Task, allTasks: Task[], run: Run | undefined): FanoutParentView {
   const children = allTasks.filter((t) => t.parentId === task.id).map((c) => ({ id: c.id, status: c.status }));
+  const failureKind = failureKindForTask(task.id);
+  const reDrive = reDriveDisposition(task, allTasks, run, failureKind);
+  const recommendation = fanoutRecommendation(task, reDrive, failureKind);
   return {
     parentId: task.id,
     runId: task.runId,
     phase: task.phase,
     status: task.status,
-    failureKind: failureKindForTask(task.id),
+    failureKind,
     children,
-    recommendation: `forge recover ${task.id} --re-drive`,
+    recommendation: renderRecommendation(recommendation),
+    recommendationCommands: recommendation.commands,
+    reDrive,
   };
 }
 
@@ -369,7 +555,7 @@ export function performInspect(id: string, containerAlive: ContainerAlive = defa
     if (!run) return { kind: "unknown", id };
     const allTasks = tasksForRun(task.runId);
     if (isFanoutParent(task, allTasks)) {
-      return { kind: "inspect-fanout-parent", parent: buildFanoutView(task, allTasks) };
+      return { kind: "inspect-fanout-parent", parent: buildFanoutView(task, allTasks, run) };
     }
     return { kind: "inspect-task", task: buildTaskView(task, run, containerAlive) };
   }
@@ -382,7 +568,7 @@ export function performInspect(id: string, containerAlive: ContainerAlive = defa
     const tasks = allTasks
       .filter((t) => t.status === "failed" && RUN_INSPECT_KINDS.has(failureKindForTask(t.id) ?? ""))
       .map((t) => buildTaskView(t, run, containerAlive));
-    const fanoutParents = allTasks.filter((t) => fanoutParentRecoverable(t, allTasks)).map((t) => buildFanoutView(t, allTasks));
+    const fanoutParents = allTasks.filter((t) => fanoutParentRecoverable(t, allTasks)).map((t) => buildFanoutView(t, allTasks, run));
     return { kind: "inspect-run", runId: run.id, tasks, fanoutParents };
   }
 
@@ -908,6 +1094,7 @@ function renderFanoutView(v: FanoutParentView): string[] {
   const lines: string[] = [];
   lines.push(`  ${v.parentId}  [${v.phase}]  status=${v.status}  failure_kind=${v.failureKind ?? "none"}`);
   lines.push(`    children: ${v.children.map((c) => `${c.id}(${c.status})`).join(", ") || "(none)"}`);
+  lines.push(`    re-drive: ${v.reDrive.eligible ? "eligible" : `not eligible (${v.reDrive.disposition})`} — ${v.reDrive.why}`);
   lines.push(`    next:     ${v.recommendation}`);
   return lines;
 }
@@ -920,7 +1107,10 @@ export function registerRecover(program: Command): void {
       "Operator-safe recovery for a task/run left behind by a lost container. Read-only by default — inspects persisted diff/result and recommends a next command. --continue adopts persisted work and completes the task; --re-drive re-dispatches an orphaned fanout wave in-run.",
     )
     .option("--continue", "adopt the orphaned task's persisted result and mark it complete")
-    .option("--re-drive", "re-drive an orphaned fanout wave in-run instead of stranding a detached primary")
+    .option(
+      "--re-drive",
+      "re-drive a failed fanout wave in-run: an ORDERED wave is reopened in place, adopting the items already integrated; an unordered orphaned one is re-driven as a fresh primary",
+    )
     .option("--force", "acknowledge an ambiguous shared-directory diff (or other refusal) and proceed anyway")
     .option("--json", "emit structured JSON (the primary orchestrator surface)")
     .action((id: string, opts: { continue?: boolean; reDrive?: boolean; force?: boolean; json?: boolean }) => {
