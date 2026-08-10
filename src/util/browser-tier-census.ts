@@ -54,7 +54,9 @@ export const BROWSER_TIER_DIR = join(
 // noise, and one test per malformed-payload depth AC7 has to survive in a real browser —
 // a null AGENT entry (RF-3) and a null CI CONTEXT inside a valid-looking observation
 // (RF-5). Both used to throw mid-render, which leaves the operator a blank surface
-// rather than the unavailable state and its Retry.
+// rather than the unavailable state and its Retry. FG-700 adds the mixed live-launch
+// shape: one declared verification and every associated invoke/review/campaign launch
+// remain separately visible in Activity.
 // The FG-694 POST-SHIP CORRECTION then added `fg694-home-in-flight` (9 tests): Home's
 // own shape, which the suite above no longer asserts because the `Current activity`
 // panel moved off Home onto the Activity view. One activity surface, no agent rendered
@@ -83,7 +85,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "completed-runs.test.ts": 8,
   "completed-runs-real-store.test.ts": 2,
   "fg591-queue-board.test.ts": 6,
-  "fg679-current-activity.test.ts": 12,
+  "fg679-current-activity.test.ts": 13,
   "fg694-home-in-flight.test.ts": 9,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,

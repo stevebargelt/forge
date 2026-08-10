@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import { readFileSync } from "node:fs";
 import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, statusLine, tmuxServerCwdDiagnosis, type ControlRuntime, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
 import { waitAndRender } from "./launch-wait.js";
-import { recordLaunchStart } from "../../store/launch-observations.js";
+import { LAUNCH_PURPOSE_VALUES, isLaunchPurpose, recordLaunchStart, type LaunchPurpose } from "../../store/launch-observations.js";
 
 // FG-535: `forge launch` — the supported durable launch path for long-running
 // forge commands (`forge invoke`, `forge next`, `forge review-loop`, …) when
@@ -108,6 +108,18 @@ function renderView(v: LaunchView, logTailLines = 15): string {
   return lines.join("\n");
 }
 
+/** FG-700: the submitted `--purpose`, or undefined when none was declared. An
+ *  unrecognized value is REFUSED here — before `startLaunch` runs, so nothing is
+ *  started and nothing is recorded. Accepting it would write a row that silently
+ *  decodes to `generic` later, telling the submitter nothing. */
+function declaredPurpose(raw: string | undefined): LaunchPurpose | undefined {
+  if (raw === undefined) return undefined;
+  if (!isLaunchPurpose(raw)) {
+    throw new Error(`forge launch run: unknown --purpose '${raw}' — expected one of ${LAUNCH_PURPOSE_VALUES.join(", ")}`);
+  }
+  return raw;
+}
+
 export function registerLaunch(program: Command): void {
   const launch = program
     .command("launch")
@@ -132,8 +144,18 @@ export function registerLaunch(program: Command): void {
     .option("--run <run-id>", "FG-679: associate this launch with a forge run — the only thing that places it on that run's Current activity surface")
     .option("--task <task-id>", "FG-679: associate this launch with a forge task")
     .option("--ticket <ticket-id>", "FG-679: associate this launch with a ticket")
+    // FG-700 (BD-2, second half): WHAT this launch is, which is a different question
+    // from where it belongs. Only `--purpose host_verification` may render as a
+    // host-verification wait on `forge status` and the dashboard; `--run`/`--task`/
+    // `--ticket` say nothing about it, and a launch that declares no purpose is
+    // recorded `generic` and rendered as a generic launch diagnostic.
+    .option(
+      `--purpose <${LAUNCH_PURPOSE_VALUES.join("|")}>`,
+      "FG-700: declare WHAT this launch is (default: generic). Only 'host_verification' renders as a host-verification wait; association metadata never implies it",
+    )
     .argument("<command...>", "the command to run (prefix with -- to stop option parsing)")
-    .action((command: string[], opts: { name?: string; json?: boolean; requireControlToolchain?: boolean; run?: string; task?: string; ticket?: string }) => {
+    .action((command: string[], opts: { name?: string; json?: boolean; requireControlToolchain?: boolean; run?: string; task?: string; ticket?: string; purpose?: string }) => {
+      const purpose = declaredPurpose(opts.purpose);
       const profile = opts.requireControlToolchain ? controlRuntimeProfile({ label: "control-runtime" }) : undefined;
       const association = {
         ...(opts.run ? { runId: opts.run } : {}),
@@ -144,7 +166,7 @@ export function registerLaunch(program: Command): void {
       // FG-679 (BD-12): the durable start observation, written AFTER the command is
       // already running. Best-effort by construction — a store forge cannot write
       // leaves the launch running and merely unobserved, never refused.
-      recordLaunchStart(meta, Object.keys(association).length > 0 ? association : undefined);
+      recordLaunchStart(meta, Object.keys(association).length > 0 ? association : undefined, purpose);
       // FG-614: the launch is unaffected (the wrapper enters the recorded cwd itself),
       // but a bricked tmux server is a host-wide condition the operator needs named —
       // with the remedy and what the remedy costs. On stderr, so --json stays clean.

@@ -42,7 +42,7 @@ db.exec(`
     launch_id TEXT PRIMARY KEY, name TEXT, command TEXT NOT NULL, cwd TEXT NOT NULL, project_dir TEXT,
     association_kind TEXT NOT NULL, run_id TEXT, task_id TEXT, ticket_id TEXT, campaign_id TEXT, item_id TEXT,
     started_at TEXT NOT NULL, observed_at TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, signal TEXT,
-    terminal INTEGER NOT NULL
+    purpose TEXT, terminal INTEGER NOT NULL
   );
 `);
 
@@ -56,8 +56,8 @@ db.prepare(`INSERT INTO tasks VALUES ('task-guard','run-guard','build','engineer
 db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES ('run-guard','task-guard','container.started', ?, ?)`)
   .run(JSON.stringify({ container: "forge-run-guard-task-guard" }), iso);
 db.prepare(`
-  INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, started_at, observed_at, state, terminal)
-  VALUES ('launch-guard-aaaaaa', 'guard', ?, '/proj/guard', '/proj/guard', 'explicit', 'run-guard', ?, ?, 'running', 0)
+  INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, started_at, observed_at, state, purpose, terminal)
+  VALUES ('launch-guard-aaaaaa', 'guard', ?, '/proj/guard', '/proj/guard', 'explicit', 'run-guard', ?, ?, 'running', 'host_verification', 0)
 `).run(JSON.stringify(["npm", "run", "test:worktree"]), iso, iso);
 db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES ('run-guard', NULL, 'review_loop.ci_observed', ?, ?)`)
   .run(JSON.stringify({

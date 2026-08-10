@@ -25,10 +25,11 @@ import {
   type ReconcileReason,
 } from "@forge/reconcile-candidate";
 import {
-  LAUNCH_OBSERVATION_COLUMNS,
   hasPlacementAuthority,
+  launchObservationColumns,
   rowToLaunchObservation,
   type LaunchObservationRow,
+  type LaunchPurpose,
 } from "@forge/launch-observations";
 // FG-576 step 11: the two records an interactive orchestrator has — the durable
 // receipt (what was SELECTED) and the launcher-owned liveness record (whether the
@@ -2367,6 +2368,9 @@ export type LaunchDetail = {
   observation: "fresh" | "unobserved";
   terminal: boolean;
   associationKind: string;
+  /** FG-700: what the submitter DECLARED this launch is. Carried on the detail so the
+   *  operator can see why a launch did or did not render as host verification. */
+  purpose: LaunchPurpose;
   unassociated: boolean;
   runId: string | null;
   taskId: string | null;
@@ -2379,7 +2383,9 @@ export type LaunchDetail = {
 export function launchDetail(launchId: string, nowMs: number = Date.now()): LaunchDetail | null {
   if (!isLaunchId(launchId)) return null;
   const row = db()
-    .prepare(`SELECT ${LAUNCH_OBSERVATION_COLUMNS} FROM launch_observations WHERE launch_id = ?`)
+    // The column list is resolved against the store this handle opened: it is READ-ONLY
+    // and runs no migrations, so `purpose` (FG-700) may not be there yet.
+    .prepare(`SELECT ${launchObservationColumns(db())} FROM launch_observations WHERE launch_id = ?`)
     .get(launchId) as LaunchObservationRow | undefined;
   if (!row) return null;
   const obs = rowToLaunchObservation(row);
@@ -2403,6 +2409,7 @@ export function launchDetail(launchId: string, nowMs: number = Date.now()): Laun
     observation: stale ? "unobserved" : "fresh",
     terminal: obs.terminal,
     associationKind: obs.associationKind,
+    purpose: obs.purpose,
     // The DECLARED submission ids, matching the shared derivation exactly:
     // `association_kind` names which channel resolved the project home (FG-684 AC4),
     // which is a different question from whether the launch was associated at all.

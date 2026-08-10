@@ -145,6 +145,10 @@ function launch(over: Partial<Activity["hostVerification"][number]> & { launchId
     projectDir: over.projectDir ?? null,
     projectLabel: over.projectLabel ?? "forge",
     associationKind: over.associationKind ?? "explicit",
+    // FG-700: this file's launches ARE the host-verification fixtures, so the default
+    // DECLARES that purpose rather than leaving it to be inferred from the association
+    // — which is the inference FG-700 removed.
+    purpose: over.purpose ?? "host_verification",
     unassociated: over.unassociated ?? false,
     placement: over.placement ?? "run",
     runId: over.runId ?? "run-fg679",
@@ -184,6 +188,7 @@ const base = (over: Partial<Activity>): Activity => ({
   scope: { runId: "run-fg679", projectDirs: null },
   agents: over.agents ?? [],
   hostVerification: over.hostVerification ?? [],
+  launches: over.launches ?? [],
   // FG-694: the honest default for a fixture that declares no CI at all is "nothing
   // in scope could be waiting on required checks" — not "we observed no CI", which
   // is a claim about an observer that was never asked.
@@ -278,6 +283,45 @@ test("FG-679 BD-1: ONE Current activity surface with DISTINCT sections; a host l
   assert.doesNotMatch(surface, /Nothing currently running/, "something IS running");
 
   await page.screenshot({ path: join(SHOTS, "fg679-populated.png"), fullPage: true });
+  await page.close();
+});
+
+test("FG-700 AC7: the served mixed-launch payload renders one real verification separately from every associated launch diagnostic", async () => {
+  // This is the live 2026-08-10 shape at the browser boundary.  The payload has
+  // already passed through the shared derivation (covered at its own boundary);
+  // this assertion proves the Activity view does not undo that classification while
+  // rendering it.  In particular, all of these rows carry the same run association
+  // as the one verification, so a renderer that grouped by association would fail.
+  const diagnostics = [
+    launch({ launchId: "launch-engineer-fg700", name: "engineer", purpose: "agent_invoke", commandLine: "forge invoke engineer" }),
+    launch({ launchId: "launch-tester-fg700", name: "test-engineer", purpose: "agent_invoke", commandLine: "forge invoke test-engineer" }),
+    launch({ launchId: "launch-docs-fg700", name: "documentation-maintainer", purpose: "agent_invoke", commandLine: "forge invoke documentation-maintainer" }),
+    launch({ launchId: "launch-review-start-fg700", name: "review-start", purpose: "review", commandLine: "forge review start FG-700" }),
+    launch({ launchId: "launch-review-continue-fg700", name: "review-continue", purpose: "review", commandLine: "forge review continue FG-700" }),
+    launch({ launchId: "launch-campaign-fg700", name: "campaign", purpose: "campaign", commandLine: "forge campaign drive-item camp item" }),
+  ];
+  served = base({
+    hostVerification: [launch({ launchId: "launch-verify-fg700", name: "real verification", purpose: "host_verification" })],
+    launches: diagnostics,
+  });
+
+  const page = await open();
+  assert.deepEqual(await sectionHeadings(page), ["Host verification", "Launch activity"]);
+  const sections = page.locator("section.current-activity section.ca-section");
+  const verification = sections.nth(0);
+  const diagnosticsSection = sections.nth(1);
+  assert.equal(await verification.locator(".ca-launch-row").count(), 1, "exactly one declared verification is an in-flight wait");
+  assert.match(await verification.innerText(), /launch-verify-fg700/);
+
+  const diagnosticText = await diagnosticsSection.innerText();
+  assert.equal(await diagnosticsSection.locator(".ca-launch-row").count(), diagnostics.length, "no associated launch is lost when its label narrows");
+  for (const row of diagnostics) {
+    assert.match(diagnosticText, new RegExp(row.launchId));
+  }
+  assert.doesNotMatch(diagnosticText, /launch-verify-fg700/, "the verification is represented exactly once");
+  assert.doesNotMatch(await verification.innerText(), /launch-(engineer|tester|docs|review|campaign)-fg700/,
+    "association never promotes an agent, review, or campaign launch into Host verification");
+  await page.screenshot({ path: join(SHOTS, "fg700-mixed-launches.png"), fullPage: true });
   await page.close();
 });
 

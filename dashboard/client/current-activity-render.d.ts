@@ -10,6 +10,17 @@ export type LaunchStatusState =
   | "owner_gone"
   | "unknown";
 
+/** FG-700: WHAT a launch is, declared at submission. Separate from the association
+ *  ids, which say only WHERE it belongs. Only `host_verification` may render under the
+ *  host-verification label; an absent or unrecognized value is `generic`. */
+export type LaunchPurpose =
+  | "host_verification"
+  | "agent_invoke"
+  | "review"
+  | "campaign"
+  | "dashboard"
+  | "generic";
+
 export type HostLaunchEntry = {
   launchId: string;
   name: string | null;
@@ -18,6 +29,7 @@ export type HostLaunchEntry = {
   projectDir: string | null;
   projectLabel: string | null;
   associationKind: "explicit" | "cwd" | "none";
+  purpose: LaunchPurpose;
   unassociated: boolean;
   placement: "run" | "project" | "host";
   runId: string | null;
@@ -85,7 +97,11 @@ export type CurrentActivityPayload = {
     status: string;
     startedAt: string | null;
   }>;
+  /** ONLY launches whose declared purpose is host verification (FG-700). */
   hostVerification: HostLaunchEntry[];
+  /** FG-700: every OTHER open launch in scope — the generic launch-diagnostics bucket.
+   *  Absent from a server that predates FG-700, so readers substitute []. */
+  launches?: HostLaunchEntry[];
   requiredCi: RequiredCiSectionEntry;
   unassociated: HostLaunchEntry[];
 };
@@ -106,6 +122,7 @@ export function activityIsEmpty(activity: Partial<CurrentActivityPayload> | null
 export function activityCounts(activity: Partial<CurrentActivityPayload> | null | undefined): {
   agents: number;
   hostVerification: number;
+  launches: number;
   requiredCi: number;
   unassociated: number;
 };

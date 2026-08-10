@@ -103,7 +103,7 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
       .run("2026-08-05T09:00:00.000Z", "/repos/forge");
 
     const meta = startLaunch(["sh", "-c", "true"], { name: "worktree", cwd: process.cwd(), tmux: tmuxStub() });
-    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" });
+    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" }, "host_verification");
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.associationKind, "explicit");
@@ -127,7 +127,7 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
     const worktree = mkdtempSync(join(tmpdir(), "fg679-worktree-"));
 
     const meta = startLaunch(["npm", "run", "test:worktree"], { name: "verify", cwd: worktree, tmux: tmuxStub() });
-    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" });
+    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" }, "host_verification");
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.associationKind, "explicit");
@@ -162,7 +162,7 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
       .run("2026-08-05T09:00:00.000Z", PROJECT_B);
 
     const meta = startLaunch(["npm", "run", "test:all"], { name: "verify", cwd: PROJECT_B, tmux: tmuxStub() });
-    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" });
+    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" }, "host_verification");
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.projectDir, PROJECT_A, "the DECLARED run's project, not the one the cwd happens to sit in");
@@ -185,7 +185,7 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
       .run("2026-08-05T09:00:00.000Z", PROJECT);
 
     const meta = startLaunch(["npm", "run", "test:all"], { name: "verify", cwd: PROJECT, tmux: tmuxStub() });
-    recordLaunchStart(meta, { runId: "run-unregistered", ticketId: "FG-679" });
+    recordLaunchStart(meta, { runId: "run-unregistered", ticketId: "FG-679" }, "host_verification");
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.projectDir, PROJECT, "an unknown declared run does not discard a registered cwd fallback");
@@ -213,7 +213,7 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
       .run("2026-08-05T09:00:00.000Z", PROJECT);
 
     const meta = startLaunch(["npm", "run", "test:all"], { name: "verify", cwd: PROJECT, tmux: tmuxStub() });
-    recordLaunchStart(meta, { runId: "run-homeless" });
+    recordLaunchStart(meta, { runId: "run-homeless" }, "host_verification");
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.associationKind, "cwd");
@@ -236,20 +236,45 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
       .run("2026-08-05T09:00:00.000Z", PROJECT);
 
     const meta = startLaunch(["forge", "campaign", "drive-item", "camp-1", "item-1"], { name: "campaign-drive-item-1", cwd: PROJECT, tmux: tmuxStub() });
-    recordLaunchStart(meta, { campaignId: "camp-1", itemId: "item-1" });
+    // Exactly what the campaign launcher records: the identity it knows, and (FG-700)
+    // the purpose it knows — driving a campaign item is not host verification.
+    recordLaunchStart(meta, { campaignId: "camp-1", itemId: "item-1" }, "campaign");
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.associationKind, "cwd", "campaign/item identity is provenance, not placement authority");
     assert.equal(obs?.campaignId, "camp-1", "…and it is still recorded");
     assert.equal(obs?.itemId, "item-1");
     assert.equal(obs?.runId, null);
+    assert.equal(obs?.purpose, "campaign");
 
     const onProject = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
-    assert.deepEqual(onProject.hostVerification.map((l) => l.launchId), [meta.id], "project level, from its cwd");
-    assert.equal(onProject.hostVerification[0]!.unassociated, true, "labeled `unassociated`, as the launcher documents");
+    assert.deepEqual(onProject.launches.map((l) => l.launchId), [meta.id], "project level, from its cwd");
+    assert.equal(onProject.launches[0]!.unassociated, true, "labeled `unassociated`, as the launcher documents");
+    assert.deepEqual(onProject.hostVerification, [], "FG-700: a campaign drive is not host verification");
 
     // And it never reaches a run surface, since it declared no run.
-    assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-other" } }).hostVerification.length, 0);
+    const onRun = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-other" } });
+    assert.equal(onRun.hostVerification.length, 0);
+    assert.equal(onRun.launches.length, 0);
+  });
+
+  test("FG-700: a launch submitted with an association but NO declared purpose is placed on its run and is NOT host verification", () => {
+    // The pre-FG-700 orchestrator shape, submitted through the REAL path: `forge launch
+    // run --run <id> --ticket <id>` with nothing said about what the command is. The
+    // association still places it — that half is unchanged — and the label does not
+    // follow from it.
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-real', 'feature', 'real', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", "/repos/forge");
+
+    const meta = startLaunch(["sh", "-c", "true"], { name: "undeclared", cwd: process.cwd(), tmux: tmuxStub() });
+    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-700" });
+
+    assert.equal(getLaunchObservation(meta.id)?.purpose, "generic", "declaring nothing records `generic`, never a kind");
+
+    const onRun = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-real" } });
+    assert.deepEqual(onRun.launches.map((l) => l.launchId), [meta.id], "placement is unchanged: it named its run");
+    assert.equal(onRun.launches[0]!.unassociated, false);
+    assert.deepEqual(onRun.hostVerification, [], "…and carrying --run/--ticket is not a declaration that it is verification");
   });
 
   test("the observation write is BEST-EFFORT: an unwritable store leaves the launch RUNNING and merely unobserved", () => {

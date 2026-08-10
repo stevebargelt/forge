@@ -114,8 +114,8 @@ function reportedShape(): CurrentActivity {
   db.prepare(`
     INSERT INTO launch_observations (
       launch_id, name, command, cwd, project_dir, association_kind, run_id, task_id, ticket_id,
-      campaign_id, item_id, started_at, observed_at, state, exit_code, signal, terminal
-    ) VALUES (?, ?, ?, ?, ?, 'explicit', 'run-fg694', NULL, ?, NULL, NULL, ?, ?, 'running', NULL, NULL, 0)
+      campaign_id, item_id, started_at, observed_at, state, exit_code, signal, purpose, terminal
+    ) VALUES (?, ?, ?, ?, ?, 'explicit', 'run-fg694', NULL, ?, NULL, NULL, ?, ?, 'running', NULL, NULL, 'host_verification', 0)
   `).run(
     "launch-worktree-8pagjk", "worktree-tier", JSON.stringify(["npm", "run", "test:worktree"]),
     PROJECT, PROJECT, LIVE_TICKET, ago(900_000), ago(30_000),
@@ -126,8 +126,8 @@ function reportedShape(): CurrentActivity {
   db.prepare(`
     INSERT INTO launch_observations (
       launch_id, name, command, cwd, project_dir, association_kind, run_id, task_id, ticket_id,
-      campaign_id, item_id, started_at, observed_at, state, exit_code, signal, terminal
-    ) VALUES (?, ?, ?, ?, ?, 'cwd', NULL, NULL, NULL, NULL, NULL, ?, ?, 'running', NULL, NULL, 0)
+      campaign_id, item_id, started_at, observed_at, state, exit_code, signal, purpose, terminal
+    ) VALUES (?, ?, ?, ?, ?, 'cwd', NULL, NULL, NULL, NULL, NULL, ?, ?, 'running', NULL, NULL, 'dashboard', 0)
   `).run(
     UNASSOCIATED_LAUNCH, "dashboard", JSON.stringify(["forge", "dashboard"]),
     PROJECT, PROJECT, ago(4 * 3_600_000), ago(15_000),
@@ -263,9 +263,13 @@ test("FG-694: a running launch nobody associated is NOT a wait — the dashboard
   served = reportedShape();
   inFlight = IN_FLIGHT;
   // Non-vacuous at the source: the derivation DOES carry it, fresh and running, so only
-  // the missing association can have kept it off Home.
-  const orphan = served.hostVerification.find((l) => l.launchId === UNASSOCIATED_LAUNCH);
+  // the missing association can have kept it off Home. Since FG-700 it is carried in the
+  // generic launch bucket — the dashboard server declares `dashboard`, not host
+  // verification — which is a second, independent reason it is not a wait.
+  const orphan = served.launches.find((l) => l.launchId === UNASSOCIATED_LAUNCH);
   assert.ok(orphan, "the derivation carries the cwd-placed launch");
+  assert.equal(orphan.purpose, "dashboard");
+  assert.equal(served.hostVerification.some((l) => l.launchId === UNASSOCIATED_LAUNCH), false);
   assert.equal(orphan.unassociated, true);
   assert.equal(orphan.observation, "fresh");
   assert.equal(orphan.status.state, "running");

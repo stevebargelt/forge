@@ -14,7 +14,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
-import { recordLaunchObservation } from "../store/launch-observations.js";
+import { recordLaunchObservation, type LaunchPurpose } from "../store/launch-observations.js";
 import { statusLine, type LaunchStatus } from "./launch.js";
 import {
   CI_NOT_OBSERVED_LABEL,
@@ -50,6 +50,10 @@ function addTask(id: string, status: string): void {
     .run(id, status, "2026-08-05T11:30:00.000Z", "2026-08-05T11:30:00.000Z");
 }
 
+/** FG-700: every launch here DECLARES a purpose, because that is now the only thing
+ *  that puts one under `Host verification`. The default is `host_verification` since
+ *  this suite's subject IS that section — a fixture that wants a different kind, or a
+ *  legacy row that declared nothing (`purpose: null`), says so explicitly. */
 function addLaunch(opts: {
   id: string;
   status?: LaunchStatus;
@@ -59,7 +63,9 @@ function addLaunch(opts: {
   name?: string;
   command?: string[];
   cwd?: string;
+  purpose?: LaunchPurpose | null;
 }): void {
+  const purpose = opts.purpose === undefined ? "host_verification" : opts.purpose;
   recordLaunchObservation({
     launchId: opts.id,
     name: opts.name ?? opts.id,
@@ -67,10 +73,21 @@ function addLaunch(opts: {
     cwd: opts.cwd ?? PROJECT,
     projectDir: opts.projectDir === undefined ? PROJECT : opts.projectDir,
     ...(opts.association ? { association: opts.association } : {}),
+    ...(purpose === null ? {} : { purpose }),
     startedAt: "2026-08-05T11:50:00.000Z",
     observedAt: opts.observedAt ?? "2026-08-05T11:59:00.000Z",
     status: opts.status ?? { state: "running" },
   });
+}
+
+/** A row as a PRE-FG-700 binary wrote it: no purpose column value at all. Written with
+ *  raw SQL because the recorder now always writes one, and "the column is NULL" is the
+ *  legacy shape the fail-closed rule exists for. */
+function addLegacyLaunch(id: string, runId: string | null): void {
+  getDb().prepare(`
+    INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, started_at, observed_at, state, terminal)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '2026-08-05T11:50:00.000Z', '2026-08-05T11:59:00.000Z', 'running', 0)
+  `).run(id, id, JSON.stringify(["npm", "run", "test:worktree"]), PROJECT, PROJECT, runId === null ? "cwd" : "explicit", runId);
 }
 
 function addCiEvent(payload: Record<string, unknown>, createdAt: string, runId: string | null = "run-fg679"): void {
@@ -280,6 +297,162 @@ describe("FG-679 BD-2/BD-3/BD-14 — placement", () => {
     const entry = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } }).hostVerification[0]!;
     assert.equal("cwd" in entry, false);
     assert.equal("logPath" in entry, false);
+  });
+});
+
+// ─────────────────────────────────── FG-700 ───────────────────────────────────
+//
+// WHAT A LAUNCH IS, versus WHERE IT BELONGS. Before FG-700 there was no purpose field
+// at all, so this derivation used PLACEMENT as a proxy for it: every non-terminal
+// launch that passed the scope test rendered under `Host verification`. On 2026-08-10
+// that labelled `forge invoke engineer`, `forge invoke test-engineer`, `forge invoke
+// documentation-maintainer` and `forge review start/continue` as host verification —
+// work the agent-task surface was already showing, presented as a wait nobody had.
+//
+// The ENFORCEMENT half is what these tests are mostly about: a launch that declared
+// nothing, or declared something this binary cannot read, is NOT host verification.
+// Failing closed to the generic bucket is the whole property; the positive case is one
+// assertion and the negative cases are the rest.
+
+describe("FG-700 — only a DECLARED host verification renders as one", () => {
+  test("AC7 — the 2026-08-10 live shape: four associated agent/review/campaign launches plus one real verification", () => {
+    // Every one of these carries `--run` and would have rendered as host verification
+    // before FG-700. Only the last DECLARED that it is one.
+    addLaunch({ id: "launch-engineer-aa0001", association: { runId: "run-fg679", ticketId: "MG-49" }, purpose: "agent_invoke", command: ["forge", "invoke", "engineer"] });
+    addLaunch({ id: "launch-tester-aa0002", association: { runId: "run-fg679", ticketId: "MG-49" }, purpose: "agent_invoke", command: ["forge", "invoke", "test-engineer"] });
+    addLaunch({ id: "launch-docs-aa0003", association: { runId: "run-fg679", ticketId: "FG-683" }, purpose: "agent_invoke", command: ["forge", "invoke", "documentation-maintainer"] });
+    addLaunch({ id: "launch-review-aa0004", association: { runId: "run-fg679", ticketId: "FG-683" }, purpose: "review", command: ["forge", "review", "continue", "FG-683"] });
+    addLaunch({ id: "launch-verify-aa0005", association: { runId: "run-fg679", ticketId: "FG-700" }, purpose: "host_verification" });
+
+    const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    assert.deepEqual(activity.hostVerification.map((l) => l.launchId), ["launch-verify-aa0005"],
+      "EXACTLY the launch that declared host verification");
+
+    // …and none of the other four is hidden: they are all still in flight, under a
+    // heading that does not claim they are verification (AC3 + the diagnostics rule).
+    assert.deepEqual(activity.launches.map((l) => l.launchId).sort(), [
+      "launch-docs-aa0003", "launch-engineer-aa0001", "launch-review-aa0004", "launch-tester-aa0002",
+    ]);
+    const rendered = renderCurrentActivityLines(activity).join("\n");
+    assert.match(rendered, /^ {2}Launch activity$/m);
+    for (const id of ["launch-engineer-aa0001", "launch-tester-aa0002", "launch-docs-aa0003", "launch-review-aa0004"]) {
+      assert.match(rendered, new RegExp(id), `${id} must still be visible as a launch diagnostic`);
+    }
+    // The four are BELOW the Host verification heading's own rows, never among them.
+    const lines = renderCurrentActivityLines(activity);
+    const hostHeading = lines.indexOf("  Host verification");
+    const launchHeading = lines.indexOf("  Launch activity");
+    for (const id of ["launch-engineer-aa0001", "launch-review-aa0004"]) {
+      assert.ok(lines.findIndex((l) => l.includes(id)) > launchHeading, `${id} renders under Launch activity`);
+    }
+    assert.ok(lines.findIndex((l) => l.includes("launch-verify-aa0005")) > hostHeading);
+    assert.ok(lines.findIndex((l) => l.includes("launch-verify-aa0005")) < launchHeading);
+  });
+
+  test("AC5 (fail closed) — a LEGACY row with no purpose at all is not host verification", () => {
+    addLegacyLaunch("launch-legacy-bb0001", "run-fg679");
+    const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    // Non-vacuous: it is associated with the run, fresh, and running — every pre-FG-700
+    // condition for the host-verification section is met, and only the absent
+    // declaration excludes it.
+    assert.deepEqual(activity.launches.map((l) => l.launchId), ["launch-legacy-bb0001"]);
+    assert.equal(activity.launches[0]!.statusLabel, "running");
+    assert.equal(activity.launches[0]!.runId, "run-fg679");
+    assert.equal(activity.launches[0]!.purpose, "generic", "an absent declaration reads `generic`");
+    assert.deepEqual(activity.hostVerification, []);
+  });
+
+  test("AC5 (fail closed) — an UNRECOGNIZED purpose is not host verification either", () => {
+    // A newer binary sharing ~/.forge/forge.db wrote a purpose this one has never heard
+    // of. The honest reading is the WEAKEST one, never the most specific.
+    addLaunch({ id: "launch-x-bb0002", association: { runId: "run-fg679" }, purpose: "host_verification" });
+    getDb().prepare(`UPDATE launch_observations SET purpose = ? WHERE launch_id = ?`).run("host_verification_v2", "launch-x-bb0002");
+
+    const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    assert.deepEqual(activity.hostVerification, []);
+    assert.deepEqual(activity.launches.map((l) => l.purpose), ["generic"]);
+  });
+
+  test("an empty-string purpose is an absent declaration, not a kind", () => {
+    addLaunch({ id: "launch-empty-bb0003", association: { runId: "run-fg679" }, purpose: "host_verification" });
+    getDb().prepare(`UPDATE launch_observations SET purpose = '' WHERE launch_id = ?`).run("launch-empty-bb0003");
+    const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    assert.deepEqual(activity.hostVerification, []);
+    assert.deepEqual(activity.launches.map((l) => l.purpose), ["generic"]);
+  });
+
+  test("AC1/AC8 — purpose and association are SEPARATE: neither decides the other, at every scope", () => {
+    // A declared host verification with NO association at all: purpose does not place
+    // it on a run, and placement does not revoke its purpose.
+    addLaunch({ id: "launch-hostwide-cc0001", purpose: "host_verification" });
+    // An agent invoke that DID declare a run: the association still places it on that
+    // run; the purpose still keeps it out of the host-verification section there.
+    addLaunch({ id: "launch-invoke-cc0002", association: { runId: "run-fg679" }, purpose: "agent_invoke" });
+
+    const onRun = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    assert.deepEqual(onRun.hostVerification, [], "purpose alone never places a launch on a run");
+    assert.deepEqual(onRun.launches.map((l) => l.launchId), ["launch-invoke-cc0002"], "association still places it");
+
+    const onProject = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
+    assert.deepEqual(onProject.hostVerification.map((l) => l.launchId), ["launch-hostwide-cc0001"]);
+    assert.equal(onProject.hostVerification[0]!.unassociated, true,
+      "…and it is still labeled `unassociated`: the purpose says nothing about placement");
+    assert.deepEqual(onProject.launches.map((l) => l.launchId), ["launch-invoke-cc0002"]);
+  });
+
+  test("the two buckets are DISJOINT and together are every placed launch — nothing is dropped", () => {
+    addLaunch({ id: "launch-hv-dd0001", association: { runId: "run-fg679" }, purpose: "host_verification" });
+    addLaunch({ id: "launch-ai-dd0002", association: { runId: "run-fg679" }, purpose: "agent_invoke" });
+    addLaunch({ id: "launch-rv-dd0003", association: { runId: "run-fg679" }, purpose: "review" });
+    addLaunch({ id: "launch-cp-dd0004", association: { runId: "run-fg679" }, purpose: "campaign" });
+    addLaunch({ id: "launch-db-dd0005", association: { runId: "run-fg679" }, purpose: "dashboard" });
+    addLaunch({ id: "launch-gn-dd0006", association: { runId: "run-fg679" }, purpose: "generic" });
+
+    const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    const hv = activity.hostVerification.map((l) => l.launchId);
+    const other = activity.launches.map((l) => l.launchId);
+    assert.deepEqual(hv, ["launch-hv-dd0001"]);
+    assert.deepEqual([...hv, ...other].sort(), [
+      "launch-ai-dd0002", "launch-cp-dd0004", "launch-db-dd0005",
+      "launch-gn-dd0006", "launch-hv-dd0001", "launch-rv-dd0003",
+    ], "every placed launch is in exactly one of the two sections");
+    assert.equal(hv.some((id) => other.includes(id)), false);
+  });
+
+  test("AC4 — a declared verification that goes TERMINAL or STALE renders no host-verification row", () => {
+    addLaunch({ id: "launch-term-ee0001", association: { runId: "run-fg679" }, purpose: "host_verification", status: { state: "exited_ok", code: 0 } });
+    assert.deepEqual(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } }).hostVerification, [],
+      "terminality is unchanged by FG-700 — a finished verification is not in flight");
+
+    const observedAt = new Date(NOW.getTime() - LAUNCH_OBSERVATION_FRESH_MS - 60_000).toISOString();
+    addLaunch({ id: "launch-stale-ee0002", association: { runId: "run-fg679" }, purpose: "host_verification", observedAt });
+    const stale = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } }).hostVerification;
+    assert.deepEqual(stale.map((l) => l.launchId), ["launch-stale-ee0002"]);
+    assert.equal(stale[0]!.statusLabel, `unobserved since ${observedAt}`, "…and an unobserved one never claims to be running");
+  });
+
+  test("AC6 — the agent section is untouched by any of this: an agent task is not a launch and is counted once", () => {
+    addTask("task-build-ff0001", "running");
+    addLaunch({ id: "launch-invoke-ff0002", association: { runId: "run-fg679", taskId: "task-build-ff0001" }, purpose: "agent_invoke" });
+    const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
+    assert.deepEqual(activity.agents.map((a) => a.taskId), ["task-build-ff0001"]);
+    assert.deepEqual(activity.hostVerification, []);
+    assert.deepEqual(activity.launches.map((l) => l.launchId), ["launch-invoke-ff0002"]);
+  });
+
+  test("with nothing but non-verification launches, `Host verification` says so — and does not borrow one", () => {
+    addLaunch({ id: "launch-invoke-gg0001", association: { runId: "run-fg679" }, purpose: "agent_invoke" });
+    const rendered = renderCurrentActivityLines(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } })).join("\n");
+    assert.match(rendered, /\(no host launch observed in flight\)/);
+    assert.match(rendered, /^ {2}Launch activity$/m);
+    assert.match(rendered, /launch-invoke-gg0001/);
+    assert.match(rendered, /\[agent_invoke\]/, "the row NAMES what it declared rather than leaving a reader to guess");
+  });
+
+  test("`Launch activity` renders only when there IS one — an empty bucket prints no heading", () => {
+    addLaunch({ id: "launch-only-hh0001", association: { runId: "run-fg679" }, purpose: "host_verification" });
+    const rendered = renderCurrentActivityLines(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } })).join("\n");
+    assert.doesNotMatch(rendered, /Launch activity/);
   });
 });
 
