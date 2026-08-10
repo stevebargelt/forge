@@ -49,6 +49,9 @@ function seed(id: string, exitRecord?: string): void {
     command: ["npm", "run", "test:worktree"],
     cwd: "/repos/forge",
     projectDir: "/repos/forge",
+    // FG-700: a DECLARED host verification, so the promotion assertions below are about
+    // the disposition rather than about which section the row landed in.
+    purpose: "host_verification",
     startedAt: "2026-08-05T11:50:00.000Z",
     observedAt: "2026-08-05T11:51:00.000Z",
     status: { state: "running" },
@@ -127,6 +130,7 @@ describe("FG-679 BD-16 — opportunistic promotion, no daemon", () => {
       command: ["npm", "test"],
       cwd: "/repos/forge",
       projectDir: "/repos/forge",
+      purpose: "host_verification",
       startedAt: "2026-08-05T06:00:00.000Z",
       observedAt: "2026-08-05T06:00:00.000Z",
       status: { state: "running" },

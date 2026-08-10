@@ -18,6 +18,20 @@
 // launch is NEVER represented as an agent task, and a pending check is never
 // represented as either.
 //
+// WHAT MAKES A LAUNCH HOST VERIFICATION (FG-700). Its DECLARED PURPOSE, recorded on
+// the observation at submission, and NOTHING ELSE. `hostVerification` admits only
+// `purpose === 'host_verification'`; every other open launch in scope — agent invoke,
+// review, campaign, dashboard, generic, and every legacy row whose purpose is NULL —
+// lands in `launches`, the generic launch-diagnostics bucket, and is still rendered in
+// full there. Placement (run / project / host, and the `unassociated` label) is decided
+// by the association ids exactly as before and is NOT consulted for the label; purpose
+// is not consulted for placement. Until FG-700 this section had no purpose to consult
+// and used PLACEMENT as a proxy for it, so `forge invoke engineer`, `forge invoke
+// test-engineer`, `forge invoke documentation-maintainer` and `forge review start` all
+// rendered as `Host verification` on 2026-08-10 merely by carrying `--run`/`--ticket`.
+// An unrecognized or absent purpose is `generic`, never host verification: the fallback
+// is always to the WEAKER claim.
+//
 // WHAT IT REFUSES TO DO:
 //   - It never claims liveness it did not observe. A non-terminal row past the
 //     freshness cutoff reads `unobserved since <t>` — never `running`, never
@@ -45,12 +59,14 @@ import { basename } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { isLaunchId, statusLine, type LaunchStatus } from "./launch.js";
 import {
-  LAUNCH_OBSERVATION_COLUMNS,
+  HOST_VERIFICATION_PURPOSE,
   hasPlacementAuthority,
+  launchObservationColumns,
   rowToLaunchObservation,
   type LaunchAssociationKind,
   type LaunchObservation,
   type LaunchObservationRow,
+  type LaunchPurpose,
 } from "../store/launch-observations.js";
 import { isTerminalReviewState } from "../store/reviews.js";
 
@@ -140,6 +156,11 @@ export type HostLaunchActivity = {
   projectDir: string | null;
   projectLabel: string | null;
   associationKind: LaunchAssociationKind;
+  /** FG-700: what the SUBMITTER declared this launch IS, carried on every launch row
+   *  of every section so a reader can see the classification rather than infer it back
+   *  out of which array the row arrived in. `generic` for an undeclared or
+   *  unrecognized purpose — never upgraded to a more specific kind. */
+  purpose: LaunchPurpose;
   /** True unless the SUBMITTER declared placement-authorizing metadata. Rendered as
    *  the literal `unassociated` label (BD-3). Deliberately NOT `associationKind !==
    *  "explicit"`: since FG-684 that label names which channel resolved the project
@@ -211,7 +232,15 @@ export type CurrentActivity = {
   generatedAt: string;
   scope: { runId: string | null; projectDirs: string[] | null };
   agents: ActivityAgentTask[];
+  /** ONLY launches whose DECLARED purpose is host verification (FG-700). */
   hostVerification: HostLaunchActivity[];
+  /** FG-700: every OTHER open launch in scope — agent invoke, review, campaign,
+   *  dashboard, generic, and every legacy row with no declared purpose. Disjoint from
+   *  `hostVerification` by construction: a launch is in exactly one of the two. This is
+   *  the generic launch-diagnostics bucket, and it exists so that narrowing the
+   *  host-verification LABEL does not delete the launch DIAGNOSTICS — a launch that is
+   *  not host verification still renders, under a heading that does not claim it is. */
+  launches: HostLaunchActivity[];
   requiredCi: RequiredCiSection;
   /** BD-14: launches whose cwd maps to NO registered project home. Populated only
    *  for the host-wide scope — it is a HOST-level bucket, and surfacing it inside a
@@ -312,6 +341,7 @@ function toHostLaunch(obs: LaunchObservation, placement: "run" | "project" | "ho
     projectDir: obs.projectDir,
     projectLabel: projectLabelOf(obs.projectDir),
     associationKind: obs.associationKind,
+    purpose: obs.purpose,
     unassociated: !hasPlacementAuthority(obs),
     placement,
     runId: obs.runId,
@@ -332,8 +362,12 @@ function toHostLaunch(obs: LaunchObservation, placement: "run" | "project" | "ho
  *  left the in-flight set by construction (BD-16), which is what lets a promoted
  *  hand-run launch stop appearing without anything fabricating its disposition. */
 function readOpenLaunches(db: DatabaseInstance): LaunchObservation[] {
+  // The column list is resolved against THIS store: the dashboard's read-only handle
+  // runs no migrations, so `purpose` may not exist there yet. A row read without it
+  // decodes to `generic` — which keeps it out of the host-verification section, the
+  // fail-closed direction.
   const rows = db.prepare(`
-    SELECT ${LAUNCH_OBSERVATION_COLUMNS}
+    SELECT ${launchObservationColumns(db)}
       FROM launch_observations
      WHERE terminal = 0
      ORDER BY started_at DESC
@@ -763,18 +797,22 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
   // `unassociated`; anything else lands in the host-level bucket. The launch NAME,
   // ARGV and LOG TEXT are not consulted anywhere in here — FG-492 records that argv
   // carries conversation text that false-matches unrelated run and ticket ids.
-  let hostVerification: HostLaunchActivity[];
+  //
+  // Placement decides WHICH SCOPE a launch is in. It does NOT decide what the launch
+  // is: that is the purpose split below, applied to whatever placement selected. The
+  // two questions are answered by two fields and neither is re-derived from the other.
+  let placed: HostLaunchActivity[];
   if (scope.runId !== undefined) {
     // The DECLARED run id, not `association_kind`: a row's run id is only ever what
     // the submitter declared (BD-15 — nothing is inferred), while the label names
     // which channel resolved the PROJECT home. A launch whose declared run is
     // registered without a project home takes its project from the cwd and reads
     // `cwd`; it still belongs on the run it named.
-    hostVerification = open
+    placed = open
       .filter((o) => o.runId === scope.runId)
       .map((o) => toHostLaunch(o, "run", nowMs));
   } else if (scope.projectDirs !== undefined) {
-    hostVerification = open
+    placed = open
       .filter((o) => inProjectScope(o.projectDir, scope.projectDirs))
       .map((o) => toHostLaunch(o, "project", nowMs));
   } else {
@@ -784,10 +822,17 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
     // it is the honest last tier, not a dumping ground for a launch that named its
     // run but happened to run in a per-task worktree (the ticket's own 2026-08-04
     // case, which lands ON ITS RUN once `--run` is supplied).
-    hostVerification = open
+    placed = open
       .filter((o) => o.projectDir !== null || hasPlacementAuthority(o))
       .map((o) => toHostLaunch(o, o.runId !== null ? "run" : o.projectDir !== null ? "project" : "host", nowMs));
   }
+
+  // PURPOSE. The ONE thing that decides the host-verification LABEL, and it is a
+  // DECLARATION read off the row — never the presence of an association, never the
+  // name, argv or log. Everything else stays visible as generic launch diagnostics, so
+  // this narrows what may be CALLED host verification without hiding a single launch.
+  const hostVerification = placed.filter((l) => l.purpose === HOST_VERIFICATION_PURPOSE);
+  const launches = placed.filter((l) => l.purpose !== HOST_VERIFICATION_PURPOSE);
 
   const unassociated = hostWide
     ? open
@@ -815,6 +860,7 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
     },
     agents: readAgents(db, scope),
     hostVerification,
+    launches,
     requiredCi: {
       state: ciState,
       label: ciState === "observed"
@@ -844,6 +890,18 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   if (activity.hostVerification.length === 0) lines.push("    (no host launch observed in flight)");
   for (const l of activity.hostVerification) {
     lines.push(`    ${l.statusLabel}  ${l.launchId}${l.unassociated ? "  [unassociated]" : ""}  — ${l.commandLine}`);
+  }
+
+  // FG-700: the generic launch diagnostics. Rendered only when there is something to
+  // render (the `Unassociated activity` pattern), and under a heading that claims
+  // nothing about what the launch is beyond the purpose each row DECLARES. These rows
+  // used to print under `Host verification` above; narrowing that label may not cost
+  // an operator the diagnostics, so they moved rather than disappeared.
+  if (activity.launches.length > 0) {
+    lines.push("  Launch activity");
+    for (const l of activity.launches) {
+      lines.push(`    ${l.statusLabel}  ${l.launchId}  [${l.purpose}]${l.unassociated ? "  [unassociated]" : ""}  — ${l.commandLine}`);
+    }
   }
 
   lines.push("  Required CI");

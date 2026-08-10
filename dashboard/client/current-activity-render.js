@@ -122,10 +122,12 @@ export function ciContextClass(state) {
 export function activityIsEmpty(activity) {
   if (!activity || typeof activity !== "object") return true;
   const agents = Array.isArray(activity.agents) ? activity.agents : [];
-  const launches = Array.isArray(activity.hostVerification) ? activity.hostVerification : [];
+  const hostVerification = Array.isArray(activity.hostVerification) ? activity.hostVerification : [];
+  const launches = Array.isArray(activity.launches) ? activity.launches : [];
   const unassociated = Array.isArray(activity.unassociated) ? activity.unassociated : [];
   const ci = activity.requiredCi && Array.isArray(activity.requiredCi.observations) ? activity.requiredCi.observations : [];
-  return agents.length === 0 && launches.length === 0 && unassociated.length === 0 && ci.length === 0;
+  return agents.length === 0 && hostVerification.length === 0 && launches.length === 0
+    && unassociated.length === 0 && ci.length === 0;
 }
 
 export function activityCounts(activity) {
@@ -133,6 +135,10 @@ export function activityCounts(activity) {
   return {
     agents: Array.isArray(a.agents) ? a.agents.length : 0,
     hostVerification: Array.isArray(a.hostVerification) ? a.hostVerification.length : 0,
+    // FG-700: the generic launch-diagnostics bucket — every open launch in scope whose
+    // DECLARED purpose is not host verification. Counted separately because it is a
+    // different fact, and absent from an older server's payload.
+    launches: Array.isArray(a.launches) ? a.launches.length : 0,
     requiredCi: a.requiredCi && Array.isArray(a.requiredCi.observations) ? a.requiredCi.observations.length : 0,
     unassociated: Array.isArray(a.unassociated) ? a.unassociated.length : 0,
   };
@@ -322,8 +328,10 @@ export function isCurrentActivityPayload(value) {
   if (!isArrayOf(value.hostVerification, isLaunchEntry)) return false;
   // Only ever checked AS an array: `homeActivityView` already substitutes `[]` for a
   // missing or non-array `unassociated`, so tightening past the crash surface here
-  // would reject payloads the surface renders correctly today.
+  // would reject payloads the surface renders correctly today. `launches` (FG-700) is
+  // read the same way and for the same reason — a server predating it sends none.
   if (Array.isArray(value.unassociated) && !value.unassociated.every(isLaunchEntry)) return false;
+  if (Array.isArray(value.launches) && !value.launches.every(isLaunchEntry)) return false;
   const ci = value.requiredCi;
   if (!isPlainObject(ci)) return false;
   if (!isNonEmptyString(ci.state)) return false;
@@ -701,10 +709,17 @@ export function homeActivityView(load) {
   const activity = load.activity;
   const ci = homeCiSummaries(activity.requiredCi);
   const sections = [];
-  const launches = activity.hostVerification;
+  const hostVerification = activity.hostVerification;
+  // FG-700: the launches that are NOT host verification. They used to render under the
+  // `Host verification` heading purely for carrying a run/task/ticket association, which
+  // is what made Home and `forge status` call every associated agent, review and campaign
+  // launch a host-verification wait. They keep their full diagnostic row here — the label
+  // narrowed, the evidence did not.
+  const launches = Array.isArray(activity.launches) ? activity.launches : [];
   const unassociated = Array.isArray(activity.unassociated) ? activity.unassociated : [];
-  if (launches.length > 0) sections.push({ kind: "hostVerification", heading: "Host verification", entries: launches });
+  if (hostVerification.length > 0) sections.push({ kind: "hostVerification", heading: "Host verification", entries: hostVerification });
   if (ci !== null) sections.push({ kind: "requiredCi", heading: "CI checks", entries: ci });
+  if (launches.length > 0) sections.push({ kind: "launches", heading: "Launch activity", entries: launches });
   if (unassociated.length > 0) sections.push({ kind: "unassociated", heading: "Unassociated activity", entries: unassociated });
   return {
     phase,

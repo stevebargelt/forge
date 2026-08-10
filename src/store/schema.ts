@@ -1157,6 +1157,18 @@ CREATE INDEX IF NOT EXISTS idx_queue_claims_scope
 -- observed_at is what makes freshness a FACT rather than an inference: a row
 -- older than the reader's cutoff renders unobserved since <t>, never running
 -- and never terminal.
+--
+-- purpose is WHAT THE LAUNCH IS, declared at submission and recorded here
+-- (FG-700). It is a SEPARATE field from the association ids with SEPARATE
+-- semantics: association answers WHERE a launch belongs (run / project / host
+-- placement), purpose answers WHAT it is. Neither decides the other. Enum-as-
+-- convention (FG-585), no CHECK: 'host_verification' | 'agent_invoke' |
+-- 'review' | 'campaign' | 'dashboard' | 'generic'. NULL (every row written
+-- before this column existed) and any value this binary does not recognize read
+-- as 'generic' — the weakest claim, never a more specific one. Before FG-700 the
+-- readers treated the mere PRESENCE of run_id/task_id/ticket_id as proof that a
+-- launch was host verification, so every associated agent, review and campaign
+-- launch rendered under the Host verification label.
 CREATE TABLE IF NOT EXISTS launch_observations (
   launch_id        TEXT PRIMARY KEY,
   name             TEXT,
@@ -1174,6 +1186,7 @@ CREATE TABLE IF NOT EXISTS launch_observations (
   state            TEXT NOT NULL,
   exit_code        INTEGER,
   signal           TEXT,
+  purpose          TEXT,
   terminal         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_launch_observations_run
@@ -1585,6 +1598,11 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "launch_observations", column: "item_id", ddl: "ALTER TABLE launch_observations ADD COLUMN item_id TEXT" },
   { table: "launch_observations", column: "exit_code", ddl: "ALTER TABLE launch_observations ADD COLUMN exit_code INTEGER" },
   { table: "launch_observations", column: "signal", ddl: "ALTER TABLE launch_observations ADD COLUMN signal TEXT" },
+  // FG-700: the first launch_observations column that is NOT a no-op — every store
+  // created since FG-679 carries the table WITHOUT it. Nullable and undefaulted on
+  // purpose: an existing row's purpose was never declared, and NULL is how it says so
+  // (it reads as `generic`, never as host verification). user_version is NOT bumped.
+  { table: "launch_observations", column: "purpose", ddl: "ALTER TABLE launch_observations ADD COLUMN purpose TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

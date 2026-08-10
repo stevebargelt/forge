@@ -2944,7 +2944,10 @@ export function launchDriveItemUnderForge(
       // from its cwd and labeled `unassociated` — which is the honest answer, and the
       // one this comment has always claimed.
       meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
-      recordLaunchStart(meta, { campaignId, itemId });
+      // FG-700: `campaign`, declared — this launch drives a campaign item, it is not
+      // host verification. Recorded as its own field beside the campaign/item
+      // provenance, which still authorizes no placement (associationKindFor).
+      recordLaunchStart(meta, { campaignId, itemId }, "campaign");
       // FG-564 (AC10 / P1-F): make the item-attempt -> launch linkage durable as a REQUIRED
       // ordered step BEFORE arming the waiter, so a crash between here and the child's
       // continuation-record is recoverable by direct linkage discovery (C7). If it cannot

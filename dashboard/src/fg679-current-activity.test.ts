@@ -50,7 +50,7 @@ db.exec(`
     launch_id TEXT PRIMARY KEY, name TEXT, command TEXT NOT NULL, cwd TEXT NOT NULL, project_dir TEXT,
     association_kind TEXT NOT NULL, run_id TEXT, task_id TEXT, ticket_id TEXT, campaign_id TEXT, item_id TEXT,
     started_at TEXT NOT NULL, observed_at TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, signal TEXT,
-    terminal INTEGER NOT NULL
+    purpose TEXT, terminal INTEGER NOT NULL
   );
 `);
 
@@ -62,26 +62,50 @@ const SHA = "a".repeat(40);
 db.prepare(`INSERT INTO runs VALUES ('run-1','surface activity','feature', ?, 'active', ?)`).run(PROJECT, ago(3_600_000));
 db.prepare(`INSERT INTO runs VALUES ('run-2','another','feature','/repos/other','active', ?)`).run(ago(3_600_000));
 
+/** FG-700: `purpose` is DECLARED per row. `undefined` writes NULL — a legacy row that
+ *  declared nothing — which is deliberately not the same fixture as one that declared
+ *  `host_verification`, and must not classify the same way. */
 function insertLaunch(row: {
   id: string; kind: string; runId?: string | null; projectDir?: string | null;
   observedAt?: string; state?: string; terminal?: number; exitCode?: number | null; signal?: string | null;
+  purpose?: string | null;
 }): void {
   db.prepare(`
-    INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, started_at, observed_at, state, exit_code, signal, terminal)
-    VALUES (?, ?, ?, '/repos/forge', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, started_at, observed_at, state, exit_code, signal, purpose, terminal)
+    VALUES (?, ?, ?, '/repos/forge', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     row.id, row.id, JSON.stringify(["npm", "run", "test:worktree"]),
     row.projectDir === undefined ? PROJECT : row.projectDir,
     row.kind, row.runId ?? null, ago(600_000), row.observedAt ?? ago(60_000),
-    row.state ?? "running", row.exitCode ?? null, row.signal ?? null, row.terminal ?? 0,
+    row.state ?? "running", row.exitCode ?? null, row.signal ?? null,
+    row.purpose === undefined ? null : row.purpose, row.terminal ?? 0,
   );
 }
 
-insertLaunch({ id: "launch-explicit-aaaaaa", kind: "explicit", runId: "run-1" });
-insertLaunch({ id: "launch-cwd-bbbbbb", kind: "cwd" });
+insertLaunch({ id: "launch-explicit-aaaaaa", kind: "explicit", runId: "run-1", purpose: "host_verification" });
+insertLaunch({ id: "launch-cwd-bbbbbb", kind: "cwd", purpose: "host_verification" });
+// The host-level bucket takes this row on PLACEMENT alone, so it declares no purpose —
+// which also shows the bucket does not depend on one.
 insertLaunch({ id: "launch-orphan-cccccc", kind: "none", projectDir: null });
-insertLaunch({ id: "launch-stale-dddddd", kind: "explicit", runId: "run-2", projectDir: "/repos/other", observedAt: ago(3 * 3_600_000) });
-insertLaunch({ id: "launch-done-eeeeee", kind: "explicit", runId: "run-1", state: "exited_ok", exitCode: 0, terminal: 1 });
+insertLaunch({ id: "launch-stale-dddddd", kind: "explicit", runId: "run-2", projectDir: "/repos/other", observedAt: ago(3 * 3_600_000), purpose: "host_verification" });
+insertLaunch({ id: "launch-done-eeeeee", kind: "explicit", runId: "run-1", state: "exited_ok", exitCode: 0, terminal: 1, purpose: "host_verification" });
+
+// FG-700: the 2026-08-10 live shape, in the store — several associated launches that
+// are NOT host verification, one that is, one legacy row that declared nothing, and one
+// carrying a purpose this binary has never heard of.
+// Its own project home, so the placement assertions above keep reading exactly the
+// rows they were written for — purpose and placement are separate questions here too.
+const PURPOSE_RUN = "run-purpose";
+const PURPOSE_PROJECT = "/repos/purpose";
+db.prepare(`INSERT INTO runs VALUES (?,'purpose scoping','feature', ?, 'active', ?)`).run(PURPOSE_RUN, PURPOSE_PROJECT, ago(3_600_000));
+const purposeLaunch = (id: string, purpose?: string): void =>
+  insertLaunch({ id, kind: "explicit", runId: PURPOSE_RUN, projectDir: PURPOSE_PROJECT, ...(purpose === undefined ? {} : { purpose }) });
+purposeLaunch("launch-invoke-p11111", "agent_invoke");
+purposeLaunch("launch-review-p22222", "review");
+purposeLaunch("launch-campaign-p3333", "campaign");
+purposeLaunch("launch-legacy-p44444");
+purposeLaunch("launch-newer-p55555", "something_this_binary_has_never_heard_of");
+purposeLaunch("launch-verify-p66666", "host_verification");
 
 db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES ('run-1', NULL, 'review_loop.ci_observed', ?, ?)`)
   .run(JSON.stringify({
@@ -147,6 +171,7 @@ describe("FG-679 queries.currentActivity — the read model", () => {
     assert.equal(JSON.stringify(detail).includes(PROJECT), false);
     assert.equal(detail.projectLabel, "forge");
     assert.equal(detail.statusLabel, "running");
+    assert.equal(detail.purpose, "host_verification", "FG-700: the detail carries the DECLARED purpose");
   });
 
   test("launchDetail refuses an id outside the launch charset without touching the filesystem", () => {
@@ -156,7 +181,7 @@ describe("FG-679 queries.currentActivity — the read model", () => {
   });
 
   test("a FUTURE-dated observation reads `unobserved since <t>` on launch detail too — the same range predicate, not a second one-sided copy", () => {
-    insertLaunch({ id: "launch-future-ffffff", kind: "explicit", runId: "run-1", observedAt: new Date(NOW + 6 * 3_600_000).toISOString() });
+    insertLaunch({ id: "launch-future-ffffff", kind: "explicit", runId: "run-1", observedAt: new Date(NOW + 6 * 3_600_000).toISOString(), purpose: "host_verification" });
     const detail = launchDetail("launch-future-ffffff", NOW)!;
     assert.equal(detail.observation, "unobserved");
     assert.equal(detail.state, "unknown");
@@ -168,6 +193,36 @@ describe("FG-679 queries.currentActivity — the read model", () => {
     // This row is this test's own fixture; the module-level set is what the later
     // count assertions read.
     db.prepare(`DELETE FROM launch_observations WHERE launch_id = 'launch-future-ffffff'`).run();
+  });
+});
+
+// ── FG-700: the dashboard reads the SAME durable classification `forge status` does ──
+//
+// The read model is exercised here through the dashboard's own read-only handle, which
+// is the position that matters: it runs no migrations, so it is also the reader that
+// meets a store whose `launch_observations` predates the purpose column.
+
+describe("FG-700 — only a DECLARED host verification reaches the dashboard's host-verification bucket", () => {
+  test("the real verification is the ONLY host-verification row; everything else is a generic launch diagnostic", () => {
+    const activity = currentActivity(undefined, PURPOSE_RUN, NOW);
+    assert.deepEqual(activity.hostVerification.map((l) => l.launchId), ["launch-verify-p66666"]);
+    assert.deepEqual(activity.launches.map((l) => l.launchId).sort(), [
+      "launch-campaign-p3333", "launch-invoke-p11111", "launch-legacy-p44444",
+      "launch-newer-p55555", "launch-review-p22222",
+    ]);
+  });
+
+  test("a NULL purpose and an unrecognized purpose both read `generic` — never host verification", () => {
+    const byId = new Map(currentActivity(undefined, PURPOSE_RUN, NOW).launches.map((l) => [l.launchId, l]));
+    assert.equal(byId.get("launch-legacy-p44444")!.purpose, "generic");
+    assert.equal(byId.get("launch-newer-p55555")!.purpose, "generic");
+    // Non-vacuous: both are associated, fresh and running — only the purpose excludes them.
+    for (const id of ["launch-legacy-p44444", "launch-newer-p55555"]) {
+      assert.equal(byId.get(id)!.statusLabel, "running");
+      assert.equal(byId.get(id)!.runId, PURPOSE_RUN);
+    }
+    assert.equal(launchDetail("launch-legacy-p44444", NOW)!.purpose, "generic");
+    assert.equal(launchDetail("launch-newer-p55555", NOW)!.purpose, "generic");
   });
 });
 
@@ -274,7 +329,10 @@ describe("FG-679 — the empty surface says nothing was observed, not that nothi
     const live = currentActivity(undefined, undefined, NOW);
     assert.equal(activityIsEmpty(live), false);
     const counts = activityCounts(live);
-    assert.equal(counts.hostVerification, 3, "host-wide: both project-homed launches plus the stale one");
+    assert.equal(counts.hostVerification, 4,
+      "host-wide: both project-homed launches, the stale one, and FG-700's declared verification");
+    assert.equal(counts.launches, 5,
+      "FG-700: the agent-invoke, review, campaign, legacy-NULL and unknown-purpose launches — visible, just not called host verification");
     assert.equal(counts.unassociated, 1);
     assert.equal(counts.requiredCi, 1);
   });

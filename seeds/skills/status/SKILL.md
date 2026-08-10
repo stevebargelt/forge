@@ -50,11 +50,18 @@ evidence that agent work is running or stopped.
    forge status --read-only --json
    ```
 
-   `Current activity` has three distinct sections: `Agents`, `Host
-   verification`, and `Required CI`. A launch is never an agent task. This is
-   the SAME derivation over the same persisted observations that the dashboard
-   renders (FG-679), which is why the two agree; classify from it, not from a
-   live probe.
+   `Current activity` has four sections: `Agents`, `Host verification`,
+   `Launch activity`, and `Required CI`. A launch is never an agent task. Only
+   a launch that DECLARED `--purpose host_verification` at submission (FG-700)
+   ever renders under `Host verification`; every other placed launch —
+   `agent_invoke`, `review`, `campaign`, `dashboard`, `generic`, and any
+   legacy row recorded before the field existed — renders in full under
+   `Launch activity` instead. Treat `Launch activity` as diagnostic only: it
+   exists so an associated launch is never silently dropped, not as a second
+   WORKING signal — the agent task or review it belongs to already carries
+   that. This is the SAME derivation over the same persisted observations
+   that the dashboard renders (FG-679), which is why the two agree; classify
+   from it, not from a live probe.
 
    Read each launch status exactly as printed and never upgrade it: `terminated
    by SIGTERM (signal sender not recorded — origin unknown)`, a bare `exited 143

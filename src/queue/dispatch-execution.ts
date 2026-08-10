@@ -90,6 +90,7 @@ import {
   promoteLaunchObservations as promoteLaunchObservationsReal,
   recordLaunchStart as recordLaunchStartReal,
   type LaunchObservation,
+  type LaunchPurpose,
 } from "../store/launch-observations.js";
 import { allocateLaunchId, removeLaunch as removeLaunchReal, startLaunch as startLaunchReal, type LaunchMeta } from "../v2/launch.js";
 import { acquireRunLock, releaseRunLock } from "../util/run-lock.js";
@@ -160,7 +161,7 @@ export type ExecutionSeams = {
    *  the container under it and return it, because it is the only durable pointer a
    *  successor has to what this call started. */
   startLaunch?: (argv: string[], opts: { id: string; name: string; cwd: string }) => LaunchMeta;
-  recordLaunchStart?: (meta: LaunchMeta, association: { ticketId: string }) => boolean;
+  recordLaunchStart?: (meta: LaunchMeta, association: { ticketId: string }, purpose: LaunchPurpose) => boolean;
   removeLaunch?: (id: string, opts?: { force?: boolean }) => void;
   promoteLaunchObservations?: () => number;
   /** The existing `forge cancel` seam. Defaults to the production path: steal the run
@@ -172,9 +173,15 @@ function seamStartLaunch(seams: ExecutionSeams): (argv: string[], opts: { id: st
   return seams.startLaunch ?? ((argv, opts) => startLaunchReal(argv, { id: opts.id, name: opts.name, cwd: opts.cwd }));
 }
 
-function seamRecordLaunchStart(seams: ExecutionSeams): (meta: LaunchMeta, association: { ticketId: string }) => boolean {
-  return seams.recordLaunchStart ?? ((meta, association) => recordLaunchStartReal(meta, association));
+function seamRecordLaunchStart(seams: ExecutionSeams): (meta: LaunchMeta, association: { ticketId: string }, purpose: LaunchPurpose) => boolean {
+  return seams.recordLaunchStart ?? ((meta, association, purpose) => recordLaunchStartReal(meta, association, purpose));
 }
+
+/** FG-700: what the dispatcher's own launch IS. `buildDispatchArgv` starts the
+ *  ordinary single-ticket run (`forge new --ticket …`), so this container is AGENT
+ *  work — already represented once by the agent-task projection — and never host
+ *  verification, whatever ticket association it carries for orphan discovery. */
+const DISPATCH_LAUNCH_PURPOSE: LaunchPurpose = "agent_invoke";
 
 function seamRemoveLaunch(seams: ExecutionSeams): (id: string, opts?: { force?: boolean }) => void {
   return seams.removeLaunch ?? ((id, opts) => removeLaunchReal(id, opts ?? {}));
@@ -664,7 +671,7 @@ export function launchClaimedTicket(input: LaunchClaimInput): LaunchClaimResult 
   // invisible one it would duplicate.
   if (meta.id !== launchId) {
     try {
-      seamRecordLaunchStart(seams)(meta, { ticketId: claim.ticketId });
+      seamRecordLaunchStart(seams)(meta, { ticketId: claim.ticketId }, DISPATCH_LAUNCH_PURPOSE);
     } catch {
       /* the observation is best-effort by its own contract; the removal still runs */
     }
@@ -691,7 +698,7 @@ export function launchClaimedTicket(input: LaunchClaimInput): LaunchClaimResult 
   // ── 5. the observation (best-effort by contract; the ticket association a later
   //      orphan discovery reads) ────────────────────────────────────────────────
   try {
-    seamRecordLaunchStart(seams)(meta, { ticketId: claim.ticketId });
+    seamRecordLaunchStart(seams)(meta, { ticketId: claim.ticketId }, DISPATCH_LAUNCH_PURPOSE);
   } catch {
     /* unobserved, never unlaunched */
   }

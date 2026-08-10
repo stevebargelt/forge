@@ -78,9 +78,27 @@ jobs:
   # landing on the wrong shard. Every shard runs on the .nvmrc interpreter alone
   # (FG-647): the F31 preflight coverage in node-preflight.integration.test.ts is
   # deterministic under one Node, so no shard downloads a second one.
+  #
+  # The shards' ceiling is 10 minutes, not the 6 the other extended-gate jobs
+  # carry. At cfbebcc5 `integration_1` ran the whole shard GREEN — node:test
+  # reported `suites 19, pass 696, fail 0, cancelled 0, skipped 0` in
+  # `duration_ms 356585` (5m57s) — and was then killed at the 6-minute ceiling.
+  # GitHub renders that as `##[error]The operation was canceled.`, which is NOT a
+  # test failure; because `test-extended` is a fail-closed aggregate, the
+  # cancelled shard turned a required check red with nothing actually failing.
+  # The same shard on `main` took 4m54s (6ed18386) and 5m29s (1807ba1f) — 31 to
+  # 66 seconds of headroom against the ceiling, with roughly 35 seconds of
+  # observed run-to-run variance between two consecutive green runs: the margin
+  # was already smaller than the noise. Nor is the shard estimate at fault —
+  # FG-624's bin-packer in src/test-shards.ts already weights an unmeasured file
+  # at the p75 of measured files precisely because "the cost of guessing low is a
+  # shard that blows the 6-minute ceiling". It guessed high and the shard blew
+  # the ceiling anyway. The tier has grown into its budget. Raising the ceiling
+  # costs no wall-clock on a healthy run (the shards are concurrent); it only
+  # changes how long a genuinely hung job is allowed to hang.
   integration_1:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -100,7 +118,7 @@ jobs:
 
   integration_2:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -120,7 +138,7 @@ jobs:
 
   integration_3:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -140,7 +158,7 @@ jobs:
 
   integration_4:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -160,7 +178,7 @@ jobs:
 
   integration_5:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

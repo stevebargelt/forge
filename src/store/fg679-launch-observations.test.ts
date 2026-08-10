@@ -15,11 +15,15 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, getDb } from "./db.js";
 import {
   LAUNCH_OBSERVATION_STATES,
+  LAUNCH_PURPOSE_VALUES,
   associationKindFor,
+  decodeLaunchPurpose,
   decodeLaunchStatus,
   encodeLaunchStatus,
   getLaunchObservation,
+  isLaunchPurpose,
   isTerminalObservationState,
+  launchObservationColumns,
   listLaunchObservations,
   listOpenLaunchObservations,
   recordLaunchObservation,
@@ -268,5 +272,107 @@ describe("FG-679 launch_observations — cwd -> registered project home", () => 
 
   test("a sibling directory whose path merely SHARES A PREFIX is not a match", () => {
     assert.equal(resolveRegisteredProjectDir("/repos/forge-other"), null);
+  });
+});
+
+// ─────────────────────────────── FG-700 ───────────────────────────────
+//
+// PURPOSE is a SEPARATE DECLARED FIELD, and the decode is where its fail-closed rule
+// lives. Everything downstream (`deriveCurrentActivity`, `forge status`, the dashboard)
+// asks exactly one question — "is this purpose `host_verification`?" — so a decode that
+// promoted an unreadable value would reinstate the false label at every surface at once.
+
+describe("FG-700 launch_observations — the declared purpose", () => {
+  const base = {
+    name: "verify",
+    command: ["npm", "run", "test:all"],
+    cwd: "/repos/forge",
+    projectDir: "/repos/forge",
+    startedAt: "2026-08-05T10:00:00.000Z",
+    observedAt: "2026-08-05T10:01:00.000Z",
+    status: { state: "running" } as LaunchStatus,
+  };
+
+  test("every purpose in the vocabulary round-trips unchanged", () => {
+    for (const purpose of LAUNCH_PURPOSE_VALUES) {
+      recordLaunchObservation({ ...base, launchId: `launch-p-${purpose}`, purpose });
+      assert.equal(getLaunchObservation(`launch-p-${purpose}`)?.purpose, purpose);
+    }
+  });
+
+  test("a caller that declares NOTHING records `generic` — never a kind it did not claim", () => {
+    recordLaunchObservation({ ...base, launchId: "launch-undeclared-aaaaaa" });
+    assert.equal(getLaunchObservation("launch-undeclared-aaaaaa")?.purpose, "generic");
+    // The column carries the word rather than a NULL, so a row THIS binary wrote stays
+    // distinguishable from one written before the column existed.
+    assert.deepEqual(
+      getDb().prepare(`SELECT purpose FROM launch_observations WHERE launch_id = ?`).get("launch-undeclared-aaaaaa"),
+      { purpose: "generic" },
+    );
+  });
+
+  test("a NULL column (a row written before FG-700) decodes to `generic`", () => {
+    recordLaunchObservation({ ...base, launchId: "launch-legacy-bbbbbb", purpose: "host_verification" });
+    getDb().prepare(`UPDATE launch_observations SET purpose = NULL WHERE launch_id = ?`).run("launch-legacy-bbbbbb");
+    assert.equal(getLaunchObservation("launch-legacy-bbbbbb")?.purpose, "generic");
+  });
+
+  test("an UNRECOGNIZED value decodes to `generic`, never to the nearest-looking kind", () => {
+    for (const raw of ["host_verification_v2", "HOST_VERIFICATION", "verification", " host_verification", "", "toString", "__proto__"]) {
+      recordLaunchObservation({ ...base, launchId: "launch-unknown-cccccc", purpose: "host_verification" });
+      getDb().prepare(`UPDATE launch_observations SET purpose = ? WHERE launch_id = ?`).run(raw, "launch-unknown-cccccc");
+      assert.equal(getLaunchObservation("launch-unknown-cccccc")?.purpose, "generic", `'${raw}' must not decode to a kind`);
+      assert.equal(decodeLaunchPurpose(raw), "generic");
+    }
+    assert.equal(decodeLaunchPurpose(null), "generic");
+    assert.equal(decodeLaunchPurpose(undefined), "generic");
+  });
+
+  test("isLaunchPurpose accepts exactly the vocabulary — the submission surface's guard", () => {
+    for (const purpose of LAUNCH_PURPOSE_VALUES) assert.equal(isLaunchPurpose(purpose), true);
+    for (const raw of ["host_verification_v2", "", "generic ", "constructor", "hasOwnProperty"]) {
+      assert.equal(isLaunchPurpose(raw), false, `'${raw}' is not a declarable purpose`);
+    }
+  });
+
+  test("purpose and association are recorded INDEPENDENTLY — neither is derived from the other", () => {
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-p', 'feature', 't', 'active', '2026-08-05T00:00:00.000Z', '/repos/forge')`).run();
+    recordLaunchObservation({ ...base, launchId: "launch-assoc-dddddd", association: { runId: "run-p", ticketId: "FG-700" }, purpose: "agent_invoke" });
+    const obs = getLaunchObservation("launch-assoc-dddddd")!;
+    assert.equal(obs.runId, "run-p", "the association is recorded verbatim…");
+    assert.equal(obs.ticketId, "FG-700");
+    assert.equal(obs.associationKind, "explicit");
+    assert.equal(obs.purpose, "agent_invoke", "…and it did not upgrade the purpose");
+
+    recordLaunchObservation({ ...base, launchId: "launch-noassoc-eeeeee", purpose: "host_verification" });
+    const solo = getLaunchObservation("launch-noassoc-eeeeee")!;
+    assert.equal(solo.purpose, "host_verification");
+    assert.equal(solo.runId, null, "…and the purpose did not invent an association");
+  });
+
+  test("a re-record UPDATES the purpose rather than keeping a stale one", () => {
+    recordLaunchObservation({ ...base, launchId: "launch-rewrite-ffffff", purpose: "host_verification" });
+    recordLaunchObservation({ ...base, launchId: "launch-rewrite-ffffff", purpose: "agent_invoke" });
+    assert.equal(getLaunchObservation("launch-rewrite-ffffff")?.purpose, "agent_invoke");
+  });
+
+  test("promoting a terminal disposition leaves the declared purpose alone", () => {
+    recordLaunchObservation({ ...base, launchId: "launch-promote-gggggg", purpose: "host_verification" });
+    updateLaunchObservationStatus("launch-promote-gggggg", { state: "exited_ok", code: 0 }, "2026-08-05T10:09:00.000Z");
+    const obs = getLaunchObservation("launch-promote-gggggg")!;
+    assert.equal(obs.purpose, "host_verification", "a disposition is not a reclassification");
+    assert.equal(obs.terminal, true);
+  });
+
+  test("a store whose launch_observations PREDATES the column still reads — every row `generic`", () => {
+    // The dashboard's position: a read-only handle over a store no writer has migrated.
+    // Selecting a column that is not there would throw and take the surface down.
+    recordLaunchObservation({ ...base, launchId: "launch-aged-hhhhhh", purpose: "host_verification" });
+    getDb().exec(`ALTER TABLE launch_observations DROP COLUMN purpose`);
+    assert.doesNotMatch(launchObservationColumns(getDb()), /purpose/);
+    const obs = getLaunchObservation("launch-aged-hhhhhh");
+    assert.ok(obs, "the read must succeed against the aged shape");
+    assert.equal(obs.purpose, "generic", "…and an unreadable declaration is not host verification");
+    assert.equal(listOpenLaunchObservations().length, 1);
   });
 });

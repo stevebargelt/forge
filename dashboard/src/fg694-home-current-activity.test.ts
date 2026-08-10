@@ -163,6 +163,7 @@ function payload(over: Partial<CurrentActivityPayload> = {}): CurrentActivityPay
     scope: { runId: null, projectDirs: null },
     agents: [],
     hostVerification: [],
+    launches: [],
     requiredCi: { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
     unassociated: [],
     ...over,
@@ -183,6 +184,10 @@ const agent = {
   startedAt: "2026-08-08T11:50:00.000Z",
 };
 
+// FG-700: a launch is host verification because it DECLARED that purpose — never
+// because it carries a run or a ticket. Everything under `hostVerification` in these
+// fixtures is a launch the server already classified, so it declares the purpose the
+// server would have read.
 const launch = {
   launchId: "launch-worktree-8pagjk",
   name: "worktree-tier",
@@ -191,6 +196,7 @@ const launch = {
   projectDir: null,
   projectLabel: "forge",
   associationKind: "explicit" as const,
+  purpose: "host_verification" as const,
   unassociated: false,
   placement: "run" as const,
   runId: "run-fg694",
@@ -366,6 +372,39 @@ describe("FG-694 AC6 — empty diagnostics render nothing; In flight owns the em
       ["Host verification", "CI checks", "Unassociated activity"]);
   });
 
+  // FG-700: the diagnostic surface keeps every launch. What changed is which heading
+  // each one renders under — a launch that did not declare host verification renders
+  // under `Launch activity`, in full, instead of under `Host verification`.
+  test("a non-host-verification launch renders its full diagnostic row under `Launch activity`, never under `Host verification`", () => {
+    const invoke = {
+      ...launch,
+      launchId: "launch-invoke-jjjjjj",
+      name: "engineer-mg49",
+      command: ["forge", "invoke", "engineer"],
+      commandLine: "forge invoke engineer",
+      purpose: "agent_invoke" as const,
+    };
+    const load = ready({ launches: [invoke] } as never);
+    const view = homeActivityView(load);
+    assert.deepEqual(view.sections.map((s) => s.heading), ["Launch activity"]);
+    assert.deepEqual((view.sections[0]!.entries as Array<{ launchId: string }>).map((e) => e.launchId), ["launch-invoke-jjjjjj"]);
+
+    // The row is the SAME diagnostic row, argv and identity included — the label
+    // narrowed, the evidence did not.
+    const text = collapsed(load);
+    assert.match(text, /forge invoke engineer/);
+    assert.match(text, /engineer-mg49/);
+    assert.doesNotMatch(text, /Host verification/, "an agent-invoke launch may not render under that heading");
+  });
+
+  test("both buckets populated: two headings, and each launch under exactly one of them", () => {
+    const load = ready({
+      hostVerification: [launch],
+      launches: [{ ...launch, launchId: "launch-review-kkkkkk", name: "review-fg683", purpose: "review" as const }],
+    } as never);
+    assert.deepEqual(homeActivityView(load).sections.map((s) => s.heading), ["Host verification", "Launch activity"]);
+  });
+
   test("`no_current_candidate` omits the CI row entirely — it does NOT report CI as unobserved", () => {
     assert.equal(homeCiSummaries({ state: "no_current_candidate", label: "no current CI candidate", observations: [] }), null);
     const text = collapsed(ready({ agents: [agent] }));
@@ -445,6 +484,7 @@ describe("FG-694 correction — Home's In flight folds in waits only, and never 
       command: ["forge", "dashboard"],
       commandLine: "forge dashboard",
       associationKind: "cwd" as const,
+      purpose: "dashboard" as const,
       unassociated: true,
       placement: "project" as const,
       runId: null,
@@ -472,6 +512,27 @@ describe("FG-694 correction — Home's In flight folds in waits only, and never 
       "homeInFlightActivity must not read `unassociated` — the host-level bucket is diagnostic activity");
   });
 
+  // FG-700: the third bucket Home may not fold in, asserted the same structural way as
+  // `agents` and `unassociated`. `launches` is every open launch that did NOT declare
+  // host verification — the agent, review and campaign launches the 2026-08-10
+  // reproduction found rendering as host-verification waits. Reading it here would put
+  // them straight back, under a heading that says `host verification`.
+  test("the generic launch bucket is NOT folded into Home's waits", () => {
+    const invoke = { ...launch, launchId: "launch-invoke-jjjjjj", purpose: "agent_invoke" as const };
+    // Non-vacuous: it is associated, fresh and running, so ONLY the bucket excludes it.
+    assert.equal(invoke.observation, "fresh");
+    assert.deepEqual(invoke.status, { state: "running" });
+    assert.equal(invoke.ticketId, "FG-694");
+
+    assert.deepEqual(wait({ launches: [invoke] } as never).hostVerification, []);
+    assert.equal(waitsText(ready({ launches: [invoke] } as never)), "");
+
+    const source = readFileSync(new URL("../client/current-activity-render.js", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function homeInFlightActivity("));
+    assert.doesNotMatch(body.slice(0, body.indexOf("\n}")), /\.launches\b/,
+      "homeInFlightActivity must not read `launches` — a launch that is not host verification is not a host-verification wait");
+  });
+
   test("an ASSOCIATED running verification still renders, compactly, on any one of the three ids", () => {
     for (const [field, over] of [
       ["ticketId", { runId: null, taskId: null, ticketId: "FG-694" }],
@@ -497,6 +558,7 @@ describe("FG-694 correction — Home's In flight folds in waits only, and never 
     const driveItem = {
       ...launch,
       launchId: "launch-campaign-iiiiii",
+      purpose: "campaign" as const,
       unassociated: true,
       runId: null,
       taskId: null,
@@ -1006,7 +1068,11 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       { file: "current-activity-render.js", fn: "launchAssociationLabel", receiver: "entry", kind: "launch", guarded: ["unassociated"] },
       { file: "current-activity-render.js", fn: "launchIdentityLine", receiver: "entry", kind: "launch",
         guarded: ["runId", "taskId", "ticketId", "campaignId", "projectLabel"] },
-      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: [] },
+      // FG-700: `launches` is read through `Array.isArray(...) ? … : []`, exactly like
+      // `unassociated`, and is legitimately ABSENT from a server that predates FG-700 —
+      // so it is declared guarded rather than required. The payload validator still
+      // rejects a `launches` that is present and holds a malformed entry.
+      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches"] },
       { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: [] },
       { file: "current-activity-render.js", fn: "launchIsAssociatedWait", receiver: "entry", kind: "launch",
         guarded: ["runId", "taskId", "ticketId"] },

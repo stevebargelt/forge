@@ -48,17 +48,22 @@ function seed(): void {
       launch_id TEXT PRIMARY KEY, name TEXT, command TEXT NOT NULL, cwd TEXT NOT NULL, project_dir TEXT,
       association_kind TEXT NOT NULL, run_id TEXT, task_id TEXT, ticket_id TEXT, campaign_id TEXT, item_id TEXT,
       started_at TEXT NOT NULL, observed_at TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, signal TEXT,
-      terminal INTEGER NOT NULL
+      purpose TEXT, terminal INTEGER NOT NULL
     );
   `);
   db.prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-agree','feature','agreement run','active', ?, ?)`).run(iso, PROJECT);
   // Deliberately NO running/awaiting task: the whole point is a run whose only
   // in-flight work is a host launch and a pending check.
   db.prepare(`INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, created_at, completed_at) VALUES ('task-done','run-agree','plan','tech-lead','complete','{}', ?, ?)`).run(iso, iso);
-  db.prepare(`
-    INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, ticket_id, started_at, observed_at, state, terminal)
-    VALUES ('launch-worktree-agree1', 'worktree', ?, ?, ?, 'explicit', 'run-agree', 'FG-679', ?, ?, 'running', 0)
-  `).run(JSON.stringify(["npm", "run", "test:worktree"]), PROJECT, PROJECT, iso, iso);
+  // FG-700: the launch DECLARES what it is. The second one declares a different kind
+  // while carrying the SAME run association, which is what makes the agreement below an
+  // assertion about the classification and not just about a row count.
+  const insertLaunch = db.prepare(`
+    INSERT INTO launch_observations (launch_id, name, command, cwd, project_dir, association_kind, run_id, ticket_id, started_at, observed_at, state, purpose, terminal)
+    VALUES (?, ?, ?, ?, ?, 'explicit', 'run-agree', 'FG-679', ?, ?, 'running', ?, 0)
+  `);
+  insertLaunch.run("launch-worktree-agree1", "worktree", JSON.stringify(["npm", "run", "test:worktree"]), PROJECT, PROJECT, iso, iso, "host_verification");
+  insertLaunch.run("launch-invoke-agree2", "engineer", JSON.stringify(["forge", "invoke", "engineer"]), PROJECT, PROJECT, iso, iso, "agent_invoke");
   db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES ('run-agree', NULL, 'review_loop.ci_observed', ?, ?)`)
     .run(JSON.stringify({
       attemptId: "attempt-agree", ticketId: "FG-679", projectDir: PROJECT, candidateSha: SHA,
@@ -121,6 +126,9 @@ describe("FG-679 BD-9 — /status and the dashboard answer from ONE derivation",
     assert.equal(payload.currentActivity.hostVerification.length, 1);
     assert.equal(payload.currentActivity.hostVerification[0]!.launchId, "launch-worktree-agree1");
     assert.equal(payload.currentActivity.hostVerification[0]!.statusLabel, "running");
+    // FG-700: the equally-associated agent launch is present, and is NOT the wait.
+    assert.deepEqual(payload.currentActivity.launches.map((l) => l.launchId), ["launch-invoke-agree2"]);
+    assert.equal(payload.currentActivity.launches[0]!.purpose, "agent_invoke");
   });
 
   test("(b) a pending required check with no active agent task: both name the same sha and the same contexts", () => {
@@ -150,6 +158,12 @@ describe("FG-679 BD-9 — /status and the dashboard answer from ONE derivation",
     assert.match(out, /\(no agent task in flight\)/);
     assert.match(out, /running {2}launch-worktree-agree1/);
     assert.match(out, /npm run test:worktree/);
+    // FG-700 on the HUMAN surface: the agent-invoke launch renders under its own
+    // heading, in full, and never under Host verification.
+    assert.match(out, /^ {2}Launch activity$/m);
+    assert.match(out, /launch-invoke-agree2 {2}\[agent_invoke\]/);
+    const hostSection = out.slice(out.indexOf("  Host verification"), out.indexOf("  Launch activity"));
+    assert.doesNotMatch(hostSection, /launch-invoke-agree2/, "an agent invoke is not a host-verification row");
     // BD-5 on the human surface: the exact sha and EVERY context.
     assert.match(out, new RegExp(`candidate ${SHA}`));
     assert.match(out, /test: pending {2}https:\/\/example\.invalid\/1/);

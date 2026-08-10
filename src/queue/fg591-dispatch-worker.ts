@@ -199,7 +199,7 @@ function makeLauncher(): Launcher {
       return meta;
     },
 
-    recordLaunchStart: (meta, association) => {
+    recordLaunchStart: (meta, association, purpose) => {
       const runId = `run-w${WORKER_ID}-${association.ticketId}`;
       writeTransaction(() => {
         recordLaunchObservation({
@@ -209,6 +209,9 @@ function makeLauncher(): Launcher {
           cwd: meta.cwd,
           projectDir: meta.cwd,
           association: { ticketId: association.ticketId },
+          // FG-700: the substituted boundary records the purpose production records,
+          // so the row this fixture writes is the row the dispatcher would write.
+          purpose,
           startedAt: meta.startedAt,
           observedAt: meta.startedAt,
           status: { state: "running" },

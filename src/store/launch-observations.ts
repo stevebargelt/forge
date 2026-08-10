@@ -40,12 +40,76 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { Database as DatabaseInstance } from "better-sqlite3";
 import { getDb, writeTransaction } from "./db.js";
 import { LAUNCHES_DIR, classifyExit, isLaunchId, parseExitRecord, type LaunchMeta, type LaunchStatus } from "../v2/launch.js";
 
 /** How a launch's placement was AUTHORIZED. Enum-as-convention (FG-585): TEXT with
  *  no DB CHECK, so an old/new binary never fights a constraint the other lacks. */
 export type LaunchAssociationKind = "explicit" | "cwd" | "none";
+
+/** WHAT A LAUNCH IS (FG-700) — declared by the SUBMITTER at submission time and
+ *  persisted with the observation. Never derived, at any point, from the launch name,
+ *  the argv, the command text, a task prompt or the log: those are the surfaces FG-492
+ *  quarantined for false-matching unrelated role and ticket names.
+ *
+ *  It is a DIFFERENT QUESTION from the association ids, and the two must stay
+ *  separate. Association answers WHERE a launch belongs; purpose answers WHAT it is.
+ *  Before FG-700 there was no purpose field at all, so the readers used the presence
+ *  of run_id/task_id/ticket_id as a stand-in for it and every associated engineer,
+ *  test-engineer, documentation-maintainer, review and campaign launch rendered under
+ *  the label `Host verification` — false waits, for work the agent-task surface was
+ *  already showing.
+ *
+ *  The vocabulary is the set of launch kinds this codebase actually submits:
+ *    host_verification — a host verification run (the tests/typecheck/build an operator
+ *                        or an orchestrator runs on the host for a run or ticket). The
+ *                        ONLY value that may render as a host-verification wait.
+ *    agent_invoke      — a launch that starts agent work: `forge invoke`, `forge new`,
+ *                        `forge next`, and the queue dispatcher's own ticket launch.
+ *                        Already represented once by the agent-task projection.
+ *    review            — `forge review start/continue`, `forge review-loop`.
+ *    campaign          — the campaign drive-item launcher and campaign controllers.
+ *    dashboard         — the long-lived dashboard server.
+ *    generic           — anything else, AND the fail-closed answer for a launch that
+ *                        declared nothing (a legacy row, or a value this binary does
+ *                        not know). */
+const LAUNCH_PURPOSES = {
+  host_verification: true,
+  agent_invoke: true,
+  review: true,
+  campaign: true,
+  dashboard: true,
+  generic: true,
+} as const;
+
+export type LaunchPurpose = keyof typeof LAUNCH_PURPOSES;
+
+export const LAUNCH_PURPOSE_VALUES = Object.keys(LAUNCH_PURPOSES) as ReadonlyArray<LaunchPurpose>;
+
+/** The one purpose that may render as a host-verification wait, named once so no
+ *  reader spells it itself. */
+export const HOST_VERIFICATION_PURPOSE: LaunchPurpose = "host_verification";
+
+/** The purpose an undeclared launch has. NOT a claim that the launch is unimportant —
+ *  a claim that nothing declared what it is, which is exactly what `generic` says. */
+export const DEFAULT_LAUNCH_PURPOSE: LaunchPurpose = "generic";
+
+/** Column value -> purpose. UNKNOWN FAILS CLOSED, in the only direction that is safe:
+ *  a NULL (the column arrived by ALTER, so every pre-FG-700 row has one), an empty
+ *  string, or a value a newer binary wrote all decode to `generic`. They never decode
+ *  to `host_verification` — a purpose this binary cannot read is not evidence for the
+ *  most specific claim the surface can make. */
+export function decodeLaunchPurpose(raw: string | null | undefined): LaunchPurpose {
+  return typeof raw === "string" && Object.hasOwn(LAUNCH_PURPOSES, raw) ? (raw as LaunchPurpose) : DEFAULT_LAUNCH_PURPOSE;
+}
+
+/** Is this a purpose the CALLER may declare? Used by the submission surface
+ *  (`forge launch run --purpose`) to refuse an unknown value at submission rather than
+ *  writing a row that would silently decode to `generic` later. */
+export function isLaunchPurpose(raw: string): raw is LaunchPurpose {
+  return Object.hasOwn(LAUNCH_PURPOSES, raw);
+}
 
 /** Submission-time structured association. The ONLY thing that authorizes
  *  run-level placement (BD-2). Every field is what the SUBMITTER declared — never
@@ -70,6 +134,9 @@ export type LaunchObservation = {
   ticketId: string | null;
   campaignId: string | null;
   itemId: string | null;
+  /** FG-700: what the submitter DECLARED this launch is. `generic` for every row that
+   *  declared nothing — the column's absence is not evidence of a specific kind. */
+  purpose: LaunchPurpose;
   startedAt: string;
   observedAt: string;
   status: LaunchStatus;
@@ -96,6 +163,9 @@ export type LaunchObservationRow = {
   state: string;
   exit_code: number | null;
   signal: string | null;
+  /** Absent (not merely null) when the store predates the column — see
+   *  `launchObservationColumns`. Both absences decode the same way: `generic`. */
+  purpose?: string | null;
   terminal: number;
 };
 
@@ -183,6 +253,7 @@ export function rowToLaunchObservation(row: LaunchObservationRow): LaunchObserva
     ticketId: row.ticket_id,
     campaignId: row.campaign_id,
     itemId: row.item_id,
+    purpose: decodeLaunchPurpose(row.purpose),
     startedAt: row.started_at,
     observedAt: row.observed_at,
     status,
@@ -192,8 +263,37 @@ export function rowToLaunchObservation(row: LaunchObservationRow): LaunchObserva
   };
 }
 
-export const LAUNCH_OBSERVATION_COLUMNS =
-  "launch_id, name, command, cwd, project_dir, association_kind, run_id, task_id, ticket_id, campaign_id, item_id, started_at, observed_at, state, exit_code, signal, terminal";
+const LAUNCH_OBSERVATION_COLUMN_LIST = [
+  "launch_id", "name", "command", "cwd", "project_dir", "association_kind",
+  "run_id", "task_id", "ticket_id", "campaign_id", "item_id",
+  "started_at", "observed_at", "state", "exit_code", "signal", "purpose", "terminal",
+] as const;
+
+export const LAUNCH_OBSERVATION_COLUMNS = LAUNCH_OBSERVATION_COLUMN_LIST.join(", ");
+
+/** The select list for THE STORE IN FRONT OF THIS READER, which is not always the
+ *  store this binary would create.
+ *
+ *  `purpose` arrived by ALTER (FG-700), and the ordinary open path adds it — but the
+ *  dashboard opens its OWN READ-ONLY handle and deliberately runs neither SCHEMA_SQL
+ *  nor applyMigrations (src/store/db.ts), so it can be pointed at a store no writer has
+ *  touched since the upgrade. Selecting a column that store does not have would throw
+ *  `no such column: purpose` and take the whole Current-activity surface down — a read
+ *  failure presented as an error page, for data that is simply older.
+ *
+ *  PRAGMA table_info on a MISSING table returns zero rows rather than throwing (db.ts's
+ *  shape-probe rule), so a table this store does not have at all falls back to the full
+ *  list and fails exactly the way it does today (`no such table`), rather than silently
+ *  becoming a query with no columns. A row that comes back without `purpose` decodes to
+ *  `generic` — the same fail-closed answer a NULL gives. */
+export function launchObservationColumns(db: DatabaseInstance): string {
+  const present = new Set(
+    (db.prepare(`PRAGMA table_info(launch_observations)`).all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (present.size === 0) return LAUNCH_OBSERVATION_COLUMNS;
+  const usable = LAUNCH_OBSERVATION_COLUMN_LIST.filter((c) => present.has(c));
+  return usable.length === 0 ? LAUNCH_OBSERVATION_COLUMNS : usable.join(", ");
+}
 
 export type RecordLaunchObservationInput = {
   launchId: string;
@@ -205,6 +305,10 @@ export type RecordLaunchObservationInput = {
    *  channels separately — see associationKindFor. */
   associationProjectDir?: string | null;
   association?: LaunchAssociation | undefined;
+  /** FG-700: what this launch IS, as the submitter declares it. Omitting it records
+   *  `generic` — a caller that does not say is never assumed to be running host
+   *  verification. */
+  purpose?: LaunchPurpose | undefined;
   startedAt: string;
   observedAt: string;
   status: LaunchStatus;
@@ -266,7 +370,7 @@ export function recordLaunchObservation(input: RecordLaunchObservationInput): vo
   writeTransaction(() => {
     getDb().prepare(`
       INSERT INTO launch_observations (${LAUNCH_OBSERVATION_COLUMNS})
-      VALUES (@launch_id, @name, @command, @cwd, @project_dir, @association_kind, @run_id, @task_id, @ticket_id, @campaign_id, @item_id, @started_at, @observed_at, @state, @exit_code, @signal, @terminal)
+      VALUES (@launch_id, @name, @command, @cwd, @project_dir, @association_kind, @run_id, @task_id, @ticket_id, @campaign_id, @item_id, @started_at, @observed_at, @state, @exit_code, @signal, @purpose, @terminal)
       ON CONFLICT(launch_id) DO UPDATE SET
         name = excluded.name,
         command = excluded.command,
@@ -283,6 +387,7 @@ export function recordLaunchObservation(input: RecordLaunchObservationInput): vo
         state = excluded.state,
         exit_code = excluded.exit_code,
         signal = excluded.signal,
+        purpose = excluded.purpose,
         terminal = excluded.terminal
     `).run({
       launch_id: input.launchId,
@@ -301,6 +406,7 @@ export function recordLaunchObservation(input: RecordLaunchObservationInput): vo
       state,
       exit_code: exitCode,
       signal,
+      purpose: input.purpose ?? DEFAULT_LAUNCH_PURPOSE,
       terminal,
     });
   });
@@ -323,8 +429,9 @@ export function updateLaunchObservationStatus(launchId: string, status: LaunchSt
 }
 
 export function getLaunchObservation(launchId: string): LaunchObservation | undefined {
-  const row = getDb()
-    .prepare(`SELECT ${LAUNCH_OBSERVATION_COLUMNS} FROM launch_observations WHERE launch_id = ?`)
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT ${launchObservationColumns(db)} FROM launch_observations WHERE launch_id = ?`)
     .get(launchId) as LaunchObservationRow | undefined;
   return row ? rowToLaunchObservation(row) : undefined;
 }
@@ -333,15 +440,17 @@ export function getLaunchObservation(launchId: string): LaunchObservation | unde
  *  the opportunistic promoter sweeps. Bounded and newest-first so a host with a
  *  long history of abandoned records never turns a `forge next` into a scan. */
 export function listOpenLaunchObservations(limit = 200): LaunchObservation[] {
-  const rows = getDb()
-    .prepare(`SELECT ${LAUNCH_OBSERVATION_COLUMNS} FROM launch_observations WHERE terminal = 0 ORDER BY started_at DESC LIMIT ?`)
+  const db = getDb();
+  const rows = db
+    .prepare(`SELECT ${launchObservationColumns(db)} FROM launch_observations WHERE terminal = 0 ORDER BY started_at DESC LIMIT ?`)
     .all(limit) as LaunchObservationRow[];
   return rows.map(rowToLaunchObservation);
 }
 
 export function listLaunchObservations(limit = 500): LaunchObservation[] {
-  const rows = getDb()
-    .prepare(`SELECT ${LAUNCH_OBSERVATION_COLUMNS} FROM launch_observations ORDER BY started_at DESC LIMIT ?`)
+  const db = getDb();
+  const rows = db
+    .prepare(`SELECT ${launchObservationColumns(db)} FROM launch_observations ORDER BY started_at DESC LIMIT ?`)
     .all(limit) as LaunchObservationRow[];
   return rows.map(rowToLaunchObservation);
 }
@@ -433,8 +542,13 @@ const LAUNCH_OBSERVATION_BUSY_TIMEOUT_MS = 250;
  *  than assume it.
  *
  *  The association is the SUBMITTER's declared metadata, verbatim. Nothing is
- *  derived from the launch name, from argv, or from anything the command logs. */
-export function recordLaunchStart(meta: LaunchMeta, association?: LaunchAssociation): boolean {
+ *  derived from the launch name, from argv, or from anything the command logs.
+ *
+ *  FG-700: so is the PURPOSE, and it is a separate argument for the same reason it is
+ *  a separate column — carrying `--run`/`--task`/`--ticket` says where the launch
+ *  belongs and says NOTHING about what it is. A caller that does not declare one
+ *  records `generic`. */
+export function recordLaunchStart(meta: LaunchMeta, association?: LaunchAssociation, purpose?: LaunchPurpose): boolean {
   try {
     const db = getDb();
     const priorBusyTimeout = db.pragma("busy_timeout", { simple: true }) as number;
@@ -451,6 +565,7 @@ export function recordLaunchStart(meta: LaunchMeta, association?: LaunchAssociat
         projectDir: associationProjectDir ?? resolveRegisteredProjectDir(meta.cwd),
         associationProjectDir,
         ...(association ? { association } : {}),
+        ...(purpose ? { purpose } : {}),
         startedAt: meta.startedAt,
         observedAt: meta.startedAt,
         status: { state: "running" },
