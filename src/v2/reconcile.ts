@@ -439,6 +439,33 @@ function manifestIdleTimeoutMs(taskDirPath: string): number | undefined {
   }
 }
 
+/** FG-584: was this fan-out parent's wave dispatched through the ORDERED path?
+ *
+ *  Read off the parent's own durable evidence — the `integration.worktree_created`
+ *  event runOrderedWave writes before any child is dispatched — never inferred
+ *  from a child's inputs, because an ordered plan's FIRST group declares no edges
+ *  at all and would be indistinguishable from an unordered wave by that test.
+ *
+ *  Answers FALSE when no such event exists. In reconcile's sweep that costs
+ *  nothing (a crash before this event means no child exists either, and the sweep
+ *  never reaches a childless parent). FG-688 makes the same fact GATE A MUTATION
+ *  — the adopt-preserving re-drive lane in `forge recover --re-drive` — so the
+ *  absence of evidence must read as "not provably ordered", not as a default: an
+ *  unordered parent reopened to `pending` would wedge on dispatchFanoutStep's
+ *  `pendingHasChildren && !graph.ordered` early return.
+ *
+ *  Newest-first is immaterial to the answer (`.some` over the whole stream), but
+ *  this is deliberately the ONE reader of that payload flag: reconcile's
+ *  ordered_fanout_resumable arm and the re-drive verb must never disagree about
+ *  a wave's shape. */
+export function isOrderedFanoutWave(parentTaskId: string): boolean {
+  return eventsForTask(parentTaskId).some(
+    (e) =>
+      e.eventType === "integration.worktree_created" &&
+      (e.payload as Record<string, unknown> | null)?.["ordered"] === true,
+  );
+}
+
 /** Reconcile a single run's task + run state against reality. Returns what (if
  *  anything) changed. */
 export function reconcileRun(
@@ -1187,21 +1214,6 @@ export function reconcileRun(
       if (backfilled) taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
     } catch { /* FG-459: never throw — keep reconciling the rest */ }
   }
-
-  // FG-584: was this fan-out parent's wave dispatched through the ORDERED path?
-  //
-  // Read off the parent's own durable evidence, written by runOrderedWave before
-  // any child is dispatched — never inferred from a child's inputs, because an
-  // ordered plan's FIRST group declares no edges at all and would be
-  // indistinguishable from an unordered wave by that test. A crash before this
-  // event means no child exists either, and the sweep below never reaches a
-  // childless parent.
-  const isOrderedFanoutWave = (parentTaskId: string): boolean =>
-    eventsForTask(parentTaskId).some(
-      (e) =>
-        e.eventType === "integration.worktree_created" &&
-        (e.payload as Record<string, unknown> | null)?.["ordered"] === true,
-    );
 
   // FG-455 p2: a fanout PARENT left `running` after its children finish or die
   // mid-wave. dispatchFanoutStep never gives the parent its own container (no
