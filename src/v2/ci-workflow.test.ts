@@ -25,6 +25,7 @@ type Job = {
   steps?: Step[];
 };
 type Workflow = {
+  name?: string;
   on?: { push?: unknown; pull_request?: { branches?: string[] } };
   jobs?: Record<string, Job>;
 };
@@ -35,6 +36,16 @@ function loadWorkflow(): Workflow {
 
 test("FG-474: ci.yml parses as valid YAML", () => {
   assert.doesNotThrow(() => loadWorkflow());
+});
+
+test("FG-474: ci.yml preserves the exact required-check contexts CI / test and CI / test-extended", () => {
+  const wf = loadWorkflow();
+  assert.equal(wf.name, "CI", "the workflow name is the required-check context prefix");
+  assert.ok(wf.jobs?.test, 'the required-check context "CI / test" must retain its job id');
+  assert.ok(
+    wf.jobs?.["test-extended"],
+    'the required-check context "CI / test-extended" must retain its job id'
+  );
 });
 
 test("FG-474: ci.yml triggers on push and on pull_request into main", () => {
@@ -137,6 +148,8 @@ const INTEGRATION_SHARD_JOBS = [
   "integration_4",
   "integration_5",
 ] as const;
+const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser"] as const;
+const EXTENDED_GATE_JOBS = [...INTEGRATION_SHARD_JOBS, ...SMALL_TIER_JOBS] as const;
 
 test("FG-495 (sharded, FG-624 5-way): ci.yml has five integration shard jobs each running the shard script with its own k/5 selector", () => {
   const wf = loadWorkflow();
@@ -228,19 +241,9 @@ test("FG-495 (sharded): the test-extended aggregate needs all eight extended-gat
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
 
   const needs = job!.needs ?? [];
-  const expectedNeeds = [
-    "integration_1",
-    "integration_2",
-    "integration_3",
-    "integration_4",
-    "integration_5",
-    "worktree",
-    "dashboard_integration",
-    "dashboard_browser",
-  ];
   assert.deepEqual(
     [...needs].sort(),
-    [...expectedNeeds].sort(),
+    [...EXTENDED_GATE_JOBS].sort(),
     "test-extended must `needs` exactly the eight sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
   );
 
@@ -257,7 +260,7 @@ test("FG-495 (sharded): the test-extended aggregate needs all eight extended-gat
     .map((s) => s.run)
     .filter((r): r is string => typeof r === "string")
     .join("\n");
-  for (const dep of expectedNeeds) {
+  for (const dep of EXTENDED_GATE_JOBS) {
     assert.ok(
       aggregateBody.includes(`needs.${dep}.result`),
       `aggregate step must inspect needs.${dep}.result`
@@ -288,42 +291,58 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
   );
 });
 
-// Extended-gate wall-clock ceiling: each of the eight concurrent extended-gate
-// jobs carries `timeout-minutes: 6`, so a suite that runs long is cancelled →
-// its result is not `success` → the fail-closed aggregate goes red → merge is
-// blocked. Because the eight jobs run concurrently, bounding each to 6 min bounds
-// the whole extended gate to ~6 min. The fast `test` gate (separate) and the
-// `test-extended` aggregate (a 3s step) must NOT carry this ceiling.
-const EXTENDED_GATE_JOBS = [
-  "integration_1",
-  "integration_2",
-  "integration_3",
-  "integration_4",
-  "integration_5",
-  "worktree",
-  "dashboard_integration",
-  "dashboard_browser",
-] as const;
-
-test("extended-gate ceiling: each of the eight extended-gate jobs has timeout-minutes: 6", () => {
+// Extended-gate wall-clock ceiling: every one of the eight concurrent
+// extended-gate jobs carries a `timeout-minutes` ceiling, so a suite that runs
+// long is cancelled → its result is not `success` → the fail-closed aggregate
+// goes red → merge is blocked. Because the eight run concurrently, bounding each
+// bounds the whole extended gate.
+//
+// The five integration shards get 10 minutes; the three smaller tiers keep 6.
+// The tier grew into the old shared 6: at cfbebcc5 `integration_1` finished the
+// whole shard green in 5m57s and was killed at the ceiling anyway, turning the
+// required check red with nothing failing. See the evidence recorded above the
+// shard jobs in ci.yml.
+test("extended-gate ceiling: each of the five integration shards has timeout-minutes: 10", () => {
   const wf = loadWorkflow();
-  for (const name of EXTENDED_GATE_JOBS) {
+  for (const name of INTEGRATION_SHARD_JOBS) {
+    const job = wf.jobs?.[name];
+    assert.ok(job, `ci.yml must define the ${name} extended-gate job`);
+    assert.equal(
+      job!["timeout-minutes"],
+      10,
+      `${name} must carry timeout-minutes: 10 — over-ceiling ⇒ job cancelled ⇒ aggregate fails ⇒ merge blocked, and a shard that ran every test green in 5m57s hit the old 6`
+    );
+  }
+});
+
+test("extended-gate ceiling: the two timeout tiers cover exactly every test-extended dependency", () => {
+  const needs = loadWorkflow().jobs?.["test-extended"]?.needs ?? [];
+  assert.deepEqual(
+    [...EXTENDED_GATE_JOBS].sort(),
+    [...needs].sort(),
+    "every test-extended dependency must appear in exactly one timeout tier — a ninth extended job without a ceiling must fail this guard"
+  );
+});
+
+test("extended-gate ceiling: the three smaller extended-gate tiers keep timeout-minutes: 6", () => {
+  const wf = loadWorkflow();
+  for (const name of SMALL_TIER_JOBS) {
     const job = wf.jobs?.[name];
     assert.ok(job, `ci.yml must define the ${name} extended-gate job`);
     assert.equal(
       job!["timeout-minutes"],
       6,
-      `${name} must carry timeout-minutes: 6 — over-6min ⇒ job cancelled ⇒ aggregate fails ⇒ merge blocked`
+      `${name} must carry timeout-minutes: 6 — these tiers run in seconds to ~2min; the shards' 10 is not a licence to relax theirs`
     );
   }
 });
 
-test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry the 6-minute job timeout", () => {
+test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry a job timeout", () => {
   const wf = loadWorkflow();
   assert.equal(
     wf.jobs?.test?.["timeout-minutes"],
     undefined,
-    "the fast `test` gate is a separate gate — it must not carry the extended gate's 6-minute ceiling"
+    "the fast `test` gate is a separate gate — it must not carry the extended gate's ceiling"
   );
   assert.equal(
     wf.jobs?.["test-extended"]?.["timeout-minutes"],
