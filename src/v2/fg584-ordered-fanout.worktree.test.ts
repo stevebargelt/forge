@@ -35,7 +35,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { eventsForRun, eventsForTask } from "../store/events.js";
 import { getRun } from "../store/runs.js";
 import { allPublicationAttempts, publicationAttemptsForTask } from "../store/publications.js";
-import { performReDrive } from "../cli/commands/recover.js";
+import { performReDrive, performRecover } from "../cli/commands/recover.js";
 import { startRun } from "./startRun.js";
 import { runNext, analyzePlanItems, type DockerExecFn } from "./runNext.js";
 import { retry } from "./retry.js";
@@ -1825,8 +1825,25 @@ test("fg688 (AC1/AC2/AC4): a prerequisite_blocked ordered wave is RE-DRIVEN IN P
     "…and that base IS an ancestor of the gated candidate, so ancestry alone would wrongly 'adopt' A",
   );
 
-  // ── The verb ────────────────────────────────────────────────────────────────
-  const outcome = performReDrive(parent.id, { containerAlive: () => false });
+  // ── The operator flow ──────────────────────────────────────────────────────
+  // AC4 is not just a direct mutation API contract: the real terminal wave must
+  // be inspected first, and its machine-readable advice must name the mutation
+  // that actually reopens this same parent. This catches a future drift where
+  // the inspector again recommends a verb the guard refuses.
+  const inspected = performRecover(parent.id, { json: true }, () => false);
+  assert.equal(inspected.kind, "inspect-fanout-parent", `the failed wave must be inspectable; got: ${JSON.stringify(inspected)}`);
+  if (inspected.kind !== "inspect-fanout-parent") return;
+  assert.equal(inspected.parent.failureKind, "prerequisite_blocked");
+  assert.equal(inspected.parent.reDrive.eligible, true);
+  assert.equal(inspected.parent.reDrive.disposition, "eligible");
+  assert.equal(inspected.parent.reDrive.ordered, true);
+  assert.deepEqual(
+    inspected.parent.recommendationCommands,
+    [`forge recover ${parent.id} --re-drive`],
+    "the inspector must recommend the re-drive that preserves this failed wave's captured work",
+  );
+
+  const outcome = performRecover(parent.id, { reDrive: true }, () => false);
   assert.equal(outcome.kind, "re-drive-done", `the re-drive must be accepted; got: ${JSON.stringify(outcome)}`);
   assert.equal(outcome.kind === "re-drive-done" && outcome.lane, "ordered_reopened_in_place");
   assert.equal(
