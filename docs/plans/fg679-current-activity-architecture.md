@@ -14,7 +14,10 @@ The dashboard projects Forge **tasks**. Two load-bearing kinds of in-flight work
 host verification running under `forge launch run`, and the required CI checks running at the candidate
 sha — so a run with either in flight reads as though nothing is happening. FG-679 adds one
 `Current activity` surface with three distinct sections (`Agents`, `Host verification`, `Required CI`),
-projected from durable state only.
+projected from durable state only. *(Note 2026-08-10: FG-700 split `Host verification` by a declared
+`purpose` field and added a fourth, disjoint `Launch activity` section for every other placed launch —
+the projection is four sections now, not three. See `docs/concepts.md` → Current activity → "What a
+launch IS" for the current model; the three-section shape above is FG-679's as shipped.)*
 
 The ticket was filed as a pure projection gap. **It is not one, and the correction matters** to anyone
 reading this later. The CI half *is* a projection gap: `probeCiGateStatus` (FG-501) already probes
