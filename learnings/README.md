@@ -50,6 +50,7 @@ learnings/
 | FORGE-DEC-028 | 2026-07-03 | [Fail-safe recovery for lost containers: adopt vs. re-drive, gated behind `forge recover` (FG-455 p2/p3)](decisions/2026-07-03_fanout-orphan-recovery-fail-safe.md) |
 | FORGE-DEC-029 | 2026-07-29 | [Agent containers read tickets from a host-published, project-scoped snapshot on a read-only mount (FG-608)](decisions/2026-07-29_container-backlog-snapshot-authority.md) |
 | FORGE-DEC-030 | 2026-08-02 | [A read-only reviewer's dependency environment is resolved host-side before dispatch; a lane that cannot load the real driver is refused (FG-664)](decisions/2026-08-02_reviewer-dependency-environment.md) |
+| FORGE-DEC-034 | 2026-08-10 | [Release-fixture temp residue is bounded by fixture lifetime and left to expire with the container; no startup sweep of stale workspaces is built (FG-698)](decisions/2026-08-10_release-fixture-temp-space-discipline.md) |
 
 ## Historical design records
 

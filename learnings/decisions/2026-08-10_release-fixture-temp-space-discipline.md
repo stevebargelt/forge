@@ -70,7 +70,7 @@ belong to no living process, and remove them.
   `scripts/run-integration-tests.sh:57` execs a single `node --test "${FILES[@]}"` over the whole
   shard, and `node --test` runs files in PARALLEL (verified empirically in this container: two
   probe files' bodies both entered at the same millisecond; 14 CPUs available). More pointedly,
-  the test at `src/v2/fg644-dirty-tree-execution.integration.test.ts:186` spawns
+  the test at `src/v2/fg644-dirty-tree-execution.integration.test.ts:229` spawns
   `docker/forge-test.sh … src/v2/release.integration.test.ts` as an INNER `node --test` run (an
   800s spawn timeout inside a 900s test) — so an inner process mints its own
   `/tmp/fg569-rel-*` while an outer release run
@@ -278,11 +278,16 @@ structural invariant has no such drift — it is exact, and it names what actual
 
 - *Per-test disposal races a process a test spawned*, turning deterministic passes into intermittent
   EACCES/ENOENT. Mitigated by ordering — `afterEach` runs after the test body's own `finally`, so
-  the dashboard tests have already SIGKILLed their process groups — and by disposal never deciding a
-  verdict.
+  the dashboard tests have already torn down their process groups — and by disposal never deciding a
+  verdict. Signalling is not exit observation: a `finally` that only calls
+  `process.kill(-pid, "SIGKILL")` hands control back before the group is actually reaped, so the
+  dashboard tests use `killGroupAndAwaitExit()`, which SIGKILLs the group and then waits for node's
+  own `exit` plus no remaining runnable member (polled via `ps`, 5 s deadline) before returning —
+  closing the window where a still-running server races the sweep that disposes of the release tree
+  it booted from.
 - *Someone "simplifies" by making `thawReleaseTree` itself tolerant.* That would break its fail-loud
   contract at `src/v2/promote.ts:935` (thaw the STAGING unit before `validateCandidate` and before
-  the exec descriptor is authored into it) and at `src/v2/release.ts:1379` (a refused build must
+  the exec descriptor is authored into it) and at `src/v2/release.ts:1533` (a refused build must
   leave no release behind). The strict thaw and the tolerant disposal are deliberately two
   functions.
 
@@ -303,11 +308,11 @@ structural invariant has no such drift — it is exact, and it names what actual
   `freezeReleaseFiles` would clear write bits on the operator's real dependency tree through the
   shared inodes (FG-575).
 
-**Known remaining, deliberately not acted on**: 10 test files call the strict `thawReleaseTree`
-inside cleanup; FG-698 converts 2 of them (`release.integration.test.ts:187`,
-`launch-r2.integration.test.ts:40`). The other 8 — `fg571-trust-boundary`, `fg571-env-identity`,
+**Known remaining, deliberately not acted on**: 9 test files call the strict `thawReleaseTree`
+inside cleanup; FG-698 converts 2 of them (`release.integration.test.ts:236`,
+`launch-r2.integration.test.ts:45`). The other 7 — `fg571-trust-boundary`, `fg571-env-identity`,
 `fg571-entry-containment`, `fg571-unit-provenance`, `fg571-promote`, `fg565-f23-f24-broken-source`,
-`fg583-promoted-layout`, `launch-cli` — are the same defect class and are now a one-line adoption of
+`launch-cli` — are the same defect class and are now a one-line adoption of
 `disposeReleaseWorkspace()` each. FG-698 also forbade re-fixing the per-test try/finally fixtures it
 verified as already correct, so those keep their strict thaw. `src/v2/promote.ts:935` is production
 and must KEEP the strict thaw.
