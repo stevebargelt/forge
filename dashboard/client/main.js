@@ -1351,7 +1351,23 @@ function CompletedRunsChart({ buckets, total, resolution, window, bucketMs, zone
   const tickTexts = scale.ticks.map(String);
   const PAD_LEFT = fontUnits * runtimeAxisGutterEm(tickTexts);
   const PAD_RIGHT = fontUnits * 0.8;
-  const PAD_TOP = fontUnits * 1.7;
+  // FG-683: the `runs` axis unit gets a band RESERVED FOR IT at the top of the
+  // viewBox, drawn on a baseline inside that band — not hung above the plot by a
+  // negative dy off the y=PAD_TOP edge. Hanging it off an edge made containment a
+  // function of the font's ascent (and, at x=0, of its left side bearing), so the
+  // same markup fitted on one machine's resolved font and escaped on another's.
+  // Inside the band it is contained by the geometry: the baseline sits
+  // UNIT_BASELINE_EM below the top of the viewBox, so the glyph box escapes only
+  // if the font's ascent exceeds 1.8x the font size, and it starts UNIT_INSET_EM
+  // in from the left edge, so it escapes sideways only on a side bearing more
+  // negative than half an em. Neither is reachable for a text font — real UI sans
+  // ascents top out near 1.07em (Noto Sans) and side bearings on `r` are positive.
+  // UNIT_BAND_EM leaves 0.8em under the baseline for the descent before the band
+  // ends, and the plot's own 1.7em top gutter after that.
+  const UNIT_BASELINE_EM = 1.8;
+  const UNIT_BAND_EM = 2.6;
+  const UNIT_INSET_EM = 0.5;
+  const PAD_TOP = fontUnits * (UNIT_BAND_EM + 1.7);
   const PAD_BOTTOM = fontUnits * 2.2;
   const chartH = fontUnits * (RUNTIME_PLOT_TARGET_PX / RUNTIME_AXIS_TARGET_PX);
   const VH = PAD_TOP + chartH + PAD_BOTTOM;
@@ -1442,7 +1458,7 @@ function CompletedRunsChart({ buckets, total, resolution, window, bucketMs, zone
             <text class="runs-y-tick" x=${PAD_LEFT - fontUnits * RUNTIME_TICK_INSET_EM} y=${y} dy="0.32em" text-anchor="end" font-size=${fontUnits} fill="var(--fg-dim)">${tickTexts[tick]}</text>
           </g>`;
         })}
-        <text class="runs-axis-unit" x="0" y=${PAD_TOP} dy="-0.75em" text-anchor="start" font-size=${fontUnits} fill="var(--fg-dim)">runs</text>
+        <text class="runs-axis-unit" x=${fontUnits * UNIT_INSET_EM} y=${fontUnits * UNIT_BASELINE_EM} text-anchor="start" font-size=${fontUnits} fill="var(--fg-dim)">runs</text>
         ${bars}
         ${valueIdxs.map((i) => html`
           <text class="runs-value" key=${buckets[i].bucketStart} x=${xAt(i)} y=${baseY - barH(buckets[i])} dy="-0.45em"
