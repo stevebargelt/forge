@@ -26,6 +26,17 @@ import { failureKindForTask, getOrphanEvidenceFromEvents } from "../../v2/failur
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import type { OrphanEvidence } from "../../v2/failure-kind.js";
 import { retryPolicy, isReDrivableFailureKind } from "../../v2/retry-policy.js";
+// FG-688 (build review, finding 1): the re-drive's eligibility predicate and the
+// recommendation built from it live in v2 so `forge retry` reads the SAME answer
+// this verb enforces — see the header of re-drive-eligibility.ts.
+import {
+  fanoutRecommendation,
+  reDriveDisposition,
+  renderRecommendation,
+  supersedingPrimary,
+  type Recommendation,
+  type ReDriveDisposition,
+} from "../../v2/re-drive-eligibility.js";
 import { changedWorktreeFiles, defaultContainerAlive, reconcileRun, isOrderedFanoutWave } from "../../v2/reconcile.js";
 import type { ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
@@ -162,14 +173,6 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
 // That is `invoke` AND `invoke_chain` (campaign quick lanes chain plain
 // invokes); run-kind.ts owns the one definition shared with reconcile.ts.
 
-// A recommended next step: the command(s) to run, and why. Rendered as
-// `cmd [&& cmd]  (note)` — the `&&` chain is literal, copy-pasteable shell.
-type Recommendation = { commands: string[]; note: string };
-
-function renderRecommendation(r: Recommendation): string {
-  return r.commands.join(" && ") + (r.note ? `  (${r.note})` : "");
-}
-
 // FG-455 p4 review finding 2: only recommend --continue for a failure_kind
 // performContinue will actually accept (CONTINUABLE_KINDS) — otherwise this
 // recommended a command performContinue then refused (e.g. a container_crash
@@ -279,29 +282,7 @@ function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): Ta
   };
 }
 
-/** FG-688: which clause of `--re-drive`'s eligibility conjunction decided this
- *  parent — `eligible`, or the one that refused. Surfaced on the view so a
- *  `--json` consumer reads WHY rather than inferring it from a rendered string. */
-export type ReDriveDispositionCode =
-  | "eligible"
-  | "superseded"
-  | "run_not_reopenable"
-  | "failure_kind_refused"
-  | "ordered_resumable_in_place"
-  | "wave_in_flight"
-  | "not_failed";
-
-export type ReDriveDisposition = {
-  /** Would `performReDrive` accept this parent right now? */
-  eligible: boolean;
-  disposition: ReDriveDispositionCode;
-  /** One sentence: the clause that decided it, in operator language. */
-  why: string;
-  /** The wave's DURABLE shape (isOrderedFanoutWave) — what picks the lane. */
-  ordered: boolean;
-  /** Set only for `superseded`: the later primary that owns the phase now. */
-  supersededBy?: string;
-};
+export type { ReDriveDisposition, ReDriveDispositionCode } from "../../v2/re-drive-eligibility.js";
 
 export type FanoutParentView = {
   parentId: string;
@@ -340,153 +321,6 @@ function fanoutParentRecoverable(task: Task, allTasks: Task[]): boolean {
     return children.every((c) => TERMINAL.has(c.status));
   }
   return false;
-}
-
-// ── FG-688: the fanout recommendation, held to the same rule as the task one ──
-//
-// `buildFanoutView` used to hardcode `forge recover <id> --re-drive` for EVERY
-// fanout parent regardless of failure kind, while the mutation guard accepts only
-// an enumerated set — so on the `prerequisite_blocked` parent this ticket is about
-// (FG-576), following forge's own printed advice produced a refusal. That is the
-// same defect `recommendationForKind` above already fixed once for --continue by
-// routing through CONTINUABLE_KINDS, and it is fixed the same way here: the
-// recommendation reads the SAME predicate the guard enforces, and every refusing
-// clause names a verb that WILL be accepted instead.
-//
-// The invariant, stated once: the printed recommendation may never name a verb
-// the mutation guard would reject — for ANY failure kind, not just this ticket's.
-// So the clauses below mirror performReDrive's conjunction and are deliberately at
-// least as STRICT as it: anything this predicate cannot decide from durable state
-// resolves to "not eligible", because a run-level inspect must stay docker-free
-// (no container probe) and a false --re-drive recommendation IS the defect.
-function reDriveDisposition(
-  parent: Task,
-  allTasks: Task[],
-  run: Run | undefined,
-  failureKind: string | undefined,
-): ReDriveDisposition {
-  const ordered = isOrderedFanoutWave(parent.id);
-
-  // Guard (iv), read first because a dead lineage is never re-driven whatever
-  // else is true. performReDrive checks status before this; checking it earlier
-  // only makes this predicate stricter, never looser, which is the safe direction.
-  const superseding = supersedingPrimary(parent, allTasks);
-  if (superseding) {
-    return {
-      eligible: false,
-      disposition: "superseded",
-      ordered,
-      supersededBy: superseding.id,
-      why:
-        `${superseding.id} (status=${superseding.status}) is a later primary in phase '${parent.phase}', so this parent is a ` +
-        "dead lineage — reopening it would put two live parents in one phase",
-    };
-  }
-
-  if (!run || (run.status !== "failed" && run.status !== "active")) {
-    return {
-      eligible: false,
-      disposition: "run_not_reopenable",
-      ordered,
-      why:
-        `run ${parent.runId} is '${run?.status ?? "missing"}' — --re-drive only reopens a 'failed' run (an 'active' one it ` +
-        "leaves alone), and no recovery verb resurrects a completed or abandoned one",
-    };
-  }
-
-  if (parent.status === "failed") {
-    if (!isReDrivableFailureKind(failureKind)) {
-      return {
-        eligible: false,
-        disposition: "failure_kind_refused",
-        ordered,
-        why:
-          `failure_kind=${failureKind ?? "none"} is not in the re-drivable enumeration (an unrecognized kind fails closed here ` +
-          "too) — a re-drive would re-read the same plan and re-gate the same tree",
-      };
-    }
-    return {
-      eligible: true,
-      disposition: "eligible",
-      ordered,
-      why: ordered
-        ? `failure_kind=${failureKind} is re-drivable and the wave is ORDERED — the parent is reopened in place`
-        : `failure_kind=${failureKind} is re-drivable — the wave is re-driven as a fresh pending primary`,
-    };
-  }
-
-  if (parent.status === "running") {
-    // An ordered wave stranded by a crash is NOT a re-drive case: reconcile puts
-    // the parent back to `pending` on its own row (ordered_fanout_resumable) and
-    // the controller resumes it. --re-drive would then refuse a `pending` parent.
-    if (ordered) {
-      return {
-        eligible: false,
-        disposition: "ordered_resumable_in_place",
-        ordered,
-        why:
-          "a crash-stranded ORDERED wave is put back to pending on its own row by reconcile (ordered_fanout_resumable) — it is " +
-          "resumed automatically, not re-driven",
-      };
-    }
-    // The unordered shape reconcile settles: no container of its own, every child
-    // terminal. --re-drive reconciles first, and BOTH of reconcile's landings for
-    // this shape stamp `fanout_wave_orphaned`, which the guard accepts — so this
-    // stays eligible, exactly as it was before FG-688.
-    const waveSettleable =
-      !eventsForTask(parent.id).some((e) => e.eventType === "container.started") &&
-      allTasks.filter((t) => t.parentId === parent.id).every((c) => TERMINAL.has(c.status));
-    if (waveSettleable) {
-      return {
-        eligible: true,
-        disposition: "eligible",
-        ordered,
-        why:
-          "every child is terminal and the parent never had a container of its own — --re-drive settles the wave to " +
-          "fanout_wave_orphaned first, then re-drives it",
-      };
-    }
-    return {
-      eligible: false,
-      disposition: "wave_in_flight",
-      ordered,
-      why: "a child is still non-terminal, so the wave may still be in flight — --re-drive refuses a running wave",
-    };
-  }
-
-  return { eligible: false, disposition: "not_failed", ordered, why: `the parent is '${parent.status}', not a failed fanout parent` };
-}
-
-function fanoutRecommendation(parent: Task, d: ReDriveDisposition, failureKind: string | undefined): Recommendation {
-  if (d.eligible) {
-    return {
-      commands: [`forge recover ${parent.id} --re-drive`],
-      note: d.ordered
-        ? "reopens this parent in place — adopts the items whose captured commits are already integrated and dispatches only the ones that did not complete"
-        : "",
-    };
-  }
-  switch (d.disposition) {
-    case "superseded":
-      return { commands: [`forge next ${parent.runId}`], note: `${d.why}; drive the live wave (${d.supersededBy}) instead` };
-    // The general fallback the ticket asks for: name what the OTHER mutation verb
-    // will accept, derived from retryPolicy rather than special-cased per kind, so
-    // a kind added by a later build gets a correct line without editing this.
-    case "failure_kind_refused": {
-      const policy = retryPolicy(failureKind);
-      return policy.retryable
-        ? { commands: [`forge retry ${parent.id}`], note: `${d.why}; it IS retryable without --force` }
-        : { commands: [`forge retry ${parent.id} --force`], note: `${d.why}, and retryPolicy needs --force for this kind` };
-    }
-    case "ordered_resumable_in_place":
-      return { commands: [`forge next ${parent.runId}`], note: `${d.why} — drive the run` };
-    case "not_failed":
-      return parent.status === "pending"
-        ? { commands: [`forge next ${parent.runId}`], note: "this wave's parent is already pending — dispatch it" }
-        : { commands: [`forge show ${parent.id}`], note: d.why };
-    default:
-      return { commands: [`forge show ${parent.id}`], note: d.why };
-  }
 }
 
 function buildFanoutView(task: Task, allTasks: Task[], run: Run | undefined): FanoutParentView {
@@ -779,24 +613,36 @@ class ReDriveRollback extends Error {
   }
 }
 
-// FG-688 / AC3, the verb-level half of "cross-parent adoption stays closed".
-//
-// A parent is SUPERSEDED when another parent-less primary in the same phase was
-// created at or after it. Such a primary OWNS the phase now — `forge gate
-// request-changes` mints exactly this shape — so the older parent belongs to a
-// DEAD LINEAGE, and reopening it would put two live parents in one phase. That is
-// precisely the cross-wave hazard FG-584's RF-3b review closed by scoping adoption
-// to the current parent, arriving through the recovery door instead of the
-// dispatch one, and the reason decision (a) reuses the parent row is so that guard
-// never has to move.
-//
-// The comparison is `>=`, not `>`: two primaries stamped in the same millisecond
-// leave the phase's ownership genuinely ambiguous, and this gates a MUTATION, so
-// the tie refuses. It subsumes the old `dupePending` check (a pending re-drive is
-// a superseding primary), whose "run forge next instead" advice is preserved below.
-function supersedingPrimary(parent: Task, allTasks: Task[]): Task | undefined {
-  return allTasks.find(
-    (t) => t.id !== parent.id && t.phase === parent.phase && t.parentId === undefined && t.createdAt >= parent.createdAt,
+/** FG-688 (build review, finding 2): the supersession half of the re-drive
+ *  transaction, and the third eligibility clause to get a compare-and-set
+ *  backstop — the architect's constraint ("every write in this design is a CAS on
+ *  the expected prior status, read inside the transaction") applied to the one
+ *  clause that was still resting on a pre-lock read.
+ *
+ *  The window it closes: performReDrive evaluates supersession BEFORE
+ *  acquireRunLock, and both verbs that can mint a competing parent-less primary —
+ *  `forge retry <parent> --force` (retry.ts, under withRunLock) and `forge gate
+ *  request-changes` (gate.ts, likewise) — serialize on that same run lock. So one
+ *  of them can take the lock, mint the primary and release it entirely inside the
+ *  window between this verb's eligibility read and its own acquireRunLock. The
+ *  parent row would still be 'failed' and the run row still 'failed', so both
+ *  existing CASes would apply and the wave would be reopened beside a live
+ *  primary in the same phase — the cross-wave adoption hazard AC3 and FG-584's
+ *  RF-3b parent-scoping exist to prevent, reached through the recovery door.
+ *
+ *  MUST be called from inside the enclosing writeTransaction: tasksForRun reads
+ *  the writable handle, so the re-read there sees every primary committed before
+ *  BEGIN IMMEDIATE took the write lock. Throws ReDriveRollback — rolling every
+ *  other write in the transaction back with it — exactly like the parent CAS and
+ *  the run CAS beside it. No new lock, no nonce, no generation counter: the fix is
+ *  a read moved inside a critical section that was already being taken. */
+function refuseIfSupersededInTransaction(parent: Task): void {
+  const superseding = supersedingPrimary(parent, tasksForRun(parent.runId));
+  if (!superseding) return;
+  throw new ReDriveRollback(
+    `${parent.id} was SUPERSEDED by ${superseding.id} (status=${superseding.status}) after this re-drive's eligibility check ` +
+      `and before it took the run lock — a later primary now owns phase '${parent.phase}', and reopening a dead lineage would ` +
+      `put two live parents in one phase. Run \`forge next ${parent.runId}\` to drive the live wave instead. Nothing was written.`,
   );
 }
 
@@ -914,7 +760,10 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
   // cast at each of the four places the audit trail carries it.
   const authorizingKind: string = parentFailureKind as string;
 
-  // (iv) Supersession — see supersedingPrimary above. This is AC3's verb-level half.
+  // (iv) Supersession — see supersedingPrimary in v2/re-drive-eligibility.ts. This
+  // is AC3's verb-level half. An EARLY refusal only: the binding one is the
+  // re-read inside the transaction below, which is what closes the window between
+  // this read and the lock.
   const allTasks = tasksForRun(parent.runId);
   const superseding = supersedingPrimary(parent, allTasks);
   if (superseding) {
@@ -962,6 +811,11 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
               "settled. Nothing was written.",
           );
         }
+        // (a2) Supersession, re-read INSIDE the transaction. Ordered after the
+        // parent CAS rather than before it only because the two are independent
+        // and this keeps the cheap row-level CAS first; either order refuses the
+        // same interleavings, because both reads happen under the same write lock.
+        refuseIfSupersededInTransaction(parent);
         // (b) Stamp the failure onto the reopened row's inputs, mirroring the mint
         // lane. markTaskRunning clears `error` when the row is actually
         // re-dispatched, so without this the reason for the re-drive would not
@@ -1004,6 +858,11 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
     // orphaned pending primary behind.
     const newId = newTaskId(parent.phase);
     const runReactivated = writeTransaction(() => {
+      // Same in-transaction supersession CAS as the ordered lane, but it must run
+      // BEFORE the mint: this lane's own new row is itself a later parent-less
+      // primary in the parent's phase, so checking after the insert would refuse
+      // every unordered re-drive on its own write.
+      refuseIfSupersededInTransaction(parent);
       const newTask: Task = {
         id: newId,
         runId: parent.runId,

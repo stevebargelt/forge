@@ -1076,6 +1076,56 @@ test("FG-688 --re-drive ATOMICITY: the run CAS losing its race rolls the parent 
   assert.equal(eventsForRun(RUN.id).length, eventCount, "no run.reactivated, no task.reconciled — a rolled-back verb emits nothing");
 });
 
+test("FG-688 --re-drive ATOMICITY: a competing primary minted AFTER the eligibility read is caught INSIDE the transaction — the verb refuses and writes nothing", () => {
+  buildFailedWave("parent-ordered-supersede-race", "prerequisite_blocked");
+  settleRunFailed();
+
+  // The interleaving the in-transaction supersession CAS exists to survive.
+  // performReDrive evaluates supersession BEFORE acquireRunLock; both verbs that
+  // can mint a competing parent-less primary in the same phase — `forge retry
+  // <parent> --force` (retry.ts, under withRunLock) and `forge gate
+  // request-changes` (gate.ts, likewise) — take and RELEASE that same run lock, so
+  // one can do it entirely inside the window between this verb's read and its own
+  // acquireRunLock. Both other CASes would still apply: the parent row is 'failed'
+  // and the run row is 'failed'.
+  //
+  // Simulated the way the run-CAS race above is — deterministically, by a trigger
+  // that fires on the parent reopen itself, so the competing row exists only after
+  // the pre-lock read has already passed. A re-drive that reads supersession only
+  // outside the transaction reopens a dead lineage beside a live primary, which is
+  // the cross-wave adoption hazard AC3 and FG-584's RF-3b parent-scoping close.
+  db.exec(`
+    CREATE TRIGGER race_mint_superseding_primary AFTER UPDATE OF status ON tasks
+    WHEN NEW.id = 'parent-ordered-supersede-race' AND NEW.status = 'pending'
+    BEGIN
+      INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, created_at)
+      VALUES ('parent-raced-live', '${RUN.id}', 'build', 'engineer', 'pending', '{}', '2026-06-09T00:00:00Z');
+    END;
+  `);
+
+  const parentBefore = getTask("parent-ordered-supersede-race")!;
+  const runBefore = getRun(RUN.id)!;
+  const taskCount = tasksForRun(RUN.id).length;
+  const eventCount = eventsForRun(RUN.id).length;
+
+  const outcome = performReDrive("parent-ordered-supersede-race");
+  assert.equal(outcome.kind, "re-drive-refused", `a raced supersession must refuse; got ${JSON.stringify(outcome)}`);
+  if (outcome.kind === "re-drive-refused") {
+    assert.match(outcome.reason, /SUPERSEDED by parent-raced-live/, "the refusal names the primary that won the race");
+    assert.match(outcome.reason, new RegExp(`forge next ${RUN.id}`), "…and the verb that WILL be accepted");
+    assert.match(outcome.reason, /Nothing was written/);
+  }
+
+  // Whole rows, not selected fields — the standard the AC3 refusal cells use. The
+  // trigger's own INSERT rolls back with the transaction, so the row count is the
+  // pre-verb one: a refusal leaves the store byte-identical.
+  assert.deepEqual(getTask("parent-ordered-supersede-race"), parentBefore, "the parent reopen rolled back — still failed");
+  assert.deepEqual(getRun(RUN.id), runBefore, "the run row never left 'failed'");
+  assert.equal(tasksForRun(RUN.id).length, taskCount, "no task row survived the rollback");
+  assert.equal(getTask("parent-raced-live"), undefined, "…including the trigger's own competing primary");
+  assert.equal(eventsForRun(RUN.id).length, eventCount, "no run.reactivated, no task.reconciled — a rolled-back verb emits nothing");
+});
+
 // ── FG-688: the inspector that misadvises ────────────────────────────────────
 //
 // The ticket's second half. `buildFanoutView` hardcoded `forge recover <id>

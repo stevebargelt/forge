@@ -5,10 +5,21 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { insertRun } from "../store/runs.js";
+import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { insertTask, getTask, tasksForRun } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
-import { retry, RetryNotAllowedError, FanoutChildRetryError, OrderedFanoutParentRetryError, reapRetainedContainer } from "./retry.js";
+import {
+  retry,
+  RetryNotAllowedError,
+  FanoutChildRetryError,
+  OrderedFanoutParentRetryError,
+  OrderedWaveReDriveUnavailableError,
+  reapRetainedContainer,
+} from "./retry.js";
+// The verb the redirect names, called for real: these cells assert that when retry
+// points at `--re-drive` the guard ACCEPTS it, and that when the guard refuses,
+// retry points somewhere else.
+import { performReDrive } from "../cli/commands/recover.js";
 import { retryPolicy, RE_DRIVABLE_FAILURE_KINDS, isReDrivableFailureKind } from "./retry-policy.js";
 import type { FailureKind } from "./failure-kind.js";
 import type { Run, Task } from "../types/index.js";
@@ -509,6 +520,101 @@ test("FG-688: a NON-fanout failed task with the same failure kind is unaffected"
   const out = await retry("t-blocked-primary");
   assert.equal(out.newTask.status, "pending");
   assert.equal(out.newTask.parentId, undefined);
+});
+
+// ── FG-688 build review, finding 1: the redirect must consult the SAME live state
+// the re-drive guard enforces. Supersession and the run's status are two clauses
+// `performReDrive` refuses on and the first cut of this redirect never read, so
+// `forge retry` could advise a `--re-drive` that immediately refused — bouncing the
+// operator between two refusals with no accepted verb named. Each cell below drives
+// the guard for real, so "the named verb is accepted" is proved, not asserted. ──
+
+/** A later parent-less primary in the parent's phase — exactly what `forge retry
+ *  <parent> --force` and `forge gate request-changes` mint. */
+function supersedingPrimaryRow(id: string): void {
+  insertTask({
+    id, runId: RUN.id, phase: "build", agentRole: "engineer", status: "pending",
+    taskPackage: { taskId: id, runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-06-02T00:00:00Z",
+  });
+}
+
+test("FG-688 (finding 1): a SUPERSEDED ordered parent is refused with a verb that IS accepted — not the --re-drive that would refuse it", async () => {
+  fanoutWaveParent("ord-parent-superseded", "prerequisite_blocked");
+  supersedingPrimaryRow("ord-parent-live");
+
+  // The verb the first cut advised, driven for real at this exact state.
+  assert.equal(
+    performReDrive("ord-parent-superseded").kind,
+    "re-drive-refused",
+    "sanity: `forge recover <parent> --re-drive` refuses a superseded parent — so advising it is the defect",
+  );
+
+  const before = tasksForRun(RUN.id).length;
+  await assert.rejects(retry("ord-parent-superseded"), (e: unknown) => {
+    assert.ok(e instanceof OrderedWaveReDriveUnavailableError, "the ineligible lane gets its own named refusal");
+    assert.ok(!(e instanceof OrderedFanoutParentRetryError), "…and NOT the one that names --re-drive");
+    assert.equal(e.reDrive.disposition, "superseded");
+    assert.equal(e.reDrive.supersededBy, "ord-parent-live");
+    // The VERB, read off the discrete commands — the same standard the recover
+    // surface's own invariant test uses, since a refusal's prose may legitimately
+    // mention --re-drive while explaining why it is not being offered.
+    assert.deepEqual(e.recommendationCommands, [`forge next ${RUN.id}`], "it names the verb the recover surface names");
+    assert.equal(e.recommendationCommands.some((c) => c.includes("--re-drive")), false);
+    assert.match(e.message, /ord-parent-live/, "…and says which primary owns the phase now");
+    return true;
+  });
+
+  assert.equal(tasksForRun(RUN.id).length, before, "the refusal minted no discarding primary");
+  assert.equal(eventsForTask("ord-parent-superseded").some((e) => e.eventType === "task.retried"), false);
+
+  // --force is untouched: this is medium and not high precisely because the
+  // operator's explicit override still proceeds.
+  const out = await retry("ord-parent-superseded", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  assert.equal(out.newTask.parentId, undefined);
+});
+
+test("FG-688 (finding 1): an ordered parent whose run was CANCELLED is refused with an accepted verb — an abandoned run is terminal for --re-drive", async () => {
+  fanoutWaveParent("ord-parent-abandoned", "prerequisite_blocked");
+  updateRunStatus(RUN.id, "abandoned");
+
+  assert.equal(
+    performReDrive("ord-parent-abandoned").kind,
+    "re-drive-refused",
+    "sanity: no recovery verb resurrects an abandoned run — so advising --re-drive is the defect",
+  );
+
+  const before = tasksForRun(RUN.id).length;
+  await assert.rejects(retry("ord-parent-abandoned"), (e: unknown) => {
+    assert.ok(e instanceof OrderedWaveReDriveUnavailableError);
+    assert.ok(!(e instanceof OrderedFanoutParentRetryError));
+    assert.equal(e.reDrive.disposition, "run_not_reopenable");
+    assert.equal(e.recommendationCommands.some((c) => c.includes("--re-drive")), false, "never the verb that refuses");
+    assert.match(e.disposition.advice ?? "", /forge retry ord-parent-abandoned --force/, "it names the forward verb that IS accepted");
+    assert.match(e.message, /abandoned/);
+    return true;
+  });
+
+  assert.equal(tasksForRun(RUN.id).length, before, "the refusal minted no discarding primary");
+
+  // And the named verb really is accepted — the only way to prove the operator is
+  // no longer bounced between two refusals.
+  const out = await retry("ord-parent-abandoned", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  assert.equal(getRun(RUN.id)!.status, "active", "the forced retry reactivated the cancelled run, as it always has");
+});
+
+test("FG-688 (finding 1): the ELIGIBLE case still names --re-drive — and that command is accepted at the same state", async () => {
+  fanoutWaveParent("ord-parent-eligible", "prerequisite_blocked");
+  await assert.rejects(retry("ord-parent-eligible"), (e: unknown) => {
+    assert.ok(e instanceof OrderedFanoutParentRetryError);
+    assert.match(e.message, /forge recover ord-parent-eligible --re-drive/);
+    return true;
+  });
+  // The invariant, driven: the verb retry named is the verb the guard accepts.
+  const outcome = performReDrive("ord-parent-eligible");
+  assert.equal(outcome.kind, "re-drive-done", `retry may only name a verb that is accepted; got ${JSON.stringify(outcome)}`);
 });
 
 test("FG-688: an ordered fanout parent whose kind the re-drive REFUSES is not redirected at it", async () => {
