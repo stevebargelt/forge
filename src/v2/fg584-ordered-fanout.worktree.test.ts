@@ -32,8 +32,10 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
-import { eventsForTask } from "../store/events.js";
+import { eventsForRun, eventsForTask } from "../store/events.js";
+import { getRun } from "../store/runs.js";
 import { allPublicationAttempts, publicationAttemptsForTask } from "../store/publications.js";
+import { performReDrive } from "../cli/commands/recover.js";
 import { startRun } from "./startRun.js";
 import { runNext, analyzePlanItems, type DockerExecFn } from "./runNext.js";
 import { reconcileRun } from "./reconcile.js";
@@ -1696,4 +1698,223 @@ test("fg584 (FG-424): a mid-wave gate that TIMES OUT is integration_gate_timeout
     "and the dependent is still not cut from an unproven candidate",
   );
   assert.deepEqual(publicationAttemptsForTask(parent.id), []);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FG-688 (AC1/AC2/AC4) — a TERMINALLY-FAILED ordered wave is re-drivable without
+// discarding the work it already captured.
+//
+// This extends the AC7/D3 fixture above rather than opening a file of its own:
+// that cell already drives a REAL wave over real git to a real
+// `prerequisite_blocked` parent failure, which is the exact terminal state the
+// ticket is about, and AC4 demands a real wave rather than a hand-assembled
+// fixture asserting the classifier in isolation.
+//
+// The gap it closes: before FG-688, `forge recover <parent> --re-drive` refused
+// this kind outright, and `forge retry <parent>` minted a fresh PRIMARY with
+// parentId unset — which, adoption being scoped to the current parent (FG-584's
+// RF-3b), could not adopt the old parent's captured children and re-ran every
+// item. Measured cost on FG-576: 8 of 9 children already complete and merged,
+// including a 64-minute build step, all of it discarded.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** The AC7/D3 shape, byte for byte — A fails; E and F are independent and run to
+ *  completion; B and D are transitively blocked behind A. */
+const FG688_ITEMS: PlanItem[] = [
+  { id: "A", files: ["src/a.ts"] },                       // fails on the first pass
+  { id: "E", files: ["src/e.ts"] },                       // independent, group 0 — a PREREQUISITE (F depends on it)
+  { id: "B", files: ["src/b.ts"], depends_on: ["A"] },    // blocked
+  { id: "F", files: ["src/f.ts"], depends_on: ["E"] },    // independent, group 1 — a LEAF
+  { id: "D", files: ["src/d.ts"], depends_on: ["B"] },    // transitively blocked
+];
+
+test("fg688 (AC1/AC2/AC4): a prerequisite_blocked ordered wave is RE-DRIVEN IN PLACE — captured items are adopted, only the items that never ran dispatch", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg688-redrive" });
+  const { runId } = startRun({ workflow: wf, title: "fg688 redrive", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  // The operator's fix, standing in for "the blocking item's cause was fixed":
+  // flipped between the two passes so A succeeds the second time.
+  let aFails = true;
+  const exec = makeExec(
+    FG688_ITEMS,
+    ({ item, workspace }) => {
+      if (item === "A" && aFails) return { ok: false };
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item.toLowerCase()}.ts`), `export const ${item} = 1;\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const firstWave = await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  // ── The terminal state the ticket is about, reached for real ────────────────
+  assert.deepEqual(firstWave.completedSteps, [], "the build phase failed");
+  const parent = buildParent(runId)!;
+  assert.equal(parent.status, "failed");
+  assert.equal(
+    eventsForTask(parent.id)
+      .filter((e) => e.eventType === "task.failed")
+      .map((e) => (e.payload as Record<string, unknown>)["failure_kind"])
+      .pop(),
+    "prerequisite_blocked",
+    "…as prerequisite_blocked — the ticket's headline kind, and one --re-drive refused outright before FG-688",
+  );
+  assert.deepEqual(runs.map((r) => r.planItemId).sort(), ["A", "E", "F"], "A failed; E and F ran to completion");
+  assert.equal(getRun(runId)!.status, "failed", "and the RUN settled to failed behind it — the pre-existing hole in this verb");
+
+  const firstPassChildren = buildChildren(runId);
+  const childIdOf = (item: string) => firstPassChildren.find((t) => planItemIdOf(t) === item)!.id;
+  const capturedIds = { E: childIdOf("E"), F: childIdOf("F") };
+
+  // ── THE NON-NEGOTIABLE INVARIANT, computed from durable git ancestry BEFORE
+  //    the re-drive writes anything ────────────────────────────────────────────
+  //
+  // "A re-driven ordered wave must NOT re-dispatch an item whose exact commit is
+  // already an ancestor of the candidate it would receive." Readiness is
+  // recomputable from durable state — two task rows and two git refs — so an item
+  // whose commit is already integrated is adoptable regardless of WHY the wave
+  // stopped. Git ancestry does not record why, which is the whole point.
+  //
+  // Asserted in the direction the ticket states it: whatever is ALREADY integrated
+  // must not run again. E is a prerequisite (F depends on it), so its captured
+  // commit was merged into the candidate and the D1 gate advanced the gated ref to
+  // it. F is a LEAF, whose merge the wave defers to the end (AC4's exclusion
+  // clause) and which the failure therefore beat — so F is adopted on the weaker
+  // FG-584 rule (a complete child row plus a captured branch tip), and its
+  // deferred merge folds in idempotently on the second pass. F being adopted too
+  // is MORE than the invariant demands, never less.
+  const gatedRef = gatedCandidateRef(runId, parent.id);
+  const completedFirstPass = (["A", "E", "F"] as const).filter(
+    (item) => firstPassChildren.find((t) => planItemIdOf(t) === item)!.status === "complete",
+  );
+  assert.deepEqual(completedFirstPass, ["E", "F"], "precondition: E and F completed, A did not");
+  const integratedBeforeReDrive = completedFirstPass.filter((item) => {
+    const tip = capturedBranchTip(repo, runId, childIdOf(item));
+    return tip !== undefined && isCommitIntegrated(repo, tip, gatedRef);
+  });
+  assert.deepEqual(
+    integratedBeforeReDrive,
+    ["E"],
+    "precondition: E's exact captured commit is already an ancestor of the gated candidate a re-drive would receive",
+  );
+  assert.ok(capturedBranchTip(repo, runId, capturedIds.F), "…and F's work is captured, if not yet folded into the candidate");
+
+  // …and why the invariant is quantified over COMPLETED items and not over every
+  // item with a resolvable branch: A's container crashed having written nothing,
+  // so its worker branch still points at the wave's own base commit — an ancestor
+  // of the gated candidate by construction, carrying none of A's work. Ancestry
+  // alone therefore cannot authorize adoption, which is exactly why the FG-584
+  // rule requires a `complete` row AND a captured tip. A degenerate tip that
+  // adopted itself would silently skip the one item the operator re-drove for.
+  const aRow = firstPassChildren.find((t) => planItemIdOf(t) === "A")!;
+  assert.equal(aRow.status, "failed");
+  assert.equal(
+    capturedBranchTip(repo, runId, aRow.id),
+    aRow.baseSha,
+    "A's worker branch is still the base it was cut from — nothing of A's is in the tree",
+  );
+  assert.equal(
+    isCommitIntegrated(repo, capturedBranchTip(repo, runId, aRow.id)!, gatedRef),
+    true,
+    "…and that base IS an ancestor of the gated candidate, so ancestry alone would wrongly 'adopt' A",
+  );
+
+  // ── The verb ────────────────────────────────────────────────────────────────
+  const outcome = performReDrive(parent.id, { containerAlive: () => false });
+  assert.equal(outcome.kind, "re-drive-done", `the re-drive must be accepted; got: ${JSON.stringify(outcome)}`);
+  assert.equal(outcome.kind === "re-drive-done" && outcome.lane, "ordered_reopened_in_place");
+  assert.equal(
+    outcome.kind === "re-drive-done" && outcome.dispatchTaskId,
+    parent.id,
+    "the ORDERED lane reuses the parent row — it reports the reused id, not a newTaskId it did not mint",
+  );
+
+  const reopened = buildParent(runId)!;
+  assert.equal(reopened.id, parent.id, "the SAME parent row — no fresh primary, so the captured children stay attached to it");
+  assert.equal(reopened.status, "pending");
+  assert.equal(
+    tasksForRun(runId).filter((t) => t.phase === "build" && t.parentId === undefined).length,
+    1,
+    "exactly one primary in the phase: a re-drive that minted a second one is the discard this ticket removes",
+  );
+
+  // (d) The run row, and the audit record that is its only durable trace: the
+  //     reactivation NULLs completed_at, so the row itself forgets it ever failed.
+  const runRow = getRun(runId)!;
+  assert.equal(runRow.status, "active", "the run was reactivated — otherwise `forge next` refuses and the reopened parent never dispatches");
+  assert.equal(runRow.completedAt ?? null, null);
+  const reactivations = eventsForRun(runId).filter((e) => e.eventType === "run.reactivated");
+  assert.equal(reactivations.length, 1, "exactly one run.reactivated event");
+  const reactivation = reactivations[0]!.payload as Record<string, unknown>;
+  assert.equal(reactivation["source"], "recover --re-drive", "…naming THIS verb, distinctly from retry/invoke");
+  assert.equal(reactivation["from"], "failed");
+  assert.equal(reactivation["authorizingTaskId"], parent.id);
+  assert.equal(reactivation["failure_kind"], "prerequisite_blocked");
+  assert.equal(typeof reactivation["completedAtCleared"], "string", "…and the completed_at it nulled, which the row no longer carries");
+
+  // ── The second pass ─────────────────────────────────────────────────────────
+  const firstPassRuns = runs.length;
+  aFails = false;
+  const secondWave = await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  // (a) ADOPTION. No new child rows for E and F, no second container for either,
+  //     and an adoption event naming each ORIGINAL child task id.
+  const rowsFor = (item: string) => buildChildren(runId).filter((t) => planItemIdOf(t) === item);
+  for (const item of ["E", "F"] as const) {
+    assert.equal(rowsFor(item).length, 1, `${item} got NO new child row — its captured work was adopted, not re-planned`);
+    assert.equal(dispatchCount(runs, item), 1, `…and no container was spent re-running ${item}`);
+  }
+  // The adoption event's `item` is the graph's LABEL (`'E' (index 1)`), the same
+  // string the blocked/refusal messages name an item by.
+  const adopted = eventsForTask(parent.id)
+    .filter((e) => e.eventType === "fanout.item_adopted")
+    .map((e) => e.payload as { item: string; childTaskId: string });
+  assert.deepEqual(
+    adopted.map((a) => a.item).sort(),
+    ["'E' (index 1)", "'F' (index 3)"],
+    `exactly the completed items were adopted; got ${JSON.stringify(adopted)}`,
+  );
+  for (const item of ["E", "F"] as const) {
+    assert.equal(
+      adopted.find((a) => a.item.startsWith(`'${item}'`))!.childTaskId,
+      capturedIds[item],
+      `${item}'s adoption names the ORIGINAL child task id from the failed wave`,
+    );
+  }
+
+  // (b) DISPATCH — exactly the items that did not complete, plus the ones whose
+  //     prerequisite changed (AC2). B and D never got a child row on the first
+  //     pass at all; they get one now, each in its own group, once A's commit is
+  //     integrated and gated.
+  const secondPass = runs.slice(firstPassRuns).map((r) => r.planItemId);
+  assert.deepEqual(secondPass.slice().sort(), ["A", "B", "D"], "the re-drive dispatched A, B and D — and nothing else");
+  assert.deepEqual(secondPass, ["A", "B", "D"], "…in dependency order: A, then B behind it, then D behind B");
+  assert.equal(rowsFor("A").length, 2, "A's failed row stayed as the audit trail and a fresh row was dispatched beside it");
+  assert.equal(rowsFor("A").filter((t) => t.status === "complete").length, 1, "…exactly one of which completed");
+  for (const item of ["B", "D"] as const) {
+    assert.equal(rowsFor(item).length, 1, `${item} was dispatched exactly once`);
+  }
+  // …and the ordering the wave exists to serve held across the re-drive: B's base
+  // carries A's output, D's carries B's. Read off the durable rows.
+  const rowFor = (item: string) => rowsFor(item).find((t) => t.status === "complete")!;
+  git(repo, "cat-file", "-e", `${rowFor("B").baseSha}:src/a.ts`);
+  git(repo, "cat-file", "-e", `${rowFor("D").baseSha}:src/b.ts`);
+
+  // (c) The wave completes and the phase publishes ONCE, carrying all five items.
+  assert.deepEqual(
+    secondWave.completedSteps,
+    ["build"],
+    `the re-driven wave must complete; tasks: ${JSON.stringify(tasksForRun(runId).map((t) => [t.id, t.status, t.error]))}`,
+  );
+  const attempts = publicationAttemptsForTask(parent.id);
+  assert.equal(attempts.length, 1, "one publication attempt for the phase, across BOTH passes");
+  assert.equal(attempts[0]!.state, "published");
+  for (const f of ["a.ts", "b.ts", "d.ts", "e.ts", "f.ts"]) {
+    assert.ok(existsSync(join(repo, "src", f)), `${f} must be on the publish target — including the adopted items' work`);
+  }
 });
