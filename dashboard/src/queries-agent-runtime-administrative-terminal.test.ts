@@ -129,6 +129,15 @@ const exitedAt = (isoAt: string): EventRow => ({
   payload: JSON.stringify({ containerName: "forge-t", exitCode: 0 }),
 });
 
+// FG-690: layer 1 reads an exit only for an attempt that has start evidence, so
+// each fixture whose premise is "the supervisor watched a real container stop"
+// says so. See queries-agent-runtime-start-evidence for the absence case.
+const startedAt = (isoAt: string): EventRow => ({
+  type: "container.started",
+  at: isoAt,
+  payload: JSON.stringify({ containerName: "forge-t" }),
+});
+
 /** `{ started, completed }` for a run of `durationMs` ending at `completedIso`. */
 const ending = (completedIso: string, durationMs: number) => ({
   started: new Date(Date.parse(completedIso) - durationMs).toISOString(),
@@ -308,7 +317,7 @@ test("an attached exit outranks an administrative kind even from an earlier buck
       {
         id: "swept", role: "engineer", status: "failed",
         started: `${PREV_DAY}T09:00:00.000Z`, completed: `${DAY}T12:00:00.000Z`,
-        events: [exitedAt(`${PREV_DAY}T09:35:00.000Z`), kindAt("orphaned_work_may_persist", `${DAY}T12:00:00.000Z`)],
+        events: [startedAt(`${PREV_DAY}T09:00:00.000Z`), exitedAt(`${PREV_DAY}T09:35:00.000Z`), kindAt("orphaned_work_may_persist", `${DAY}T12:00:00.000Z`)],
       },
     ],
     () => {
@@ -329,7 +338,7 @@ test("oom_killed counts when the supervisor logged the exit and is dropped when 
       {
         id: "oom-attached", role: "engineer", status: "failed",
         ...ending(`${DAY}T10:00:00.000Z`, 18 * MINUTE),
-        events: [exitedAt(`${DAY}T10:00:00.000Z`), kindAt("oom_killed", `${DAY}T10:00:00.000Z`)],
+        events: [startedAt(`${DAY}T09:42:00.000Z`), exitedAt(`${DAY}T10:00:00.000Z`), kindAt("oom_killed", `${DAY}T10:00:00.000Z`)],
       },
       {
         id: "oom-swept", role: "tech-lead", status: "failed",
@@ -352,7 +361,7 @@ test("the per-role SERIES and the weighted summary both carry the corrected dura
       {
         id: "e1", role: "engineer", status: "failed",
         started: `${PREV_DAY}T09:00:00.000Z`, completed: `${PREV_DAY}T20:00:00.000Z`,
-        events: [exitedAt(`${PREV_DAY}T09:10:00.000Z`), kindAt("cancelled", `${PREV_DAY}T20:00:00.000Z`)],
+        events: [startedAt(`${PREV_DAY}T09:00:00.000Z`), exitedAt(`${PREV_DAY}T09:10:00.000Z`), kindAt("cancelled", `${PREV_DAY}T20:00:00.000Z`)],
       },
       // 06-09: two real runs and one artifact that contributes nothing.
       { id: "e2", role: "engineer", status: "complete", ...ending(`${DAY}T10:00:00.000Z`, 20 * MINUTE) },
@@ -429,7 +438,7 @@ test("'all' starts at the surviving row's completed_at bucket, not at its much o
       {
         id: "long-abandoned-container", role: "engineer", status: "failed",
         started: "2026-05-20T09:00:00.000Z", completed: `${DAY}T09:00:00.000Z`,
-        events: [exitedAt("2026-05-20T09:12:00.000Z"), kindAt("cancelled", `${DAY}T09:00:00.000Z`)],
+        events: [startedAt("2026-05-20T09:00:00.000Z"), exitedAt("2026-05-20T09:12:00.000Z"), kindAt("cancelled", `${DAY}T09:00:00.000Z`)],
       },
     ],
     () => {

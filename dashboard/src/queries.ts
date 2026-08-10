@@ -821,7 +821,17 @@ type AgentRuntimeRow = {
   started: string;
   completed: string;
   status: string;
+  /** FG-690: the earliest attached-exit event of this attempt that start
+   *  evidence authorizes — a `container.started` at or after the attempt's
+   *  started_at and at or before the exit itself. Null when no exit on the
+   *  attempt is authorized, which is NOT the same as having no exit at all. */
   agentExit: string | null;
+  /** FG-690: 1 when the attempt carries an attached-exit event at all, whether
+   *  or not one is authorized. It is what separates "a supervisor observed a
+   *  stop here" — a row layer 1 must drop outright — from "nothing observed a
+   *  stop", the pre-instrumentation row layer 2 still measures. 0/1 from
+   *  SQLite's EXISTS. */
+  attachedExit: number;
   failedPayload: string | null;
   reconciledPayloads: string | null;
 };
@@ -871,9 +881,35 @@ function reconciledIntoComplete(payloads: string | null): boolean {
  *  (clock skew, a prior attempt's exit) — completed_at is the end only if the
  *  terminal was not written administratively, on either the failure side (an
  *  administrative failure_kind) or the success side (a sweep that completed the
- *  task); otherwise the row has no defensible end and contributes nothing. */
+ *  task); otherwise the row has no defensible end and contributes nothing.
+ *
+ *  FG-690: layer 1 additionally requires start evidence. An exit event says a
+ *  supervising process saw something stop, NOT that an agent container ever
+ *  existed: `runContainer` emits `container.exited` when `docker run` itself
+ *  fails, so a failed start's whole wait — five hours, on the row that found
+ *  this — was aggregated as agent execution. Without a `container.started` for
+ *  the measured attempt the exit bounds a pre-container window, so the row is
+ *  dropped outright rather than falling through to completed_at, which would
+ *  hand back the very same interval. `container.dependency_provisioning_failed`
+ *  from the FG-664 gate is excluded by exactly this rule and needs no case of
+ *  its own: a gate refusal is decided before any container is created.
+ *
+ *  The evidence must PRECEDE the exit it authorizes, which is why the two are
+ *  selected together rather than checked independently: `agentExit` is already
+ *  the earliest AUTHORIZED exit, so a start recorded after an exit vouches for
+ *  nothing, and an exit that no start precedes is passed over for the next one
+ *  that a start does. `attachedExit` — an exit of any kind on this attempt — is
+ *  what still drops the row instead of letting it fall to completed_at: an
+ *  unauthorized exit and no exit at all are different records, and only the
+ *  second is the pre-instrumentation history layer 2 exists to keep.
+ *
+ *  The requirement stops at layer 1. `container.started` only reached ~98%
+ *  coverage from 2026-06 on, and the rows below it are the ones whose missing
+ *  event is instrumentation age rather than evidence that nothing ran — layer 2
+ *  keeps its existing administrative guards and is unchanged. */
 function agentObservedEndMs(row: AgentRuntimeRow): number | null {
-  if (row.agentExit !== null) {
+  if (row.attachedExit === 1) {
+    if (row.agentExit === null) return null;
     const exitedMs = Date.parse(row.agentExit);
     if (Number.isFinite(exitedMs)) return exitedMs;
   }
@@ -928,13 +964,30 @@ export function agentRuntimeTrends(
   // rather than the raw TEXT also drops an unparseable created_at (NULL, so the
   // comparison is never true) instead of letting it sort below — or, for a
   // latest-wins pick, above — a valid sibling and mask it.
+  // FG-690: the start evidence layer 1 requires is correlated to the exit it
+  // authorizes rather than selected beside it — bounded below by started_at, as
+  // everything else here is, so a PRIOR attempt's container.started cannot vouch
+  // for this one, and above by the candidate exit, so a start recorded AFTER an
+  // exit cannot vouch for it either and a stale exit that lands after this
+  // attempt's started_at is passed over for the next exit a start does precede.
+  // Existence is all that is asked of the start event; the duration still runs
+  // from started_at, never from the start. `attachedExit` is the separate
+  // question of whether the attempt logged any exit at all — see
+  // agentObservedEndMs for why an unauthorized exit must not fall to layer 2.
   const exitEvents = AGENT_OBSERVED_EXIT_EVENTS.map((e) => `'${e}'`).join(",");
   const rows = db().prepare(`
     SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed, t.status AS status,
       (SELECT x.created_at FROM events x
         WHERE x.task_id = t.id AND x.event_type IN (${exitEvents})
           AND julianday(x.created_at) >= julianday(t.started_at)
+          AND EXISTS (SELECT 1 FROM events s
+            WHERE s.task_id = t.id AND s.event_type = 'container.started'
+              AND julianday(s.created_at) >= julianday(t.started_at)
+              AND julianday(s.created_at) <= julianday(x.created_at))
         ORDER BY julianday(x.created_at), x.id LIMIT 1) AS agentExit,
+      EXISTS (SELECT 1 FROM events e
+        WHERE e.task_id = t.id AND e.event_type IN (${exitEvents})
+          AND julianday(e.created_at) >= julianday(t.started_at)) AS attachedExit,
       (SELECT f.payload FROM events f
         WHERE f.task_id = t.id AND f.event_type = 'task.failed'
           AND julianday(f.created_at) >= julianday(t.started_at)

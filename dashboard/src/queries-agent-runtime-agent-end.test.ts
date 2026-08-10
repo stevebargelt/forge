@@ -145,6 +145,16 @@ const exited = (isoAt: string, type = "container.exited"): EventRow => ({
   payload: JSON.stringify({ containerName: "forge-t", exitCode: 0 }),
 });
 
+// FG-690: every case below is about WHICH end a genuinely started container is
+// measured to, so each fixture that carries an exit also carries the start that
+// authorizes it — layer 1 now requires one at or after the attempt's started_at.
+// The absence case has its own suite (queries-agent-runtime-start-evidence).
+const started = (isoAt: string): EventRow => ({
+  type: "container.started",
+  at: isoAt,
+  payload: JSON.stringify({ containerName: "forge-t" }),
+});
+
 const failedWith = (kind: string, isoAt: string): EventRow => ({
   type: "task.failed",
   at: isoAt,
@@ -161,6 +171,7 @@ test("with two container.exited events the EARLIEST supplies the duration", () =
         id: "twice", role: "engineer", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T12:00:00.000Z`,
         events: [
+          started(`${DAY}T09:00:00.000Z`),
           failedWith("cancelled", `${DAY}T12:00:00.000Z`),
           exited(`${DAY}T09:10:00.000Z`),
           exited(`${DAY}T09:40:00.000Z`),
@@ -182,6 +193,7 @@ test("the earliest wins ACROSS exit event types — an idle_timeout before a lat
         id: "idle-then-exit", role: "engineer", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T12:00:00.000Z`,
         events: [
+          started(`${DAY}T09:00:00.000Z`),
           failedWith("idle_timeout", `${DAY}T12:00:00.000Z`),
           exited(`${DAY}T09:45:00.000Z`, "container.idle_timeout"),
           exited(`${DAY}T10:30:00.000Z`),
@@ -204,6 +216,7 @@ test("the choice is by TIMESTAMP, not by insertion order — the later event wri
         id: "out-of-order", role: "engineer", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T12:00:00.000Z`,
         events: [
+          started(`${DAY}T09:00:00.000Z`),
           exited(`${DAY}T09:40:00.000Z`),
           exited(`${DAY}T09:10:00.000Z`),
           failedWith("cancelled", `${DAY}T12:00:00.000Z`),
@@ -226,6 +239,7 @@ test("a container.killed logged BEFORE a real exit does not pull the end earlier
         id: "killed-then-exited", role: "engineer", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T13:00:00.000Z`,
         events: [
+          started(`${DAY}T09:00:00.000Z`),
           { type: "container.killed", at: `${DAY}T09:05:00.000Z`, payload: JSON.stringify({ via: "forge cancel" }) },
           exited(`${DAY}T09:20:00.000Z`),
           failedWith("cancelled", `${DAY}T13:00:00.000Z`),
@@ -264,6 +278,7 @@ test("each task reads only its OWN exit events; unattached ones reach nobody", (
         id: "mine", role: "engineer", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T13:00:00.000Z`,
         events: [
+          started(`${DAY}T09:00:00.000Z`),
           exited(`${DAY}T09:30:00.000Z`),
           // An exit for a task row that does not exist, and a run-scoped one
           // attached to no task at all. Both are earlier than every real exit
@@ -278,7 +293,7 @@ test("each task reads only its OWN exit events; unattached ones reach nobody", (
       {
         id: "sibling", role: "tech-lead", status: "failed",
         started: `${DAY}T08:00:00.000Z`, completed: `${DAY}T14:00:00.000Z`,
-        events: [exited(`${DAY}T08:05:00.000Z`), failedWith("cancelled", `${DAY}T14:00:00.000Z`)],
+        events: [started(`${DAY}T08:00:00.000Z`), exited(`${DAY}T08:05:00.000Z`), failedWith("cancelled", `${DAY}T14:00:00.000Z`)],
       },
     ],
     () => {
@@ -305,7 +320,7 @@ test("a retried task is measured from the exit of the attempt it describes, not 
       {
         id: "retried", role: "engineer",
         started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T11:30:00.000Z`,
-        events: [exited(`${DAY}T09:10:00.000Z`), exited(`${DAY}T11:30:00.000Z`)],
+        events: [started(`${DAY}T11:00:00.000Z`), exited(`${DAY}T09:10:00.000Z`), exited(`${DAY}T11:30:00.000Z`)],
       },
       { id: "control", role: "tech-lead", started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T11:30:00.000Z` },
     ],
@@ -331,6 +346,7 @@ test("with a stale exit AND several of its own, a retried task takes the earlies
         id: "retried-many", role: "engineer", status: "failed",
         started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T13:00:00.000Z`,
         events: [
+          started(`${DAY}T11:00:00.000Z`),
           exited(`${DAY}T09:10:00.000Z`),
           exited(`${DAY}T11:50:00.000Z`),
           exited(`${DAY}T11:20:00.000Z`, "container.idle_timeout"),
@@ -449,7 +465,7 @@ test("an exit stamped exactly at started_at is a real zero-duration sample, not 
       {
         id: "instant", role: "engineer",
         started: `${DAY}T10:00:00.000Z`, completed: `${DAY}T10:20:00.000Z`,
-        events: [exited(`${DAY}T10:00:00.000Z`)],
+        events: [started(`${DAY}T10:00:00.000Z`), exited(`${DAY}T10:00:00.000Z`)],
       },
     ],
     () => {
@@ -470,7 +486,7 @@ test("the observation sits in the completed_at bucket while its DURATION comes o
       {
         id: "crossing", role: "engineer", status: "failed",
         started: `2026-06-07T09:00:00.000Z`, completed: `${DAY}T12:00:00.000Z`,
-        events: [exited("2026-06-07T09:25:00.000Z"), failedWith("cancelled", `${DAY}T12:00:00.000Z`)],
+        events: [started("2026-06-07T09:00:00.000Z"), exited("2026-06-07T09:25:00.000Z"), failedWith("cancelled", `${DAY}T12:00:00.000Z`)],
       },
     ],
     () => {
@@ -494,7 +510,7 @@ test("the same split holds at hourly resolution", () => {
       {
         id: "hourly", role: "engineer", status: "failed",
         started: "2026-06-10T12:05:00.000Z", completed: "2026-06-10T14:10:00.000Z",
-        events: [exited("2026-06-10T12:20:00.000Z"), failedWith("gate_rejected", "2026-06-10T14:10:00.000Z")],
+        events: [started("2026-06-10T12:05:00.000Z"), exited("2026-06-10T12:20:00.000Z"), failedWith("gate_rejected", "2026-06-10T14:10:00.000Z")],
       },
     ],
     () => {
@@ -519,7 +535,7 @@ test("an exit LATER than completed_at yields a duration longer than the row's ow
       {
         id: "late-exit", role: "engineer",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T09:20:00.000Z`,
-        events: [exited(`${DAY}T09:26:00.000Z`)],
+        events: [started(`${DAY}T09:00:00.000Z`), exited(`${DAY}T09:26:00.000Z`)],
       },
     ],
     () => {
@@ -538,7 +554,7 @@ test("a SUCCESSFUL task's exit event also overrides completed_at — the rule is
       {
         id: "clean", role: "engineer", status: "complete",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T09:30:00.000Z`,
-        events: [exited(`${DAY}T09:05:00.000Z`), { type: "task.completed", at: `${DAY}T09:30:00.000Z` }],
+        events: [started(`${DAY}T09:00:00.000Z`), exited(`${DAY}T09:05:00.000Z`), { type: "task.completed", at: `${DAY}T09:30:00.000Z` }],
       },
     ],
     () => {
@@ -584,12 +600,12 @@ test("an unparseable exit timestamp cannot mask a valid sibling", () => {
       {
         id: "blank", role: "engineer", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T10:00:00.000Z`,
-        events: [{ type: "container.exited", at: "", payload: null }, exited(`${DAY}T09:20:00.000Z`), failedWith("container_crash", `${DAY}T10:00:00.000Z`)],
+        events: [started(`${DAY}T09:00:00.000Z`), { type: "container.exited", at: "", payload: null }, exited(`${DAY}T09:20:00.000Z`), failedWith("container_crash", `${DAY}T10:00:00.000Z`)],
       },
       {
         id: "junk", role: "tech-lead", status: "failed",
         started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T13:00:00.000Z`,
-        events: [exited("not-a-timestamp"), exited(`${DAY}T09:30:00.000Z`), failedWith("cancelled", `${DAY}T13:00:00.000Z`)],
+        events: [started(`${DAY}T09:00:00.000Z`), exited("not-a-timestamp"), exited(`${DAY}T09:30:00.000Z`), failedWith("cancelled", `${DAY}T13:00:00.000Z`)],
       },
     ],
     () => {
