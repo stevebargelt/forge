@@ -116,3 +116,109 @@ export function retryPolicy(failureKind: string | undefined, taskId?: string): R
   if (taskId === undefined || disposition.advice === undefined) return disposition;
   return { ...disposition, advice: disposition.advice.replaceAll("<id>", taskId) };
 }
+
+// ── FG-688: which failure kinds an adopt-preserving re-drive may act on ──
+//
+// The ONE enumeration. `forge recover <parent> --re-drive`'s mutation guard and
+// the recommendation `forge recover <parent>` PRINTS both read it, so the
+// inspector cannot advise a verb the guard will reject — the defect this ticket
+// exists to close, on both surfaces, from one list.
+//
+// THE DEFAULTS HERE AND IN retryPolicy ABOVE ARE DELIBERATELY OPPOSITE AND MUST
+// NEVER BE SHARED. retryPolicy is an ADVISORY surface: it explains a failure to
+// an operator who then decides, so an unrecognized kind defaults to
+// `{ retryable: true }` (see the `??` above) — the worst case is imprecise
+// prose. This is a MUTATION guard: saying yes reopens a settled task row and a
+// settled run row. It has the opposite duty and FAILS CLOSED — an unrecognized
+// string, or a kind read off an event written by a build this one does not know,
+// is refused. That is the FG-425 lesson (a kind added by another build reaching
+// operators through a permissive default), applied where the cost is a write
+// rather than a sentence.
+//
+// Typed as Record<FailureKind, boolean>, NOT Record<string, boolean>: adding a
+// kind to FailureKind without deciding this question is a COMPILE ERROR. There
+// is no "sensible default" line to fall into; the decision is forced at the
+// point the kind is authored.
+export const RE_DRIVABLE_FAILURE_KINDS: Record<FailureKind, boolean> = {
+  // ── Accepted ──
+  // The unordered wave's stranded parent — today's only accepted kind, and the
+  // behaviour it authorizes (mint one fresh pending primary) is unchanged.
+  fanout_wave_orphaned: true,
+  // FG-688's headline case. A prerequisite failed, so every transitive dependent
+  // was blocked and never dispatched, while independent ready work ran to
+  // completion and was captured and integrated. Re-driving adopts the integrated
+  // items and dispatches only what never ran. Note a mid-wave gate that fails ON
+  // THE MERITS also lands here, not on integration_failed: the gated ref simply
+  // does not advance, its dependents block, and runNext.ts:2771-2779 stamps this
+  // kind unconditionally of failure_mode.
+  prerequisite_blocked: true,
+  // The three mid-wave arms where the ordered wave itself reached NO VERDICT on
+  // the code (runNext.ts:2740-2749). Nothing was said about the work items — so
+  // re-running the gate over the already-adopted candidate is the correct
+  // forward move, not a re-run of the items.
+  integration_gate_timeout: true,
+  integration_gate_crashed: true,
+  verification_environment_unavailable: true,
+  // A typed PARK, not a verdict: the captured work is integrated and retained
+  // and no dependent was dispatched. Once a human has rebased the conflicting
+  // worker onto the candidate, the adopt-preserving re-drive IS the resume. If
+  // the conflict still stands, the wave simply parks again with nothing lost —
+  // which is what makes accepting this cheap rather than risky.
+  integration_blocked: true,
+
+  // ── Refused ──
+  // A re-drive re-reads the SAME plan and the SAME isolation config and refuses
+  // at exactly the same place; the plan or the setting has to change first.
+  plan_dependency_invalid: false,
+  ordered_fanout_unavailable: false,
+  // An end-of-phase verdict on the MERGED code. A re-drive adopts everything,
+  // re-gates the same tree, and fails identically — fix the break, then retry.
+  integration_failed: false,
+  // A human's decision. Authoritatively terminal (AWN-2): no recovery verb ever
+  // resurrects it.
+  cancelled: false,
+
+  // Everything else. These are per-TASK failures with their own remediation
+  // (retryPolicy above), not wave-level stops an adopt-preserving re-drive has
+  // anything to say about.
+  orphaned: false,
+  orphaned_work_may_persist: false,
+  oom_killed: false,
+  orphaned_needs_finalize: false,
+  container_crash: false,
+  idle_timeout: false,
+  result_missing: false,
+  result_malformed: false,
+  work_not_persisted: false,
+  merge_conflict: false,
+  capture_failed: false,
+  publish_base_churn: false,
+  dirty_publish_target: false,
+  publication_refused: false,
+  lane_taken_over: false,
+  auth_missing: false,
+  auth_expired: false,
+  auth_injection_failed: false,
+  model_error: false,
+  tool_error: false,
+  red_blocked: false,
+  gate_rejected: false,
+  agent_reported_failure: false,
+  pre_container_crash: false,
+  unknown: false,
+};
+
+/**
+ * FG-688: may an adopt-preserving re-drive act on this failure kind?
+ *
+ * Fails CLOSED, deliberately unlike `retryPolicy` above: `undefined` (no
+ * recorded kind) and any string this build does not recognize both return
+ * false. Consulted by BOTH the `--re-drive` mutation guard and the recommendation
+ * `forge recover` prints, so the two can never disagree.
+ */
+export function isReDrivableFailureKind(kind: string | undefined): boolean {
+  if (kind === undefined) return false;
+  // Same cast seam as retryPolicy's, with the opposite default: a kind read off
+  // an event written by another build is absent from the map and refused.
+  return RE_DRIVABLE_FAILURE_KINDS[kind as FailureKind] === true;
+}
