@@ -45,12 +45,18 @@ import {
 } from "@forge/heartbeats";
 import {
   ORCHESTRATOR_RECEIPT_COLUMNS,
-  canonicalReceiptProjectDir,
   rowToOrchestratorReceipt,
   type CapabilityLimitation,
   type OrchestratorReceipt,
   type OrchestratorReceiptRow,
 } from "@forge/orchestrator-receipts";
+// FG-693: the ONE canonical filesystem-identity contract. Imported RELATIVELY
+// rather than through an `@forge/*` alias only because adding a path alias means
+// editing dashboard/tsconfig.json, which is outside this step's file boundary;
+// the module is a zero-dependency leaf (node:fs + node:path), so nothing heavier
+// is dragged into this typecheck than the alias would have pulled. Worth an alias
+// in a follow-up.
+import { identify, provenSameOnly } from "../../src/util/path-identity.js";
 import { findRemoteControlUrlInText } from "@forge/orchestrator-credential";
 // The SAME loopback predicate that gates this surface's writes. Imported, never
 // re-expressed: two definitions of "is this bind loopback" is one edit away from
@@ -76,17 +82,228 @@ export { type ProjectRecord };
  * and an array is the complete set of observed paths for one repository. */
 export type ProjectScope = string | readonly string[] | undefined;
 
-function scopeSql(column: string, scope: ProjectScope): { clause: string; params: string[] } {
-  if (scope === undefined) return { clause: "", params: [] };
-  if (typeof scope === "string") return { clause: `AND ${column} = ?`, params: [scope] };
-  if (scope.length === 0) return { clause: "AND 0 = 1", params: [] };
-  return { clause: `AND ${column} IN (${scope.map(() => "?").join(",")})`, params: [...scope] };
+// ── FG-693: project scope is decided by filesystem IDENTITY, not by bytes ───
+//
+// An operating system routinely gives one directory many names — a symlinked
+// parent, a system directory exposed under two prefixes, a relative spelling, a
+// trailing separator. Until FG-693 every scope here was raw-string equality
+// (`projectDir === scope` in process, `= ?` / `IN (…)` in SQL), so a scope
+// entered under one spelling silently dropped every row recorded under another:
+// the operator saw an EMPTY board for a project that was busy. That is the same
+// write/read asymmetry the store layer just closed, one seam over.
+//
+// What replaces it, per src/util/path-identity.ts (the ONE contract). The
+// operator's spellings are resolved to PROVEN identities, and rows are matched on
+// the durable `project_dir_canonical` column — FG-693's additive column, carrying
+// the identity PROVEN when the row was written, or NULL. `project_dir` keeps the
+// bytes the caller wrote; it is audit evidence and presentation, and where an
+// identity exists it decides nothing.
+//
+// THE PROJECTION IS THE ACTING ONE (`provenSameOnly`): an INDETERMINATE
+// comparison is NOT a match, so a spelling that cannot be resolved never claims a
+// row on a guess, and two spellings neither side can resolve are never asserted
+// to name one tree.
+//
+// THE DISPOSITION IS THE DISPLAY ONE. This surface LISTS; it authorizes nothing
+// — no lifecycle transition, no cleanup, no gate attribution — so it takes the
+// same split src/store/orchestrator-receipts.ts's `displayAttribution` makes for
+// `forge show` (FG-693 step 6), and for the same reason: dropping a row a project
+// can plausibly claim re-creates the exact FG-576 defect of a live orchestrator
+// missing from the operator's board. Concretely, per asked spelling S:
+//
+//   S RESOLVES to physical P
+//     · a row with a canonical identity matches iff that identity IS P. Bytes are
+//       never consulted — a recorded spelling whose canonical identity is some
+//       other tree belongs to that other tree, whatever it looks like.
+//     · a NULL-canonical row (pre-FG-693, or written while its path was
+//       unresolvable) matches iff its recorded spelling resolves to P TODAY.
+//       That is read-time resolution, and it is deliberately NOT the stronger
+//       retarget-proof rule the store's AUTHORITY reads take
+//       (src/store/legacy-path-attribution.ts): that rule protects a PROOF, and
+//       is right where a legacy row could otherwise satisfy a gate or authorize a
+//       transition. Nothing here is protected by declining — being listed grants
+//       no authority — while declining WOULD delete every aged row whose recorded
+//       spelling goes through a symlinked prefix, which on a host that aliases
+//       its temp root is the ordinary case rather than the exotic one.
+//
+//   S DOES NOT RESOLVE (routine here: checkouts are disposable and a scope can
+//     name one that is already gone)
+//     · nothing can be proven about it, so the only honest relation left is the
+//       recorded bytes being the bytes we were handed. Exact equality, never
+//       alias reasoning — verbatim the `unproven-target` arm of the receipt
+//       read's display rule — and it preserves the pre-change behaviour for a
+//       deleted checkout instead of blanking its history.
+//
+// A negative control falls out of the shape: two distinct physical directories
+// never match each other, however much their lexical paths share, because the
+// only cross-spelling relation available is equality of a RESOLVED physical path.
+//
+// THESE READS NEVER WRITE. A legacy spelling resolved here is not backfilled into
+// the canonical column: this handle is READ-ONLY by design, and a read that
+// sometimes writes would fail on exactly the aged stores this rule serves.
+//
+// PRESENTATION IS UNTOUCHED. Labels, basenames and `projectDir` in every payload
+// still carry the operator's own spelling, byte for byte — identity decides what
+// is shown, never how it is spelled.
+
+/** FG-693's additive canonical-identity column, on every table keyed on a
+ *  project directory. */
+const CANONICAL_COLUMN = "project_dir_canonical";
+
+/** The durable tables this surface scopes by project directory. */
+type ScopedTable = "runs" | "host_verifications" | "orchestrator_receipts" | "campaigns";
+
+type ScopeMatch = { clause: string; params: string[] };
+
+const UNSCOPED: ScopeMatch = { clause: "", params: [] };
+/** Nothing a row could match — the same clause the pre-change empty-array scope
+ *  produced, and the honest answer for a scope with nothing behind it. */
+const MATCHES_NOTHING: ScopeMatch = { clause: "AND 0 = 1", params: [] };
+
+function sqlPlaceholders(count: number): string {
+  return new Array(count).fill("?").join(",");
 }
 
-function scopeIncludes(scope: ProjectScope, projectDir: string | null): boolean {
+/** The operator's spellings, split by what the filesystem said about each. */
+type ScopeTargets = {
+  /** PROVEN physical paths, deduplicated — two spellings of one checkout probe once. */
+  physicals: string[];
+  /** Spellings the filesystem would not confirm. Matched by recorded bytes ONLY. */
+  unresolved: string[];
+};
+
+function resolveScopeTargets(scope: Exclude<ProjectScope, undefined>): ScopeTargets {
+  // Two sets, deliberately: an unresolved SPELLING and a proven PHYSICAL path are
+  // different kinds of thing, and deduplicating them in one namespace would be the
+  // very conflation this contract exists to prevent.
+  const physicals = new Set<string>();
+  const unresolved = new Set<string>();
+  for (const spelling of typeof scope === "string" ? [scope] : scope) {
+    const identity = identify(spelling);
+    if (identity.kind === "resolved") physicals.add(identity.physical);
+    else unresolved.add(spelling);
+  }
+  return { physicals: [...physicals], unresolved: [...unresolved] };
+}
+
+// Whether the open store actually HAS the canonical column. The dashboard handle
+// is read-only and runs no migrations (db.ts's policy), so it can be pointed at a
+// store a peer forge has not migrated yet; naming a column that store lacks would
+// fail every scoped query on it. Absent, every row of the table is the legacy
+// population — which is exactly what it is. Cached per open handle and dropped
+// when the handle rotates, so a store flip (FG-616) re-answers rather than
+// serving the previous store's shape.
+const canonicalColumnCache = new Map<ScopedTable, boolean>();
+
+function hasCanonicalColumn(table: ScopedTable): boolean {
+  const cached = canonicalColumnCache.get(table);
+  if (cached !== undefined) return cached;
+  let present = false;
+  try {
+    const columns = db().prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    present = columns.some((column) => column.name === CANONICAL_COLUMN);
+  } catch {
+    present = false;
+  }
+  canonicalColumnCache.set(table, present);
+  return present;
+}
+
+/** Does this NULL-canonical row's recorded spelling resolve to one of the proven
+ *  targets TODAY? The ACTING projection, so an unresolvable spelling on either
+ *  side is no match rather than a guess. */
+function legacySpellingResolvesToTarget(spelling: string, physicals: readonly string[]): boolean {
+  if (physicals.length === 0) return false;
+  return physicals.some((physical) => provenSameOnly(spelling, physical));
+}
+
+// A legacy scan reads the DISTINCT recorded spellings rather than the rows, so it
+// costs one realpath per distinct spelling and not one per row. The population is
+// aged, fixed at migration and self-extinguishing — nothing new lands in it unless
+// a project path was genuinely unresolvable at write time. The cap is stated
+// rather than left implicit because a silent truncation reads as "there are none".
+const LEGACY_SPELLING_SCAN_LIMIT = 2000;
+
+function claimableLegacySpellings(
+  table: ScopedTable,
+  physicals: readonly string[],
+  canonicalPresent: boolean,
+): string[] {
+  if (physicals.length === 0) return [];
+  const nullCanonical = canonicalPresent ? `${CANONICAL_COLUMN} IS NULL AND` : "";
+  let spellings: Array<{ project_dir: string }>;
+  try {
+    spellings = db()
+      .prepare(
+        `SELECT DISTINCT project_dir FROM ${table}
+          WHERE ${nullCanonical} project_dir IS NOT NULL AND project_dir != ''
+          LIMIT ?`,
+      )
+      .all(LEGACY_SPELLING_SCAN_LIMIT) as Array<{ project_dir: string }>;
+  } catch {
+    // A store written by a peer that predates the table answers "none" — the TRUE
+    // answer for it, and the same fail-quiet the receipt read already takes.
+    return [];
+  }
+  return spellings
+    .map((row) => row.project_dir)
+    .filter((spelling) => legacySpellingResolvesToTarget(spelling, physicals));
+}
+
+/** The scope predicate for one table, in SQL. `qualifier` is the table's alias in
+ *  the statement (or the table name where it is unaliased). */
+function scopeSql(table: ScopedTable, qualifier: string, scope: ProjectScope): ScopeMatch {
+  if (scope === undefined) return UNSCOPED;
+  const { physicals, unresolved } = resolveScopeTargets(scope);
+
+  const canonicalPresent = hasCanonicalColumn(table);
+  const canonical = `${qualifier}.${CANONICAL_COLUMN}`;
+  const asWritten = `${qualifier}.project_dir`;
+  const parts: string[] = [];
+  const params: string[] = [];
+
+  if (canonicalPresent && physicals.length > 0) {
+    parts.push(`${canonical} IN (${sqlPlaceholders(physicals.length)})`);
+    params.push(...physicals);
+  }
+  const legacy = claimableLegacySpellings(table, physicals, canonicalPresent);
+  if (legacy.length > 0) {
+    parts.push(
+      canonicalPresent
+        ? `(${canonical} IS NULL AND ${asWritten} IN (${sqlPlaceholders(legacy.length)}))`
+        : `${asWritten} IN (${sqlPlaceholders(legacy.length)})`,
+    );
+    params.push(...legacy);
+  }
+  // The unproven-target arm: recorded bytes, for a spelling that resolves to
+  // nothing. It can only ever match rows whose stored path IS the string the
+  // operator handed us, so it widens nothing an identity could have decided.
+  if (unresolved.length > 0) {
+    parts.push(`${asWritten} IN (${sqlPlaceholders(unresolved.length)})`);
+    params.push(...unresolved);
+  }
+
+  if (parts.length === 0) return MATCHES_NOTHING;
+  return { clause: `AND (${parts.join(" OR ")})`, params };
+}
+
+/** One row's project identity, as the two columns record it. */
+type RowProjectIdentity = { projectDir: string | null; canonical: string | null };
+
+/** The same decision as `scopeSql`, applied to a row already in hand — the
+ *  in-process half, for the event-derived views that resolve their project
+ *  through a second lookup and so have no single statement to put the clause in.
+ *  Kept deliberately in step with `scopeSql`: same arms, same order. */
+function scopeIncludes(scope: ProjectScope, row: RowProjectIdentity): boolean {
   if (scope === undefined) return true;
-  if (projectDir === null) return false;
-  return typeof scope === "string" ? projectDir === scope : scope.includes(projectDir);
+  const { physicals, unresolved } = resolveScopeTargets(scope);
+  const projectDir = row.projectDir ?? "";
+  if (row.canonical !== null && row.canonical !== "") {
+    if (physicals.includes(row.canonical)) return true;
+  } else if (projectDir !== "" && legacySpellingResolvesToTarget(projectDir, physicals)) {
+    return true;
+  }
+  return projectDir !== "" && unresolved.includes(projectDir);
 }
 
 // FG-616: resolved PER CALL, never snapshotted at module eval. ESM evaluates a
@@ -119,6 +336,10 @@ function db(): Database.Database {
     if (_db.path === path) return _db.handle;
     _db.handle.close();
     _db = null;
+    // FG-693: the new store may have a different migration level, so the cached
+    // answer to "does this table have the canonical column" belonged to the old
+    // one. Dropped with the handle it was taken through.
+    canonicalColumnCache.clear();
   }
   if (!existsSync(path)) {
     throw new Error(`forge DB not found at ${path}. Has forge run yet?`);
@@ -170,7 +391,7 @@ export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectSc
     sql += ` AND t.completed_at > ?`;
     params.push(sinceIso);
   }
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   sql += ` ${project.clause}`;
   params.push(...project.params);
   sql += ` ORDER BY t.completed_at DESC LIMIT ?`;
@@ -261,7 +482,7 @@ export type InFlightEntry = {
  *  injectable for tests; the classifier only docker-probes running+containerized
  *  tasks. Detection is read-only — the dashboard never calls reconcileRun. */
 export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightEntry[] {
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   const rows = db().prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
            r.title, r.workflow, r.project_dir
@@ -287,10 +508,21 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
   // #290: classify running+containerized tasks by liveness once, map by taskId.
   // Only `reconcile_candidate` (container gone) becomes an annotation; alive,
   // liveness_unknown, and anomalous tasks render as ordinary running.
+  //
+  // FG-693: the scoped fan-out no longer re-derives the scope. It used to hand
+  // each operator spelling to findReconcileCandidates, whose own filter is raw
+  // `r.project_dir = ?` — so a scope spelled differently from the recorded path
+  // annotated NOTHING, and a stale `running` row rendered as live work on exactly
+  // the aliased spelling this ticket is about. The fan-out is now driven by the
+  // RUNS THIS QUERY ALREADY SCOPED, which makes "scopes identically" structural
+  // rather than asserted: there is only one scope decision, made above, and no
+  // second raw-string comparison to disagree with it. It also probes the same
+  // containers as before — every running task in an active run in scope is one of
+  // these rows — so the docker cost is unchanged.
+  const scopedRunIds = [...new Set(rows.map((r) => r.run_id))];
   const reconcileRows = scope === undefined
     ? findReconcileCandidates(db(), {}, probe)
-    : (typeof scope === "string" ? [scope] : scope).flatMap((projectDir) =>
-      findReconcileCandidates(db(), { projectDir }, probe));
+    : scopedRunIds.flatMap((runId) => findReconcileCandidates(db(), { runId }, probe));
   const candidates = new Map(
     reconcileRows
       .filter((c) => c.classification === "reconcile_candidate")
@@ -631,12 +863,17 @@ function opsMedian(values: number[]): number {
 
 export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
   const cutoff = opsCutoff(since);
+  // FG-693: resolved ONCE for the whole roll-up, not once per sub-query. The scope
+  // predicate now touches the filesystem (it resolves the operator's spellings) and
+  // reads the legacy spellings, and the five sub-queries below share one window by
+  // construction — recomputing it five times would also let a directory that
+  // appeared or vanished mid-roll-up make the five disagree.
+  const project = scopeSql("runs", "r", scope);
   // Window clause + params, applied to a `runs r` alias in each query.
   const win = (): { clause: string; params: unknown[] } => {
     const params: unknown[] = [];
     let clause = "";
     if (cutoff) { clause += " AND r.created_at >= ?"; params.push(cutoff); }
-    const project = scopeSql("r.project_dir", scope);
     clause += ` ${project.clause}`;
     params.push(...project.params);
     return { clause, params };
@@ -947,7 +1184,7 @@ export function agentRuntimeTrends(
   // it in SQL keeps the chart, the role summary and the sample note agreeing.
   clause += " AND t.completed_at <= ?";
   params.push(new Date(nowMs).toISOString());
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   clause += ` ${project.clause}`;
   params.push(...project.params);
 
@@ -1130,7 +1367,7 @@ export function completedRunTrends(
   }
   clause += " AND r.completed_at <= ?";
   params.push(new Date(nowMs).toISOString());
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   clause += ` ${project.clause}`;
   params.push(...project.params);
 
@@ -1219,7 +1456,7 @@ export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScop
       params.push(cutoff);
     }
   }
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   const projectClause = project.clause;
   params.push(...project.params);
   params.push(limit);
@@ -1273,7 +1510,7 @@ export function usageTimeSeries(since = "30d", scope?: ProjectScope): UsageTimeS
       params.push(cutoff);
     }
   }
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   const projectClause = project.clause;
   params.push(...project.params);
 
@@ -1337,7 +1574,7 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
       params.push(cutoff);
     }
   }
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   const projectClause = project.clause;
   params.push(...project.params);
 
@@ -1783,21 +2020,45 @@ function readEventsByType(types: readonly string[], sinceMs?: number): Verificat
     .all(...params) as VerificationEventRow[];
 }
 
-function runScopeInfo(runId: string | null): { projectDir: string | null; status: string | null } | null {
-  if (!runId) return null;
-  const row = db().prepare(`SELECT project_dir, status FROM runs WHERE id = ?`).get(runId) as
-    | { project_dir: string | null; status: string | null }
-    | undefined;
-  if (!row) return null;
-  return { projectDir: row.project_dir ?? null, status: row.status ?? null };
+/** FG-693: `campaigns` carries the canonical column but has no WRITER for it, so
+ *  every row of it is NULL-canonical. The column is still SELECTed — a future
+ *  writer must be honoured the moment it exists rather than silently ignored —
+ *  and it is selected conditionally because this read-only handle may be pointed
+ *  at a store that has not been migrated to the column yet. */
+function campaignCanonicalSelect(qualifier: string): string {
+  return hasCanonicalColumn("campaigns") ? `, ${qualifier}.${CANONICAL_COLUMN}` : "";
 }
 
-function campaignProjectDir(campaignId: string | null): string | null {
-  if (!campaignId) return null;
-  const row = db().prepare(`SELECT project_dir FROM campaigns WHERE id = ?`).get(campaignId) as
-    | { project_dir: string | null }
+type CampaignProjectRow = { project_dir: string | null; project_dir_canonical?: string | null };
+
+function campaignRowIdentity(row: CampaignProjectRow): RowProjectIdentity {
+  return { projectDir: row.project_dir ?? null, canonical: row.project_dir_canonical ?? null };
+}
+
+type RunScopeInfo = { identity: RowProjectIdentity; status: string | null };
+
+// FG-693: the run's canonical identity is read alongside its as-written spelling,
+// so a scope decision here is the SAME decision `scopeSql` makes in SQL. Selected
+// conditionally for the unmigrated-store reason above.
+function runScopeInfo(runId: string | null): RunScopeInfo | null {
+  if (!runId) return null;
+  const canonical = hasCanonicalColumn("runs") ? `, ${CANONICAL_COLUMN}` : "";
+  const row = db().prepare(`SELECT project_dir, status${canonical} FROM runs WHERE id = ?`).get(runId) as
+    | { project_dir: string | null; status: string | null; project_dir_canonical?: string | null }
     | undefined;
-  return row?.project_dir ?? null;
+  if (!row) return null;
+  return {
+    identity: { projectDir: row.project_dir ?? null, canonical: row.project_dir_canonical ?? null },
+    status: row.status ?? null,
+  };
+}
+
+function campaignProjectIdentity(campaignId: string | null): RowProjectIdentity {
+  if (!campaignId) return { projectDir: null, canonical: null };
+  const row = db()
+    .prepare(`SELECT project_dir${campaignCanonicalSelect("campaigns")} FROM campaigns WHERE id = ?`)
+    .get(campaignId) as CampaignProjectRow | undefined;
+  return row ? campaignRowIdentity(row) : { projectDir: null, canonical: null };
 }
 
 function parseEventPayload(raw: string | null): Record<string, unknown> {
@@ -1880,7 +2141,9 @@ export function inProgressVerifications(nowMs: number = Date.now(), scope?: Proj
       // scopes retain the previous operational filtering semantics. The
       // loop's eager run row carries project_dir; campaign gates resolve via
       // their campaign row (item.runId is frequently null).
-      if (!scopeIncludes(scope, runInfo.projectDir)) continue;
+      // FG-693: the run row is decided by the same identity rule the run-scoped
+      // SQL applies, so an aliased scope spelling keeps this verification visible.
+      if (!scopeIncludes(scope, runInfo.identity)) continue;
       out.push({
         kind: "review_loop_verification",
         attemptId,
@@ -1894,7 +2157,7 @@ export function inProgressVerifications(nowMs: number = Date.now(), scope?: Proj
       });
     } else {
       const campaignId = typeof payload.campaignId === "string" ? payload.campaignId : null;
-      if (!scopeIncludes(scope, campaignProjectDir(campaignId))) continue;
+      if (!scopeIncludes(scope, campaignProjectIdentity(campaignId))) continue;
       out.push({
         kind: "campaign_reconcile_gate",
         attemptId,
@@ -1976,7 +2239,7 @@ export function reviewLoopRunPhases(nowMs: number = Date.now(), scope?: ProjectS
   }
   if (latestStartByRun.size === 0) return [];
 
-  const project = scopeSql("r.project_dir", scope);
+  const project = scopeSql("runs", "r", scope);
   const runRows = db()
     .prepare(`SELECT id, title, workflow, project_dir FROM runs r WHERE r.status = 'active' ${project.clause}`)
     .all(...project.params) as Array<{ id: string; title: string; workflow: string; project_dir: string | null }>;
@@ -2096,7 +2359,7 @@ function rowToHostVerification(row: HostVerificationDbRow): HostVerificationEvid
  *  one project_dir), most-recent-first. Unscoped by gate/sha — an evidence
  *  view shows everything recorded, not one gate lookup at a time. */
 export function hostVerificationsForTicket(ticketId: string, scope?: ProjectScope, limit = 100): HostVerificationEvidenceRow[] {
-  const project = scopeSql("project_dir", scope);
+  const project = scopeSql("host_verifications", "host_verifications", scope);
   const params: unknown[] = [ticketId];
   params.push(...project.params);
   params.push(limit);
@@ -2114,13 +2377,17 @@ export function hostVerificationsForTicket(ticketId: string, scope?: ProjectScop
 export function hostVerificationsForCampaignItem(itemId: string, scope?: ProjectScope): HostVerificationEvidenceRow[] {
   const item = db()
     .prepare(
-      `SELECT ci.ticket_id AS ticket_id, c.project_dir AS project_dir
+      `SELECT ci.ticket_id AS ticket_id, c.project_dir AS project_dir${campaignCanonicalSelect("c")}
        FROM campaign_items ci JOIN campaigns c ON c.id = ci.campaign_id
        WHERE ci.id = ?`
     )
-    .get(itemId) as { ticket_id: string; project_dir: string | null } | undefined;
+    .get(itemId) as { ticket_id: string; project_dir: string | null; project_dir_canonical?: string | null } | undefined;
   if (!item) return [];
-  if (!scopeIncludes(scope, item.project_dir)) return [];
+  // FG-693: the campaign's own project identity decides whether this item is in
+  // scope, and the campaign's recorded spelling is then handed on as the scope for
+  // the evidence lookup — where it is resolved again, so an aliased campaign
+  // spelling still finds evidence recorded under the canonical one.
+  if (!scopeIncludes(scope, campaignRowIdentity(item))) return [];
   return hostVerificationsForTicket(item.ticket_id, item.project_dir ?? undefined);
 }
 
@@ -2129,7 +2396,7 @@ export function hostVerificationsForCampaignItem(itemId: string, scope?: Project
  *  review-loop/reconcile wrapper) has no in-flight window to catch, but its
  *  recorded row is still discoverable here after the fact. */
 export function recentHostVerifications(limit = 50, scope?: ProjectScope): HostVerificationEvidenceRow[] {
-  const project = scopeSql("project_dir", scope);
+  const project = scopeSql("host_verifications", "host_verifications", scope);
   const rows = db().prepare(`SELECT * FROM host_verifications WHERE 1 = 1 ${project.clause} ORDER BY recorded_at DESC LIMIT ?`)
     .all(...project.params, limit) as HostVerificationDbRow[];
   return rows.map(rowToHostVerification);
@@ -2275,7 +2542,7 @@ function riskLensesOf(contractJson: string | null): string[] {
 /** Reviews (most recently touched first) with their findings, scoped through the
  *  owning run's project_dir. A review with no run is unscoped and always listed. */
 export function reviewLedger(scope?: ProjectScope, limit = 25): ReviewLedgerEntry[] {
-  const project = scopeSql("runs.project_dir", scope);
+  const project = scopeSql("runs", "runs", scope);
   const reviews = db()
     .prepare(
       `SELECT reviews.*, runs.project_dir AS project_dir
@@ -4042,13 +4309,6 @@ function cachedOrchestratorSessions(): Map<string, OrchestratorSession> {
   return sessions;
 }
 
-/** Every spelling in a scope, resolved through the store's ONE canonicalizer. */
-function canonicalScope(scope: ProjectScope): ProjectScope {
-  if (scope === undefined) return undefined;
-  if (typeof scope === "string") return canonicalReceiptProjectDir(scope);
-  return scope.map(canonicalReceiptProjectDir);
-}
-
 export type OrchestratorReadOptions = {
   /** Injected by tests so the receipt × liveness matrix can be exercised without
    *  a real ~/.forge/orchestrators. Production always reads the real records. */
@@ -4059,16 +4319,17 @@ export type OrchestratorReadOptions = {
  *  their liveness records. A CLOSED receipt is not here at all, which is what makes
  *  "after a receipt closes it is absent from every subsequent response" structural.
  *
- *  The scope is canonicalized before it filters `project_dir`, because that column is
- *  written canonical (canonicalReceiptProjectDir, the invariant the store owns). A
- *  registry-supplied or request-supplied spelling of the same directory that skipped
- *  it would return NOTHING for a project that has live orchestrators — the same
- *  write/read asymmetry, one seam over. Other tables' `project_dir` columns carry no
- *  such invariant, so `scopeSql` itself stays literal.
+ *  FG-693: the scope is decided by PROVEN identity against `project_dir_canonical`,
+ *  like every other project-scoped read here — it no longer pre-canonicalizes the
+ *  operator's spelling through `canonicalReceiptProjectDir` and then compares raw
+ *  bytes against a column that mixed proven and unproven values. A registry- or
+ *  request-supplied spelling of the same directory therefore still returns a project
+ *  that has live orchestrators, and a NULL-canonical (pre-FG-693) receipt is reached
+ *  through the shared retarget-proof rule rather than dropped.
  *
  *  Never carries a credential — see the type's own comment. */
 export function orchestratorEntries(scope: ProjectScope, opts: OrchestratorReadOptions = {}): OrchestratorEntry[] {
-  const project = scopeSql("project_dir", canonicalScope(scope));
+  const project = scopeSql("orchestrator_receipts", "orchestrator_receipts", scope);
   const receipts = readOrchestratorReceipts(
     `WHERE state NOT IN ('exited', 'spawn_failed', 'orphaned') ${project.clause}
       ORDER BY created_at DESC, receipt_id DESC LIMIT 200`,
