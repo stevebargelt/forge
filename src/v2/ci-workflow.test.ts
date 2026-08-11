@@ -132,11 +132,12 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 // FG-495 regression guard (updated: sharded extended gate; FG-624: 5-way and
 // duration-aware): the slow integration/worktree coverage moved out of the
 // fast `test` gate must still run somewhere routine and visible. It now runs
-// as EIGHT concurrent jobs — five root integration shards
+// as NINE concurrent jobs — five root integration shards
 // (`integration_1`..`integration_5`, partitioned by measured per-file duration
 // via scripts/run-integration-tests.sh), a `worktree` job, a
-// `dashboard_integration` job, and (FG-642) a `dashboard_browser` job — with the
-// required `test-extended` job reduced to a fail-closed aggregate over all eight. If a future edit drops a shard, mistargets a shard
+// `dashboard_integration` job, (FG-642) a `dashboard_browser` job, and (FG-693)
+// an `fg693_alias_identity` job — with the
+// required `test-extended` job reduced to a fail-closed aggregate over all nine. If a future edit drops a shard, mistargets a shard
 // selector, or lets the aggregate go green on a failed dependency, the
 // trust-sensitive coverage (FG-419/FG-440/FG-474 gate-enforcement tests, among
 // others) would stop gating merges without anyone deciding that on purpose.
@@ -149,7 +150,17 @@ const INTEGRATION_SHARD_JOBS = [
   "integration_5",
 ] as const;
 const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser"] as const;
-const EXTENDED_GATE_JOBS = [...INTEGRATION_SHARD_JOBS, ...SMALL_TIER_JOBS] as const;
+// FG-693: the synthetic symlink-alias job. It re-runs the whole FG-693 identity
+// suite with TMPDIR pointed at a symlink, so this Linux CI executes the
+// filesystem-alias class instead of being green on it by accident of platform —
+// the asymmetry that let FG-575, FG-576 and FG-253 each ship green and each
+// leave the invariant open. It sits in the TEN-minute tier rather than the six:
+// the suite carries its own AC8 falsification harness, which copies the tree and
+// spawns a nested test run per migrated consumer, so its cost is a multiple of
+// the suite's own and it has the same headroom problem the shards documented.
+const ALIAS_IDENTITY_JOB = "fg693_alias_identity" as const;
+const TEN_MINUTE_JOBS = [...INTEGRATION_SHARD_JOBS, ALIAS_IDENTITY_JOB] as const;
+const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS] as const;
 
 test("FG-495 (sharded, FG-624 5-way): ci.yml has five integration shard jobs each running the shard script with its own k/5 selector", () => {
   const wf = loadWorkflow();
@@ -235,7 +246,7 @@ test("FG-642: ci.yml has a dashboard_browser job that provisions a browser and r
   );
 });
 
-test("FG-495 (sharded): the test-extended aggregate needs all eight extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
+test("FG-495 (sharded): the test-extended aggregate needs all nine extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
@@ -244,7 +255,7 @@ test("FG-495 (sharded): the test-extended aggregate needs all eight extended-gat
   assert.deepEqual(
     [...needs].sort(),
     [...EXTENDED_GATE_JOBS].sort(),
-    "test-extended must `needs` exactly the eight sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
+    "test-extended must `needs` exactly the nine sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
   );
 
   assert.equal(
@@ -291,20 +302,21 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
   );
 });
 
-// Extended-gate wall-clock ceiling: every one of the eight concurrent
+// Extended-gate wall-clock ceiling: every one of the nine concurrent
 // extended-gate jobs carries a `timeout-minutes` ceiling, so a suite that runs
 // long is cancelled → its result is not `success` → the fail-closed aggregate
-// goes red → merge is blocked. Because the eight run concurrently, bounding each
+// goes red → merge is blocked. Because the nine run concurrently, bounding each
 // bounds the whole extended gate.
 //
-// The five integration shards get 10 minutes; the three smaller tiers keep 6.
+// The five integration shards and the FG-693 alias job get 10 minutes; the three
+// smaller tiers keep 6.
 // The tier grew into the old shared 6: at cfbebcc5 `integration_1` finished the
 // whole shard green in 5m57s and was killed at the ceiling anyway, turning the
 // required check red with nothing failing. See the evidence recorded above the
 // shard jobs in ci.yml.
-test("extended-gate ceiling: each of the five integration shards has timeout-minutes: 10", () => {
+test("extended-gate ceiling: each of the ten-minute jobs (five shards + the FG-693 alias job) has timeout-minutes: 10", () => {
   const wf = loadWorkflow();
-  for (const name of INTEGRATION_SHARD_JOBS) {
+  for (const name of TEN_MINUTE_JOBS) {
     const job = wf.jobs?.[name];
     assert.ok(job, `ci.yml must define the ${name} extended-gate job`);
     assert.equal(
@@ -320,7 +332,7 @@ test("extended-gate ceiling: the two timeout tiers cover exactly every test-exte
   assert.deepEqual(
     [...EXTENDED_GATE_JOBS].sort(),
     [...needs].sort(),
-    "every test-extended dependency must appear in exactly one timeout tier — a ninth extended job without a ceiling must fail this guard"
+    "every test-extended dependency must appear in exactly one timeout tier — a tenth extended job without a ceiling must fail this guard"
   );
 });
 
