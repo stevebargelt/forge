@@ -32,7 +32,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -150,6 +150,34 @@ test("FG-693/C5: a negative canonical-column answer is RE-CHECKED, so a peer's m
   );
 });
 
+// ── FG-693 (fix batch): what bounds the uncapped sweep ─────────────────────
+//
+// Removing the cap (C2 above) traded a silent-truncation defect for an unbounded one:
+// a scoped request re-resolved EVERY distinct legacy spelling through the filesystem,
+// synchronously, on a single-threaded server, and paid it again on the next request.
+// The bound is a cache, not a cap — a cap ahead of the identity question is the defect
+// C2 removed. The cache's one visible consequence is its staleness window, and it is
+// asserted here rather than left as an accident: within the TTL a resolution is
+// answered from memory, which is precisely what a second request does not pay for.
+
+test("FG-693 (fix batch): a recorded spelling is resolved ONCE, not once per query", () => {
+  const before = recentActivity(100, undefined, PHYSICAL).map((e) => e.runId);
+  assert.ok(before.includes("run-in-scope"), "fixture: the aliased legacy row is in scope to begin with");
+
+  // The alias is destroyed. A re-resolution now FAILS, so anything still answering
+  // with its physical path can only be answering from the cache the fix added.
+  rmSync(join(tmpHome, "link"), { force: true });
+  assert.throws(() => realpathSync(ALIAS), "fixture: the spelling no longer resolves at all");
+
+  assert.ok(
+    recentActivity(100, undefined, PHYSICAL).map((e) => e.runId).includes("run-in-scope"),
+    "the second scoped read spent no syscall on a spelling it had already resolved (if this fails after a " +
+      "multi-second stall, the TTL expired between the two reads rather than the cache being absent)",
+  );
+
+  symlinkSync(trees, join(tmpHome, "link"));
+});
+
 // ── C1: the shape the cost argument rests on ───────────────────────────────
 
 test("FG-693/C1: the per-row predicate cannot re-resolve the scope — it takes a RESOLVED one", () => {
@@ -174,5 +202,12 @@ test("FG-693/C1: the per-row predicate cannot re-resolve the scope — it takes 
     /provenSameOnly\(/,
     "and the targets are ALREADY the filesystem's answer, so re-resolving them per candidate is provably " +
       "wasted work the contract's own guidance says not to do",
+  );
+
+  const scan = source.slice(source.indexOf("function claimableLegacySpellings("));
+  assert.doesNotMatch(
+    scan.slice(0, scan.indexOf("\n}\n")),
+    /LIMIT/,
+    "and the sweep is still uncapped — the bound is the cache above it, never a slice of the answer",
   );
 });

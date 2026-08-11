@@ -57,7 +57,8 @@
 
 import { basename } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { compareIdentity, identify, provenPhysical } from "../util/path-identity.js";
+import { compareIdentity, identify } from "../util/path-identity.js";
+import { retargetProofIdentity } from "../store/legacy-path-attribution.js";
 import { isLaunchId, statusLine, type LaunchStatus } from "./launch.js";
 import {
   HOST_VERIFICATION_PURPOSE,
@@ -314,7 +315,9 @@ type ResolvedProjectScope = {
   /** Spellings the filesystem would not confirm. Matched by recorded BYTES only: for
    *  an unproven target, byte equality is the only relation left that claims nothing. */
   unresolved: ReadonlySet<string>;
-  /** One resolution per DISTINCT recorded spelling, for this derivation only. */
+  /** One RETARGET-PROOF decision per DISTINCT recorded spelling, for this derivation
+   *  only — the physical path where a legacy spelling can still be claimed, and null
+   *  where nothing about it can be (see recordedPhysical). */
   spellings: Map<string, string | null>;
 };
 
@@ -330,10 +333,35 @@ function resolveProjectScope(projectDirs: readonly string[] | undefined): Resolv
   return { physicals, unresolved, spellings: new Map() };
 }
 
+// FG-693 (fix batch): a legacy row is credited only when it is RETARGET-PROOF.
+//
+// The value below used to be a plain `provenPhysical(spelling)` — where the recorded
+// spelling resolves TODAY — and that is the one thing a NULL-canonical row may not be
+// attributed on. Resolving a stored spelling now establishes that it resolves now; it
+// never establishes that it resolved to the same tree when the row was written. A
+// symlink recorded before the migration and since repointed from checkout A to
+// checkout B therefore made A's run, launch and CI evidence appear under B — a false
+// pass on the surface an operator reads to decide whether their checkout has work in
+// flight and whether its checks have run.
+//
+// The rule is not restated here. `retargetProofIdentity` (src/store/legacy-path-
+// attribution.ts) is the ONE definition the receipts and gate-evidence consumers
+// already take, and it answers with a physical path only where the spelling
+// demonstrably traversed no symlink at all. Membership in `scope.physicals` then
+// finishes the comparison the shared `attributeLegacyRow` would do per target — the
+// targets are ALREADY the filesystem's proven answers, so comparing against the set
+// is that same proven-identity equality, without one realpath per target per row.
+//
+// WHAT A DECLINE COSTS, stated rather than hidden (AC6's compatibility projection is
+// explicit, not silent): the row keeps every byte it recorded and stays fully
+// readable — an unscoped `forge status` and the dashboard's host-wide read return it
+// exactly as before. What it loses is its claim on ONE PARTICULAR project scope,
+// which is the claim nothing ever proved.
 function recordedPhysical(scope: ResolvedProjectScope, spelling: string): string | null {
   const memo = scope.spellings.get(spelling);
   if (memo !== undefined) return memo;
-  const physical = provenPhysical(spelling);
+  const proof = retargetProofIdentity(spelling);
+  const physical = proof.provable ? proof.identity.physical : null;
   scope.spellings.set(spelling, physical);
   return physical;
 }
@@ -486,6 +514,10 @@ type CiPayload = {
   attemptId?: unknown;
   ticketId?: unknown;
   projectDir?: unknown;
+  /** FG-693: the observer's PROVEN identity for `projectDir`, written since the fix
+   *  batch and absent from every payload recorded before it — which is exactly what
+   *  makes an older payload legacy-shaped and decided by the retarget-proof rule. */
+  projectDirCanonical?: unknown;
   candidateSha?: unknown;
   observedAt?: unknown;
   outcome?: unknown;
@@ -761,6 +793,41 @@ function runCouldHoldCurrentWork(runId: string, currency: Omit<CiCurrency, "acti
  *  pair contributes NOTHING: the older rows behind it are not promoted in its place,
  *  which would carry a superseded candidate forward under a fresher label — exactly
  *  what AC3 forbids. */
+/** The payload's recorded project home, as SQL. `json_valid` is not decoration:
+ *  `json_extract` on a malformed payload is a hard error that would take the whole
+ *  read down, and a row whose payload does not parse is one the loop below skips
+ *  anyway. Written as a CASE rather than an `AND` because SQLite does not promise to
+ *  short-circuit a conjunction. */
+const PAYLOAD_PROJECT_DIR = `CASE WHEN json_valid(payload) THEN json_extract(payload, '$.projectDir') END`;
+const PAYLOAD_PROJECT_CANONICAL = `CASE WHEN json_valid(payload) THEN json_extract(payload, '$.projectDirCanonical') END`;
+
+/** Every DISTINCT spelling a run-less CI observation was recorded under that the
+ *  scope's own predicate admits. Spellings, not rows: it is one entry per checkout
+ *  ever observed, decided once, and the resolution each costs is memoized on the
+ *  scope alongside the per-row decisions that follow. Deliberately NOT capped — a cap
+ *  ahead of the identity question is the silent truncation this fix removes.
+ *
+ *  The narrowing is by BYTES because the pair key is the bytes, so a pair is admitted
+ *  whole or not at all; which bytes survive is decided by IDENTITY, through the same
+ *  predicate the per-row pass applies. */
+function inScopeRunlessSpellings(db: DatabaseInstance, project: ResolvedProjectScope): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT ${PAYLOAD_PROJECT_DIR} AS project_dir, ${PAYLOAD_PROJECT_CANONICAL} AS project_dir_canonical
+         FROM events
+        WHERE event_type = ? AND run_id IS NULL`,
+    )
+    .all(CI_OBSERVED_EVENT_TYPE) as Array<{ project_dir: string | null; project_dir_canonical: string | null }>;
+  const spellings = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.project_dir !== "string" || row.project_dir === "") continue;
+    if (inProjectScope({ projectDir: row.project_dir, canonical: row.project_dir_canonical }, project)) {
+      spellings.add(row.project_dir);
+    }
+  }
+  return [...spellings];
+}
+
 function readNewestCiObservations(
   db: DatabaseInstance,
   scope: CurrentActivityScope,
@@ -812,12 +879,41 @@ function readNewestCiObservations(
   // ticket clause here even though a run-less row needs a ticket-only review to be
   // current at all.
   //
-  // Rows that declare no run therefore stay in the window whatever the project scope,
-  // and identity decides them below. That is the honest trade: their pair key is the
-  // payload's project BYTES, so the only pair-granular clause available for them is
-  // the byte equality FG-693 exists to delete.
+  // Rows that declare no run have no run to be narrowed by, and their pair key is the
+  // payload's project BYTES — so a byte clause taken from the OPERATOR'S spellings
+  // would be the FG-693 defect, and no clause at all left them competing for the same
+  // 500 slots as every other project's run-less rows. 500 newer observations anchored
+  // by reviews elsewhere then evicted a requested project's current one, and no later
+  // identity check can recover a row SQLite did not return.
+  //
+  // So the byte set is taken from the DATA and decided by IDENTITY, which is
+  // pair-granular by construction: every distinct spelling a run-less observation was
+  // recorded under, each put through the SAME per-row predicate below. A pair is
+  // therefore admitted whole or not at all — never partially, which is what would
+  // promote a superseded row into a slot its successor had already closed. What is
+  // excluded is only what identity DECIDED is another project's.
+  //
+  // The spelling pass costs a scan of the run-less slice, and this surface is polled,
+  // so it is not spent where it cannot change the answer: with NO open review, no
+  // run-less row can be current under any reference (`workIsCurrent` for a row that
+  // declares no run is answered by an open review naming its ticket, and by nothing
+  // else), and a row that cannot be current contributes neither an observation nor a
+  // declared run. The window may drop them outright there.
+  const runlessSpellings =
+    project === undefined
+      ? undefined
+      : currency.openReviews.length === 0
+        ? []
+        : inScopeRunlessSpellings(db, project);
+
   const clauses: string[] = [];
   const params: string[] = [];
+  const runlessClause =
+    runlessSpellings === undefined
+      ? "run_id IS NULL"
+      : runlessSpellings.length > 0
+        ? `(run_id IS NULL AND ${PAYLOAD_PROJECT_DIR} IN (${runlessSpellings.map(() => "?").join(",")}))`
+        : null;
   if (scope.runId !== undefined) {
     // A run-scoped read wants that run's rows and nothing else — not the no-run rows a
     // host-wide read has to consider, which were dropped AFTER the limit before.
@@ -826,10 +922,16 @@ function readNewestCiObservations(
     params.push(scope.runId);
   } else if (eligibleRunIds.length === 0) {
     // Rows with no run id stay in: their anchor is a review, resolved per row below.
-    clauses.push("AND run_id IS NULL");
+    if (runlessClause === null) return { observations: [], declaredRunIds: new Set() };
+    clauses.push(`AND ${runlessClause}`);
+    params.push(...(runlessSpellings ?? []));
   } else {
-    clauses.push(`AND (run_id IS NULL OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`);
-    params.push(...eligibleRunIds);
+    clauses.push(
+      runlessClause === null
+        ? `AND run_id IN (${eligibleRunIds.map(() => "?").join(",")})`
+        : `AND (${runlessClause} OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`,
+    );
+    params.push(...(runlessClause === null ? [] : (runlessSpellings ?? [])), ...eligibleRunIds);
   }
 
   const rows = db.prepare(`
@@ -864,9 +966,14 @@ function readNewestCiObservations(
     if (decided.has(key)) continue; // rows arrive newest-first
     if (typeof payload.candidateSha !== "string" || payload.candidateSha === "") continue;
     if (scope.runId !== undefined && row.run_id !== scope.runId) continue;
-    // The payload declares the project home; nothing beside it records a proven
-    // identity, so this is the legacy-shaped arm of the same one rule.
-    if (!inProjectScope({ projectDir, canonical: null }, project)) continue;
+    // The payload declares the project home, and — since the fix batch — the PROVEN
+    // identity beside it. An older payload carries only the spelling, which is what
+    // puts it on the legacy-shaped arm of the same one rule.
+    const canonical =
+      typeof payload.projectDirCanonical === "string" && payload.projectDirCanonical !== ""
+        ? payload.projectDirCanonical
+        : null;
+    if (!inProjectScope({ projectDir, canonical }, project)) continue;
 
     // This row IS the newest in-scope observation for its pair. Whatever is decided
     // about it is decided about the pair.

@@ -31,6 +31,7 @@ import {
   type CheckStatusProvider, type CiGateStatus, type CiGateObservation, type CiObservationOutcome,
 } from "../../store/host-verifications.js";
 import { logEvent } from "../../store/events.js";
+import { provenPhysical } from "../../util/path-identity.js";
 import { newAttemptId } from "../../util/ids.js";
 
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
@@ -142,6 +143,13 @@ type CiObservedPayload = {
   attemptId: string;
   ticketId: string | null;
   projectDir: string;
+  /** FG-693: the PROVEN filesystem identity of `projectDir`, or null where the
+   *  filesystem would not confirm one — the two-value shape every canonical-bearing
+   *  table records, in the one place an observation has to carry its own. Without it
+   *  a reader has nothing but a spelling, and a spelling resolved at READ time says
+   *  only that it resolves today, never that it resolved to this tree when the
+   *  observation was made. */
+  projectDirCanonical: string | null;
   candidateSha: string;
   observedAt: string;
   outcome: CiObservationOutcome;
@@ -623,9 +631,10 @@ export function buildReviewLoopDeps(
     const payload: CiObservedPayload = {
       attemptId,
       ticketId: ctx.ticketId,
-      // canonical, matching how host_verifications rows record project_dir —
-      // the reader joins on it and must not miss a row over `./` vs absolute.
+      // The caller's spelling, lexically absolute so the reader never misses a row
+      // over `./` vs absolute. It is BYTES, not identity — the identity is beside it.
       projectDir: resolve(ctx.projectDir),
+      projectDirCanonical: provenPhysical(ctx.projectDir),
       candidateSha: observation.candidateSha,
       observedAt: observation.observedAt,
       outcome: observation.outcome,

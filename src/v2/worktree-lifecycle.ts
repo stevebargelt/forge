@@ -205,6 +205,13 @@ export type ForceRemoveWorktreeResult = {
   gitRemoved: boolean;
   /** The path is gone once this returns — however that came about. */
   pathAbsent: boolean;
+  /** FG-693: present only when a tree that IS THERE was left in place because its
+   *  identity could not be proven distinct from projectDir. Absent on every
+   *  ordinary outcome, INCLUDING the already-gone one: nothing was refused there,
+   *  because there was no tree to refuse. A caller whose own next step is
+   *  destructive (a branch or ref deletion that only the removal justifies) must
+   *  take the SAME decision from it — see cleanupIntegrationWorktree. */
+  declined?: string[];
 };
 
 /** `git worktree remove` that survives a LOCKED worktree (FG-356).
@@ -223,11 +230,38 @@ export type ForceRemoveWorktreeResult = {
  *  genuinely failed with the tree still on disk keeps its registration, and
  *  pruning never widens what gets disposed of.
  *
- *  Best-effort and never throws: an already-gone worktree is a no-op. */
+ *  Best-effort and never throws: an already-gone worktree is a no-op.
+ *
+ *  FG-693: the identity precondition lives HERE, on the primitive, not at each
+ *  call site. It was applied at the task-worktree disposals and missed at all
+ *  three integration-worktree ones (create-retry, re-materialization, post-merge
+ *  cleanup), which is the failure mode a per-call-site guard has: the next
+ *  destructive consumer added is the one nobody remembers to guard. `git worktree
+ *  remove --force --force` on a path that is another spelling of projectDir
+ *  deletes the operator's checkout whenever that checkout is itself a linked
+ *  worktree (git only refuses the MAIN one), so an unproven match must abstain. */
 export function forceRemoveWorktree(
   projectDir: string,
   worktreePath: string
 ): ForceRemoveWorktreeResult {
+  const notDistinct = notProvenDistinctFromProject(worktreePath, projectDir);
+  if (notDistinct.length > 0) {
+    // A path the filesystem will not answer for has NO TREE to delete, so nothing
+    // is refused there and the registration hygiene below is still owed — `git
+    // worktree prune` only ever drops entries whose working tree is already
+    // missing, so it can neither delete a tree nor widen what is disposed of.
+    if (identify(worktreePath).kind !== "resolved") {
+      try {
+        execFileSync("git", ["worktree", "prune"], {
+          cwd: projectDir,
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+      } catch { /* fully best-effort */ }
+      return { gitRemoved: false, pathAbsent: !existsSync(worktreePath) };
+    }
+    return { gitRemoved: false, pathAbsent: false, declined: notDistinct };
+  }
+
   try {
     execFileSync("git", ["worktree", "unlock", worktreePath], {
       cwd: projectDir,
@@ -525,12 +559,20 @@ export function cleanupFailedCloneSetup(projectDir: string, runId: string, taskI
   // FG-693: same precondition as cleanupFailedWorktreeSetup — an unconditional
   // rmSync must first prove the path is not the project checkout under another
   // spelling. A clone forge cannot prove distinct is left in place; the safe side.
-  if (existsSync(path) && notProvenDistinctFromProject(path, projectDir).length === 0) {
-    try {
-      rmSync(path, { recursive: true, force: true });
-    } catch {
-      // Best-effort: a clone we cannot remove is retained, which is the safe side.
-    }
+  //
+  // ONE decision, governing BOTH halves. The workspace removal and the anchor
+  // deletion rest on the identical premise — that everything this function finds
+  // was made by the attempt that is now failing — and that premise is false exactly
+  // when `path` is not the clone. Refusing the removal while force-deleting the
+  // branch anyway would preserve the redirected checkout and destroy the task's only
+  // durable parent-side record, which is the worse half of the pair to get wrong.
+  // createTaskClone writes the anchor LAST, after the clone directory exists, so a
+  // path that does not resolve at all had no anchor to leak either.
+  if (notProvenDistinctFromProject(path, projectDir).length > 0) return;
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    // Best-effort: a clone we cannot remove is retained, which is the safe side.
   }
   // The parent-side anchor this setup created. `-D` is safe here for the same
   // reason the whole function is: the agent never ran, and the ref did not exist
@@ -1778,7 +1820,18 @@ export function createIntegrationWorktree(
   const branch = integrationBranchName(runId, parentTaskId);
 
   if (integrationBranchExists(projectDir, runId, parentTaskId)) {
-    forceRemoveWorktree(projectDir, integrationPath);
+    // FG-693: the prune and the branch deletion are ONE decision. "A stale
+    // integration worktree is always from an aborted prior attempt" is an argument
+    // about a path that names the integration tree; a path that is another spelling
+    // of the project checkout is not that, and force-deleting the branch after the
+    // removal already refused would leave the destructive half acting on exactly
+    // the premise the safe half rejected.
+    const removal = forceRemoveWorktree(projectDir, integrationPath);
+    if (removal.declined) {
+      throw new Error(
+        `refusing to prune the integration workspace ${integrationPath}: ${removal.declined.join("; ")}`
+      );
+    }
     try {
       execFileSync("git", ["branch", "-D", branch], {
         cwd: projectDir,
@@ -1935,7 +1988,15 @@ export function openIntegrationWorktree(
     return { integrationPath, adopted: true };
   }
 
-  forceRemoveWorktree(projectDir, integrationPath);
+  // FG-693: re-materializing over a tree whose identity is not proven distinct from
+  // the project checkout would remove that checkout and put the integration branch
+  // in its place. The removal refuses; so does the replacement it exists to enable.
+  const removal = forceRemoveWorktree(projectDir, integrationPath);
+  if (removal.declined) {
+    throw new Error(
+      `refusing to re-materialize the integration workspace ${integrationPath}: ${removal.declined.join("; ")}`
+    );
+  }
   mkdirSync(join(WORKTREES_DIR, runId, parentTaskId), { recursive: true });
   execFileSync("git", ["worktree", "add", integrationPath, branch], {
     cwd: projectDir,
@@ -2095,7 +2156,13 @@ export function cleanupIntegrationWorktree(
   // FIX3 (FG-376 review): no dependency-volume cleanup here — see
   // removeWorktreeIfSafe above for why a shared cache volume must not be
   // removed at individual worktree disposal.
-  forceRemoveWorktree(projectDir, path);
+  const removal = forceRemoveWorktree(projectDir, path);
+  // FG-693: everything below is disposal of the same integration step, authorized by
+  // the same premise — that `path` names the integration workspace and not the
+  // project checkout under another spelling. Where the removal could not establish
+  // that, the branch and the candidate refs stay too: a leaked ref is reclaimable by
+  // a later pass, a deleted one is the only durable record of the wave's work.
+  if (removal.declined) return;
   try {
     execFileSync("git", ["branch", "-D", branch], {
       cwd: projectDir,

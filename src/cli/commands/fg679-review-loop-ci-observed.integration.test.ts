@@ -13,7 +13,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -29,7 +29,8 @@ const GATE_CMD = "npm run test:all";
 
 // Contract B, spelled out. Sorted so a key ADDED or REMOVED fails, not just renamed.
 const PAYLOAD_KEYS = [
-  "attemptId", "candidateSha", "contexts", "observedAt", "outcome", "projectDir", "ticketId", "unavailableReason",
+  "attemptId", "candidateSha", "contexts", "observedAt", "outcome", "projectDir", "projectDirCanonical", "ticketId",
+  "unavailableReason",
 ].sort();
 const CONTEXT_KEYS = ["context", "observedAt", "state", "url"].sort();
 
@@ -37,6 +38,7 @@ type CiObservedPayload = {
   attemptId: string;
   ticketId: string | null;
   projectDir: string;
+  projectDirCanonical: string | null;
   candidateSha: string;
   observedAt: string;
   outcome: string;
@@ -132,6 +134,10 @@ test("FG-679: a clean-tree round with pending CI emits `review_loop.ci_observed`
     assert.ok(payload.attemptId.length > 0);
     assert.equal(payload.ticketId, "FG-679");
     assert.equal(payload.projectDir, projectDir);
+    // FG-693: the bytes above are a SPELLING and decide nothing; the PROVEN identity
+    // travels beside them, so a reader never has to re-resolve the spelling later and
+    // credit this observation to whatever it happens to reach then.
+    assert.equal(payload.projectDirCanonical, realpathSync(projectDir));
     assert.equal(payload.candidateSha, headSha);
     assert.equal(payload.candidateSha.length, 40, "the FULL probed sha, never a short sha");
     assert.equal(payload.observedAt, new Date(payload.observedAt).toISOString(), "observedAt is ISO 8601");

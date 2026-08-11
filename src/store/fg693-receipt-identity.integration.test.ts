@@ -142,7 +142,12 @@ const DECISION: OrchestratorLaunchDecision = {
  *  failed, and rows written before FG-576 stored whatever the launcher held. That is
  *  precisely why the canonical column is NULL for them — nothing ever proved what
  *  they named. */
-function seedLegacyReceipt(receiptId: string, storedSpelling: string, state: "pending" | "running"): void {
+function seedLegacyReceipt(
+  receiptId: string,
+  storedSpelling: string,
+  state: "pending" | "running",
+  createdAt = "2026-07-01T10:00:00.000Z",
+): void {
   getDb()
     .prepare(
       `INSERT INTO orchestrator_receipts (${ORCHESTRATOR_RECEIPT_COLUMNS})
@@ -157,8 +162,8 @@ function seedLegacyReceipt(receiptId: string, storedSpelling: string, state: "pe
       receipt_id: receiptId,
       session_key: `sk-${receiptId}`,
       state,
-      created_at: "2026-07-01T10:00:00.000Z",
-      updated_at: "2026-07-01T10:00:00.000Z",
+      created_at: createdAt,
+      updated_at: createdAt,
       project_dir: storedSpelling,
       project_name: null,
       resolved_profile: null,
@@ -324,6 +329,49 @@ test("a legacy receipt whose stored spelling traversed no symlink is attributed 
     () => closeOrchestratorReceipt("orx-legacy-proof", { state: "exited", exitCode: 0 }, { project: checkoutB }),
     (e: unknown) => e instanceof OrchestratorReceiptAuthorityError && e.reason === "other-project",
   );
+});
+
+// FG-693 (fix batch): THE LEGACY SCAN'S CAP WAS ITSELF A SILENT TRUNCATION.
+//
+// It read the newest 2,000 NULL-canonical rows and only then asked which project they
+// belonged to, so a store holding more newer legacy receipts for OTHER projects hid an
+// older in-scope one from the listing AND from the authorized read — reported as "there
+// are none", which is the same empty-board defect the dashboard's `LIMIT 2000` was
+// removed for. The population is now narrowed by the identity question itself, asked
+// once per DISTINCT recorded spelling, and the only limit left is the caller's own.
+test("an in-scope legacy receipt past the old scan cap is still listed AND still authorizes", () => {
+  // The requested project's receipt is the OLDEST row in the store, and link-free, so
+  // it is retarget-proof: it must both list as proven and authorize.
+  seedLegacyReceipt("orx-in-scope", checkoutA, "running", "2026-06-01T00:00:00.000Z");
+  const FILLER = 2400;
+  for (let i = 0; i < FILLER; i++) {
+    seedLegacyReceipt(
+      `orx-filler-${String(i).padStart(5, "0")}`,
+      join(base, "_elsewhere", `checkout-${String(i).padStart(5, "0")}`),
+      "pending",
+      new Date(Date.UTC(2026, 6, 1) + i * 1000).toISOString(),
+    );
+  }
+
+  // NOT vacuous: the pre-fix scan, restated, never reached this row.
+  const capped = getDb()
+    .prepare(
+      `SELECT receipt_id FROM orchestrator_receipts WHERE project_dir_canonical IS NULL
+        ORDER BY created_at DESC, receipt_id DESC LIMIT 2000`,
+    )
+    .all() as Array<{ receipt_id: string }>;
+  assert.equal(
+    capped.some((r) => r.receipt_id === "orx-in-scope"),
+    false,
+    "fixture: the capped scan stopped 400 rows short of this project's receipt",
+  );
+
+  assert.deepEqual(ids(listOrchestratorReceiptsForProject(checkoutA)), ["orx-in-scope"]);
+  assert.deepEqual(ids(listOrchestratorReceiptsAuthorizedForProject(checkoutA, 200, {})), ["orx-in-scope"]);
+
+  // And removing the cap widened nothing: 2,400 other checkouts' receipts are still
+  // not this project's, and a different real checkout still claims none of them.
+  assert.deepEqual(ids(listOrchestratorReceiptsForProject(checkoutB)), []);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

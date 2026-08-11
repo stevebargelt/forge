@@ -12,7 +12,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -21,10 +21,11 @@ import {
   integrationBranchName,
   forceRemoveWorktree,
   removeWorktreeIfSafe,
+  cleanupFailedCloneSetup,
   cleanupFailedWorktreeSetup,
   cleanupIntegrationWorktree,
 } from "./worktree-lifecycle.js";
-import { worktreeDir, integrationWorktreeDir, WORKTREES_DIR } from "../util/paths.js";
+import { cloneDir, worktreeDir, integrationWorktreeDir, WORKTREES_DIR } from "../util/paths.js";
 
 const tmpDirs: string[] = [];
 
@@ -312,4 +313,120 @@ test("forceRemoveWorktree: a path that was never a worktree is a no-op across re
 
   assert.ok(existsSync(live), "a registration whose working tree is still on disk is not prunable");
   assert.ok(existsSync(registrationDir(projectDir, live)), "so pruning never widens what gets disposed of");
+});
+
+// ── FG-693 (fix batch): the identity precondition on the DESTRUCTIVE primitive ─
+//
+// RF-2. The precondition was applied at the task-worktree disposals and missed at
+// every integration-worktree one — the post-merge cleanup, the create-retry prune and
+// the re-materialization all handed a derived path straight to `git worktree remove
+// --force --force`. Git refuses to remove the MAIN working tree, and only that: where
+// the project checkout is itself a linked worktree (which is what a fan-out publisher
+// is working in), a recorded integration path that is another spelling of it deletes
+// the operator's tree. So the precondition lives on the primitive, where the NEXT
+// destructive consumer inherits it instead of having to remember it.
+//
+// RF-3. And a caller whose own next step is destructive takes the SAME decision: the
+// failed-clone cleanup declined the workspace removal and then force-deleted the
+// task's parent-side anchor anyway, which is the worse half to get wrong — the tree
+// survives and the only durable record of the attempt does not.
+
+/** The attack shape, built for real: a managed path that RESOLVES to the project
+ *  checkout through a symlinked leaf. Nothing here is contrived about the spelling —
+ *  it is exactly the "symlinked parent" case the identity contract exists for. */
+function aliasOfProject(projectDir: string, at: string): string {
+  mkdirSync(join(at, ".."), { recursive: true });
+  symlinkSync(projectDir, at);
+  return at;
+}
+
+/** A project checkout that is itself a LINKED worktree — the shape a fan-out
+ *  publisher actually works in, and the one where git's own protection does not
+ *  apply: `git worktree remove` refuses the MAIN working tree and only that. */
+function linkedCheckout(label: string): string {
+  const parent = makeTmpDir(`forge-fg693-${label}-parent-`);
+  initGitRepo(parent);
+  const checkout = join(makeTmpDir(`forge-fg693-${label}-`), "checkout");
+  execFileSync("git", ["worktree", "add", checkout, "-b", `operator/${label}`], { cwd: parent, stdio: "ignore" });
+  return checkout;
+}
+
+test("FG-693: forceRemoveWorktree REFUSES a path that is the project checkout under another spelling", () => {
+  // NOT vacuous, and proven with a sacrificial twin: raw git, handed the same shape,
+  // deletes the checkout. The precondition is the only thing standing between the
+  // recorded integration path and the operator's tree.
+  const doomed = linkedCheckout("doomed");
+  const doomedAlias = aliasOfProject(doomed, join(makeTmpDir("forge-fg693-doomed-alias-"), "integration"));
+  execFileSync("git", ["worktree", "remove", "--force", "--force", doomedAlias], { cwd: doomed, stdio: "ignore" });
+  assert.equal(existsSync(join(doomed, "README.md")), false, "fixture: git removes a LINKED checkout without complaint");
+
+  const projectDir = linkedCheckout("guarded");
+  const alias = aliasOfProject(projectDir, join(makeTmpDir("forge-fg693-alias-"), "integration"));
+
+  const result = forceRemoveWorktree(projectDir, alias);
+
+  assert.ok(result.declined, "an unproven match must make a destructive consumer abstain, and SAY it did");
+  assert.equal(result.gitRemoved, false);
+  assert.ok(existsSync(join(projectDir, "README.md")), "the operator's checkout is still there");
+  assert.ok(existsSync(join(projectDir, ".git")), "and it is still a worktree of its repository");
+});
+
+test("FG-693: the integration cleanup takes the removal's decision for its BRANCH deletion too", () => {
+  const projectDir = makeTmpDir("forge-fg693-integration-alias-");
+  initGitRepo(projectDir);
+  const runId = "run-fg693-int";
+  const parentTaskId = "task-fg693-int";
+  const branch = integrationBranchName(runId, parentTaskId);
+  execFileSync("git", ["branch", branch], { cwd: projectDir, stdio: "ignore" });
+  aliasOfProject(projectDir, integrationWorktreeDir(runId, parentTaskId));
+
+  cleanupIntegrationWorktree(projectDir, runId, parentTaskId);
+
+  assert.ok(existsSync(join(projectDir, "README.md")), "the checkout the path really named is untouched");
+  assert.equal(
+    execFileSync("git", ["branch", "--list", branch], { cwd: projectDir, encoding: "utf8" }).trim(),
+    branch,
+    "the branch is disposal too — a leaked ref is reclaimable, a deleted one is not",
+  );
+});
+
+test("FG-693: a failed clone setup that cannot prove its path keeps BOTH the tree and the anchor", () => {
+  const projectDir = makeTmpDir("forge-fg693-clone-alias-");
+  initGitRepo(projectDir);
+  const runId = "run-fg693-clone";
+  const taskId = "task-fg693-clone";
+  const branch = worktreeBranchName(runId, taskId);
+  // The parent-side anchor this attempt created — the durable record of its base.
+  execFileSync("git", ["branch", branch], { cwd: projectDir, stdio: "ignore" });
+  aliasOfProject(projectDir, cloneDir(runId, taskId));
+
+  cleanupFailedCloneSetup(projectDir, runId, taskId);
+
+  assert.ok(existsSync(join(projectDir, "README.md")), "the redirected 'clone' was the project checkout — not removed");
+  assert.equal(
+    execFileSync("git", ["branch", "--list", branch], { cwd: projectDir, encoding: "utf8" }).trim(),
+    branch,
+    "and the anchor survives with it: declining the removal while force-deleting the ref is the worst of both",
+  );
+});
+
+test("FG-693: the ordinary failed-clone cleanup still disposes of the clone AND its anchor", () => {
+  const projectDir = makeTmpDir("forge-fg693-clone-ok-");
+  initGitRepo(projectDir);
+  const runId = "run-fg693-clone-ok";
+  const taskId = "task-fg693-clone-ok";
+  const branch = worktreeBranchName(runId, taskId);
+  execFileSync("git", ["branch", branch], { cwd: projectDir, stdio: "ignore" });
+  const clone = cloneDir(runId, taskId);
+  mkdirSync(clone, { recursive: true });
+  writeFileSync(join(clone, "half-finished.ts"), "export const partial = true;\n");
+
+  cleanupFailedCloneSetup(projectDir, runId, taskId);
+
+  assert.equal(existsSync(clone), false, "a clone that IS provably its own tree is disposed of as before");
+  assert.equal(
+    execFileSync("git", ["branch", "--list", branch], { cwd: projectDir, encoding: "utf8" }).trim(),
+    "",
+    "and its anchor goes with it — the refusal above must not have made this path timid",
+  );
 });

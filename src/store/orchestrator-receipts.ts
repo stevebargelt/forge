@@ -128,6 +128,7 @@ import {
   describeIdentity,
   provenPhysical,
   type PathIdentityInput,
+  type ResolvedPathIdentity,
 } from "../util/path-identity.js";
 import {
   attributeLegacyRow,
@@ -1135,15 +1136,21 @@ export function findOrchestratorReceiptBySessionIdentity(identifier: string): Or
 //               written while its path was unresolvable. Decided in process by the
 //               shared retarget-proof rule.
 //
-// The legacy scan is CAPPED. There is no other dimension to narrow it by (a receipt
-// carries no ticket the way gate evidence does), so it reads the newest
-// LEGACY_SCAN_LIMIT NULL-canonical rows rather than the whole table. That population
-// is fixed at migration time and self-extinguishing — nothing new lands in it unless
-// a project path was genuinely unresolvable at launch — so the cap bounds the work
-// without, in practice, hiding a row. It is stated here rather than left implicit
-// because a silent truncation reads as "there are none".
-
-const LEGACY_SCAN_LIMIT = 2000;
+// THE LEGACY SCAN IS NOT CAPPED, and the earlier `LIMIT 2000` on it was the same
+// defect this ticket exists to remove. It read the newest N NULL-canonical rows and
+// only THEN asked which project they belonged to, so a store holding more than N
+// newer legacy receipts for other projects hid an older in-scope one from both the
+// listing and the authorized read — and hid it silently, which reads as "there are
+// none". A cap applied before the identity question is not a bound, it is a wrong
+// answer with a constant in front of it.
+//
+// What narrows it instead is the question itself, asked once per DISTINCT recorded
+// spelling rather than once per row: a spelling is a property of a checkout, so the
+// population is one entry per project directory ever launched from (tens), not one
+// per receipt. The rows are then fetched by that spelling set under the CALLER'S OWN
+// `limit`, ordered newest-first — the same explicit newest-N contract the proven arm
+// has always had, applied to both arms so the merged result is genuinely the newest
+// `limit` receipts of the union.
 
 export type ReceiptLegacyDeclineReport = {
   /** the caller's spelling, as given. */
@@ -1167,6 +1174,39 @@ type AttributedRow = { row: OrchestratorReceiptRow; attribution: ReceiptProjectA
 function byRecency(a: AttributedRow, b: AttributedRow): number {
   if (a.row.created_at !== b.row.created_at) return a.row.created_at < b.row.created_at ? 1 : -1;
   return a.row.receipt_id < b.row.receipt_id ? 1 : -1;
+}
+
+/** The NULL-canonical receipts this project could be shown, newest `limit` first.
+ *
+ *  The spelling decides, so the spelling is what gets asked: one pass over the
+ *  DISTINCT recorded directories (one per checkout ever launched from), each put
+ *  through the SAME `displayAttribution` the per-row pass below applies, and then one
+ *  ordered, limited read of the rows recorded under the surviving ones. The declines
+ *  are deliberately NOT tallied here — a tally counts ROWS an operator is shown, and
+ *  this pass counts spellings — so the per-row pass remains the only counter. */
+function legacyRowsForProject(
+  db: ReturnType<typeof getDb>,
+  target: ResolvedPathIdentity,
+  askedSpelling: string,
+  limit: number,
+  select: (where: string, params: unknown[]) => OrchestratorReceiptRow[],
+): OrchestratorReceiptRow[] {
+  const spellings = (
+    db
+      .prepare(`SELECT DISTINCT project_dir FROM orchestrator_receipts WHERE project_dir_canonical IS NULL`)
+      .all() as Array<{ project_dir: string | null }>
+  )
+    .map((row) => row.project_dir)
+    .filter((spelling): spelling is string => spelling !== null && spelling !== "")
+    .filter(
+      (spelling) =>
+        displayAttribution({ projectDir: spelling, projectDirCanonical: null }, target, askedSpelling, null) !== null,
+    );
+  if (spellings.length === 0) return [];
+  return select(`project_dir_canonical IS NULL AND project_dir IN (${spellings.map(() => "?").join(",")})`, [
+    ...spellings,
+    limit,
+  ]);
 }
 
 function attributedProjectRows(
@@ -1193,7 +1233,7 @@ function attributedProjectRows(
     target.kind === "resolved"
       ? [
           ...select("project_dir_canonical = ?", [target.physical, limit]),
-          ...select("project_dir_canonical IS NULL", [LEGACY_SCAN_LIMIT]),
+          ...legacyRowsForProject(db, target, projectDir, limit, select),
         ]
       : select("project_dir = ?", [projectDir, limit]);
 

@@ -251,10 +251,48 @@ function legacySpellingResolvesToTarget(spelling: string, targets: ScopeTargets)
   return physical !== null && targets.physicals.has(physical);
 }
 
+// FG-693 (fix batch): the legacy sweep is bounded by CACHING it, never by capping it.
+//
+// The cap is not available: an unordered LIMIT is exactly the silent truncation this
+// ticket exists to delete (see claimableLegacySpellings below), and a scoped read may
+// not drop an in-scope row to defend its own cost. What IS available is that the
+// answer barely moves. A recorded spelling's physical path is a property of the
+// filesystem, not of the request, so resolving it once per SCOPE OBJECT — one per
+// query, several per request, every request — pays the whole distinct-spelling
+// population again on every scoped page load, on a single-threaded event loop.
+//
+// So the resolutions are memoized for the PROCESS, under a TTL. Steady state costs a
+// scoped request no realpath at all; a cold or expired entry costs one syscall per
+// distinct spelling, which is the population the scan already bounds itself by
+// (DISTINCT over NULL-canonical rows: one entry per checkout an operator ever used).
+//
+// The TTL is what keeps this a cache and not a snapshot: a spelling that stops
+// resolving, or starts resolving elsewhere, is observed within it. It is deliberately
+// shorter than the dashboard's own poll cadence, so no rendered page is ever built
+// from an answer older than the page before it — and the uncached code claimed no
+// more than this either, since the filesystem can change between the syscall and the
+// response being written.
+const SCOPE_RESOLUTION_TTL_MS = 2_000;
+/** Emptied rather than trimmed when it grows past this: dropping SOME entries would
+ *  make which spelling stayed cached depend on insertion order, and a cache that is
+ *  merely cold is always correct. */
+const SCOPE_RESOLUTION_MAX_ENTRIES = 4_096;
+const scopeResolutionCache = new Map<string, { physical: string | null; at: number }>();
+
+function resolveRecordedSpelling(spelling: string): string | null {
+  const now = Date.now();
+  const hit = scopeResolutionCache.get(spelling);
+  if (hit !== undefined && now - hit.at < SCOPE_RESOLUTION_TTL_MS) return hit.physical;
+  const physical = provenPhysical(spelling);
+  if (scopeResolutionCache.size >= SCOPE_RESOLUTION_MAX_ENTRIES) scopeResolutionCache.clear();
+  scopeResolutionCache.set(spelling, { physical, at: now });
+  return physical;
+}
+
 function recordedPhysical(targets: ScopeTargets, spelling: string): string | null {
   const memo = targets.recorded.get(spelling);
   if (memo !== undefined) return memo;
-  const physical = provenPhysical(spelling);
+  const physical = resolveRecordedSpelling(spelling);
   targets.recorded.set(spelling, physical);
   return physical;
 }
