@@ -209,7 +209,11 @@ function launchEnv(overrides: Record<string, string> = {}): Record<string, strin
     // Where FORGE reads Codex session state. Deliberately NOT CODEX_HOME: Forge
     // redirects only where it reads, never where the child writes (D8).
     FORGE_CODEX_DIR: roots.codexState,
-    FORGE_CODEX_CORRELATION_WINDOW_MS: "400",
+    // The fake writes its post-spawn session 150ms later. 400ms leaves only
+    // child-spawn contention as its budget under the full integration tier;
+    // this remains test-only while AC9's ordering and ambiguity assertions
+    // below continue to prove the correlation policy.
+    FORGE_CODEX_CORRELATION_WINDOW_MS: "5000",
     FORGE_CODEX_CORRELATION_POLL_MS: "50",
     FAKE_CODEX_RECORD: roots.record,
     FAKE_CODEX_SESSIONS: roots.codexState,

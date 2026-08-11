@@ -8,7 +8,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../store/schema.js";
-import { applyMigrations } from "../../store/db.js";
+import { applyMigrations, setDbForTest } from "../../store/db.js";
+import { insertHostVerification } from "../../store/host-verifications.js";
 import { writeTicket, closeTicket } from "../../backlog/structured.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -80,6 +81,26 @@ function runForge(args: string[], opts: { rawPlan?: boolean } = {}) {
   return spawnSync(tsx, [entry, ...finalArgs], {
     encoding: "utf8",
     env: { ...process.env, FORGE_HOME: forgeHome, NO_NOTIFY: "true" },
+  });
+}
+
+/** Campaign fixtures must use the production writer, which derives the proven
+ * project_dir_canonical identity instead of accidentally creating legacy rows. */
+function insertFixtureHostVerification(
+  db: Database.Database,
+  ticketId: string,
+  commitSha: string,
+  recordedAt = "2026-01-01T00:00:00Z",
+): void {
+  setDbForTest(db);
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt,
   });
 }
 
@@ -2490,13 +2511,10 @@ test("integ FG-419 FIX1: forge campaign report (human) renders host-verification
   assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
   const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
 
-  // Insert host_verifications row directly into the forge DB
+  // Write evidence through production's writer, including its proven identity.
   const dbPath = join(forgeHome, "forge.db");
   const db = new Database(dbPath);
-  db.prepare(
-    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("FG-101", projectDir, realCommit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T12:00:00Z");
+  insertFixtureHostVerification(db, "FG-101", realCommit, "2026-01-01T12:00:00Z");
 
   // Set item to shipped and campaign to complete
   db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
@@ -2609,10 +2627,7 @@ function setupReconcileCliCampaign(eligibleTicketId: string, ineligibleTicketId:
   db.prepare(
     "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ? WHERE id = ?"
   ).run(runId, eligibleItem.id);
-  db.prepare(
-    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(eligibleTicketId, projectDir, commit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  insertFixtureHostVerification(db, eligibleTicketId, commit);
   db.prepare(
     `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
   ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "fail", authority: "authoritative" }), "2026-01-01T00:00:00Z");
@@ -2760,10 +2775,7 @@ function setupSingleItemReconcileCliCampaign(ticketId: string): { campaignId: st
   db.prepare(
     "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ? WHERE id = ?"
   ).run(runId, item.id);
-  db.prepare(
-    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(ticketId, projectDir, commit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  insertFixtureHostVerification(db, ticketId, commit);
   db.prepare(
     `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
   ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "fail", authority: "authoritative" }), "2026-01-01T00:00:00Z");
@@ -3532,19 +3544,13 @@ test("FG-473 integ: invoke-lane out-of-band items (runId, manually-driven awaiti
   // host-verification, and ZERO events on its run. Must SHIP.
   const commit700 = commitFileIn(projectDir, "src/FG-700.ts", "export const x700 = 1;\n", "feat: FG-700");
   closeTicket(projectDir, "FG-700", commit700);
-  db.prepare(
-    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("FG-700", projectDir, commit700, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  insertFixtureHostVerification(db, "FG-700", commit700);
 
   // FG-701: SAME lane evidence, but the run carries an unresolved authoritative
   // FAIL. Must still REFUSE (FG-458 preserved).
   const commit701 = commitFileIn(projectDir, "src/FG-701.ts", "export const x701 = 1;\n", "feat: FG-701");
   closeTicket(projectDir, "FG-701", commit701);
-  db.prepare(
-    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("FG-701", projectDir, commit701, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  insertFixtureHostVerification(db, "FG-701", commit701);
   db.prepare(
     `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
   ).run(
@@ -3558,10 +3564,7 @@ test("FG-473 integ: invoke-lane out-of-band items (runId, manually-driven awaiti
   // INCONCLUSIVE. Must still REFUSE.
   const commit702 = commitFileIn(projectDir, "src/FG-702.ts", "export const x702 = 1;\n", "feat: FG-702");
   closeTicket(projectDir, "FG-702", commit702);
-  db.prepare(
-    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("FG-702", projectDir, commit702, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  insertFixtureHostVerification(db, "FG-702", commit702);
   db.prepare(
     `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
   ).run(

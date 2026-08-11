@@ -167,43 +167,46 @@ test("FG-552 F4 (real): the exit record is PUBLISHED ATOMICALLY — a reader CON
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "exit"), "utf8")), { code: 0, signal: null });
 
   // Now the interleave the OLD F4 test never exercised. The pre-atomic writer was a
-  // bare `writeFileSync(exit, json)`; the shipped one writes a sibling temp then
-  // renames it into place (launch.ts exitRecorderScript). We drive BOTH strategies
-  // in a CHILD process (writeFileSync blocks the event loop, so a same-process reader
-  // could never land mid-write) while the parent polls the `exit` path, and assert:
+  // bare write to `exit`; the shipped one writes a sibling temp then renames it into
+  // place (launch.ts exitRecorderScript). We drive BOTH strategies in a CHILD process
+  // (writeFileSync blocks the event loop, so a same-process reader could never land
+  // mid-write) and explicitly hold the writer after its first half. This makes the
+  // RED baseline a real, cross-filesystem state rather than hoping one write tears.
   //   atomic  → `exit` is NEVER seen at a partial size — absent, then complete-via-rename;
   //   bare    → `exit` IS seen partial (torn) — the RED baseline. If this ever stops
   //             holding the payload is too small; it is what makes the atomic assert non-trivial.
   const workDir = mkdtempSync(join(tmpdir(), "fg552-f4-"));
   try {
-    const padBytes = 24 * 1024 * 1024; // large enough that a bare write is multi-syscall / torn-observable
+    const padBytes = 1024;
 
-    // Poll the `exit` path for every distinct disposition a reader could observe while
-    // the child writes: absent / partial (present but short) / complete (full size).
+    // The child writes half the payload, announces that state, then writes the rest.
+    // A bare writer therefore exposes a deterministic partial `exit`; an atomic writer
+    // exposes that same partial state only at its private temp path.
     async function observeWrite(strategy: "atomic" | "bare"): Promise<{ sawPartial: boolean; final: unknown }> {
       const exitPath = join(workDir, `exit-${strategy}`);
       const tmpPath = `${exitPath}.tmp`;
+      const readyPath = `${exitPath}.ready`;
       rmSync(exitPath, { force: true });
       rmSync(tmpPath, { force: true });
-      // `node -e <script> A B` exposes A as process.argv[1], B as process.argv[2].
+      rmSync(readyPath, { force: true });
+      // `node -e <script> A B C` exposes A as argv[1], B as argv[2], C as argv[3].
       const script =
         strategy === "atomic"
-          ? `const fs=require("fs");const b=JSON.stringify({code:0,signal:null,pad:"x".repeat(${padBytes})});fs.writeFileSync(process.argv[1],b);fs.renameSync(process.argv[1],process.argv[2]);`
-          : `const fs=require("fs");const b=JSON.stringify({code:0,signal:null,pad:"x".repeat(${padBytes})});fs.writeFileSync(process.argv[2],b);`;
+          ? `const fs=require("fs");const b=JSON.stringify({code:0,signal:null,pad:"x".repeat(${padBytes})});const h=fs.openSync(process.argv[1],"w");fs.writeSync(h,b.slice(0,b.length/2));fs.writeFileSync(process.argv[3],"ready");setTimeout(()=>{fs.writeSync(h,b.slice(b.length/2));fs.closeSync(h);fs.renameSync(process.argv[1],process.argv[2]);},100);`
+          : `const fs=require("fs");const b=JSON.stringify({code:0,signal:null,pad:"x".repeat(${padBytes})});const h=fs.openSync(process.argv[2],"w");fs.writeSync(h,b.slice(0,b.length/2));fs.writeFileSync(process.argv[3],"ready");setTimeout(()=>{fs.writeSync(h,b.slice(b.length/2));fs.closeSync(h);},100);`;
       const full = Buffer.byteLength(JSON.stringify({ code: 0, signal: null, pad: "x".repeat(padBytes) }));
-      const child = spawn(process.execPath, ["-e", script, tmpPath, exitPath], { stdio: "ignore" });
+      const child = spawn(process.execPath, ["-e", script, tmpPath, exitPath, readyPath], { stdio: "ignore" });
       let sawPartial = false;
       let done = false;
       child.on("exit", () => { done = true; });
+      await waitFor("the deliberately held half-write", () => existsSync(readyPath));
+      try {
+        const size = statSync(exitPath).size;
+        sawPartial = size > 0 && size < full;
+      } catch { /* ENOENT — the atomic strategy only exposes its temp file here */ }
       while (!done) {
-        try {
-          const size = statSync(exitPath).size;
-          if (size > 0 && size < full) sawPartial = true; // `exit` present but not yet whole
-        } catch { /* ENOENT — absent, the atomic pre-rename state */ }
         await new Promise((r) => setImmediate(r));
       }
-      // A couple of final reads to catch the completed state deterministically.
-      try { const size = statSync(exitPath).size; if (size > 0 && size < full) sawPartial = true; } catch { /* absent */ }
       const final = existsSync(exitPath) ? (JSON.parse(readFileSync(exitPath, "utf8")) as unknown) : undefined;
       return { sawPartial, final };
     }

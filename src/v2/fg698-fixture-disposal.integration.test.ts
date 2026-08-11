@@ -301,7 +301,10 @@ test("FG-698 AC2 (C): a cleanly frozen tree is disposed of completely and report
     // why disposal has to do more than call rmSync.
     assert.throws(
       () => rmSync(root, { recursive: true, force: true }),
-      (e: unknown) => errCode(e) === "EACCES" || errCode(e) === "EPERM",
+      // Linux refuses the frozen entries directly; APFS can empty them first and
+      // refuse the final directory removal as ENOTEMPTY. Both prove the portable
+      // invariant: plain recursive removal refuses this frozen tree.
+      (e: unknown) => ["EACCES", "EPERM", "ENOTEMPTY"].includes(errCode(e) ?? ""),
       inductionMsg(`expected a frozen tree at ${root} to refuse a plain recursive rmSync`),
     );
 
