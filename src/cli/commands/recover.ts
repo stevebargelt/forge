@@ -38,6 +38,12 @@ import {
   type ReDriveDisposition,
 } from "../../v2/re-drive-eligibility.js";
 import { changedWorktreeFiles, defaultContainerAlive, reconcileRun, isOrderedFanoutWave } from "../../v2/reconcile.js";
+// FG-693 (step 11): the ONE filesystem-identity contract. `forge recover` decides
+// whether a task's evidence came from a tree dedicated to it or from the shared
+// project checkout, and that decision gates the --force confirmation on an
+// irreversible adoption — so it is the ACTING class and it never runs on a
+// spelling nobody proved. See src/util/path-identity.ts.
+import { compareIdentity, describeIdentity, identify } from "../../util/path-identity.js";
 import type { ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { analyzeProviderFailure } from "../../v2/provider-failure.js";
@@ -150,21 +156,100 @@ function recoverStdoutResult(task: Task): StdoutRecovered | undefined {
   }
 }
 
+/** Where the changed-file evidence came from, and therefore whether adopting it
+ *  needs the operator's explicit --force acknowledgement.
+ *
+ *  FG-693 (step 11). This used to be `task.worktreePath ? "worktree" : ...` — a
+ *  presence check on a STRING, which asks the wrong question twice over:
+ *
+ *    • A recorded worktree path that is another SPELLING of run.projectDir (a
+ *      symlinked parent, a system directory exposed under two prefixes, a
+ *      trailing separator, a relative spelling) classified as a DEDICATED
+ *      worktree. The --force gate below then never fired, and `--continue`
+ *      adopted whatever was uncommitted in the operator's own live checkout as
+ *      if it were the agent's output. That is the exact hazard the gate exists
+ *      for, reached by spelling one path two ways.
+ *    • It never asked the filesystem anything at all, so it could not tell a
+ *      proven-separate tree from one nobody had confirmed.
+ *
+ *  So the classification is now the contract's three-valued comparison, and the
+ *  third value is its own disposition rather than being folded into either of
+ *  the first two — "an unproven identity never authorizes a delete, a reclaim OR
+ *  a shared-checkout classification". */
+export type EvidenceSource =
+  /** PROVEN a different tree from run.projectDir: the evidence is this task's. */
+  | "worktree"
+  /** No worktree was recorded, or the recorded one is PROVEN to be run.projectDir
+   *  under another spelling. Either way the diff may be the operator's. */
+  | "project_dir_shared"
+  /** FG-693: a worktree path was recorded, but the filesystem would not answer
+   *  for one or both sides, so neither of the above was established. Treated as
+   *  ambiguous evidence — the ACTING-class direction — and NEVER silently
+   *  promoted to "worktree". */
+  | "identity_unproven";
+
 type LiveEvidence = {
   worktreePathChecked: string | null;
-  source: "worktree" | "project_dir_shared";
+  source: EvidenceSource;
+  /** Set only for `identity_unproven`: WHICH side the filesystem would not
+   *  answer for, and why, in the contract's labelled form. Display and
+   *  diagnostics only — nothing here decides anything. */
+  unprovenIdentity?: string[];
   changedFiles: string[];
   validResult?: unknown;
   stdoutRecovered?: StdoutRecovered;
 };
 
+/** The three-valued classification, kept in one place so the recommendation
+ *  surface and the mutation gate cannot disagree about which one a task got. */
+function classifyEvidenceSource(
+  worktreePath: string | undefined,
+  projectDir: string | undefined,
+): { source: EvidenceSource; unprovenIdentity?: string[] } {
+  // Nothing recorded ⇒ the evidence path IS the project dir. No comparison to
+  // make, and this is the pre-FG-693 answer for this shape, unchanged.
+  if (!worktreePath) return { source: "project_dir_shared" };
+  // A run with no recorded project directory (a pre-FG-374 row) names no shared
+  // checkout the workspace could be an alias OF, so there is no identity question
+  // to answer and this stays what it has always been. Deliberately not folded
+  // into `identity_unproven`: that value means "forge asked and could not tell",
+  // and inventing it here would put a --force in front of every legacy-run
+  // recovery for a hazard that does not exist. Consistent with reconcile.ts,
+  // which skips workspace reaping entirely for a run in this shape.
+  if (!projectDir) return { source: "worktree" };
+  const workspace = identify(worktreePath);
+  const project = identify(projectDir);
+  switch (compareIdentity(workspace, project)) {
+    case "different":
+      return { source: "worktree" };
+    case "same":
+      return { source: "project_dir_shared" };
+    default: {
+      const unprovenIdentity: string[] = [];
+      if (workspace.kind !== "resolved") unprovenIdentity.push(`recorded worktree path ${describeIdentity(workspace)}`);
+      if (project.kind !== "resolved") unprovenIdentity.push(`run project dir ${describeIdentity(project)}`);
+      return { source: "identity_unproven", unprovenIdentity };
+    }
+  }
+}
+
 function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
+  // The path PROBED keeps the operator's spelling verbatim — presentation
+  // fidelity is useful and the non-goals preserve it — but it decides nothing:
+  // the classification above is what the --force gate reads.
   const worktreePathChecked = task.worktreePath ?? run.projectDir;
-  const source: LiveEvidence["source"] = task.worktreePath ? "worktree" : "project_dir_shared";
+  const { source, unprovenIdentity } = classifyEvidenceSource(task.worktreePath, run.projectDir);
   const changedFiles = changedWorktreeFiles(worktreePathChecked);
   const validResult = readResult(task.runId, task.id);
   const stdoutRecovered = validResult === undefined ? recoverStdoutResult(task) : undefined;
-  return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutRecovered };
+  return {
+    worktreePathChecked: worktreePathChecked ?? null,
+    source,
+    ...(unprovenIdentity ? { unprovenIdentity } : {}),
+    changedFiles,
+    validResult,
+    stdoutRecovered,
+  };
 }
 
 // FG-481/FG-486: only a run whose tasks have NO host-side pipeline finalize
@@ -183,9 +268,17 @@ function recommendationForKind(task: Task, evidence: LiveEvidence, failureKind: 
   const hasRecoverableWork =
     evidence.validResult !== undefined || evidence.stdoutRecovered !== undefined || evidence.changedFiles.length > 0;
   if (continuable && hasRecoverableWork) {
-    return evidence.source === "project_dir_shared"
-      ? { commands: [`forge recover ${task.id} --continue --force`], note: "shared project dir — confirm the diff is this task's before forcing" }
-      : { commands: [`forge recover ${task.id} --continue`], note: "" };
+    // FG-693: only a PROVEN-dedicated workspace gets the unforced command. Both
+    // of the other dispositions recommend --force, because both mean the same
+    // thing to an operator — forge cannot vouch that this diff is the task's.
+    if (evidence.source === "worktree") return { commands: [`forge recover ${task.id} --continue`], note: "" };
+    return {
+      commands: [`forge recover ${task.id} --continue --force`],
+      note:
+        evidence.source === "project_dir_shared"
+          ? "shared project dir — confirm the diff is this task's before forcing"
+          : `workspace identity unproven (${(evidence.unprovenIdentity ?? []).join("; ")}) — confirm the diff is this task's before forcing`,
+    };
   }
   if (hasRecoverableWork) {
     if (retryPolicy(failureKind).retryable) {
@@ -248,7 +341,10 @@ export type TaskEvidenceView = {
   failureKind?: string;
   storedEvidence?: OrphanEvidence;
   worktreePathChecked: string | null;
-  source: "worktree" | "project_dir_shared";
+  source: EvidenceSource;
+  /** FG-693: present only when `source` is `identity_unproven` — which side the
+   *  filesystem would not answer for. Diagnostics; never an input to a decision. */
+  unprovenIdentity?: string[];
   changedFiles: string[];
   hasValidResult: boolean;
   hasStdoutRecoverableResult: boolean;
@@ -273,6 +369,7 @@ function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): Ta
     storedEvidence,
     worktreePathChecked: evidence.worktreePathChecked,
     source: evidence.source,
+    ...(evidence.unprovenIdentity ? { unprovenIdentity: evidence.unprovenIdentity } : {}),
     changedFiles: evidence.changedFiles,
     hasValidResult: evidence.validResult !== undefined,
     hasStdoutRecoverableResult: evidence.stdoutRecovered !== undefined,
@@ -474,6 +571,12 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
     };
   }
 
+  // FG-693: the ACTING-class gate. Adoption is irreversible (the task is marked
+  // complete and the run moves on), so it proceeds unforced ONLY on a workspace
+  // PROVEN to be a different tree from run.projectDir. The two ways that proof
+  // can be absent refuse separately, because they are different facts and the
+  // operator's next step differs: one is "this really is the shared checkout",
+  // the other is "the filesystem would not say".
   if (evidence.source === "project_dir_shared" && !opts.force) {
     return {
       kind: "continue-refused",
@@ -481,7 +584,24 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
       reason:
         `task ${taskId} had no dedicated worktree — its evidence source is project_dir_shared, so the ` +
         `${evidence.changedFiles.length} changed file(s) at ${evidence.worktreePathChecked} may include unrelated uncommitted changes ` +
-        "from the operator's own working tree or another no-worktree task in this run. Pass --force once you've confirmed the diff is this task's.",
+        "from the operator's own working tree or another no-worktree task in this run. Pass --force once you've confirmed the diff is this task's." +
+        (task.worktreePath
+          ? ` (The recorded worktree path ${task.worktreePath} and the run's project dir are the SAME tree spelled two different ways, ` +
+            "so this task never had an isolated workspace.)"
+          : ""),
+    };
+  }
+
+  if (evidence.source === "identity_unproven" && !opts.force) {
+    return {
+      kind: "continue-refused",
+      id: taskId,
+      reason:
+        `task ${taskId}'s workspace identity could not be PROVEN distinct from its run's project directory — ` +
+        `${(evidence.unprovenIdentity ?? []).join("; ")}. Forge therefore cannot say whether the ` +
+        `${evidence.changedFiles.length} changed file(s) at ${evidence.worktreePathChecked ?? "(no path recorded)"} are this task's or the ` +
+        "operator's own working tree, and an unproven identity never authorizes an irreversible adoption. Pass --force once you've " +
+        "confirmed the diff is this task's, or re-dispatch fresh with `forge retry " + taskId + "`.",
     };
   }
 
@@ -538,7 +658,15 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
         reason: "operator_recovered",
         via: "forge recover --continue",
         adoptedFrom: adopted.adoptedFrom,
-        evidence: { source: evidence.source, changedFiles: evidence.changedFiles, worktreePathChecked: evidence.worktreePathChecked },
+        evidence: {
+          source: evidence.source,
+          changedFiles: evidence.changedFiles,
+          worktreePathChecked: evidence.worktreePathChecked,
+          // FG-693: when the adoption was forced past an unproven identity, the
+          // audit trail must say what was unproven — otherwise the record shows
+          // a --force with no visible reason it was needed.
+          ...(evidence.unprovenIdentity ? { unprovenIdentity: evidence.unprovenIdentity } : {}),
+        },
         forced: !!opts.force,
       },
     });
@@ -979,6 +1107,10 @@ function renderTaskEvidence(v: TaskEvidenceView): string[] {
   lines.push(`    worktree:      ${v.worktreePathChecked ?? "(none)"} (${v.source})`);
   if (v.source === "project_dir_shared") {
     lines.push("    ⚠ shared project directory — this diff may include unrelated uncommitted changes.");
+  }
+  if (v.source === "identity_unproven") {
+    lines.push("    ⚠ workspace identity UNPROVEN — forge cannot tell this workspace apart from the run's project directory:");
+    for (const d of v.unprovenIdentity ?? []) lines.push(`        ${d}`);
   }
   lines.push(`    changed files: ${v.changedFiles.length > 0 ? v.changedFiles.join(", ") : "(none)"}`);
   lines.push(`    valid result.json: ${v.hasValidResult}   stdout-recoverable: ${v.hasStdoutRecoverableResult}`);

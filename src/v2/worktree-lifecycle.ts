@@ -17,11 +17,16 @@
 //
 // FG-345: isolation is the DEFAULT, not an opt-in. See isWorktreeModeEnabled().
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
+// FG-693 (step 11): the ONE filesystem-identity contract. This module holds
+// forge's most destructive operations — it removes whole working trees — so
+// every path comparison here is the ACTING class: it acts only on a PROVEN
+// identity and refuses on anything less. See src/util/path-identity.ts.
+import { compareIdentity, describeIdentity, identify, provenPhysical } from "../util/path-identity.js";
 import { createDependencyMountpoints } from "./dependency-provisioning.js";
 import { provisionWorkspaceCommitMsgHook } from "../util/commit-msg-hook.js";
 import { WORKTREES_DIR, cloneDir, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
@@ -129,6 +134,57 @@ export function preflightWorktreeGate(projectDir: string): void {
         `worktree mode requires a clean tracked tree in ${root}. ` +
           "Commit or stash your changes, or set FORGE_WORKTREE_IGNORE_DIRTY=1 to bypass."
       );
+    }
+  }
+}
+
+// ── FG-693: the identity precondition on every removal ────────────────────────
+
+/** Why this workspace path may NOT be removed — empty when removal is
+ *  identity-safe. The FIRST question asked on every disposal path in this
+ *  module, before any of the git-level ownership or capture proofs.
+ *
+ *  WHAT IT ADDS that the ownership proofs do not. Those proofs ask git about the
+ *  workspace: which repository it belongs to, which branch it has checked out,
+ *  whose object store it borrows. Every one of them takes the recorded path at
+ *  face value as a NAME. None of them asks the prior question — is the tree
+ *  about to be deleted the very tree forge is deleting it FROM? A recorded
+ *  worktree path that is another spelling of run.projectDir (a symlinked parent,
+ *  a system directory exposed under two prefixes, a relative spelling, a
+ *  trailing separator) names the operator's live source checkout, and the answer
+ *  is decided by the SPELLINGS, not by the trees.
+ *
+ *  In practice the clone branch's alternates proof already refuses the exact
+ *  same-string case (a repository is never its own alternate — FG-621). This
+ *  guard is deliberately EARLIER, BROADER and NOT git-dependent: it holds on the
+ *  linked-worktree branch too, it holds when git cannot answer at all, and it
+ *  holds for a spelling the alternates proof would have had to resolve
+ *  correctly in order to refuse. Defence in depth on the one irreversible step,
+ *  which is what "the most destructive consumers" earns.
+ *
+ *  ACTING class, so INDETERMINATE REFUSES: a path the filesystem will not answer
+ *  for is not proof of a separate tree, and the cost of the two mistakes is not
+ *  symmetric — refusing leaks a directory a later pass can still reap, while
+ *  proceeding can delete an operator's working tree with no way back. */
+function notProvenDistinctFromProject(workspacePath: string, projectDir: string): string[] {
+  const workspace = identify(workspacePath);
+  const project = identify(projectDir);
+  switch (compareIdentity(workspace, project)) {
+    case "different":
+      return [];
+    case "same":
+      return [
+        `workspace ${workspace.asWritten} and the project directory ${project.asWritten} are ONE tree ` +
+          `(${describeIdentity(workspace)}) spelled two different ways — removing it would delete the project checkout itself`,
+      ];
+    default: {
+      const details: string[] = [];
+      if (workspace.kind !== "resolved") details.push(`workspace path ${describeIdentity(workspace)}`);
+      if (project.kind !== "resolved") details.push(`project directory ${describeIdentity(project)}`);
+      return [
+        `could not prove the workspace is a different tree from the project directory (${details.join("; ")}) — ` +
+          "an unproven identity never authorizes a removal",
+      ];
     }
   }
 }
@@ -466,7 +522,10 @@ export function createTaskClone(
  *  is now failing. */
 export function cleanupFailedCloneSetup(projectDir: string, runId: string, taskId: string): void {
   const path = cloneDir(runId, taskId);
-  if (existsSync(path)) {
+  // FG-693: same precondition as cleanupFailedWorktreeSetup — an unconditional
+  // rmSync must first prove the path is not the project checkout under another
+  // spelling. A clone forge cannot prove distinct is left in place; the safe side.
+  if (existsSync(path) && notProvenDistinctFromProject(path, projectDir).length === 0) {
     try {
       rmSync(path, { recursive: true, force: true });
     } catch {
@@ -642,6 +701,32 @@ export function captureTaskClone(
   return { ok: true, branch, commit: tip, safetyCommitted };
 }
 
+/** What removeWorktreeIfSafe actually did, and — when it declined — why.
+ *
+ *  FG-693 widened this from `void`. The dispatch-path disposal had exactly one
+ *  observable behaviour (the directory is gone, or it is not) and several silent
+ *  early returns that were indistinguishable from each other, so a refusal driven
+ *  by an identity it could not prove would have looked identical to the ordinary
+ *  "not eligible yet" no-op. A declining destructive path must say why it
+ *  declined. Existing callers ignore the value and are unaffected. */
+export type WorktreeRemovalOutcome = {
+  /** True only when this call left the workspace directory gone. */
+  readonly removed: boolean;
+  readonly reason:
+    | "removed"
+    /** Neither EPHEMERAL mode nor a proven merge-back — the no-discard invariant. */
+    | "not_eligible"
+    | "absent"
+    /** FG-693: the workspace could not be proven to be a different tree from
+     *  projectDir. Either it IS the project checkout under another spelling, or
+     *  the filesystem would not answer for one of the two. */
+    | "identity_not_proven_distinct"
+    /** The clone's alternates do not resolve to the project's object store. */
+    | "workspace_not_owned"
+    | "removal_failed";
+  readonly details: string[];
+};
+
 /** Remove a task worktree and its branch when doing so is SAFE.
  *
  *  Safe to remove under two conditions:
@@ -650,6 +735,9 @@ export function captureTaskClone(
  *
  *  No-discard invariant: never remove an unmerged worktree outside EPHEMERAL mode.
  *  Callers must NOT pass provenMerged=true unless the merge already succeeded.
+ *
+ *  FG-693: and never remove a workspace that is not PROVEN to be a different tree
+ *  from projectDir — see notProvenDistinctFromProject.
  *
  *  Silently skips if the path is absent (idempotent).
  *
@@ -664,11 +752,21 @@ export function removeWorktreeIfSafe(
   taskId: string,
   projectDir: string,
   provenMerged = false
-): void {
+): WorktreeRemovalOutcome {
   // Only remove in ephemeral test mode OR after a proven merge-back (FG-352).
-  if (process.env.FORGE_WORKTREES_EPHEMERAL !== "1" && !provenMerged) return;
+  if (process.env.FORGE_WORKTREES_EPHEMERAL !== "1" && !provenMerged) {
+    return { removed: false, reason: "not_eligible", details: [] };
+  }
 
-  if (!existsSync(worktreePath)) return;
+  if (!existsSync(worktreePath)) return { removed: false, reason: "absent", details: [] };
+
+  // FG-693: FIRST, and before anything reads git. The two proofs below both take
+  // the recorded path as a name; this is the one that asks whether the name is
+  // the project checkout wearing another spelling.
+  const notDistinct = notProvenDistinctFromProject(worktreePath, projectDir);
+  if (notDistinct.length > 0) {
+    return { removed: false, reason: "identity_not_proven_distinct", details: notDistinct };
+  }
 
   const branch = worktreeBranchName(runId, taskId);
 
@@ -689,11 +787,12 @@ export function removeWorktreeIfSafe(
   // A clone that fails it is left exactly where it is for reapTaskWorkspace to
   // classify and RECORD — this inline path never retains silently by deleting.
   if (classifyWorkspace(worktreePath) === "private_clone") {
-    if (cloneOwnershipMismatch(worktreePath, projectDir, branch).length > 0) return;
+    const notOurs = cloneOwnershipMismatch(worktreePath, projectDir, branch);
+    if (notOurs.length > 0) return { removed: false, reason: "workspace_not_owned", details: notOurs };
     try {
       rmSync(worktreePath, { recursive: true, force: true });
     } catch {
-      return;
+      return { removed: false, reason: "removal_failed", details: [] };
     }
   } else {
     forceRemoveWorktree(projectDir, worktreePath);
@@ -711,6 +810,12 @@ export function removeWorktreeIfSafe(
   } catch {
     // Best-effort: branch may already be gone.
   }
+
+  // The directory is what decides — `git worktree remove` can decline while the
+  // tree turns out to be gone anyway, and vice versa.
+  return existsSync(worktreePath)
+    ? { removed: false, reason: "removal_failed", details: [] }
+    : { removed: true, reason: "removed", details: [] };
 }
 
 // ── Merge-back ────────────────────────────────────────────────────────────────
@@ -823,6 +928,12 @@ export function cleanupFailedWorktreeSetup(
 ): void {
   const path = worktreeDir(runId, taskId);
   if (!existsSync(path)) return;
+  // FG-693: "the agent never ran, so there is nothing to preserve" is an argument
+  // about the WORKSPACE. It says nothing if the path does not name the workspace
+  // — a WORKTREES_DIR reached through a symlinked parent that lands in the
+  // project checkout would make this an unconditional rm of the operator's tree.
+  // Cheap to prove, and this path is deliberately un-gated otherwise.
+  if (notProvenDistinctFromProject(path, projectDir).length > 0) return;
   // FIX3 (FG-376 review): no dependency-volume cleanup here — see
   // removeWorktreeIfSafe above for why a shared cache volume must not be
   // removed at individual worktree disposal.
@@ -1053,16 +1164,21 @@ function resolveCommit(cwd: string, rev: string): string | undefined {
  *  shared `.git` dir. A linked worktree reports its PARENT's — which is what
  *  makes it the ownership test. undefined when git could not answer. */
 function gitCommonDir(cwd: string): string | undefined {
+  let out: string;
   try {
-    const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+    out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    return out ? realpathSync(resolve(cwd, out)) : undefined;
   } catch {
     return undefined;
   }
+  // FG-693: the PROVEN physical path or nothing. This value is compared for
+  // equality by both ownership proofs below, so a lexical guess in its place
+  // would let two spellings of one git dir read as different repositories —
+  // and, worse, let an unresolvable one read as a resolved path.
+  return out ? (provenPhysical(resolve(cwd, out)) ?? undefined) : undefined;
 }
 
 /** The ref a working tree has checked out, e.g. `refs/heads/forge/<run>/<task>`.
@@ -1125,13 +1241,11 @@ function alternateObjectStores(commonGitDir: string): string[] | undefined {
   for (const line of raw.split("\n")) {
     const entry = line.trim();
     if (!entry || entry.startsWith("#")) continue;
-    try {
-      entries.push(realpathSync(resolve(commonGitDir, "objects", entry)));
-    } catch {
-      // An alternate that does not resolve cannot match the parent's object
-      // store, so record it verbatim and let the comparison below refuse it.
-      entries.push(entry);
-    }
+    // FG-693: an alternate that does not resolve has no proven identity, so it
+    // cannot match the parent's object store. Record the spelling VERBATIM and
+    // let the comparison below refuse it — the one place a raw spelling appears
+    // here, and it is on the side that is guaranteed to fail the check.
+    entries.push(provenPhysical(resolve(commonGitDir, "objects", entry)) ?? entry);
   }
   return entries;
 }
@@ -1182,10 +1296,8 @@ function cloneOwnershipMismatch(workspacePath: string, projectDir: string, branc
     details.push(`${join(workspaceRepo, "objects", "info", "alternates")} exists but could not be read`);
     return details;
   }
-  let parentObjects: string;
-  try {
-    parentObjects = realpathSync(join(projectRepo, "objects"));
-  } catch {
+  const parentObjects = provenPhysical(join(projectRepo, "objects"));
+  if (parentObjects === null) {
     details.push(`the project's object store ${join(projectRepo, "objects")} could not be resolved`);
     return details;
   }
@@ -1317,7 +1429,9 @@ function deleteMergedBranch(projectDir: string, branch: string): boolean {
  *  is provably captured. Never throws; reaping an already-gone workspace is a
  *  no-op, so repeated calls are safe.
  *
- *  Safe means all of: the workspace is one of the two substrates forge creates and
+ *  Safe means all of: the workspace is PROVEN to be a different tree from
+ *  projectDir (FG-693 — asked first, and of the filesystem rather than of git),
+ *  it is one of the two substrates forge creates and
  *  is THIS task's, it holds no checked-out submodule, the tree is clean (no
  *  uncommitted, untracked or ignored files), and every commit its branch/HEAD
  *  points at is reachable from Forge-owned state. Anything else — including
@@ -1373,6 +1487,20 @@ export function reapTaskWorkspace(
       ? { action: "branch_reaped", branch }
       : { action: "absent", branch };
   }
+
+  // FG-693: the identity precondition, ahead of every substrate branch and ahead
+  // of every git-level proof. Deliberately NOT inside the two ownership helpers:
+  // they answer "whose repository is this?" from git, which is a question about a
+  // path that has already been accepted as naming some OTHER tree. This asks
+  // whether it names THIS one. Reported as `workspace_not_owned` — the existing
+  // reason for "not THIS task's workspace", so the published retain-reason enum
+  // (docs/SCHEMA-CONTRACT.md, and every historical event carrying these values)
+  // is untouched — with details that name the identity failure specifically.
+  const notDistinct = notProvenDistinctFromProject(workspacePath, projectDir);
+  if (notDistinct.length > 0) {
+    return { action: "retained", substrate, branch, reason: "workspace_not_owned", details: notDistinct };
+  }
+
   if (substrate === "private_clone") {
     // OWNERSHIP FIRST on this branch — the opposite order from the linked-worktree
     // path below, and deliberately so. There, ownership runs last because the
