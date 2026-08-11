@@ -2011,7 +2011,9 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
 // canonical project dir (that is the normal case — many runs in one checkout), and NULL
 // is the common value on aged rows.
 //
-// NOTE FOR THE CONSUMER THAT WIRES THIS UP: applying these from applyMigrations keeps
+// APPLIED FROM applyMigrations (src/store/db.ts), immediately after the additive-column
+// loop, under that loop's two guards (table present, column present). Applying them there
+// keeps
 // fresh-vs-migrated parity intact, because fg608-migration-parity's strip runs against a
 // SCHEMA_SQL-only database — the indexes do not exist yet at strip time, so the columns
 // stay droppable and the guard's UNDROPPABLE set does not grow. Creating them from

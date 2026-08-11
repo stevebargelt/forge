@@ -57,6 +57,12 @@ const MIGRATED_BY_THIS_STEP = [
   "src/cli/commands/init.ts",
   "src/backlog/config.ts",
   "src/util/commit-msg-hook.ts",
+  // The two boundaries the plan's inventory MISSED, migrated by FG-693's fix batch
+  // and promoted from PENDING_FG693 (below) to this list. They are held to the same
+  // standard as the rest: no realpath of their own, no lexical fallback, and an
+  // import of the contract.
+  "src/cli/commands/review.ts",
+  "src/store/backlog-import.ts",
 ];
 
 /** Production modules that call realpath for SYMLINK MECHANICS, not for project
@@ -87,19 +93,16 @@ const NOT_PROJECT_PATH_IDENTITY: Record<string, string> = {
  *  scan rather than as a list of the files this step happened to touch. Both are
  *  project-path boundaries in FG-693's sense and NO step in this plan lists
  *  either file, so neither can be fixed from here without writing outside this
- *  step's declared files. They are recorded, not quietly absorbed. */
+ *  step's declared files. They are recorded, not quietly absorbed.
+ *
+ *  BOTH UNOWNED ENTRIES ARE NOW CLOSED — the fix batch migrated them, and they moved
+ *  to MIGRATED_BY_THIS_STEP above, where they are asserted rather than excused. What
+ *  remains here is only what a later step of the plan owns. */
 const PENDING_FG693: Record<string, string> = {
   "src/v2/self-host-guard.ts": "step 5 migrates the dispatch guard",
   "src/v2/adapter-stamp.ts": "step 7 deletes isSameTree",
   "src/v2/project-identity.ts": "step 8 makes it a projection over the contract",
   "src/v2/worktree-lifecycle.ts": "step 11 migrates the reaper",
-  "src/cli/commands/review.ts":
-    "UNOWNED — the ticket's boundary inventory names review scoping and self-host protection " +
-    "(FG-566) as an FG-693 boundary, and canonicalPath() here is the try-realpath-catch-resolve " +
-    "shape verbatim, but no plan step lists this file",
-  "src/store/backlog-import.ts":
-    "UNOWNED — resolveSourceIdentity() and importedFrom realpath a PROJECT DIR to derive the " +
-    "durable backlog source identity; not in the ticket's inventory and not in any plan step",
 };
 
 /** The lexical-fallback shape specifically, kept as its OWN register: a module
@@ -109,7 +112,6 @@ const PENDING_FG693: Record<string, string> = {
 const LEXICAL_FALLBACK_PENDING: Record<string, string> = {
   "src/v2/adapter-stamp.ts": "step 7 deletes isSameTree",
   "src/v2/project-identity.ts": "step 8 makes it a projection over the contract",
-  "src/cli/commands/review.ts": "UNOWNED — see PENDING_FG693",
   "src/v2/promote.ts":
     "UNOWNED — realpathContains() falls back to a lexical path on BOTH sides of a containment " +
     "check that decides whether a release write escapes the forge home; release-scoped rather " +

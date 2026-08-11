@@ -36,9 +36,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SCHEMA_SQL } from "../../store/schema.js";
 import { applyMigrations } from "../../store/db.js";
@@ -540,6 +540,44 @@ test("FG-649: a --project that is a DIFFERENT registered repository than the run
     reviewRow("review-identity").workspace_dir,
     runRepo,
     "a refused override never becomes the recorded binding",
+  );
+});
+
+// ── arm 12 (FG-693 fix batch) ───────────────────────────────────────────────
+//
+// The workspace check's root comparison was a PRIVATE canonicalizer — realpath with a
+// `resolve()` fallback — the sixth copy of the shape FG-693 exists to delete. It fed
+// the decision about WHICH repository every later stage, including the coordinator's
+// own `git commit`, writes into, so an unresolved spelling presented as proven here is
+// a wrong-WRITE risk. It now goes through the one contract and takes the ACTING
+// projection: an indeterminate comparison refuses by name rather than proceeding.
+//
+// This arm proves the routing did not weaken what the check accepts: the checkout root
+// reached through a symlinked PARENT is still its own root, decided by identity rather
+// than by bytes — `top` and `dir` are DIFFERENT strings here, so a raw string
+// comparison at this seam turns it red.
+test("FG-693: the checkout root reached through a symlinked parent IS its root, and its bytes are recorded verbatim", () => {
+  const aliasParent = join(homeDir, "link-to-repos");
+  symlinkSync(dirname(workspaceRepo), aliasParent);
+  const aliasedWorkspace = join(aliasParent, basename(workspaceRepo));
+  assert.notEqual(aliasedWorkspace, workspaceRepo, "fixture: two spellings, or nothing here discriminates");
+  assert.equal(realpathSync(aliasedWorkspace), realpathSync(workspaceRepo), "fixture: and they are ONE tree");
+
+  seedReview({
+    id: "review-aliased",
+    workspaceDir: workspaceRepo,
+    baseSha: workspaceBase,
+    candidateSha: workspaceHead,
+    verifiedEntryAt: workspaceHead,
+  });
+
+  const r = runForge(["review", "continue", "review-aliased", "--project", aliasedWorkspace]);
+  const out = `${r.stdout}${r.stderr}`;
+  assert.doesNotMatch(out, /review_workspace_unusable/, "an alias of the root is not 'inside' the worktree");
+  assert.equal(
+    reviewRow("review-aliased").workspace_dir,
+    aliasedWorkspace,
+    "the operator's own spelling is what gets recorded — identity decides, presentation is untouched",
   );
 });
 

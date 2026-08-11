@@ -57,6 +57,7 @@
 
 import { basename } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
+import { compareIdentity, identify, provenPhysical } from "../util/path-identity.js";
 import { isLaunchId, statusLine, type LaunchStatus } from "./launch.js";
 import {
   HOST_VERIFICATION_PURPOSE,
@@ -278,29 +279,131 @@ export function observationIsFresh(observedMs: number | null, nowMs: number, fre
   return age >= 0 && age <= freshMs;
 }
 
-function inProjectScope(projectDir: string | null, projectDirs: readonly string[] | undefined): boolean {
-  if (projectDirs === undefined) return true;
-  if (projectDir === null) return false;
-  return projectDirs.includes(projectDir);
+// ─── FG-693: project scope is FILESYSTEM IDENTITY, never the bytes ──────────────
+//
+// This derivation used to scope by raw strings on both halves — `projectDirs.includes
+// (projectDir)` in process and `r.project_dir IN (...)` in SQL. One checkout has many
+// names (a symlinked parent, a system directory exposed under two prefixes, a relative
+// spelling, a trailing separator), so a run created under one spelling was invisible to
+// a query naming another. This is the ONE derivation `forge status` and the dashboard
+// both call, so that hid live work on BOTH surfaces at once.
+//
+// Everything below goes through the ONE contract (src/util/path-identity.ts). The
+// SCOPE is resolved ONCE per derivation and a recorded spelling is resolved at most
+// once per DISTINCT value — never once per row, and never at all for a row that
+// carries its proven identity in `project_dir_canonical`. This path serves every
+// dashboard poll, so the syscall count is part of its contract.
+//
+// No outbound call is added: `realpath` is a filesystem read, which this module has
+// always been allowed (BD-7/BD-12 forbid tmux/git/gh/shell/CLI), and it is the one
+// call the contract itself makes.
+
+/** One row's project identity as the two columns record it: the caller's bytes, and
+ *  the PROVEN identity beside them (null when nothing proved one). */
+type RowProjectIdentity = { projectDir: string | null; canonical: string | null };
+
+/** Nothing recorded at all — neither bytes nor a proven identity. */
+const EMPTY_ROW_IDENTITY: RowProjectIdentity = { projectDir: null, canonical: null };
+
+/** The operator's scope spellings, RESOLVED ONCE per derivation. Two sets, because a
+ *  PROVEN physical path and an unresolvable SPELLING are different kinds of thing and
+ *  deduplicating them in one namespace is the conflation the contract exists to stop. */
+type ResolvedProjectScope = {
+  /** Proven physical paths, deduplicated — two spellings of one checkout probe once. */
+  physicals: ReadonlySet<string>;
+  /** Spellings the filesystem would not confirm. Matched by recorded BYTES only: for
+   *  an unproven target, byte equality is the only relation left that claims nothing. */
+  unresolved: ReadonlySet<string>;
+  /** One resolution per DISTINCT recorded spelling, for this derivation only. */
+  spellings: Map<string, string | null>;
+};
+
+function resolveProjectScope(projectDirs: readonly string[] | undefined): ResolvedProjectScope | undefined {
+  if (projectDirs === undefined) return undefined;
+  const physicals = new Set<string>();
+  const unresolved = new Set<string>();
+  for (const spelling of projectDirs) {
+    const identity = identify(spelling);
+    if (identity.kind === "resolved") physicals.add(identity.physical);
+    else unresolved.add(spelling);
+  }
+  return { physicals, unresolved, spellings: new Map() };
 }
 
-function readAgents(db: DatabaseInstance, scope: CurrentActivityScope): ActivityAgentTask[] {
+function recordedPhysical(scope: ResolvedProjectScope, spelling: string): string | null {
+  const memo = scope.spellings.get(spelling);
+  if (memo !== undefined) return memo;
+  const physical = provenPhysical(spelling);
+  scope.spellings.set(spelling, physical);
+  return physical;
+}
+
+/** Is this row in the operator's scope? The ACTING projection: scoping decides what an
+ *  operator is shown as THEIR work, so an indeterminate comparison excludes the row
+ *  rather than claiming it on a guess. A row that carries a proven canonical identity
+ *  is decided by set membership alone — no filesystem call. */
+function inProjectScope(row: RowProjectIdentity, scope: ResolvedProjectScope | undefined): boolean {
+  if (scope === undefined) return true;
+  const spelling = row.projectDir ?? "";
+  if (row.canonical !== null && row.canonical !== "") {
+    if (scope.physicals.has(row.canonical)) return true;
+  } else if (spelling !== "" && scope.physicals.size > 0) {
+    const physical = recordedPhysical(scope, spelling);
+    if (physical !== null && scope.physicals.has(physical)) return true;
+  }
+  return spelling !== "" && scope.unresolved.has(spelling);
+}
+
+/** Could a row of this project still be in scope? The GUARD projection of the same
+ *  question, used ONLY to decide which runs the bounded event window may be spent on
+ *  — a budget rule, not a currency answer, so a run whose identity cannot be decided
+ *  KEEPS its slot. A run is dropped only where the comparison is genuinely decided
+ *  against it: its identity is proven and is not one of the targets, or the targets
+ *  are all unproven and byte equality (their only possible relation) already failed. */
+function scopeCouldInclude(row: RowProjectIdentity, scope: ResolvedProjectScope | undefined): boolean {
+  if (scope === undefined) return true;
+  if (inProjectScope(row, scope)) return true;
+  if (scope.physicals.size === 0) return false;
+  if (row.canonical !== null && row.canonical !== "") return false;
+  const spelling = row.projectDir ?? "";
+  if (spelling === "") return true;
+  return recordedPhysical(scope, spelling) === null;
+}
+
+/** Does the store in front of THIS reader carry FG-693's canonical column? The
+ *  dashboard opens its own read-only handle and runs no migrations, so it can be
+ *  pointed at a store no writer has touched since the upgrade; naming a column that
+ *  store lacks would throw and take the whole surface down. PRAGMA table_info on a
+ *  missing table returns zero rows rather than throwing (db.ts's shape-probe rule).
+ *
+ *  Asked per read rather than cached: a PRAGMA is a schema lookup, and a peer forge
+ *  that migrates the store in place must not leave a long-running dashboard reading
+ *  the pre-migration shape forever. */
+function hasCanonicalColumn(db: DatabaseInstance, table: "runs"): boolean {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return columns.some((c) => c.name === "project_dir_canonical");
+}
+
+function readAgents(
+  db: DatabaseInstance,
+  scope: CurrentActivityScope,
+  project: ResolvedProjectScope | undefined,
+): ActivityAgentTask[] {
   const clauses: string[] = [];
   const params: string[] = [];
   if (scope.runId !== undefined) {
     clauses.push("AND t.run_id = ?");
     params.push(scope.runId);
   }
-  if (scope.projectDirs !== undefined) {
-    if (scope.projectDirs.length === 0) clauses.push("AND 0 = 1");
-    else {
-      clauses.push(`AND r.project_dir IN (${scope.projectDirs.map(() => "?").join(",")})`);
-      params.push(...scope.projectDirs);
-    }
-  }
+  // FG-693: the project narrowing is deliberately NOT in this statement any more.
+  // `r.project_dir IN (...)` compared the operator's BYTES against the recorded bytes,
+  // which is the defect. The rows this query returns are the IN-FLIGHT ones — a
+  // handful — so deciding identity over them in process costs at most one realpath per
+  // distinct recorded spelling and none at all for a row with a proven canonical.
+  const canonical = hasCanonicalColumn(db, "runs") ? ", r.project_dir_canonical" : "";
   const rows = db.prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
-           r.title, r.workflow, r.project_dir
+           r.title, r.workflow, r.project_dir${canonical}
       FROM tasks t
       JOIN runs r ON r.id = t.run_id
      WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'blocked_by_red', 'awaiting_recovery')
@@ -310,8 +413,11 @@ function readAgents(db: DatabaseInstance, scope: CurrentActivityScope): Activity
   `).all(...params) as Array<{
     id: string; run_id: string; phase: string; agent_role: string; agent_model: string | null;
     status: string; started_at: string | null; title: string; workflow: string; project_dir: string | null;
+    project_dir_canonical?: string | null;
   }>;
-  return rows.map((r) => ({
+  return rows.filter((r) =>
+    inProjectScope({ projectDir: r.project_dir, canonical: r.project_dir_canonical ?? null }, project),
+  ).map((r) => ({
     runId: r.run_id,
     runTitle: r.title,
     workflow: r.workflow,
@@ -425,7 +531,7 @@ type WorkRef = { runId: string | null; projectDir: string | null; ticketId: stri
  *  because the work it names is current, never because it happens to be the newest
  *  row for a pair. */
 type CiCurrency = {
-  activeRuns: readonly { id: string; projectDir: string | null }[];
+  activeRuns: readonly { id: string; identity: RowProjectIdentity }[];
   activeRunIds: ReadonlySet<string>;
   openReviews: readonly ReviewAnchor[];
   /** Reviews that are OVER, carried for the same reason the open ones are. AC2 names
@@ -440,6 +546,10 @@ type CiCurrency = {
    *  predicate. Excluding a run it should have kept is the only way this can be wrong,
    *  which is why the ticket it does not know is quantified rather than assumed away. */
   windowRunIds: ReadonlySet<string>;
+  /** Each ACTIVE run's project identity, for the same budget rule. A run this map does
+   *  not carry (an open review's run whose row has closed) is undecided, and the rule
+   *  keeps it. */
+  runIdentities: ReadonlyMap<string, RowProjectIdentity>;
 };
 
 /** What one pass over the event window produced: the CURRENT observations, and which
@@ -492,9 +602,13 @@ function readClosedTicketIds(db: DatabaseInstance): ReadonlySet<string> {
 }
 
 function readCiCurrency(db: DatabaseInstance): CiCurrency {
+  // FG-693: the run's proven identity is read alongside its as-written spelling, so a
+  // scope decision here is the same decision every other seam makes. Selected
+  // conditionally for the unmigrated-store reason hasCanonicalColumn states.
+  const canonical = hasCanonicalColumn(db, "runs") ? ", project_dir_canonical" : "";
   const activeRuns = db.prepare(`
-    SELECT id, project_dir FROM runs WHERE status = ?
-  `).all(ACTIVE_RUN_STATUS) as Array<{ id: string; project_dir: string | null }>;
+    SELECT id, project_dir${canonical} FROM runs WHERE status = ?
+  `).all(ACTIVE_RUN_STATUS) as Array<{ id: string; project_dir: string | null; project_dir_canonical?: string | null }>;
 
   const cols = reviewColumns(db);
   // Every column below arrived by ALTER (FG-638/FG-649), so an aged store can carry a
@@ -536,10 +650,15 @@ function readCiCurrency(db: DatabaseInstance): CiCurrency {
     [...activeRunIds, ...openReviewRunIds].filter((id) => runCouldHoldCurrentWork(id, work)),
   );
 
+  const identified = activeRuns.map((r) => ({
+    id: r.id,
+    identity: { projectDir: r.project_dir, canonical: r.project_dir_canonical ?? null },
+  }));
   return {
-    activeRuns: activeRuns.map((r) => ({ id: r.id, projectDir: r.project_dir })),
+    activeRuns: identified,
     ...work,
     windowRunIds,
+    runIdentities: new Map(identified.map((r) => [r.id, r.identity])),
   };
 }
 
@@ -555,8 +674,24 @@ function reviewNamesWork(anchor: ReviewAnchor, work: WorkRef): boolean {
   const anchorRun = reviewRunOf(anchor);
   if (anchorRun !== null) return anchorRun === (work.runId === "" ? null : work.runId);
   if (work.ticketId === null || work.ticketId === "") return false;
-  return anchor.ticketId === work.ticketId
-    && (anchor.workspaceDir === null || work.projectDir === null || anchor.workspaceDir === work.projectDir);
+  return anchor.ticketId === work.ticketId && namesSameWorkspace(anchor.workspaceDir, work.projectDir);
+}
+
+/** FG-693: the workspace half of the anchor rule, by IDENTITY rather than by bytes.
+ *
+ *  `reviews.workspace_dir` and the observation payload's `projectDir` are written by
+ *  two different code paths, so one checkout reaches them under two spellings as a
+ *  matter of course — and `anchor.workspaceDir === work.projectDir` then said the
+ *  review does not speak for its own work, which hides a LIVE CI observation from
+ *  both surfaces. Neither side records a proven identity beside its bytes, so this is
+ *  the same rule `inProjectScope` applies to a legacy row: PROVEN sameness, or — for
+ *  a pair the filesystem will not confirm — the recorded bytes, which is the only
+ *  relation an unproven spelling can have. A null on either side still names the work,
+ *  unchanged: a review that recorded no workspace speaks for its ticket anywhere. */
+function namesSameWorkspace(workspaceDir: string | null, projectDir: string | null): boolean {
+  if (workspaceDir === null || projectDir === null) return true;
+  const comparison = compareIdentity(workspaceDir, projectDir);
+  return comparison === "same" || (comparison === "indeterminate" && workspaceDir === projectDir);
 }
 
 function reviewRunOf(anchor: ReviewAnchor): string | null {
@@ -567,7 +702,7 @@ function reviewRunOf(anchor: ReviewAnchor): string | null {
  *  observation asks it about the run, project and ticket it declared, and a run asks it
  *  about the work the store declares for that run. It reads the run and review rows and
  *  answers from those alone — nothing is inferred from a sha, a label, or a timestamp. */
-function workIsCurrent(work: WorkRef, currency: Omit<CiCurrency, "activeRuns" | "windowRunIds">): boolean {
+function workIsCurrent(work: WorkRef, currency: Omit<CiCurrency, "activeRuns" | "windowRunIds" | "runIdentities">): boolean {
   const named = (r: ReviewAnchor): boolean => reviewNamesWork(r, work);
 
   // The REVIEW answers first, and it answers in both directions. An open review naming
@@ -607,7 +742,7 @@ function reviewCouldNameRun(anchor: ReviewAnchor, runId: string): boolean {
  *  and whether a run for which the store declares NO CI work is a current candidate.
  *  Once the store DOES declare that work — an observation carries the run, project and
  *  ticket together — the declaration is what gets asked, through `workIsCurrent`. */
-function runCouldHoldCurrentWork(runId: string, currency: Omit<CiCurrency, "activeRuns" | "windowRunIds">): boolean {
+function runCouldHoldCurrentWork(runId: string, currency: Omit<CiCurrency, "activeRuns" | "windowRunIds" | "runIdentities">): boolean {
   if (currency.openReviews.some((r) => reviewCouldNameRun(r, runId))) return true;
   // A terminal review that recorded this run names EVERY ticket of it, so it retires
   // the run outright. A terminal TICKET-ONLY review retires only the work declaring its
@@ -629,6 +764,7 @@ function runCouldHoldCurrentWork(runId: string, currency: Omit<CiCurrency, "acti
 function readNewestCiObservations(
   db: DatabaseInstance,
   scope: CurrentActivityScope,
+  project: ResolvedProjectScope | undefined,
   nowMs: number,
   currency: CiCurrency,
 ): CiObservationRead {
@@ -655,9 +791,31 @@ function readNewestCiObservations(
   // current observation (`workIsCurrent` rejects every row declaring that run), so it may
   // not hold a slot. A run no review recorded is kept whatever the ticket-only reviews
   // say, because the ticket that would decide it lives in the rows this query returns.
+  // FG-693: the project narrowing is expressed over the RUNS the window may be spent
+  // on, never over the project bytes recorded in the payload. `json_extract(payload,
+  // '$.projectDir') IN (<the operator's spellings>)` is raw string equality on a path,
+  // so an observation recorded under another spelling of the operator's own checkout
+  // was dropped BEFORE the identity check below could ever see it — the RF-2 narrowing
+  // and the FG-693 defect in one clause. A run is dropped from the window only where
+  // its identity is DECIDED against the scope (scopeCouldInclude, the guard
+  // projection); the authoritative per-row decision stays in process, on identity.
   const eligibleRunIds = [...currency.windowRunIds]
-    .filter((id) => scope.runId === undefined || id === scope.runId);
+    .filter((id) => scope.runId === undefined || id === scope.runId)
+    .filter((id) => scopeCouldInclude(currency.runIdentities.get(id) ?? EMPTY_ROW_IDENTITY, project));
 
+  // EVERY narrowing here is at PAIR granularity — a function of (run_id, payload
+  // projectDir) and nothing else — because a pair is DECIDED by its newest in-scope
+  // row and then closed. A clause that dropped SOME rows of a pair would promote the
+  // next-oldest row into a slot the newest one had already closed, which carries a
+  // superseded candidate forward under a fresher label (the AC3 defect). Narrowing by
+  // run id is pair-granular; narrowing by ticket id is NOT, which is why there is no
+  // ticket clause here even though a run-less row needs a ticket-only review to be
+  // current at all.
+  //
+  // Rows that declare no run therefore stay in the window whatever the project scope,
+  // and identity decides them below. That is the honest trade: their pair key is the
+  // payload's project BYTES, so the only pair-granular clause available for them is
+  // the byte equality FG-693 exists to delete.
   const clauses: string[] = [];
   const params: string[] = [];
   if (scope.runId !== undefined) {
@@ -672,16 +830,6 @@ function readNewestCiObservations(
   } else {
     clauses.push(`AND (run_id IS NULL OR run_id IN (${eligibleRunIds.map(() => "?").join(",")}))`);
     params.push(...eligibleRunIds);
-  }
-  if (scope.projectDirs !== undefined) {
-    if (scope.projectDirs.length === 0) return { observations: [], declaredRunIds: new Set() };
-    // The project home lives in the payload, so the window is narrowed by reading it
-    // there. CASE, not `json_valid(...) AND json_extract(...)`: only CASE is guaranteed
-    // not to evaluate its branch, and json_extract raises on malformed JSON. An
-    // unreadable payload yields NULL here and is dropped — the same outcome the JSON
-    // parse below reaches for it, and never a thrown query.
-    clauses.push(`AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.projectDir') END) IN (${scope.projectDirs.map(() => "?").join(",")})`);
-    params.push(...scope.projectDirs);
   }
 
   const rows = db.prepare(`
@@ -716,7 +864,9 @@ function readNewestCiObservations(
     if (decided.has(key)) continue; // rows arrive newest-first
     if (typeof payload.candidateSha !== "string" || payload.candidateSha === "") continue;
     if (scope.runId !== undefined && row.run_id !== scope.runId) continue;
-    if (!inProjectScope(projectDir, scope.projectDirs)) continue;
+    // The payload declares the project home; nothing beside it records a proven
+    // identity, so this is the legacy-shaped arm of the same one rule.
+    if (!inProjectScope({ projectDir, canonical: null }, project)) continue;
 
     // This row IS the newest in-scope observation for its pair. Whatever is decided
     // about it is decided about the pair.
@@ -770,6 +920,7 @@ function readNewestCiObservations(
  *    - an open review is current work by definition, even after its run row closes. */
 function hasCurrentCandidate(
   scope: CurrentActivityScope,
+  project: ResolvedProjectScope | undefined,
   currency: CiCurrency,
   read: CiObservationRead,
 ): boolean {
@@ -777,8 +928,10 @@ function hasCurrentCandidate(
   const candidate = (id: string): boolean => !read.declaredRunIds.has(id) && runCouldHoldCurrentWork(id, currency);
   if (scope.runId !== undefined) return candidate(scope.runId);
   if (scope.projectDirs !== undefined) {
-    return currency.activeRuns.some((r) => inProjectScope(r.projectDir, scope.projectDirs) && candidate(r.id))
-      || currency.openReviews.some((r) => inProjectScope(r.workspaceDir, scope.projectDirs));
+    // FG-693: a review row records only its workspace SPELLING (`reviews` carries no
+    // canonical column), so it takes the legacy-shaped arm of the one rule.
+    return currency.activeRuns.some((r) => inProjectScope(r.identity, project) && candidate(r.id))
+      || currency.openReviews.some((r) => inProjectScope({ projectDir: r.workspaceDir, canonical: null }, project));
   }
   return currency.activeRuns.some((r) => candidate(r.id)) || currency.openReviews.length > 0;
 }
@@ -789,6 +942,10 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
   const nowMs = now.getTime();
   const scope = opts.scope ?? {};
   const hostWide = scope.runId === undefined && scope.projectDirs === undefined;
+  // FG-693: ONE resolution of the operator's scope for the whole derivation. Resolving
+  // it inside the row predicates would realpath the same spellings once per row, on a
+  // path that serves every dashboard poll.
+  const project = resolveProjectScope(scope.projectDirs);
 
   const open = readOpenLaunches(db);
 
@@ -813,7 +970,7 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
       .map((o) => toHostLaunch(o, "run", nowMs));
   } else if (scope.projectDirs !== undefined) {
     placed = open
-      .filter((o) => inProjectScope(o.projectDir, scope.projectDirs))
+      .filter((o) => inProjectScope({ projectDir: o.projectDir, canonical: o.projectDirCanonical }, project))
       .map((o) => toHostLaunch(o, "project", nowMs));
   } else {
     // Host-wide. A launch belongs in the main section if ANYTHING places it: an
@@ -844,13 +1001,13 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
   // predicate over the SAME work references — which observations are current, and which
   // of the three CI absences is the true one.
   const currency = readCiCurrency(db);
-  const read = readNewestCiObservations(db, scope, nowMs, currency);
+  const read = readNewestCiObservations(db, scope, project, nowMs, currency);
   const observations = read.observations;
   // The three-way choice the trap in FG-694 is about. `not_observed` is only ever
   // reachable when there IS current work owed an observation; with nothing open,
   // "we observed no CI" would be a claim about an observer that was never asked.
   const ciState: RequiredCiSection["state"] =
-    observations.length > 0 ? "observed" : hasCurrentCandidate(scope, currency, read) ? "not_observed" : "no_current_candidate";
+    observations.length > 0 ? "observed" : hasCurrentCandidate(scope, project, currency, read) ? "not_observed" : "no_current_candidate";
 
   return {
     generatedAt: now.toISOString(),
@@ -858,7 +1015,7 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
       runId: scope.runId ?? null,
       projectDirs: scope.projectDirs === undefined ? null : [...scope.projectDirs],
     },
-    agents: readAgents(db, scope),
+    agents: readAgents(db, scope, project),
     hostVerification,
     launches,
     requiredCi: {

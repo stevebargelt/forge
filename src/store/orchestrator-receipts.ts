@@ -725,6 +725,12 @@ export type OrchestratorLaunchDecision = {
 export function persistPendingOrchestratorReceipt(decision: OrchestratorLaunchDecision): OrchestratorReceipt {
   const receiptId = decision.receiptId ?? newOrchestratorReceiptId();
   const at = decision.createdAt ?? nowIso();
+  // FG-693: the identity is resolved BEFORE the transaction opens. `writeTransaction`
+  // is BEGIN IMMEDIATE on a machine-wide store, and both db.ts and runs.ts state the
+  // same invariant — no filesystem syscall is held across the write lock, because a
+  // realpath on a slow or unresponsive mount would block every other forge process on
+  // this host for as long as it takes to answer.
+  const projectDirCanonical = provenPhysical(decision.projectDir);
   return withReceiptWrite(receiptId, "write the pre-spawn launch record", PRE_SPAWN_CONSEQUENCE, () =>
     writeTransaction(() => {
       getDb()
@@ -750,7 +756,7 @@ export function persistPendingOrchestratorReceipt(decision: OrchestratorLaunchDe
           // project is still a fully recorded receipt, it simply cannot later claim
           // to belong to a checkout nobody proved it belonged to.
           project_dir: decision.projectDir,
-          project_dir_canonical: provenPhysical(decision.projectDir),
+          project_dir_canonical: projectDirCanonical,
           project_name: decision.projectName ?? null,
           resolved_profile: decision.resolvedProfile ?? null,
           runtime: decision.runtime,

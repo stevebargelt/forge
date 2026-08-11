@@ -13,6 +13,7 @@ import type {
   SourceKind,
 } from "../types/index.js";
 import { nowIso, newCampaignId, newCampaignItemId } from "../util/ids.js";
+import { provenPhysical } from "../util/path-identity.js";
 
 type CampaignRow = {
   id: string;
@@ -112,10 +113,17 @@ export function createCampaign(opts: {
     metadata: opts.metadata,
     projectDir: opts.projectDir,
   };
+  // FG-693: project_dir keeps the caller's bytes VERBATIM (audit evidence, and what
+  // every surface renders); the PROVEN identity goes beside it, or NULL when the
+  // filesystem would not confirm the path. Without this writer every new campaign row
+  // joined the pre-FG-693 NULL-canonical population permanently, so the legacy read
+  // path — the one whose cost is bounded by that population being self-extinguishing —
+  // would have grown forever instead of shrinking.
+  const canonical = campaign.projectDir ? provenPhysical(campaign.projectDir) : null;
   getDb()
     .prepare(
-      `INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, metadata, project_dir)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, metadata, project_dir, project_dir_canonical)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       campaign.id,
@@ -126,7 +134,8 @@ export function createCampaign(opts: {
       campaign.createdAt,
       campaign.updatedAt,
       campaign.metadata ? JSON.stringify(campaign.metadata) : null,
-      campaign.projectDir ?? null
+      campaign.projectDir ?? null,
+      canonical
     );
   return campaign;
 }
