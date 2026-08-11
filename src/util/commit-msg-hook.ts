@@ -33,7 +33,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -41,6 +40,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describeIdentity, identify, provenSameOnly } from "./path-identity.js";
 
 // ── The bundled hook source (moved verbatim from init.ts) ─────────────────────
 
@@ -317,16 +317,17 @@ export function assertWorkspaceHookEnforceable(workspacePath: string): void {
   }
   const effective = resolve(workspacePath, hooksPath);
   const installed = dirname(target);
-  const same = (() => {
-    try {
-      return realpathSync(effective) === realpathSync(installed);
-    } catch {
-      return false;
-    }
-  })();
-  if (!same) {
+  // FG-693: one contract, and the ACTING-class projection — the permissive
+  // outcome here is "these are the same directory, the hook git runs IS the hook
+  // we installed", so an indeterminate comparison must NOT certify. Unresolved
+  // is therefore a refusal, exactly as the old catch-returns-false was, but now
+  // the message says which side would not resolve instead of naming a spelling
+  // as though it were a directory that answered.
+  const effectiveId = identify(effective);
+  const installedId = identify(installed);
+  if (!provenSameOnly(effectiveId, installedId)) {
     return fail(
-      `git consults ${effective} for hooks, not ${installed} — a core.hooksPath override would make the guard never run`
+      `git consults ${describeIdentity(effectiveId)} for hooks, not ${describeIdentity(installedId)} — a core.hooksPath override would make the guard never run`
     );
   }
 
@@ -341,9 +342,16 @@ export function assertWorkspaceHookEnforceable(workspacePath: string): void {
       `core.hooksPath is pinned to the absolute path ${pin}; the workspace is mounted at a different path inside the agent container, where that names something else or nothing at all`
     );
   }
-  if (resolve(workspacePath, pin) !== resolve(installed)) {
+  // FG-693: the pin and the installed hooks dir are the SAME QUESTION as the
+  // rev-parse comparison above — "is this one directory?" — so they are answered
+  // the same way. A lexical compare called two spellings of one directory
+  // different and refused a workspace whose hook git would in fact have run; it
+  // is also the shape that, elsewhere in forge, silently made guards inert.
+  // provenSameOnly again: certifying is the permissive outcome.
+  const pinned = resolve(workspacePath, pin);
+  if (!provenSameOnly(pinned, installedId)) {
     return fail(
-      `core.hooksPath is pinned to ${pin} (${resolve(workspacePath, pin)}), not to the installed hooks directory ${installed}`
+      `core.hooksPath is pinned to ${pin} (${describeIdentity(pinned)}), not to the installed hooks directory ${describeIdentity(installedId)}`
     );
   }
 }

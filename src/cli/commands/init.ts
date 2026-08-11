@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeBacklogConfig } from "../../backlog/config.js";
@@ -36,6 +36,7 @@ import {
 // the hook bytes" the same way. What the operator's primary checkout installs is
 // unchanged — still the symlink through $FORGE_HOME/current planned below.
 import { resolveHookSource, tryResolveHookSource } from "../../util/commit-msg-hook.js";
+import { describeIdentity, identify } from "../../util/path-identity.js";
 
 // #153: Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd)
 // write heartbeat files into ~/.forge/orchestrators/<session-id>.json so forge
@@ -880,10 +881,6 @@ export type OperatorAdaptersPlan =
  *  the files, the way the old symlink propagated an edit. */
 export { currentAdapterStamp };
 
-function safeRealpath(p: string): string {
-  try { return realpathSync(p); } catch { return resolve(p); }
-}
-
 // ── Rendering → targets ──────────────────────────────────────────────────────
 
 type RenderedTarget = {
@@ -1026,16 +1023,27 @@ function classifyAdapterTarget(target: string, projectDir: string, surface: Adap
  *  fill. Refusals returned here surface as project overrides: reported, not
  *  written over, not fatal. */
 function containmentProblem(target: string, projectDir: string): string | null {
-  const root = safeRealpath(projectDir);
+  // FG-693: the containment root is a PROVEN physical path or the write is
+  // refused. The old local realpath-with-lexical-fallback handed a guessed root
+  // to a prefix comparison that reads as though it proved containment; a root
+  // nobody could resolve proves nothing, and this walk decides whether forge
+  // writes into a directory.
+  const rootIdentity = identify(projectDir);
+  if (rootIdentity.kind !== "resolved") {
+    return `refusing to write: the project dir ${describeIdentity(rootIdentity)} does not resolve, so containment cannot be established`;
+  }
+  const root = rootIdentity.physical;
   let probe = dirname(target);
   while (!entryExists(probe)) {
     const parent = dirname(probe);
     if (parent === probe) return `no existing ancestor directory under ${projectDir}`;
     probe = parent;
   }
-  let real: string;
-  try { real = realpathSync(probe); }
-  catch { return `refusing to write: ${probe} does not resolve (dangling symlink)`; }
+  const probeIdentity = identify(probe);
+  if (probeIdentity.kind !== "resolved") {
+    return `refusing to write: ${probe} does not resolve (dangling symlink)`;
+  }
+  const real = probeIdentity.physical;
   if (!(real === root || real.startsWith(root + sep))) {
     return `refusing to write: ${probe} resolves to ${real}, outside the project at ${root}`;
   }
