@@ -133,6 +133,43 @@ test("listRunsForWorkspace: matches by metadata.workspace (audit-workspace case)
   assert.deepEqual(projectMatches, ["run-audit"]);
 });
 
+// FG-693 regression: the audit-workspace clause is alias-agnostic in BOTH
+// directions. metadata.workspace carries no canonical column, so it is resolved at
+// read time — and it must not be put through the legacy retarget-proof rule, whose
+// link-free clause declines every workspace reached through a symlink and therefore
+// deleted this clause outright on any host with an aliased temp or home root. Both
+// halves below fail under that rule; the stored-through-a-symlink half fails on
+// every platform, so the case is not left to a darwin-only host to catch.
+test("listRunsForWorkspace: the audit-workspace match survives an alias on either side", () => {
+  const externalRepo = mkFixture("external-repo");
+  const auditWorkspace = mkFixture("audit-workspace");
+  const linkedParent = join(fixtureRoot, "link-audit");
+  symlinkSync(fixtureRoot, linkedParent, "dir");
+  const aliasedWorkspace = join(linkedParent, "audit-workspace");
+
+  insertRun({ ...RUN, id: "run-stored-plain", projectDir: externalRepo, metadata: { workspace: auditWorkspace } });
+  insertRun({
+    ...RUN,
+    id: "run-stored-aliased",
+    projectDir: externalRepo,
+    metadata: { workspace: aliasedWorkspace },
+  });
+
+  for (const spelling of [auditWorkspace, aliasedWorkspace, auditWorkspace + sep]) {
+    assert.deepEqual(
+      listRunsForWorkspace(spelling).map((r) => r.id).sort(),
+      ["run-stored-aliased", "run-stored-plain"],
+      `both audit runs must be found through the ${spelling} spelling of one workspace`,
+    );
+  }
+
+  assert.deepEqual(
+    listRunsForWorkspace(mkFixture("unrelated")).map((r) => r.id),
+    [],
+    "and resolving the workspace never widens the match to another directory",
+  );
+});
+
 test("listRunsForWorkspace: returns empty when no run matches the workspace", () => {
   insertRun({ ...RUN, id: "run-x", projectDir: mkFixture("somewhere") });
   assert.deepEqual(listRunsForWorkspace(mkFixture("other")).map((r) => r.id), []);

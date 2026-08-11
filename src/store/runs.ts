@@ -2,7 +2,7 @@ import { getDb, writeTransaction } from "./db.js";
 import type { Run, RunStatus, ReviewMode } from "../types/index.js";
 import { nowIso } from "../util/ids.js";
 import { notifyOnRunTransition } from "../notify/trigger.js";
-import { identify, provenPhysical, type PathIdentity } from "../util/path-identity.js";
+import { identify, provenPhysical, provenSameOnly, type PathIdentity } from "../util/path-identity.js";
 import { attributeLegacyRow, retargetProofIdentity } from "./legacy-path-attribution.js";
 
 // ── FG-693: project identity for runs ────────────────────────────────────────
@@ -205,9 +205,21 @@ function metadataWorkspace(row: RunRow): string | undefined {
  *      only establish that it resolves TODAY, never that it resolves to the tree
  *      it was written against.
  *
- *  metadata.workspace has no canonical column and never had one — it is an
- *  as-written spelling in every row, of every vintage — so it takes the same
- *  legacy rule rather than a second, weaker one. */
+ *  metadata.workspace has no canonical column and never had one, so no equality
+ *  probe settles it — but it does NOT take the legacy rule either. That rule's
+ *  link-free clause exists to protect a PROOF: a pre-FG-693 project_dir records
+ *  bytes nobody confirmed, and resolving them at read time could credit the row to a
+ *  tree it was never written against. Nothing here is protected by declining — no
+ *  vintage of metadata.workspace was ever proven, so the rule removes no exposure
+ *  the `ws === workspace` it replaced did not already carry. What it does remove is
+ *  the clause itself: every workspace reached through a symlinked prefix is declined,
+ *  INCLUDING the byte-identical spelling the operator is standing in, and on a host
+ *  that aliases its temp or home root (darwin's /var -> /private/var) that is the
+ *  ordinary case rather than the exotic one. An audit run then disappears from its
+ *  own workspace listing. So the workspace half is decided by PROVEN identity: both
+ *  sides resolve and name one directory. That subsumes byte equality wherever the
+ *  directory still exists, and keeps the ACTING projection's refusal where it does
+ *  not — a spelling neither side can resolve still matches nothing. */
 export function listRunsForWorkspace(workspace: string): Run[] {
   const target: PathIdentity = identify(workspace);
 
@@ -227,6 +239,17 @@ export function listRunsForWorkspace(workspace: string): Run[] {
     return verdict;
   };
 
+  // Memoized for the same reason and with the same call-scoped lifetime.
+  const workspaceVerdicts = new Map<string, boolean>();
+  const workspaceNamesTarget = (spelling: string): boolean => {
+    let verdict = workspaceVerdicts.get(spelling);
+    if (verdict === undefined) {
+      verdict = provenSameOnly(spelling, target);
+      workspaceVerdicts.set(spelling, verdict);
+    }
+    return verdict;
+  };
+
   const rows = getDb().prepare(`SELECT * FROM runs ORDER BY created_at DESC`).all() as RunRow[];
   return rows
     .filter((row) => {
@@ -237,7 +260,7 @@ export function listRunsForWorkspace(workspace: string): Run[] {
         return true;
       }
       const ws = metadataWorkspace(row);
-      return ws !== undefined && legacyAttributes(ws);
+      return ws !== undefined && workspaceNamesTarget(ws);
     })
     .map(rowToRun);
 }

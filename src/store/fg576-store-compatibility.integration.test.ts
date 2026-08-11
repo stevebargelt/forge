@@ -27,6 +27,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
 import Database from "better-sqlite3";
 import { applyMigrations, assertSchemaVersionSupported, setDbForTest, closeDb, SCHEMA_VERSION } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
@@ -34,7 +35,6 @@ import { FORGE_HOME } from "../util/paths.js";
 import {
   persistPendingOrchestratorReceipt,
   getOrchestratorReceipt,
-  canonicalReceiptProjectDir,
   markOrchestratorReceiptRunning,
   type OrchestratorLaunchDecision,
 } from "./orchestrator-receipts.js";
@@ -211,9 +211,15 @@ test("C3: a Codex receipt read through the GENERIC columns reports provider 'ope
 
   // A DIFFERENT reader, on its own connection, selecting only the generic columns a
   // peer that knows nothing of adapters would name. No forge code in the path.
+  // FG-693: project_dir_canonical joins that set, because the pair is what a generic
+  // reader now has to be able to tell apart — the spelling the launcher passed, and
+  // the identity forge PROVED for it.
   const reader = new Database(path, { readonly: true });
   const rows = reader
-    .prepare(`SELECT receipt_id, state, provider, runtime, adapter, project_dir FROM orchestrator_receipts ORDER BY receipt_id`)
+    .prepare(
+      `SELECT receipt_id, state, provider, runtime, adapter, project_dir, project_dir_canonical
+         FROM orchestrator_receipts ORDER BY receipt_id`,
+    )
     .all() as { receipt_id: string; provider: string; runtime: string; adapter: string }[];
   reader.close();
 
@@ -226,7 +232,12 @@ test("C3: a Codex receipt read through the GENERIC columns reports provider 'ope
         provider: "anthropic",
         runtime: "claude-code",
         adapter: "claude",
-        project_dir: canonicalReceiptProjectDir(CLAUDE_DECISION.projectDir),
+        // FG-693 supersedes FG-576's write-side canonicalization: the launcher's bytes
+        // stay in project_dir as audit evidence and the PROVEN identity lands beside
+        // them. realpathSync rather than canonicalReceiptProjectDir — an independent
+        // oracle, so the canonical column cannot pass by agreeing with its own writer.
+        project_dir: CLAUDE_DECISION.projectDir,
+        project_dir_canonical: realpathSync(CLAUDE_DECISION.projectDir),
       },
       {
         receipt_id: "orx-compat-codex",
@@ -234,10 +245,12 @@ test("C3: a Codex receipt read through the GENERIC columns reports provider 'ope
         provider: "openai",
         runtime: "codex-cli",
         adapter: "codex",
-        project_dir: canonicalReceiptProjectDir(CODEX_DECISION.projectDir),
+        project_dir: CODEX_DECISION.projectDir,
+        project_dir_canonical: realpathSync(CODEX_DECISION.projectDir),
       },
     ] as unknown as typeof rows,
-    "provider/runtime/adapter are recorded columns — a generic reader gets the truth without knowing either adapter",
+    "provider/runtime/adapter are recorded columns — a generic reader gets the truth without knowing either adapter; " +
+      "and FG-693's project_dir/project_dir_canonical pair reads the same way without forge in the path",
   );
 
   const codex = rows.find((r) => r.receipt_id === "orx-compat-codex");

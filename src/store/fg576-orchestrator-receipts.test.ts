@@ -23,7 +23,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { makeInMemoryDb, setDbForTest, getDb } from "./db.js";
@@ -38,7 +38,6 @@ import {
   OrchestratorReceiptWriteError,
   OrchestratorReceiptTransitionError,
   persistPendingOrchestratorReceipt,
-  canonicalReceiptProjectDir,
   markOrchestratorReceiptRunning,
   closeOrchestratorReceipt,
   recordOrchestratorSessionIdentity,
@@ -144,6 +143,7 @@ test("AC6/AC11: every recorded field of the pre-spawn decision round-trips, and 
       receiptId: read.receiptId,
       sessionKey: read.sessionKey,
       projectDir: read.projectDir,
+      projectDirCanonical: read.projectDirCanonical,
       projectName: read.projectName,
       resolvedProfile: read.resolvedProfile,
       runtime: read.runtime,
@@ -167,9 +167,18 @@ test("AC6/AC11: every recorded field of the pre-spawn decision round-trips, and 
     {
       receiptId: "orx-claude-1",
       sessionKey: "11111111-2222-3333-4444-555555555555",
-      // Invariant: receipt project_dir is the canonical physical workspace so every
-      // reader finds the same receipt; its input spelling has no operational meaning.
-      projectDir: canonicalReceiptProjectDir(CLAUDE_DECISION.projectDir),
+      // FG-693 supersedes FG-576's single-column invariant. FG-576 canonicalized INTO
+      // project_dir, which destroyed the launcher's own bytes and left one column
+      // holding an unmarked mix of proven paths and lexical guesses. The two columns
+      // now say different things, and BOTH are asserted here:
+      //   project_dir            the launcher's spelling VERBATIM — audit evidence of
+      //                          what the operator actually passed. Never rewritten.
+      //   project_dir_canonical  the PROVEN filesystem identity, or NULL where the
+      //                          filesystem would not confirm the path.
+      // realpathSync, not canonicalReceiptProjectDir: an independent oracle, so the
+      // canonical column cannot pass this by agreeing with the shim that wrote it.
+      projectDir: CLAUDE_DECISION.projectDir,
+      projectDirCanonical: realpathSync(CLAUDE_DECISION.projectDir),
       projectName: "test-project",
       resolvedProfile: "claude-subscription",
       runtime: "claude-code",
@@ -196,6 +205,28 @@ test("AC6/AC11: every recorded field of the pre-spawn decision round-trips, and 
       createdAt: "2026-08-07T10:00:00.000Z",
     },
     "the full decision survives the round trip — nothing is dropped, defaulted or reinterpreted",
+  );
+
+  // FG-576's REGRESSION, restated against the new columns rather than retired with
+  // them. What FG-576 closed was a receipt going missing from an operator surface
+  // because the launcher held one spelling of the project and the reader held
+  // another (darwin's /tmp -> /private/tmp). That must still not happen — the
+  // project read now reaches the receipt through project_dir_canonical instead of
+  // through a rewritten project_dir, so the guarantee is unchanged and the audit
+  // evidence survives. Two spellings that are not the written bytes: a trailing
+  // separator (a real alias on every platform) and the physical path (a real alias
+  // wherever the host aliases its temp root, which is the original incident).
+  for (const spelling of [`${CLAUDE_DECISION.projectDir}${sep}`, realpathSync(CLAUDE_DECISION.projectDir)]) {
+    assert.deepEqual(
+      listOrchestratorReceiptsForProject(spelling).map((r) => r.receiptId),
+      ["orx-claude-1"],
+      `a receipt written as ${CLAUDE_DECISION.projectDir} must still be found through ${spelling}`,
+    );
+  }
+  assert.equal(
+    read.projectDir,
+    CLAUDE_DECISION.projectDir,
+    "and it is found through those spellings WITHOUT the write having rewritten the launcher's bytes",
   );
 });
 
