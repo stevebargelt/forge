@@ -3,6 +3,15 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { getDb } from "./db.js";
+import { describeIdentity, identify, provenPhysical, type PathIdentity } from "../util/path-identity.js";
+import {
+  attributeLegacyRow,
+  countLegacyDecline,
+  describeLegacyDeclines,
+  legacyDeclineTotal,
+  newLegacyDeclineTally,
+  type LegacyDeclineTally,
+} from "./legacy-path-attribution.js";
 
 // FG-500: the project default gate is a single command, but a project may also
 // split its suite across an extended tier (see reconcile-collect.ts's
@@ -36,14 +45,96 @@ export function deriveRequiredGateList(projectDir: string, requiredGate: string)
   return [requiredGate];
 }
 
-// FG-431: LOOKUP exact-matches project_dir, but callers (the CLI recorder, the
-// reconcile-time auto-capture writer) may hand in a relative or otherwise
-// non-canonical path. Canonicalizing to the same absolute form on both the
-// insert and the lookup side means a row recorded with an equivalent-but-not-
-// identical path string is still found by reconcile — without loosening any
-// other match dimension (ticket_id, gate_name, commit_sha stay exact).
-function canonicalizeProjectDir(projectDir: string): string {
-  return path.resolve(projectDir);
+// ── FG-693: project identity for gate evidence ──────────────────────────────
+//
+// FG-431 canonicalized project_dir on both the insert and the lookup side with
+// `path.resolve`, so a row recorded under an equivalent-but-differently-spelled
+// path was still found. That was purely LEXICAL, and it is the defect FG-693
+// closes: `/tmp/x` and `/private/tmp/x`, a symlinked parent, and a relative
+// spelling resolved from another cwd all name one tree that `path.resolve` calls
+// three (or, worse, calls one tree by a name that is really two).
+//
+// What replaces it, per src/util/path-identity.ts (the ONE contract):
+//
+//   WRITE  project_dir keeps the caller's bytes VERBATIM — it is audit evidence
+//          and it is never rewritten. project_dir_canonical carries the PROVEN
+//          identity, or NULL when the filesystem would not confirm the path. A
+//          lexically-resolved path is NEVER written there.
+//   READ   post-change rows match by exact equality on project_dir_canonical —
+//          indexed, alias-agnostic, no filesystem call per row. NULL-canonical
+//          rows (everything written before this change, plus anything written
+//          while its path was unresolvable) go through the retarget-proof rule
+//          in ./legacy-path-attribution.ts, which is shared verbatim with
+//          orchestrator receipts.
+//
+// Gate evidence is the ACTING class: a row that cannot be PROVEN to belong to
+// the checkout being asked about must not satisfy its gate. So an indeterminate
+// comparison declines and the gate RE-RUNS — the costly-but-correct direction.
+// THE READ NEVER WRITES: it does not opportunistically fill project_dir_canonical
+// for a legacy row it just resolved. The dashboard holds a read-only store handle
+// by design, and a read that sometimes writes would fail on exactly the old rows
+// this mechanism exists to serve.
+
+/** A caller's decline sink. Silent by default — the query helpers collect,
+ *  findCoveringGateEvidence reports (see reportLegacyDeclines). */
+type LegacyDeclineSink = LegacyDeclineTally | null;
+
+/** Rows for one (ticket, project, gate[, sha]) that may be ATTRIBUTED to
+ *  `projectDir`. Two populations, one SQL narrowing each, merged in recorded_at
+ *  order so callers see one stream and cannot tell (or depend on) which
+ *  population a row came from.
+ *
+ *  The legacy narrowing keys on the non-path dimensions the existing
+ *  (ticket_id, project_dir, commit_sha, gate_name) index already carries —
+ *  ticket_id is a usable prefix — so the in-process candidate set is one
+ *  ticket's rows for one gate. That population is fixed at migration time and
+ *  self-extinguishing: nothing new is written with a NULL canonical unless its
+ *  path was genuinely unresolvable. */
+function attributedRows(
+  ticketId: string,
+  projectDir: string,
+  gateName: string,
+  commitSha: string | null,
+  declines: LegacyDeclineSink
+): HostVerificationRow[] {
+  const db = getDb();
+  const target: PathIdentity = identify(projectDir);
+  const shaClause = commitSha === null ? "" : " AND commit_sha = ?";
+  const shaArgs = commitSha === null ? [] : [commitSha];
+
+  // POST-change rows: an indexed equality probe on the proven identity. Skipped
+  // outright when the CALLER's own path is unproven — there is no canonical
+  // value to probe with, and `= NULL` would silently match nothing anyway.
+  const provenRows =
+    target.kind === "resolved"
+      ? (db
+          .prepare(
+            `SELECT * FROM host_verifications
+              WHERE ticket_id = ? AND project_dir_canonical = ? AND gate_name = ?${shaClause}`
+          )
+          .all(ticketId, target.physical, gateName, ...shaArgs) as DbRow[])
+      : [];
+
+  const legacyCandidates = db
+    .prepare(
+      `SELECT * FROM host_verifications
+        WHERE ticket_id = ? AND project_dir_canonical IS NULL AND gate_name = ?${shaClause}`
+    )
+    .all(ticketId, gateName, ...shaArgs) as DbRow[];
+
+  const legacyRows: DbRow[] = [];
+  for (const row of legacyCandidates) {
+    const attribution = attributeLegacyRow(row.project_dir, target);
+    if (attribution.outcome === "attributed") legacyRows.push(row);
+    else if (attribution.outcome === "declined" && declines) countLegacyDecline(declines, attribution.reason);
+  }
+
+  // recorded_at ASC, as both public queries have always promised, with id as the
+  // tie-break so a merge of the two populations is deterministic rather than
+  // dependent on which SQL statement happened to run first.
+  return [...provenRows, ...legacyRows]
+    .sort((a, b) => (a.recorded_at < b.recorded_at ? -1 : a.recorded_at > b.recorded_at ? 1 : a.id - b.id))
+    .map(rowToVerification);
 }
 
 // FG-474: 'host' (default) = a real host command execution; 'ci' = sourced from a
@@ -53,6 +144,7 @@ export type HostVerificationSource = "host" | "ci";
 export type HostVerificationRow = {
   id?: number;
   ticketId: string;
+  /** WHAT THE CALLER WROTE, verbatim. Audit evidence and display. Decides nothing. */
   projectDir: string;
   commitSha: string;
   gateName: string;
@@ -62,6 +154,10 @@ export type HostVerificationRow = {
   recordedAt: string;
   source?: HostVerificationSource;
   ciUrl?: string | null;
+  /** FG-693: the PROVEN identity of projectDir at WRITE time, or null when the
+   *  filesystem would not confirm it. Read-only on the way out — writers never
+   *  set it; insertHostVerification derives it from projectDir. */
+  projectDirCanonical?: string | null;
 };
 
 type DbRow = {
@@ -76,6 +172,7 @@ type DbRow = {
   recorded_at: string;
   source: string;
   ci_url: string | null;
+  project_dir_canonical: string | null;
 };
 
 function rowToVerification(row: DbRow): HostVerificationRow {
@@ -91,16 +188,34 @@ function rowToVerification(row: DbRow): HostVerificationRow {
     recordedAt: row.recorded_at,
     source: row.source === "ci" ? "ci" : "host",
     ciUrl: row.ci_url,
+    projectDirCanonical: row.project_dir_canonical ?? null,
   };
 }
 
-function runInsert(v: Omit<HostVerificationRow, "id">, runId: string | null): void {
+/** Writers supply the spelling; the proven identity is DERIVED here and is not
+ *  theirs to set — a caller-supplied canonical value would be exactly the
+ *  unproven-value-in-a-proven-column ambiguity FG-693 removes. */
+export type HostVerificationWrite = Omit<HostVerificationRow, "id" | "projectDirCanonical">;
+
+function runInsert(v: HostVerificationWrite, runId: string | null, projectDirCanonical: string | null): void {
   getDb()
     .prepare(
-      `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url, project_dir_canonical)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(v.ticketId, v.projectDir, v.commitSha, v.gateName, v.command, v.exitCode, runId, v.recordedAt, v.source ?? "host", v.ciUrl ?? null);
+    .run(
+      v.ticketId,
+      v.projectDir,
+      v.commitSha,
+      v.gateName,
+      v.command,
+      v.exitCode,
+      runId,
+      v.recordedAt,
+      v.source ?? "host",
+      v.ciUrl ?? null,
+      projectDirCanonical
+    );
 }
 
 // run_id references runs(id) — a run row pruned between dispatch and this write
@@ -113,33 +228,35 @@ function isDanglingRunIdForeignKeyError(err: unknown): boolean {
   return code === "SQLITE_CONSTRAINT_FOREIGNKEY";
 }
 
-export function insertHostVerification(v: Omit<HostVerificationRow, "id">): void {
-  const canonical = { ...v, projectDir: canonicalizeProjectDir(v.projectDir) };
+/** FG-693: project_dir is stored VERBATIM (audit evidence); the proven identity
+ *  goes in its own column, or NULL when the filesystem would not confirm the
+ *  path. A NULL here is not a failure to record the result — the gate really
+ *  ran and the row is real; it just cannot later claim to belong to a checkout
+ *  nobody proved it belonged to. */
+export function insertHostVerification(v: HostVerificationWrite): void {
+  const canonical = provenPhysical(v.projectDir);
   try {
-    runInsert(canonical, canonical.runId ?? null);
+    runInsert(v, v.runId ?? null, canonical);
   } catch (err) {
-    if (canonical.runId && isDanglingRunIdForeignKeyError(err)) {
-      runInsert(canonical, null);
+    if (v.runId && isDanglingRunIdForeignKeyError(err)) {
+      runInsert(v, null, canonical);
       return;
     }
     throw err;
   }
 }
 
+/** Rows for this ticket+project+sha+gate, ATTRIBUTED by proven identity — never
+ *  by raw string equality on project_dir. `declines` collects NULL-canonical
+ *  rows that could not be attributed, for the caller to report. */
 export function queryHostVerificationRows(
   ticketId: string,
   projectDir: string,
   commitSha: string,
-  gateName: string
+  gateName: string,
+  declines: LegacyDeclineSink = null
 ): HostVerificationRow[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM host_verifications
-       WHERE ticket_id = ? AND project_dir = ? AND commit_sha = ? AND gate_name = ?
-       ORDER BY recorded_at ASC`
-    )
-    .all(ticketId, canonicalizeProjectDir(projectDir), commitSha, gateName) as DbRow[];
-  return rows.map(rowToVerification);
+  return attributedRows(ticketId, projectDir, gateName, commitSha, declines);
 }
 
 // FG-440: unfiltered by commit_sha — reconcile-collect.ts's ancestry-based
@@ -148,16 +265,10 @@ export function queryHostVerificationRows(
 export function queryHostVerificationRowsForGate(
   ticketId: string,
   projectDir: string,
-  gateName: string
+  gateName: string,
+  declines: LegacyDeclineSink = null
 ): HostVerificationRow[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM host_verifications
-       WHERE ticket_id = ? AND project_dir = ? AND gate_name = ?
-       ORDER BY recorded_at ASC`
-    )
-    .all(ticketId, canonicalizeProjectDir(projectDir), gateName) as DbRow[];
-  return rows.map(rowToVerification);
+  return attributedRows(ticketId, projectDir, gateName, null, declines);
 }
 
 // ── FG-474: covering-evidence lookup for the deterministic gate ────────────────
@@ -402,6 +513,47 @@ export type GateEvidence =
   | { source: "host_row"; row: HostVerificationRow; rows: HostVerificationRow[] }
   | { source: "ci"; sha: string; checkUrl?: string; checks: { context: string; url?: string }[] };
 
+// ── FG-693: surfacing a refused legacy row ──────────────────────────────────
+//
+// A declined NULL-canonical row is invisible by construction: the lookup simply
+// does not find covering evidence and the gate runs again. To an operator who
+// remembers the gate passing, that is an unexplained repeat. So the counts are
+// reported, per reason code, at the moment they cost something.
+//
+// This channel is deliberately WRITE-FREE — no event row, no opportunistic
+// backfill. findCoveringGateEvidence is called from read-only-handle contexts,
+// and a read that sometimes writes would fail on exactly the aged stores this
+// mechanism exists to serve.
+
+export type LegacyDeclineReport = {
+  ticketId: string;
+  /** the caller's spelling, as given. */
+  projectDir: string;
+  declines: LegacyDeclineTally;
+  /** one operator-facing line, already assembled. */
+  message: string;
+};
+
+export type LegacyDeclineReporter = (report: LegacyDeclineReport) => void;
+
+function reportLegacyDeclines(
+  opts: { ticketId: string; projectDir: string; onLegacyDeclines?: LegacyDeclineReporter },
+  declines: LegacyDeclineTally
+): void {
+  if (legacyDeclineTotal(declines) === 0) return;
+  const message =
+    `forge: ${describeLegacyDeclines(declines)} host_verifications row(s) for ${opts.ticketId} ` +
+    `could not be attributed to ${describeIdentity(opts.projectDir)} — they predate canonical ` +
+    `project identity and their recorded path cannot be proven to name this checkout, so the ` +
+    `gate is being re-run rather than reused`;
+  const report: LegacyDeclineReport = { ticketId: opts.ticketId, projectDir: opts.projectDir, declines, message };
+  if (opts.onLegacyDeclines) {
+    opts.onLegacyDeclines(report);
+    return;
+  }
+  console.error(message);
+}
+
 const SHA_LOOKUP_RE = /^[0-9a-f]{7,40}$/i;
 
 // FG-501: shared by findCoveringGateEvidence AND probeCiGateStatus so the
@@ -443,6 +595,7 @@ export function findCoveringGateEvidence(opts: {
   sha: string;
   command: string;
   checkStatusProvider?: CheckStatusProvider;
+  onLegacyDeclines?: LegacyDeclineReporter;
 }): GateEvidence | null {
   if (!SHA_LOOKUP_RE.test(opts.sha)) return null;
 
@@ -450,9 +603,10 @@ export function findCoveringGateEvidence(opts: {
   // derived gate list at this exact sha — stops at the first uncovered member,
   // never partially credits a fast-tier-only row against a broader list.
   const gateList = deriveRequiredGateList(opts.projectDir, opts.command);
+  const declines = newLegacyDeclineTally();
   const coveringRows: HostVerificationRow[] = [];
   for (const gate of gateList) {
-    const rows = queryHostVerificationRowsForGate(opts.ticketId, opts.projectDir, gate);
+    const rows = queryHostVerificationRowsForGate(opts.ticketId, opts.projectDir, gate, declines);
     const row = rows.find((r) => r.commitSha === opts.sha && r.command === gate && r.exitCode === 0);
     if (!row) break;
     coveringRows.push(row);
@@ -460,6 +614,12 @@ export function findCoveringGateEvidence(opts: {
   if (coveringRows.length === gateList.length) {
     return { source: "host_row", row: coveringRows[0]!, rows: coveringRows };
   }
+
+  // FG-693: the host-row branch did not cover, and some NULL-canonical rows were
+  // refused on the way. This is the point where that costs something — the gate
+  // is about to be re-run (or re-minted from CI) — so say WHY, rather than
+  // leaving an operator with an unexplained repeat of a gate they know passed.
+  reportLegacyDeclines(opts, declines);
 
   // forge is host-global — opts.projectDir is an ARBITRARY managed project, so
   // the only thing that can prove a green REQUIRED_CI_CHECK_CONTEXT ran
