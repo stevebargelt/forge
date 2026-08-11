@@ -2,9 +2,9 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { makeInMemoryDb, setDbForTest, applyMigrations } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
 import {
@@ -27,14 +27,30 @@ import type { Run } from "../types/index.js";
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 
+// FG-693: project identity is decided by asking the FILESYSTEM, so a store test
+// needs a real directory rather than a `/home/test/project` placeholder — a
+// spelling nothing can resolve is UNRESOLVED, and an unproven identity never
+// satisfies gate evidence (that refusal is itself covered, below). Two sibling
+// checkouts under one root, so "distinct projects" cases stay honest: their
+// lexical paths share a prefix and only their physical identity separates them.
+let fixtureRoot: string;
+let PROJECT_DIR: string;
+let OTHER_DIR: string;
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
+  fixtureRoot = mkdtempSync(join(tmpdir(), "hv-identity-"));
+  PROJECT_DIR = join(fixtureRoot, "checkout");
+  OTHER_DIR = join(fixtureRoot, "checkout-other");
+  mkdirSync(PROJECT_DIR);
+  mkdirSync(OTHER_DIR);
 });
 
 afterEach(() => {
   setDbForTest(prev as DatabaseInstance);
   db.close();
+  rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
 const SAMPLE_RUN: Run = {
@@ -50,7 +66,7 @@ const SAMPLE_RUN: Run = {
 test("insertHostVerification: stores a row and queryHostVerificationRows retrieves it (without runId)", () => {
   insertHostVerification({
     ticketId: "FG-001",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -58,11 +74,11 @@ test("insertHostVerification: stores a row and queryHostVerificationRows retriev
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-001", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-001", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 1);
   const row = rows[0]!;
   assert.equal(row.ticketId, "FG-001");
-  assert.equal(row.projectDir, "/home/test/project");
+  assert.equal(row.projectDir, PROJECT_DIR);
   assert.equal(row.commitSha, "abc123");
   assert.equal(row.gateName, "npm run test:all");
   assert.equal(row.command, "npm run test:all");
@@ -76,7 +92,7 @@ test("insertHostVerification: runId stored correctly when referencing an existin
   insertRun(SAMPLE_RUN);
   insertHostVerification({
     ticketId: "FG-001-B",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -85,7 +101,7 @@ test("insertHostVerification: runId stored correctly when referencing an existin
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-001-B", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-001-B", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.runId, SAMPLE_RUN.id);
 });
@@ -93,7 +109,7 @@ test("insertHostVerification: runId stored correctly when referencing an existin
 test("insertHostVerification: runId defaults to null when not provided", () => {
   insertHostVerification({
     ticketId: "FG-002",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -101,7 +117,7 @@ test("insertHostVerification: runId defaults to null when not provided", () => {
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-002", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-002", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.runId, null);
 });
@@ -111,7 +127,7 @@ test("insertHostVerification: runId defaults to null when not provided", () => {
 test("queryHostVerificationRows: empty when ticket_id does not match", () => {
   insertHostVerification({
     ticketId: "FG-003",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -119,14 +135,14 @@ test("queryHostVerificationRows: empty when ticket_id does not match", () => {
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-WRONG", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-WRONG", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 0, "must return empty when ticket_id does not match");
 });
 
 test("queryHostVerificationRows: empty when project_dir does not match", () => {
   insertHostVerification({
     ticketId: "FG-004",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -134,14 +150,14 @@ test("queryHostVerificationRows: empty when project_dir does not match", () => {
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-004", "/different/dir", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-004", OTHER_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 0, "must return empty when project_dir does not match");
 });
 
 test("queryHostVerificationRows: empty when commit_sha does not match", () => {
   insertHostVerification({
     ticketId: "FG-005",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -149,14 +165,14 @@ test("queryHostVerificationRows: empty when commit_sha does not match", () => {
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-005", "/home/test/project", "different-sha", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-005", PROJECT_DIR, "different-sha", "npm run test:all");
   assert.equal(rows.length, 0, "must return empty when commit_sha does not match");
 });
 
 test("queryHostVerificationRows: empty when gate_name does not match", () => {
   insertHostVerification({
     ticketId: "FG-006",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -164,7 +180,7 @@ test("queryHostVerificationRows: empty when gate_name does not match", () => {
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-006", "/home/test/project", "abc123", "make test");
+  const rows = queryHostVerificationRows("FG-006", PROJECT_DIR, "abc123", "make test");
   assert.equal(rows.length, 0, "must return empty when gate_name does not match");
 });
 
@@ -173,7 +189,7 @@ test("queryHostVerificationRows: empty when gate_name does not match", () => {
 test("queryHostVerificationRows: returns multiple rows in recorded_at ASC order", () => {
   insertHostVerification({
     ticketId: "FG-007",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -182,7 +198,7 @@ test("queryHostVerificationRows: returns multiple rows in recorded_at ASC order"
   });
   insertHostVerification({
     ticketId: "FG-007",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -190,7 +206,7 @@ test("queryHostVerificationRows: returns multiple rows in recorded_at ASC order"
     recordedAt: "2026-01-01T02:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-007", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-007", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 2);
   assert.equal(rows[0]!.recordedAt, "2026-01-01T01:00:00Z", "first row must be the earlier one (ASC order)");
   assert.equal(rows[0]!.exitCode, 1);
@@ -201,7 +217,7 @@ test("queryHostVerificationRows: returns multiple rows in recorded_at ASC order"
 test("queryHostVerificationRows: rows for different keys are independent — each key only returns its own rows", () => {
   insertHostVerification({
     ticketId: "FG-008",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "sha-a",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -210,7 +226,7 @@ test("queryHostVerificationRows: rows for different keys are independent — eac
   });
   insertHostVerification({
     ticketId: "FG-009",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "sha-b",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -218,8 +234,8 @@ test("queryHostVerificationRows: rows for different keys are independent — eac
     recordedAt: "2026-01-01T01:00:00Z",
   });
 
-  const rowsA = queryHostVerificationRows("FG-008", "/home/test/project", "sha-a", "npm run test:all");
-  const rowsB = queryHostVerificationRows("FG-009", "/home/test/project", "sha-b", "npm run test:all");
+  const rowsA = queryHostVerificationRows("FG-008", PROJECT_DIR, "sha-a", "npm run test:all");
+  const rowsB = queryHostVerificationRows("FG-009", PROJECT_DIR, "sha-b", "npm run test:all");
 
   assert.equal(rowsA.length, 1);
   assert.equal(rowsA[0]!.ticketId, "FG-008");
@@ -230,7 +246,7 @@ test("queryHostVerificationRows: rows for different keys are independent — eac
 test("queryHostVerificationRows: non-zero exit code persisted and retrieved correctly", () => {
   insertHostVerification({
     ticketId: "FG-010",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -238,7 +254,7 @@ test("queryHostVerificationRows: non-zero exit code persisted and retrieved corr
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-010", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-010", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.exitCode, 2);
 });
@@ -248,7 +264,7 @@ test("queryHostVerificationRows: non-zero exit code persisted and retrieved corr
 test("insertHostVerification: a dangling run_id FK is retried once with run_id nulled — the real result is still recorded", () => {
   insertHostVerification({
     ticketId: "FG-011",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "abc123",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -257,7 +273,7 @@ test("insertHostVerification: a dangling run_id FK is retried once with run_id n
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-011", "/home/test/project", "abc123", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-011", PROJECT_DIR, "abc123", "npm run test:all");
   assert.equal(rows.length, 1, "the real gate result must still be recorded despite the dangling run_id FK");
   assert.equal(rows[0]!.runId, null, "retried with run_id nulled");
   assert.equal(rows[0]!.exitCode, 0);
@@ -269,7 +285,7 @@ test("insertHostVerification: a non-FK DB error surfaces (is thrown), not silent
       // A NOT NULL column forced null via an intentional type violation —
       // a DB error that is NOT the dangling run_id FK case the retry exists for.
       ticketId: null as unknown as string,
-      projectDir: "/home/test/project",
+      projectDir: PROJECT_DIR,
       commitSha: "abc123",
       gateName: "npm run test:all",
       command: "npm run test:all",
@@ -278,7 +294,7 @@ test("insertHostVerification: a non-FK DB error surfaces (is thrown), not silent
     });
   }, "a non-FK DB error must surface as a real error, not be assumed to be the dangling-run_id case and retried away");
 
-  const rows = queryHostVerificationRowsForGate("FG-012", "/home/test/project", "npm run test:all");
+  const rows = queryHostVerificationRowsForGate("FG-012", PROJECT_DIR, "npm run test:all");
   assert.equal(rows.length, 0, "the failed insert must not have silently landed a row under some other key");
 });
 
@@ -287,7 +303,7 @@ test("insertHostVerification: a non-FK DB error surfaces (is thrown), not silent
 test("queryHostVerificationRowsForGate: returns rows across different commit shas for the same ticket+project+gate", () => {
   insertHostVerification({
     ticketId: "FG-013",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "sha-early",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -296,7 +312,7 @@ test("queryHostVerificationRowsForGate: returns rows across different commit sha
   });
   insertHostVerification({
     ticketId: "FG-013",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "sha-later",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -304,7 +320,7 @@ test("queryHostVerificationRowsForGate: returns rows across different commit sha
     recordedAt: "2026-01-01T01:00:00Z",
   });
 
-  const rows = queryHostVerificationRowsForGate("FG-013", "/home/test/project", "npm run test:all");
+  const rows = queryHostVerificationRowsForGate("FG-013", PROJECT_DIR, "npm run test:all");
   assert.equal(rows.length, 2, "unfiltered by commit_sha — both rows for this ticket+project+gate are returned");
   assert.deepEqual(rows.map((r) => r.commitSha).sort(), ["sha-early", "sha-later"]);
 });
@@ -312,7 +328,7 @@ test("queryHostVerificationRowsForGate: returns rows across different commit sha
 test("queryHostVerificationRowsForGate: excludes rows for a different gate_name", () => {
   insertHostVerification({
     ticketId: "FG-014",
-    projectDir: "/home/test/project",
+    projectDir: PROJECT_DIR,
     commitSha: "sha-a",
     gateName: "npm run verify",
     command: "npm run verify",
@@ -320,24 +336,34 @@ test("queryHostVerificationRowsForGate: excludes rows for a different gate_name"
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRowsForGate("FG-014", "/home/test/project", "npm run test:all");
+  const rows = queryHostVerificationRowsForGate("FG-014", PROJECT_DIR, "npm run test:all");
   assert.equal(rows.length, 0);
 });
 
-// ── FG-431: projectDir canonicalization on BOTH the insert and lookup side ────
+// ── FG-431 / FG-693: a row recorded under one spelling is found under another ─
 //
 // insertHostVerification (backing the public `forge record-host-verification`
 // CLI command) can be handed a relative or otherwise non-canonical project
-// path. Reconcile's lookup exact-matches project_dir, so a row recorded under
-// an equivalent-but-differently-spelled path must still resolve — otherwise
-// legitimate evidence silently becomes unmatchable and reconcile falsely
-// refuses with host_verification_not_recorded.
+// path, and reconcile then looks the row up under whatever spelling IT holds.
+// A row recorded under an equivalent-but-differently-spelled path must still be
+// found — otherwise legitimate evidence silently becomes unmatchable and
+// reconcile falsely refuses with host_verification_not_recorded.
+//
+// FG-693 keeps that guarantee and changes HOW it is delivered, in two ways the
+// assertions below now pin. (1) Equivalence is decided by PROVEN filesystem
+// identity, not by `path.resolve` — so a symlinked parent and the /tmp-vs-
+// /private/tmp class of alias are covered, which lexical resolution never was.
+// (2) The stored project_dir is NO LONGER REWRITTEN: the caller's bytes are
+// audit evidence and are preserved verbatim, with the proven identity kept
+// beside them in its own column. FG-431's old assertion that the stored path
+// "is itself canonicalized" was the audit-evidence rewrite FG-693 removes.
 
-test("FG-431: a row recorded with a non-canonical projectDir (redundant segments) is found by queryHostVerificationRows using the canonical absolute path", () => {
-  const nonCanonical = "/home/test/other/../project";
-  const canonical = "/home/test/project";
+test("FG-431/FG-693: a row recorded with a non-canonical projectDir (redundant segments) is found by queryHostVerificationRows using the canonical absolute path", () => {
+  // Built by concatenation, not join(): join() would normalize the `..` away and
+  // the fixture would silently stop exercising a non-canonical spelling.
+  const nonCanonical = `${fixtureRoot}/checkout-other/../checkout`;
   // Confirm the fixture actually exercises a non-canonical path, not a no-op.
-  assert.notEqual(nonCanonical, canonical);
+  assert.notEqual(nonCanonical, PROJECT_DIR);
 
   insertHostVerification({
     ticketId: "FG-015",
@@ -349,15 +375,15 @@ test("FG-431: a row recorded with a non-canonical projectDir (redundant segments
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRows("FG-015", canonical, "sha-a", "npm run test:all");
+  const rows = queryHostVerificationRows("FG-015", PROJECT_DIR, "sha-a", "npm run test:all");
   assert.equal(rows.length, 1, "a non-canonical projectDir at insert must resolve to the same row the canonical lookup expects");
-  assert.equal(rows[0]!.projectDir, canonical, "the stored projectDir is itself canonicalized");
+  assert.equal(rows[0]!.projectDir, nonCanonical, "FG-693: the caller's bytes are audit evidence and are stored VERBATIM, never rewritten");
+  assert.equal(rows[0]!.projectDirCanonical, realpathSync(PROJECT_DIR), "the PROVEN identity is what the lookup matched on");
 });
 
-test("FG-431: a row recorded with an equivalent non-canonical projectDir (trailing slash) is found by queryHostVerificationRowsForGate", () => {
-  const nonCanonical = "/home/test/project/";
-  const canonical = "/home/test/project";
-  assert.notEqual(nonCanonical, canonical);
+test("FG-431/FG-693: a row recorded with an equivalent non-canonical projectDir (trailing slash) is found by queryHostVerificationRowsForGate", () => {
+  const nonCanonical = `${PROJECT_DIR}/`;
+  assert.notEqual(nonCanonical, PROJECT_DIR);
 
   insertHostVerification({
     ticketId: "FG-016",
@@ -369,15 +395,102 @@ test("FG-431: a row recorded with an equivalent non-canonical projectDir (traili
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRowsForGate("FG-016", canonical, "npm run test:all");
+  const rows = queryHostVerificationRowsForGate("FG-016", PROJECT_DIR, "npm run test:all");
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.projectDir, canonical);
+  assert.equal(rows[0]!.projectDir, nonCanonical, "stored verbatim, trailing separator and all");
+});
+
+test("FG-693: a row recorded through a SYMLINKED PARENT is found under the physical spelling — the alias class path.resolve never covered", () => {
+  const aliasRoot = join(fixtureRoot, "alias-root");
+  symlinkSync(realpathSync(fixtureRoot), aliasRoot);
+  const aliasSpelling = join(aliasRoot, "checkout");
+
+  insertHostVerification({
+    ticketId: "FG-693-A",
+    projectDir: aliasSpelling,
+    commitSha: "sha-alias",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRowsForGate("FG-693-A", PROJECT_DIR, "npm run test:all");
+  assert.equal(rows.length, 1, "a symlinked-parent spelling and the physical spelling name ONE checkout");
+  assert.equal(rows[0]!.projectDir, aliasSpelling, "the operator's spelling survives for display");
+  assert.equal(rows[0]!.projectDirCanonical, realpathSync(PROJECT_DIR));
+
+  // …and the reverse direction: recorded physically, looked up through the alias.
+  const reverse = queryHostVerificationRowsForGate("FG-693-A", aliasSpelling, "npm run test:all");
+  assert.equal(reverse.length, 1, "identity is symmetric — either spelling finds the row");
+});
+
+test("FG-693: a RELATIVE spelling of the same checkout finds the row (resolved against the process cwd, like every other caller)", () => {
+  const relativeSpelling = relative(process.cwd(), PROJECT_DIR);
+  assert.notEqual(relativeSpelling, PROJECT_DIR);
+
+  insertHostVerification({
+    ticketId: "FG-693-R",
+    projectDir: PROJECT_DIR,
+    commitSha: "sha-rel",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRowsForGate("FG-693-R", relativeSpelling, "npm run test:all");
+  assert.equal(rows.length, 1, "a relative spelling of the same tree must find the row recorded under the absolute one");
+});
+
+test("FG-693: an UNRESOLVABLE projectDir records a real row with a NULL canonical identity — and never satisfies a lookup, not even under the byte-identical spelling", () => {
+  const gone = join(fixtureRoot, "deleted-worktree");
+
+  insertHostVerification({
+    ticketId: "FG-693-U",
+    projectDir: gone,
+    commitSha: "sha-gone",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const raw = db.prepare("SELECT project_dir, project_dir_canonical FROM host_verifications WHERE ticket_id = ?").get("FG-693-U") as {
+    project_dir: string;
+    project_dir_canonical: string | null;
+  };
+  assert.equal(raw.project_dir, gone, "the result really was recorded — the row exists with its path verbatim");
+  assert.equal(raw.project_dir_canonical, null, "nothing proved this path, so the canonical column is NULL — never a lexical guess");
+
+  const rows = queryHostVerificationRowsForGate("FG-693-U", gone, "npm run test:all");
+  assert.equal(
+    rows.length,
+    0,
+    "byte equality of two UNPROVEN spellings proves nothing — gate evidence is the ACTING class and refuses rather than guessing"
+  );
+});
+
+test("FG-693: distinct physical checkouts whose lexical paths share a prefix stay distinct (negative control)", () => {
+  insertHostVerification({
+    ticketId: "FG-693-N",
+    projectDir: PROJECT_DIR,
+    commitSha: "sha-n",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  assert.equal(basename(OTHER_DIR).startsWith(basename(PROJECT_DIR)), true, "the fixture really does share a lexical prefix");
+  assert.equal(queryHostVerificationRowsForGate("FG-693-N", OTHER_DIR, "npm run test:all").length, 0);
+  assert.equal(queryHostVerificationRowsForGate("FG-693-N", fixtureRoot, "npm run test:all").length, 0, "the parent is not the checkout either");
 });
 
 test("FG-431: canonicalization does not loosen matching — a genuinely different project still does not match", () => {
   insertHostVerification({
     ticketId: "FG-017",
-    projectDir: "/home/test/project-a",
+    projectDir: PROJECT_DIR,
     commitSha: "sha-c",
     gateName: "npm run test:all",
     command: "npm run test:all",
@@ -385,7 +498,7 @@ test("FG-431: canonicalization does not loosen matching — a genuinely differen
     recordedAt: "2026-01-01T00:00:00Z",
   });
 
-  const rows = queryHostVerificationRowsForGate("FG-017", "/home/test/project-b", "npm run test:all");
+  const rows = queryHostVerificationRowsForGate("FG-017", OTHER_DIR, "npm run test:all");
   assert.equal(rows.length, 0, "a different project directory must never match, canonicalized or not");
 });
 
@@ -507,7 +620,7 @@ test("projectCiWorkflowJobIds: unparseable YAML with no other matching workflow 
 // ── FG-474: findCoveringGateEvidence / describeGateEvidence ────────────────────
 //
 // projectDir here is a REAL temp directory with a matching .github/workflows/ci.yml
-// (workflow "CI", job "test", running GATE_CMD) — not the pre-fix "/home/test/project"
+// (workflow "CI", job "test", running GATE_CMD) — not the pre-fix PROJECT_DIR
 // placeholder — so these tests exercise the real per-project pairing gate end to end,
 // not just the provider dispatch downstream of it.
 
@@ -1186,16 +1299,22 @@ test("applyMigrations: a pre-FG-474 host_verifications row (no source/ci_url col
   db.prepare(
     `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("FG-720", "/home/test/project", "abc123", "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+    // The PHYSICAL spelling: this row predates project_dir_canonical, so FG-693
+    // reads it under the legacy rule, and only a spelling that demonstrably
+    // traversed no symlink is attributable. (On darwin the mkdtemp spelling is
+    // the /var alias of /private/var and would be declined — see
+    // fg693-legacy-attribution.integration.test.ts, which owns that case.)
+  ).run("FG-720", realpathSync(PROJECT_DIR), "abc123", "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
 
   applyMigrations(db);
 
   const prev = setDbForTest(db);
   try {
-    const rows = queryHostVerificationRows("FG-720", "/home/test/project", "abc123", "npm run test:all");
+    const rows = queryHostVerificationRows("FG-720", PROJECT_DIR, "abc123", "npm run test:all");
     assert.equal(rows.length, 1, "the pre-existing row must survive the migration");
     assert.equal(rows[0]!.source, "host", "a pre-FG-474 row must backfill to source='host'");
     assert.equal(rows[0]!.ciUrl, null, "a pre-FG-474 row must backfill to ci_url=null");
+    assert.equal(rows[0]!.projectDirCanonical, null, "FG-693: a pre-change row's identity was never proven — the column stays NULL, unbackfilled");
   } finally {
     setDbForTest(prev as DatabaseInstance);
   }
