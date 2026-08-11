@@ -87,7 +87,8 @@ import { nowIso } from "../util/ids.js";
 import { hostConfigPath } from "../util/paths.js";
 import { safeLockfileHash } from "./dependency-provisioning.js";
 import { controlRuntimeProfile } from "./launch.js";
-import { forgeSourceRoot, isSelfHostDispatch } from "./self-host-guard.js";
+import { classifySelfHostDispatch, forgeSourceRootIdentity } from "./self-host-guard.js";
+import { describeIdentity } from "../util/path-identity.js";
 import {
   hostReadinessSetupTimeoutMs,
   readReadinessRecord,
@@ -105,7 +106,7 @@ import {
  *  ticket exists to prevent. */
 export type HostReadinessRefusalReason =
   | "no_setup_contract"          // no operator-declared setup command and no lockfile to derive one from — forge refuses to guess
-  | "self_host_workspace"        // the workspace overlaps the forge source root this process is executing from — an install there would delete forge's own live bindings
+  | "self_host_workspace"        // the workspace overlaps the forge source root this process is executing from, OR could not be PROVEN not to (FG-693) — an install there would delete forge's own live bindings
   | "runtime_unresolved"         // the intended verification interpreter could not be resolved/probed, or the workspace's ABI requirement could not be established
   | "runtime_abi_mismatch"       // it resolved, but its ABI is not the one the workspace requires (checkAbi)
   | "ambiguous_setup_contract"   // an operator-declared setup contract forge will not guess the argv of — refused, never split and mis-executed
@@ -185,7 +186,11 @@ export type HostReadinessDeps = {
   porcelain?: (dir: string) => string;
   lock?: ReadinessLockDeps;
   /** The forge source root the self-host refusal compares against. Injectable so a
-   *  test can stage an overlapping workspace without running from one. */
+   *  test can stage an overlapping workspace without running from one.
+   *
+   *  FG-693: this is a SPELLING, and identity is re-derived from it. A path that
+   *  does not exist on disk therefore refuses (unproven), it does not compare as
+   *  separate — a stand-in root for "not the forge" must be a real directory. */
   sourceRoot?: string;
 };
 
@@ -747,15 +752,39 @@ export async function prepareHostVerification(
   // readiness installs into the workspace it was handed, and no worktree setting
   // makes an rm -rf of forge's live bindings safe. There is deliberately NO
   // acknowledged-override escape hatch here for the same reason.
-  const sourceRoot = deps.sourceRoot ?? forgeSourceRoot();
-  if (isSelfHostDispatch(workspace, sourceRoot)) {
-    return refuse(
-      req, "self_host_workspace", "(none)",
-      `The workspace overlaps the forge source root this process is executing from (${sourceRoot}). Preparing it ` +
-        `would run an install that deletes and rebuilds the node_modules this forge — and every concurrent forge on ` +
-        `this host — is loading its native bindings from. Prepare a workspace outside the forge checkout, or install ` +
-        `dependencies there yourself before running verification.`,
-    );
+  //
+  // FG-693: the comparison is the ONE identity contract's, and it is THREE-VALUED.
+  // Only a proven-separate answer proceeds. An UNPROVEN identity — the workspace
+  // or the source root did not resolve — refuses too, and refuses LOUDLY about
+  // which side: an unproven path is not evidence of a separate tree, and the
+  // asymmetry here is total (a wrong refusal costs one skipped preparation; a
+  // wrong permission runs `npm ci` over the bindings of every live forge on this
+  // host). Note the source root can genuinely be unresolvable — assetRoot() names
+  // a release tree a concurrent promote can replace underneath a running forge —
+  // which is exactly the moment when installing anywhere near it is worst.
+  const sourceRoot = deps.sourceRoot ?? forgeSourceRootIdentity();
+  const relation = classifySelfHostDispatch(workspace, sourceRoot);
+  if (relation.kind !== "distinct") {
+    const rootShown = describeIdentity(relation.sourceRoot);
+    const detail =
+      relation.kind === "unproven"
+        ? `The workspace could not be PROVEN to be outside the forge source root this process is executing from ` +
+          `(source root: ${rootShown}; workspace: ${describeIdentity(relation.project)}). The ` +
+          `${relation.unresolved === "both" ? "workspace path and the forge source root" : relation.unresolved === "project" ? "workspace path" : "forge source root"} ` +
+          `did not resolve, so forge has no identity to compare — and an unresolved spelling is not evidence of a ` +
+          (relation.unresolved === "source-root" || relation.unresolved === "both"
+            ? `separate tree. An unresolvable forge source root means the installation this process runs from moved ` +
+              `or was replaced (a concurrent release promote does this), which is the worst moment to install ` +
+              `anything near it. `
+            : `separate tree. `) +
+          `Preparing anyway could run an install that deletes and rebuilds the node_modules this forge — and every ` +
+          `concurrent forge on this host — is loading its native bindings from. Prepare a workspace that resolves ` +
+          `and sits outside the forge checkout, or install dependencies there yourself before running verification.`
+        : `The workspace overlaps the forge source root this process is executing from (${rootShown}). Preparing it ` +
+          `would run an install that deletes and rebuilds the node_modules this forge — and every concurrent forge on ` +
+          `this host — is loading its native bindings from. Prepare a workspace outside the forge checkout, or install ` +
+          `dependencies there yourself before running verification.`;
+    return refuse(req, "self_host_workspace", "(none)", detail);
   }
 
   if (req.coveredCommandSet.length === 0) {
