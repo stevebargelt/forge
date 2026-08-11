@@ -98,12 +98,24 @@ function recordingDeps(calls: SetupCall[], extra: HostReadinessDeps = {}): HostR
   };
 }
 
+/** A stand-in forge source root for every test that is not ABOUT the self-host
+ *  guard. FG-693: it must be a REAL directory. The guard's comparison is
+ *  three-valued now, and a source root that does not exist on disk has no
+ *  identity to compare — so it refuses as UNPROVEN rather than comparing as
+ *  separate. The old literal path was never created, which made every case below
+ *  depend on a lexical compare of two spellings. */
+function notTheForgeRoot(): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg566-not-the-forge-root-")));
+  dirs.push(dir);
+  return dir;
+}
+
 function prepare(ws: string, deps: HostReadinessDeps): Promise<HostReadinessOutcome> {
   return prepareHostVerification(
     { workspace: ws, treeSha: "deadbeef", coveredCommandSet: ["npm run test:unit"], label: "test" },
     // Every test that is not ABOUT the self-host guard must be outside the forge
     // source root, or the guard (correctly) refuses first.
-    { sourceRoot: join(tmpdir(), "fg566-not-the-forge-root"), ...deps },
+    { sourceRoot: notTheForgeRoot(), ...deps },
   );
 }
 

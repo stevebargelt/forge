@@ -38,11 +38,20 @@ let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 let savedApiKey: string | undefined;
 
+/** The project dirs the two secrets-discipline cases dispatch against.
+ *  FG-693: they must EXIST. The self-host guard's comparison is three-valued
+ *  now — a project path the filesystem will not resolve has no identity to
+ *  compare against the forge source root, so the dispatch is refused as
+ *  UNPROVEN before it ever reaches the auth handling these cases are about.
+ *  Nothing in either test depends on the path being absent. */
+const SECRETS_PROJECTS = ["/tmp/fk-secrets-project", "/tmp/fk-secrets-expired-project"] as const;
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
   savedApiKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  for (const dir of SECRETS_PROJECTS) mkdirSync(dir, { recursive: true });
 });
 
 afterEach(() => {
