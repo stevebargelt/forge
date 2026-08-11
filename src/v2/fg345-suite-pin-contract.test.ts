@@ -30,6 +30,9 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { isWorktreeModeEnabled } from "./worktree-lifecycle.js";
 
@@ -44,6 +47,31 @@ const PRELOAD_NO_WORKTREES = process.env.FORGE_NO_WORKTREES;
 
 const ENV_VARS = ["FORGE_WORKTREES", "FORGE_NO_WORKTREES"] as const;
 const savedEnv: Partial<Record<(typeof ENV_VARS)[number], string>> = {};
+
+function integrationTestsUnder(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return integrationTestsUnder(path);
+    return entry.name.endsWith(".integration.test.ts") ? [path] : [];
+  });
+}
+
+function clearsPinnedWorktreeModeWithoutRepinning(source: string): boolean {
+  const listName = Array.from(source.matchAll(/const\s+(\w+)\s*=\s*\[([\s\S]*?)\]\s+as const;/g))
+    .find((match) => (match[2] ?? "").includes('"FORGE_WORKTREES"'))?.[1];
+  if (listName === undefined) return false;
+  const setupMatch = source.match(new RegExp(
+    `beforeEach\\(\\(\\) => \\{([\\s\\S]*?)\\n\\}\\);`,
+  ));
+  if (setupMatch === null) return false;
+
+  const setup = setupMatch[1] ?? "";
+  const clearsList = new RegExp(
+    `for \\(const \\w+ of ${listName}\\) \\{[\\s\\S]*?delete process\\.env\\[\\w+\\];[\\s\\S]*?\\}`,
+  ).test(setup);
+  const repins = /process\.env(?:\["FORGE_WORKTREES"\]|\.FORGE_WORKTREES)\s*=\s*"0"/.test(setup);
+  return clearsList && !repins;
+}
 
 function setPlatform(p: string): void {
   Object.defineProperty(process, "platform", { value: p, configurable: true });
@@ -114,4 +142,17 @@ test("fg345 (pin-3): deleting the pin inside a test restores the PLATFORM defaul
 
   setPlatform("linux");
   assert.equal(isWorktreeModeEnabled(), false, "with the pin removed, a non-darwin host resolves OFF — the two hosts disagree");
+});
+
+test("fg345 (pin-4): integration setup that clears a saved worktree env list re-pins explicit off", () => {
+  const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const offenders = integrationTestsUnder(srcRoot)
+    .filter((path) => clearsPinnedWorktreeModeWithoutRepinning(readFileSync(path, "utf8")))
+    .map((path) => path.slice(srcRoot.length + 1));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    "a test setup may clear FORGE_NO_WORKTREES and FORGE_WORKTREE_IGNORE_DIRTY, but clearing a saved FORGE_WORKTREES list must immediately restore the preload's explicit \"0\" pin",
+  );
 });

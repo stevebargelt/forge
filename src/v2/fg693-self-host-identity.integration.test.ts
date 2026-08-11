@@ -182,6 +182,7 @@ beforeEach(() => {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
+  process.env.FORGE_WORKTREES = "0";
   process.env["ANTHROPIC_API_KEY"] = "sk-stub";
   ensureRuntime();
   stderr = [];

@@ -155,6 +155,7 @@ beforeEach(() => {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
+  process.env.FORGE_WORKTREES = "0";
   // The stub runtime declares auth.mode=apikey; buildDockerArgs refuses to
   // assemble a container without the credential, before the stubbed exec runs.
   process.env["ANTHROPIC_API_KEY"] = "sk-stub";

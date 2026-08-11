@@ -161,6 +161,7 @@ beforeEach(() => {
     savedWorktreeEnv[k] = process.env[k];
     delete process.env[k];
   }
+  process.env.FORGE_WORKTREES = "0";
 });
 
 afterEach(() => {
