@@ -16,8 +16,7 @@
 // learn its own identity, nor the reverse. So it is its own module, and both
 // import it.
 
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { compareIdentity, describeIdentity } from "../util/path-identity.js";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfString } from "../util/content-digest.js";
 import { isValidAdapterStamp, type AdapterStamp } from "./operator-workflows.js";
@@ -63,6 +62,24 @@ export function currentAdapterStamp(): AdapterStamp {
   return releaseAdapterStamp(assetRoot()) ?? devAdapterStamp();
 }
 
+/** WHY a root does or does not have a stamp this forge can name. FG-693 splits the
+ *  two ways of having no answer, because they are not the same claim:
+ *
+ *   `foreign-tree`   PROVEN a different tree from the running one, and carrying no
+ *                    manifest to name itself. We looked, and there is nothing here.
+ *   `indeterminate`  one of the two spellings did not resolve, so NOTHING was
+ *                    compared. We did not look, and must not imply that we did. */
+export type AdapterStampBasis = "release-manifest" | "running-tree" | "foreign-tree" | "indeterminate";
+
+export type AdapterStampResolution = {
+  /** null whenever the basis is not a naming one — never a guess. */
+  stamp: AdapterStamp | null;
+  basis: AdapterStampBasis;
+  /** Operator-facing prose. An unresolved spelling appears here LABELLED (via the
+   *  contract's describeIdentity) and never flows back into a comparison. */
+  detail: string;
+};
+
 /** The stamp the forge at `root` renders adapters with — for a caller comparing a
  *  project against a release that is NOT the one executing. FG-253 step 8's launch
  *  check needs this: an adapter can bind its instruction surface out of a PUBLISHED
@@ -74,16 +91,59 @@ export function currentAdapterStamp(): AdapterStamp {
  *  is its own — so for somebody else's dev checkout there is nothing here to compute.
  *  Returning the running stamp instead would make a drift detector report agreement
  *  with a generation it never looked at, which is the failure this function exists to
- *  stop. */
-export function adapterStampForAssetRoot(root: string): AdapterStamp | null {
+ *  stop.
+ *
+ *  FG-693: and NEITHER may an unresolvable spelling produce that agreement. The
+ *  private isSameTree() this replaced was the try-realpath-catch-resolve shape — on a
+ *  realpath failure it compared two LEXICAL guesses, so a `root` that no longer
+ *  existed but spelled out to the running tree's path claimed the running dev stamp:
+ *  agreement with a generation it never looked at, arrived at from a path it never
+ *  resolved. The comparison is now the one contract's, and it is three-valued, so
+ *  "we could not tell" is its own answer rather than the "same" arm's default. */
+export function resolveAdapterStampForAssetRoot(
+  root: string,
+  // The tree this forge executes from. A PARAMETER only so a test can own both sides
+  // of the comparison — the running root is not something a test can move, and the
+  // case that matters most (a running root that does NOT resolve, because a
+  // concurrent promote replaced the release tree under it) cannot be reached from
+  // the outside otherwise. Production callers never pass it.
+  runningRoot: string = assetRoot(),
+): AdapterStampResolution {
   const release = releaseAdapterStamp(root);
-  if (release !== null) return release;
-  return isSameTree(root, assetRoot()) ? devAdapterStamp() : null;
+  if (release !== null) {
+    return { stamp: release, basis: "release-manifest", detail: `release manifest names itself ${release}` };
+  }
+  // Deliberately compareIdentity() and not one of the two boolean projections: BOTH
+  // of the non-naming answers are reported, and collapsing them would re-hide the
+  // distinction this function exists to keep.
+  switch (compareIdentity(root, runningRoot)) {
+    case "same":
+      return {
+        stamp: devAdapterStamp(),
+        basis: "running-tree",
+        detail: "the tree this forge is executing from — content identity",
+      };
+    case "different":
+      return {
+        stamp: null,
+        basis: "foreign-tree",
+        detail:
+          `${describeIdentity(root)} carries no release manifest and is not the tree this forge executes ` +
+          `from (${describeIdentity(runningRoot)}), so this process cannot render its content identity`,
+      };
+    default:
+      return {
+        stamp: null,
+        basis: "indeterminate",
+        detail:
+          `INDETERMINATE — ${describeIdentity(root)} could not be compared against ` +
+          `${describeIdentity(runningRoot)}; no generation was read and none is claimed`,
+      };
+  }
 }
 
-function isSameTree(a: string, b: string): boolean {
-  const real = (p: string): string => {
-    try { return realpathSync(p); } catch { return resolve(p); }
-  };
-  return real(a) === real(b);
+/** The projection every existing caller reads: the stamp, or null. Callers that must
+ *  tell "a different tree" from "we could not tell" take the resolution above. */
+export function adapterStampForAssetRoot(root: string): AdapterStamp | null {
+  return resolveAdapterStampForAssetRoot(root).stamp;
 }
