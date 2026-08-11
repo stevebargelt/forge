@@ -37,6 +37,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { CLAUDE_SKILLS_DIR, FORGE_HOME } from "../util/paths.js";
+import { identify, type PathIdentity } from "../util/path-identity.js";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
 import { inspectAgentProtocols, type ProtocolInspectOptions } from "./agent-protocol.js";
@@ -334,9 +335,21 @@ export type ProjectAdapterEntry = {
 };
 
 export type ProjectAdapterReport = {
-  /** the ONE project this report describes. doctor runs with projectDir: cwd(),
-   *  so it can honestly report this project and nothing else. */
+  /** the ONE project this report describes, AS THE CALLER SPELLED IT. doctor runs
+   *  with projectDir: cwd(), so it can honestly report this project and nothing else.
+   *
+   *  FG-693: DISPLAY AND AUDIT ONLY. Presentation fidelity is useful here — an
+   *  operator reading `forge doctor` wants to see the directory they typed — but this
+   *  string decides nothing. Anything comparing one report against another, or a
+   *  report against a checkout, reads `projectIdentity` below. */
   projectDir: string;
+  /** FG-693: the PROVEN filesystem identity of `projectDir`, from the one contract
+   *  (util/path-identity.ts). Resolved carries `physical` — the value two spellings of
+   *  one checkout agree on, and the only field in this report that may decide whether
+   *  two reports describe the same tree. Unresolved carries no identity at all: the
+   *  project directory did not resolve when the report was taken, so every entry below
+   *  is an observation of an absence rather than of a tree. */
+  projectIdentity: PathIdentity;
   /** the stamp the running release renders adapters with. */
   expectedStamp: AdapterStamp;
   entries: ProjectAdapterEntry[];
@@ -484,20 +497,37 @@ export function inspectProjectAdapters(
   return projectAdapterBaseline(stamp).map((base) => inspectOne(projectDir, base));
 }
 
+/** FG-693: `identity` is a parameter so a caller that already resolved this project
+ *  through the contract (doctor does, once, for its whole findings value) passes its
+ *  answer in rather than resolving a second time and risking a different one. The
+ *  default is the contract, never a lexical guess. */
 export function detectProjectAdapterDrift(
   projectDir: string,
   stamp: AdapterStamp = currentAdapterStamp(),
+  identity: PathIdentity = identify(projectDir),
 ): ProjectAdapterReport {
   const entries = inspectProjectAdapters(projectDir, stamp);
   const stale = entries.filter((e) => e.status !== "current");
-  return { projectDir, expectedStamp: stamp, entries, stale, ok: !stale.some((e) => e.coupling === "executable") };
+  return {
+    projectDir,
+    projectIdentity: identity,
+    expectedStamp: stamp,
+    entries,
+    stale,
+    ok: !stale.some((e) => e.coupling === "executable"),
+  };
 }
 
 /** Human-readable project-adapter section. Empty when every adapter is current,
  *  so doctor prints nothing when there is nothing to say. */
 export function renderProjectAdapterDrift(report: ProjectAdapterReport): string {
   if (report.stale.length === 0) return "";
-  const lines: string[] = [`Project orientation/handoff adapters (this project only — ${report.projectDir}):`];
+  // FG-693: the operator's own spelling is what is PRINTED — that is presentation
+  // fidelity and it decides nothing. What it must never do is imply an identity
+  // nobody established, so an unresolved project dir is printed LABELLED.
+  const unresolved = report.projectIdentity.kind === "unresolved" ? report.projectIdentity : null;
+  const shownDir = unresolved ? `${report.projectDir} (UNRESOLVED: ${unresolved.reason})` : report.projectDir;
+  const lines: string[] = [`Project orientation/handoff adapters (this project only — ${shownDir}):`];
   for (const e of report.stale) {
     // Same rule as renderSeedDrift: the mark derives from COUPLING. Adapters are
     // prose, so a stale one warns and never fails readiness.
@@ -509,6 +539,16 @@ export function renderProjectAdapterDrift(report: ProjectAdapterReport): string 
   // never appear under a "forge upgrade fixes this" line: forge will not touch it,
   // and a remedy that converges nothing is the defect FG-578 removed from the seed
   // half of this report.
+  // FG-693: an unresolvable project directory makes every entry above "missing" —
+  // true as an observation, and misleading as a finding, because nothing was read from
+  // a tree. Say so BEFORE the remedy: `forge upgrade` in a directory that does not
+  // resolve converges nothing, and a remedy that cannot converge the detector naming
+  // it is the defect FG-577 removed from the seed half of this report.
+  if (unresolved) {
+    lines.push(`  This project directory did not resolve (${unresolved.reason}), so no tree was read and no`);
+    lines.push("  adapter state above was observed against one. The remedies below assume a directory that");
+    lines.push("  resolves; resolve the path first.");
+  }
   const converges = report.stale.filter((e) => e.ownership === "forge-owned").map((e) => e.path);
   if (converges.length > 0) {
     lines.push(`  Forge-owned adapters above are not this release's (stamp ${report.expectedStamp}).`);
@@ -521,6 +561,6 @@ export function renderProjectAdapterDrift(report: ProjectAdapterReport): string 
     lines.push("  your files stand. To hand one back to forge, delete it and re-run forge init.");
   }
   lines.push("  Installed is not active: these bytes on disk are not evidence the provider loaded them.");
-  lines.push(`  Scope: only the project forge was invoked in (${report.projectDir}) — no other checkout on this host was read.`);
+  lines.push(`  Scope: only the project forge was invoked in (${shownDir}) — no other checkout on this host was read.`);
   return lines.join("\n");
 }
