@@ -95,6 +95,7 @@ beforeEach(() => {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
+  process.env.FORGE_WORKTREES = "0";
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   ensureRuntime("fg586-dispatch-test");
   ensureWorkflow("fg586-dispatch-test", "authoritative");
