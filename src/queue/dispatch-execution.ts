@@ -68,7 +68,6 @@
 // a process clock, so two forge processes with skewed clocks cannot disagree about
 // whether a lease is live or a claim is old enough to retire.
 
-import { existsSync } from "node:fs";
 import { performCancel, type CancelOutcome } from "../cli/commands/cancel.js";
 import { getDb } from "../store/db.js";
 import { storeNowMs } from "../store/publications.js";
@@ -94,6 +93,7 @@ import {
 } from "../store/launch-observations.js";
 import { allocateLaunchId, removeLaunch as removeLaunchReal, startLaunch as startLaunchReal, type LaunchMeta } from "../v2/launch.js";
 import { acquireRunLock, releaseRunLock } from "../util/run-lock.js";
+import { describeIdentity, identify, provenSameOnly, type PathIdentity } from "../util/path-identity.js";
 import { FORGE_HOME, DB_PATH } from "../util/paths.js";
 
 // ─── THE RELEASE VOCABULARY FG-591 OWNS ──────────────────────────────────────
@@ -225,10 +225,32 @@ export type DispatchTarget = {
   ticketId: string;
   title: string;
   workflow: string;
+  /** FG-693: the PROVEN filesystem identity of the checkout — the realpath, never a
+   *  recorded or operator-entered spelling. This is what `--project` carries and what
+   *  the container's working directory is set to, so the directory forge NAMES and the
+   *  directory the child process REPORTS as its own cwd are one string on every host. */
   projectDir: string;
 };
 
 export type ResolveTargetResult = { ok: true; target: DispatchTarget } | { ok: false; refusal: DispatchTargetRefusal };
+
+/** One observed checkout: the recorded SPELLINGS (display and diagnostics) beside the
+ *  one identity they were proven to name (or an UNRESOLVED identity, which names
+ *  nothing and decides nothing). */
+type CheckoutCandidate = {
+  /** Every recorded spelling that resolved to this candidate, VERBATIM and in the
+   *  order the store returned them. Audit/display only — these never decide. */
+  readonly spellings: string[];
+  readonly identity: PathIdentity;
+};
+
+/** Grouping keys live in TWO namespaces that cannot collide, so an unproven spelling
+ *  can never be absorbed into a proven group by looking alike, and two unproven
+ *  spellings are never claimed to be one tree. The prefix is part of the key rather
+ *  than a convention: a proven group is keyed on a realpath and an unproven one on the
+ *  recorded bytes, and those two populations must never share a key space. */
+const PROVEN_CHECKOUT_KEY_PREFIX = "physical:";
+const UNPROVEN_CHECKOUT_KEY_PREFIX = "unproven:";
 
 /** The project's known checkout directories, out of durable rows only.
  *
@@ -238,8 +260,23 @@ export type ResolveTargetResult = { ok: true; target: DispatchTarget } | { ok: f
  *  `tickets.imported_from` (the canonical source directory the ticket was last
  *  imported from) and the `runs.project_dir` of runs that carry dispatch evidence for
  *  this project's tickets. That is the SAME pair compatibility.ts reads for its
- *  foreign-execution narrowing, deliberately, rather than a second derivation. */
-function observedCheckouts(projectKey: string): string[] {
+ *  foreign-execution narrowing, deliberately, rather than a second derivation.
+ *
+ *  FG-693: the DISTINCT is over recorded BYTES, and bytes are not identity. One
+ *  checkout recorded under two spellings — a symlinked parent, a system directory
+ *  exposed under two prefixes, a relative path, a trailing separator — used to arrive
+ *  here as two rows and read as the linked-worktree shape, so the dispatcher refused
+ *  `ambiguous_checkout` for a project that has exactly one checkout. The rows are
+ *  therefore collapsed by PROVEN identity (src/util/path-identity.ts, the one
+ *  contract) rather than by string.
+ *
+ *  An UNPROVEN spelling keeps a bucket of its own rather than being dropped: dropping
+ *  it would turn a project whose only recorded checkout is gone into `no_checkout`
+ *  ("nobody ever told us where this project lives") when the truthful refusal is
+ *  `missing_checkout` ("we know where it lived and it is not there now"). It is also
+ *  never merged with a proven candidate — whether the two name one tree is exactly
+ *  what could not be established. */
+function observedCheckouts(projectKey: string): CheckoutCandidate[] {
   const rows = getDb()
     .prepare(
       `SELECT DISTINCT r.project_dir AS dir
@@ -253,7 +290,36 @@ function observedCheckouts(projectKey: string): string[] {
         ORDER BY dir ASC`,
     )
     .all(projectKey, projectKey) as { dir: string }[];
-  return rows.map((r) => r.dir);
+
+  // Insertion order is the store's `ORDER BY dir ASC`, so the candidate list — and
+  // therefore the refusal prose below — is deterministic rather than dependent on
+  // which spelling happened to resolve first.
+  const byIdentity = new Map<string, { spellings: string[]; identity: PathIdentity }>();
+  for (const { dir } of rows) {
+    const identity = identify(dir);
+    const key =
+      identity.kind === "resolved"
+        ? `${PROVEN_CHECKOUT_KEY_PREFIX}${identity.physical}`
+        : `${UNPROVEN_CHECKOUT_KEY_PREFIX}${dir}`;
+    const existing = byIdentity.get(key);
+    if (existing) existing.spellings.push(dir);
+    else byIdentity.set(key, { spellings: [dir], identity });
+  }
+  return [...byIdentity.values()];
+}
+
+/** The `missing_checkout` refusal, named from the spellings that were RECORDED — the
+ *  operator has to be able to recognise the value in their own store, so presentation
+ *  keeps their bytes while identity is what refused. */
+function missingCheckoutRefusal(projectKey: string, candidate: CheckoutCandidate): DispatchTargetRefusal {
+  return {
+    kind: "missing_checkout",
+    message:
+      `the checkout recorded for project '${projectKey}' does not exist on this host: ` +
+      `${candidate.spellings.map((s) => describeIdentity(s)).join(", ")}. ` +
+      `Every launch is started IN its directory, so this is refused here by name rather than dying ` +
+      `inside the tmux pane as an ENOENT that reads as if the launched command were at fault.`,
+  };
 }
 
 /**
@@ -269,6 +335,24 @@ function observedCheckouts(projectKey: string): string[] {
  * AMBIGUITY REFUSES. Two observed checkouts for one project_key is the linked-worktree
  * shape, and picking one would run the ticket's work in a directory the operator did
  * not choose. The refusal names both and the caller supplies `projectDir` explicitly.
+ *
+ * FG-693: "two checkouts" now means TWO TREES, not two strings. Two spellings of one
+ * checkout are one candidate and dispatch proceeds; two genuinely distinct directories
+ * still refuse, even when their lexical paths share a prefix or their checkouts share a
+ * git remote — path identity is not repository identity.
+ *
+ * The resolved `projectDir` is the PROVEN identity of whichever spelling won, including
+ * when the caller supplied one explicitly. An operator's spelling is an ANSWER TO WHICH
+ * TREE, not a decision about how that tree is named: the launch argv and the container's
+ * working directory carry the physical path, so a checkout reached through an alias does
+ * not produce a run recorded under a spelling nothing else in the store agrees with. The
+ * operator's own bytes survive where they are useful — in the refusals below, which have
+ * to be recognisable against what is in their store.
+ *
+ * An UNRESOLVABLE spelling is `missing_checkout`, by name. This is the same refusal the
+ * existence check made before, reached through the one identity contract instead of a
+ * second existence predicate: a path realpath will not confirm is exactly a path no
+ * launch may be started in, and refusing here beats dying inside the pane.
  */
 export function resolveDispatchTarget(input: {
   projectKey: string;
@@ -308,8 +392,12 @@ export function resolveDispatchTarget(input: {
     };
   }
 
-  let projectDir = input.projectDir;
-  if (projectDir === undefined) {
+  let chosen: CheckoutCandidate;
+  if (input.projectDir !== undefined) {
+    // The operator named a TREE. Which spelling they used is theirs; which directory
+    // forge launches in is decided here, by the filesystem.
+    chosen = { spellings: [input.projectDir], identity: identify(input.projectDir) };
+  } else {
     const observed = observedCheckouts(projectKey);
     if (observed.length === 0) {
       return {
@@ -330,29 +418,23 @@ export function resolveDispatchTarget(input: {
           kind: "ambiguous_checkout",
           message:
             `project '${projectKey}' has ${observed.length} observed checkout directories ` +
-            `(${observed.join(", ")}), which is the linked-worktree shape. Choosing one would run this ` +
-            `ticket's work in a directory the operator did not pick, so the dispatch refuses and asks for ` +
-            `an explicit checkout instead.`,
+            `(${observed.map((c) => c.spellings.join(" = ")).join(", ")}), which is the linked-worktree ` +
+            `shape. Choosing one would run this ticket's work in a directory the operator did not pick, so ` +
+            `the dispatch refuses and asks for an explicit checkout instead.`,
         },
       };
     }
-    projectDir = observed[0] as string;
+    chosen = observed[0] as CheckoutCandidate;
   }
 
-  if (!existsSync(projectDir)) {
-    return {
-      ok: false,
-      refusal: {
-        kind: "missing_checkout",
-        message:
-          `the checkout recorded for project '${projectKey}' does not exist on this host: ${projectDir}. ` +
-          `Every launch is started IN its directory, so this is refused here by name rather than dying ` +
-          `inside the tmux pane as an ENOENT that reads as if the launched command were at fault.`,
-      },
-    };
+  if (chosen.identity.kind !== "resolved") {
+    return { ok: false, refusal: missingCheckoutRefusal(projectKey, chosen) };
   }
 
-  return { ok: true, target: { projectKey, ticketId, title: ticket.title, workflow, projectDir } };
+  return {
+    ok: true,
+    target: { projectKey, ticketId, title: ticket.title, workflow, projectDir: chosen.identity.physical },
+  };
 }
 
 /**
@@ -365,6 +447,11 @@ export function resolveDispatchTarget(input: {
  * campaign launcher's, for its stated reason: a long-lived tmux server does not pick
  * up the launcher's environment, so the child would otherwise open a DIFFERENT store
  * than the dispatcher and the run would never be discoverable from this claim.
+ *
+ * FG-693: `--project` carries `target.projectDir`, which resolveDispatchTarget has
+ * already reduced to a PROVEN physical path. That is what makes the argv identical on
+ * every host — and it is the same string the child will record on its run row and the
+ * same one this launch's cwd is set to, which is what discoverRunForClaim narrows on.
  */
 export function buildDispatchArgv(forgeBin: readonly string[], target: DispatchTarget): string[] {
   return [
@@ -406,6 +493,18 @@ export type RunDiscovery =
  * A launch id is REQUIRED. Without one there is no window to narrow to, and a bare
  * "some run mentions this ticket" match is exactly the kind of inference that binds a
  * reservation to work it never started.
+ *
+ * FG-693: the directory half of that narrowing was raw SQL string equality against the
+ * launch's recorded cwd, so a run this very launch created — but which recorded its
+ * directory under a different spelling of the same tree — read as "created somewhere
+ * else" and the reservation never bound it. The SQL now narrows on the two dimensions
+ * that ARE bytes (the ticket and the instant) and the directory is decided in process,
+ * by identity. Byte equality is kept as the first clause rather than replaced: it costs
+ * no filesystem call and it is what still binds a run whose directory has since been
+ * removed, which is ordinary on a substrate of disposable clones. Identity only ADDS
+ * the alias cases — it can never take away a binding the old comparison had, and it can
+ * never manufacture one, because two spellings that resolve to one physical path ARE
+ * one directory.
  */
 export function discoverRunForClaim(claim: QueueClaim): RunDiscovery {
   if (claim.launchId === null) {
@@ -418,15 +517,30 @@ export function discoverRunForClaim(claim: QueueClaim): RunDiscovery {
       detail: `launch ${claim.launchId} has no observation row, so the directory and instant to bind a run within are unknown`,
     };
   }
-  const rows = getDb()
-    .prepare(
-      `SELECT id, created_at FROM runs
+  const launchDir = identify(observation.cwd);
+  // Memoized per call: distinct recorded spellings are far fewer than rows, and each
+  // costs a realpath. The map is call-scoped, so no read caches a filesystem answer
+  // beyond the query that asked for it.
+  const verdicts = new Map<string, boolean>();
+  const namesLaunchDir = (spelling: string): boolean => {
+    let verdict = verdicts.get(spelling);
+    if (verdict === undefined) {
+      verdict = spelling === observation.cwd || provenSameOnly(spelling, launchDir);
+      verdicts.set(spelling, verdict);
+    }
+    return verdict;
+  };
+
+  const rows = (
+    getDb()
+      .prepare(
+        `SELECT id, created_at, project_dir FROM runs
         WHERE json_extract(metadata, '$.ticketId') = ?
-          AND project_dir = ?
           AND created_at >= ?
         ORDER BY created_at ASC, id ASC`,
-    )
-    .all(claim.ticketId, observation.cwd, observation.startedAt) as { id: string; created_at: string }[];
+      )
+      .all(claim.ticketId, observation.startedAt) as { id: string; created_at: string; project_dir: string | null }[]
+  ).filter((r) => r.project_dir !== null && namesLaunchDir(r.project_dir));
 
   if (rows.length === 0) {
     return { kind: "none", detail: `no run for ${claim.ticketId} was created in ${observation.cwd} after ${observation.startedAt}` };

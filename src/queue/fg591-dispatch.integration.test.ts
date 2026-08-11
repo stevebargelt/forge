@@ -40,8 +40,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   applyMigrations,
@@ -68,6 +68,7 @@ import { setDispatcherPolicy } from "../store/dispatcher-policy.js";
 import { evaluationsFor, latestEvaluation, type DispatcherEvaluation } from "../store/dispatcher-evidence.js";
 import { completeRun } from "../store/runs.js";
 import { resetPublishBarrierForTest } from "../backlog/snapshot.js";
+import { buildDispatchArgv, discoverRunForClaim, resolveDispatchTarget } from "./dispatch-execution.js";
 import type { WorkerReport } from "./fg591-dispatch-worker.js";
 
 const WORKER = join(dirname(fileURLToPath(import.meta.url)), "fg591-dispatch-worker.ts");
@@ -102,10 +103,18 @@ const READY_BODY = [
 
 let tmpSeq = 0;
 
+/** FG-693: every fixture path is rooted at a PHYSICAL directory. `mkdtemp` hands back
+ *  the spelling it was given, and FORGE_HOME is a temp root that on darwin is reached
+ *  through a symlink (/var -> /private/var) — so without this every path in this file
+ *  would be an ALIAS of the tree it names, and every assertion about a directory the
+ *  dispatcher decided would silently be asserting a platform-specific spelling. The
+ *  alias cases belong in the FG-693 block at the bottom of this file, where they are
+ *  arranged on purpose and are exercised on EVERY host, rather than being smeared over
+ *  the whole suite on one of them. */
 function freshDir(name: string): string {
   const d = join(mkdtempSync(join(FORGE_HOME, `fg591-${name}-`)), `run-${tmpSeq++}`);
   mkdirSync(d, { recursive: true });
-  return d;
+  return realpathSync(d);
 }
 
 type Store = { dbFile: string; dir: string; done: () => void };
@@ -1224,6 +1233,194 @@ describe("FG-591 step 15 (D5): disarming and reducing capacity stop new claims a
       assert.equal(evaluation?.reason, "no_capacity");
       assert.equal(evaluation?.capacityLimit, 1);
       assert.equal(evaluation?.capacityUsed, 2, "the report says plainly that usage is ABOVE the new ceiling");
+    } finally {
+      store.done();
+    }
+  });
+});
+
+// ===========================================================================
+// 10) FG-693: THE DISPATCH TARGET IS A PROVEN FILESYSTEM IDENTITY, NOT A STRING.
+//
+//     An operating system routinely gives one directory several names: a
+//     symlinked parent anywhere in the chain, a system root exposed under two
+//     prefixes (darwin's /var and /private/var), a relative spelling, a trailing
+//     separator. Every case below arranges such an alias EXPLICITLY, with a
+//     symlink this test creates, so it runs on Linux CI exactly as it runs on the
+//     host where the defect was found — no platform branch, no enumerated prefix,
+//     and no case that only fires on one operating system.
+//
+//     The seam is the DISPATCHER's own argument production — resolveDispatchTarget
+//     into buildDispatchArgv into the launch cwd — driven through a real dispatcher
+//     process wherever a container is involved. Asserting against the identity
+//     helper directly would prove nothing about what forge launches.
+// ===========================================================================
+describe("FG-693: the dispatch target is a proven filesystem identity", () => {
+  test("an aliased spelling launches in the PHYSICAL checkout — the argv and the cwd are canonical on every host", async () => {
+    const store = openStore("fg693-alias");
+    try {
+      const PK = "pk-fg693-alias";
+      const checkout = checkoutDir(store, PK);
+      registerProject(PK);
+      seedQueued(PK, ["FG-1"], checkout);
+      arm({ maxActiveRuns: 1 });
+
+      // The operator's spelling: a symlink to the checkout, with a trailing separator
+      // on top of it. Two aliasing mechanisms at once, neither of them named anywhere
+      // in production code.
+      const link = join(store.dir, `link-${PK}`);
+      symlinkSync(checkout, link);
+      const operatorSpelling = `${link}/`;
+      assert.notEqual(operatorSpelling, checkout, "the fixture must actually be an alias, or this proves nothing");
+      assert.equal(realpathSync(operatorSpelling), checkout, "...of exactly this checkout");
+
+      const report = await runWorker(store, "fg693-alias", {
+        id: "0",
+        projectKey: PK,
+        projectDir: operatorSpelling,
+        dispatcherId: "instance-fg693-alias",
+      });
+
+      const launch = report.launched[0];
+      assert.ok(launch, "the aliased spelling must still launch — canonicalization is not a refusal");
+      assert.deepEqual(
+        launch.argv.slice(launch.argv.indexOf("new")),
+        ["new", "feature", "title FG-1", "--ticket", "FG-1", "--project", checkout],
+        "`--project` carries the PHYSICAL checkout, not the spelling the dispatcher was handed",
+      );
+      assert.equal(launch.cwd, checkout, "and the container is started in that same physical directory");
+      assert.equal(
+        launch.argv.some((a) => a.includes(link)),
+        false,
+        "the alias appears NOWHERE in what forge launches — a run recorded under a spelling only this " +
+          "host understands is the whole defect",
+      );
+
+      // The run the launch created records the same physical directory, so the
+      // reservation can bind it. That binding is the production narrowing
+      // (discoverRunForClaim), driven here against the settled store.
+      const runId = runIdFor("FG-1") as string;
+      assert.ok(runId, "the launch created a run");
+      assert.equal(
+        (getDb().prepare(`SELECT project_dir FROM runs WHERE id = ?`).get(runId) as { project_dir: string }).project_dir,
+        checkout,
+      );
+      const claim = liveClaimFor(PK, "FG-1") as QueueClaim;
+      assert.equal(discoverRunForClaim(claim).kind, "found", "the reservation binds the run its own launch created");
+
+      // AND the binding survives a run row that recorded the OTHER spelling — which is
+      // exactly what an aged row, or a run an operator started through the alias, looks
+      // like. Raw string equality returns 'none' here and the reservation never binds.
+      writeTransaction(() => {
+        getDb().prepare(`UPDATE runs SET project_dir = ?, project_dir_canonical = NULL WHERE id = ?`).run(operatorSpelling, runId);
+      });
+      assert.equal(
+        discoverRunForClaim(claim).kind,
+        "found",
+        "a run recorded under an aliased spelling of the launch directory is the SAME run",
+      );
+    } finally {
+      store.done();
+    }
+  });
+
+  test("two recorded SPELLINGS of one checkout are ONE target — not the ambiguous-checkout refusal", () => {
+    const store = openStore("fg693-one-target");
+    try {
+      const PK = "pk-fg693-one-target";
+      const checkout = checkoutDir(store, PK);
+      registerProject(PK);
+      seedQueued(PK, ["FG-1"], checkout);
+      arm({ maxActiveRuns: 1 });
+
+      // A second ticket in the same project was imported through an alias of the SAME
+      // checkout. Before FG-693 the DISTINCT over recorded bytes returned two rows and
+      // the dispatcher refused `ambiguous_checkout` — reading one checkout as the
+      // linked-worktree shape and stalling a project that has exactly one.
+      const link = join(store.dir, `link-${PK}`);
+      symlinkSync(checkout, link);
+      writeTransaction(() => {
+        upsertTicket(ticketRow(PK, "FG-2", `${link}/`));
+      });
+
+      const res = resolveDispatchTarget({ projectKey: PK, ticketId: "FG-1" });
+      assert.equal(res.ok, true, `two spellings of one checkout must resolve: ${res.ok ? "" : res.refusal.message}`);
+      if (!res.ok) return;
+      assert.equal(res.target.projectDir, checkout, "and they resolve to the PHYSICAL checkout");
+      assert.equal(
+        buildDispatchArgv(["forge"], res.target)[buildDispatchArgv(["forge"], res.target).indexOf("--project") + 1],
+        checkout,
+        "which is what the launch argv carries",
+      );
+
+      // A relative spelling and a `.`-bearing spelling of the same tree collapse too —
+      // the contract covers the whole aliasing class, not a list of prefixes.
+      writeTransaction(() => {
+        upsertTicket(ticketRow(PK, "FG-3", relative(process.cwd(), checkout)));
+        upsertTicket(ticketRow(PK, "FG-4", join(checkout, ".")));
+      });
+      const again = resolveDispatchTarget({ projectKey: PK, ticketId: "FG-1" });
+      assert.equal(again.ok, true, `every spelling of one checkout is one target: ${again.ok ? "" : again.refusal.message}`);
+      assert.equal(again.ok && again.target.projectDir, checkout);
+    } finally {
+      store.done();
+    }
+  });
+
+  test("NEGATIVE CONTROL: two genuinely distinct checkouts still refuse, even sharing a lexical prefix", () => {
+    const store = openStore("fg693-distinct");
+    try {
+      const PK = "pk-fg693-distinct";
+      const checkout = checkoutDir(store, PK);
+      // A sibling whose absolute path is a strict lexical PREFIX-sharer of the first —
+      // and which, being a copy of the same project, would share a git remote. Neither
+      // fact makes it the same checkout: path identity is not repository identity.
+      const sibling = `${checkout}-sibling`;
+      mkdirSync(sibling, { recursive: true });
+      registerProject(PK);
+      seedQueued(PK, ["FG-1"], checkout);
+      writeTransaction(() => {
+        upsertTicket(ticketRow(PK, "FG-2", sibling));
+      });
+      arm({ maxActiveRuns: 1 });
+
+      const res = resolveDispatchTarget({ projectKey: PK, ticketId: "FG-1" });
+      assert.equal(res.ok, false, "two different directories are still two checkouts");
+      if (res.ok) return;
+      assert.equal(res.refusal.kind, "ambiguous_checkout");
+      assert.match(res.refusal.message, /linked-worktree/);
+      assert.ok(res.refusal.message.includes(sibling), "the refusal names both, in the operator's own bytes");
+      assert.ok(res.refusal.message.includes(checkout));
+    } finally {
+      store.done();
+    }
+  });
+
+  test("a recorded checkout that no longer resolves still refuses BY NAME, never launching against a guess", () => {
+    const store = openStore("fg693-gone");
+    try {
+      const PK = "pk-fg693-gone";
+      const gone = join(store.dir, `checkout-${PK}-gone`);
+      registerProject(PK);
+      seedQueued(PK, ["FG-1"], gone);
+      arm({ maxActiveRuns: 1 });
+
+      const res = resolveDispatchTarget({ projectKey: PK, ticketId: "FG-1" });
+      assert.equal(res.ok, false, "a directory that is not there is not a launch target");
+      if (res.ok) return;
+      assert.equal(
+        res.refusal.kind,
+        "missing_checkout",
+        "'we know where it lived and it is not there' — never 'nobody ever said where this project lives'",
+      );
+      assert.ok(res.refusal.message.includes(gone), "the refusal names the recorded spelling the operator would recognise");
+      assert.match(res.refusal.message, /UNRESOLVED/, "and labels it as unproven rather than printing it as a path");
+
+      // An EXPLICIT unresolvable checkout refuses identically — an operator's spelling
+      // is an answer to which tree, and it does not become one by being typed.
+      const explicit = resolveDispatchTarget({ projectKey: PK, ticketId: "FG-1", projectDir: join(store.dir, "typed-but-absent") });
+      assert.equal(explicit.ok, false);
+      assert.equal(explicit.ok === false && explicit.refusal.kind, "missing_checkout");
     } finally {
       store.done();
     }
