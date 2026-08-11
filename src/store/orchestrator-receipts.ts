@@ -62,11 +62,82 @@
 // runtime and adapter decode VERBATIM and have no default at all: a Codex receipt
 // read by a reader that knows only the generic columns reports provider='openai',
 // because there is no fallback value for it to become.
+//
+// ── FG-693: PROJECT IDENTITY, AND THE DISPLAY / AUTHORITY SPLIT ─────────────
+//
+// FG-576 filed a receipt under a "canonical" project_dir computed by projectIdentity,
+// whose fallback wrote a LEXICALLY resolved path into the same column on realpath
+// failure. So orchestrator_receipts already holds an UNMARKED MIX of proven-canonical
+// and guessed-lexical values under one column, and no reader can tell which it is
+// looking at. FG-693 removes that ambiguity by splitting the two facts apart:
+//
+//   project_dir            the launcher's spelling, VERBATIM. Audit evidence and
+//                          display. It is never rewritten and it decides NOTHING.
+//   project_dir_canonical  the PROVEN filesystem identity (src/util/path-identity.ts)
+//                          at write time, or NULL when the filesystem would not
+//                          confirm the path. A lexical guess is never written here.
+//
+// The read stays WRITE-FREE — it does not opportunistically fill the canonical column
+// for a legacy row it just resolved — because the dashboard holds a read-only store
+// handle and a read that sometimes writes would fail on exactly the aged stores this
+// mechanism exists to serve.
+//
+// LEGACY ROWS TAKE THE SHARED RULE, IMPORTED AND NOT RESTATED
+// (./legacy-path-attribution.ts, shared verbatim with host_verifications gate
+// evidence). Read-time resolution of a NULL-canonical receipt establishes AT MOST
+// that the stored spelling resolves TODAY — never that it resolves to the tree the
+// row was written against. A `/projects/current`-style spelling that pointed at
+// checkout A survives being repointed at checkout B, and would otherwise let B claim
+// A's receipt. FG-576's own rows are in this NULL-canonical population despite
+// FG-576 having "already canonicalized" them, precisely because its fallback wrote
+// unproven values.
+//
+// THE DISPOSITION OF A DECLINE DIFFERS FROM GATE EVIDENCE'S, DELIBERATELY. A receipt
+// is not gate evidence, and declining it outright would re-create the exact defect
+// this module's header names — a live orchestrator missing from `forge show` and the
+// dashboard. So the split is by what the read DOES:
+//
+//   DISPLAY / LISTING   listOrchestratorReceiptsForProject. A declined legacy receipt
+//                       is still SHOWN under the queried project, LABELLED as
+//                       attributed by an unproven spelling. Display is not authority.
+//   AUTHORITY / ACTING  listOrchestratorReceiptsAuthorizedForProject, and any
+//                       lifecycle write given a project scope. PROVEN identity only —
+//                       the ACTING-class bias, where an indeterminate comparison
+//                       counts as NO match and the actor refuses: a receipt that
+//                       cannot prove it belongs to the project never authorizes a
+//                       transition, an adoption or a cleanup against it. The legacy
+//                       arm reaches that bias through attributeLegacyRow, which takes
+//                       provenSameOnly itself.
+//
+// Both dispositions count the decline under the shared reason codes
+// (legacy-unresolved / legacy-alias-unprovable) and surface it where it costs
+// something, so a refused transition or an unproven-spelling label is explained
+// rather than mysterious.
+//
+// NAMED RESIDUAL, not closed and not hidden: retarget-proof does not exclude path
+// RECREATION (`mv /a /b; mkdir /a` makes one absolute physical path name a different
+// tree over time). That residual is IDENTICAL for a post-change proven-canonical row,
+// is not an aliasing phenomenon, and is out of scope for FG-693.
 
 import { randomBytes } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
 import { resolveDbPath } from "../util/paths.js";
-import { projectIdentity } from "../v2/project-identity.js";
+import {
+  asIdentity,
+  compareIdentity,
+  describeIdentity,
+  provenPhysical,
+  type PathIdentityInput,
+} from "../util/path-identity.js";
+import {
+  attributeLegacyRow,
+  countLegacyDecline,
+  describeLegacyDeclines,
+  legacyDeclineTotal,
+  newLegacyDeclineTally,
+  type LegacyDeclineReason,
+  type LegacyDeclineTally,
+} from "./legacy-path-attribution.js";
 import {
   classifyProcessIdentity,
   coerceProcessIdentity,
@@ -177,6 +248,24 @@ export class OrchestratorReceiptTransitionError extends Error {
   }
 }
 
+/** FG-693: a write that was given a PROJECT SCOPE and could not prove the receipt
+ *  belongs to it. Deliberately its own type: the store is fine (not a write error)
+ *  and the lifecycle edge may well be legal (not a transition error) — what failed
+ *  is the identity claim, and a caller that catches it must not retry the same
+ *  write against the same project the way D11's remedy would advise. */
+export class OrchestratorReceiptAuthorityError extends Error {
+  constructor(
+    message: string,
+    readonly receiptId: string,
+    /** the project the caller claimed, as written. */
+    readonly project: string,
+    readonly reason: ReceiptAuthorityRefusal,
+  ) {
+    super(message);
+    this.name = "OrchestratorReceiptAuthorityError";
+  }
+}
+
 // ─── the row and the decoded receipt ────────────────────────────────────────
 
 export type OrchestratorReceiptRow = {
@@ -212,6 +301,13 @@ export type OrchestratorReceiptRow = {
   exit_code: number | null;
   exit_signal: string | null;
   failure_reason: string | null;
+  /** FG-693: PROVEN identity of project_dir at write time, or null when the
+   *  filesystem would not confirm it. OPTIONAL on this type rather than required
+   *  because ORCHESTRATOR_RECEIPT_COLUMNS — the historical projection external
+   *  readers still select and insert with — does not name it; a row read through
+   *  that projection is decoded as though its identity were unproven, which is the
+   *  conservative direction for every consumer here. */
+  project_dir_canonical?: string | null;
 };
 
 /** Instruction-carrier provenance (AC8): which generation supplied it, where the
@@ -250,7 +346,18 @@ export type OrchestratorReceipt = {
   terminal: boolean;
   createdAt: string;
   updatedAt: string;
+  /** WHAT THE LAUNCHER WROTE, verbatim. Audit evidence and display. Decides nothing
+   *  (FG-693) — every project decision goes through `projectDirCanonical` or, for a
+   *  NULL-canonical row, the shared legacy rule. */
   projectDir: string;
+  /** FG-693: the PROVEN identity of projectDir at WRITE time, or null when nothing
+   *  proved it (every pre-FG-693 row, plus anything written while its path was
+   *  unresolvable). Never a lexical guess. */
+  projectDirCanonical: string | null;
+  /** FG-693: set ONLY by a project-scoped read, and only for the project that read
+   *  asked about — how this receipt came to be listed under it. `unproven` rows are
+   *  shown and labelled; they authorize nothing. */
+  projectAttribution?: ReceiptProjectAttribution;
   projectName: string | null;
   resolvedProfile: string | null;
   runtime: string;
@@ -278,12 +385,22 @@ export type OrchestratorReceipt = {
   failureReason: string | null;
 };
 
+/** The historical column projection. FROZEN at its FG-576 membership: external
+ *  readers select with it AND at least one seam inserts with it, so appending a
+ *  column here would silently change the arity of somebody else's VALUES list.
+ *  FG-693's companion column rides on ORCHESTRATOR_RECEIPT_READ_COLUMNS instead. */
 export const ORCHESTRATOR_RECEIPT_COLUMNS =
   "receipt_id, session_key, state, created_at, updated_at, project_dir, project_name, resolved_profile, " +
   "runtime, provider, model, auth_mode, resolved_by, adapter, session_operation, session_target, " +
   "provider_session_id, identity_strength, identity_basis, carrier_generation, carrier_path, " +
   "carrier_acceptance, carrier_evidence, limitations, task_id, launcher_pid, launcher_identity, " +
   "started_at, closed_at, exit_code, exit_signal, failure_reason";
+
+/** What THIS module reads: the historical projection plus FG-693's proven-identity
+ *  companion. A reader that selects the historical projection alone still decodes —
+ *  the column simply arrives absent, and an absent proof is treated exactly like an
+ *  unproven one. */
+export const ORCHESTRATOR_RECEIPT_READ_COLUMNS = `${ORCHESTRATOR_RECEIPT_COLUMNS}, project_dir_canonical`;
 
 /** Trust-bearing decode: DOWN to the weakest value, never up. */
 function decodeIdentityStrength(raw: string): SessionIdentityStrength {
@@ -329,6 +446,125 @@ function decodeLauncherIdentity(raw: string | null): ProcessIdentity | undefined
   }
 }
 
+// ─── FG-693: attribution, and the authority it does or does not confer ──────
+
+/** WHY a receipt is listed under the project a read asked about.
+ *  `proven`   — PROVEN identity. This, and only this, authorizes.
+ *  `unproven` — shown because the operator would otherwise lose a live orchestrator
+ *               from `forge show`, LABELLED, and authorizing nothing. */
+export type ReceiptProjectAttribution =
+  | { readonly kind: "proven"; readonly physical: string }
+  | { readonly kind: "unproven"; readonly reason: ReceiptAuthorityRefusal; readonly label: string };
+
+/** Why identity could not be claimed. The two shared legacy reason codes, plus the
+ *  two facts that are about the QUESTION rather than the row: the caller's own path
+ *  is unproven, or the row provably belongs to a different tree. */
+export type ReceiptAuthorityRefusal = LegacyDeclineReason | "unproven-target" | "other-project";
+
+export type ReceiptProjectAuthority =
+  | { readonly authorized: true; readonly physical: string }
+  | { readonly authorized: false; readonly reason: ReceiptAuthorityRefusal };
+
+/** The identity fields a decision needs — so an authority question can be asked of a
+ *  decoded receipt or of a raw row without either being converted to the other. */
+type ReceiptProjectIdentity = { projectDir: string; projectDirCanonical: string | null };
+
+/** THE authority decision (ACTING class). A receipt authorizes something against a
+ *  project only where identity is PROVEN:
+ *
+ *    post-change row  its proven canonical identity equals the caller's proven
+ *                     physical path. Both sides are already realpaths — the stored
+ *                     one proven at write time, the caller's proven just now — so
+ *                     this is equality of two proven identities, NOT the raw-spelling
+ *                     comparison FG-693 removes. Re-resolving the stored value here
+ *                     would buy nothing and would widen the path-recreation residual.
+ *    NULL-canonical   the shared retarget-proof rule (./legacy-path-attribution.ts),
+ *                     imported and not restated, so receipts and gate evidence cannot
+ *                     drift apart on what a legacy row is allowed to claim. */
+export function receiptProjectAuthority(
+  receipt: ReceiptProjectIdentity,
+  project: PathIdentityInput,
+): ReceiptProjectAuthority {
+  const target = asIdentity(project);
+  if (target.kind !== "resolved") return { authorized: false, reason: "unproven-target" };
+
+  if (receipt.projectDirCanonical !== null) {
+    return receipt.projectDirCanonical === target.physical
+      ? { authorized: true, physical: target.physical }
+      : { authorized: false, reason: "other-project" };
+  }
+
+  const attribution = attributeLegacyRow(receipt.projectDir, target);
+  switch (attribution.outcome) {
+    case "attributed":
+      return { authorized: true, physical: attribution.physical };
+    case "other_project":
+      return { authorized: false, reason: "other-project" };
+    case "declined":
+      return { authorized: false, reason: attribution.reason };
+    case "unproven_target":
+      return { authorized: false, reason: "unproven-target" };
+  }
+}
+
+function unprovenLabel(spelling: string, reason: ReceiptAuthorityRefusal): string {
+  return `attributed by an unproven spelling (${spelling}) — ${reason}`;
+}
+
+/** How a candidate row relates to the project a read asked about, for DISPLAY.
+ *  Returns null when the row must not be listed under it at all.
+ *
+ *  Everything below the `proven` arm is presentation, permitted by FG-693's non-goal
+ *  that an operator spelling may be preserved for display PROVIDED it decides
+ *  nothing — and it decides nothing here, because only `proven` ever reaches
+ *  `receiptProjectAuthority`'s authorized answer. */
+function displayAttribution(
+  row: ReceiptProjectIdentity,
+  target: PathIdentityInput,
+  askedSpelling: string,
+  declines: LegacyDeclineTally | null,
+): ReceiptProjectAttribution | null {
+  const asked = asIdentity(target);
+
+  // The caller's own path does not resolve — routine here, where a checkout can be
+  // deleted between launch and read. Nothing can be PROVEN about it, so the only
+  // honest relation left is the recorded bytes matching the bytes we were handed.
+  // It is exact equality, not alias reasoning, and it authorizes nothing.
+  if (asked.kind !== "resolved") {
+    return row.projectDir === askedSpelling
+      ? { kind: "unproven", reason: "unproven-target", label: unprovenLabel(row.projectDir, "unproven-target") }
+      : null;
+  }
+
+  const authority = receiptProjectAuthority(row, asked);
+  if (authority.authorized) return { kind: "proven", physical: authority.physical };
+  if (authority.reason === "other-project" || authority.reason === "unproven-target") return null;
+
+  // A DECLINED legacy row. It keeps its place on the operator's surfaces — a live
+  // orchestrator must never silently vanish from `forge show` — provided it is
+  // plausibly this project's at all: its spelling resolves here today (which proves
+  // nothing about where it pointed when the row was written), or, for a spelling
+  // that no longer resolves, its recorded bytes are the ones we were asked about.
+  const related =
+    authority.reason === "legacy-unresolved"
+      ? row.projectDir === askedSpelling
+      : compareIdentity(row.projectDir, asked) === "same";
+  if (!related) return null;
+
+  if (declines) countLegacyDecline(declines, authority.reason);
+  return { kind: "unproven", reason: authority.reason, label: unprovenLabel(row.projectDir, authority.reason) };
+}
+
+/** Decode a row as it stands under a project the caller asked about. Kept SEPARATE
+ *  from rowToOrchestratorReceipt, whose single-argument shape callers pass directly
+ *  to `.map()`. */
+function receiptUnderProject(
+  row: OrchestratorReceiptRow,
+  projectAttribution: ReceiptProjectAttribution,
+): OrchestratorReceipt {
+  return { ...rowToOrchestratorReceipt(row), projectAttribution };
+}
+
 export function rowToOrchestratorReceipt(row: OrchestratorReceiptRow): OrchestratorReceipt {
   // Exact match on the recorded bytes: an unrecognized state is not running.
   const claimsRunning = row.state === "running";
@@ -351,6 +587,7 @@ export function rowToOrchestratorReceipt(row: OrchestratorReceiptRow): Orchestra
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     projectDir: row.project_dir,
+    projectDirCanonical: row.project_dir_canonical ?? null,
     projectName: row.project_name,
     resolvedProfile: row.resolved_profile,
     // No default and no fallback — see the module header.
@@ -389,20 +626,20 @@ export function newOrchestratorReceiptId(): string {
   return `orx-${randomBytes(3).toString("hex")}${randomBytes(3).toString("hex")}`;
 }
 
-/** THE INVARIANT: `project_dir` is always STORED canonical, so every seam that keys
- *  or filters on it canonicalizes the same way and the write and read halves cannot
- *  disagree. One directory has many spellings — a symlinked ancestor (`/tmp` ->
- *  `/private/tmp` on darwin), a relative path, a trailing slash — and a receipt
- *  written under one spelling that cannot be read back under another is a live
- *  orchestrator missing from `forge show` and the dashboard.
+/** FG-576's write-side canonicalization, kept ONLY as a compatibility shim.
  *
- *  projectIdentity is the ONE canonicalizer (src/v2/project-identity.ts, FG-425),
- *  delegated to rather than restated: a second normalizer is how the two halves
- *  drifted apart in the first place. It realpaths and falls back to `resolve` when
- *  the path does not resolve, so a deleted project degrades to its as-written
- *  spelling on BOTH halves rather than throwing. */
+ *  @deprecated It is NOT an identity and must not decide one. FG-693 stores the
+ *  launcher's bytes verbatim in `project_dir` and the PROVEN identity beside them in
+ *  `project_dir_canonical`; every decision in this module goes through
+ *  `receiptProjectAuthority`. This function survives only so the dashboard's scope
+ *  projection keeps compiling until it migrates to the contract, and it no longer
+ *  delegates to projectIdentity — whose realpath-failure fallback wrote a LEXICALLY
+ *  resolved path into a column that read as proven, which is the ambiguity FG-693
+ *  removes. What it returns now is the PROVEN physical path where the filesystem
+ *  confirms one, and otherwise the caller's spelling UNCHANGED: no lexical
+ *  resolution, no rewriting, and no platform special-casing. */
 export function canonicalReceiptProjectDir(projectDir: string): string {
-  return projectIdentity(projectDir).canonicalDir;
+  return provenPhysical(projectDir) ?? projectDir;
 }
 
 function nowIso(): string {
@@ -421,7 +658,10 @@ function withReceiptWrite<T>(receiptId: string, what: string, consequence: strin
   try {
     return fn();
   } catch (e) {
-    if (e instanceof OrchestratorReceiptTransitionError) throw e;
+    // A refusal this module already made deliberately — an illegal edge, or FG-693's
+    // unproven-identity refusal — is not a store failure and must not be dressed as
+    // one: D11's "retry the same command" remedy is actively wrong advice for both.
+    if (e instanceof OrchestratorReceiptTransitionError || e instanceof OrchestratorReceiptAuthorityError) throw e;
     let dbPath: string;
     try {
       dbPath = resolveDbPath();
@@ -489,13 +729,14 @@ export function persistPendingOrchestratorReceipt(decision: OrchestratorLaunchDe
     writeTransaction(() => {
       getDb()
         .prepare(
-          `INSERT INTO orchestrator_receipts (${ORCHESTRATOR_RECEIPT_COLUMNS})
+          `INSERT INTO orchestrator_receipts (${ORCHESTRATOR_RECEIPT_READ_COLUMNS})
            VALUES (@receipt_id, @session_key, @state, @created_at, @updated_at, @project_dir, @project_name,
                    @resolved_profile, @runtime, @provider, @model, @auth_mode, @resolved_by, @adapter,
                    @session_operation, @session_target, @provider_session_id, @identity_strength,
                    @identity_basis, @carrier_generation, @carrier_path, @carrier_acceptance,
                    @carrier_evidence, @limitations, @task_id, @launcher_pid, @launcher_identity,
-                   @started_at, @closed_at, @exit_code, @exit_signal, @failure_reason)`,
+                   @started_at, @closed_at, @exit_code, @exit_signal, @failure_reason,
+                   @project_dir_canonical)`,
         )
         .run({
           receipt_id: receiptId,
@@ -503,7 +744,13 @@ export function persistPendingOrchestratorReceipt(decision: OrchestratorLaunchDe
           state: "pending",
           created_at: at,
           updated_at: at,
-          project_dir: canonicalReceiptProjectDir(decision.projectDir),
+          // FG-693: the launcher's bytes, VERBATIM — audit evidence, and the operator
+          // spelling every surface renders. The identity goes in its own column, or
+          // NULL when the filesystem would not confirm the path: an unresolvable
+          // project is still a fully recorded receipt, it simply cannot later claim
+          // to belong to a checkout nobody proved it belonged to.
+          project_dir: decision.projectDir,
+          project_dir_canonical: provenPhysical(decision.projectDir),
           project_name: decision.projectName ?? null,
           resolved_profile: decision.resolvedProfile ?? null,
           runtime: decision.runtime,
@@ -560,7 +807,68 @@ type TransitionPatch = Partial<
  *  between loses the race and is REFUSED rather than overwriting a state it never
  *  read — which is how a receipt closed as `exited` would get resurrected as
  *  `running` with nothing behind it. */
-function transition(receiptId: string, to: OrchestratorReceiptState, patch: TransitionPatch, at: string): OrchestratorReceipt {
+/** FG-693: the project a WRITE claims to be acting for. Optional everywhere, because
+ *  a caller that holds no project context (the launcher closing the receipt it just
+ *  minted, by id, in-process) is not making a cross-project claim and has nothing to
+ *  prove. A caller that DOES hold one — a project-scoped cleanup, an orphan adoption,
+ *  a dashboard-driven action — passes it, and the write is REFUSED unless identity is
+ *  proven. Passing it can only ever narrow what a write may touch. */
+export type ReceiptProjectScope = {
+  project: PathIdentityInput;
+  /** told about the refusal before it is thrown, for surfaces that count declines. */
+  onDecline?: (report: ReceiptLegacyDeclineReport) => void;
+};
+
+/** ACTING class: an unproven identity never authorizes a write. The refusal names
+ *  WHICH reason applies, so a legacy receipt refused because its spelling went
+ *  through a link nobody can vouch for is distinguishable from one refused because
+ *  it plainly belongs to another checkout. */
+function requireProjectAuthority(receiptId: string, row: OrchestratorReceiptRow, scope: ReceiptProjectScope): void {
+  const authority = receiptProjectAuthority(
+    { projectDir: row.project_dir, projectDirCanonical: row.project_dir_canonical ?? null },
+    scope.project,
+  );
+  if (authority.authorized) return;
+
+  const asked = asIdentity(scope.project);
+  const message =
+    `forge: orchestrator receipt ${receiptId} cannot be acted on for ${describeIdentity(asked)} — ` +
+    `${refusalExplanation(authority.reason, row.project_dir)}. The write was refused rather than applied ` +
+    `against a project the receipt cannot be proven to belong to.`;
+  if (scope.onDecline && (authority.reason === "legacy-unresolved" || authority.reason === "legacy-alias-unprovable")) {
+    const declines = newLegacyDeclineTally();
+    countLegacyDecline(declines, authority.reason);
+    scope.onDecline({ projectDir: asked.asWritten, declines, message });
+  }
+  throw new OrchestratorReceiptAuthorityError(message, receiptId, asked.asWritten, authority.reason);
+}
+
+function refusalExplanation(reason: ReceiptAuthorityRefusal, storedSpelling: string): string {
+  switch (reason) {
+    case "other-project":
+      return `its proven identity is a different directory`;
+    case "unproven-target":
+      return `the project path given does not resolve, so nothing can be proven about it`;
+    case "legacy-unresolved":
+      return (
+        `it predates canonical project identity and its recorded path (${storedSpelling}) no longer resolves, ` +
+        `so nothing can establish which tree it was written against`
+      );
+    case "legacy-alias-unprovable":
+      return (
+        `it predates canonical project identity and its recorded path (${storedSpelling}) resolves only through ` +
+        `a symlink, whose target when the receipt was written cannot be established`
+      );
+  }
+}
+
+function transition(
+  receiptId: string,
+  to: OrchestratorReceiptState,
+  patch: TransitionPatch,
+  at: string,
+  scope?: ReceiptProjectScope,
+): OrchestratorReceipt {
   const consequence =
     to === "running"
       ? `The child was already spawned, so a session is running under a receipt still recorded as pending.`
@@ -576,6 +884,9 @@ function transition(receiptId: string, to: OrchestratorReceiptState, patch: Tran
           to,
         );
       }
+      // FG-693: BEFORE legality. A caller that cannot prove the receipt is this
+      // project's has no standing to move it at all, legal edge or not.
+      if (scope) requireProjectAuthority(receiptId, current, scope);
       if (!isKnownReceiptState(current.state)) {
         throw new OrchestratorReceiptTransitionError(
           `forge: orchestrator receipt ${receiptId} is in state '${current.state}', which this forge does not ` +
@@ -654,6 +965,7 @@ export type SpawnConfirmation = {
 export function markOrchestratorReceiptRunning(
   receiptId: string,
   spawn: SpawnConfirmation = {},
+  scope?: ReceiptProjectScope,
 ): OrchestratorReceipt {
   const at = spawn.startedAt ?? nowIso();
   return transition(
@@ -668,6 +980,7 @@ export function markOrchestratorReceiptRunning(
       ...(spawn.identityBasis !== undefined ? { identity_basis: spawn.identityBasis } : {}),
     },
     at,
+    scope,
   );
 }
 
@@ -684,7 +997,11 @@ export type ReceiptCloseOutcome = {
   closedAt?: string;
 };
 
-export function closeOrchestratorReceipt(receiptId: string, outcome: ReceiptCloseOutcome): OrchestratorReceipt {
+export function closeOrchestratorReceipt(
+  receiptId: string,
+  outcome: ReceiptCloseOutcome,
+  scope?: ReceiptProjectScope,
+): OrchestratorReceipt {
   const at = outcome.closedAt ?? nowIso();
   return transition(
     receiptId,
@@ -696,6 +1013,7 @@ export function closeOrchestratorReceipt(receiptId: string, outcome: ReceiptClos
       failure_reason: outcome.reason ?? null,
     },
     at,
+    scope,
   );
 }
 
@@ -709,6 +1027,7 @@ export function closeOrchestratorReceipt(receiptId: string, outcome: ReceiptClos
 export function recordOrchestratorSessionIdentity(
   receiptId: string,
   identity: { providerSessionId?: string | null; strength: SessionIdentityStrength; basis?: string | null },
+  scope?: ReceiptProjectScope,
 ): OrchestratorReceipt {
   return withReceiptWrite(
     receiptId,
@@ -726,6 +1045,7 @@ export function recordOrchestratorSessionIdentity(
             "running",
           );
         }
+        if (scope) requireProjectAuthority(receiptId, current, scope);
         if (isKnownReceiptState(current.state) && isTerminalReceiptState(current.state)) {
           throw new OrchestratorReceiptTransitionError(
             `forge: orchestrator receipt ${receiptId} is already ${current.state}; a provider session identity ` +
@@ -760,7 +1080,7 @@ export function recordOrchestratorSessionIdentity(
 
 function readRow(receiptId: string): OrchestratorReceiptRow | undefined {
   return getDb()
-    .prepare(`SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts WHERE receipt_id = ?`)
+    .prepare(`SELECT ${ORCHESTRATOR_RECEIPT_READ_COLUMNS} FROM orchestrator_receipts WHERE receipt_id = ?`)
     .get(receiptId) as OrchestratorReceiptRow | undefined;
 }
 
@@ -786,7 +1106,7 @@ export function getOrchestratorReceipt(receiptId: string): OrchestratorReceipt |
 export function findOrchestratorReceiptBySessionIdentity(identifier: string): OrchestratorReceipt | undefined {
   const row = getDb()
     .prepare(
-      `SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts
+      `SELECT ${ORCHESTRATOR_RECEIPT_READ_COLUMNS} FROM orchestrator_receipts
         WHERE session_key = ? OR provider_session_id = ?
         ORDER BY created_at DESC, receipt_id DESC
         LIMIT 1`,
@@ -795,21 +1115,150 @@ export function findOrchestratorReceiptBySessionIdentity(identifier: string): Or
   return row ? rowToOrchestratorReceipt(row) : undefined;
 }
 
-/** A receipt is filed under the PHYSICAL project directory — the invariant
- *  `canonicalReceiptProjectDir` states and the persist boundary enforces. The read
- *  canonicalizes its query the same way, so a caller holding another spelling of the
- *  same directory does not read as though the project has no receipts, which is how a
- *  live orchestrator goes missing from `forge show` and the dashboard. */
-export function listOrchestratorReceiptsForProject(projectDir: string, limit = 200): OrchestratorReceipt[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts
-        WHERE project_dir = ?
-        ORDER BY created_at DESC, receipt_id DESC
-        LIMIT ?`,
-    )
-    .all(canonicalReceiptProjectDir(projectDir), limit) as OrchestratorReceiptRow[];
-  return rows.map(rowToOrchestratorReceipt);
+// ─── FG-693: the project-scoped reads ───────────────────────────────────────
+//
+// A receipt is attributed to a project by PROVEN identity, never by raw-string
+// equality on the spelling the launcher happened to hold. Two populations answer
+// every project question, and they are queried separately because they are answered
+// differently:
+//
+//   PROVEN      project_dir_canonical = <the caller's proven physical path>. One
+//               indexed equality probe (idx_orchestrator_receipts_project_canonical),
+//               alias-agnostic, no filesystem call per row.
+//   LEGACY      project_dir_canonical IS NULL — every pre-FG-693 row plus anything
+//               written while its path was unresolvable. Decided in process by the
+//               shared retarget-proof rule.
+//
+// The legacy scan is CAPPED. There is no other dimension to narrow it by (a receipt
+// carries no ticket the way gate evidence does), so it reads the newest
+// LEGACY_SCAN_LIMIT NULL-canonical rows rather than the whole table. That population
+// is fixed at migration time and self-extinguishing — nothing new lands in it unless
+// a project path was genuinely unresolvable at launch — so the cap bounds the work
+// without, in practice, hiding a row. It is stated here rather than left implicit
+// because a silent truncation reads as "there are none".
+
+const LEGACY_SCAN_LIMIT = 2000;
+
+export type ReceiptLegacyDeclineReport = {
+  /** the caller's spelling, as given. */
+  projectDir: string;
+  declines: LegacyDeclineTally;
+  /** one operator-facing line, already assembled. */
+  message: string;
+};
+
+export type ReceiptProjectReadOptions = {
+  /** collects the NULL-canonical rows that could not be PROVEN to be this project's,
+   *  under the two shared reason codes. */
+  declines?: LegacyDeclineTally;
+};
+
+type AttributedRow = { row: OrchestratorReceiptRow; attribution: ReceiptProjectAttribution };
+
+/** Newest first, receipt_id as the deterministic tie-break — the order both project
+ *  reads have always promised, applied across the merged populations so a caller
+ *  cannot tell (or come to depend on) which SQL statement a row arrived from. */
+function byRecency(a: AttributedRow, b: AttributedRow): number {
+  if (a.row.created_at !== b.row.created_at) return a.row.created_at < b.row.created_at ? 1 : -1;
+  return a.row.receipt_id < b.row.receipt_id ? 1 : -1;
+}
+
+function attributedProjectRows(
+  projectDir: string,
+  limit: number,
+  declines: LegacyDeclineTally | null,
+): AttributedRow[] {
+  const db = getDb();
+  const target = asIdentity(projectDir);
+  const select = (where: string, params: unknown[]): OrchestratorReceiptRow[] =>
+    db
+      .prepare(
+        `SELECT ${ORCHESTRATOR_RECEIPT_READ_COLUMNS} FROM orchestrator_receipts
+          WHERE ${where}
+          ORDER BY created_at DESC, receipt_id DESC
+          LIMIT ?`,
+      )
+      .all(...params) as OrchestratorReceiptRow[];
+
+  // An unresolved caller path can probe nothing: there is no proven value to compare
+  // with, and `= NULL` matches nothing anyway. It reads by recorded bytes only, and
+  // everything it finds is labelled unproven.
+  const candidates: OrchestratorReceiptRow[] =
+    target.kind === "resolved"
+      ? [
+          ...select("project_dir_canonical = ?", [target.physical, limit]),
+          ...select("project_dir_canonical IS NULL", [LEGACY_SCAN_LIMIT]),
+        ]
+      : select("project_dir = ?", [projectDir, limit]);
+
+  const attributed: AttributedRow[] = [];
+  for (const row of candidates) {
+    const attribution = displayAttribution(
+      { projectDir: row.project_dir, projectDirCanonical: row.project_dir_canonical ?? null },
+      target,
+      projectDir,
+      declines,
+    );
+    if (attribution) attributed.push({ row, attribution });
+  }
+  return attributed.sort(byRecency).slice(0, limit);
+}
+
+/** DISPLAY / LISTING — what `forge show` and the dashboard panel put in front of an
+ *  operator. Every receipt this project can plausibly claim, each carrying HOW it was
+ *  attributed:
+ *
+ *    proven    identity was established (post-change canonical match, or a legacy row
+ *              the retarget-proof rule vouches for).
+ *    unproven  shown anyway, LABELLED. A legacy receipt whose spelling resolves here
+ *              today but cannot be proven to have resolved here when it was written,
+ *              or a project path that no longer resolves at all. Declining these
+ *              outright would re-create the exact FG-576 defect this module exists to
+ *              close — a live orchestrator missing from `forge show` — and display is
+ *              not authority: nothing here authorizes a transition or a cleanup.
+ *
+ *  A caller that needs to ACT must use listOrchestratorReceiptsAuthorizedForProject
+ *  (or pass a project scope to the write), never this list. */
+export function listOrchestratorReceiptsForProject(
+  projectDir: string,
+  limit = 200,
+  opts: ReceiptProjectReadOptions = {},
+): OrchestratorReceipt[] {
+  return attributedProjectRows(projectDir, limit, opts.declines ?? null).map(({ row, attribution }) =>
+    receiptUnderProject(row, attribution),
+  );
+}
+
+/** AUTHORITY / ACTING — the receipts this project may act on: adopt, transition,
+ *  clean up. PROVEN identity only. A receipt that is merely displayed under the
+ *  project is absent here by construction, and the declines that made it so are
+ *  reported (they are the reason an operator sees a receipt listed that no action
+ *  will touch).
+ *
+ *  The report channel is deliberately WRITE-FREE — no event row, no opportunistic
+ *  backfill of the canonical column — because this is reachable from a read-only
+ *  store handle, and a read that sometimes writes would fail on exactly the aged
+ *  stores the legacy rule exists to serve. */
+export function listOrchestratorReceiptsAuthorizedForProject(
+  projectDir: string,
+  limit = 200,
+  opts: ReceiptProjectReadOptions & { onLegacyDeclines?: (report: ReceiptLegacyDeclineReport) => void } = {},
+): OrchestratorReceipt[] {
+  const declines = opts.declines ?? newLegacyDeclineTally();
+  const authorized = attributedProjectRows(projectDir, limit, declines)
+    .filter(({ attribution }) => attribution.kind === "proven")
+    .map(({ row, attribution }) => receiptUnderProject(row, attribution));
+
+  if (legacyDeclineTotal(declines) > 0) {
+    const message =
+      `forge: ${describeLegacyDeclines(declines)} orchestrator receipt(s) listed under ` +
+      `${describeIdentity(projectDir)} predate canonical project identity and their recorded path cannot be ` +
+      `proven to name this checkout, so they are shown but authorize no transition or cleanup`;
+    const report: ReceiptLegacyDeclineReport = { projectDir, declines, message };
+    if (opts.onLegacyDeclines) opts.onLegacyDeclines(report);
+    else console.error(message);
+  }
+  return authorized;
 }
 
 /** Receipts that CLAIM a confirmed spawn — deliberately not called "live".
@@ -821,7 +1270,7 @@ export function listOrchestratorReceiptsForProject(projectDir: string, limit = 2
 export function listOrchestratorReceiptsClaimingRunning(limit = 200): OrchestratorReceipt[] {
   const rows = getDb()
     .prepare(
-      `SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts
+      `SELECT ${ORCHESTRATOR_RECEIPT_READ_COLUMNS} FROM orchestrator_receipts
         WHERE state = 'running'
         ORDER BY created_at DESC, receipt_id DESC
         LIMIT ?`,
@@ -836,7 +1285,7 @@ export function listOrchestratorReceiptsClaimingRunning(limit = 200): Orchestrat
 export function listOpenOrchestratorReceipts(limit = 200): OrchestratorReceipt[] {
   const rows = getDb()
     .prepare(
-      `SELECT ${ORCHESTRATOR_RECEIPT_COLUMNS} FROM orchestrator_receipts
+      `SELECT ${ORCHESTRATOR_RECEIPT_READ_COLUMNS} FROM orchestrator_receipts
         WHERE state IN ('pending', 'running')
         ORDER BY created_at DESC, receipt_id DESC
         LIMIT ?`,
