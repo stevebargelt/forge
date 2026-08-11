@@ -117,13 +117,24 @@ function bareWorkspace(opts: { hostileSetup?: unknown } = {}): string {
   return dir;
 }
 
+/** A stand-in forge source root nothing is under, so the self-host guard
+ *  (correctly evaluated first) does not preempt what is being measured.
+ *
+ *  FG-693: it must be a REAL directory. The guard's comparison is three-valued
+ *  now — a source root that does not exist has no identity to compare, so it
+ *  refuses as UNPROVEN rather than comparing as separate. */
+function notTheForgeRoot(): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg566-not-the-forge-root-")));
+  dirs.push(dir);
+  return dir;
+}
+
 /** No `runSetup` — every test in this file goes through the module's own
- *  execFileSync. `sourceRoot` is a directory nothing is under, so the self-host
- *  guard (correctly evaluated first) does not preempt what is being measured. */
+ *  execFileSync. */
 function prepare(workspace: string, deps: HostReadinessDeps = {}): Promise<HostReadinessOutcome> {
   return prepareHostVerification(
     { workspace, treeSha: "deadbeef", coveredCommandSet: ["npm run test:unit"], label: "exec-test" },
-    { sourceRoot: join(tmpdir(), "fg566-not-the-forge-root"), porcelain: () => "", ...deps },
+    { sourceRoot: notTheForgeRoot(), porcelain: () => "", ...deps },
   );
 }
 

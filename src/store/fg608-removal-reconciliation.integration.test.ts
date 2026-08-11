@@ -17,9 +17,9 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, writeTransaction } from "./db.js";
@@ -331,6 +331,62 @@ test("FG-608: source identity is durable — it is NOT the realpath and survives
 
   const other = newProject();
   assert.notEqual(resolveSourceIdentity(other), first, "two directories are two sources");
+});
+
+// ─── FG-693: this boundary goes through the ONE identity contract ────────────
+//
+// The plan's boundary inventory MISSED this file, and both halves of it derived a
+// project identity with a private realpath: `resolveSourceIdentity` realpathed the
+// project dir and compared `realpathSync(topLevel) === canonicalDir`, and
+// `importBacklog` realpathed it a second time for `imported_from`. That column is
+// UNIONed with `runs.project_dir` by the dispatcher's observedCheckouts, so the two
+// sides of that union have to be canonicalized under ONE discipline — otherwise one
+// checkout arrives there as two candidates and dispatch refuses `ambiguous_checkout`
+// for a project that has exactly one checkout.
+
+test("FG-693: one checkout under two spellings is ONE backlog source, not two", () => {
+  const dir = newProject();
+  const alias = join(dirname(dir), "link-to-" + basename(dir));
+  symlinkSync(dir, alias);
+  dirs.push(alias);
+  assert.notEqual(alias, dir, "fixture: the two spellings must differ, or nothing here discriminates");
+
+  assert.equal(
+    resolveSourceIdentity(alias),
+    resolveSourceIdentity(dir),
+    "a source is one physical checkout — a second spelling of it must not register a second source, " +
+      "because a source that 'evaporates' pins every ticket it ever imported",
+  );
+});
+
+test("FG-693: imported_from is the PROVEN physical path, whatever spelling the import was driven with", () => {
+  const dir = newProject();
+  writeTicketFile(dir, { id: "FG-1", type: "story", status: "active", title: "keep" }, "k");
+  const alias = join(dirname(dir), "link-to-" + basename(dir));
+  symlinkSync(dir, alias);
+  dirs.push(alias);
+
+  const result = importBacklog(alias, { git: GIT, now: NOW, sourceId: "src-a" });
+
+  const row = db
+    .prepare(`SELECT imported_from FROM tickets WHERE project_key = ? AND ticket_id = ?`)
+    .get(result.projectKey, "FG-1") as { imported_from: string | null };
+  assert.equal(
+    row.imported_from,
+    realpathSync(dir),
+    "the persisted provenance is the physical path — the dispatcher UNIONs this column with runs.project_dir " +
+      "and collapses both by proven identity, so an alias recorded here would arrive as a second checkout",
+  );
+  assert.notEqual(row.imported_from, alias, "and it is NOT the spelling the caller happened to use");
+});
+
+test("FG-693: an unresolvable project dir is REFUSED by name rather than recorded as a guess", () => {
+  const gone = join(tmpdir(), "fg693-never-existed", "checkout");
+  assert.throws(
+    () => resolveSourceIdentity(gone),
+    /durable source identity/,
+    "`path:<unproven spelling>` would be a guess persisted in a proven position",
+  );
 });
 
 test("FG-608: a directory merely INSIDE a repository does not inherit that repo's source identity", () => {

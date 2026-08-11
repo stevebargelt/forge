@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FORGE_HOME } from "../../util/paths.js";
+import { identify, type PathIdentity } from "../../util/path-identity.js";
 import { resolvePolicyPath } from "../../raci/project.js";
 import { assetRoot, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
 import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.js";
@@ -17,6 +18,7 @@ import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
 import { validateRoutePolicyFile } from "./route.js";
 import {
+  currentAdapterStamp,
   detectSeedDrift,
   renderSeedDrift,
   detectProtocolDrift,
@@ -313,10 +315,24 @@ export type DoctorFindings = {
   seedInstall: SeedInstallState;
   /** FG-253: the orientation/handoff adapters in the project doctor was invoked in. */
   projectAdapters: ProjectAdapterReport;
+  /** FG-693: WHICH TREE doctor read, as the one contract (util/path-identity.ts)
+   *  proved it — not as the ambient spelling doctor happened to be handed.
+   *
+   *  This is the field a caller compares. `forge doctor` takes its project from
+   *  process.cwd(), and cwd is one of several spellings of a checkout on any host with
+   *  a symlinked parent anywhere in the chain; a reader comparing the raw spelling
+   *  against the checkout it asked about calls one tree two trees. That is the exact
+   *  shape FG-253 hit — a doctor assertion comparing two spellings of ONE fixture as
+   *  different — and the reason the coverage it added had to canonicalize by hand at
+   *  the call site. Doctor resolves ONCE, here, and every consumer below shares that
+   *  answer rather than resolving again and possibly differently. */
+  project: PathIdentity;
 };
 
 export function gatherDoctorFindings(projectDir: string = process.cwd(), imageName = DEFAULT_IMAGE): DoctorFindings {
+  const project = identify(projectDir);
   return {
+    project,
     report: buildReleaseReport(gatherReleaseInputs(imageName, { projectDir })),
     seedDrift: detectSeedDrift(), // FG-335: installed ~/.forge seeds vs running code
     // FG-654: the Forge-owned protocol, read out of the published seed generation.
@@ -332,7 +348,9 @@ export function gatherDoctorFindings(projectDir: string = process.cwd(), imageNa
     // FG-253: doctor already runs with projectDir: cwd(), so this is honestly ONE
     // project's adapters — the rendered section says so rather than reading as a
     // host-wide inventory.
-    projectAdapters: detectProjectAdapterDrift(projectDir),
+    // FG-693: the identity resolved above is HANDED IN, so doctor's findings and the
+    // adapter report cannot disagree about which tree was read.
+    projectAdapters: detectProjectAdapterDrift(projectDir, currentAdapterStamp(), project),
   };
 }
 
@@ -343,6 +361,10 @@ export function doctorJson(f: DoctorFindings): unknown {
     protocolDrift: f.protocolDrift,
     seedInstall: f.seedInstall,
     projectAdapters: f.projectAdapters,
+    // FG-693: the proven identity of the tree doctor read, for a script that must
+    // decide whether two doctor runs describe the same checkout. The as-written
+    // spelling stays on projectAdapters.projectDir for display.
+    project: f.project,
   };
 }
 

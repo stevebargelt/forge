@@ -13,7 +13,7 @@
 // (`review_disposition`) rather than a pilot running beside verdict aggregation.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Command } from "commander";
 import { ensureForgeDirs } from "../../util/paths.js";
@@ -41,6 +41,7 @@ import { fixBatchesForReview } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import { computeRepositoryEvidence, registryByEvidence } from "../../store/project-registry.js";
 import { newReviewId } from "../../util/ids.js";
+import { compareIdentity, describeIdentity, identify } from "../../util/path-identity.js";
 import { nextTransition } from "../../v2/review-coordinator.js";
 import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/review-run.js";
 import { validateReviewContract } from "../../v2/review-contract.js";
@@ -325,14 +326,6 @@ const WORKSPACE_REFUSALS = {
   identityMismatch: "review_workspace_identity_mismatch",
 } as const;
 
-function canonicalPath(dir: string): string {
-  try {
-    return realpathSync(dir);
-  } catch {
-    return resolve(dir);
-  }
-}
-
 function gitToplevel(dir: string): string | undefined {
   try {
     return execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
@@ -376,7 +369,15 @@ function identityRefusal(runId: string | undefined, dir: string): string | undef
 
 /** A usable workspace is the ROOT of a git worktree that exists. `git -C <dir> rev-parse
  *  --show-toplevel` resolving to <dir> is the check, so a subdirectory of a repo (whose
- *  diffs and commits would be scoped differently than the review expects) is refused too. */
+ *  diffs and commits would be scoped differently than the review expects) is refused too.
+ *
+ *  FG-693: the root check goes through the ONE identity contract (src/util/path-identity.ts)
+ *  and takes the ACTING projection. This is the workspace every later stage READS and
+ *  COMMITS in, so a spelling the filesystem would not confirm must never reach the ok:true
+ *  arm: an indeterminate comparison refuses by name here rather than authorizing a write
+ *  into a directory nobody proved. The private canonicalizer this replaced caught the
+ *  realpath failure and returned `resolve(dir)` — a LEXICAL guess in the proven position —
+ *  so two unresolvable spellings compared equal and a guessed directory passed the check. */
 function checkWorkspace(
   dir: string,
   runId: string | undefined,
@@ -390,6 +391,16 @@ function checkWorkspace(
         `--project <dir> — it is then recorded on the review. Nothing was written.`,
     };
   }
+  const here = identify(dir);
+  if (here.kind !== "resolved") {
+    return {
+      ok: false,
+      refusal:
+        `${WORKSPACE_REFUSALS.unusable}: ${origin} ${describeIdentity(here)} — the filesystem would not ` +
+        `confirm what it names, so it cannot be the checkout a review reads and COMMITS in. Name the ` +
+        `checkout with --project <dir> — it is then recorded on the review. Nothing was written.`,
+    };
+  }
   const top = gitToplevel(dir);
   if (top === undefined) {
     return {
@@ -399,7 +410,18 @@ function checkWorkspace(
         `--project <dir> — it is then recorded on the review. Nothing was written.`,
     };
   }
-  if (canonicalPath(top) !== canonicalPath(dir)) {
+  const atRoot = compareIdentity(top, here);
+  if (atRoot === "indeterminate") {
+    return {
+      ok: false,
+      refusal:
+        `${WORKSPACE_REFUSALS.unusable}: ${origin} ${dir} names the git worktree rooted at ` +
+        `${describeIdentity(top)}, whose identity could not be established — so it cannot be shown to BE ` +
+        `that root. Name the checkout root with --project <dir> — it is then recorded on the review. ` +
+        `Nothing was written.`,
+    };
+  }
+  if (atRoot === "different") {
     return {
       ok: false,
       refusal:

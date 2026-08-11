@@ -42,6 +42,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { getDb, writeTransaction } from "./db.js";
+import { provenPhysical } from "../util/path-identity.js";
 import { LAUNCHES_DIR, classifyExit, isLaunchId, parseExitRecord, type LaunchMeta, type LaunchStatus } from "../v2/launch.js";
 
 /** How a launch's placement was AUTHORIZED. Enum-as-convention (FG-585): TEXT with
@@ -141,6 +142,10 @@ export type LaunchObservation = {
   observedAt: string;
   status: LaunchStatus;
   terminal: boolean;
+  /** FG-693: the PROVEN filesystem identity of `projectDir` at write time, or null —
+   *  either because the store predates the column, or because the filesystem would not
+   *  confirm the path. `projectDir` keeps the submitter's bytes verbatim. */
+  projectDirCanonical: string | null;
 };
 
 /** The raw row shape, exported so the shared derivation can decode rows it read
@@ -166,6 +171,10 @@ export type LaunchObservationRow = {
   /** Absent (not merely null) when the store predates the column — see
    *  `launchObservationColumns`. Both absences decode the same way: `generic`. */
   purpose?: string | null;
+  /** Absent (not merely null) when the store predates FG-693's column — the same
+   *  shape-probe rule `purpose` takes. Both absences decode to null: no identity was
+   *  proven for this row, which is exactly what null means here. */
+  project_dir_canonical?: string | null;
   terminal: number;
 };
 
@@ -247,6 +256,7 @@ export function rowToLaunchObservation(row: LaunchObservationRow): LaunchObserva
     command: decodeCommand(row.command),
     cwd: row.cwd,
     projectDir: row.project_dir,
+    projectDirCanonical: row.project_dir_canonical ?? null,
     associationKind: decodeAssociationKind(row.association_kind),
     runId: row.run_id,
     taskId: row.task_id,
@@ -266,7 +276,8 @@ export function rowToLaunchObservation(row: LaunchObservationRow): LaunchObserva
 const LAUNCH_OBSERVATION_COLUMN_LIST = [
   "launch_id", "name", "command", "cwd", "project_dir", "association_kind",
   "run_id", "task_id", "ticket_id", "campaign_id", "item_id",
-  "started_at", "observed_at", "state", "exit_code", "signal", "purpose", "terminal",
+  "started_at", "observed_at", "state", "exit_code", "signal", "purpose",
+  "project_dir_canonical", "terminal",
 ] as const;
 
 export const LAUNCH_OBSERVATION_COLUMNS = LAUNCH_OBSERVATION_COLUMN_LIST.join(", ");
@@ -367,15 +378,25 @@ export function recordLaunchObservation(input: RecordLaunchObservationInput): vo
   const kind = associationKindFor(input.association, projectDir, input.associationProjectDir);
   const { state, exitCode, signal } = encodeLaunchStatus(input.status);
   const terminal = isTerminalObservationState(input.status.state) ? 1 : 0;
+  // FG-693: the submitter's bytes go in project_dir VERBATIM and the PROVEN identity
+  // beside them, or NULL where the filesystem would not confirm the path. Resolved
+  // BEFORE the transaction opens — no filesystem syscall may be held across the
+  // machine-wide write lock (the invariant db.ts and runs.ts both state).
+  //
+  // Without this writer every new observation joined the pre-FG-693 NULL-canonical
+  // population, and the read-time legacy scan whose cost is justified by that
+  // population being self-extinguishing would have grown with every launch instead.
+  const projectDirCanonical = projectDir === null ? null : provenPhysical(projectDir);
   writeTransaction(() => {
     getDb().prepare(`
       INSERT INTO launch_observations (${LAUNCH_OBSERVATION_COLUMNS})
-      VALUES (@launch_id, @name, @command, @cwd, @project_dir, @association_kind, @run_id, @task_id, @ticket_id, @campaign_id, @item_id, @started_at, @observed_at, @state, @exit_code, @signal, @purpose, @terminal)
+      VALUES (@launch_id, @name, @command, @cwd, @project_dir, @association_kind, @run_id, @task_id, @ticket_id, @campaign_id, @item_id, @started_at, @observed_at, @state, @exit_code, @signal, @purpose, @project_dir_canonical, @terminal)
       ON CONFLICT(launch_id) DO UPDATE SET
         name = excluded.name,
         command = excluded.command,
         cwd = excluded.cwd,
         project_dir = excluded.project_dir,
+        project_dir_canonical = excluded.project_dir_canonical,
         association_kind = excluded.association_kind,
         run_id = excluded.run_id,
         task_id = excluded.task_id,
@@ -395,6 +416,7 @@ export function recordLaunchObservation(input: RecordLaunchObservationInput): vo
       command: JSON.stringify(input.command),
       cwd: input.cwd,
       project_dir: projectDir,
+      project_dir_canonical: projectDirCanonical,
       association_kind: kind,
       run_id: input.association?.runId ?? null,
       task_id: input.association?.taskId ?? null,

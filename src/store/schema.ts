@@ -47,6 +47,42 @@ export function ticketEventsTableSql(table: string): string {
 )`;
 }
 
+// FG-693 — THE CANONICAL PROJECT-IDENTITY COLUMN, and what the pair of columns means.
+//
+// Five tables are keyed on a project directory: runs, campaigns, host_verifications,
+// orchestrator_receipts and launch_observations. Each already carries a `project_dir`
+// holding whatever spelling the caller supplied. On macOS `/tmp` and `/private/tmp`
+// name one tree, as do `/var` and `/private/var`; a symlinked parent, a relative
+// spelling and a trailing separator produce the same class of alias anywhere. So a raw
+// `project_dir` cannot answer "is this the same checkout" — which is the defect FG-693
+// exists to close.
+//
+// Each of those tables therefore gains ONE additive column, `project_dir_canonical`.
+// The two columns answer two different questions and NEITHER substitutes for the other:
+//
+//   project_dir            — WHAT THE CALLER WROTE. Audit evidence. Its bytes are
+//                            preserved VERBATIM and are NEVER rewritten, backfilled or
+//                            converged by any migration. It may be shown to an operator
+//                            (presentation fidelity is useful) and it decides NOTHING.
+//   project_dir_canonical  — PROVEN filesystem identity, or NULL. It is written only
+//                            when the filesystem actually answered for the path; when
+//                            resolution failed the column is NULL. A LEXICALLY resolved
+//                            path is NEVER stored here.
+//
+// NULL IS A FIRST-CLASS VALUE and means "identity was never proven for this row". That
+// is exactly the ambiguity this column exists to remove: canonicalReceiptProjectDir
+// (src/store/orchestrator-receipts.ts) delegates to projectIdentity, whose fallback
+// writes a lexically-resolved path on realpath failure — so `orchestrator_receipts`
+// today holds an unmarked MIX of proven and guessed values under one column, with no
+// way for a reader to tell them apart. A separate column with an honest NULL is how a
+// reader can. Every pre-change row reads back NULL, which is the truth about it: nothing
+// proved its identity, and no migration may pretend otherwise.
+//
+// NOTHING IS BACKFILLED. Resolving a stored spelling at migration time would establish
+// only that it resolves TODAY — never that it resolves to the tree the row was written
+// against — so a backfill would mint proof that does not exist. The read-time
+// compatibility rule for NULL-canonical rows lives in the store modules (FG-693 steps 4
+// and 6), not here.
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS runs (
   id              TEXT PRIMARY KEY,
@@ -57,6 +93,11 @@ CREATE TABLE IF NOT EXISTS runs (
   completed_at    TEXT,
   metadata        TEXT,
   project_dir     TEXT,
+  -- FG-693: PROVEN canonical identity of project_dir, or NULL when it was never proven.
+  -- project_dir above keeps the caller's bytes verbatim; this column is what a lookup
+  -- or a project-scoped aggregation compares, so one checkout spelled two ways is one
+  -- project. Never a lexical fallback. See the block comment above SCHEMA_SQL.
+  project_dir_canonical TEXT,
   -- FG-638: exactly one review authority model per run. NOT NULL with a DEFAULT so a
   -- row written by a binary that predates the ledger (or by an INSERT that omits the
   -- column) reads back the legacy verdict/blocked_by_red model rather than NULL.
@@ -201,7 +242,9 @@ CREATE TABLE IF NOT EXISTS campaigns (
   approved_at         TEXT,
   approval_rationale  TEXT,
   approved_plan_hash  TEXT,
-  project_dir         TEXT
+  project_dir         TEXT,
+  -- FG-693: PROVEN canonical identity of project_dir, or NULL. See SCHEMA_SQL's header.
+  project_dir_canonical TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
 
@@ -248,7 +291,12 @@ CREATE TABLE IF NOT EXISTS host_verifications (
   run_id      TEXT REFERENCES runs(id),
   recorded_at TEXT NOT NULL,
   source      TEXT NOT NULL DEFAULT 'host',
-  ci_url      TEXT
+  ci_url      TEXT,
+  -- FG-693: PROVEN canonical identity of project_dir, or NULL. Gate evidence is the
+  -- ACTING class — a row whose identity was never proven must not silently satisfy a
+  -- gate for a checkout it cannot be shown to belong to — so the NULL here is what a
+  -- reader needs in order to decline rather than guess. See SCHEMA_SQL's header.
+  project_dir_canonical TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_host_verifications_lookup
   ON host_verifications(ticket_id, project_dir, commit_sha, gate_name);
@@ -1187,6 +1235,11 @@ CREATE TABLE IF NOT EXISTS launch_observations (
   exit_code        INTEGER,
   signal           TEXT,
   purpose          TEXT,
+  -- FG-693: PROVEN canonical identity of project_dir, or NULL. cwd is deliberately
+  -- NOT given one: it is the launch's working directory as recorded, not a project
+  -- key, and nothing decides project ownership from it — association_kind already
+  -- records which channel decided the project home. See SCHEMA_SQL's header.
+  project_dir_canonical TEXT,
   terminal         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_launch_observations_run
@@ -1458,7 +1511,13 @@ CREATE TABLE IF NOT EXISTS orchestrator_receipts (
   closed_at           TEXT,
   exit_code           INTEGER,
   exit_signal         TEXT,
-  failure_reason      TEXT
+  failure_reason      TEXT,
+  -- FG-693: PROVEN canonical identity of project_dir, or NULL. project_dir stays NOT
+  -- NULL and keeps the launcher's bytes; this column is added NULLABLE because a
+  -- receipt written before FG-693 has no proven identity and none can be invented for
+  -- it. This is the table whose single canonicalDir column held an unmarked mix of
+  -- proven and lexically-guessed values. See SCHEMA_SQL's header.
+  project_dir_canonical TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_project
   ON orchestrator_receipts(project_dir, created_at);
@@ -1502,6 +1561,12 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // every pre-FG-638 run row reads back 'legacy_verdict' without a backfill — a
   // legacy run with no `reviews` row is unambiguous rather than null-and-guessed.
   { table: "runs", column: "review_mode", ddl: "ALTER TABLE runs ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'legacy_verdict'" },
+  // FG-693: PROVEN canonical project identity. Nullable with NO default, deliberately:
+  // a pre-FG-693 row's identity was never proven, and NULL is the only honest reading
+  // of it. A DEFAULT of any kind — or a backfill that resolved the stored spelling at
+  // migration time — would mint proof that does not exist, since resolving a spelling
+  // TODAY says nothing about the tree it named when the row was written.
+  { table: "runs", column: "project_dir_canonical", ddl: "ALTER TABLE runs ADD COLUMN project_dir_canonical TEXT" },
 
   { table: "tasks", column: "parent_id", ddl: "ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id)" },
   { table: "tasks", column: "agent_alias", ddl: "ALTER TABLE tasks ADD COLUMN agent_alias TEXT" },
@@ -1547,6 +1612,8 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "campaigns", column: "approval_rationale", ddl: "ALTER TABLE campaigns ADD COLUMN approval_rationale TEXT" },
   { table: "campaigns", column: "approved_plan_hash", ddl: "ALTER TABLE campaigns ADD COLUMN approved_plan_hash TEXT" },
   { table: "campaigns", column: "project_dir", ddl: "ALTER TABLE campaigns ADD COLUMN project_dir TEXT" },
+  // FG-693: see the runs entry above for why this is nullable, undefaulted and unbackfilled.
+  { table: "campaigns", column: "project_dir_canonical", ddl: "ALTER TABLE campaigns ADD COLUMN project_dir_canonical TEXT" },
 
   { table: "campaign_items", column: "run_id", ddl: "ALTER TABLE campaign_items ADD COLUMN run_id TEXT" },
   { table: "campaign_items", column: "branch", ddl: "ALTER TABLE campaign_items ADD COLUMN branch TEXT" },
@@ -1566,6 +1633,10 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // classifies correctly without a backfill.
   { table: "host_verifications", column: "source", ddl: "ALTER TABLE host_verifications ADD COLUMN source TEXT NOT NULL DEFAULT 'host'" },
   { table: "host_verifications", column: "ci_url", ddl: "ALTER TABLE host_verifications ADD COLUMN ci_url TEXT" },
+  // FG-693: see the runs entry above. Gate evidence is the one population where a
+  // fabricated canonical value would be worst — it would let one checkout's green gate
+  // satisfy another's — so the undefaulted NULL is load-bearing, not incidental.
+  { table: "host_verifications", column: "project_dir_canonical", ddl: "ALTER TABLE host_verifications ADD COLUMN project_dir_canonical TEXT" },
 
   { table: "publication_attempts", column: "base_sha", ddl: "ALTER TABLE publication_attempts ADD COLUMN base_sha TEXT" },
   { table: "publication_attempts", column: "candidate_sha", ddl: "ALTER TABLE publication_attempts ADD COLUMN candidate_sha TEXT" },
@@ -1603,6 +1674,11 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // purpose: an existing row's purpose was never declared, and NULL is how it says so
   // (it reads as `generic`, never as host verification). user_version is NOT bumped.
   { table: "launch_observations", column: "purpose", ddl: "ALTER TABLE launch_observations ADD COLUMN purpose TEXT" },
+  // FG-693: the SECOND launch_observations column that is not a no-op — every store
+  // created since FG-679 carries the table without it. Nullable and undefaulted for the
+  // same reason as the runs entry above. `cwd` gets no companion column: it is the
+  // launch's working directory, not a project key, and nothing decides ownership from it.
+  { table: "launch_observations", column: "project_dir_canonical", ddl: "ALTER TABLE launch_observations ADD COLUMN project_dir_canonical TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },
@@ -1906,4 +1982,84 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "orchestrator_receipts", column: "exit_code", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN exit_code INTEGER" },
   { table: "orchestrator_receipts", column: "exit_signal", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN exit_signal TEXT" },
   { table: "orchestrator_receipts", column: "failure_reason", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN failure_reason TEXT" },
+  // FG-693: see the runs entry above. project_dir stays NOT NULL and keeps the
+  // launcher's bytes; this companion is nullable because a receipt written before
+  // FG-693 has no proven identity — and because canonicalReceiptProjectDir's lexical
+  // fallback means some of those rows' recorded values are guesses, which is precisely
+  // what a NULL here refuses to inherit.
+  { table: "orchestrator_receipts", column: "project_dir_canonical", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN project_dir_canonical TEXT" },
+];
+
+// FG-693 — THE LOOKUP INDEXES THE CANONICAL COLUMNS NEED, declared as DATA for the
+// same reason ADDITIVE_COLUMNS is: schema.ts owns the shape, db.ts owns the guarded,
+// idempotent application, and the two cannot drift.
+//
+// WHY THEY ARE NOT IN SCHEMA_SQL, which is where a `CREATE INDEX IF NOT EXISTS` would
+// otherwise belong. Every table below ALREADY EXISTS on an aged store, so its
+// project_dir_canonical arrives by ALTER — from ADDITIVE_COLUMNS, inside applyMigrations,
+// which runs AFTER db.ts has exec'd SCHEMA_SQL. A CREATE INDEX in SCHEMA_SQL naming a
+// column the live table does not yet have throws SQLITE_ERROR, and SCHEMA_SQL is exec'd
+// on EVERY writable open — so the index would brick every open of every aged store on
+// the machine before the ALTER that adds its column could ever run. That is the FG-563
+// hazard exactly (see the comment above `runs` in SCHEMA_SQL, and idx_model_calls_task
+// in db.ts, which lives on the migration path for the identical reason).
+//
+// So these belong on the guarded migration path, AFTER the additive loop. They are
+// deliberately NOT created from SCHEMA_SQL and they must NOT be moved there.
+//
+// They are also, deliberately, plain non-unique indexes: two DIFFERENT rows may share a
+// canonical project dir (that is the normal case — many runs in one checkout), and NULL
+// is the common value on aged rows.
+//
+// APPLIED FROM applyMigrations (src/store/db.ts), immediately after the additive-column
+// loop, under that loop's two guards (table present, column present). Applying them there
+// keeps
+// fresh-vs-migrated parity intact, because fg608-migration-parity's strip runs against a
+// SCHEMA_SQL-only database — the indexes do not exist yet at strip time, so the columns
+// stay droppable and the guard's UNDROPPABLE set does not grow. Creating them from
+// SCHEMA_SQL would both brick aged opens AND shrink that guard's coverage.
+export type CanonicalIdentityIndex = { table: string; column: string; index: string; ddl: string };
+
+export const CANONICAL_IDENTITY_INDEXES: CanonicalIdentityIndex[] = [
+  {
+    table: "runs",
+    column: "project_dir_canonical",
+    index: "idx_runs_project_canonical",
+    ddl: "CREATE INDEX IF NOT EXISTS idx_runs_project_canonical ON runs(project_dir_canonical)",
+  },
+  {
+    table: "campaigns",
+    column: "project_dir_canonical",
+    index: "idx_campaigns_project_canonical",
+    ddl: "CREATE INDEX IF NOT EXISTS idx_campaigns_project_canonical ON campaigns(project_dir_canonical)",
+  },
+  {
+    // Mirrors idx_host_verifications_lookup's column ORDER with the canonical dir in
+    // place of the as-written one, so the covering-evidence lookup keeps an indexed
+    // probe and ticket_id stays a usable prefix for the legacy NULL-canonical scan.
+    table: "host_verifications",
+    column: "project_dir_canonical",
+    index: "idx_host_verifications_canonical_lookup",
+    ddl:
+      "CREATE INDEX IF NOT EXISTS idx_host_verifications_canonical_lookup " +
+      "ON host_verifications(ticket_id, project_dir_canonical, commit_sha, gate_name)",
+  },
+  {
+    // Mirrors idx_orchestrator_receipts_project, which is (project_dir, created_at).
+    table: "orchestrator_receipts",
+    column: "project_dir_canonical",
+    index: "idx_orchestrator_receipts_project_canonical",
+    ddl:
+      "CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_project_canonical " +
+      "ON orchestrator_receipts(project_dir_canonical, created_at)",
+  },
+  {
+    // Mirrors idx_launch_observations_project.
+    table: "launch_observations",
+    column: "project_dir_canonical",
+    index: "idx_launch_observations_project_canonical",
+    ddl:
+      "CREATE INDEX IF NOT EXISTS idx_launch_observations_project_canonical " +
+      "ON launch_observations(project_dir_canonical)",
+  },
 ];

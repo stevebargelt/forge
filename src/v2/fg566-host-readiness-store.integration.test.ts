@@ -139,8 +139,17 @@ function halfInstallingFailure(calls: SetupCall[], extra: HostReadinessDeps = {}
 }
 
 /** Outside the forge source root, or the self-host guard (correctly) refuses
- *  first — it is evaluated ahead of every other arm by design. */
-const NOT_THE_FORGE_ROOT = join(tmpdir(), "fg566-store-not-the-forge-root");
+ *  first — it is evaluated ahead of every other arm by design.
+ *
+ *  FG-693: it must be a REAL directory. The guard's comparison is three-valued
+ *  now — a source root that does not exist has no identity to compare, so it
+ *  refuses as UNPROVEN rather than comparing as separate. Created per call and
+ *  registered for teardown like every other fixture directory here. */
+function notTheForgeRoot(): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg566-store-not-the-forge-root-")));
+  dirs.push(dir);
+  return dir;
+}
 
 function prepare(
   ws: string,
@@ -154,7 +163,7 @@ function prepare(
       coveredCommandSet: req.coveredCommandSet ?? ["npm run test:unit"],
       label: "verify-phase",
     },
-    { sourceRoot: NOT_THE_FORGE_ROOT, ...deps },
+    { sourceRoot: notTheForgeRoot(), ...deps },
   );
 }
 

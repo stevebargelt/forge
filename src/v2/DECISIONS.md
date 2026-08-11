@@ -198,6 +198,57 @@ that kills containers with no stdout for 5 min. The runner's exec stub
 doesn't implement it. To add: copy the pattern from src/spine/spawn.ts's
 runDocker function. ~50 LoC.
 
+### Decision 10 — FG-693: ONE canonical filesystem-identity contract (2026-08-10)
+
+`src/util/path-identity.ts` is the single authoritative answer to "do these two
+spellings name the same tree". Every boundary that persists, looks up, compares,
+filters, or decides ownership from a project directory calls it. Subsystem-local
+canonicalizers are deleted or delegate to it; nothing else in production reaches
+`realpathSync` for a project path.
+
+**The module header is the authoritative documentation, not this entry.** Read
+it before touching any consumer. The shape, in one paragraph: a `PathIdentity`
+is RESOLVED (the filesystem answered — carries `physical`, the realpath) or
+UNRESOLVED (it did not — carries `asWritten` and `reason`, for display and
+diagnostics only, and NO `physical`). `compareIdentity` is three-valued —
+`"same" | "different" | "indeterminate"` — and either side being unresolved is
+always `"indeterminate"`, including when the two spellings are byte-identical.
+
+**Why three values and no boolean equality.** Collapsing to a boolean is a
+safety decision, and it differs by consumer. The module therefore exports no
+plain equality at all, only two projections that state the direction they fail
+in: `matchesOrIndeterminate()` for the GUARD/AUTHORITY class (indeterminate
+counts as a match, so the guard FIRES — self-host dispatch, host readiness) and
+`provenSameOnly()` for the ACTING/DESTRUCTIVE class (indeterminate counts as no
+match, so the actor REFUSES — deletes, reclaims, lane ownership, lifecycle
+transitions, gate-evidence attribution, scope filtering). Choosing a bias is now
+a visible act at the call site and reviewable in a diff. A third boolean-returning
+export fails the typecheck (`path-identity.test.ts` asserts it at compile time).
+
+**Alternative I rejected:** a `canonicalize(p): string` helper — the shape all
+five previous private copies had. Every one of them caught the realpath failure
+and returned `path.resolve(p)`, so a proven path and a lexical guess were the
+same type and the same bytes, and a guard comparing two guesses looked like it
+was working. FG-575, FG-576 and FG-253 each fixed one consumer of that shape and
+the invariant still did not hold. Making UNRESOLVED its own case is what makes
+the old bug unrepresentable rather than merely absent.
+
+**Why realpath and nothing else:** no enumerated alias prefixes and no platform
+branching, both mechanically asserted against the module's own source. A list of
+one OS's aliases goes stale and covers no symlinked parent anybody creates; a
+contract whose answer depends on the host cannot be tested on Linux CI and
+trusted on a macOS host — which is exactly how this defect survived three
+repairs.
+
+**Named residuals, not closed:** path RECREATION (one absolute physical path
+naming different trees over time), bind mounts (two physical paths reaching one
+tree — reported `"different"`), and case-insensitive filesystems. All three are
+stated in the module header rather than papered over.
+
+**If you flip it:** don't add a boolean equality "just for this one call site" —
+that is the regression. Add the consumer's bias to the call site by picking a
+projection.
+
 ## What's tested
 
 - `ready-queue.test.ts`: 8 cases covering linear, parallel, diamond, retry-pending, dep-not-met.

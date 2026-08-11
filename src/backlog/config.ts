@@ -6,13 +6,13 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { describeIdentity, identify } from "../util/path-identity.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 
@@ -59,9 +59,27 @@ function safeConfigPath(projectDir: string): string {
     }
   }
   // Defense in depth: the resolved .forge dir must live inside the resolved project dir.
+  //
+  // FG-693: both sides come from the ONE identity contract, and an UNPROVEN side
+  // is a refusal rather than a raw ENOENT escaping a security guard. Note what is
+  // deliberately NOT done here: `realExpected` is a LEXICAL join onto the proven
+  // project dir, never itself resolved, and the two are compared as proven bytes
+  // rather than through compareIdentity(). Resolving the expected path would
+  // follow the very symlink this check exists to catch — a `.forge` pointing
+  // outside the project would resolve identically on both sides and the guard
+  // would pass. The comparison is containment, not identity.
   if (existsSync(forgeDir)) {
-    const realForge = realpathSync(forgeDir);
-    const realExpected = join(realpathSync(projectDir), ".forge");
+    const forgeIdentity = identify(forgeDir);
+    const projectIdentity = identify(projectDir);
+    if (forgeIdentity.kind !== "resolved" || projectIdentity.kind !== "resolved") {
+      throw new Error(
+        `forge: refusing to write ${configPath} — ` +
+          `${forgeIdentity.kind !== "resolved" ? describeIdentity(forgeIdentity) : describeIdentity(projectIdentity)} ` +
+          `does not resolve, so containment inside the project cannot be established.`,
+      );
+    }
+    const realForge = forgeIdentity.physical;
+    const realExpected = join(projectIdentity.physical, ".forge");
     if (realForge !== realExpected) {
       throw new Error(
         `forge: refusing to write ${configPath} — resolved .forge dir '${realForge}' is ` +
@@ -97,7 +115,17 @@ export function assertConfigWritable(projectDir: string): void {
 // write (TOCTOU); the guarded open then happens on the resolved dir.
 function atomicWriteConfig(projectDir: string, contents: string): void {
   safeConfigPath(projectDir);
-  const realForge = realpathSync(join(projectDir, ".forge"));
+  // FG-693: the same one contract. An unresolvable .forge here is a named
+  // refusal, not a raw filesystem throw out of a TOCTOU-critical window — and
+  // never a lexical guess we then open a file descriptor against.
+  const forgeIdentity = identify(join(projectDir, ".forge"));
+  if (forgeIdentity.kind !== "resolved") {
+    throw new Error(
+      `forge: refusing to write ${join(projectDir, ".forge", "config.yml")} — ` +
+        `${describeIdentity(forgeIdentity)}; the .forge dir must resolve immediately before the write.`,
+    );
+  }
+  const realForge = forgeIdentity.physical;
   const configPath = join(realForge, "config.yml");
   const tmp = join(realForge, `.config.yml.tmp-${randomBytes(12).toString("hex")}`);
   const fd = openSync(

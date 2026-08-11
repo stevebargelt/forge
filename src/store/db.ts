@@ -5,6 +5,7 @@ import { resolveDbPath, ensureForgeDirs } from "../util/paths.js";
 import {
   SCHEMA_SQL,
   ADDITIVE_COLUMNS,
+  CANONICAL_IDENTITY_INDEXES,
   TICKET_EVENTS_COLUMNS,
   TICKET_EVENTS_PRIMARY_KEY,
   TICKET_EVENTS_INDEX_SQL,
@@ -79,6 +80,27 @@ export function applyMigrations(db: DatabaseInstance): void {
     if (have.has(col.column)) continue;
     db.exec(col.ddl);
     have.add(col.column);
+  }
+
+  // FG-693: the lookup indexes for the canonical-identity columns, applied HERE and
+  // deliberately not from SCHEMA_SQL — see CANONICAL_IDENTITY_INDEXES in schema.ts for
+  // why a CREATE INDEX naming a column an aged table does not yet have would brick every
+  // open on this machine. Running after the additive loop above means the column exists
+  // by the time its index is created, on a fresh store and a migrated one alike.
+  //
+  // Additive only, exactly like the loop above: CREATE INDEX IF NOT EXISTS, no
+  // user_version bump, no data pass. Both guards are the ones that loop states — the
+  // TABLE must exist (a foreign/minimal fixture DB has neither the table nor the column,
+  // and PRAGMA table_info returns zero rows for it rather than throwing) and the COLUMN
+  // must be present, so an index is never created against a shape that cannot carry it.
+  for (const idx of CANONICAL_IDENTITY_INDEXES) {
+    let have = present.get(idx.table);
+    if (!have) {
+      have = liveColumns(idx.table);
+      present.set(idx.table, have);
+    }
+    if (!have.has(idx.column)) continue;
+    db.exec(idx.ddl);
   }
 
   // FG-608 (reopen): CONSTRAINT-shape convergence for ticket_events. Runs AFTER the

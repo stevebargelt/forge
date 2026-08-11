@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertSelfHostDispatchAllowed,
+  classifySelfHostDispatch,
   isSelfHostDispatch,
   forgeSourceRoot,
   _resetSelfHostWarnings,
@@ -301,6 +302,21 @@ test("forgeSourceRoot() is the canonicalized assetRoot() — one answer, not a s
   assert.equal(forgeSourceRoot(), realpathSync(assetRoot()));
 });
 
-test("a non-existent project dir does not throw on canonicalization — existence is preflight's job", () => {
-  assert.equal(isSelfHostDispatch(join(workspace, "nope", "gone"), forgeRoot), false);
+// EXPECTATION CHANGE (FG-693, was: "a non-existent project dir does not throw on
+// canonicalization — existence is preflight's job", asserting FALSE). It still
+// does not throw. But it no longer answers FALSE: the old canonical() caught
+// realpath's failure and returned a LEXICALLY resolved path, so an unresolvable
+// project was compared as though it were a proven separate tree — a guard
+// deciding "not self-host" from a spelling nobody confirmed. Identity is
+// three-valued now and this guard takes the GUARD-class bias: unproven counts as
+// self-host, because an unresolved path is not evidence of a separate tree and
+// the cost of being wrong the other way is agent writes in the live source tree.
+test("a non-existent project dir does not throw — and is UNPROVEN, so the guard fires rather than assuming it is separate", () => {
+  const gone = join(workspace, "nope", "gone");
+  assert.equal(isSelfHostDispatch(gone, forgeRoot), true);
+  assert.equal(classifySelfHostDispatch(gone, forgeRoot).kind, "unproven");
+  assert.throws(
+    () => assertSelfHostDispatchAllowed(gone, workflowIsolation(), forgeRoot),
+    /REFUSING to dispatch/
+  );
 });

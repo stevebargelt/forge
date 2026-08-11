@@ -7,12 +7,13 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   doctorJson,
   doctorReady,
+  gatherDoctorFindings,
   registerDoctor,
   gatherPolicy,
   gatherProfileAuth,
@@ -33,9 +34,11 @@ import {
   renderSeedDrift,
   detectProjectAdapterDrift,
   projectAdapterBaseline,
+  renderProjectAdapterDrift,
 } from "../../v2/seed-drift.js";
 import { protocolRelPath } from "../../v2/agent-protocol.js";
 import { publishTestGeneration } from "../../v2/seed-generation.testkit.js";
+import { adapterStampForAssetRoot, resolveAdapterStampForAssetRoot } from "../../v2/adapter-stamp.js";
 
 // proj-default is the reachable default; proj-optin is defined but only
 // selectable via --profile (not in defaults/overrides).
@@ -432,12 +435,17 @@ test("FG-654: OPERATOR-side prose in ~/.forge/agents stays a warn — readiness 
 const OK_REPORT: ReleaseReport = { checks: [{ name: "probe", status: "ok", detail: "fine" }], ok: true };
 
 function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
+  // FG-693: the synthetic project is UNRESOLVED, and deliberately so — /tmp/p is not
+  // on disk, and a fixture that quietly claimed a proven identity for a path nobody
+  // resolved would be the very confusion the contract removes.
+  const projectIdentity = { kind: "unresolved" as const, asWritten: "/tmp/p", reason: "ENOENT" };
   return {
     report: OK_REPORT,
     seedDrift: { entries: [], stale: [], ok: true },
     protocolDrift: { entries: [], stale: [], ok: true },
     seedInstall: { kind: "healthy", generation: "/tmp/gen" },
-    projectAdapters: { projectDir: "/tmp/p", expectedStamp: "release-x", entries: [], stale: [], ok: true },
+    projectAdapters: { projectDir: "/tmp/p", projectIdentity, expectedStamp: "release-x", entries: [], stale: [], ok: true },
+    project: projectIdentity,
     ...over,
   };
 }
@@ -604,5 +612,221 @@ test("FG-253 `forge doctor`: the real action reports THIS project's adapters, hu
     assert.equal(after.exitCode, human.exitCode);
   } finally {
     cleanup();
+  }
+});
+
+// ───────── FG-693 step 7: doctor and the drift checks decide on IDENTITY ─────────
+//
+// THE DEFECT, IN THIS EXACT FILE. Read `adapterProject()` above: it realpaths its
+// fixture root, and the comment says why — doctor reads its project from
+// process.cwd(), the assertions compare that against the path the test made, and on
+// darwin os.tmpdir() is a /var/folders/… spelling of /private/var/folders/…, so the
+// comparison called ONE directory two directories. FG-253 canonicalized at the call
+// site and moved on; that is a workaround in a test, and it is the third time this
+// class was fixed locally rather than settled. The production fix is here: doctor
+// resolves its project ONCE through the one contract and reports the PROVEN identity
+// alongside the operator's spelling, so a reader comparing two doctor runs compares
+// trees rather than strings.
+//
+// PORTABLE BY CONSTRUCTION. Every alias below is one these tests CREATE — a
+// symlinked parent, a trailing separator, a `..` segment, a relative spelling. None
+// depends on an alias a particular OS happens to provide, which is exactly why the
+// earlier coverage was CI-green and host-red. On darwin the /var vs /private/var
+// spellings are the SAME class and are exercised natively by this file's own tmpdir
+// fixtures (see the HOST note in the step's acceptance).
+
+/** A project under a symlinked parent, so one checkout has several spellings.
+ *  `physical` is the realpath; every entry of `aliases` names that same tree. */
+function aliasedProject(): { physical: string; aliases: string[]; root: string; cleanup: () => void } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fg693-doctor-")));
+  mkdirSync(join(root, "real"), { recursive: true });
+  const physical = join(root, "real", "checkout");
+  mkdirSync(physical, { recursive: true });
+  symlinkSync(join(root, "real"), join(root, "link"), "dir");
+  return {
+    physical,
+    root,
+    aliases: [
+      join(root, "link", "checkout"), // a symlinked parent
+      physical + sep, // a trailing separator
+      `${physical}${sep}..${sep}checkout`, // an uncollapsed `..` segment
+    ],
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+test("FG-693 AC4: doctor run from an aliased spelling reports the SAME findings as the canonical one", () => {
+  const { physical, aliases, cleanup } = aliasedProject();
+  try {
+    const canonical = gatherDoctorFindings(physical);
+    assert.equal(canonical.project.kind, "resolved", "fixture precondition: the checkout resolves");
+
+    for (const alias of aliases) {
+      const aliased = gatherDoctorFindings(alias);
+
+      // The identity is the same tree — this is the comparison every consumer makes.
+      assert.deepEqual(aliased.project, { kind: "resolved", physical, asWritten: alias });
+      assert.equal(
+        (aliased.projectAdapters.projectIdentity as { physical?: string }).physical,
+        (canonical.projectAdapters.projectIdentity as { physical?: string }).physical,
+        `${alias} and ${physical} are one checkout`,
+      );
+
+      // ...and the drift verdict itself is identical: same entries, same stale set,
+      // same readiness. "Reports no drift against the same checkout's canonical
+      // spelling" is a claim about the FINDINGS, not only about the identity field.
+      assert.deepEqual(aliased.projectAdapters.entries, canonical.projectAdapters.entries);
+      assert.deepEqual(aliased.projectAdapters.stale, canonical.projectAdapters.stale);
+      assert.equal(aliased.projectAdapters.ok, canonical.projectAdapters.ok);
+      assert.equal(doctorReady(aliased), doctorReady(canonical));
+
+      // THE FALSIFICATION (AC8), at doctor's own seam rather than at the primitive:
+      // the two runs are only equal BECAUSE the comparison is on identity. Raw string
+      // equality — what every consumer did before this ticket — calls them different.
+      if (alias !== physical) {
+        assert.notEqual(
+          aliased.projectAdapters.projectDir,
+          canonical.projectAdapters.projectDir,
+          "precondition: this spelling really is a different string",
+        );
+      }
+      // Display fidelity is preserved: the operator's spelling is reported verbatim,
+      // and it is the field that decides nothing.
+      assert.equal(aliased.projectAdapters.projectDir, alias);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("FG-693 AC2: a RELATIVE spelling of the checkout is the same identity to doctor", () => {
+  const { physical, root, cleanup } = aliasedProject();
+  const saved = process.cwd();
+  try {
+    process.chdir(join(root, "real"));
+    const relative = gatherDoctorFindings("checkout");
+    process.chdir(saved);
+    const canonical = gatherDoctorFindings(physical);
+
+    assert.deepEqual(relative.project, { kind: "resolved", physical, asWritten: "checkout" });
+    assert.deepEqual(relative.projectAdapters.entries, canonical.projectAdapters.entries);
+    assert.equal(relative.projectAdapters.projectDir, "checkout", "display keeps what the operator typed");
+  } finally {
+    process.chdir(saved);
+    cleanup();
+  }
+});
+
+test("FG-693 AC7 negative control: two distinct checkouts sharing a lexical prefix stay distinct", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fg693-doctor-distinct-")));
+  try {
+    const a = join(root, "project");
+    const b = join(root, "project-two"); // `a` is a strict string prefix of `b`
+    mkdirSync(a, { recursive: true });
+    mkdirSync(b, { recursive: true });
+    // Install this release's adapters into `a` only, so the two reports must differ.
+    const stamp = currentAdapterStamp();
+    for (const base of projectAdapterBaseline(stamp)) {
+      const abs = join(a, ...base.path.split("/"));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, base.bytes);
+    }
+
+    const left = gatherDoctorFindings(a);
+    const right = gatherDoctorFindings(b);
+    assert.notDeepEqual(left.project, right.project);
+    assert.deepEqual(left.projectAdapters.stale, [], "the converged checkout reports no adapter drift");
+    assert.ok(right.projectAdapters.stale.length > 0, "the other checkout is NOT credited with its neighbour's bytes");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-693: an UNRESOLVED project dir is reported as unresolved, not as a tree doctor read", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fg693-doctor-gone-")));
+  const gone = join(root, "deleted-checkout");
+  try {
+    const f = gatherDoctorFindings(gone);
+    assert.equal(f.project.kind, "unresolved");
+    assert.equal(f.project.asWritten, gone, "the spelling is still reported — under a discriminator that says nothing was proven");
+    assert.equal(f.projectAdapters.projectIdentity.kind, "unresolved");
+
+    const section = renderProjectAdapterDrift(f.projectAdapters);
+    assert.match(section, /UNRESOLVED/, "the printed spelling is LABELLED, never shown as though it were proven");
+    assert.match(section, /did not resolve/);
+    // Prose coupling still decides readiness — an unresolvable project dir is a
+    // reported condition, not a new exit-code trigger.
+    assert.equal(doctorReady(f), doctorReady({ ...f, projectAdapters: { ...f.projectAdapters, stale: [], ok: true } }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── adapterStampForAssetRoot: agreement is only ever claimed about a tree it read ──
+
+test("FG-693 AC4: an ALIASED spelling of the running asset root resolves to the same stamp", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fg693-assetroot-")));
+  try {
+    const alias = join(root, "running-forge");
+    symlinkSync(assetRoot(), alias, "dir");
+
+    const direct = resolveAdapterStampForAssetRoot(assetRoot());
+    const aliased = resolveAdapterStampForAssetRoot(alias);
+    assert.notEqual(direct.stamp, null, "fixture precondition: the running tree names itself");
+    assert.equal(aliased.stamp, direct.stamp, "one tree, two spellings, one generation");
+    assert.equal(aliased.basis, direct.basis);
+    assert.equal(adapterStampForAssetRoot(alias), adapterStampForAssetRoot(assetRoot()));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The regression the deleted isSameTree() could not survive. Its catch arm returned
+// `resolve(p)` — a LEXICAL guess — in the position a proven path is read from, so a
+// root that does NOT EXIST but whose lexical resolution spells out to the running
+// tree compared EQUAL and was handed the running forge's dev stamp: agreement with a
+// generation it never looked at, derived from a directory it never resolved.
+test("FG-693: two UNRESOLVABLE spellings are INDETERMINATE — never agreement between guesses", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fg693-promoted-away-")));
+  try {
+    // The release tree a concurrent promote replaced: the running forge still names
+    // it, and it is no longer there. BOTH sides of the comparison are the same
+    // unresolvable spelling — the case the deleted isSameTree() got wrong, because
+    // resolve() of a gone path is the path, so its two guesses matched and it
+    // returned the running dev stamp for a tree neither side had read.
+    const promotedAway = join(root, "release-that-was-replaced");
+    assert.equal(resolve(promotedAway), promotedAway, "precondition: lexically, the two guesses are identical");
+
+    const resolution = resolveAdapterStampForAssetRoot(promotedAway, promotedAway);
+    assert.equal(resolution.basis, "indeterminate", "byte-equal spellings prove nothing when neither resolves");
+    assert.equal(resolution.stamp, null, "no stamp is claimed for a tree that was never read");
+    assert.match(resolution.detail, /INDETERMINATE/);
+    assert.match(resolution.detail, /UNRESOLVED/, "both unresolved sides are named and labelled");
+
+    // ...and it stays indeterminate against the tree that IS running, rather than
+    // being reported as a proven difference from it.
+    const againstRunning = resolveAdapterStampForAssetRoot(promotedAway);
+    assert.equal(againstRunning.basis, "indeterminate");
+    assert.equal(adapterStampForAssetRoot(promotedAway), null);
+
+    // Non-vacuity: the same fixture, once it EXISTS, is a proven answer — so the
+    // indeterminate arm above is about resolvability and not about this path.
+    mkdirSync(promotedAway, { recursive: true });
+    assert.equal(resolveAdapterStampForAssetRoot(promotedAway, promotedAway).basis, "running-tree");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-693: a resolvable tree that is NOT the running one is a NAMED disagreement, not indeterminate", () => {
+  const foreign = realpathSync(mkdtempSync(join(tmpdir(), "fg693-foreign-forge-")));
+  try {
+    const resolution = resolveAdapterStampForAssetRoot(foreign);
+    assert.equal(resolution.basis, "foreign-tree", "both sides resolved — this is a real disagreement");
+    assert.equal(resolution.stamp, null, "somebody else's dev checkout has only a content identity this process cannot render");
+    assert.ok(resolution.detail.includes(foreign));
+    assert.ok(!resolution.detail.includes("INDETERMINATE"), "a proven difference must not read as 'we could not tell'");
+  } finally {
+    rmSync(foreign, { recursive: true, force: true });
   }
 });

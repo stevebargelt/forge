@@ -19,15 +19,21 @@
 // CONFIG-ONLY (inert, portable, adopted on retry). We never leave an authoritative
 // DB identity with a missing config identity.
 
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { join, resolve as resolvePath } from "node:path";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { writeTransaction } from "./db.js";
 import { assertConfigWritable, readBacklogConfig, writeProjectKey } from "../backlog/config.js";
 import { listMarkdownTickets, mapStatusToDb, type StructuredTicket } from "../backlog/structured.js";
 import type { GitRunner } from "../util/github-url.js";
+import {
+  describeIdentity,
+  identify,
+  provenSameOnly,
+  type ResolvedPathIdentity,
+} from "../util/path-identity.js";
 import {
   computeRepositoryEvidence,
   resolveAndClaimProjectKey,
@@ -257,8 +263,8 @@ export function requiredNextSeq(
 // Removal reconciliation prunes a ticket only when NO LIVE SOURCE claims it, so
 // the identity of a source has to survive the things that move a checkout around.
 //
-// It is deliberately NOT the realpath. `imported_from` is realpathSync(projectDir)
-// and FG-345/FG-621 transient clones live under ~/.forge/worktrees/** and are
+// It is deliberately NOT the physical path. `imported_from` is the project's PROVEN
+// identity and FG-345/FG-621 transient clones live under ~/.forge/worktrees/** and are
 // reaper-deleted, so a path-derived id both COLLIDES (two clones of one repo at
 // two paths are two sources, but a git-dir-derived id would call them one) and
 // EVAPORATES (a moved or reaped checkout looks like a brand-new source, and its
@@ -275,11 +281,42 @@ export function requiredNextSeq(
 //     is <repo>/.git/worktrees/<name>, not the common dir.
 //
 // A non-git directory has no admin dir to hide the file in; fall back to the
-// realpath, which for a non-repo directory is as durable as anything available.
+// PROVEN physical path, which for a non-repo directory is as durable as anything
+// available.
+//
+// FG-693: every path question below goes through the ONE identity contract
+// (src/util/path-identity.ts) rather than through a second realpath of its own.
+// This is a DURABLE-IDENTITY boundary — the id minted here is persisted, and
+// `imported_from` (importBacklog, below) is UNIONed with `runs.project_dir` by the
+// dispatcher's observedCheckouts — so the two sides of that union must be
+// canonicalized under ONE discipline, or one checkout arrives there as two
+// candidates and the dispatcher refuses `ambiguous_checkout` for a project that has
+// exactly one checkout.
 const SOURCE_ID_FILE = "forge-source-id";
 
+/** The import's ONE project identity, PROVEN or refused by name.
+ *
+ *  A backlog source is one physical checkout and removal reconciliation prunes
+ *  against it, so neither the minted source id nor the persisted `imported_from` may
+ *  be derived from a spelling the filesystem would not confirm: `path:<unproven
+ *  spelling>` is a guess in a proven position, which is precisely what FG-693
+ *  removes. The pre-FG-693 code raised the filesystem's own ENOENT here rather than
+ *  inventing an identity; this refuses in the same direction, by name. */
+function provenProjectDir(projectDir: string): ResolvedPathIdentity {
+  const project = identify(projectDir);
+  if (project.kind !== "resolved") {
+    throw new Error(
+      `forge backlog: cannot establish a durable source identity for ${describeIdentity(project)}. ` +
+        `A backlog source is one physical checkout, and removal reconciliation prunes against it — ` +
+        `so an unresolvable directory is refused rather than recorded as a source. Nothing was written.`,
+    );
+  }
+  return project;
+}
+
 export function resolveSourceIdentity(projectDir: string): string {
-  const canonicalDir = realpathSync(resolvePath(projectDir));
+  const project = provenProjectDir(projectDir);
+  const canonicalDir = project.physical;
   let gitDir = "";
   try {
     const out = execFileSync("git", ["rev-parse", "--absolute-git-dir", "--show-toplevel"], {
@@ -292,8 +329,11 @@ export function resolveSourceIdentity(projectDir: string): string {
     // directory that merely sits INSIDE some enclosing repository is not that
     // repository's backlog source — treating it as one would give two unrelated
     // project directories a single source identity and let one's removals prune
-    // the other's tickets.
-    if (absoluteGitDir && topLevel && realpathSync(topLevel) === canonicalDir) {
+    // the other's tickets. That is the ACTING class, so `provenSameOnly`: an
+    // indeterminate comparison declines the git identity and falls through to the
+    // path-derived one, never adopting a checkout root nobody proved. The already-
+    // proven `project` identity is passed through rather than re-resolved.
+    if (absoluteGitDir && topLevel && provenSameOnly(topLevel, project)) {
       gitDir = absoluteGitDir;
     }
   } catch {
@@ -469,9 +509,16 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
   // Always the MARKDOWN reader: import is a migration from the filesystem, so it
   // must not follow a project that has already flipped to db mode.
   const tickets = listMarkdownTickets(projectDir); // FS read, outside the write transaction
-  // Canonical source dir (realpath), recorded as provenance on each ticket row.
+  // The PROVEN physical source dir, recorded as provenance on each ticket row.
   // Harmless metadata this slice — no longer drives any deletion.
-  const importedFrom = realpathSync(projectDir);
+  //
+  // FG-693: through the contract, and never a lexical fallback. This column is one
+  // side of the UNION the dispatcher's observedCheckouts reads (the other is
+  // runs.project_dir), so it holds exactly what that side holds — a physical path the
+  // filesystem answered for — and an unprovable project dir is refused by name here
+  // rather than persisted as a guess. Resolved BEFORE the write transaction, like
+  // every other filesystem question on this path.
+  const importedFrom = provenProjectDir(projectDir).physical;
   const evidence = computeRepositoryEvidence(projectDir, opts.git);
   const config = readBacklogConfig(projectDir);
   const now = opts.now ?? new Date().toISOString();
