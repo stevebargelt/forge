@@ -79,6 +79,9 @@ beforeEach(() => {
     delete process.env[k];
   }
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // FG-345: retain the suite's explicit-off pin even though this case also
+  // exercises the stronger FORGE_NO_WORKTREES kill switch below.
+  process.env.FORGE_WORKTREES = "0";
   // Non-isolated dispatch: the primary is rw against the checkout, the red is ro
   // against the same tree. That is the shape the pipeline reds actually take.
   process.env.FORGE_NO_WORKTREES = "1";

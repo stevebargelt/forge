@@ -48,6 +48,9 @@ beforeEach(() => {
   prevDb = setDbForTest(makeInMemoryDb());
   savedEnv = Object.fromEntries(envKeys.map((k) => [k, process.env[k]]));
   for (const k of envKeys) delete process.env[k];
+  // FG-345: clearing the inherited pin hands the suite to the host's platform
+  // default. Keep this unit-tier fixture in the shared non-worktree lane.
+  process.env.FORGE_WORKTREES = "0";
   rmSync(hostConfigPath(), { force: true });
 });
 
