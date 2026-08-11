@@ -27,7 +27,7 @@ Five tables are keyed on a project directory — `runs`, `campaigns`, `host_veri
 
 **The lookup indexes are declared as data, not in `SCHEMA_SQL`.** `CANONICAL_IDENTITY_INDEXES` (`src/store/schema.ts`) names one index per table — `idx_runs_project_canonical`, `idx_campaigns_project_canonical`, `idx_host_verifications_canonical_lookup` (mirroring the as-written lookup index's column order), `idx_orchestrator_receipts_project_canonical`, `idx_launch_observations_project_canonical`. They belong on the **guarded migration path**, after the additive loop, for the FG-563 reason: every one of these tables already exists on an aged store, so its canonical column arrives by `ALTER` *inside* `applyMigrations` — which runs **after** `db.ts` has exec'd `SCHEMA_SQL`. A `CREATE INDEX` in `SCHEMA_SQL` naming a column the live table does not yet have throws `SQLITE_ERROR` on every writable open, bricking every aged store on the machine before the `ALTER` could run. **Do not move them into `SCHEMA_SQL`.** They are plain non-unique indexes: many rows legitimately share one canonical project dir.
 
-> **Wiring still owed.** `applyMigrations` (`src/store/db.ts`) does not yet execute `CANONICAL_IDENTITY_INDEXES` — the declaration landed with the columns; the one guarded loop that applies them (table present *and* column present, exactly as `idx_model_calls_task` is handled today) has not. Until it does, canonical-column lookups are correct but unindexed.
+`applyMigrations` (`src/store/db.ts`) applies `CANONICAL_IDENTITY_INDEXES` right after the additive-columns loop above, guarded the same way that loop is (table present *and* column present) — `CREATE INDEX IF NOT EXISTS`, no `user_version` bump, no data pass. Canonical-column lookups are indexed on both a fresh store and a migrated one.
 
 ### `runs` table
 
@@ -433,6 +433,7 @@ Required-CI progress is **persisted by extending the ONE existing Forge-owned CI
   "attemptId": "string",
   "ticketId": "string|null",
   "projectDir": "string",
+  "projectDirCanonical": "string|null",
   "candidateSha": "string (full 40 chars)",
   "observedAt": "string (ISO 8601)",
   "outcome": "pending | success | failed | unavailable",
@@ -442,6 +443,8 @@ Required-CI progress is **persisted by extending the ONE existing Forge-owned CI
 ```
 
 `contexts` enumerates **EVERY** required context at that sha with its own state, URL and observation time. A summary verdict without the per-context enumeration does not satisfy BD-5.
+
+`projectDirCanonical` — added by FG-693. `projectDir` above stays the caller's own lexically-absolute spelling (bytes only, never identity); this is the **proven** canonical identity of that spelling at observation time, or `null` where the filesystem would not confirm one. A spelling re-resolved at read time would only prove it resolves *today*, never that it resolved to this tree when the observation was recorded, which is why the event carries its own rather than leaving a reader to derive it. Not yet read by any consumer — see [the identity pair](#project-path-identity-the-project_dir--project_dir_canonical-pair-fg-693).
 
 **The observer DECLARES the candidate; no reader ever derives it** (the dashboard has neither git nor a GitHub credential). BD-6 supersession therefore needs no supersession column: every observation carries the sha it was bound to, and the reader presents ONLY the newest **current** observation per `(run_id, projectDir)` — so an observation for an advanced candidate simply stops being the newest and disappears from the surface rather than being carried forward or relabeled. Since FG-694, "newest" is scoped to current work before it is scoped to the pair: a pair whose newest in-scope row is not anchored to an active run or open review contributes nothing, and the older rows behind it are not promoted into its place.
 
