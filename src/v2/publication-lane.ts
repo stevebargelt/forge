@@ -30,6 +30,17 @@
 // No PID checks, no process-group probes, no "confirm it is really dead" logic.
 // A lease is a durable timestamp the owner refreshes — that is not process
 // supervision. See the ADR for why the lane is ALLOWED to be approximate.
+//
+// FG-693: TAKING A TURN IS A CLAIM, SO IT TAKES THE ACTING-CLASS PROJECTION.
+// The lane serializes every publication against ONE checkout, and the only thing
+// that puts two spellings of that checkout into one lane is proven filesystem
+// identity. A turn claimed under a directory nobody proved is a turn in a lane
+// that may not be the project's lane at all — so awaitLaneTurn REFUSES (by name,
+// through the contract in src/util/path-identity.ts via project-identity.ts)
+// rather than queueing on a guess. Refusing costs a publication that could not
+// have been coordinated anyway; queueing on a guess costs the serialization the
+// whole lane exists to provide. RENEWALS are not claims and are not gated: a
+// holder that already owns its entry keeps its lease.
 
 import {
   laneTick,
@@ -40,7 +51,7 @@ import {
 } from "../store/publications.js";
 import { integrationGateTimeoutMs } from "./integration-gate.js";
 import { hostReadinessSetupTimeoutMs } from "./host-readiness-store.js";
-import { describeWait } from "./project-identity.js";
+import { describeWait, requireCanonicalProjectDir } from "./project-identity.js";
 
 /** Base lease TTL. Comfortably longer than a poll tick, so an ordinary scheduling
  *  hiccup can never expire a live owner. */
@@ -112,12 +123,21 @@ export type LaneWaitOpts = {
  *
  *  Throws LaneTakenOverError if our entry went terminal underneath us. It never
  *  loops on an entry it cannot win, and it never dereferences a head that isn't
- *  there. */
+ *  there.
+ *
+ *  Throws UnprovenProjectIdentityError — before the first tick, so nothing is
+ *  claimed — when `canonicalDir` is not the PROVEN physical directory of a
+ *  checkout that is there right now (FG-693, see the header). */
 export async function awaitLaneTurn(
   attemptId: string,
   canonicalDir: string,
   opts?: LaneWaitOpts,
 ): Promise<LaneEntry> {
+  // FG-693 (ACTING class): prove the identity we are about to serialize on BEFORE
+  // the first laneTick. A lane claimed on an unproven spelling is not this
+  // project's lane, and the refusal must land before any tick so a refused attempt
+  // has provably taken no turn from anyone.
+  requireCanonicalProjectDir(canonicalDir, `claim a turn in the integration lane for attempt ${attemptId}`);
   const pollMs = opts?.pollMs ?? LANE_POLL_MS;
   const ttlMs = opts?.ttlMs ?? LANE_BASE_TTL_MS;
   const log = opts?.log ?? ((line: string) => console.log(line));

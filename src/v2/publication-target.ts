@@ -21,8 +21,38 @@
 // The implicit lease form (`--force-with-lease` with no expected value) is NEVER
 // used: it reads a local remote-tracking ref, which a concurrent `git fetch` can
 // poison into agreeing with a base we never validated against.
+//
+// ── FG-693: WHICH CHECKOUT A TARGET MUTATION LANDS ON ──────────────────────
+//
+// `projectDir` on a target is not decoration: it is the repository whose refs get
+// compare-and-swapped and whose working tree gets read-tree'd. It also survives
+// into the DURABLE target descriptor, which AD-5 recovery rebuilds a target from
+// long after the process that recorded it is gone — including descriptors written
+// before canonical identity existed, which carry whatever spelling their caller
+// happened to hold.
+//
+// So the two entry points that ACT — publishToTarget and recoverCheckout — resolve
+// the target's directory to its PROVEN physical path through the one contract
+// (src/util/path-identity.ts, via project-identity.ts) and run every git op there.
+// Two consequences, both wanted:
+//
+//   * An aliased spelling (a symlinked parent, a relative path, a trailing
+//     separator, a system directory exposed under two prefixes) acts on the SAME
+//     tree as the canonical spelling — so a recovery that rebuilt its target from
+//     a legacy descriptor converges the checkout the attempt was actually made
+//     against, and does not need that descriptor rewritten to do it.
+//   * A directory the filesystem will not confirm is a NAMED REFUSAL
+//     (UnprovenProjectIdentityError) before the ancestry proof, before the CAS and
+//     before any write. This is the ACTING-class direction: publication is
+//     irreversible, so an unproven identity never authorizes it.
+//
+// The target's RECORDED `projectDir` is left byte-for-byte as the caller wrote it
+// — the descriptor is durable evidence and presentation, and it decides nothing on
+// its own; resolution happens at the moment of acting, against the filesystem as
+// it is then.
 
 import { execFileSync } from "node:child_process";
+import { requireProvenProjectDir } from "./project-identity.js";
 
 export type LocalTarget = {
   kind: "local";
@@ -52,6 +82,21 @@ export function targetDescriptor(t: PublicationTarget): string {
 
 function refOf(t: PublicationTarget): string {
   return `refs/heads/${t.branch}`;
+}
+
+/** FG-693: the target THIS PROCESS WILL ACT ON — the same target, with its
+ *  directory resolved to the one physical path the identity contract recognises.
+ *
+ *  Called at the top of every entry point that mutates a target or decides
+ *  whether one was mutated. Refuses (by name) when the directory cannot be
+ *  proven, which is the ACTING-class collapse of the contract's three-valued
+ *  comparison: an unproven identity never authorizes an irreversible step.
+ *
+ *  Returns the SAME OBJECT when the caller's spelling is already physical, so the
+ *  common path allocates nothing and the recorded descriptor is untouched. */
+function actingTarget<T extends PublicationTarget>(t: T, action: string): T {
+  const physical = requireProvenProjectDir(t.projectDir, action);
+  return physical === t.projectDir ? t : { ...t, projectDir: physical };
 }
 
 /** AD-3: a dirty local publish target is a NAMED blocker, refused BEFORE any
@@ -242,8 +287,16 @@ export function untrackedCollisions(
   return [...collisions];
 }
 
-/** The local checked-out branch, i.e. the default publish target of a repo. */
+/** The local checked-out branch, i.e. the default publish target of a repo.
+ *
+ *  FG-693: refuses a directory the filesystem will not confirm, BEFORE deriving a
+ *  branch from it — a target built on an unproven directory would put that
+ *  spelling into the durable descriptor and hand AD-5 recovery a checkout nobody
+ *  proved exists. The caller's spelling is otherwise preserved verbatim on the
+ *  returned target (the descriptor is evidence); resolution to the physical path
+ *  happens where the target is ACTED on. */
 export function localTargetFor(projectDir: string): LocalTarget {
+  requireProvenProjectDir(projectDir, "derive a publication target");
   let branch: string;
   try {
     branch = git(projectDir, ["symbolic-ref", "--short", "HEAD"]);
@@ -305,11 +358,15 @@ export type PublishOpts = {
  *  The caller holds the short publication mutex across this call and nothing
  *  else — validation NEVER runs inside it. */
 export function publishToTarget(
-  t: PublicationTarget,
+  target: PublicationTarget,
   baseSha: string,
   candidateSha: string,
   opts?: PublishOpts,
 ): PublishResult {
+  // FG-693: FIRST — before the ancestry proof, before the CAS, before anything is
+  // read from or written to a repository. Publication is irreversible, so it acts
+  // on a PROVEN checkout or it does not act.
+  const t = actingTarget(target, `publish ${candidateSha.slice(0, 12)} to ${targetDescriptor(target)}`);
   // (a) ANCESTRY PROOF — before any mutation, local or remote.
   if (!isAncestor(t.projectDir, baseSha, candidateSha, opts?.renewHold)) {
     throw new NonFastForwardError(baseSha, candidateSha);
@@ -508,11 +565,18 @@ export type RecoveryOutcome =
   | { state: "external_writer"; currentSha: string };
 
 export function recoverCheckout(
-  t: PublicationTarget,
+  target: PublicationTarget,
   baseSha: string,
   candidateSha: string,
   renew?: RenewHold,
 ): RecoveryOutcome {
+  // FG-693: recovery RE-RUNS THE CHECKOUT — it is a target mutation like any
+  // other, reached from a DURABLE descriptor that may have been recorded before
+  // canonical identity existed and may spell the checkout any way its writer held
+  // it. Resolve that spelling to the one physical path here, or refuse by name: a
+  // convergence run against a directory nobody proved is a convergence of some
+  // other tree, and it is exactly as irreversible as the publication it converges.
+  const t = actingTarget(target, `recover the publication of ${candidateSha.slice(0, 12)} on ${targetDescriptor(target)}`);
   const current = readTargetSha(t, renew);
   if (current === baseSha) return { state: "not_published" };
   if (current !== candidateSha) {
