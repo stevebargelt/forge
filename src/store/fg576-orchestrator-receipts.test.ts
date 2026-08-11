@@ -563,7 +563,15 @@ test("a project read finds the receipt through any spelling of the same director
   }
 });
 
-test("the WRITE path files a receipt under the canonical dir, so either spelling written is found by either spelling read", () => {
+// FG-693 amended the two assertions below, and ONLY those two. What FG-576 required
+// of this test — either spelling written is found by either spelling read, and the
+// read never widens to a sibling — is unchanged and still asserted here. What changed
+// is WHERE the identity lives: FG-576 satisfied it by rewriting project_dir to the
+// canonical spelling on the way in, which destroyed the launcher's own bytes and put
+// an unmarked mix of proven and lexically-guessed values in one column. FG-693 keeps
+// project_dir VERBATIM as audit evidence and carries the PROVEN identity in
+// project_dir_canonical beside it.
+test("the WRITE path files a receipt under its PROVEN identity, so either spelling written is found by either spelling read", () => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "fg576-receipt-write-canon-")));
   const physical = join(base, "project");
   const link = join(base, "link-to-project");
@@ -581,12 +589,15 @@ test("the WRITE path files a receipt under the canonical dir, so either spelling
     });
 
     assert.deepEqual(
-      getDb().prepare(`SELECT receipt_id, project_dir FROM orchestrator_receipts ORDER BY receipt_id`).all(),
+      getDb()
+        .prepare(`SELECT receipt_id, project_dir, project_dir_canonical FROM orchestrator_receipts ORDER BY receipt_id`)
+        .all(),
       [
-        { receipt_id: "orx-wrote-link", project_dir: physical },
-        { receipt_id: "orx-wrote-physical", project_dir: physical },
+        { receipt_id: "orx-wrote-link", project_dir: link, project_dir_canonical: physical },
+        { receipt_id: "orx-wrote-physical", project_dir: physical, project_dir_canonical: physical },
       ],
-      "project_dir is STORED canonical whatever spelling the launcher held — one directory is one key",
+      "FG-693: project_dir keeps the launcher's bytes verbatim; the PROVEN identity is the separate column, " +
+        "and one directory is one key there whatever spelling the launcher held",
     );
 
     for (const spelling of [physical, link, `${link}/`, `${physical}/`]) {
@@ -598,9 +609,14 @@ test("the WRITE path files a receipt under the canonical dir, so either spelling
     }
 
     assert.equal(
-      getOrchestratorReceipt("orx-wrote-link")?.projectDir,
+      getOrchestratorReceipt("orx-wrote-link")?.projectDirCanonical,
       physical,
-      "and the receipt reports the directory it is actually filed under, not the spelling it was handed",
+      "and the receipt reports the directory it is actually filed under",
+    );
+    assert.equal(
+      getOrchestratorReceipt("orx-wrote-link")?.projectDir,
+      link,
+      "while still reporting the spelling it was handed — audit evidence, never rewritten",
     );
     assert.equal(
       listOrchestratorReceiptsForProject(join(base, "sibling")).length,
