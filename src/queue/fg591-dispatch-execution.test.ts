@@ -28,7 +28,7 @@
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,7 +98,16 @@ beforeEach(() => {
   prev = setDbForTest(db);
   resetPublishBarrierForTest();
   setPublicationClockOffsetForTest(0);
-  CHECKOUT = mkdtempSync(join(tmpdir(), "fg591-checkout-"));
+  // FG-693: the fixture checkout is its own PHYSICAL path. `mkdtemp` hands back the
+  // spelling it was given, and on a host whose temp root is reached through a symlink
+  // (darwin's /var -> /private/var) that spelling is an ALIAS of the tree it created.
+  // resolveDispatchTarget now answers with proven identity, so a fixture pinned to the
+  // alias would assert the dispatcher had named a directory by a spelling nothing else
+  // in the store agrees with — and would do it only on that host, which is the
+  // CI-green/host-red split FG-693 exists to end. The assertions below are unchanged
+  // and still exact: only the fixture stopped being platform-dependent. The ALIAS cases
+  // are exercised deliberately, in fg591-dispatch.integration.test.ts.
+  CHECKOUT = realpathSync(mkdtempSync(join(tmpdir(), "fg591-checkout-")));
   registerDbProject(PK);
   setDispatcherPolicy({ leaseTtlMs: TTL, heartbeatMs: HEARTBEAT_MS, updatedBy: "fixture" });
   assert.ok(TTL >= MIN_LEASE_TTL_MS, "the fixture TTL must clear the derived floor");
