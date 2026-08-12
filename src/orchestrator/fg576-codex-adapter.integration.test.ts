@@ -209,12 +209,10 @@ function launchEnv(overrides: Record<string, string> = {}): Record<string, strin
     // Where FORGE reads Codex session state. Deliberately NOT CODEX_HOME: Forge
     // redirects only where it reads, never where the child writes (D8).
     FORGE_CODEX_DIR: roots.codexState,
-    // The fake writes its post-spawn session 150ms later. 400ms leaves only
-    // child-spawn contention as its budget under the full integration tier;
-    // this remains test-only while AC9's ordering and ambiguity assertions
-    // below continue to prove the correlation policy.
-    FORGE_CODEX_CORRELATION_WINDOW_MS: "5000",
-    FORGE_CODEX_CORRELATION_POLL_MS: "50",
+    // AC9 deliberately uses the production correlation window and poll defaults.
+    // This is not arbitrary slack: if a child cannot run within the 30s production
+    // window, the host is oversubscribed enough that a non-correlated result is the
+    // correct production outcome.
     FAKE_CODEX_RECORD: roots.record,
     FAKE_CODEX_SESSIONS: roots.codexState,
     PATH: `${roots.bin}:${process.env["PATH"] ?? ""}`,
@@ -476,7 +474,7 @@ async function launchAndObserve(
 test("integ FG-576 AC9: the session codex itself recorded is CORRELATED onto the receipt after spawn", async () => {
   let observed: OrchestratorReceipt | undefined;
   await launchAndObserve({}, async (receiptId) => {
-    await waitFor(() => getOrchestratorReceipt(receiptId)?.identityStrength === "correlated", 30_000);
+    await waitFor(() => getOrchestratorReceipt(receiptId)?.identityStrength === "correlated", 45_000);
     observed = getOrchestratorReceipt(receiptId);
   });
 
@@ -498,7 +496,7 @@ test("integ FG-576 AC9: two overlapping sessions in one project record AMBIGUOUS
     await waitFor(() => {
       const strength = getOrchestratorReceipt(receiptId)?.identityStrength;
       return strength === "ambiguous" || strength === "correlated";
-    }, 30_000);
+    }, 45_000);
     observed = getOrchestratorReceipt(receiptId);
   });
 

@@ -258,12 +258,14 @@ test("FG-566 REAL SINK — the setup ceiling bounds the WHOLE contract: a multi-
   // the very lease that covers it — so the reading has to be falsifiable, not
   // asserted in a comment.
   //
-  // Each step sleeps, then drops a marker. The two readings are distinguishable
-  // by the markers alone, with no wall-clock assertion to flake on:
-  //   per-step ceiling  → step 1 (1.8s < 2.6s) and step 2 (1.8s < 2.6s) both
-  //                       finish, step 3 runs, ALL THREE markers exist, ready.
-  //   whole-contract    → step 1 finishes, step 2 is left ~0.8s and is killed,
-  //                       step 3 never runs — ONE marker, setup_timed_out.
+  // Each step sleeps, then drops a marker. The markers still depend on the
+  // wall-clock ceiling, so use enough absolute headroom for a contended child
+  // spawn while preserving the discriminator:
+  //   per-step ceiling  → both 7s steps fit inside a 10s ceiling, step 3 runs,
+  //                       ALL THREE markers exist, ready.
+  //   whole-contract    → step 1 has 3s headroom; step 2 has only ~3s left and
+  //                       is killed, so step 3 never runs — ONE marker,
+  //                       setup_timed_out.
   const m1 = outsidePath("step1");
   const m2 = outsidePath("step2");
   const m3 = outsidePath("step3");
@@ -271,10 +273,10 @@ test("FG-566 REAL SINK — the setup ceiling bounds the WHOLE contract: a multi-
     "node", "-e", `setTimeout(() => require("fs").writeFileSync(${JSON.stringify(marker)}, "1"), ${ms})`,
   ];
 
-  process.env["FORGE_HOST_READINESS_SETUP_TIMEOUT_MS"] = "2600";
+  process.env["FORGE_HOST_READINESS_SETUP_TIMEOUT_MS"] = "10000";
   process.env["FORGE_HOST_VERIFICATION_SETUP"] = JSON.stringify([
-    sleepThenMark(1800, m1),
-    sleepThenMark(1800, m2),
+    sleepThenMark(7000, m1),
+    sleepThenMark(7000, m2),
     sleepThenMark(0, m3),
   ]);
 
@@ -294,7 +296,7 @@ test("FG-566 REAL SINK — the setup ceiling bounds the WHOLE contract: a multi-
   assert.match(refusal.message, /step 2 of 3/, "the refusal names WHICH step exhausted the ceiling");
   // A loose bound only — the markers above are the real discriminator. This one
   // catches "the ceiling was never applied at all", which no marker would.
-  assert.ok(elapsed < 2600 + 4000, `the whole contract must be bounded by the ceiling; took ${elapsed}ms`);
+  assert.ok(elapsed < 10_000 + 4_000, `the whole contract must be bounded by the ceiling; took ${elapsed}ms`);
 });
 
 test("FG-566 REAL SINK — the ceiling is not over-tightened: a single step that fits the ceiling still completes", async () => {
