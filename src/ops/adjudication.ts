@@ -40,6 +40,7 @@
 // facts above fixes both failure modes at once (over-broad whole-evidence hash
 // and under-broad anchor-only key).
 
+import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { sha256OfString } from "../util/content-digest.js";
 
@@ -113,4 +114,47 @@ export function computeAdjudicationIdentity(input: AdjudicationIdentityInput): s
   // canonicalIdentity fixes the key order, so JSON.stringify is stable without a
   // custom serializer.
   return sha256OfString(JSON.stringify(canonicalIdentity(input)));
+}
+
+/** The detection-side read path: the CURRENT recorded adjudication identity(ies)
+ *  for a task, as a set the suppression check (step 3, detectOrphanedWorkMayPersist)
+ *  tests the freshly-computed identity against with `.has(...)`. Empty when the task
+ *  was never adjudicated.
+ *
+ *  Only the LATEST `ops.adjudicated` event counts. An adjudication records the
+ *  identity computed off the task.failed payload at write time; when that work
+ *  materially changes and the incident reappears, the operator re-adjudicates and a
+ *  NEW `ops.adjudicated` event supersedes the old one. Returning the latest — rather
+ *  than every historical identity — keeps suppression bound to the operator's most
+ *  recent decision: a superseded identity must NOT keep suppressing (fail-closed;
+ *  see threat-model risk #2, a genuinely new incident inheriting a stale
+ *  adjudication).
+ *
+ *  Reads the single latest event via the same latest-event-per-task selection the
+ *  detectors use (detect.ts:267-272) — one prepared statement, one round trip over
+ *  the read-only handle, no per-task event-stream walk. `$.identity` is the field
+ *  performAdjudicate (step 4) writes into the ops.adjudicated payload. This helper
+ *  only READS the record; it does not itself decide suppression. */
+export function adjudicatedIdentitiesForTask(db: DatabaseInstance, taskId: string): Set<string> {
+  const row = db
+    .prepare(
+      `SELECT json_extract(e.payload, '$.identity') AS identity
+       FROM events e
+       WHERE e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = ? AND e2.event_type = 'ops.adjudicated'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )`
+    )
+    .get(taskId) as { identity: string | null } | undefined;
+  const identities = new Set<string>();
+  // A pre-identity or malformed payload (json_extract → null / non-string) records
+  // no usable identity: treat it as "not adjudicated for any current identity" so it
+  // can never suppress. This never happens for records performAdjudicate writes, but
+  // the read path stays fail-closed against a hand-edited or partial row.
+  if (row && typeof row.identity === "string" && row.identity.length > 0) {
+    identities.add(row.identity);
+  }
+  return identities;
 }
