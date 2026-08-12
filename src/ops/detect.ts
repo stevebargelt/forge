@@ -19,6 +19,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { Incident } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
+import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity } from "./adjudication.js";
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { taskDir } from "../util/paths.js";
@@ -342,9 +343,34 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
                 : failureKind === "result_missing"
                   ? `task ${row.taskId} (${row.phase}) — container exited cleanly but no result.json was ever produced (result missing after a clean exit, not a killed agent)`
                   : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
+    const incidentKind =
+      failureKind === "oom_killed"
+        ? "oom_killed"
+        : failureKind === "orphaned_needs_finalize"
+          ? "orphaned_needs_finalize"
+          : "orphaned_work_may_persist";
+    // FG-703: suppression at the detector choke point. SCOPE is exactly the
+    // orphaned_work_may_persist incident kind (the brief's only adjudicable
+    // kind) — oom_killed / orphaned_needs_finalize are out of scope and never
+    // suppressed here. Compute this incident's canonical identity from the SAME
+    // structured facts the adjudication write recorded (step 1's one function,
+    // never re-derived), and drop the incident iff the task's LATEST
+    // ops.adjudicated record names exactly THIS identity. Suppression is gated
+    // strictly on an adjudication record for this identity — NEVER on run status
+    // — so a failed or active parent still raises an UNADJUDICATED incident and
+    // FG-549's complete/abandoned behavior (the SETTLED_RUN_STATES filter in the
+    // SQL above) is untouched. A materially-changed task.failed yields a
+    // different identity, so the recorded one no longer matches and the incident
+    // reappears as unresolved; volatile churn (shared-checkout changedFiles,
+    // paths, timestamps, prose) leaves the identity stable and keeps it
+    // suppressed.
+    if (incidentKind === "orphaned_work_may_persist") {
+      const identity = computeAdjudicationIdentity({ runId: row.runId, taskId: row.taskId, failureKind, evidence });
+      if (adjudicatedIdentitiesForTask(db, row.taskId).has(identity)) continue;
+    }
     incidents.push(
       makeIncident({
-        kind: failureKind === "oom_killed" ? "oom_killed" : failureKind === "orphaned_needs_finalize" ? "orphaned_needs_finalize" : "orphaned_work_may_persist",
+        kind: incidentKind,
         severity: "high",
         confidence: "db-confirmed",
         runId: row.runId,
