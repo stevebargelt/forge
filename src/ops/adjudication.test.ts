@@ -602,3 +602,58 @@ for (const otherKind of ["oom_killed", "orphaned_needs_finalize"]) {
     assert.equal(adjudicatedCount("t1"), 0);
   });
 }
+
+// ── RF-1: the write path must accept PRECISELY the set the detector emits ──────
+//
+// incidentKindForFailureKind is a TOTAL mapping — every kind that is not
+// oom_killed / orphaned_needs_finalize collapses to orphaned_work_may_persist.
+// But detectOrphanedWorkMayPersist gates candidates on a membership set (+ two
+// evidence rules) BEFORE that mapping, so a failure kind OUTSIDE the set never
+// surfaces as a live incident. Scoping the write on the mapping alone fails OPEN
+// on those kinds — it retires an incident that never existed. The fix shares the
+// detector's OWN candidate predicate, so the writer refuses every kind the
+// detector would never present, by name, writing no audit row.
+
+for (const unpresentedKind of ["orphaned", "result_malformed", "merge_conflict", "gate_rejected", "some_future_kind"]) {
+  test(`performAdjudicate: a ${unpresentedKind} task (outside the detector's candidate set) is refused, writing no event`, () => {
+    seedRun("run1");
+    seedTask("t1", "run1");
+    seedFailed("t1", "run1", { failureKind: unpresentedKind, evidence: worktreeEvidence() });
+
+    // The mapping would collapse this to orphaned_work_may_persist, but the
+    // detector never emits an incident for it — so the write must refuse.
+    assert.equal(incidentKindForFailureKind(unpresentedKind), "orphaned_work_may_persist", "precondition: the total mapping still collapses it");
+    const res = performAdjudicate("t1", validInput({ expectedIdentity: identityFor({ failureKind: unpresentedKind }) }));
+    assert.equal(res.kind, "refused", `${unpresentedKind} is not a live orphaned_work_may_persist incident and must not be adjudicable`);
+    assert.match((res as { reason: string }).reason, /unsupported incident kind/);
+    assert.match((res as { reason: string }).reason, new RegExp(unpresentedKind));
+    assert.equal(adjudicatedCount("t1"), 0, "no audit row appended for a phantom incident");
+  });
+}
+
+test("performAdjudicate: an attached-exit container_crash with NO evidence is refused (the detector never emits it)", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  // container_crash is in the membership set but only rises to an incident once
+  // evidence was recorded — an evidence-less one is skipped by the detector, so
+  // the writer must refuse it too rather than fall open.
+  seedFailed("t1", "run1", { failureKind: "container_crash" }); // no evidence
+
+  const res = performAdjudicate("t1", validInput({ expectedIdentity: identityFor({ failureKind: "container_crash", evidence: undefined }) }));
+  assert.equal(res.kind, "refused", "an evidence-less container_crash raises no incident and is not adjudicable");
+  assert.match((res as { reason: string }).reason, /unsupported incident kind/);
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: a container_crash whose worktree is CLEAN is refused (the detector skips a clean worktree)", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  // changedFiles empty → no persisted work at risk → the detector skips it, so
+  // the write path must refuse it as well.
+  seedFailed("t1", "run1", { failureKind: "container_crash", evidence: worktreeEvidence({ changedFiles: [] }) });
+
+  const res = performAdjudicate("t1", validInput({ expectedIdentity: identityFor({ failureKind: "container_crash", evidence: worktreeEvidence({ changedFiles: [] }) }) }));
+  assert.equal(res.kind, "refused", "a clean-worktree container_crash raises no incident and is not adjudicable");
+  assert.match((res as { reason: string }).reason, /unsupported incident kind/);
+  assert.equal(adjudicatedCount("t1"), 0);
+});

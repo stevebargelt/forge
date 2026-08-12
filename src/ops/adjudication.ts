@@ -213,6 +213,70 @@ const SUPPORTED_KIND = "orphaned_work_may_persist";
 /** The one outcome this verb accepts (brief constraint 2). */
 const SUPPORTED_OUTCOME = "no_unique_work";
 
+// ── The ONE shared candidate predicate (RF-1) ─────────────────────────────────
+//
+// incidentKindForFailureKind above is a TOTAL mapping: every kind that is not
+// oom_killed / orphaned_needs_finalize collapses to orphaned_work_may_persist.
+// The detector, however, does NOT emit an incident for every failure kind — it
+// first gates candidates on a fixed membership set (and two evidence rules)
+// BEFORE it applies the mapping. Scoping the write path on the mapping alone
+// therefore admits kinds the detector never presents as a live incident (e.g. a
+// failed task with failure_kind `orphaned`, `result_malformed`, `merge_conflict`,
+// `gate_rejected`) — a fail-open that would retire an incident which never
+// existed. The two sides must agree COMPLETELY, so both call the SAME candidate
+// predicate here, not just the same kind mapping.
+//
+// These two sets and the two rules below are the detector's candidate gate,
+// lifted out of detect.ts so detectOrphanedWorkMayPersist imports them rather
+// than keeping a divergent second copy.
+//
+// FG-455 p4 / FG-479 / FG-492: oom_killed, orphaned_needs_finalize,
+// fanout_wave_orphaned and result_missing carry the same "container gone, work
+// may persist" shape as orphaned_work_may_persist, so `forge ops check` covers
+// all of them.
+const WORK_MAY_PERSIST_KINDS = new Set([
+  "orphaned_work_may_persist",
+  "oom_killed",
+  "container_crash",
+  "idle_timeout",
+  "orphaned_needs_finalize",
+  "fanout_wave_orphaned",
+  "result_missing",
+]);
+// FG-461 / FG-492: the attached-exit kinds only carry recovery evidence when it
+// was actually recorded. A crash with no evidence payload is common and would be
+// retroactive noise, so these kinds only present as an incident once evidence is
+// attached. fanout_wave_orphaned is deliberately NOT here — its evidence lives
+// under a different payload key and it must always raise an incident.
+const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing"]);
+
+/** Does a failed task with this failure_kind + evidence raise ANY orphaned-work-
+ *  family incident in detectOrphanedWorkMayPersist? Covers all three incident
+ *  kinds that detector emits (orphaned_work_may_persist, oom_killed,
+ *  orphaned_needs_finalize). This is the detector's candidate gate — the SAME
+ *  three checks it applies inline, in the same order. */
+export function raisesWorkMayPersistIncident(failureKind: string, evidence: OrphanEvidence | undefined): boolean {
+  if (!WORK_MAY_PERSIST_KINDS.has(failureKind)) return false;
+  // A clean worktree means no persisted work at risk — skip, EXCEPT for the two
+  // kinds whose at-risk artifact is not the worktree diff (an unfinalized result
+  // for orphaned_needs_finalize; a clean-exit-no-result for result_missing).
+  if (evidence && evidence.changedFiles.length === 0 && failureKind !== "orphaned_needs_finalize" && failureKind !== "result_missing") return false;
+  // The attached-exit kinds only rise to an incident once evidence was recorded.
+  if (ATTACHED_EXIT_EVIDENCE_KINDS.has(failureKind) && !evidence) return false;
+  return true;
+}
+
+/** Does a failed task present as an ADJUDICABLE orphaned_work_may_persist incident?
+ *  The write side's scope gate: a STRICT subset of raisesWorkMayPersistIncident —
+ *  the task must both raise an incident AND have that incident collapse to the one
+ *  adjudicable kind (oom_killed / orphaned_needs_finalize raise their own incident
+ *  kinds and are refused by name). This is the exact set the detector emits as an
+ *  orphaned_work_may_persist incident, so the writer accepts precisely that set and
+ *  refuses everything else. */
+export function presentsAsAdjudicableIncident(failureKind: string, evidence: OrphanEvidence | undefined): boolean {
+  return raisesWorkMayPersistIncident(failureKind, evidence) && incidentKindForFailureKind(failureKind) === SUPPORTED_KIND;
+}
+
 export type AdjudicateInput = {
   /** The disposition. Only `no_unique_work` is accepted; anything else fails closed. */
   outcome: string;
@@ -337,20 +401,27 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
   if (!payload) return { kind: "unknown", id: incidentId };
 
   // ── Scope: exactly orphaned_work_may_persist × no_unique_work. Scope on the
-  //    INCIDENT kind the detector EMITS (via the shared mapping), not the raw
-  //    failure_kind: container_crash / idle_timeout / result_missing /
-  //    fanout_wave_orphaned all present as an orphaned_work_may_persist incident
-  //    and must be adjudicable. A kind that maps to another incident (oom_killed,
-  //    orphaned_needs_finalize) is still refused by name. ──
+  //    detector's OWN candidate predicate (presentsAsAdjudicableIncident), not
+  //    the kind mapping alone: container_crash / idle_timeout / result_missing /
+  //    fanout_wave_orphaned present as an orphaned_work_may_persist incident and
+  //    must be adjudicable, while a kind the detector never surfaces as a live
+  //    incident (oom_killed / orphaned_needs_finalize map to another incident;
+  //    `orphaned` / `result_malformed` / `merge_conflict` / … are outside the
+  //    membership set entirely; an evidence-less attached-exit kind or a
+  //    clean-worktree crash raises no incident) is refused by name (RF-1). The
+  //    mapping is total, so scoping on it alone would fail OPEN on those kinds. ──
   const failureKind = payload["failure_kind"];
-  const incidentKind = typeof failureKind === "string" ? incidentKindForFailureKind(failureKind) : undefined;
-  if (incidentKind !== SUPPORTED_KIND) {
+  const evidence = payload["evidence"] as OrphanEvidence | undefined;
+  if (typeof failureKind !== "string" || !presentsAsAdjudicableIncident(failureKind, evidence)) {
+    const asKind = typeof failureKind === "string" ? incidentKindForFailureKind(failureKind) : undefined;
     return {
       kind: "refused",
       id: incidentId,
       reason: `unsupported incident kind: task ${incidentId}'s failure_kind ${
         typeof failureKind === "string" ? failureKind : "(unrecorded)"
-      } presents as ${incidentKind ? `an ${incidentKind}` : "no"} incident, not a ${SUPPORTED_KIND} incident — this verb adjudicates only ${SUPPORTED_KIND} incidents`,
+      } does not present as a live ${SUPPORTED_KIND} incident${
+        asKind && asKind !== SUPPORTED_KIND ? ` (it presents as an ${asKind} incident)` : ""
+      } — this verb adjudicates only ${SUPPORTED_KIND} incidents the detector emits`,
     };
   }
   if (input.outcome !== SUPPORTED_OUTCOME) {
@@ -419,7 +490,8 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
     }
     const livePayload = latestFailedPayload(db, incidentId);
     const liveFailureKind = livePayload?.["failure_kind"];
-    if (!livePayload || typeof liveFailureKind !== "string" || incidentKindForFailureKind(liveFailureKind) !== SUPPORTED_KIND) {
+    const liveEvidence = livePayload?.["evidence"] as OrphanEvidence | undefined;
+    if (!livePayload || typeof liveFailureKind !== "string" || !presentsAsAdjudicableIncident(liveFailureKind, liveEvidence)) {
       return { kind: "refused", id: incidentId, reason: `identity drift: task ${incidentId}'s current failure no longer presents as a ${SUPPORTED_KIND} incident — nothing was written` };
     }
     const writeIdentity = computeAdjudicationIdentity(identityInputFor(task.runId, incidentId, livePayload));

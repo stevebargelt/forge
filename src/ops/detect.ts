@@ -19,7 +19,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { Incident, IncidentAdjudication } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
-import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity, incidentKindForFailureKind } from "./adjudication.js";
+import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity, incidentKindForFailureKind, raisesWorkMayPersistIncident } from "./adjudication.js";
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { taskDir } from "../util/paths.js";
@@ -209,44 +209,12 @@ export function detectReconcileCandidate(
 
 type FailedRow = { taskId: string; runId: string; phase: string; payload: string | null };
 
-// FG-455 p4 review: oom_killed carries the same "container gone, worktree may
-// hold real work" shape as orphaned_work_may_persist (mirrors ORPHAN_EVIDENCE_KINDS
-// in failure-kind.ts and CONTINUABLE_KINDS in recover.ts) — excluding it here left
-// an OOM-killed task with a dirty worktree invisible to `forge ops check`.
-// FG-479 review finding 1: orphaned_needs_finalize carries the same OrphanEvidence
-// shape (reconcile.ts's container-gone evidence path) — a pipeline step stuck
-// fail-safe in this state never raised an incident here either.
-// FG-492 finding 4: fanout_wave_orphaned (state 3 — a fanout parent's derived
-// failure, never had its own container) and result_missing (state 4 — a clean
-// container exit that produced no result) join the set so `forge ops check` can
-// distinguish all four causal states the ticket requires, not just the two
-// (orphaned_work_may_persist-family / orphaned_needs_finalize) it already covered.
-const WORK_MAY_PERSIST_KINDS = new Set([
-  "orphaned_work_may_persist",
-  "oom_killed",
-  "container_crash",
-  "idle_timeout",
-  "orphaned_needs_finalize",
-  "fanout_wave_orphaned",
-  "result_missing",
-]);
-// FG-461: the attached-exit kinds only carry recovery evidence when it was
-// actually recorded (invoke.ts / runNext.ts). A pre-FG-461 crash — or any
-// read-only-dispatch crash — has no evidence payload, and container_crash /
-// idle_timeout are common outcomes, so raising an incident for one with no
-// recorded persisted-work evidence would be retroactive noise. Require evidence
-// (with changed files) for these kinds; the reconcile-time kinds keep their
-// prior behavior (they always carry evidence, or legacy events with none still
-// surface as "evidence not recorded").
-// FG-492 finding 4: result_missing joins this set too — invoke.ts's current
-// result_missing path (see invoke.ts's `no_result_json` branch) never attaches
-// an OrphanEvidence tuple, so this keeps today's behavior noise-free (no
-// incident fires) while making the renderer below ready the moment a producer
-// does attach evidence. fanout_wave_orphaned is NOT in this set — its evidence
-// lives under a different payload key (childSummary, not evidence) and it must
-// always raise an incident when it occurs (an unfinalized wave, unlike a plain
-// clean-exit-no-result task, is never "just retry it").
-const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing"]);
+// FG-455 p4 / FG-479 / FG-492 / FG-461: the failure-kind membership set and the
+// attached-exit evidence rule that together decide whether a failed task raises
+// an orphaned-work-family incident here now live in adjudication.ts as the ONE
+// shared candidate predicate (raisesWorkMayPersistIncident), so the adjudication
+// write path accepts precisely the set this detector emits and cannot drift into
+// a divergent second copy (RF-1).
 
 /** FG-703 (step 5): read back the LATEST ops.adjudicated record for a task as the
  *  operator-facing audit annotation (outcome, rationale, actor, timestamp,
@@ -336,8 +304,14 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
   for (const row of rows) {
     const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
     const failureKind = payload?.["failure_kind"];
-    if (typeof failureKind !== "string" || !WORK_MAY_PERSIST_KINDS.has(failureKind)) continue;
+    if (typeof failureKind !== "string") continue;
     const evidence = payload?.["evidence"] as OrphanEvidence | undefined;
+    // The ONE shared candidate predicate (adjudication.ts): membership in the
+    // work-may-persist kind set, the clean-worktree skip (with the
+    // orphaned_needs_finalize / result_missing exemptions), and the attached-exit
+    // evidence requirement — all in one function the adjudication write path also
+    // gates on, so the two sides cannot diverge (RF-1).
+    if (!raisesWorkMayPersistIncident(failureKind, evidence)) continue;
     // FG-492 finding 4 (state 3): a fanout parent's derived failure carries its
     // evidence under a DIFFERENT payload key (childSummary, not evidence) — the
     // parent never had its own container, so there's no OrphanEvidence tuple to
@@ -346,29 +320,6 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
     const childSummary = isFanoutParent
       ? (payload?.["childSummary"] as { total?: number; complete?: number } | undefined)
       : undefined;
-    // oom_killed is emitted regardless of worktree state (failure-kind.ts /
-    // reconcile.ts), unlike orphaned_work_may_persist which only fires when the
-    // worktree is dirty — so a clean-worktree oom_killed task has no persisted
-    // work at risk and shouldn't raise this incident.
-    // FG-479: orphaned_needs_finalize is exempt from the clean-worktree skip —
-    // its at-risk artifact is the preserved unfinalized RESULT, not dirty files
-    // (e.g. a crash after the worktree merge leaves changedFiles empty while the
-    // integration gate and reds still never ran).
-    // FG-492 finding 4 (state 4): result_missing is exempt too — "container
-    // exited cleanly, wrote nothing" is meaningful on its own, independent of
-    // whether the (usually empty) worktree diff happens to be clean.
-    if (
-      evidence &&
-      evidence.changedFiles.length === 0 &&
-      failureKind !== "orphaned_needs_finalize" &&
-      failureKind !== "result_missing"
-    ) continue;
-    // FG-461: an attached-exit container_crash / idle_timeout / result_missing
-    // only rises to an incident when it recorded evidence — skip the
-    // evidence-less ones (pre-FG-461 events, read-only-dispatch crashes, or
-    // today's result_missing producer, which doesn't attach evidence yet) so
-    // common crashes don't retroactively flood ops check.
-    if (ATTACHED_EXIT_EVIDENCE_KINDS.has(failureKind) && !evidence) continue;
     const dir = taskDir(row.runId, row.taskId);
     const firstLine =
       failureKind === "oom_killed"
