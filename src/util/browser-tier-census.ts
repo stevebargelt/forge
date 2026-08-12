@@ -78,6 +78,8 @@ export const BROWSER_TIER_DIR = join(
 // the selector through the real dashboard server and production schema, including
 // canonical checkout scope, dedupe against related records and a phone-to-desktop
 // count-chart legibility sweep.
+// FG-663 adds `fg663-deleted-checkout` (1 test): a run written from a disposable
+// checkout remains visibly attributed to its project after that checkout is gone.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
@@ -85,6 +87,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "completed-runs.test.ts": 8,
   "completed-runs-real-store.test.ts": 2,
   "fg591-queue-board.test.ts": 6,
+  "fg663-deleted-checkout.test.ts": 1,
   "fg679-current-activity.test.ts": 13,
   "fg694-home-in-flight.test.ts": 9,
   "fg608-backlog-cutover.test.ts": 3,
