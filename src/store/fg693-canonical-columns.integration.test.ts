@@ -446,9 +446,13 @@ describe("FG-693 — ADDITIVE ONLY, held mechanically rather than by review memo
   });
 
   test("the FG-693 DDL adds columns and nothing else — no UPDATE, no backfill, no drop, no rebuild", () => {
+    // FG-663 added a second, non-canonical index to CANONICAL_IDENTITY_INDEXES
+    // (idx_runs_project_identity, over the durable project_identity column). That array
+    // is now a shared guarded-index registry, not exclusively FG-693's — so this
+    // FG-693-specific assertion filters it to the canonical column it owns.
     const ddl = [
       ...ADDITIVE_COLUMNS.filter((c) => c.column === CANONICAL_COLUMN).map((c) => c.ddl),
-      ...CANONICAL_IDENTITY_INDEXES.map((i) => i.ddl),
+      ...CANONICAL_IDENTITY_INDEXES.filter((i) => i.column === CANONICAL_COLUMN).map((i) => i.ddl),
     ];
     assert.equal(ddl.length, CANONICAL_TABLES.length * 2, "every canonical table contributes one ALTER and one index");
     for (const statement of ddl) {
@@ -528,7 +532,11 @@ describe("FG-693 — ADDITIVE ONLY, held mechanically rather than by review memo
         const shape = indexShape(fresh);
         assert.equal(
           shape.length,
-          CANONICAL_IDENTITY_INDEXES.length,
+          // indexShape filters sqlite_master to indexes whose SQL names CANONICAL_COLUMN,
+          // so it counts only FG-693's canonical indexes. Since FG-663 the array also holds
+          // idx_runs_project_identity (a different column), so compare against the canonical
+          // subset rather than the whole array.
+          CANONICAL_IDENTITY_INDEXES.filter((i) => i.column === CANONICAL_COLUMN).length,
           "every declared index must actually be creatable against the schema it names",
         );
         assert.deepEqual(
