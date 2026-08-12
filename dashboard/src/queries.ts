@@ -183,6 +183,13 @@ type ScopeTargets = {
    *  so a legacy spelling shared by many rows (and by several tables in one query)
    *  costs one syscall rather than one per row. */
   recorded: Map<string, string | null>;
+  /** FG-663: the durable project-identity keys this scope also matches on `runs`,
+   *  independent of any path — the scoped project's `repo-` evidence key plus the
+   *  `pk-` it maps to. Non-empty ONLY for a genuine project (array) scope; a string
+   *  (exact-checkout) scope carries none so AC7 stays a pure path filter. This is
+   *  the arm that keeps a run whose checkout was DELETED attributed to its project,
+   *  because project_dir / project_dir_canonical can no longer resolve to anything. */
+  identities: ReadonlySet<string>;
 };
 
 function resolveScopeTargets(scope: Exclude<ProjectScope, undefined>): ScopeTargets {
@@ -196,7 +203,51 @@ function resolveScopeTargets(scope: Exclude<ProjectScope, undefined>): ScopeTarg
     if (identity.kind === "resolved") physicals.add(identity.physical);
     else unresolved.add(spelling);
   }
-  return { physicals, unresolved, recorded: new Map() };
+  // FG-663: only a project (array) scope carries a durable identity set. A string
+  // scope is an exact operational checkout — AC7 — and is never widened by identity.
+  const identities = typeof scope === "string" ? new Set<string>() : scopeProjectIdentities(scope);
+  return { physicals, unresolved, recorded: new Map(), identities };
+}
+
+// FG-663: the identity keys a genuine PROJECT scope matches in addition to its
+// paths. A project scope is the array resolveProjectScope() produces — exactly one
+// project's observed member paths — so we recognize it structurally: the UNIQUE
+// project whose registry `projectDirs` contains every path in the scope. A
+// synthetic union spanning several projects, a set of raw spellings no project ever
+// recorded, or an empty scope owns no single project and therefore widens NOTHING,
+// which is what keeps the exact-checkout and multi-spelling scope cases path-only.
+//
+// The set is that one project's `repo-` evidence key (its ProjectRecord.key, what
+// the dashboard registry and colors are built on) plus the `pk-` it maps to in the
+// project_identity registry — the same project_key ↔ repo_evidence_key arbiter
+// backlogTruthForProject reads. Runs captured a `pk-` OR a `repo-` at creation
+// (src/store/runs.ts), so both spaces must be in the set for the identity arm to
+// match every such run. Cross-project isolation is structural: only the one owning
+// project's own keys are ever added. READ-ONLY — the registry is never written here.
+function scopeProjectIdentities(paths: readonly string[]): Set<string> {
+  const identities = new Set<string>();
+  if (paths.length === 0) return identities;
+  try {
+    const owning = projectsForDashboard().filter((project) =>
+      paths.every((dir) => project.projectDirs.includes(dir)),
+    );
+    // Absolute paths belong to at most one project, so `owning` is 0 or 1; a scope
+    // that names more than one project (or none) is not a single project's scope.
+    if (owning.length !== 1) return identities;
+    const project = owning[0]!;
+    identities.add(project.key);
+    const pk = db()
+      .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
+      .get(project.key) as { project_key: string } | undefined;
+    if (pk?.project_key) identities.add(pk.project_key);
+  } catch {
+    // The registry read is best-effort: a store a peer wrote before the
+    // project_identity table existed, or a partial schema, degrades this scope to
+    // its path arms alone rather than failing the whole query. Attribution of a
+    // deleted-checkout run is lost in that degraded case, never mis-directed.
+    return identities;
+  }
+  return identities;
 }
 
 /** The resolved form of a caller-supplied scope: `undefined` stays unscoped. */
@@ -236,6 +287,24 @@ function hasCanonicalColumn(table: ScopedTable): boolean {
   }
   if (present) canonicalColumnCache.set(table, true);
   return present;
+}
+
+// FG-663: does the OPEN store carry the additive `runs.project_identity` column?
+// This read-only handle may be pointed at an aged store a peer forge has not
+// migrated yet, so naming the column unconditionally would fail every scoped run
+// query on it. Deliberately un-memoized (matching runsProjectIdentitySelect): a
+// cached `false` would leave the identity arm permanently dark the instant a peer
+// applies the migration under this long-lived handle, and PRAGMA reads the schema
+// SQLite already holds for this connection — cheap next to the polled query it
+// guards. A store predating the `runs` table itself fails closed to `false`.
+function hasRunsProjectIdentity(): boolean {
+  try {
+    return (db().prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).some(
+      (col) => col.name === "project_identity",
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Does this NULL-canonical row's recorded spelling resolve to one of the proven
@@ -376,13 +445,25 @@ function scopeSql(table: ScopedTable, qualifier: string, scope: ProjectScope): S
     parts.push(`${asWritten} IN (${sqlPlaceholders(unresolved.length)})`);
     params.push(...unresolved);
   }
+  // FG-663: the identity arm (AC5). Only `runs` carries a durable project_identity,
+  // and only a genuine project scope populated the identity set (string scopes and
+  // synthetic unions get an empty one — AC7 untouched). OR'd with the path arms, it
+  // is what matches runs whose checkout is gone and whose project_dir /
+  // project_dir_canonical therefore resolve to nothing on disk.
+  if (table === "runs" && targets.identities.size > 0 && hasRunsProjectIdentity()) {
+    const identities = [...targets.identities];
+    parts.push(`${qualifier}.project_identity IN (${sqlPlaceholders(identities.length)})`);
+    params.push(...identities);
+  }
 
   if (parts.length === 0) return MATCHES_NOTHING;
   return { clause: `AND (${parts.join(" OR ")})`, params };
 }
 
-/** One row's project identity, as the two columns record it. */
-type RowProjectIdentity = { projectDir: string | null; canonical: string | null };
+/** One row's project identity, as the columns record it. `identity` is FG-663's
+ *  durable `runs.project_identity` — present on run rows, absent on rows from
+ *  tables (campaigns) that carry no project identity of their own. */
+type RowProjectIdentity = { projectDir: string | null; canonical: string | null; identity?: string | null };
 
 /** The same decision as `scopeSql`, applied to a row already in hand — the
  *  in-process half, for the event-derived views that resolve their project
@@ -396,6 +477,11 @@ type RowProjectIdentity = { projectDir: string | null; canonical: string | null 
  *  are all a row costs now. */
 function scopeIncludes(targets: ScopeTargets | undefined, row: RowProjectIdentity): boolean {
   if (targets === undefined) return true;
+  // FG-663: a run carrying a durable project identity in the scoped project's
+  // identity set matches even when its checkout is gone and no path arm resolves.
+  // The set is non-empty only for a genuine project scope, so an exact-checkout
+  // (AC7) scope — whose set is empty — is never widened here.
+  if (row.identity != null && row.identity !== "" && targets.identities.has(row.identity)) return true;
   const projectDir = row.projectDir ?? "";
   if (row.canonical !== null && row.canonical !== "") {
     if (targets.physicals.has(row.canonical)) return true;
@@ -1941,10 +2027,7 @@ const projectPresentationCache = new Map<string, { at: number; value: ProjectPre
 // polled query it guards, and a cached `false` would go stale the instant a peer
 // applies the migration under this long-lived read handle.
 function runsProjectIdentitySelect(): string {
-  const present = (db().prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).some(
-    (col) => col.name === "project_identity",
-  );
-  return present ? ", r.project_identity" : "";
+  return hasRunsProjectIdentity() ? ", r.project_identity" : "";
 }
 
 function normalizeStoredIdentityToEvidenceKey(storedIdentity: string): string {
@@ -2224,10 +2307,16 @@ type RunScopeInfo = { identity: RowProjectIdentity; status: string | null };
 /** The column shape of THIS store, resolved once per query rather than once per row.
  *  Both lookups below run inside a loop, and asking the store its shape per row is
  *  the same class of waste as re-resolving the scope per row. */
-type CanonicalShape = { runs: boolean; campaigns: boolean };
+type CanonicalShape = { runs: boolean; campaigns: boolean; runsIdentity: boolean };
 
 function canonicalShape(): CanonicalShape {
-  return { runs: hasCanonicalColumn("runs"), campaigns: hasCanonicalColumn("campaigns") };
+  return {
+    runs: hasCanonicalColumn("runs"),
+    campaigns: hasCanonicalColumn("campaigns"),
+    // FG-663: whether `runs` carries project_identity, resolved once per query so
+    // runScopeInfo's per-row reads select it only when the store actually has it.
+    runsIdentity: hasRunsProjectIdentity(),
+  };
 }
 
 // FG-693: the run's canonical identity is read alongside its as-written spelling,
@@ -2236,12 +2325,20 @@ function canonicalShape(): CanonicalShape {
 function runScopeInfo(runId: string | null, shape: CanonicalShape): RunScopeInfo | null {
   if (!runId) return null;
   const canonical = shape.runs ? `, ${CANONICAL_COLUMN}` : "";
-  const row = db().prepare(`SELECT project_dir, status${canonical} FROM runs WHERE id = ?`).get(runId) as
-    | { project_dir: string | null; status: string | null; project_dir_canonical?: string | null }
+  // FG-663: the run's durable project_identity travels with its path/canonical so
+  // scopeIncludes makes the SAME decision here that scopeSql makes in SQL — a
+  // review-loop verification on a run whose checkout is gone stays in project scope.
+  const identity = shape.runsIdentity ? `, project_identity` : "";
+  const row = db().prepare(`SELECT project_dir, status${canonical}${identity} FROM runs WHERE id = ?`).get(runId) as
+    | { project_dir: string | null; status: string | null; project_dir_canonical?: string | null; project_identity?: string | null }
     | undefined;
   if (!row) return null;
   return {
-    identity: { projectDir: row.project_dir ?? null, canonical: row.project_dir_canonical ?? null },
+    identity: {
+      projectDir: row.project_dir ?? null,
+      canonical: row.project_dir_canonical ?? null,
+      identity: row.project_identity ?? null,
+    },
     status: row.status ?? null,
   };
 }
