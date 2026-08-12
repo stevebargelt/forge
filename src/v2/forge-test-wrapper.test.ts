@@ -69,15 +69,15 @@ test("FG-695: a tier's paths are never handed to `npm run <tier> --`, which woul
   assert.match(wrapper, /_tier_files/, "narrowing must go through the tier's own file set");
 });
 
-test("FG-695: the narrowed integration runner still matches run-integration-tests.sh's own exec line", () => {
+test("FG-695: the narrowed integration runner still matches run-integration-tests.sh's bulk runner", () => {
   // The wrapper cannot invoke that script for a narrowed run (it selects its own
   // files), so it reproduces its runner — including the test-setup preload that
   // keeps the suite off the real ~/.forge/forge.db (#199). This fails if either moves.
-  const execLine = readFileSync(join(root, "scripts", "run-integration-tests.sh"), "utf8").match(
-    /^exec (.+)$/m,
+  const bulkLine = readFileSync(join(root, "scripts", "run-integration-tests.sh"), "utf8").match(
+    /^\s*(node --import tsx --import \.\/src\/test-setup\.ts --test) "\$\{BULK_FILES\[@\]\}"$/m,
   )?.[1];
-  assert.ok(execLine, "run-integration-tests.sh must still end in an exec line");
-  const runner = execLine.replace(/\s*"\$\{FILES\[@\]\}"\s*$/, "");
+  assert.ok(bulkLine, "run-integration-tests.sh must retain its explicit bulk runner");
+  const runner = bulkLine;
   assert.match(runner, /--import \.\/src\/test-setup\.ts/);
   assert.ok(
     wrapper.includes(`_TIER_CMD=(${runner})`),

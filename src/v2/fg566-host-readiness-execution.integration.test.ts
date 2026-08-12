@@ -64,6 +64,7 @@ const ENV_KEYS = [
   "AWS_SESSION_TOKEN",
   "GITHUB_TOKEN",
   "FG566_DECOY",
+  "__CF_USER_TEXT_ENCODING",
   "npm_config_registry",
 ];
 let savedEnv: Record<string, string | undefined> = {};
@@ -186,10 +187,14 @@ test("FG-566 REAL SINK — a directory that only a GLOB could name is never reac
 });
 
 // ---------------------------------------------------------------------------
-// SETUP ENV — the allowlist, and NOTHING outside it.
+// SETUP ENV — Forge's allowlist, plus the closed set injected by the OS.
 // ---------------------------------------------------------------------------
 
-test("FG-566 REAL SINK — the setup child's environment contains NOTHING outside the allowlist, with decoys planted in process.env", async () => {
+test("FG-566 REAL SINK — Forge supplies only allowlisted environment entries; Darwin may additionally inject only __CF_USER_TEXT_ENCODING", async () => {
+  // Contract: Forge supplies only allowlisted environment entries at exec. The
+  // observed child environment may additionally contain a closed, documented
+  // set of OS-injected variables. On Darwin, that set currently contains only
+  // __CF_USER_TEXT_ENCODING.
   // A key-by-key assertion would keep passing if `...process.env` came back and
   // only the specific keys asserted today were deleted. This asserts the
   // COMPLEMENT: whatever the child received, every key of it is either forge's
@@ -205,6 +210,10 @@ test("FG-566 REAL SINK — the setup child's environment contains NOTHING outsid
   process.env["AWS_SESSION_TOKEN"] = "must-never-reach-a-setup-child";
   process.env["GITHUB_TOKEN"] = "must-never-reach-a-setup-child";
   process.env["FG566_DECOY"] = "must-never-reach-a-setup-child";
+  // macOS may synthesize this in the child. It must never be inherited from
+  // Forge's parent environment, so a recognizable parent value is a boundary
+  // sentinel rather than an allowed pass-through value.
+  process.env["__CF_USER_TEXT_ENCODING"] = "FG566-parent-sentinel-must-not-cross";
 
   const envDump = outsidePath("env");
   process.env["FORGE_HOST_VERIFICATION_SETUP"] = JSON.stringify([
@@ -215,10 +224,17 @@ test("FG-566 REAL SINK — the setup child's environment contains NOTHING outsid
   assert.equal(outcome.kind, "ready");
 
   const childEnv = JSON.parse(readFileSync(envDump, "utf8")) as Record<string, string>;
-  // Node itself injects nothing into a child's env; anything here that is not on
-  // the allowlist came from forge's process environment.
-  const leaked = Object.keys(childEnv).filter((k) => !allowed.has(k));
+  const osInjected = process.platform === "darwin" ? new Set(["__CF_USER_TEXT_ENCODING"]) : new Set<string>();
+  const leaked = Object.keys(childEnv).filter((k) => !allowed.has(k) && !osInjected.has(k));
   assert.deepEqual(leaked, [], `the setup child received keys outside the allowlist: ${leaked.join(", ")}`);
+  assert.notEqual(
+    childEnv["__CF_USER_TEXT_ENCODING"],
+    "FG566-parent-sentinel-must-not-cross",
+    "Forge must not pass __CF_USER_TEXT_ENCODING through from its parent; Darwin may only inject its own value afterward",
+  );
+  if (process.platform !== "darwin") {
+    assert.equal(childEnv["__CF_USER_TEXT_ENCODING"], undefined, "Linux has no OS-injected exception: its child environment is the exact allowlist");
+  }
 
   // …and the allowlist is genuinely populated, so the assertion above is not
   // passing because the env is empty.
@@ -242,12 +258,14 @@ test("FG-566 REAL SINK — the setup ceiling bounds the WHOLE contract: a multi-
   // the very lease that covers it — so the reading has to be falsifiable, not
   // asserted in a comment.
   //
-  // Each step sleeps, then drops a marker. The two readings are distinguishable
-  // by the markers alone, with no wall-clock assertion to flake on:
-  //   per-step ceiling  → step 1 (1.8s < 2.6s) and step 2 (1.8s < 2.6s) both
-  //                       finish, step 3 runs, ALL THREE markers exist, ready.
-  //   whole-contract    → step 1 finishes, step 2 is left ~0.8s and is killed,
-  //                       step 3 never runs — ONE marker, setup_timed_out.
+  // Each step sleeps, then drops a marker. The markers still depend on the
+  // wall-clock ceiling, so use enough absolute headroom for a contended child
+  // spawn while preserving the discriminator:
+  //   per-step ceiling  → both 7s steps fit inside a 10s ceiling, step 3 runs,
+  //                       ALL THREE markers exist, ready.
+  //   whole-contract    → step 1 has 3s headroom; step 2 has only ~3s left and
+  //                       is killed, so step 3 never runs — ONE marker,
+  //                       setup_timed_out.
   const m1 = outsidePath("step1");
   const m2 = outsidePath("step2");
   const m3 = outsidePath("step3");
@@ -255,10 +273,10 @@ test("FG-566 REAL SINK — the setup ceiling bounds the WHOLE contract: a multi-
     "node", "-e", `setTimeout(() => require("fs").writeFileSync(${JSON.stringify(marker)}, "1"), ${ms})`,
   ];
 
-  process.env["FORGE_HOST_READINESS_SETUP_TIMEOUT_MS"] = "2600";
+  process.env["FORGE_HOST_READINESS_SETUP_TIMEOUT_MS"] = "10000";
   process.env["FORGE_HOST_VERIFICATION_SETUP"] = JSON.stringify([
-    sleepThenMark(1800, m1),
-    sleepThenMark(1800, m2),
+    sleepThenMark(7000, m1),
+    sleepThenMark(7000, m2),
     sleepThenMark(0, m3),
   ]);
 
@@ -278,7 +296,7 @@ test("FG-566 REAL SINK — the setup ceiling bounds the WHOLE contract: a multi-
   assert.match(refusal.message, /step 2 of 3/, "the refusal names WHICH step exhausted the ceiling");
   // A loose bound only — the markers above are the real discriminator. This one
   // catches "the ceiling was never applied at all", which no marker would.
-  assert.ok(elapsed < 2600 + 4000, `the whole contract must be bounded by the ceiling; took ${elapsed}ms`);
+  assert.ok(elapsed < 10_000 + 4_000, `the whole contract must be bounded by the ceiling; took ${elapsed}ms`);
 });
 
 test("FG-566 REAL SINK — the ceiling is not over-tightened: a single step that fits the ceiling still completes", async () => {

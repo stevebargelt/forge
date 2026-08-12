@@ -120,9 +120,11 @@ function tierRunner(tier: "unit" | "integration"): string {
     return pkg.scripts["test:unit"].split("$(find")[0].trim();
   }
   const sh = readFileSync(join(REPO_ROOT, "scripts", "run-integration-tests.sh"), "utf8");
-  const execLine = sh.match(/^exec (.+)$/m)?.[1];
-  assert.ok(execLine, "run-integration-tests.sh must still end in an exec line");
-  return execLine.replace(/\s*"\$\{FILES\[@\]\}"\s*$/, "");
+  const bulkRunner = sh.match(
+    /^\s*(node --import tsx --import \.\/src\/test-setup\.ts --test) "\$\{BULK_FILES\[@\]\}"$/m,
+  )?.[1];
+  assert.ok(bulkRunner, "run-integration-tests.sh must retain its explicit bulk runner");
+  return bulkRunner;
 }
 
 test("FG-695: --unit <path> narrows to that file with the unit tier's own runner", () => {
