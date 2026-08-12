@@ -277,6 +277,27 @@ export type ReviewerContextPacket = {
   missingContext: MissingContextItem[];
 };
 
+// FG-703 (step 5): the durable audit record annotated onto an adjudicated
+// incident when it is surfaced through the operator READ surface
+// (`forge ops check --include-adjudicated`). It is NEVER attached in the default
+// suppressing path — an incident only carries this when it was retired by
+// `forge ops adjudicate` AND its CURRENT identity still matches the recorded one
+// (a materially-changed incident reappears as unresolved with no annotation).
+// Mirrors the fields performAdjudicate writes into the ops.adjudicated payload.
+export type IncidentAdjudication = {
+  /** The disposition recorded — only ever `no_unique_work` today. */
+  outcome: string;
+  /** WHY the operator retired the incident (durable audit history). */
+  rationale: string;
+  /** WHO adjudicated (the recorded actor). */
+  actor: string;
+  /** When the adjudication was recorded (ISO timestamp). */
+  at: string;
+  /** The canonical identity this adjudication was recorded against (== the
+   *  incident's current identity, or it would not be annotated). */
+  identity: string;
+};
+
 export type Incident = {
   kind: IncidentKind;
   severity: IncidentSeverity;
@@ -286,6 +307,10 @@ export type Incident = {
   /** Human-readable facts that justify the incident. */
   evidence: string[];
   recommendedAction: RecommendedAction;
+  /** FG-703: present ONLY on an adjudicated incident surfaced under
+   *  `forge ops check --include-adjudicated`. Absent in the default suppressing
+   *  path, so default results are byte-for-byte unchanged. */
+  adjudication?: IncidentAdjudication;
 };
 
 // ── Campaign Runner types (FG-390) ─────────────────────────────────────────

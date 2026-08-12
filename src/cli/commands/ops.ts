@@ -33,6 +33,12 @@ import { userInfo } from "node:os";
 // isAnyProviderEnabled(), which NO_NOTIFY short-circuits.
 export async function notifyLiveIncidents(incidents: Incident[]): Promise<void> {
   for (const inc of incidents) {
+    // FG-703 (step 5): an adjudicated incident (only present under
+    // `--include-adjudicated`) has been RETIRED from the active high-severity
+    // report — it must not push a fresh risk_found milestone. In the default
+    // path no incident carries `adjudication`, so this is a no-op there and the
+    // shipped notify behavior is byte-for-byte unchanged.
+    if (inc.adjudication) continue;
     try {
       await emitMilestone({
         runId: inc.runId,
@@ -59,6 +65,17 @@ export function renderHuman(incidents: Incident[]): string {
     const action = a.command ? a.command : `(${a.type})`;
     lines.push(`    action: ${action}  [autonomy: ${a.autonomy}]`);
     lines.push(`            ${a.reason}`);
+    // FG-703 (step 5): an adjudicated incident surfaced under
+    // `--include-adjudicated` renders its durable audit record BENEATH the
+    // ORIGINAL detector evidence above (`why:`), so an operator sees WHAT they
+    // decided alongside the facts that justified it. Only ever present in the
+    // include-adjudicated read path — the default report never sets it.
+    if (i.adjudication) {
+      const adj = i.adjudication;
+      lines.push(`    adjudicated: ${adj.outcome}  by ${adj.actor}  at ${adj.at}  (retired from the active high-severity report)`);
+      lines.push(`            rationale: ${adj.rationale}`);
+      lines.push(`            identity:  ${adj.identity}`);
+    }
     lines.push("");
   }
   return lines.join("\n");
@@ -302,16 +319,23 @@ export function registerOps(program: Command): void {
     .option("--json", "emit structured incidents as JSON")
     .option("--all", "check every project on this host (default: scope to the current directory's project)")
     .option("--project <dir>", "scope to a specific project dir (default: cwd). Ignored with --all.")
+    // FG-703 (step 5): the operator READ surface for adjudicated incidents. A
+    // flag on `check`, NOT a new verb — so an adjudicated incident renders WITH
+    // its ORIGINAL detector evidence through the SAME runOpsCheck/renderHuman
+    // choke point, and the widening is explicit and one-directional. Without it,
+    // `check` is byte-for-byte unchanged (adjudicated incidents stay suppressed).
+    .option("--include-adjudicated", "also show orphaned_work_may_persist incidents already retired via `forge ops adjudicate`, each annotated with its audit record (default: hidden)")
     .description(
       "Detect 'needs attention' incidents from existing state. The default (human) output also pushes one " +
         "notification per NEW live incident, recording orchestrator.milestone events (deduped on incident identity). " +
-        "Use --json for a read-only, side-effect-free scan."
+        "Use --json for a read-only, side-effect-free scan. Use --include-adjudicated to also surface incidents " +
+        "already retired by `forge ops adjudicate`, together with their original evidence and audit record."
     )
-    .action(async (opts: { json?: boolean; all?: boolean; project?: string }) => {
+    .action(async (opts: { json?: boolean; all?: boolean; project?: string; includeAdjudicated?: boolean }) => {
       ensureForgeDirs();
       if (renderedEmptyStore(opts.json, [], "No forge store on this host yet — no incidents to report.")) return;
       const projectDir = opts.all ? undefined : resolve(opts.project ?? process.cwd());
-      const incidents = runOpsCheck({ projectDir });
+      const incidents = runOpsCheck({ projectDir, includeAdjudicated: opts.includeAdjudicated });
 
       if (opts.json) {
         // Read-only contract: the --json path must stay side-effect-free (no notify).

@@ -16,7 +16,7 @@
 // (inconsistent_run_state, whose true repair needs liveness confirmation).
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import type { Incident } from "../types/index.js";
+import type { Incident, IncidentAdjudication } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
 import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity } from "./adjudication.js";
@@ -50,6 +50,15 @@ function containerEvidenceLine(evidence: OrphanEvidence): string | undefined {
 export type OpsCheckOptions = {
   /** Scope to one project's runs (runs.project_dir). Omit for the host-wide view. */
   projectDir?: string;
+  /** FG-703 (step 5): the operator READ surface. When false/omitted (the
+   *  default), an adjudicated orphaned_work_may_persist incident is DROPPED
+   *  exactly as step 3 does — default results are byte-for-byte unchanged. When
+   *  true, such an incident is instead RETURNED, annotated with its durable
+   *  adjudication record (outcome, rationale, actor, timestamp) so an operator
+   *  can inspect what they decided together with the ORIGINAL detector evidence.
+   *  This only WIDENS the list one-directionally; it never un-suppresses in the
+   *  default path and never mutates anything. */
+  includeAdjudicated?: boolean;
 };
 
 // Terminal run states — a run here will never dispatch further work on its own.
@@ -239,6 +248,47 @@ const WORK_MAY_PERSIST_KINDS = new Set([
 // clean-exit-no-result task, is never "just retry it").
 const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing"]);
 
+/** FG-703 (step 5): read back the LATEST ops.adjudicated record for a task as the
+ *  operator-facing audit annotation (outcome, rationale, actor, timestamp,
+ *  identity). The counterpart to adjudicatedIdentitiesForTask (which returns only
+ *  the identity SET the suppression predicate tests): once the caller has confirmed
+ *  the current identity IS adjudicated, this reads the human-facing fields off that
+ *  same latest event. One prepared statement, one round trip over the read-only
+ *  handle, mirroring the latest-event-per-task selection the detectors use
+ *  (detect.ts correlated subquery). Returns undefined when no usable record exists
+ *  (never expected on the annotate path, but fail-closed if the row is malformed).
+ *
+ *  Deliberately kept on the detect (read) side rather than in adjudication.ts: the
+ *  identity FUNCTION is the one canonical shared surface (computeAdjudicationIdentity);
+ *  reading the audit prose for display is a read-surface concern, and step 5 owns
+ *  detect.ts. */
+function latestAdjudicationRecord(db: DatabaseInstance, taskId: string): IncidentAdjudication | undefined {
+  const row = db
+    .prepare(
+      `SELECT json_extract(e.payload, '$.outcome')   AS outcome,
+              json_extract(e.payload, '$.rationale') AS rationale,
+              json_extract(e.payload, '$.actor')     AS actor,
+              json_extract(e.payload, '$.at')        AS at,
+              json_extract(e.payload, '$.identity')  AS identity
+       FROM events e
+       WHERE e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = ? AND e2.event_type = 'ops.adjudicated'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )`
+    )
+    .get(taskId) as { outcome: string | null; rationale: string | null; actor: string | null; at: string | null; identity: string | null } | undefined;
+  if (!row || typeof row.identity !== "string" || row.identity.length === 0) return undefined;
+  return {
+    outcome: typeof row.outcome === "string" ? row.outcome : "(unrecorded)",
+    rationale: typeof row.rationale === "string" ? row.rationale : "(unrecorded)",
+    actor: typeof row.actor === "string" ? row.actor : "(unrecorded)",
+    at: typeof row.at === "string" ? row.at : "(unrecorded)",
+    identity: row.identity,
+  };
+}
+
 /** A FAILED task under an ACTIVE run classified `orphaned_work_may_persist` or
  *  `oom_killed` (FG-455):
  *  reconcile found the container gone with no recoverable result, but changed
@@ -364,12 +414,24 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
     // reappears as unresolved; volatile churn (shared-checkout changedFiles,
     // paths, timestamps, prose) leaves the identity stable and keeps it
     // suppressed.
+    // FG-703 (step 5): the read surface widens this branch by ONE direction
+    // only. `adjudication` is annotated onto the incident iff (a) it is the
+    // adjudicable kind, (b) the task's LATEST ops.adjudicated record names
+    // exactly THIS current identity, AND (c) the caller asked to include
+    // adjudicated incidents. In the DEFAULT path (includeAdjudicated falsy) a
+    // matching adjudication still drops the incident, byte-for-byte as step 3 —
+    // the annotation is never even read. A non-matching (stale) adjudication
+    // never suppresses and never annotates in either mode: the incident is a
+    // genuinely new, unresolved one.
+    let adjudication: IncidentAdjudication | undefined;
     if (incidentKind === "orphaned_work_may_persist") {
       const identity = computeAdjudicationIdentity({ runId: row.runId, taskId: row.taskId, failureKind, evidence });
-      if (adjudicatedIdentitiesForTask(db, row.taskId).has(identity)) continue;
+      if (adjudicatedIdentitiesForTask(db, row.taskId).has(identity)) {
+        if (!opts.includeAdjudicated) continue; // default: suppress, unchanged
+        adjudication = latestAdjudicationRecord(db, row.taskId); // include mode: annotate + return
+      }
     }
-    incidents.push(
-      makeIncident({
+    const incident = makeIncident({
         kind: incidentKind,
         severity: "high",
         confidence: "db-confirmed",
@@ -408,8 +470,13 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
               ? `the container exited cleanly but produced no result — usually transient; \`forge retry ${row.taskId}\` re-dispatches without needing --force. Investigate first if this recurs for the same task/role.`
               : `the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with \`forge retry ${row.taskId} --force\`.`,
         },
-      })
-    );
+      });
+    // FG-703 (step 5): attach the audit annotation AFTER construction (makeIncident
+    // validates the safety invariant and returns the same object). Only ever set in
+    // include mode for a matching adjudication, so the default incident shape is
+    // untouched.
+    if (adjudication) incident.adjudication = adjudication;
+    incidents.push(incident);
   }
   return incidents;
 }
