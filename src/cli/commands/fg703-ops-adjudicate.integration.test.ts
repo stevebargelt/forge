@@ -287,6 +287,45 @@ test("integ forge ops adjudicate: a MATCHING --identity is accepted (TOCTOU CAS 
   assert.equal(adjudicatedCount("t1"), 1);
 });
 
+test("integ forge ops adjudicate: retrying the same inspected identity is idempotent and preserves the original durable audit decision", () => {
+  const projectDir = makeProjectDir();
+  const evidence = worktreeEvidence({ containerName: "forge-t1" });
+  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence });
+
+  const identity = identityOf({ runId: "run1", taskId: "t1", evidence });
+  const first = runForge([
+    "ops", "adjudicate", "t1", "--project", projectDir,
+    "--rationale", "first inspected decision", "--actor", "first-operator",
+    "--identity", identity, "--json",
+  ]);
+  assert.equal(first.status, 0, `first adjudication expected exit 0\nstdout: ${first.stdout}\nstderr: ${first.stderr}`);
+  const firstResult = JSON.parse(first.stdout) as { actor: string; at: string; identity: string };
+
+  // A caller retrying after an ambiguous client/process failure must not append a
+  // second decision or overwrite who made the original decision and why.
+  const retry = runForge([
+    "ops", "adjudicate", "t1", "--project", projectDir,
+    "--rationale", "conflicting retry rationale", "--actor", "retrying-operator",
+    "--identity", identity, "--json",
+  ]);
+  assert.equal(retry.status, 0, `idempotent retry expected exit 0\nstdout: ${retry.stdout}\nstderr: ${retry.stderr}`);
+  const retryResult = JSON.parse(retry.stdout) as { actor: string; at: string; identity: string };
+  assert.deepEqual(retryResult, firstResult, "the CLI returns the existing decision, not the retry's caller-provided audit fields");
+  assert.equal(adjudicatedCount("t1"), 1, "an identical retry writes no duplicate ops.adjudicated event");
+
+  const included = runForge(["ops", "check", "--project", projectDir, "--json", "--include-adjudicated"]);
+  assert.equal(included.status, 0, `included check expected exit 0\nstdout: ${included.stdout}\nstderr: ${included.stderr}`);
+  const incident = (JSON.parse(included.stdout) as Array<{
+    kind: string;
+    taskId: string | null;
+    adjudication?: { actor: string; rationale: string; identity: string };
+  }>).find((item) => item.kind === "orphaned_work_may_persist" && item.taskId === "t1");
+  assert.ok(incident?.adjudication, "the retained incident exposes its audit record under --include-adjudicated");
+  assert.equal(incident.adjudication.actor, "first-operator");
+  assert.equal(incident.adjudication.rationale, "first inspected decision");
+  assert.equal(incident.adjudication.identity, identity);
+});
+
 // ── FG-703 FIX 1: --identity is a requiredOption — omitting it is refused ──────
 
 test("integ forge ops adjudicate: WITHOUT --identity the CLI refuses (requiredOption), exits non-zero, and writes NO event", () => {
