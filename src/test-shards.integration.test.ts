@@ -7,10 +7,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SERIAL_FILE = "src/orchestrator/fg576-codex-adapter.integration.test.ts";
 
 function listFiles(shard?: string): string[] {
   const out = execFileSync("bash", ["scripts/run-integration-tests.sh", ...(shard ? [shard] : [])], {
@@ -43,6 +46,58 @@ test("FG-624: the shards the script emits are a disjoint cover of the unsharded 
       `N=${n}: the union of the shards must be exactly the unsharded file list — a missing file is a green shard that proves nothing`,
     );
     for (const shard of shards) assert.ok(shard.length > 0, `N=${n}: every shard must get work`);
+  }
+});
+
+test("FG-681: AC9's serial tail remains in the census and belongs to exactly one shard", () => {
+  const all = listFiles();
+  assert.ok(all.includes(SERIAL_FILE), "the unsharded integration selection lost the AC9 serial file");
+
+  for (const n of [4, 6]) {
+    const carriers = Array.from({ length: n }, (_, i) => `${i + 1}/${n}`).filter((shard) => listFiles(shard).includes(SERIAL_FILE));
+    assert.deepEqual(carriers, [`1/${n}`], `N=${n}: the serial tail must be carried once, by shard 1`);
+  }
+});
+
+test("FG-681: AC9's tail executes after the bulk with concurrency one, and its failure fails the script", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg681-serial-runner-"));
+  const log = join(dir, "node-invocations.jsonl");
+  const node = join(dir, "node");
+  writeFileSync(
+    node,
+    `#!${process.execPath}
+const { appendFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args.includes("src/test-shards.ts")) {
+  const result = spawnSync(process.execPath, args, { stdio: "inherit" });
+  process.exit(result.status ?? 1);
+}
+appendFileSync(process.env.FG681_NODE_LOG, JSON.stringify(args) + "\\n");
+if (process.env.FG681_FAIL_SERIAL === "1" && args.includes("${SERIAL_FILE}")) process.exit(23);
+`,
+  );
+  chmodSync(node, 0o755);
+
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}`, FG681_NODE_LOG: log };
+  try {
+    execFileSync("bash", ["scripts/run-integration-tests.sh"], { cwd: REPO_ROOT, env, stdio: "pipe" });
+    const invocations = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
+    assert.equal(invocations.length, 2, "the bulk and serial tail must be separate node invocations");
+    assert.equal(invocations[0]!.includes(SERIAL_FILE), false, "the bulk invocation must exclude the serial file");
+    assert.deepEqual(
+      invocations[1],
+      ["--import", "tsx", "--import", "./src/test-setup.ts", "--test-concurrency=1", "--test", SERIAL_FILE],
+      "the tail must execute only the AC9 file with node's serial test concurrency",
+    );
+
+    assert.throws(
+      () => execFileSync("bash", ["scripts/run-integration-tests.sh"], { cwd: REPO_ROOT, env: { ...env, FG681_FAIL_SERIAL: "1" }, stdio: "pipe" }),
+      (error: unknown) => (error as { status?: number }).status === 23,
+      "a deliberately failing serial tail must propagate its exit code",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
