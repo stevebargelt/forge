@@ -550,6 +550,83 @@ test("FG-703: a suppressed incident is excluded from the composed runOpsCheck li
   );
 });
 
+// ── FG-703: the identity surface an operator copies into --identity ─────────
+//
+// Every emitted orphaned_work_may_persist incident must carry the canonical
+// identity — the exact `--identity` compare-and-set token the write path
+// recomputes — and nothing else must. The value a check REPORTS has to be
+// byte-identical to what computeAdjudicationIdentity (the write path's own
+// function) produces, or the operator copies a value the write refuses as drift.
+
+test("FG-703 (identity): an unadjudicated orphaned_work_may_persist incident carries a non-empty identity byte-identical to the write path's compute", () => {
+  insertRun(mkRun("run-id", "active"));
+  insertTask(mkTask("task-id", "run-id", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-id", taskId: "task-id", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const reported = incidents[0]!.identity;
+  assert.ok(reported && /^[0-9a-f]{64}$/.test(reported), "the incident carries a non-empty sha256 identity");
+  // The write path recomputes identity from the SAME structured facts; the value
+  // the operator copies must be exactly what `forge ops adjudicate --identity`
+  // will demand — a mismatch here is silent and total.
+  const writePathIdentity = computeAdjudicationIdentity({ runId: "run-id", taskId: "task-id", failureKind: "orphaned_work_may_persist", evidence: evidence as never });
+  assert.equal(reported, writePathIdentity, "reported identity == write-path identity (copyable, accepted, not refused as drift)");
+});
+
+test("FG-703 (identity): the production shape — a container_crash under a failed parent, source project_dir_shared — carries a copyable identity", () => {
+  insertRun(mkRun("run-prod", "failed"));
+  insertTask(mkTask("task-prod", "run-prod", "failed"));
+  const evidence = worktreeEvidence(["M a.ts", "M b.ts"], {
+    source: "project_dir_shared",
+    worktreePathChecked: "/shared/project",
+    containerExitedEventObserved: true,
+    exitCode: 1,
+    oomKilled: false,
+  });
+  logEvent("task.failed", { runId: "run-prod", taskId: "task-prod", payload: { failure_kind: "container_crash", error: "crash", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0]!.kind, "orphaned_work_may_persist", "container_crash presents as an orphaned_work_may_persist incident");
+  assert.equal(
+    incidents[0]!.identity,
+    computeAdjudicationIdentity({ runId: "run-prod", taskId: "task-prod", failureKind: "container_crash", evidence: evidence as never }),
+    "the reported identity matches the write path for the exact production incident shape",
+  );
+});
+
+test("FG-703 (identity): incident kinds with no adjudication path carry NO identity", () => {
+  // A retry_orphan (pending task under a terminal run) — no adjudication path.
+  insertRun(mkRun("run-noid", "complete"));
+  insertTask(mkTask("task-noid", "run-noid", "pending"));
+  const orphan = detectRetryOrphan(db);
+  assert.equal(orphan.length, 1);
+  assert.equal(orphan[0]!.identity, undefined, "retry_orphan has no adjudication path — no identity");
+
+  // An oom_killed incident — an adjudicable-looking sibling kind, but out of scope.
+  insertRun(mkRun("run-oomid", "active"));
+  insertTask(mkTask("task-oomid", "run-oomid", "failed"));
+  logEvent("task.failed", { runId: "run-oomid", taskId: "task-oomid", payload: { failure_kind: "oom_killed", error: "oom", evidence: worktreeEvidence(["?? f.txt"], { oomKilled: true, exitCode: 137 }) } });
+  const oom = detectOrphanedWorkMayPersist(db).filter((i) => i.kind === "oom_killed");
+  assert.equal(oom.length, 1);
+  assert.equal(oom[0]!.identity, undefined, "oom_killed is not adjudicable — no identity");
+});
+
+test("FG-703 (identity): renderHuman prints the identity for an adjudicable incident, copyable into --identity", () => {
+  insertRun(mkRun("run-render", "active"));
+  insertTask(mkTask("task-render", "run-render", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-render", taskId: "task-render", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  const rendered = renderHuman(incidents);
+  const identity = incidents[0]!.identity!;
+  assert.match(rendered, new RegExp(`identity: ${identity}`), "the human render shows the exact identity");
+  assert.match(rendered, new RegExp(`forge ops adjudicate task-render --identity ${identity}`), "the render spells out the copyable adjudicate command");
+});
+
 // ── detectStuckRun (FG-414) ─────────────────────────────────────────────────
 
 test("detectStuckRun: flags an active run whose tasks are all terminal", () => {

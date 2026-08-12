@@ -307,6 +307,13 @@ export type Incident = {
   /** Human-readable facts that justify the incident. */
   evidence: string[];
   recommendedAction: RecommendedAction;
+  /** FG-703: the canonical adjudication identity, present ONLY on an
+   *  `orphaned_work_may_persist` incident (the sole adjudicable kind). It is the
+   *  exact `--identity` compare-and-set token `forge ops adjudicate` requires, so
+   *  an operator reads it off `ops check` and copies it in. Other incident kinds
+   *  have no adjudication path and never carry it (an identity there would be
+   *  meaningless). Derived by the ONE shared computeAdjudicationIdentity. */
+  identity?: string;
   /** FG-703: present ONLY on an adjudicated incident surfaced under
    *  `forge ops check --include-adjudicated`. Absent in the default suppressing
    *  path, so default results are byte-for-byte unchanged. */

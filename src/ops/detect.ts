@@ -421,9 +421,15 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
     // the annotation is never even read. A non-matching (stale) adjudication
     // never suppresses and never annotates in either mode: the incident is a
     // genuinely new, unresolved one.
+    // FG-703 (step 3 promise): compute this incident's canonical identity ONCE,
+    // for the ONE adjudicable kind, and use the SAME value for suppression AND
+    // for the operator-facing surface below. It is the exact token `forge ops
+    // adjudicate --identity` requires; without it on the incident no supported
+    // command reports the value the write path demands.
     let adjudication: IncidentAdjudication | undefined;
+    let identity: string | undefined;
     if (incidentKind === "orphaned_work_may_persist") {
-      const identity = computeAdjudicationIdentity({ runId: row.runId, taskId: row.taskId, failureKind, evidence });
+      identity = computeAdjudicationIdentity({ runId: row.runId, taskId: row.taskId, failureKind, evidence });
       if (adjudicatedIdentitiesForTask(db, row.taskId).has(identity)) {
         if (!opts.includeAdjudicated) continue; // default: suppress, unchanged
         adjudication = latestAdjudicationRecord(db, row.taskId); // include mode: annotate + return
@@ -469,6 +475,11 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
               : `the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with \`forge retry ${row.taskId} --force\`.`,
         },
       });
+    // FG-703: attach the canonical identity to EVERY emitted orphaned_work_may_persist
+    // incident (the same value computed above — never re-derived) so `ops check`
+    // reports the exact `--identity` token the write path recomputes. Other kinds
+    // leave it unset.
+    if (identity) incident.identity = identity;
     // FG-703 (step 5): attach the audit annotation AFTER construction (makeIncident
     // validates the safety invariant and returns the same object). Only ever set in
     // include mode for a matching adjudication, so the default incident shape is

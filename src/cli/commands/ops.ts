@@ -65,6 +65,15 @@ export function renderHuman(incidents: Incident[]): string {
     const action = a.command ? a.command : `(${a.type})`;
     lines.push(`    action: ${action}  [autonomy: ${a.autonomy}]`);
     lines.push(`            ${a.reason}`);
+    // FG-703: surface the canonical adjudication identity on an adjudicable
+    // (orphaned_work_may_persist) incident so an operator can copy it straight
+    // into `forge ops adjudicate --identity`. Only that kind carries `identity`
+    // (detect.ts). Suppressed here when the incident is already annotated as
+    // adjudicated (include-adjudicated view) — the audit block below shows the
+    // recorded identity, so a second, identical line would be noise.
+    if (i.identity && !i.adjudication) {
+      lines.push(`    identity: ${i.identity}  (adjudicate with: forge ops adjudicate ${i.taskId} --identity ${i.identity})`);
+    }
     // FG-703 (step 5): an adjudicated incident surfaced under
     // `--include-adjudicated` renders its durable audit record BENEATH the
     // ORIGINAL detector evidence above (`why:`), so an operator sees WHAT they

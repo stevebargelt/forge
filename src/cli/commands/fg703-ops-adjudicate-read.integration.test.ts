@@ -142,6 +142,77 @@ function identityOf(runId: string, taskId: string, evidence: OrphanEvidence): st
   return computeAdjudicationIdentity({ runId, taskId, failureKind: "orphaned_work_may_persist", evidence });
 }
 
+// ── FG-703: the identity a check REPORTS is the token adjudicate ACCEPTS ──────
+//
+// The whole point of the fix: `ops check` must report the exact `--identity`
+// token the write path demands, so an operator can copy it straight into
+// `forge ops adjudicate`. Exercised end to end on the PRODUCTION incident shape
+// (a container_crash failed task under a FAILED parent run, source
+// project_dir_shared): check reports an identity, adjudicating with that exact
+// value succeeds, and a subsequent check no longer lists the incident.
+
+/** The production incident shape: a container_crash failure with a shared
+ *  project-dir checkout, seeded under a FAILED parent run. */
+function seedProductionCrashIncident(o: { runId: string; taskId: string; projectDir: string }): void {
+  insertRunRow({ id: o.runId, status: "failed", projectDir: o.projectDir });
+  insertTaskRow({ id: o.taskId, runId: o.runId, status: "failed" });
+  insertEvent({
+    runId: o.runId,
+    taskId: o.taskId,
+    eventType: "task.failed",
+    payload: {
+      failure_kind: "container_crash",
+      error: "container crashed; shared checkout dirty",
+      evidence: {
+        containerName: `forge-${o.taskId}`,
+        containerLiveness: "gone",
+        resultState: "absent",
+        recoverableStdoutResult: false,
+        worktreePathChecked: o.projectDir,
+        changedFiles: ["M src/a.ts", "M src/b.ts"],
+        source: "project_dir_shared",
+        containerExitedEventObserved: true,
+        exitCode: 1,
+        oomKilled: false,
+      },
+    },
+  });
+}
+
+test("integ FG-703 round trip: check REPORTS an identity → adjudicate with THAT identity succeeds → a later check no longer lists the incident (production container_crash / project_dir_shared shape)", () => {
+  const projectDir = makeProjectDir();
+  seedProductionCrashIncident({ runId: "runp", taskId: "tp", projectDir });
+
+  // 1. check --json reports the incident WITH a copyable identity.
+  const checkJson = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(checkJson.status, 0, `stdout: ${checkJson.stdout}\nstderr: ${checkJson.stderr}`);
+  const reported = (JSON.parse(checkJson.stdout) as Array<{ kind: string; taskId: string | null; identity?: string }>).find(
+    (i) => i.kind === "orphaned_work_may_persist" && i.taskId === "tp",
+  );
+  assert.ok(reported, "the container_crash incident presents as orphaned_work_may_persist and is listed");
+  assert.ok(reported!.identity && /^[0-9a-f]{64}$/.test(reported!.identity), "the incident carries a non-empty sha256 identity in --json");
+
+  // 2. the HUMAN render shows the same identity, copyable.
+  const checkHuman = runForge(["ops", "check", "--project", projectDir]);
+  assert.equal(checkHuman.status, 0, `stdout: ${checkHuman.stdout}\nstderr: ${checkHuman.stderr}`);
+  assert.ok(checkHuman.stdout.includes(`identity: ${reported!.identity}`), "the human render prints the exact identity");
+  assert.ok(checkHuman.stdout.includes(`--identity ${reported!.identity}`), "the human render spells out the copyable --identity argument");
+
+  // 3. adjudicate using the EXACTLY-REPORTED identity — must be accepted, not
+  //    refused as drift. This is the byte-for-byte contract the whole fix exists for.
+  const adj = runForge(["ops", "adjudicate", "tp", "--project", projectDir, "--rationale", "inspected the shared checkout; no unique work", "--identity", reported!.identity!]);
+  assert.equal(adj.status, 0, `adjudicate must accept the reported identity\nstdout: ${adj.stdout}\nstderr: ${adj.stderr}`);
+  assert.equal(adjudicatedCount("tp"), 1, "exactly one adjudication event recorded");
+
+  // 4. a subsequent check no longer lists the incident (default suppression).
+  const after = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(after.status, 0, `stdout: ${after.stdout}\nstderr: ${after.stderr}`);
+  assert.ok(
+    !(JSON.parse(after.stdout) as Array<{ kind: string; taskId: string | null }>).some((i) => i.kind === "orphaned_work_may_persist" && i.taskId === "tp"),
+    "after adjudicating with the reported identity, the incident is retired from the default report",
+  );
+});
+
 // ── the HUMAN read surface ────────────────────────────────────────────────────
 
 test("integ forge ops check --include-adjudicated (human): surfaces an adjudicated incident WITH its original evidence + audit record; the default check omits it", () => {
