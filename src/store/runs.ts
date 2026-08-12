@@ -4,6 +4,7 @@ import { nowIso } from "../util/ids.js";
 import { notifyOnRunTransition } from "../notify/trigger.js";
 import { identify, provenPhysical, provenSameOnly, type PathIdentity } from "../util/path-identity.js";
 import { attributeLegacyRow, retargetProofIdentity } from "./legacy-path-attribution.js";
+import { resolveProjectIdentity } from "../backlog/storage-mode.js";
 
 // ── FG-693: project identity for runs ────────────────────────────────────────
 //
@@ -95,10 +96,17 @@ export function runReviewMode(id: string): ReviewMode | undefined {
  *  belong to a checkout nobody proved it belonged to. */
 export function insertRun(run: Run): void {
   const canonical = provenCanonical(run.projectDir);
+  // FG-663: capture the durable PROJECT identity at the single INSERT choke
+  // point, so EVERY creation path (startRun, createInvokeRun, forge design,
+  // campaign lanes, orchestrator launch, fg591 dispatch) records it by
+  // construction (AC4) with no per-caller edit. Resolution is a pure reader and
+  // completes HERE, before the INSERT — no git/YAML/fs call is held across the
+  // write, mirroring provenCanonical. NULL when there is no projectDir.
+  const projectIdentity = run.projectDir ? resolveProjectIdentity(run.projectDir) : null;
   getDb()
     .prepare(
-      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata, project_dir, review_mode, project_dir_canonical)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata, project_dir, review_mode, project_dir_canonical, project_identity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       run.id,
@@ -110,7 +118,8 @@ export function insertRun(run: Run): void {
       run.metadata ? JSON.stringify(run.metadata) : null,
       run.projectDir ?? null,
       run.reviewMode ?? "legacy_verdict",
-      canonical
+      canonical,
+      projectIdentity
     );
 }
 
@@ -127,14 +136,19 @@ export function insertRun(run: Run): void {
 // prints it.
 export function setRunProjectDir(id: string, projectDir: string): string | undefined {
   const canonical = provenCanonical(projectDir);
+  // FG-663: project identity moves with the path exactly as project_dir_canonical
+  // does — a row whose stored identity described the PREVIOUS directory would be
+  // worse than recomputing it here. Resolved (pure reader, no fs held across the
+  // lock) BEFORE the transaction opens, alongside the realpath.
+  const projectIdentity = resolveProjectIdentity(projectDir);
   return writeTransaction(() => {
     const row = getDb()
       .prepare(`SELECT project_dir FROM runs WHERE id = ?`)
       .get(id) as { project_dir: string | null } | undefined;
     const prev = row?.project_dir ?? undefined;
     getDb()
-      .prepare(`UPDATE runs SET project_dir = ?, project_dir_canonical = ? WHERE id = ?`)
-      .run(projectDir, canonical, id);
+      .prepare(`UPDATE runs SET project_dir = ?, project_dir_canonical = ?, project_identity = ? WHERE id = ?`)
+      .run(projectDir, canonical, projectIdentity, id);
     return prev;
   });
 }
