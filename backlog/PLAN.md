@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-09
+**Last revised:** 2026-08-10
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -11,159 +11,229 @@ dependencies, and lifecycle state. Forge runtime state is authoritative for
 what is running, blocked, or done. `backlog/notes.md` is a session handoff and
 may lag this plan.
 
-**Expected replacement:** FG-591 has shipped, so the condition this file was
-written to expire on is met. Whether the queue and board actually replace a
-statement of operator sequencing intent is now a live operator decision, not a
-pending dependency — see the retirement rule at the end.
+## Current objective: a stable v0.1.0 snapshot release
 
-## Current objective
+Forge's current product objective is to reach its first **stable, tagged, and
+promoted snapshot release**. This is not a 1.0 claim and does not require every
+open feature or follow-up to land. It is a coherent daily-driver checkpoint at
+which:
 
-**FG-253 — provider-neutral orientation and handoff adapters.** Promoted
-2026-08-09 by operator decision, TEMPORARILY ahead of FG-688: a fresh Codex
-dogfood found no installed orientation workflow at all, because the orientation
-and handoff semantics exist only as Claude-shaped prose and nothing installs an
-equivalent surface for any other provider. Getting a session oriented is
-upstream of the recovery work, so the adapter ticket goes first; FG-688 keeps
-its promotion and resumes as the objective once FG-253 ships.
+- no major shipped product arc remains half-implemented;
+- normal execution cannot silently report false completion or bypass its own
+  validation and safety contracts;
+- the dashboard surfaces the current state truthfully enough to operate Forge;
+- the supported host verification path is trustworthy on Darwin as well as CI;
+- the authoritative database has a tested backup and restore path;
+- fresh setup, model routing, and operator-visible security boundaries are
+  internally consistent; and
+- one exact commit is verified, tagged `v0.1.0`, built as an immutable release,
+  promoted, smoke-tested, and proven rollback-capable.
+
+`package.json` already reports `0.1.0`, but there is no Git release tag and no
+promoted stable release. The release train below defines the commit that earns
+that existing version number.
 
 ## Recently completed
 
-- **FG-576** (`04fbfeb9`, PR #223) — `forge orchestrator`, the provider-neutral interactive
-  launcher: receipt store, launcher-owned liveness with a process-identity fence, resolution
-  and capability matrix, the Forge-owned Codex instruction carrier, both adapters, and the
-  `forge show`/dashboard surfaces. 15/15 acceptance criteria evidenced at the final
-  candidate. Built as a 12-step ordered DAG, salvaged after a fanout failure, and reviewed
-  over the whole range — 5 lenses, 9 shards, 5 findings, all settled.
-- **FG-691** (`0d0ed85a`, PR #222) — an explicit instant on the paired lease predicates,
-  defaulting to `storeNowMs()`. The boundary is assertable at exactly the expiry instant and
-  that offset was added to both sweeps; `storeNowMs` itself is unchanged and no caller was
-  migrated. Settled clean: 4 lenses, 0 findings.
+- **FG-681** (`66da74be` PR #237, `e7b011bd` PR #238) — the Darwin host
+  integration tier agrees with CI: 86 distinct failures to 0, across six
+  mechanisms, none of them a production defect. Host integration runs are
+  trustworthy evidence again.
+- **FG-693** (`7e05180f`, PR #236) — one canonical filesystem-identity contract
+  across path boundaries; six private realpath-or-resolve copies removed.
+- **FG-700** (`7b96b96a`, PR #235) — launch observations carry a declared
+  purpose; only a launch explicitly marked `host_verification` renders as one.
+- **FG-698** (`6ed18386`, PR #234) — release-fixture scratch use is bounded;
+  peak temporary space fell from 4996 MiB to 1000 MiB without weakening the
+  production thaw contract.
+- **FG-690** (`1807ba1f`, PR #233) — agent runtime requires durable start
+  evidence; failed pre-start container attempts no longer create false
+  multi-hour executions in the runtime chart.
 
 ## Now
 
-1. **FG-253 — provider-neutral orientation and handoff adapters**, defined once over the
-   Forge-owned CLI and state primitives and rendered per provider, with a CLI-only fallback
-   where no provider surface applies.
+1. **FG-703 — durable orphan-incident adjudication.** Add the
+   operator-authorized, audit-preserving way to retire an exact
+   `orphaned_work_may_persist` incident as `no_unique_work`. Use it to resolve
+   the four inspected historical incidents without retrying work or rewriting
+   failed run history. Its FG-700 prerequisite has shipped, so this is the head
+   of the queue.
+2. **FG-663 — durable project identity for run history.** Persist the project
+   when each run is created so normal disposable-clone cleanup cannot turn
+   activity, usage, or runtime history into `Unknown repository`. Preserve
+   checkout paths only as operational detail, never as the task's identity or
+   display tag.
 
-## Next
+## Stable-release train
 
-1. **FG-688 — adopt-preserving re-drive for a terminally-failed ordered wave**, plus the
-   inspector recommending a verb its own failure-kind guard rejects. One gap, two halves.
-   Promoted 2026-08-07 on its third reproduction: FG-576's build wave lost one child to
-   `result_missing`, which terminated the fanout parent `prerequisite_blocked` with EIGHT of
-   nine children already completed and merged, and `forge recover --re-drive` would have
-   discarded all of it — `recover.ts:498-508` says so in its own comment — so that work was
-   salvaged by hand. The second half is the same surface lying about itself: the read-only
-   inspector RECOMMENDS `--re-drive`, but `performReDrive` refuses unless the failure kind is
-   `fanout_wave_orphaned`, which `prerequisite_blocked` is not. Displaced by FG-253 only for
-   sequencing; nothing about it was descoped.
-2. **FG-682 — a correction found after the docs stage has no supported amendment path.**
-   No longer theoretical: FG-576 hit it and paid a documented tip-equality override, and
-   re-running shipping refused `blocked_environment (candidate_not_checked_out)`. Scoped as
-   a BOUNDED late amendment, never a general re-anchor: declared paths only, undeclared
-   dirty files refused by name, the coordinator commits and advances, SHA-bound
-   verification invalidated and CI required at the new candidate, plus a bounded delta
-   check rather than full re-discovery. Adjacent to FG-688 — both are review/recovery
-   control-plane gaps.
-3. **FG-681 — the host integration tier is broadly red on darwin while CI is green** (~76
-   tests across 13+ files; the dominant signature is a pre-container refusal, not assertion
-   drift). Root-cause the shared harness from the smallest `fg381` and largest `fg628`
-   reproductions; do not patch, skip or allowlist individual symptoms. Newly urgent: three
-   of FG-576's five defects were darwin-only and invisible to CI and to the Linux agent
-   containers, so the split is now costing real defects rather than only noise.
-4. **FG-692 — FG-591 review residue** (rank no-op advancing queueVersion, WCAG AA contrast),
-   now also carrying the FG-576 finding that dashboard orchestrator rows are mouse-only.
+The ordering below is deliberate. It stabilizes the machinery used to prove the
+rest of the release before closing the larger product arcs.
 
-`Next` is deliberately short. Ordering here expresses current operator intent;
-it does not override ticket dependencies or authorize scope expansion.
+### 1. Make release evidence trustworthy
 
-## Captured follow-ups that do not preempt `Now`
+FG-693 → FG-681 completed this section's first item: filesystem identity has one
+canonical contract, and the Darwin-host/CI integration divergence is closed and
+remeasured against it. Host integration runs are usable release evidence again.
 
-- **FG-652** — stage-record SHA in the crash-after-advance recovery window.
-- **FG-656** — fanout model resolution can drift from the held seed
-  generation.
-- **FG-657** — reconcile and close the DB ticket for the already-shipped PR
-  #191 implementation.
-- **FG-658** — consolidate the evidence-validator false-negative family:
-  narrowly normalized source annotations, exact semicolon-bearing test names,
-  and candidate-baseline evidence separated from deliberate mutation output.
-- **FG-545** — add a docs/research-only CI fast path while preserving
-  exact-head required checks.
-- **FG-661** — FG-648 review residue: the WCAG contrast test asserts the peak
-  label twice and never an axis label, and a read that fails after a successful
-  load leaves a frozen chart with no staleness signal.
-- **FG-663** — runs lose their repository identity when a checkout is deleted,
-  orphaning 8.4% of task history as "Unknown repository". The durable project
-  identity is the key and the tag; `.forge/config.yml`'s git-tracked
-  `project_key` already survives cloning and is the preferred source.
-- **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
-  prebuilds directory, permanently refusing a correct cache; plus a stale
-  review-wiring comment.
-- **FG-686** — FG-685 residue: `fg352 (11)` no longer induces a failure at the
-  `git commit` invocation, because the `--no-verify` capture exemption made its
-  hook-based device inert and the replacement wedge fails at `git add`.
-- **FG-687** — FG-584 residue: `renewRunLock` reports success after a superseded
-  write to an unlinked inode. The compare-and-set protects the successor; only the
-  return value lies, and its sole caller discards it.
+1. **FG-626** — stop `forge launch run` from silently dropping caller `FORGE_*`
+   safety and behavior controls.
+2. **FG-635** — a run cannot complete while a required workflow phase was never
+   dispatched.
+3. **FG-524** — finish validation-contract parity across workflow primaries,
+   fanout implementers, and `forge invoke` completion seams.
+4. **FG-630** — `request-changes` must carry the rejected artifact and its
+   identity, so a revision does not silently reconstruct and shrink prior work.
 
-These remain real work. They move ahead only under the interruption policy
-below, not because they are adjacent to recently completed review work.
-FG-663 and FG-667 are explicitly non-preempting residue (operator instruction,
-2026-08-03) unless one becomes a deterministic blocker under the policy below.
-FG-664 was promoted out of this set on 2026-08-02 and has since shipped.
+### 2. Close release-facing safety and setup gaps
+
+1. **FG-643** — sanitize every stored-Markdown rendering boundary before it
+   reaches `dangerouslySetInnerHTML`.
+2. **FG-634** — decide and enforce the durable credential/redaction boundary for
+   readiness commands, stderr, and setup-child HOME access.
+3. **FG-546** — fresh initialization must not install schema-invalid
+   `docs-surfaces.yml`, and known generated-invalid copies must have a safe
+   repair path.
+4. **FG-560** — version and migrate model policy; an explicit workflow activity
+   must never silently fall through to the wrong/default model.
+
+### 3. Finish the partially landed core programs
+
+1. **Close FG-593 now** after its required aggregate evidence walk. FG-496 and
+   FG-591 have shipped; external ingestion is explicitly not a closure blocker.
+2. **FG-527 → FG-477** — finish the lifecycle evaluator migration and remove the
+   live duplicate lineage/settlement decisions. This is the clearest major
+   subsystem currently left mid-migration.
+3. **FG-385 + FG-386 → close FG-372** — complete deterministic risk-targeted
+   review selection and the read-only operator surface for readiness and done
+   evidence, then walk the Shipping Reviewer epic as one system.
+4. **FG-395 → close FG-370** — land the read-only campaign dashboard and perform
+   the aggregate sequential Campaign Runner walk. FG-396 parallel lanes remain
+   a future extension and are not a closure blocker.
+5. **FG-669 → FG-670** — ship and prove database backup/verify/restore, then
+   remove Forge's frozen non-authoritative Markdown ticket corpus while retaining
+   this plan and the session notes surface.
+
+## v0.1.0 release gate
+
+The snapshot is cut only when all of the following are true on one exact commit:
+
+- FG-370, FG-372, FG-477, and FG-593 are closed on their aggregate evidence;
+- every stable-release-train story above is closed with candidate-bound
+  acceptance evidence;
+- `forge ops check` reports no unresolved high-severity incidents for Forge;
+- required CI is green at the exact release commit;
+- the unit, worktree, extended, and Darwin integration evidence required by the
+  affected contracts is green and contains no unexplained host/CI split;
+- a representative `forge backup create → verify → restore` round trip succeeds;
+- an immutable release builds and promotes, `forge doctor` is healthy, and
+  rollback to the previous selection is proven;
+- one bounded Claude orchestrator smoke and one bounded Codex orchestrator smoke
+  run through the promoted release without mutating credentials or billing a
+  production-sized task;
+- dashboard smoke verifies current activity, campaign visibility, and reviewer
+  evidence against durable state; and
+- the verified commit is tagged `v0.1.0` and recorded as the promoted snapshot.
+
+The four currently reported high-severity `orphaned_work_may_persist` incidents
+have been inspected and contain no unique work. FG-703 owns their durable,
+auditable adjudication. They must be resolved through that supported lifecycle,
+not hidden or rewritten, before the release gate passes.
+
+## Explicitly after v0.1.0
+
+The following work remains legitimate but does not block this snapshot unless it
+becomes a deterministic blocker under the interruption policy.
+
+### New product capability
+
+- **FG-346, FG-348, FG-349, FG-396, FG-402, FG-446, FG-447, FG-456** — model
+  setup UX, richer dashboard/control-plane views, parallel campaigns, attention
+  inbox, prefix UX, and unattended autonomous queue control.
+
+### Automated cleanup
+
+- **FG-590, FG-677** — terminal tmux/container retirement and automatic
+  terminal-run workspace/branch cleanup. Manual conservative cleanup remains
+  acceptable for the snapshot; automation must not be rushed into the release
+  train.
+
+### Review, recovery, and assurance residue
+
+- **FG-478, FG-599, FG-600, FG-602, FG-625, FG-629, FG-652, FG-656, FG-658,
+  FG-667, FG-682, FG-687, FG-696, FG-697** — future fanout recovery, continuation
+  evidence/arming, routing-policy absence, diagnostics and retry gaps, review
+  bookkeeping, generation consistency, validator refinements, bounded late-docs
+  amendment, assurance overrides, and the explicitly bounded local TOCTOU
+  question.
+
+### Optimization, organization, and bounded polish
+
+- **FG-380, FG-543, FG-545, FG-547, FG-550, FG-588, FG-641, FG-692, FG-699** —
+  host-local handoff state, release-check/CI efficiency, handoff and orientation
+  cost, test organization, queue/UI polish, and the one-round-trip runtime-panel
+  stale-display correction.
+- **FG-701, FG-702, FG-704, FG-705** — measurement-script correctness, a
+  group-signalling hang bound, the CI shard headroom policy, and the dashboard
+  cold-path bound proof. FG-704 carries FG-681's fresh measurement:
+  `integration_1` at 6m46s against a 10-minute ceiling, roughly 32% headroom
+  and comfortably wider than the ~35s of observed run-to-run variance. It is
+  not blocking CI or release correctness, so it does not preempt the train.
+
+Deferral here is a release decision, not a claim that the tickets are invalid.
+If one demonstrates data loss, credential exposure, false publication, fake
+verification, or a deterministic blocker to the release train, it is promoted
+under the policy below.
 
 ## Interruption policy
 
-An item may move ahead of `Now` or `Next` only for:
+An item may move ahead of `Now` or the stable-release train only for:
 
 - demonstrated operator-blocking behavior;
 - failing required CI;
-- credible data-loss, security, or wrong-publication risk;
-- a deterministic defect blocking the current objective;
-- a required test tier that does not execute.
+- credible data-loss, security, credential, or wrong-publication risk;
+- a deterministic defect blocking the current release item;
+- a required test tier that does not execute or cannot produce trustworthy
+  evidence.
 
 A newly discovered hardening opportunity is recorded in the DB backlog but does
 not automatically become the next task. Do not open speculative follow-up
-tickets for limitations that fail loudly, already belong to a parent ticket,
-or have no demonstrated impact.
+tickets for limitations that fail loudly, already belong to a parent ticket, or
+have no demonstrated impact.
 
 ## Execution rules
 
 - Start implementation from current `main` in an isolated disposable clone or
-  task workspace, never by editing the live checkout.
+  Forge-owned task workspace, never by editing the live checkout.
+- Keep implementation scope bound to the selected ticket. Findings outside its
+  acceptance contract are dispositioned and tracked; they do not silently widen
+  the current change.
+- Use the dependency-aware ordered build plan where steps consume sibling
+  outputs. File disjointness alone is not independence.
 - Evidence-led review runs once: one discovery pass, at most one remediation
-  batch, and one recheck. Remaining work becomes an explicit disposition and
-  follow-up, not another internal convergence cycle.
-- The docs stage commits its own declared paths (FG-655, shipped `c93e13af`), so
-  required documentation no longer has to be committed before review. It still
-  must be DECLARED: the coordinator commits exactly the paths the agent lists in
-  `docs_updated`, an undeclared path is a named refusal rather than a silent
-  sweep, and a `docs_updated` that is missing, non-array, or carrying a
-  non-string member is a contract violation, never a claim that nothing changed.
-- The review coordinator owns candidate movement for ANY commit during a review,
-  not only a fixer's output. While FG-682 remains open there is no supported way
-  to amend a documentation correction found after the docs stage: committing it
-  by hand pins the candidate behind the branch tip and fails both `tip_equality`
-  and `docs_closeout`. Reconcile durable docs BEFORE the review where possible,
-  and if a correction is found late, surface it as an explicit override decision
-  rather than an ad-hoc commit.
+  batch, and one recheck. An unmet ticket acceptance criterion remains work on
+  that ticket; unrelated new scope becomes an explicit disposition/follow-up.
+- The review coordinator owns candidate movement during a review. While FG-682
+  remains open, reconcile known documentation before starting review and surface
+  a genuinely late correction as an explicit operator decision rather than an
+  unrecorded commit.
 - Merge only when required CI is green at the actual PR head.
-- Close shipped tickets with acceptance-criteria evidence from the merged
-  candidate.
+- Close shipped tickets with acceptance evidence from the merged candidate.
 - A dirty or untracked operator file in the live checkout is not part of an
   implementation candidate unless the operator explicitly places it in scope.
 
-## Maintenance rules
+## Plan maintenance and retirement
 
-- Keep `Now` to one product objective and `Next` to roughly five items.
-- Keep `Recently completed` to the latest one or two shipped items; Git and the
+- Keep `Now` to one product objective and keep the release train dependency
+  ordered; runtime progress belongs in Forge, not this file.
+- Keep `Recently completed` to the latest one or two shipped items. Git and the
   DB backlog are the durable history.
-- Update this file when operator sequencing changes; do not preserve stale
-  priorities as if they were current.
-- Link ticket IDs instead of copying full acceptance criteria.
-- Do not duplicate live run state or record progress percentages here.
-- Retirement is now an open operator decision, not a pending dependency. FG-591
-  shipped the operator controls and running dispatcher this file was to be retired
-  for, but those surfaces carry queue and dispatch state — not the sequencing
-  rationale, interruption policy, and execution rules recorded here. Retire this
-  file only by deciding where that prose lives, not merely because FG-591 landed.
+- Update this file when operator sequencing or the release boundary changes. Do
+  not preserve shipped work as current intent.
+- Link ticket IDs instead of copying their acceptance criteria.
+- Keep this plan through the `v0.1.0` release because it records the release
+  rationale, interruption policy, and execution rules that the queue itself does
+  not express.
+- After the snapshot is tagged and promoted, explicitly decide whether this
+  prose moves to a durable operator-policy surface or remains as the small
+  sequencing layer above the DB queue. Do not retire it merely because FG-591
+  shipped.

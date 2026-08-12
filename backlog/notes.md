@@ -1,76 +1,38 @@
-**Last session ended 2026-08-07.**
+**Last session ended 2026-08-12.**
 
-**Where we left off:** FG-691 and FG-576 both shipped. FG-576 was the big one — it ran as a
-full pipeline, the build wave lost a child to `result_missing`, and the operator directed a
-SALVAGE of the 8 completed children rather than a 12-step re-drive. The remaining DAG
-(steps 4 → 7 → 9/12) was completed as targeted invokes, then reviewed, merged and closed with
-a full AC1-AC15 evidence grid. The session ended cleanly at that point, not mid-thread.
+**Where we left off:** FG-681 shipped and closed across two merges (`66da74be` PR #237, `e7b011bd` PR #238) with a full acceptance-evidence grid. The darwin host integration tier went from 86 distinct failures to 0, and host and CI now agree at the same commit — the condition that was false when the ticket was filed. The session ended cleanly on plan maintenance, not mid-thread. Late in the session the operator corrected the sequencing instinct: FG-704 came out of FG-681, but "the ticket we just touched produced a follow-up" is NOT the sequencing policy. Read `backlog/PLAN.md` first; its `Now` section is current as of this session.
 
 **Picked up next:**
 
-1. **FG-688 — promoted by operator decision (2026-08-07).** A terminally-failed ordered wave
-   still has no adopt-preserving re-drive. Its ticket now carries the third reproduction with
-   real numbers (8 of 9 children and +12,685 lines nearly discarded on FG-576) plus a SECOND
-   defect found in the same incident: `forge recover <parent> --json` recommends
-   `--re-drive`, but `performReDrive` refuses unless the failure kind is
-   `fanout_wave_orphaned`, and FG-576's parent failed `prerequisite_blocked`. Following
-   forge's own printed advice is refused. Treat them as ONE gap — fixing only the inspector
-   leaves the expensive half.
-2. **FG-682 — now demonstrated, not theoretical.** FG-576 hit it live: a correction found
-   after the docs stage has no amendment path, and re-running shipping refused
-   `blocked_environment (candidate_not_checked_out)`. It cost a documented tip-equality
-   override (recorded in full on FG-576). Adjacent to FG-688; both are review/recovery
-   control-plane gaps.
-3. **FG-681 — the darwin/Linux split is now expensive, not just noisy.** THREE of FG-576's
-   five defects were darwin-only and structurally invisible to the Linux agent containers and
-   to CI. Every one shipped green through CI and was caught only by a host run. That changes
-   the cost calculus of leaving it open.
+1. **FG-703 — durable orphan-incident adjudication.** Head of the queue; its FG-700 prerequisite shipped. Add the operator-authorized, audit-preserving way to retire an exact `orphaned_work_may_persist` incident as `no_unique_work`, then use it to resolve the four historical incidents below without retrying work or rewriting failed run history.
+2. **FG-663 — durable project identity for run history.** Persist the project when each run is created so ordinary disposable-clone cleanup cannot turn activity, usage, or runtime history into `Unknown repository`. Checkout paths stay operational detail, never the task's identity or display tag.
+3. **FG-626** — now the head of release-train section 1, since FG-693 → FG-681 completed its first item. Stop `forge launch run` from silently dropping caller `FORGE_*` safety and behavior controls.
+
+**Do NOT pick up FG-699, FG-701, FG-702, FG-704, FG-705** as next moves — all five are now explicitly placed in PLAN.md's post-v0.1.0 polish section. FG-704 in particular is non-preempting by operator decision (see below).
 
 **External state to remember:**
 
-- **`~/code/forge-fg576` is retained.** It holds tags `fg576-salvage-candidate` (731d46d2,
-  the 8-child integration candidate) and `fg576-salvage-step4-branch`. Deleting it loses the
-  salvage provenance; the branch itself is merged and deleted on the remote.
-- **`~/code/fg584-dogfood` is still deliberately retained** (FG-584 AC14 evidence cites base
-  SHAs that exist only there).
-- **ntfy is BACK UP.** `forge notify milestone` reported a successful push this session after
-  nine consecutive sessions of `network: fetch failed`.
-- **The agent image was rebuilt** this session (`forge upgrade --rebuild-image`); doctor now
-  reports it not-stale, and both `claude` and `codex` CLIs are present in it. The STALE report
-  was real, not FG-543's false positive.
-- **Non-ticket thread:** the FG-576 clone's `better-sqlite3` is built against forge's control
-  runtime, so a direct `node`/`npm` invocation there fails `ERR_DLOPEN_FAILED` unless run via
-  `forge launch run --require-control-toolchain`. Bit the operator once this session.
+- **The dashboard IS running** — pid was 40628, up since Aug 10 10:25. Last session's notes said it was stopped; that was wrong, verify before asserting either way. Because it started Aug 10 it predates FG-683, FG-690, FG-700, FG-693 and FG-681, and `tsx` does not hot-reload, so it is serving stale server code. Notably it predates FG-700, which is the change that renders launch activity — so orchestrator launches legitimately do not appear on it. The operator starts/stops it themselves; do not restart unasked.
+- **The four high-severity `orphaned_work_may_persist` incidents are STILL open.** `forge ops check` still reports all four. FG-703, the next ticket, is what retires them.
+- The live checkout is at `e7b011bd`, clean apart from the two operator files `backlog/PLAN.md` and `backlog/notes.md`. PLAN.md was edited this session (see below) and is still UNCOMMITTED — it was already dirty with operator edits when the session started, and by its own rules is not part of any implementation candidate.
+- **`forge launch run` needs `--run <id>` for a launch to appear on a run's surface.** This session used `--ticket FG-681` from a clone with no registered project home, so every verification launch landed in the host-level `Unassociated activity` bucket. Working as designed per FG-679 (forge never infers ownership from argv or name); pass `--run` when you want it placed.
+- The disposable clone `~/code/forge-fg681` was deleted after its runs reached terminal state. `~/code/forge-fg576` and `~/code/fg584-dogfood` remain deliberately retained for prior evidence.
+- **The integration tier now has a serial tail.** `scripts/run-integration-tests.sh` excludes `src/orchestrator/fg576-codex-adapter.integration.test.ts` from the bulk run and executes it afterward in its own process at `--test-concurrency=1`. Unsharded runs always include it; when sharded, shard 1 carries it via a hardcoded `^1/` check. The script no longer ends in `exec`.
 
 **Decisions worth not relitigating:**
 
-- **Salvage, never `--re-drive`, for a partially-complete wave.** `recover.ts:498-508` states
-  it re-drives the FULL wave; on FG-576 that meant discarding 8 completed children including a
-  64-minute step. The salvage path (durable tag → targeted invokes against the candidate →
-  normal review) worked and is the precedent.
-- **`orphaned` asserts LAUNCHER loss and never child death** (FG-576 D17). No surviving-child
-  lifecycle state; splitting it widens into provider-process recovery semantics no AC needs.
-- **Receipt `project_dir` is STORED canonical**, enforced at both boundaries by one helper.
-  Settled after three wrong-direction fixes; the round-trip assertion carves out that one
-  field and every other field still round-trips verbatim. Do not "restore" the old
-  expectation.
-- **Claude's env isolation withholds credential-SELECTION variables BY EXACT NAME**, not by
-  family prefix like Codex's. The Claude child IS Claude, so `CLAUDE_`/`ANTHROPIC_` are its
-  own behavior controls; withholding the family would strip operator settings. Deliberate
-  asymmetry between the two adapters.
-- **RF-2 (dashboard rows mouse-only) folded into FG-692**, not filed separately — same client,
-  same accessibility pass as its WCAG contrast item.
-- **A green CI is not evidence when the failure is platform-specific.** FG-576 sat fully green
-  on all ten CI checks while one integration test was red on darwin. Merging was held until
-  the host was green too.
+- **FG-704 is non-preempting.** Measured at `c35bee3d`: `integration_1` runs 6m46s against a 10-minute ceiling — roughly 32% headroom, comfortably wider than the ~35s of observed run-to-run variance. The condition that made the ticket urgent (margin narrower than variance) no longer holds, and it is not blocking CI or release correctness. The evidence is recorded in the ticket. Do not promote it just because FG-681 touched it.
+- **AC9's correlation test runs in a serial lane, not a smaller concurrent one.** Under tier saturation the watcher resolved to `unknown` and STOPPED, so no assertion budget could ever pass — 45s and 120s both failed. `unknown` is the correct production outcome for an oversubscribed host, so the test was asserting something production does not guarantee. Moving it to the worktree tier was rejected: that tier is also concurrent, so it would postpone the flake rather than remove its cause.
+- **Rejected: keying AC9's correlation window to the fake's ready marker.** That marker is written BEFORE the session write is even scheduled, and real Codex emits no such signal. A test seam that hands the correlation an easier problem than the real one changes the boundary under test.
+- **Campaign fixtures write through `insertHostVerification`, not a realpath'd project dir.** Realpathing would only make a legacy-shaped raw row pass by accident of spelling; those tests are not testing legacy compatibility. A negative regression proves an intentionally legacy NULL-canonical row reached through a symlink is still DECLINED, so the fixture correction cannot weaken FG-693.
+- **FG-566's env invariant is a closed named exception, not a pattern.** macOS injects `__CF_USER_TEXT_ENCODING` regardless of the `env` passed, so "nothing outside the allowlist" was unachievable. A parent sentinel proves the key is never inherited; Linux keeps the exact allowlist. Do not relax it to "ignore keys starting with `__`".
+- **FG-676 did NOT contribute to the campaign failures.** The ticket's original lead is disproven and recorded: the cause was `host_verification_not_recorded` from a NULL `project_dir_canonical`, not `awaiting_gate` resurrection.
+- **FG-644 needs no code change.** "the FG-612 self-host suites EXECUTE from a checkout whose parent is unwritable" fails in `~/code/forge` but passes in a clone — a property of that checkout's own parent-directory writability.
+- **Two candidate-bound review waivers were granted on operator authority** (`2793b2b5` on PR #237, `c35bee3d` on PR #238), both recorded as PR comments. Neither generalizes to a test-only review exemption, and neither extends to future changes to the test-selection script.
+- **A host test run is the right evidence for a host/CI divergence.** FG-474 says do not re-run `test:all` on the host before merging because CI already did — but FG-681's subject was a divergence CI structurally cannot observe, so the host run WAS the proof and CI remained the merge gate. Do not generalize this to ordinary tickets.
 
 **Shipped (for reference):**
 
-- **FG-691** (`0d0ed85a`, PR #222) — an explicit instant on the paired lease predicates,
-  defaulting to `storeNowMs()`; exact-expiry now assertable and added to both sweeps.
-  Reviewed clean: 4 lenses, 0 findings.
-- **FG-576** (`04fbfeb9`, PR #223) — `forge orchestrator`, the provider-neutral launcher:
-  receipt store, launcher-owned liveness with a process-identity fence, resolution +
-  capability matrix, Forge-owned Codex instruction carrier, both adapters, `forge show` and
-  dashboard surfaces. 15/15 AC met with evidence at the final candidate. Five defects were
-  found and fixed during the build, two by its own security regressions.
+- **FG-681** (`66da74be` PR #237, `e7b011bd` PR #238) — darwin host integration tier agrees with CI: 86 failures to 0 across six mechanisms, none a production defect. Cause A (75 failures): 14 files deleted `test-setup.ts`'s `FORGE_WORKTREES` pin, re-arming the platform-dependent worktree default on darwin so no container was ever dispatched. Causes B1–B6: NULL `project_dir_canonical` in campaign fixtures, a macOS-injected env key, two Linux-only filesystem assumptions, and two wall-clock budgets decided by child-spawn latency. Guarded by `fg345 (pin-4)`, a syntax-tree scan over every `src/**/*.test.ts`, and an execution census that shims `node` to prove the serial tail actually runs.
+- PLAN.md updated (uncommitted): FG-700/FG-693/FG-681 moved to Recently completed; `Now` is explicitly FG-703 → FG-663; release-train section 1 drops its completed first item so FG-626 leads; FG-701/702/704/705 placed in post-v0.1.0 polish so their deferral is explicit rather than invisible.
+- FG-704 updated with FG-681's shard measurement and an explicit non-preempting framing.
