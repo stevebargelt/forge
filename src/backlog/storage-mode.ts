@@ -155,6 +155,51 @@ function resolveUncached(projectDir: string): BacklogStore {
   return storeFor(projectDir, row.projectKey);
 }
 
+// FG-663: the durable PROJECT identity captured on a run at CREATION, while the
+// checkout is still readable. A run records its project as data, so a later
+// checkout deletion can never orphan the run into "Unknown repository" — read
+// models attribute it from this stored value, never by re-deriving from a
+// project_dir that may be gone.
+//
+// Precedence mirrors resolveUncached's PURE-READER ladder, but resolves to a
+// single stored identity string rather than to a store:
+//   (a) declared config project_key (pk-) — durable, git-tracked, clone-inherited
+//   (b) else the pk- this checkout's evidence maps to in the registry
+//   (c) else the resolved repo- evidence key (remote > git-common-dir > path)
+//
+// It is a PURE READER, exactly like the rest of this module (see the header): it
+// NEVER calls resolveAndClaimProjectKey / writeProjectKey / writeBacklogConfig,
+// never mints a registry row, never heals config, never dirties git, and never
+// goes through resolveBacklogStore — that path THROWS on a config/registry
+// conflict (storeForConfigKey), and capture must DEGRADE, not refuse: a run is
+// real regardless of whether its checkout's identity is internally consistent.
+// It never throws — any failure degrades to null so run creation is never blocked
+// by identity capture — and a genuinely non-git, config-less directory degrades
+// to its stable path-source repo- key (AC6) rather than being attributed
+// elsewhere. READS NEVER WRITE holds by construction: it composes only readers.
+export function resolveProjectIdentity(projectDir: string): string | null {
+  try {
+    const config = readBacklogConfig(projectDir);
+    if (config.projectKey) return config.projectKey;
+
+    const evidenceKey = computeRepositoryEvidence(projectDir).key;
+    // Only ask the registry when a store already exists — the resolveUncached
+    // guard: probing otherwise would CREATE forge.db purely to find nothing. In
+    // the insertRun caller the store is always open, so this only guards other
+    // callers, but it keeps the reader free of side effects everywhere.
+    if (storeExists()) {
+      const row = registryByEvidence(evidenceKey);
+      if (row) return row.projectKey;
+    }
+    return evidenceKey;
+  } catch {
+    // Capture NEVER blocks run creation. A run with a NULL project_identity is a
+    // legacy-shaped row the read side already tolerates (live fallback path); a
+    // thrown identity would instead lose the run entirely.
+    return null;
+  }
+}
+
 export function resolveBacklogStore(projectDir: string): BacklogStore {
   const key = resolve(projectDir);
   const now = Date.now();
