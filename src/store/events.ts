@@ -355,7 +355,19 @@ export type EventType =
   // back, so the budget is no longer an untested number. Carries the runtime that took it
   // and the largest composed size, because "600,000 utf8_bytes" means nothing without the
   // runtime it was proven on and how close to the line the proof actually ran.
-  | "review.shard_budget_validated";
+  | "review.shard_budget_validated"
+  // FG-703: the durable audit record of an operator-authorized adjudication —
+  // an exact orphaned_work_may_persist incident (outcome no_unique_work) retired
+  // from the active high-severity report. Append-only: it writes NO task/run
+  // status, NO result column, and does NOT touch the original task.failed
+  // evidence (failed stays failed). Payload carries { incidentId, kind, outcome,
+  // rationale, actor, identity, at } — `identity` is computeAdjudicationIdentity
+  // over the latest task.failed at write time, so detection suppresses this
+  // incident ONLY while its current identity still matches. event_type is TEXT
+  // NOT NULL with no CHECK constraint, so this is additive to the TS union alone:
+  // NO SCHEMA_SQL / ADDITIVE_COLUMNS change and NO migration against the shared
+  // host DB.
+  | "ops.adjudicated";
 
 export type Event = {
   id: number;
