@@ -43,6 +43,11 @@
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { sha256OfString } from "../util/content-digest.js";
+import { getDb, writeTransaction } from "../store/db.js";
+import { getTask } from "../store/tasks.js";
+import { getRun } from "../store/runs.js";
+import { logEvent } from "../store/events.js";
+import { nowIso } from "../util/ids.js";
 
 /** The structured facts an incident's identity is derived from. Both the write
  *  side (performAdjudicate) and the detect side (detectOrphanedWorkMayPersist)
@@ -157,4 +162,222 @@ export function adjudicatedIdentitiesForTask(db: DatabaseInstance, taskId: strin
     identities.add(row.identity);
   }
   return identities;
+}
+
+// ── FG-703 step 4: the `forge ops adjudicate` write verb ──────────────────────
+//
+// An operator-authorized, fail-closed, APPEND-ONLY audit write. It retires ONE
+// exact orphaned_work_may_persist incident (outcome no_unique_work) from the
+// active high-severity report by recording a single ops.adjudicated event whose
+// `identity` is computeAdjudicationIdentity over the CURRENT latest task.failed —
+// the record the detection side (step 3) tests the freshly-computed identity
+// against before suppressing. It writes NOTHING else: no markTaskFailed /
+// updateRunStatus / restoreTaskFailed, no result-column write, and it never
+// touches the original task.failed evidence. Failed stays failed; the failed run
+// stays failed; no artifact is deleted.
+//
+// The whole surface FAILS CLOSED. Every refusal names the blocking fact and writes
+// no event. Refusals (brief constraint 6):
+//   - unknown incident        (no such task, or no live failed-task incident for it)
+//   - unsupported incident kind (the task's current failure_kind is not
+//                                orphaned_work_may_persist)
+//   - unsupported outcome      (anything other than no_unique_work)
+//   - missing/empty rationale
+//   - project mismatch         (the incident's run does not belong to the scoped project)
+//   - identity drift           (the incident's CURRENT identity no longer matches
+//                               the record the operator inspected)
+
+/** The one incident kind this verb may retire (brief constraint 2). */
+const SUPPORTED_KIND = "orphaned_work_may_persist";
+/** The one outcome this verb accepts (brief constraint 2). */
+const SUPPORTED_OUTCOME = "no_unique_work";
+
+export type AdjudicateInput = {
+  /** The disposition. Only `no_unique_work` is accepted; anything else fails closed. */
+  outcome: string;
+  /** Operator's reason. Empty / whitespace-only fails closed — an audit record
+   *  with no rationale is not an audit record. */
+  rationale: string;
+  /** WHO adjudicated. Recorded verbatim into the durable audit event. The CLI
+   *  resolves a default (the OS user) so this is never blank. */
+  actor: string;
+  /** The project the operator is scoped to (cwd or --project, resolved). The
+   *  incident's run must belong to it — a cross-project adjudication fails closed. */
+  projectDir: string;
+  /** OPTIONAL compare-and-set token: the incident identity the operator INSPECTED.
+   *  When supplied, the write refuses unless it still equals the identity recomputed
+   *  from the current latest task.failed — the TOCTOU guard against adjudicating a
+   *  record that materially changed since inspection (threat-model risk #4). When
+   *  omitted, only the in-transaction self-consistency recompute guards the write. */
+  expectedIdentity?: string | undefined;
+};
+
+export type AdjudicateResult =
+  | {
+      kind: "adjudicated";
+      taskId: string;
+      runId: string;
+      identity: string;
+      outcome: string;
+      actor: string;
+      at: string;
+    }
+  | { kind: "refused"; id: string; reason: string }
+  | { kind: "unknown"; id: string };
+
+/** The latest task.failed payload for a task (newest-first by created_at then id),
+ *  parsed, or undefined when the task has none. Mirrors the correlated-subquery
+ *  selection detectOrphanedWorkMayPersist (detect.ts:267-272) uses so the write
+ *  side reads the SAME event the detect side classifies from. */
+function latestFailedPayload(db: DatabaseInstance, taskId: string): Record<string, unknown> | undefined {
+  const row = db
+    .prepare(
+      `SELECT e.payload AS payload
+       FROM events e
+       WHERE e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = ? AND e2.event_type = 'task.failed'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )`
+    )
+    .get(taskId) as { payload: string | null } | undefined;
+  if (!row || row.payload === null) return undefined;
+  return JSON.parse(row.payload) as Record<string, unknown>;
+}
+
+/** Assemble the identity input off a task's anchor + its latest task.failed
+ *  payload, exactly the way both sides must. The identity string itself is
+ *  derived ONLY by computeAdjudicationIdentity — this just gathers its inputs. */
+function identityInputFor(runId: string, taskId: string, payload: Record<string, unknown>): AdjudicationIdentityInput {
+  return {
+    runId,
+    taskId,
+    failureKind: payload["failure_kind"] as string,
+    evidence: payload["evidence"] as OrphanEvidence | undefined,
+  };
+}
+
+/** Record an operator-authorized adjudication for the incident anchored on
+ *  `incidentId` (the failed task's id). Returns the outcome; the CLI maps it to an
+ *  exit code and message. Writes exactly one ops.adjudicated event on success, and
+ *  nothing on any refusal. */
+export function performAdjudicate(incidentId: string, input: AdjudicateInput): AdjudicateResult {
+  const db = getDb();
+
+  // ── Resolve the incident (fails closed as "unknown incident" when there is no
+  //    live orphaned-work incident to adjudicate) ──
+  const task = getTask(incidentId);
+  if (!task) return { kind: "unknown", id: incidentId };
+  // A live orphaned_work_may_persist incident is, by the detector's own contract
+  // (detect.ts: WHERE t.status = 'failed'), a FAILED task. A recovered/re-dispatched
+  // task (complete/running/…) has no such incident — treat it as unknown rather than
+  // adjudicate a state that is not the one the operator saw.
+  if (task.status !== "failed") {
+    return { kind: "unknown", id: incidentId };
+  }
+  const payload = latestFailedPayload(db, incidentId);
+  if (!payload) return { kind: "unknown", id: incidentId };
+
+  // ── Scope: exactly orphaned_work_may_persist × no_unique_work ──
+  const failureKind = payload["failure_kind"];
+  if (typeof failureKind !== "string" || failureKind !== SUPPORTED_KIND) {
+    return {
+      kind: "refused",
+      id: incidentId,
+      reason: `unsupported incident kind: task ${incidentId}'s current failure_kind is ${
+        typeof failureKind === "string" ? failureKind : "unrecorded"
+      }, not ${SUPPORTED_KIND} — this verb adjudicates only ${SUPPORTED_KIND} incidents`,
+    };
+  }
+  if (input.outcome !== SUPPORTED_OUTCOME) {
+    return {
+      kind: "refused",
+      id: incidentId,
+      reason: `unsupported outcome: ${input.outcome || "(none)"} — this verb records only the ${SUPPORTED_OUTCOME} outcome`,
+    };
+  }
+
+  // ── Non-empty rationale (an audit record with no reason is not audit history) ──
+  if (input.rationale.trim().length === 0) {
+    return {
+      kind: "refused",
+      id: incidentId,
+      reason: `missing rationale: an adjudication must record WHY the incident was retired — none was supplied`,
+    };
+  }
+
+  // ── Project match: the incident's run must belong to the scoped project. Reading
+  //    identity from a verified anchor, never from a caller-asserted field. ──
+  const run = getRun(task.runId);
+  if (!run) {
+    // A failed task whose run is gone cannot have its project confirmed — fail closed.
+    return { kind: "refused", id: incidentId, reason: `project mismatch: run ${task.runId} for task ${incidentId} not found` };
+  }
+  if ((run.projectDir ?? null) !== input.projectDir) {
+    return {
+      kind: "refused",
+      id: incidentId,
+      reason: `project mismatch: incident belongs to project ${run.projectDir ?? "(none)"}, not the scoped project ${input.projectDir}`,
+    };
+  }
+
+  // ── Identity: the current incident identity, derived only via the canonical
+  //    function. If the operator supplied the identity they inspected and it no
+  //    longer matches, refuse by naming both (identity drift). ──
+  const currentIdentity = computeAdjudicationIdentity(identityInputFor(task.runId, incidentId, payload));
+  if (input.expectedIdentity !== undefined && input.expectedIdentity !== currentIdentity) {
+    return {
+      kind: "refused",
+      id: incidentId,
+      reason: `identity drift: the incident's current identity (${currentIdentity}) no longer matches the inspected record (${input.expectedIdentity}) — the failed task's work evidence materially changed since you inspected it; re-inspect and adjudicate the current incident`,
+    };
+  }
+
+  // ── The write: a compare-and-set on identity INSIDE the transaction, mirroring
+  //    repairResurrectedGateDecision's CAS-on-observed-state (repair.ts). Recompute
+  //    the identity from the CURRENT latest task.failed at write time; refuse if it
+  //    changed since resolution (a concurrent re-dispatch appended a new task.failed
+  //    in the window) or drifted from what the operator inspected. Exactly ONE event
+  //    is written; on refusal, none. ──
+  const at = nowIso();
+  const result = writeTransaction((): AdjudicateResult => {
+    // Re-read the row + latest failure UNDER the write lock. A concurrent recover/
+    // retry can move the row off 'failed' or append a fresh task.failed between the
+    // checks above and this write; either changes the incident out from under us.
+    const liveStatus = (db.prepare(`SELECT status FROM tasks WHERE id = ?`).get(incidentId) as { status: string } | undefined)?.status;
+    if (liveStatus !== "failed") {
+      return { kind: "refused", id: incidentId, reason: `identity drift: task ${incidentId} is now ${liveStatus ?? "gone"}, no longer a live ${SUPPORTED_KIND} incident — nothing was written` };
+    }
+    const livePayload = latestFailedPayload(db, incidentId);
+    if (!livePayload || livePayload["failure_kind"] !== SUPPORTED_KIND) {
+      return { kind: "refused", id: incidentId, reason: `identity drift: task ${incidentId}'s current failure is no longer ${SUPPORTED_KIND} — nothing was written` };
+    }
+    const writeIdentity = computeAdjudicationIdentity(identityInputFor(task.runId, incidentId, livePayload));
+    if (writeIdentity !== currentIdentity || (input.expectedIdentity !== undefined && writeIdentity !== input.expectedIdentity)) {
+      return {
+        kind: "refused",
+        id: incidentId,
+        reason: `identity drift: the incident's identity changed to ${writeIdentity} between inspection and the write — nothing was written; re-inspect and adjudicate the current incident`,
+      };
+    }
+    // Append-only: one ops.adjudicated event, carrying the durable audit record.
+    // NO task/run/result/evidence write of any kind.
+    logEvent("ops.adjudicated", {
+      runId: task.runId,
+      taskId: incidentId,
+      payload: {
+        incidentId: `ops-incident:${SUPPORTED_KIND}:${task.runId}:${incidentId}`,
+        kind: SUPPORTED_KIND,
+        outcome: SUPPORTED_OUTCOME,
+        rationale: input.rationale,
+        actor: input.actor,
+        identity: writeIdentity,
+        at,
+      },
+    });
+    return { kind: "adjudicated", taskId: incidentId, runId: task.runId, identity: writeIdentity, outcome: SUPPORTED_OUTCOME, actor: input.actor, at };
+  });
+
+  return result;
 }

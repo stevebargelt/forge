@@ -4,6 +4,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import {
   computeAdjudicationIdentity,
   adjudicatedIdentitiesForTask,
+  performAdjudicate,
   type AdjudicationIdentityInput,
 } from "./adjudication.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
@@ -246,4 +247,201 @@ test("adjudicatedIdentitiesForTask: a malformed/identity-less payload records no
 
   const ids = adjudicatedIdentitiesForTask(db, "t1");
   assert.equal(ids.size, 0);
+});
+
+// ── performAdjudicate (the FG-703 write verb) ─────────────────────────────────
+//
+// These run against the same setDbForTest in-memory handle (installed in the
+// beforeEach above) so getTask/getRun/logEvent and the correlated latest-failed
+// read all resolve to it.
+
+const PROJECT = "/tmp/forge-fg703-project";
+
+function seedRun(id: string, opts: { status?: string; projectDir?: string | null } = {}): void {
+  db.prepare(
+    `INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(id, "build", "fg703", opts.status ?? "active", "2026-08-12T00:00:00Z", opts.projectDir === undefined ? PROJECT : opts.projectDir);
+}
+
+function seedTask(id: string, runId: string, opts: { status?: string; result?: unknown } = {}): void {
+  const pkg = JSON.stringify({ taskId: id, runId, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" });
+  db.prepare(
+    `INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, result, created_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, runId, "build", "engineer", opts.status ?? "failed", pkg, opts.result === undefined ? null : JSON.stringify(opts.result), "2026-08-12T00:00:01Z", "2026-08-12T00:00:02Z");
+}
+
+/** Record a task.failed carrying an OrphanEvidence tuple, exactly as failTask does. */
+function seedFailed(taskId: string, runId: string, opts: { failureKind?: string; evidence?: OrphanEvidence } = {}): void {
+  logEvent("task.failed", {
+    runId,
+    taskId,
+    payload: {
+      failure_kind: opts.failureKind ?? "orphaned_work_may_persist",
+      error: "container gone; worktree dirty",
+      ...(opts.evidence ? { evidence: opts.evidence } : {}),
+    },
+  });
+}
+
+function adjudicatedCount(taskId: string): number {
+  return (db.prepare(`SELECT COUNT(*) AS c FROM events WHERE event_type = 'ops.adjudicated' AND task_id = ?`).get(taskId) as { c: number }).c;
+}
+
+function validInput(overrides: Partial<Parameters<typeof performAdjudicate>[1]> = {}): Parameters<typeof performAdjudicate>[1] {
+  return { outcome: "no_unique_work", rationale: "operator inspected the worktree; no unique work to salvage", actor: "steve", projectDir: PROJECT, ...overrides };
+}
+
+test("performAdjudicate: a valid adjudication writes exactly ONE ops.adjudicated event with the audit record + current identity", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const res = performAdjudicate("t1", validInput());
+  assert.equal(res.kind, "adjudicated");
+  assert.equal(adjudicatedCount("t1"), 1, "exactly one audit event");
+
+  const expectedIdentity = computeAdjudicationIdentity(baseInput(worktreeEvidence()));
+  const row = db.prepare(`SELECT run_id, task_id, payload FROM events WHERE event_type = 'ops.adjudicated' AND task_id = 't1'`).get() as { run_id: string; task_id: string; payload: string };
+  const payload = JSON.parse(row.payload) as Record<string, unknown>;
+  assert.equal(row.run_id, "run1");
+  assert.equal(row.task_id, "t1");
+  assert.equal(payload["kind"], "orphaned_work_may_persist");
+  assert.equal(payload["outcome"], "no_unique_work");
+  assert.equal(payload["rationale"], "operator inspected the worktree; no unique work to salvage");
+  assert.equal(payload["actor"], "steve");
+  assert.equal(payload["identity"], expectedIdentity);
+  assert.equal(typeof payload["at"], "string");
+  // The recorded identity is exactly what the detect side recomputes and suppresses
+  // on (step 3): adjudicatedIdentitiesForTask returns it.
+  assert.ok(adjudicatedIdentitiesForTask(db, "t1").has(expectedIdentity));
+});
+
+test("performAdjudicate: a valid adjudication makes ZERO change to task status, run status, result column, or the task.failed event", () => {
+  seedRun("run1", { status: "active" });
+  seedTask("t1", "run1", { status: "failed" });
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const failedBefore = db.prepare(`SELECT payload FROM events WHERE event_type = 'task.failed' AND task_id = 't1'`).all() as { payload: string }[];
+
+  const res = performAdjudicate("t1", validInput());
+  assert.equal(res.kind, "adjudicated");
+
+  const task = db.prepare(`SELECT status, result FROM tasks WHERE id = 't1'`).get() as { status: string; result: string | null };
+  assert.equal(task.status, "failed", "failed stays failed");
+  assert.equal(task.result, null, "result column untouched");
+  const run = db.prepare(`SELECT status FROM runs WHERE id = 'run1'`).get() as { status: string };
+  assert.equal(run.status, "active", "run status untouched (never converted to abandoned)");
+  const failedAfter = db.prepare(`SELECT payload FROM events WHERE event_type = 'task.failed' AND task_id = 't1'`).all() as { payload: string }[];
+  assert.deepEqual(failedAfter, failedBefore, "the original task.failed evidence is byte-for-byte unchanged");
+});
+
+test("performAdjudicate: fails closed on an UNKNOWN incident (no such task), writing no event", () => {
+  const res = performAdjudicate("nope", validInput());
+  assert.equal(res.kind, "unknown");
+  assert.equal(adjudicatedCount("nope"), 0);
+});
+
+test("performAdjudicate: fails closed on a task that is not failed (recovered) — no live incident", () => {
+  seedRun("run1");
+  seedTask("t1", "run1", { status: "complete" });
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const res = performAdjudicate("t1", validInput());
+  assert.equal(res.kind, "unknown", "a complete task has no live orphaned_work_may_persist incident");
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: fails closed on an UNSUPPORTED KIND, naming the kind, writing no event", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { failureKind: "oom_killed", evidence: worktreeEvidence() });
+
+  const res = performAdjudicate("t1", validInput());
+  assert.equal(res.kind, "refused");
+  assert.match((res as { reason: string }).reason, /unsupported incident kind/);
+  assert.match((res as { reason: string }).reason, /oom_killed/);
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: fails closed on an UNSUPPORTED OUTCOME, writing no event", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const res = performAdjudicate("t1", validInput({ outcome: "salvage_it" }));
+  assert.equal(res.kind, "refused");
+  assert.match((res as { reason: string }).reason, /unsupported outcome/);
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: fails closed on a MISSING/empty rationale, writing no event", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const res = performAdjudicate("t1", validInput({ rationale: "   " }));
+  assert.equal(res.kind, "refused");
+  assert.match((res as { reason: string }).reason, /missing rationale/);
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: fails closed on a PROJECT MISMATCH, writing no event", () => {
+  seedRun("run1", { projectDir: "/some/other/project" });
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const res = performAdjudicate("t1", validInput({ projectDir: PROJECT }));
+  assert.equal(res.kind, "refused");
+  assert.match((res as { reason: string }).reason, /project mismatch/);
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: fails closed on IDENTITY DRIFT (supplied identity != current), naming both, writing no event", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const staleIdentity = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/OLD.ts"] })));
+  const currentIdentity = computeAdjudicationIdentity(baseInput(worktreeEvidence()));
+  assert.notEqual(staleIdentity, currentIdentity);
+
+  const res = performAdjudicate("t1", validInput({ expectedIdentity: staleIdentity }));
+  assert.equal(res.kind, "refused");
+  assert.match((res as { reason: string }).reason, /identity drift/);
+  assert.match((res as { reason: string }).reason, new RegExp(currentIdentity));
+  assert.equal(adjudicatedCount("t1"), 0);
+});
+
+test("performAdjudicate: a matching supplied identity is accepted (the TOCTOU CAS passes when nothing changed)", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const inspected = computeAdjudicationIdentity(baseInput(worktreeEvidence()));
+  const res = performAdjudicate("t1", validInput({ expectedIdentity: inspected }));
+  assert.equal(res.kind, "adjudicated");
+  assert.equal(adjudicatedCount("t1"), 1);
+});
+
+test("performAdjudicate: after the work materially changes, a RE-adjudication records the NEW identity and supersedes the old", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence({ changedFiles: ["src/a.ts"] }) });
+
+  const res1 = performAdjudicate("t1", validInput());
+  assert.equal(res1.kind, "adjudicated");
+  const identityA = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts"] })));
+  assert.deepEqual([...adjudicatedIdentitiesForTask(db, "t1")], [identityA]);
+
+  // The worktree changed-file SET materially changes → a NEW task.failed lands →
+  // the incident reappears with a different identity → operator re-adjudicates.
+  seedFailed("t1", "run1", { evidence: worktreeEvidence({ changedFiles: ["src/a.ts", "src/b.ts"] }) });
+  const identityB = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts", "src/b.ts"] })));
+  assert.notEqual(identityA, identityB);
+
+  const res2 = performAdjudicate("t1", validInput());
+  assert.equal(res2.kind, "adjudicated");
+  assert.equal(adjudicatedCount("t1"), 2, "a second, superseding audit event — the first is never rewritten");
+  assert.deepEqual([...adjudicatedIdentitiesForTask(db, "t1")], [identityB], "the current recorded identity is the new one");
 });
