@@ -12,6 +12,8 @@ import { renderedEmptyStore } from "../no-store.js";
 import { logEvent } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 import { emitMilestone } from "../../notify/milestone.js";
+import { performAdjudicate, type AdjudicateResult } from "../../ops/adjudication.js";
+import { userInfo } from "node:os";
 
 // `forge ops check` — incident detection over the blackboard (#250). The
 // orchestrator runs `--json`, which is read-only/side-effect-free, and decides
@@ -432,4 +434,71 @@ export function registerOps(program: Command): void {
       if (outcome.resolutionWriteErrors.length > 0) console.log(`  resolution write failed (container confirmed gone, but the event insert threw — a later sweep will heal it): ${outcome.resolutionWriteErrors.join(", ")}`);
       if (outcome.dryRun) console.log("No writes.");
     });
+
+  // FG-703: `forge ops adjudicate <taskId>` — operator-authorized, fail-closed,
+  // append-only. Retires ONE orphaned_work_may_persist incident (outcome
+  // no_unique_work) from the active high-severity report by recording a single
+  // ops.adjudicated audit event. It writes NOTHING else: failed stays failed, the
+  // run is untouched, the result column and the original task.failed evidence are
+  // never rewritten. Every refusal names the blocking fact and exits non-zero.
+  ops
+    .command("adjudicate")
+    .argument("<taskId>", "the failed task whose orphaned_work_may_persist incident to adjudicate (the incident's task id)")
+    .requiredOption("--rationale <text>", "why the incident is retired — recorded as durable audit history (must be non-empty)")
+    .option("--outcome <outcome>", "the disposition; only 'no_unique_work' is accepted", "no_unique_work")
+    .option("--actor <who>", "who is adjudicating (defaults to the current OS user); recorded in the audit event")
+    .option("--identity <sha>", "the incident identity you inspected (from a prior check); the write refuses on drift")
+    .option("--project <dir>", "scope to a specific project dir (default: cwd)")
+    .option("--json", "emit JSON result")
+    .description(
+      "Retire ONE orphaned_work_may_persist ops incident (outcome no_unique_work) from the active high-severity " +
+        "report, preserving the failed task, failed run, detector evidence, rationale, actor and timestamp as durable " +
+        "audit history. Append-only: it changes NO task, run, or result state. Fails closed (non-zero, naming the fact) " +
+        "for an unknown incident, an unsupported kind, an unsupported outcome, a missing rationale, a project mismatch, " +
+        "or an incident whose current identity no longer matches the record you inspected."
+    )
+    .action((taskId: string, opts: { rationale: string; outcome: string; actor?: string; identity?: string; project?: string; json?: boolean }) => {
+      ensureForgeDirs();
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const result: AdjudicateResult = performAdjudicate(taskId, {
+        outcome: opts.outcome,
+        rationale: opts.rationale,
+        actor: resolveActor(opts.actor),
+        projectDir,
+        expectedIdentity: opts.identity,
+      });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind !== "adjudicated") process.exit(1);
+        return;
+      }
+
+      if (result.kind === "unknown") {
+        process.stderr.write(`forge ops adjudicate: unknown incident — no live orphaned_work_may_persist incident for task '${result.id}'\n`);
+        process.exit(1);
+      }
+      if (result.kind === "refused") {
+        process.stderr.write(`forge ops adjudicate: refused — ${result.reason}\n`);
+        process.exit(1);
+      }
+      console.log(`Adjudicated orphaned_work_may_persist incident for task ${result.taskId} (${result.outcome}).`);
+      console.log(`  actor: ${result.actor}  at: ${result.at}`);
+      console.log(`  identity: ${result.identity}`);
+      console.log(`  failed task, failed run, and detector evidence left untouched (audit-only).`);
+    });
+}
+
+/** WHO is adjudicating. An explicit --actor wins; otherwise the current OS user,
+ *  so the durable audit event is never blank. Never throws — a userInfo() failure
+ *  in a minimal environment falls back to "unknown". */
+function resolveActor(explicit?: string): string {
+  const trimmed = explicit?.trim();
+  if (trimmed) return trimmed;
+  try {
+    const name = userInfo().username;
+    return name && name.length > 0 ? name : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
