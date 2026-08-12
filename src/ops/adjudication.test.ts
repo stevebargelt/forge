@@ -1,7 +1,14 @@
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { computeAdjudicationIdentity, type AdjudicationIdentityInput } from "./adjudication.js";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+import {
+  computeAdjudicationIdentity,
+  adjudicatedIdentitiesForTask,
+  type AdjudicationIdentityInput,
+} from "./adjudication.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
+import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { logEvent } from "../store/events.js";
 
 // A representative orphaned_work_may_persist evidence tuple: a worktree-sourced
 // diff with the full FG-492 terminal-cause fields recorded.
@@ -162,4 +169,81 @@ test("identity is defined even when no evidence is present, and differs from evi
   const noEvidence = computeAdjudicationIdentity(baseInput(undefined));
   assert.match(noEvidence, /^[0-9a-f]{64}$/);
   assert.notEqual(noEvidence, computeAdjudicationIdentity(baseInput(worktreeEvidence())));
+});
+
+// ── adjudicatedIdentitiesForTask (detection-side read path) ───────────────────
+
+let db: DatabaseInstance;
+let prevDb: DatabaseInstance | null;
+
+beforeEach(() => {
+  db = makeInMemoryDb();
+  // logEvent writes through the global handle; point it at this test DB so the
+  // read helper (which we call with `db`) sees the events logEvent inserts.
+  prevDb = setDbForTest(db);
+});
+afterEach(() => {
+  if (prevDb) setDbForTest(prevDb);
+});
+
+// Record an ops.adjudicated event exactly the way performAdjudicate (step 4) will:
+// task_id set on the row, and `identity` in the payload.
+function recordAdjudication(taskId: string, identity: string): void {
+  logEvent("ops.adjudicated", {
+    runId: "run1",
+    taskId,
+    payload: {
+      incidentId: `inc-${taskId}`,
+      kind: "orphaned_work_may_persist",
+      outcome: "no_unique_work",
+      rationale: "operator inspected; no unique work",
+      actor: "steve@bargelt.com",
+      identity,
+      at: "2026-08-12T00:00:00Z",
+    },
+  });
+}
+
+test("adjudicatedIdentitiesForTask: one recorded event yields exactly that event's identity key", () => {
+  const identity = computeAdjudicationIdentity(baseInput(worktreeEvidence()));
+  recordAdjudication("t1", identity);
+
+  const ids = adjudicatedIdentitiesForTask(db, "t1");
+  assert.deepEqual([...ids], [identity]);
+  assert.ok(ids.has(identity));
+});
+
+test("adjudicatedIdentitiesForTask: a task with no adjudication yields an empty set", () => {
+  // A different task carries an adjudication; the queried task has none.
+  recordAdjudication("t-other", computeAdjudicationIdentity(baseInput(worktreeEvidence())));
+
+  const ids = adjudicatedIdentitiesForTask(db, "t1");
+  assert.equal(ids.size, 0);
+});
+
+test("adjudicatedIdentitiesForTask: a superseded-then-re-adjudicated task yields the CURRENT recorded identity only", () => {
+  // First adjudication at identity A (the original work).
+  const identityA = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts"] })));
+  recordAdjudication("t1", identityA);
+  // Work materially changed (a different worktree changed-file set) → incident
+  // reappeared → operator re-adjudicated at identity B. This later event supersedes A.
+  const identityB = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts", "src/b.ts"] })));
+  recordAdjudication("t1", identityB);
+  assert.notEqual(identityA, identityB);
+
+  const ids = adjudicatedIdentitiesForTask(db, "t1");
+  assert.deepEqual([...ids], [identityB], "only the latest adjudication's identity is current");
+  assert.ok(!ids.has(identityA), "a superseded identity must not keep suppressing");
+});
+
+test("adjudicatedIdentitiesForTask: a malformed/identity-less payload records no usable identity (fail-closed)", () => {
+  // A hand-edited or pre-identity row with no `identity` field must not suppress
+  // anything — json_extract($.identity) is null and the set stays empty.
+  logEvent("ops.adjudicated", {
+    taskId: "t1",
+    payload: { kind: "orphaned_work_may_persist", outcome: "no_unique_work" },
+  });
+
+  const ids = adjudicatedIdentitiesForTask(db, "t1");
+  assert.equal(ids.size, 0);
 });
