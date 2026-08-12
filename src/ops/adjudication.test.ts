@@ -495,6 +495,57 @@ test("performAdjudicate: after the work materially changes, a RE-adjudication re
   assert.deepEqual([...adjudicatedIdentitiesForTask(db, "t1")], [identityB], "the current recorded identity is the new one");
 });
 
+// ── FG-703 RF-1: a second IDENTICAL adjudication is idempotent (no duplicate row) ─
+
+test("performAdjudicate: re-adjudicating the SAME identity is idempotent — no duplicate audit row is appended", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  const res1 = performAdjudicate("t1", validInput());
+  assert.equal(res1.kind, "adjudicated");
+  assert.equal(adjudicatedCount("t1"), 1);
+
+  // A second identical invocation (e.g. a retry after an ambiguous client/process
+  // failure): same task, same current identity, same evidence. It must NOT append a
+  // second row — the AC4 read surface would then be ambiguous about which record is
+  // the decision. It returns success (idempotent) reporting the EXISTING record.
+  const res2 = performAdjudicate("t1", validInput());
+  assert.equal(res2.kind, "adjudicated", "an identical retry succeeds idempotently, not refuses");
+  assert.equal(adjudicatedCount("t1"), 1, "still exactly one audit event — no duplicate appended");
+
+  // The returned record is the ORIGINAL decision, not a fresh stamp.
+  assert.ok(res1.kind === "adjudicated" && res2.kind === "adjudicated");
+  assert.equal(res2.identity, res1.identity);
+  assert.equal(res2.at, res1.at, "the record of decision keeps the ORIGINAL timestamp");
+  assert.equal(res2.actor, res1.actor);
+});
+
+test("performAdjudicate: idempotency is bound to the current-latest identity — a re-adjudication of a SUPERSEDED identity still appends", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence({ changedFiles: ["src/a.ts"] }) });
+
+  const identityA = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts"] })));
+  performAdjudicate("t1", validInput({ expectedIdentity: identityA }));
+  assert.equal(adjudicatedCount("t1"), 1);
+
+  // Work changes → new task.failed → operator re-adjudicates identity B. Latest is B.
+  seedFailed("t1", "run1", { evidence: worktreeEvidence({ changedFiles: ["src/a.ts", "src/b.ts"] }) });
+  const identityB = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts", "src/b.ts"] })));
+  performAdjudicate("t1", validInput({ expectedIdentity: identityB }));
+  assert.equal(adjudicatedCount("t1"), 2);
+
+  // Work reverts to the identity-A facts → the incident reappears as identity A. Since
+  // the current-latest record is B (not A), adjudicating A is a genuine, non-idempotent
+  // re-decision that must append and become the new latest.
+  seedFailed("t1", "run1", { evidence: worktreeEvidence({ changedFiles: ["src/a.ts"] }) });
+  const res = performAdjudicate("t1", validInput({ expectedIdentity: identityA }));
+  assert.equal(res.kind, "adjudicated");
+  assert.equal(adjudicatedCount("t1"), 3, "re-adjudicating a superseded identity is a new decision, not a no-op");
+  assert.deepEqual([...adjudicatedIdentitiesForTask(db, "t1")], [identityA], "the current recorded identity is A again");
+});
+
 // ── FG-703 FIX 1: --identity is REQUIRED — a missing token cannot fall open ────
 
 test("performAdjudicate: fails closed when NO expectedIdentity matches (an unmatched token can never adjudicate)", () => {

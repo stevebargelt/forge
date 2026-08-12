@@ -268,6 +268,41 @@ function latestFailedPayload(db: DatabaseInstance, taskId: string): Record<strin
   return JSON.parse(row.payload) as Record<string, unknown>;
 }
 
+/** The latest ops.adjudicated audit record for a task (newest by created_at then
+ *  id), parsed, or undefined when the task was never adjudicated. The write path
+ *  reads this UNDER the write lock so a second IDENTICAL adjudication is idempotent
+ *  rather than append-a-duplicate (see performAdjudicate). Mirrors the
+ *  latest-event-per-task selection adjudicatedIdentitiesForTask uses, and stays
+ *  fail-closed against a hand-edited/partial row exactly as that reader does: a
+ *  payload with no usable identity yields undefined, so it can never match a
+ *  freshly-computed identity and short-circuit a real write. */
+function latestAdjudicationRecord(
+  db: DatabaseInstance,
+  taskId: string
+): { identity: string; outcome: string; actor: string; at: string } | undefined {
+  const row = db
+    .prepare(
+      `SELECT e.payload AS payload
+       FROM events e
+       WHERE e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = ? AND e2.event_type = 'ops.adjudicated'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )`
+    )
+    .get(taskId) as { payload: string | null } | undefined;
+  if (!row || row.payload === null) return undefined;
+  const p = JSON.parse(row.payload) as { identity?: unknown; outcome?: unknown; actor?: unknown; at?: unknown };
+  if (typeof p.identity !== "string" || p.identity.length === 0) return undefined;
+  return {
+    identity: p.identity,
+    outcome: typeof p.outcome === "string" ? p.outcome : SUPPORTED_OUTCOME,
+    actor: typeof p.actor === "string" ? p.actor : "",
+    at: typeof p.at === "string" ? p.at : "",
+  };
+}
+
 /** Assemble the identity input off a task's anchor + its latest task.failed
  *  payload, exactly the way both sides must. The identity string itself is
  *  derived ONLY by computeAdjudicationIdentity — this just gathers its inputs. */
@@ -394,6 +429,20 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
         id: incidentId,
         reason: `identity drift: the incident's identity changed to ${writeIdentity} between inspection and the write — nothing was written; re-inspect and adjudicate the current incident`,
       };
+    }
+    // Idempotent: if the CURRENT record of decision (the LATEST ops.adjudicated
+    // event) already carries this exact identity, a second identical adjudication —
+    // including a retry after an ambiguous client/process failure — must NOT append
+    // a duplicate audit row. A duplicate would make the AC4 read surface ambiguous
+    // about which outcome, rationale, actor and timestamp is the record of decision.
+    // Return the EXISTING record unchanged: the first decision stands and the retry
+    // writes nothing. A LATER, DIFFERENT identity is a genuine re-adjudication (the
+    // work materially changed and the incident reappeared) and still appends — only
+    // the current-latest identity is idempotent, which is exactly the identity the
+    // detect side (adjudicatedIdentitiesForTask) suppresses on.
+    const existing = latestAdjudicationRecord(db, incidentId);
+    if (existing && existing.identity === writeIdentity) {
+      return { kind: "adjudicated", taskId: incidentId, runId: task.runId, identity: existing.identity, outcome: existing.outcome, actor: existing.actor, at: existing.at };
     }
     // Append-only: one ops.adjudicated event, carrying the durable audit record.
     // NO task/run/result/evidence write of any kind.
