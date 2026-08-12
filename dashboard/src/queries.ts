@@ -479,7 +479,7 @@ export type ActivityEntry = {
 export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectScope): ActivityEntry[] {
   let sql = `
     SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.started_at, t.completed_at,
-           r.title, r.workflow, r.project_dir
+           r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
     WHERE t.completed_at IS NOT NULL
@@ -510,10 +510,11 @@ export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectSc
     title: string;
     workflow: string;
     project_dir: string | null;
+    project_identity?: string | null;
   }>;
 
   return rows.map((r) => {
-    const meta = projectPresentation(r.project_dir);
+    const meta = projectPresentation(r.project_dir, r.project_identity);
     const durationMs = r.started_at
       ? Math.max(0, new Date(r.completed_at).getTime() - new Date(r.started_at).getTime())
       : null;
@@ -584,7 +585,7 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
   const project = scopeSql("runs", "r", scope);
   const rows = db().prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
-           r.title, r.workflow, r.project_dir
+           r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
     WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'blocked_by_red', 'awaiting_recovery')
@@ -602,6 +603,7 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
     title: string;
     workflow: string;
     project_dir: string | null;
+    project_identity?: string | null;
   }>;
 
   // #290: classify running+containerized tasks by liveness once, map by taskId.
@@ -635,7 +637,7 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
   );
 
   return rows.map((r) => {
-    const meta = projectPresentation(r.project_dir);
+    const meta = projectPresentation(r.project_dir, r.project_identity);
     return {
       runId: r.run_id,
       runTitle: r.title,
@@ -769,7 +771,7 @@ export function taskDetail(taskId: string): TaskDetail | null {
   const taskRow = db().prepare(`
     SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
            t.error, t.started_at,
-           r.title, r.workflow, r.project_dir
+           r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
     WHERE t.id = ?
@@ -789,11 +791,12 @@ export function taskDetail(taskId: string): TaskDetail | null {
         title: string;
         workflow: string;
         project_dir: string | null;
+        project_identity?: string | null;
       }
     | undefined;
   if (!taskRow) return null;
 
-  const taskMeta = projectPresentation(taskRow.project_dir);
+  const taskMeta = projectPresentation(taskRow.project_dir, taskRow.project_identity);
   const task: ActivityEntry = {
     taskId: taskRow.id,
     runId: taskRow.run_id,
@@ -1918,7 +1921,90 @@ type ProjectPresentation = { label: string; color: string; branch?: string };
 const PROJECT_PRESENTATION_CACHE_MS = 5_000;
 const projectPresentationCache = new Map<string, { at: number; value: ProjectPresentation | null }>();
 
-function projectPresentation(projectDir: string | null): ProjectPresentation | null {
+// FG-663: normalize a run's STORED project identity — a `pk-` declared project
+// key (from .forge/config.yml, FG-608) or a `repo-` resolved evidence key, both
+// captured at creation in src/store/runs.ts — to the `repo-` evidence key the
+// dashboard registry and project colors are keyed on. A `pk-` is mapped through
+// the project_identity registry (the same project_key ↔ repo_evidence_key
+// arbiter backlogTruthForProject/queueBoard read); a `repo-` is already in that
+// space and is used directly. Falls back to the input unchanged when a `pk-` has
+// no registry row yet — a stable if ungrouped key beats a throw. READ-ONLY: the
+// registry is never written from this read path.
+// FG-663: the dashboard reads ~/.forge/forge.db, whose additive `project_identity`
+// column (src/store/schema.ts) may be ABSENT on an aged DB a peer has not migrated
+// yet, or during a deploy window where this reader is ahead of the migration.
+// SELECTing a column that does not exist is a hard SQLITE_ERROR, so the three
+// presentation reads probe for it and, when absent, omit it and fall back to the
+// legacy live-resolution path (projectPresentation with a NULL identity). This is
+// the FG-568 additive-only, reader-tolerates-old-schema contract on the read side.
+// Deliberately un-memoized: PRAGMA table_info on a tiny table is cheap next to the
+// polled query it guards, and a cached `false` would go stale the instant a peer
+// applies the migration under this long-lived read handle.
+function runsProjectIdentitySelect(): string {
+  const present = (db().prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).some(
+    (col) => col.name === "project_identity",
+  );
+  return present ? ", r.project_identity" : "";
+}
+
+function normalizeStoredIdentityToEvidenceKey(storedIdentity: string): string {
+  if (!storedIdentity.startsWith("pk-")) return storedIdentity;
+  const row = db()
+    .prepare(`SELECT repo_evidence_key FROM project_identity WHERE project_key = ?`)
+    .get(storedIdentity) as { repo_evidence_key: string } | undefined;
+  return row?.repo_evidence_key ?? storedIdentity;
+}
+
+// FG-663: presentation for a run whose durable project identity was captured at
+// creation. Label and color are resolved from that stored identity, NOT
+// re-derived from project_dir (which may be gone), so a deleted checkout still
+// shows its correct project and never renders "Unknown repository" (AC2/AC3).
+// pk-/repo- rows of one project normalize to a single evidence key, so they
+// group to one label and one color — stable with the live project because the
+// live ProjectRecord's color is itself hashColor(evidence key). Branch is
+// incidental checkout detail, read live only while the directory still exists.
+function presentationFromIdentity(
+  projectDir: string | null,
+  storedIdentity: string,
+): ProjectPresentation | null {
+  const evidenceKey = normalizeStoredIdentityToEvidenceKey(storedIdentity);
+  const live = projectDir ? repositoryCheckoutIdentity(projectDir) : null;
+  const branch = live?.exists ? live.branch : undefined;
+  // Prefer the live project record: its label+color ARE the grouped
+  // presentation, so a deleted checkout renders identically to its still-present
+  // siblings and no color churn is introduced.
+  const record = projectsForDashboard().find((project) => project.key === evidenceKey);
+  const base = record
+    ? { label: record.label, color: record.color }
+    : // Every checkout of this project is gone from disk. Color stays stable off
+      // the evidence key; the label is whatever the (possibly gone) directory
+      // yields — still an attribution, never "Unknown repository".
+      (() => {
+        const meta = projectDir ? resolveProjectMeta(projectDir, { colorKey: evidenceKey }) : null;
+        return meta ? { label: meta.label, color: meta.color } : null;
+      })();
+  if (!base) return null;
+  return branch ? { ...base, branch } : base;
+}
+
+function projectPresentation(
+  projectDir: string | null,
+  storedIdentity?: string | null,
+): ProjectPresentation | null {
+  // FG-663: a run that captured its project identity at creation is presented
+  // from that durable record, never re-derived from a project_dir that may be
+  // gone. Legacy rows (NULL project_identity) keep the live filesystem path
+  // below. Identity-keyed cache entries are namespaced so they never collide
+  // with the absolute-path keys the legacy path uses.
+  if (storedIdentity) {
+    const now = Date.now();
+    const cacheKey = `id:${storedIdentity}\0${projectDir ?? ""}`;
+    const cached = projectPresentationCache.get(cacheKey);
+    if (cached && now - cached.at < PROJECT_PRESENTATION_CACHE_MS) return cached.value;
+    const value = presentationFromIdentity(projectDir, storedIdentity);
+    projectPresentationCache.set(cacheKey, { at: now, value });
+    return value;
+  }
   if (!projectDir) return null;
   const now = Date.now();
   const cached = projectPresentationCache.get(projectDir);
