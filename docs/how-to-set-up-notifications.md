@@ -290,7 +290,7 @@ The provider **title** carries the campaign id and the ticket (`Campaign <id> pa
 
 Two exemptions stay silent: an operator-initiated `forge campaign pause` (that's your own action, not a wedge), and — for now — a campaign in which *no* item ever produced a run (every item held before any run started); that residual corner is deferred to FG-517.
 
-**Live `ops check` incidents.** `forge ops check` in its default human (interactive) mode renders the incident report **and** pushes one `risk_found` milestone per **new** incident, so a standing incident (orphaned work, a stuck run) reaches you once instead of scrolling past unread. Pushes are deduped on incident identity — `kind` + `runId` + `taskId` — via the persistent event log, so re-running `ops check` over the same standing incidents never re-pushes. A notify failure never breaks the command.
+**Live `ops check` incidents.** `forge ops check` in its default human (interactive) mode renders the incident report **and** pushes one `risk_found` milestone per **new** incident, so a standing incident (orphaned work, a stuck run) reaches you once instead of scrolling past unread. Pushes are deduped on incident identity — `kind` + `runId` + `taskId` — via the persistent event log, so re-running `ops check` over the same standing incidents never re-pushes. An incident already retired via `forge ops adjudicate` (FG-703) never pushes either, even when surfaced with `--include-adjudicated` — it's audit history, not a new incident. A notify failure never breaks the command.
 
 `forge ops check --json` is unchanged: it stays **strictly read-only / side-effect-free** and pushes nothing — the orchestrator consumes the JSON and decides what to surface itself.
 
