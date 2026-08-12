@@ -134,6 +134,16 @@ function readVscodeColor(projectDir: string): string | null {
   }
 }
 
+// FG-663 (RF-1): the project color for a bare identity key, with no projectDir in
+// hand. resolveProjectMeta derives the same color from `colorKey`, but it also
+// reads the (possibly gone) directory for a label — so a caller presenting a run
+// whose every checkout is deleted uses this directly, keeping color keyed on the
+// durable evidence key while taking the label from the stored identity, never the
+// vanished path.
+export function projectColorForKey(colorKey: string): string {
+  return hashColor(colorKey);
+}
+
 // FNV-1a 32-bit hash → HSL. S/L fixed for legibility against the dashboard's
 // dark background; only the hue varies per project.
 function hashColor(s: string): string {

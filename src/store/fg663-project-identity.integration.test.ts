@@ -17,9 +17,11 @@
 // project_identity registry row, and leaves git clean.
 //
 // Resolution precedence (src/backlog/storage-mode.ts resolveProjectIdentity),
-// mirroring the pure-reader ladder:
-//   (a) declared config project_key (pk-) — durable, git-tracked, clone-inherited
-//   (b) else the pk- this checkout's evidence maps to in the registry
+// every rung anchored to THIS checkout's own repository evidence (RF-3):
+//   (a) the pk- this checkout's evidence maps to in the registry — the arbiter
+//       wins outright when it knows this evidence
+//   (b) else a declared config project_key (pk-), but ONLY when it is not
+//       registered to a DIFFERENT repository's evidence (else degrade to (c))
 //   (c) else the resolved repo- evidence key (remote > git-common-dir > path)
 //   NULL only when there is no projectDir at all.
 //
@@ -34,8 +36,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getDb, makeInMemoryDb, setDbForTest } from "./db.js";
-import { insertRun, getRun, setRunProjectDir } from "./runs.js";
+import { getDb, makeInMemoryDb, setDbForTest, writeTransaction } from "./db.js";
+import { insertRun, getRun, setRunProjectDir, resolveRunProjectIdentity } from "./runs.js";
 import { computeRepositoryEvidence } from "./project-registry.js";
 import { nowIso } from "../util/ids.js";
 import { startRun } from "../v2/startRun.js";
@@ -271,6 +273,86 @@ describe("FG-663 — every creation path reaches the choke point (AC4 spot-check
     insertRun(makeRun("run-direct", dir));
 
     assert.equal(storedIdentity("run-direct"), computeRepositoryEvidence(dir).key);
+  });
+});
+
+describe("FG-663 (RF-3) — a checkout cannot forge another project's declared identity", () => {
+  test("a copied .forge/config.yml project_key registered to a DIFFERENT repository is NOT trusted — capture stores this checkout's own evidence", () => {
+    // The victim: a registered project. Its pk- maps to ITS evidence.
+    const victim = join(root, "victim");
+    initRepo(victim, { remote: "https://github.com/acme/victim.git" });
+    const victimEvidence = computeRepositoryEvidence(victim);
+    getDb()
+      .prepare(
+        `INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run("pk-victim-9001", victimEvidence.key, victimEvidence.source, nowIso());
+
+    // The attacker: a DIFFERENT repository that ships the victim's project_key in a
+    // copied config, trying to slip its runs into the victim's scoped views.
+    const attacker = join(root, "attacker");
+    initRepo(attacker, { remote: "https://github.com/evil/attacker.git" });
+    writeConfigKey(attacker, "pk-victim-9001");
+    const attackerEvidence = computeRepositoryEvidence(attacker);
+    assert.notEqual(attackerEvidence.key, victimEvidence.key, "fixture: genuinely distinct repositories");
+
+    insertRun(makeRun("run-attacker", attacker));
+
+    assert.equal(
+      storedIdentity("run-attacker"),
+      attackerEvidence.key,
+      "a declared key registered to another repository's evidence is refused — the run is attributed to its OWN evidence, never the victim's pk-",
+    );
+    assert.notEqual(storedIdentity("run-attacker"), "pk-victim-9001", "the forged identity is never stored (cross-project isolation)");
+  });
+
+  test("a declared key that AGREES with the registry (a legitimate clone) is still captured", () => {
+    const dir = join(root, "legit-clone");
+    initRepo(dir, { remote: "https://github.com/acme/legit.git" });
+    const evidence = computeRepositoryEvidence(dir);
+    // Registry maps THIS evidence to the declared key — they agree.
+    getDb()
+      .prepare(
+        `INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run("pk-legit-9002", evidence.key, evidence.source, nowIso());
+    writeConfigKey(dir, "pk-legit-9002");
+
+    insertRun(makeRun("run-legit", dir));
+    assert.equal(storedIdentity("run-legit"), "pk-legit-9002", "a declared key corroborated by the registry is trusted");
+  });
+});
+
+describe("FG-663 (RF-3) — identity resolution is never held across the write lock", () => {
+  test("insertRun inside a write transaction WITHOUT a pre-resolved identity fails loudly", () => {
+    const dir = join(root, "in-tx-bare");
+    initRepo(dir, { remote: "https://github.com/acme/in-tx-bare.git" });
+    assert.throws(
+      () => writeTransaction(() => insertRun(makeRun("run-in-tx", dir))),
+      /write transaction/i,
+      "a git subprocess must never be resolved while the SQLite write lock is held — resolve it ABOVE the transaction",
+    );
+    assert.equal(getRun("run-in-tx"), undefined, "the run was never inserted — the guard fired before the INSERT");
+  });
+
+  test("insertRun inside a write transaction WITH a pre-resolved identity succeeds and stores it", () => {
+    const dir = join(root, "in-tx-hoisted");
+    initRepo(dir, { remote: "https://github.com/acme/in-tx-hoisted.git" });
+    // Resolve ABOVE the transaction, exactly as the dispatch/campaign paths do.
+    const identity = resolveRunProjectIdentity(dir);
+    writeTransaction(() => insertRun(makeRun("run-hoisted", dir), identity));
+    assert.equal(
+      storedIdentity("run-hoisted"),
+      computeRepositoryEvidence(dir).key,
+      "the pre-resolved identity is what lands on the row",
+    );
+  });
+
+  test("a run with NO projectDir needs no resolution, so it is fine inside a transaction", () => {
+    writeTransaction(() => insertRun(makeRun("run-no-pd", undefined)));
+    assert.equal(storedIdentity("run-no-pd"), null, "no projectDir → no subprocess → no guard to trip");
   });
 });
 

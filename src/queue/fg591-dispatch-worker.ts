@@ -46,7 +46,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getDb, writeTransaction } from "../store/db.js";
-import { insertRun } from "../store/runs.js";
+import { insertRun, resolveRunProjectIdentity } from "../store/runs.js";
 import { getTicket, recordDispatchEvidence } from "../store/tickets.js";
 import { ticketBodyHash } from "../store/queue.js";
 import { recordLaunchObservation } from "../store/launch-observations.js";
@@ -201,6 +201,11 @@ function makeLauncher(): Launcher {
 
     recordLaunchStart: (meta, association, purpose) => {
       const runId = `run-w${WORKER_ID}-${association.ticketId}`;
+      // FG-663 (RF-3): resolve the run's project identity (a git subprocess) BEFORE
+      // opening the write transaction — this dispatcher races K-way on a shared
+      // on-disk store, so a subprocess held across the write lock would stall every
+      // other claimant (FG-693 write-lock invariant).
+      const projectIdentity = resolveRunProjectIdentity(meta.cwd);
       writeTransaction(() => {
         recordLaunchObservation({
           launchId: meta.id,
@@ -220,15 +225,18 @@ function makeLauncher(): Launcher {
         // reservation to an execution, so the fixture creates one here rather than
         // pretending later. created_at is >= the launch's startedAt, which is the
         // window discoverRunForClaim narrows to.
-        insertRun({
-          id: runId,
-          workflow: WORKFLOW.length > 0 ? WORKFLOW : "feature",
-          title: `run for ${association.ticketId}`,
-          status: "active",
-          createdAt: isoNow(),
-          metadata: { ticketId: association.ticketId },
-          projectDir: meta.cwd,
-        });
+        insertRun(
+          {
+            id: runId,
+            workflow: WORKFLOW.length > 0 ? WORKFLOW : "feature",
+            title: `run for ${association.ticketId}`,
+            status: "active",
+            createdAt: isoNow(),
+            metadata: { ticketId: association.ticketId },
+            projectDir: meta.cwd,
+          },
+          projectIdentity,
+        );
         if (SEED_TASK !== "none") seedFirstTask(runId, association.ticketId);
       });
       return true;

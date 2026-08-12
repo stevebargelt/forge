@@ -18,7 +18,7 @@ import {
   tryTransitionCampaignToRunning,
   deriveCampaignItemDispatchKey,
 } from "../store/campaigns.js";
-import { insertRun, runByDispatchKey } from "../store/runs.js";
+import { insertRun, resolveRunProjectIdentity, runByDispatchKey } from "../store/runs.js";
 import { recordContinuation, getContinuation } from "../store/continuations.js";
 import { acquireCampaignLease } from "../store/campaign-controller.js";
 import {
@@ -61,15 +61,20 @@ function makePrepare(runIdBox: { id?: string }): CampaignDispatchDeps["prepareIt
     createRun: ({ dispatchKey, attemptGeneration }) => {
       const runId = `run-${itemId}-${attemptGeneration}`;
       runIdBox.id = runId;
-      insertRun({
-        id: runId,
-        workflow: "campaign-drive",
-        title: `${campaignId}/${itemId}`,
-        status: "active",
-        createdAt: "2026-07-20T00:00:00Z",
-        metadata: { dispatchKey },
-        projectDir: "/tmp/p",
-      });
+      insertRun(
+        {
+          id: runId,
+          workflow: "campaign-drive",
+          title: `${campaignId}/${itemId}`,
+          status: "active",
+          createdAt: "2026-07-20T00:00:00Z",
+          metadata: { dispatchKey },
+          projectDir: "/tmp/p",
+        },
+        // FG-663: identity resolved and handed in — this createRun runs inside the
+        // reservation's write lock, where a git subprocess must never be held.
+        resolveRunProjectIdentity("/tmp/p"),
+      );
       return runId;
     },
   });

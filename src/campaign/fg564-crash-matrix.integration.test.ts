@@ -20,7 +20,7 @@ import {
   tryTransitionCampaignToRunning,
   deriveCampaignItemDispatchKey,
 } from "../store/campaigns.js";
-import { insertRun, runByDispatchKey } from "../store/runs.js";
+import { insertRun, resolveRunProjectIdentity, runByDispatchKey } from "../store/runs.js";
 import {
   recordContinuation,
   observeLaunchStatus,
@@ -72,7 +72,7 @@ function createRunSeam(): CampaignDispatchDeps["prepareItemDispatch"] {
     driver: "pipeline",
     createRun: ({ dispatchKey, attemptGeneration }) => {
       const runId = `run-${itemId}-${attemptGeneration}`;
-      insertRun({ id: runId, workflow: "campaign-drive", title: `${campaignId}/${itemId}`, status: "active", createdAt: "2026-07-20T00:00:00Z", metadata: { dispatchKey }, projectDir: "/tmp/p" });
+      insertRun({ id: runId, workflow: "campaign-drive", title: `${campaignId}/${itemId}`, status: "active", createdAt: "2026-07-20T00:00:00Z", metadata: { dispatchKey }, projectDir: "/tmp/p" }, resolveRunProjectIdentity("/tmp/p"));
       return runId;
     },
   });

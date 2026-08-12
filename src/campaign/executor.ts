@@ -54,7 +54,7 @@ import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./
 import { listTickets } from "../backlog/structured.js";
 import { projectHasBacklog } from "../backlog/storage-mode.js";
 import type { StructuredTicket } from "../backlog/structured.js";
-import { getRun, insertRun, updateRunStatus } from "../store/runs.js";
+import { getRun, insertRun, resolveRunProjectIdentity, updateRunStatus } from "../store/runs.js";
 import { computeReadyQueue } from "../v2/ready-queue.js";
 import { taskHasPipelineFinalize } from "../v2/run-kind.js";
 import { newRunId, nowIso } from "../util/ids.js";
@@ -1215,6 +1215,12 @@ export function prepareCampaignItemDispatch(
   }
   const ticketText = `${ticket.title}\n\n${ticket.body}`;
   const projectDir = deps.projectDir;
+  // FG-663 (RF-3): resolve the run's project identity HERE — outside the
+  // reservation write transaction, alongside the other filesystem inputs — and
+  // capture it in the createRun closure below. The closures run INSIDE
+  // reserveCampaignDriveDispatch's write lock, where a git subprocess must never
+  // be held (FG-693 write-lock invariant; the createRun-does-no-fs-read contract).
+  const projectIdentity = resolveRunProjectIdentity(projectDir);
 
   if (lane === "full_feature") {
     // Resolve the workflow YAML OUTSIDE the tx (fail closed if it cannot be resolved).
@@ -1239,6 +1245,7 @@ export function prepareCampaignItemDispatch(
           projectDir,
           dispatchKey,
           attemptGeneration,
+          projectIdentity,
         }).runId,
     };
   }
@@ -1251,15 +1258,18 @@ export function prepareCampaignItemDispatch(
       invokeChain,
       createRun: ({ dispatchKey, attemptGeneration }) => {
         const newId = newRunId(ticketId);
-        insertRun({
-          id: newId,
-          workflow: "invoke_chain",
-          title: ticketId,
-          status: "active",
-          createdAt: nowIso(),
-          metadata: { invokeChain, campaignId, ticketId, itemId, dispatchKey, attemptGeneration },
-          projectDir,
-        });
+        insertRun(
+          {
+            id: newId,
+            workflow: "invoke_chain",
+            title: ticketId,
+            status: "active",
+            createdAt: nowIso(),
+            metadata: { invokeChain, campaignId, ticketId, itemId, dispatchKey, attemptGeneration },
+            projectDir,
+          },
+          projectIdentity,
+        );
         return newId;
       },
     };
@@ -1278,15 +1288,18 @@ export function prepareCampaignItemDispatch(
       agentRole,
       createRun: ({ dispatchKey, attemptGeneration }) => {
         const newId = newRunId(ticketId);
-        insertRun({
-          id: newId,
-          workflow: "invoke",
-          title: ticketId,
-          status: "active",
-          createdAt: nowIso(),
-          metadata: { invokeAgent: agentRole, campaignId, ticketId, itemId, dispatchKey, attemptGeneration },
-          projectDir,
-        });
+        insertRun(
+          {
+            id: newId,
+            workflow: "invoke",
+            title: ticketId,
+            status: "active",
+            createdAt: nowIso(),
+            metadata: { invokeAgent: agentRole, campaignId, ticketId, itemId, dispatchKey, attemptGeneration },
+            projectDir,
+          },
+          projectIdentity,
+        );
         return newId;
       },
     };
@@ -2200,21 +2213,26 @@ export async function driveOneCampaignItem(
         // parkCampaignOnStartRunThrow apply the failed/infrastructure classification —
         // creating no additional run.
         let parkRunId: string;
+        // FG-663 (RF-3): resolve identity ABOVE the reservation's write lock.
+        const syntheticIdentity = resolveRunProjectIdentity(opts.projectDir);
         try {
           const synthetic = reserveCampaignDriveDispatch({
             campaignId,
             itemId: item.id,
             createRun: ({ dispatchKey, attemptGeneration }) => {
               const newId = newRunId(item.ticketId);
-              insertRun({
-                id: newId,
-                workflow: workflowName,
-                title: item.ticketId,
-                status: "abandoned",
-                createdAt: nowIso(),
-                metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
-                projectDir: opts.projectDir,
-              });
+              insertRun(
+                {
+                  id: newId,
+                  workflow: workflowName,
+                  title: item.ticketId,
+                  status: "abandoned",
+                  createdAt: nowIso(),
+                  metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
+                  projectDir: opts.projectDir,
+                },
+                syntheticIdentity,
+              );
               return newId;
             },
           });

@@ -12,7 +12,7 @@
 
 import type { Run } from "../types/index.js";
 import type { Workflow } from "./schema.js";
-import { insertRun } from "../store/runs.js";
+import { insertRun, type ResolvedProjectIdentity } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { newRunId } from "../util/ids.js";
 import { resolvePolicyPath } from "../raci/project.js";
@@ -74,6 +74,12 @@ export type StartRunArgs = {
    *  too). `undefined` → resolve the live pointer once here. `null` → no generation
    *  (the routeReceipt records the no-generation warning rather than reading flat). */
   seedGeneration?: SeedGeneration | null;
+  /** FG-663 (RF-3): a project identity resolved ABOVE the caller's write
+   *  transaction. Required when startRun runs inside a transaction (the campaign
+   *  drive reservation), so insertRun never runs a git subprocess across the write
+   *  lock. Omitted for ordinary (non-transactional) callers, which let insertRun
+   *  resolve it. */
+  projectIdentity?: ResolvedProjectIdentity;
 };
 
 export type StartRunResult = {
@@ -184,7 +190,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
     reviewMode: args.workflow.review_mode,
   };
 
-  insertRun(run);
+  insertRun(run, args.projectIdentity);
   logEvent("run.created", {
     runId,
     payload: { workflow: args.workflow.name, title: args.title, reviewMode: args.workflow.review_mode },

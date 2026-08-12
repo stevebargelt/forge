@@ -44,7 +44,7 @@ function makeWorkflowStubs(taskId: string, worktreePath?: string): {
       }) as Workflow,
     startRunFn: (args: StartRunArgs): { runId: string } => {
       const runId = newRunId(args.title);
-      insertRun({ id: runId, workflow: args.workflow.name, title: args.title, status: "active", createdAt: nowIso(), projectDir: args.projectDir });
+      insertRun({ id: runId, workflow: args.workflow.name, title: args.title, status: "active", createdAt: nowIso(), projectDir: args.projectDir }, args.projectIdentity);
       return { runId };
     },
     runNextFn: async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {

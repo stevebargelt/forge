@@ -29,7 +29,7 @@ import {
   addCampaignItem,
   updateCampaignItemIfPending,
 } from "../store/campaigns.js";
-import { getRun, insertRun, runByDispatchKey, listRuns } from "../store/runs.js";
+import { getRun, insertRun, resolveRunProjectIdentity, runByDispatchKey, listRuns } from "../store/runs.js";
 import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
@@ -106,17 +106,21 @@ function seedRunningPendingItem(ticketId = "FG-101"): { campaignId: string; item
   return { campaignId: c.id, itemId: it.id };
 }
 
-// An invoke run insert exactly as the escape-hatch lane's createRun performs it.
+// An invoke run insert exactly as the escape-hatch lane's createRun performs it —
+// identity resolved ABOVE the reservation's write lock and handed to insertRun (FG-663).
 function insertInvokeRun(id: string, campaignId: string, itemId: string, dispatchKey: string, gen: number) {
-  insertRun({
-    id,
-    workflow: "invoke",
-    title: "FG-101",
-    status: "active",
-    createdAt: nowIso(),
-    metadata: { invokeAgent: "engineer", campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
-    projectDir,
-  });
+  insertRun(
+    {
+      id,
+      workflow: "invoke",
+      title: "FG-101",
+      status: "active",
+      createdAt: nowIso(),
+      metadata: { invokeAgent: "engineer", campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
+      projectDir,
+    },
+    resolveRunProjectIdentity(projectDir),
+  );
 }
 
 beforeEach(() => {
@@ -710,7 +714,7 @@ test("FG-596 A6: a wait failure AFTER the child dispatched a run leaves the runn
         campaignId: campaign.id,
         itemId,
         createRun: ({ dispatchKey, attemptGeneration }) => {
-          insertRun({ id: "run-inflight", workflow: "feature", title: "FG-101", status: "active", createdAt: nowIso(), metadata: { dispatchKey, attemptGeneration, campaignId: campaign.id, itemId, ticketId: "FG-101" }, projectDir });
+          insertRun({ id: "run-inflight", workflow: "feature", title: "FG-101", status: "active", createdAt: nowIso(), metadata: { dispatchKey, attemptGeneration, campaignId: campaign.id, itemId, ticketId: "FG-101" }, projectDir }, resolveRunProjectIdentity(projectDir));
           return "run-inflight";
         },
       });
@@ -787,17 +791,22 @@ test("FG-596 A6 wiring: the launch-boundary containment does NOT clobber (or pau
 // generation and is adoptable by key (no duplicate on a crash-window re-drive), and the
 // terminal/infrastructure classification is applied AFTER the reservation commits.
 
-// A synthetic 'abandoned' run insert exactly as the load-fail lane's createRun performs it.
+// A synthetic 'abandoned' run insert exactly as the load-fail lane's createRun performs it —
+// including FG-663's rule that the project identity is resolved ABOVE the reservation's write
+// lock and handed to insertRun (never a git subprocess held across the lock).
 function insertSyntheticAbandonedRun(id: string, campaignId: string, itemId: string, dispatchKey: string, gen: number) {
-  insertRun({
-    id,
-    workflow: "feature",
-    title: "FG-101",
-    status: "abandoned",
-    createdAt: nowIso(),
-    metadata: { campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
-    projectDir,
-  });
+  insertRun(
+    {
+      id,
+      workflow: "feature",
+      title: "FG-101",
+      status: "abandoned",
+      createdAt: nowIso(),
+      metadata: { campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
+      projectDir,
+    },
+    resolveRunProjectIdentity(projectDir),
+  );
 }
 
 // Seed a RUNNING campaign with one PENDING full_feature item (workflow "feature").

@@ -26,7 +26,7 @@ import {
   tryTransitionCampaignToRunning,
   deriveCampaignItemDispatchKey,
 } from "../store/campaigns.js";
-import { insertRun, runByDispatchKey, getRun } from "../store/runs.js";
+import { insertRun, resolveRunProjectIdentity, runByDispatchKey, getRun } from "../store/runs.js";
 import { insertTask, tasksForRun } from "../store/tasks.js";
 import { recordPublicationIntent, publicationAttemptsForTask } from "../store/publications.js";
 import { recordContinuation, observeLaunchStatus, getContinuation } from "../store/continuations.js";
@@ -93,7 +93,7 @@ describe("AC9 capstone: N -> N+1 five-level convergence, each derived from durab
       driver: "pipeline",
       createRun: ({ dispatchKey, attemptGeneration }) => {
         const runId = `run-${itemId}-${attemptGeneration}`;
-        insertRun({ id: runId, workflow: "campaign-drive", title: itemId, status: "active", createdAt: "2026-07-20T00:00:00Z", metadata: { campaignId, itemId, dispatchKey, attemptGeneration }, projectDir: "/tmp/proj" });
+        insertRun({ id: runId, workflow: "campaign-drive", title: itemId, status: "active", createdAt: "2026-07-20T00:00:00Z", metadata: { campaignId, itemId, dispatchKey, attemptGeneration }, projectDir: "/tmp/proj" }, resolveRunProjectIdentity("/tmp/proj"));
         return runId;
       },
     });

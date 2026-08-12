@@ -89,20 +89,52 @@ export function runReviewMode(id: string): ReviewMode | undefined {
   return getRun(id)?.reviewMode;
 }
 
+/** FG-663 (RF-3): a run's durable project identity, resolved from projectDir.
+ *  Resolution runs a git/YAML/fs read (resolveProjectIdentity ->
+ *  computeRepositoryEvidence -> execFileSync(git)), so a caller that holds the
+ *  SQLite write lock MUST resolve it ABOVE its transaction and hand the result to
+ *  insertRun — never running a subprocess across the lock (the FG-693 write-lock
+ *  invariant). The wrapper type distinguishes "the caller pre-resolved it (even to
+ *  null)" from "the caller left it to insertRun". */
+export type ResolvedProjectIdentity = { readonly value: string | null };
+
+export function resolveRunProjectIdentity(
+  projectDir: string | null | undefined,
+): ResolvedProjectIdentity {
+  return { value: projectDir ? resolveProjectIdentity(projectDir) : null };
+}
+
 /** FG-693: projectDir is persisted VERBATIM (audit evidence, and what the
  *  operator will see); its PROVEN identity is derived here and stored beside it,
  *  or NULL when the filesystem would not confirm the path. A NULL is not a
  *  failure to record the run — the run is real; it just cannot later claim to
- *  belong to a checkout nobody proved it belonged to. */
-export function insertRun(run: Run): void {
+ *  belong to a checkout nobody proved it belonged to.
+ *
+ *  FG-663 (RF-3): the durable PROJECT identity is captured at this single INSERT
+ *  choke point, so EVERY creation path records it by construction (AC4) with no
+ *  per-caller edit. `resolved` lets a caller that already holds the write lock
+ *  hand in an identity it resolved ABOVE its transaction. When it is omitted, this
+ *  resolves the identity itself — but ONLY when no write transaction is open: a
+ *  caller inside a transaction MUST pre-resolve (via resolveRunProjectIdentity)
+ *  rather than hold a git subprocess across the lock, and is failed loudly if it
+ *  does not (the FG-693 write-lock invariant, enforced not documented). */
+export function insertRun(run: Run, resolved?: ResolvedProjectIdentity): void {
   const canonical = provenCanonical(run.projectDir);
-  // FG-663: capture the durable PROJECT identity at the single INSERT choke
-  // point, so EVERY creation path (startRun, createInvokeRun, forge design,
-  // campaign lanes, orchestrator launch, fg591 dispatch) records it by
-  // construction (AC4) with no per-caller edit. Resolution is a pure reader and
-  // completes HERE, before the INSERT — no git/YAML/fs call is held across the
-  // write, mirroring provenCanonical. NULL when there is no projectDir.
-  const projectIdentity = run.projectDir ? resolveProjectIdentity(run.projectDir) : null;
+  let projectIdentity: string | null;
+  if (resolved) {
+    projectIdentity = resolved.value;
+  } else if (!run.projectDir) {
+    projectIdentity = null;
+  } else if (getDb().inTransaction) {
+    throw new Error(
+      "insertRun: called inside a write transaction without a pre-resolved project " +
+        "identity. Resolving it here would run a git subprocess while the SQLite " +
+        "write lock is held (FG-693/FG-663 write-lock invariant). Resolve it ABOVE " +
+        "the transaction via resolveRunProjectIdentity(projectDir) and pass it in.",
+    );
+  } else {
+    projectIdentity = resolveProjectIdentity(run.projectDir);
+  }
   getDb()
     .prepare(
       `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata, project_dir, review_mode, project_dir_canonical, project_identity)

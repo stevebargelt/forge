@@ -13,7 +13,8 @@ import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } fro
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { Run, Task } from "@forge/types";
-import { resolveProjectMeta } from "@forge/project-meta";
+import { resolveProjectMeta, projectColorForKey } from "@forge/project-meta";
+import { readBacklogConfig } from "@forge/backlog-config";
 import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
@@ -224,6 +225,18 @@ function resolveScopeTargets(scope: Exclude<ProjectScope, undefined>): ScopeTarg
 // (src/store/runs.ts), so both spaces must be in the set for the identity arm to
 // match every such run. Cross-project isolation is structural: only the one owning
 // project's own keys are ever added. READ-ONLY — the registry is never written here.
+// FG-663 (RF-2): the git-tracked project_key a project's live checkout declares in
+// .forge/config.yml, or null. Read from the first member dir that yields one (a
+// deleted checkout yields none). The SAME reader capture uses (readBacklogConfig),
+// so read and write see one declared key.
+function declaredProjectKey(projectDirs: readonly string[]): string | null {
+  for (const dir of projectDirs) {
+    const key = readBacklogConfig(dir).projectKey;
+    if (key) return key;
+  }
+  return null;
+}
+
 function scopeProjectIdentities(paths: readonly string[]): Set<string> {
   const identities = new Set<string>();
   if (paths.length === 0) return identities;
@@ -240,6 +253,20 @@ function scopeProjectIdentities(paths: readonly string[]): Set<string> {
       .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
       .get(project.key) as { project_key: string } | undefined;
     if (pk?.project_key) identities.add(pk.project_key);
+    // FG-663 (RF-2): capture stores the git-tracked, clone-inherited config
+    // project_key when this checkout's evidence has NO registry row (a pre-cutover
+    // clone — the common case, since this very repo declares a key). Mirror that
+    // rule here — reading the declared key from a live member checkout — so such a
+    // run is a member of its own project's scope. Add it ONLY when it is
+    // unregistered or maps to THIS project's evidence, never widening a scope into
+    // a different repository (the same RF-3 cross-check capture applies).
+    const declared = declaredProjectKey(project.projectDirs);
+    if (declared) {
+      const owner = db()
+        .prepare(`SELECT repo_evidence_key FROM project_identity WHERE project_key = ?`)
+        .get(declared) as { repo_evidence_key: string } | undefined;
+      if (!owner || owner.repo_evidence_key === project.key) identities.add(declared);
+    }
   } catch {
     // The registry read is best-effort: a store a peer wrote before the
     // project_identity table existed, or a partial schema, degrades this scope to
@@ -2059,14 +2086,13 @@ function presentationFromIdentity(
   const record = projectsForDashboard().find((project) => project.key === evidenceKey);
   const base = record
     ? { label: record.label, color: record.color }
-    : // Every checkout of this project is gone from disk. Color stays stable off
-      // the evidence key; the label is whatever the (possibly gone) directory
-      // yields — still an attribution, never "Unknown repository".
-      (() => {
-        const meta = projectDir ? resolveProjectMeta(projectDir, { colorKey: evidenceKey }) : null;
-        return meta ? { label: meta.label, color: meta.color } : null;
-      })();
-  if (!base) return null;
+    : // FG-663 (RF-1): every checkout of this project is gone from disk, so there is
+      // no live record. Identity is READ from the stored column and never
+      // re-derived from a project_dir that may be gone: the label IS the stored
+      // identity (normalized to its evidence key) and the color is keyed on that
+      // same key. projectDir stays incidental (branch only, above) — a vanished
+      // checkout can never yield a path-basename tag or "Unknown repository".
+      { label: evidenceKey, color: projectColorForKey(evidenceKey) };
   return branch ? { ...base, branch } : base;
 }
 

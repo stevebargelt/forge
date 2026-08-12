@@ -28,7 +28,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -169,11 +169,73 @@ rmSync(betaDel, { recursive: true, force: true });
 assert.throws(() => realpathSync(alphaDel), "fixture: the doomed alpha checkout no longer resolves");
 assert.throws(() => realpathSync(betaDel), "fixture: the doomed beta checkout no longer resolves");
 
-// The project scope the dashboard builds for project A — its `repo-` key resolves to
-// the surviving checkout's member paths, exactly as resolveProjectScope() does.
+// ─── RF-1 fixture: project GAMMA, whose EVERY checkout is deleted ─────────────
+//
+// alpha keeps a live sibling, so the presentation reads never enter the no-live-
+// record branch. Gamma has ONE checkout and it is removed, so there is no live
+// ProjectRecord at all — the exact case FG-663 was filed for (AC3: a run whose
+// checkout was later deleted still shows its correct project). Its label, tag and
+// color must come from the STORED identity, never a basename of the vanished path.
+//
+// All *-del checkouts (alpha/beta above, gamma/delta here) are deleted BEFORE the
+// first resolveProjectScope call below, because projectsForDashboard() memoizes for
+// 30s — the whole project set must be established in one cache build.
+const { projectColorForKey } = await import("../../src/util/project-meta.js");
+const GAMMA_REMOTE = "git@github.com:stevebargelt/fg663-gamma.git";
+const gammaDel = checkout("gamma-del", GAMMA_REMOTE);
+const REPO_G = repositoryCheckoutIdentity(gammaDel).key;
+const PK_G = "pk-fg663-gamma";
+assert.ok(REPO_G !== REPO_A && REPO_G !== REPO_B, "fixture: gamma is a distinct repository");
+// Register gamma BEFORE its run is captured, so insertRun stores pk-gamma and the
+// read side normalizes pk-gamma back to REPO_G even with no live checkout.
+store
+  .prepare(
+    `INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at)
+     VALUES (?, ?, 'remote', ?)`,
+  )
+  .run(PK_G, REPO_G, AT);
+insertRun({ id: "run-g-del-pk", workflow: "feature", title: "gamma, only checkout (doomed)", status: "complete", createdAt: AT, completedAt: AT, projectDir: gammaDel });
+directRun("run-g-repo", gammaDel, REPO_G, gammaDel); // same project, repo- space
+seedTaskAndCall("run-g-del-pk", 10);
+seedTaskAndCall("run-g-repo", 20);
+assert.equal(storedIdentity("run-g-del-pk"), PK_G, "fixture: gamma's run captured pk- while its only checkout existed");
+
+// ─── RF-2 fixture: project DELTA declares a config project_key with NO registry
+//     row — the pre-cutover-clone case (this very repo declares a key). Capture
+//     stores the declared pk-, and the scope must resolve that same key so a
+//     deleted-checkout run is a member of its own project. ─────────────────────
+const DELTA_REMOTE = "git@github.com:stevebargelt/fg663-delta.git";
+const PK_D = "pk-fg663-delta";
+function declareKey(dir: string, key: string): void {
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  writeFileSync(join(dir, ".forge", "config.yml"), `project_key: ${key}\n`);
+}
+const deltaLive = checkout("delta-live", DELTA_REMOTE);
+const deltaDel = checkout("delta-del", DELTA_REMOTE);
+declareKey(deltaLive, PK_D);
+declareKey(deltaDel, PK_D);
+const REPO_D = repositoryCheckoutIdentity(deltaLive).key;
+// Deliberately NO project_identity row for REPO_D — the pre-cutover-clone state.
+insertRun({ id: "run-d-live", workflow: "feature", title: "delta, surviving checkout", status: "complete", createdAt: AT, completedAt: AT, projectDir: deltaLive });
+insertRun({ id: "run-d-del", workflow: "feature", title: "delta, doomed checkout", status: "complete", createdAt: AT, completedAt: AT, projectDir: deltaDel });
+seedTaskAndCall("run-d-live", 30);
+seedTaskAndCall("run-d-del", 40);
+assert.equal(storedIdentity("run-d-del"), PK_D, "fixture: with no registry row, capture stores the config-declared pk- (RF-2)");
+assert.equal(storedIdentity("run-d-live"), PK_D, "fixture: the live checkout captured the same declared pk-");
+
+// THE DELETION for gamma (every checkout) and delta's doomed checkout.
+rmSync(gammaDel, { recursive: true, force: true });
+rmSync(deltaDel, { recursive: true, force: true });
+assert.throws(() => realpathSync(gammaDel), "fixture: gamma's only checkout no longer resolves");
+
+// The project scopes the dashboard builds — resolved AFTER every deletion, so the
+// one memoized project set reflects the final on-disk reality. A `repo-` key
+// resolves to its surviving checkout's member paths, exactly as the dashboard does.
 const { resolveProjectScope } = await import("./queries.js");
 const scopeA = resolveProjectScope(REPO_A);
 assert.ok(Array.isArray(scopeA) && scopeA.length > 0, "fixture: project A resolves to a non-empty member scope");
+const scopeD = resolveProjectScope(REPO_D);
+assert.ok(Array.isArray(scopeD) && scopeD.length > 0, "fixture: delta resolves to a non-empty member scope from its surviving checkout");
 
 const runIds = (entries: ReadonlyArray<{ runId: string }>): string[] => [...new Set(entries.map((e) => e.runId))].sort();
 
@@ -275,6 +337,40 @@ test("an exact-checkout scope of a now-deleted directory is a pure path filter, 
   // NOT acceptable is the identity arm firing for a string scope and sweeping in the
   // whole project (e.g. run-a-live, whose checkout is elsewhere and still on disk).
   assert.ok(!ids.includes("run-a-live"), "a string scope never widens to sibling checkouts via identity (AC7)");
+});
+
+// ─── RF-1: a project whose EVERY checkout is deleted still presents from its
+//     stored identity — no live record, no path basename, no "Unknown". ────────
+
+test("RF-1: an all-checkouts-deleted project's run takes its label and color from the stored identity, never the vanished path", () => {
+  const all = recentActivity(100, undefined, undefined); // unscoped: no scope resolves gamma
+  const g = all.find((e) => e.runId === "run-g-del-pk")!;
+  assert.ok(g, "the gamma run is present in the unscoped feed");
+  // No live ProjectRecord exists for gamma, so this exercises the no-live-record
+  // branch specifically — the branch alpha's surviving sibling never reaches.
+  assert.equal(g.projectLabel, REPO_G, "the label is the STORED identity (normalized to REPO_G), read from the column");
+  assert.notEqual(g.projectLabel, "Unknown repository", "a deleted checkout is never labelled Unknown");
+  assert.notEqual(g.projectLabel, gammaDel.split("/").pop(), "the label is NEVER a path basename of the vanished checkout");
+  assert.equal(g.projectColor, projectColorForKey(REPO_G), "the color is keyed on the evidence key, stable without the path");
+});
+
+test("RF-1: pk- and repo- runs of an all-gone project still normalize to ONE label and ONE color", () => {
+  const all = recentActivity(100, undefined, undefined);
+  const pk = all.find((e) => e.runId === "run-g-del-pk")!; // stored pk-gamma
+  const repo = all.find((e) => e.runId === "run-g-repo")!; // stored REPO_G
+  assert.equal(pk.projectLabel, repo.projectLabel, "pk- and repo- of one gone project resolve to ONE label");
+  assert.equal(pk.projectColor, repo.projectColor, "pk- and repo- of one gone project resolve to ONE color — no second group");
+});
+
+// ─── RF-2: a config-declared project_key with no registry row scopes correctly ─
+
+test("RF-2: a project-scoped read includes a deleted-checkout run captured under the config-declared pk- (no registry row)", () => {
+  const entries = recentActivity(100, undefined, scopeD);
+  const ids = runIds(entries);
+  assert.ok(ids.includes("run-d-del"), "the deleted-checkout run, stored under the declared pk-, is a member of its own project scope (RF-2)");
+  assert.ok(ids.includes("run-d-live"), "the surviving checkout's run is present too");
+  // Isolation: delta's declared key never pulls in another project's runs.
+  assert.ok(!ids.includes("run-a-live") && !ids.includes("run-b-live"), "no other project's runs leak into delta's scope");
 });
 
 test.after(() => {
