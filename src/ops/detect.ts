@@ -16,9 +16,10 @@
 // (inconsistent_run_state, whose true repair needs liveness confirmation).
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import type { Incident } from "../types/index.js";
+import type { Incident, IncidentAdjudication } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
+import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity, incidentKindForFailureKind, raisesWorkMayPersistIncident } from "./adjudication.js";
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { taskDir } from "../util/paths.js";
@@ -49,6 +50,15 @@ function containerEvidenceLine(evidence: OrphanEvidence): string | undefined {
 export type OpsCheckOptions = {
   /** Scope to one project's runs (runs.project_dir). Omit for the host-wide view. */
   projectDir?: string;
+  /** FG-703 (step 5): the operator READ surface. When false/omitted (the
+   *  default), an adjudicated orphaned_work_may_persist incident is DROPPED
+   *  exactly as step 3 does — default results are byte-for-byte unchanged. When
+   *  true, such an incident is instead RETURNED, annotated with its durable
+   *  adjudication record (outcome, rationale, actor, timestamp) so an operator
+   *  can inspect what they decided together with the ORIGINAL detector evidence.
+   *  This only WIDENS the list one-directionally; it never un-suppresses in the
+   *  default path and never mutates anything. */
+  includeAdjudicated?: boolean;
 };
 
 // Terminal run states — a run here will never dispatch further work on its own.
@@ -199,44 +209,53 @@ export function detectReconcileCandidate(
 
 type FailedRow = { taskId: string; runId: string; phase: string; payload: string | null };
 
-// FG-455 p4 review: oom_killed carries the same "container gone, worktree may
-// hold real work" shape as orphaned_work_may_persist (mirrors ORPHAN_EVIDENCE_KINDS
-// in failure-kind.ts and CONTINUABLE_KINDS in recover.ts) — excluding it here left
-// an OOM-killed task with a dirty worktree invisible to `forge ops check`.
-// FG-479 review finding 1: orphaned_needs_finalize carries the same OrphanEvidence
-// shape (reconcile.ts's container-gone evidence path) — a pipeline step stuck
-// fail-safe in this state never raised an incident here either.
-// FG-492 finding 4: fanout_wave_orphaned (state 3 — a fanout parent's derived
-// failure, never had its own container) and result_missing (state 4 — a clean
-// container exit that produced no result) join the set so `forge ops check` can
-// distinguish all four causal states the ticket requires, not just the two
-// (orphaned_work_may_persist-family / orphaned_needs_finalize) it already covered.
-const WORK_MAY_PERSIST_KINDS = new Set([
-  "orphaned_work_may_persist",
-  "oom_killed",
-  "container_crash",
-  "idle_timeout",
-  "orphaned_needs_finalize",
-  "fanout_wave_orphaned",
-  "result_missing",
-]);
-// FG-461: the attached-exit kinds only carry recovery evidence when it was
-// actually recorded (invoke.ts / runNext.ts). A pre-FG-461 crash — or any
-// read-only-dispatch crash — has no evidence payload, and container_crash /
-// idle_timeout are common outcomes, so raising an incident for one with no
-// recorded persisted-work evidence would be retroactive noise. Require evidence
-// (with changed files) for these kinds; the reconcile-time kinds keep their
-// prior behavior (they always carry evidence, or legacy events with none still
-// surface as "evidence not recorded").
-// FG-492 finding 4: result_missing joins this set too — invoke.ts's current
-// result_missing path (see invoke.ts's `no_result_json` branch) never attaches
-// an OrphanEvidence tuple, so this keeps today's behavior noise-free (no
-// incident fires) while making the renderer below ready the moment a producer
-// does attach evidence. fanout_wave_orphaned is NOT in this set — its evidence
-// lives under a different payload key (childSummary, not evidence) and it must
-// always raise an incident when it occurs (an unfinalized wave, unlike a plain
-// clean-exit-no-result task, is never "just retry it").
-const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing"]);
+// FG-455 p4 / FG-479 / FG-492 / FG-461: the failure-kind membership set and the
+// attached-exit evidence rule that together decide whether a failed task raises
+// an orphaned-work-family incident here now live in adjudication.ts as the ONE
+// shared candidate predicate (raisesWorkMayPersistIncident), so the adjudication
+// write path accepts precisely the set this detector emits and cannot drift into
+// a divergent second copy (RF-1).
+
+/** FG-703 (step 5): read back the LATEST ops.adjudicated record for a task as the
+ *  operator-facing audit annotation (outcome, rationale, actor, timestamp,
+ *  identity). The counterpart to adjudicatedIdentitiesForTask (which returns only
+ *  the identity SET the suppression predicate tests): once the caller has confirmed
+ *  the current identity IS adjudicated, this reads the human-facing fields off that
+ *  same latest event. One prepared statement, one round trip over the read-only
+ *  handle, mirroring the latest-event-per-task selection the detectors use
+ *  (detect.ts correlated subquery). Returns undefined when no usable record exists
+ *  (never expected on the annotate path, but fail-closed if the row is malformed).
+ *
+ *  Deliberately kept on the detect (read) side rather than in adjudication.ts: the
+ *  identity FUNCTION is the one canonical shared surface (computeAdjudicationIdentity);
+ *  reading the audit prose for display is a read-surface concern, and step 5 owns
+ *  detect.ts. */
+function latestAdjudicationRecord(db: DatabaseInstance, taskId: string): IncidentAdjudication | undefined {
+  const row = db
+    .prepare(
+      `SELECT json_extract(e.payload, '$.outcome')   AS outcome,
+              json_extract(e.payload, '$.rationale') AS rationale,
+              json_extract(e.payload, '$.actor')     AS actor,
+              json_extract(e.payload, '$.at')        AS at,
+              json_extract(e.payload, '$.identity')  AS identity
+       FROM events e
+       WHERE e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = ? AND e2.event_type = 'ops.adjudicated'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )`
+    )
+    .get(taskId) as { outcome: string | null; rationale: string | null; actor: string | null; at: string | null; identity: string | null } | undefined;
+  if (!row || typeof row.identity !== "string" || row.identity.length === 0) return undefined;
+  return {
+    outcome: typeof row.outcome === "string" ? row.outcome : "(unrecorded)",
+    rationale: typeof row.rationale === "string" ? row.rationale : "(unrecorded)",
+    actor: typeof row.actor === "string" ? row.actor : "(unrecorded)",
+    at: typeof row.at === "string" ? row.at : "(unrecorded)",
+    identity: row.identity,
+  };
+}
 
 /** A FAILED task under an ACTIVE run classified `orphaned_work_may_persist` or
  *  `oom_killed` (FG-455):
@@ -285,8 +304,14 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
   for (const row of rows) {
     const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
     const failureKind = payload?.["failure_kind"];
-    if (typeof failureKind !== "string" || !WORK_MAY_PERSIST_KINDS.has(failureKind)) continue;
+    if (typeof failureKind !== "string") continue;
     const evidence = payload?.["evidence"] as OrphanEvidence | undefined;
+    // The ONE shared candidate predicate (adjudication.ts): membership in the
+    // work-may-persist kind set, the clean-worktree skip (with the
+    // orphaned_needs_finalize / result_missing exemptions), and the attached-exit
+    // evidence requirement — all in one function the adjudication write path also
+    // gates on, so the two sides cannot diverge (RF-1).
+    if (!raisesWorkMayPersistIncident(failureKind, evidence)) continue;
     // FG-492 finding 4 (state 3): a fanout parent's derived failure carries its
     // evidence under a DIFFERENT payload key (childSummary, not evidence) — the
     // parent never had its own container, so there's no OrphanEvidence tuple to
@@ -295,29 +320,6 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
     const childSummary = isFanoutParent
       ? (payload?.["childSummary"] as { total?: number; complete?: number } | undefined)
       : undefined;
-    // oom_killed is emitted regardless of worktree state (failure-kind.ts /
-    // reconcile.ts), unlike orphaned_work_may_persist which only fires when the
-    // worktree is dirty — so a clean-worktree oom_killed task has no persisted
-    // work at risk and shouldn't raise this incident.
-    // FG-479: orphaned_needs_finalize is exempt from the clean-worktree skip —
-    // its at-risk artifact is the preserved unfinalized RESULT, not dirty files
-    // (e.g. a crash after the worktree merge leaves changedFiles empty while the
-    // integration gate and reds still never ran).
-    // FG-492 finding 4 (state 4): result_missing is exempt too — "container
-    // exited cleanly, wrote nothing" is meaningful on its own, independent of
-    // whether the (usually empty) worktree diff happens to be clean.
-    if (
-      evidence &&
-      evidence.changedFiles.length === 0 &&
-      failureKind !== "orphaned_needs_finalize" &&
-      failureKind !== "result_missing"
-    ) continue;
-    // FG-461: an attached-exit container_crash / idle_timeout / result_missing
-    // only rises to an incident when it recorded evidence — skip the
-    // evidence-less ones (pre-FG-461 events, read-only-dispatch crashes, or
-    // today's result_missing producer, which doesn't attach evidence yet) so
-    // common crashes don't retroactively flood ops check.
-    if (ATTACHED_EXIT_EVIDENCE_KINDS.has(failureKind) && !evidence) continue;
     const dir = taskDir(row.runId, row.taskId);
     const firstLine =
       failureKind === "oom_killed"
@@ -342,9 +344,50 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
                 : failureKind === "result_missing"
                   ? `task ${row.taskId} (${row.phase}) — container exited cleanly but no result.json was ever produced (result missing after a clean exit, not a killed agent)`
                   : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
-    incidents.push(
-      makeIncident({
-        kind: failureKind === "oom_killed" ? "oom_killed" : failureKind === "orphaned_needs_finalize" ? "orphaned_needs_finalize" : "orphaned_work_may_persist",
+    // The ONE shared mapping (adjudication.ts) both this detector and the
+    // adjudication write read, so "which failure kind presents as an
+    // orphaned_work_may_persist incident" cannot drift between the two sides.
+    const incidentKind = incidentKindForFailureKind(failureKind);
+    // FG-703: suppression at the detector choke point. SCOPE is exactly the
+    // orphaned_work_may_persist incident kind (the brief's only adjudicable
+    // kind) — oom_killed / orphaned_needs_finalize are out of scope and never
+    // suppressed here. Compute this incident's canonical identity from the SAME
+    // structured facts the adjudication write recorded (step 1's one function,
+    // never re-derived), and drop the incident iff the task's LATEST
+    // ops.adjudicated record names exactly THIS identity. Suppression is gated
+    // strictly on an adjudication record for this identity — NEVER on run status
+    // — so a failed or active parent still raises an UNADJUDICATED incident and
+    // FG-549's complete/abandoned behavior (the SETTLED_RUN_STATES filter in the
+    // SQL above) is untouched. A materially-changed task.failed yields a
+    // different identity, so the recorded one no longer matches and the incident
+    // reappears as unresolved; volatile churn (shared-checkout changedFiles,
+    // paths, timestamps, prose) leaves the identity stable and keeps it
+    // suppressed.
+    // FG-703 (step 5): the read surface widens this branch by ONE direction
+    // only. `adjudication` is annotated onto the incident iff (a) it is the
+    // adjudicable kind, (b) the task's LATEST ops.adjudicated record names
+    // exactly THIS current identity, AND (c) the caller asked to include
+    // adjudicated incidents. In the DEFAULT path (includeAdjudicated falsy) a
+    // matching adjudication still drops the incident, byte-for-byte as step 3 —
+    // the annotation is never even read. A non-matching (stale) adjudication
+    // never suppresses and never annotates in either mode: the incident is a
+    // genuinely new, unresolved one.
+    // FG-703 (step 3 promise): compute this incident's canonical identity ONCE,
+    // for the ONE adjudicable kind, and use the SAME value for suppression AND
+    // for the operator-facing surface below. It is the exact token `forge ops
+    // adjudicate --identity` requires; without it on the incident no supported
+    // command reports the value the write path demands.
+    let adjudication: IncidentAdjudication | undefined;
+    let identity: string | undefined;
+    if (incidentKind === "orphaned_work_may_persist") {
+      identity = computeAdjudicationIdentity({ runId: row.runId, taskId: row.taskId, failureKind, evidence });
+      if (adjudicatedIdentitiesForTask(db, row.taskId).has(identity)) {
+        if (!opts.includeAdjudicated) continue; // default: suppress, unchanged
+        adjudication = latestAdjudicationRecord(db, row.taskId); // include mode: annotate + return
+      }
+    }
+    const incident = makeIncident({
+        kind: incidentKind,
         severity: "high",
         confidence: "db-confirmed",
         runId: row.runId,
@@ -382,8 +425,18 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
               ? `the container exited cleanly but produced no result — usually transient; \`forge retry ${row.taskId}\` re-dispatches without needing --force. Investigate first if this recurs for the same task/role.`
               : `the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with \`forge retry ${row.taskId} --force\`.`,
         },
-      })
-    );
+      });
+    // FG-703: attach the canonical identity to EVERY emitted orphaned_work_may_persist
+    // incident (the same value computed above — never re-derived) so `ops check`
+    // reports the exact `--identity` token the write path recomputes. Other kinds
+    // leave it unset.
+    if (identity) incident.identity = identity;
+    // FG-703 (step 5): attach the audit annotation AFTER construction (makeIncident
+    // validates the safety invariant and returns the same object). Only ever set in
+    // include mode for a matching adjudication, so the default incident shape is
+    // untouched.
+    if (adjudication) incident.adjudication = adjudication;
+    incidents.push(incident);
   }
   return incidents;
 }

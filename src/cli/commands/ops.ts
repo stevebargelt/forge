@@ -12,6 +12,8 @@ import { renderedEmptyStore } from "../no-store.js";
 import { logEvent } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 import { emitMilestone } from "../../notify/milestone.js";
+import { performAdjudicate, type AdjudicateResult } from "../../ops/adjudication.js";
+import { userInfo } from "node:os";
 
 // `forge ops check` — incident detection over the blackboard (#250). The
 // orchestrator runs `--json`, which is read-only/side-effect-free, and decides
@@ -31,6 +33,12 @@ import { emitMilestone } from "../../notify/milestone.js";
 // isAnyProviderEnabled(), which NO_NOTIFY short-circuits.
 export async function notifyLiveIncidents(incidents: Incident[]): Promise<void> {
   for (const inc of incidents) {
+    // FG-703 (step 5): an adjudicated incident (only present under
+    // `--include-adjudicated`) has been RETIRED from the active high-severity
+    // report — it must not push a fresh risk_found milestone. In the default
+    // path no incident carries `adjudication`, so this is a no-op there and the
+    // shipped notify behavior is byte-for-byte unchanged.
+    if (inc.adjudication) continue;
     try {
       await emitMilestone({
         runId: inc.runId,
@@ -57,6 +65,26 @@ export function renderHuman(incidents: Incident[]): string {
     const action = a.command ? a.command : `(${a.type})`;
     lines.push(`    action: ${action}  [autonomy: ${a.autonomy}]`);
     lines.push(`            ${a.reason}`);
+    // FG-703: surface the canonical adjudication identity on an adjudicable
+    // (orphaned_work_may_persist) incident so an operator can copy it straight
+    // into `forge ops adjudicate --identity`. Only that kind carries `identity`
+    // (detect.ts). Suppressed here when the incident is already annotated as
+    // adjudicated (include-adjudicated view) — the audit block below shows the
+    // recorded identity, so a second, identical line would be noise.
+    if (i.identity && !i.adjudication) {
+      lines.push(`    identity: ${i.identity}  (adjudicate with: forge ops adjudicate ${i.taskId} --identity ${i.identity})`);
+    }
+    // FG-703 (step 5): an adjudicated incident surfaced under
+    // `--include-adjudicated` renders its durable audit record BENEATH the
+    // ORIGINAL detector evidence above (`why:`), so an operator sees WHAT they
+    // decided alongside the facts that justified it. Only ever present in the
+    // include-adjudicated read path — the default report never sets it.
+    if (i.adjudication) {
+      const adj = i.adjudication;
+      lines.push(`    adjudicated: ${adj.outcome}  by ${adj.actor}  at ${adj.at}  (retired from the active high-severity report)`);
+      lines.push(`            rationale: ${adj.rationale}`);
+      lines.push(`            identity:  ${adj.identity}`);
+    }
     lines.push("");
   }
   return lines.join("\n");
@@ -300,16 +328,23 @@ export function registerOps(program: Command): void {
     .option("--json", "emit structured incidents as JSON")
     .option("--all", "check every project on this host (default: scope to the current directory's project)")
     .option("--project <dir>", "scope to a specific project dir (default: cwd). Ignored with --all.")
+    // FG-703 (step 5): the operator READ surface for adjudicated incidents. A
+    // flag on `check`, NOT a new verb — so an adjudicated incident renders WITH
+    // its ORIGINAL detector evidence through the SAME runOpsCheck/renderHuman
+    // choke point, and the widening is explicit and one-directional. Without it,
+    // `check` is byte-for-byte unchanged (adjudicated incidents stay suppressed).
+    .option("--include-adjudicated", "also show orphaned_work_may_persist incidents already retired via `forge ops adjudicate`, each annotated with its audit record (default: hidden)")
     .description(
       "Detect 'needs attention' incidents from existing state. The default (human) output also pushes one " +
         "notification per NEW live incident, recording orchestrator.milestone events (deduped on incident identity). " +
-        "Use --json for a read-only, side-effect-free scan."
+        "Use --json for a read-only, side-effect-free scan. Use --include-adjudicated to also surface incidents " +
+        "already retired by `forge ops adjudicate`, together with their original evidence and audit record."
     )
-    .action(async (opts: { json?: boolean; all?: boolean; project?: string }) => {
+    .action(async (opts: { json?: boolean; all?: boolean; project?: string; includeAdjudicated?: boolean }) => {
       ensureForgeDirs();
       if (renderedEmptyStore(opts.json, [], "No forge store on this host yet — no incidents to report.")) return;
       const projectDir = opts.all ? undefined : resolve(opts.project ?? process.cwd());
-      const incidents = runOpsCheck({ projectDir });
+      const incidents = runOpsCheck({ projectDir, includeAdjudicated: opts.includeAdjudicated });
 
       if (opts.json) {
         // Read-only contract: the --json path must stay side-effect-free (no notify).
@@ -432,4 +467,71 @@ export function registerOps(program: Command): void {
       if (outcome.resolutionWriteErrors.length > 0) console.log(`  resolution write failed (container confirmed gone, but the event insert threw — a later sweep will heal it): ${outcome.resolutionWriteErrors.join(", ")}`);
       if (outcome.dryRun) console.log("No writes.");
     });
+
+  // FG-703: `forge ops adjudicate <taskId>` — operator-authorized, fail-closed,
+  // append-only. Retires ONE orphaned_work_may_persist incident (outcome
+  // no_unique_work) from the active high-severity report by recording a single
+  // ops.adjudicated audit event. It writes NOTHING else: failed stays failed, the
+  // run is untouched, the result column and the original task.failed evidence are
+  // never rewritten. Every refusal names the blocking fact and exits non-zero.
+  ops
+    .command("adjudicate")
+    .argument("<taskId>", "the failed task whose orphaned_work_may_persist incident to adjudicate (the incident's task id)")
+    .requiredOption("--rationale <text>", "why the incident is retired — recorded as durable audit history (must be non-empty)")
+    .option("--outcome <outcome>", "the disposition; only 'no_unique_work' is accepted", "no_unique_work")
+    .option("--actor <who>", "who is adjudicating (defaults to the current OS user); recorded in the audit event")
+    .requiredOption("--identity <sha>", "the incident identity you inspected (from a prior check); REQUIRED — the write refuses on drift and there is no way to adjudicate without naming it")
+    .option("--project <dir>", "scope to a specific project dir (default: cwd)")
+    .option("--json", "emit JSON result")
+    .description(
+      "Retire ONE orphaned_work_may_persist ops incident (outcome no_unique_work) from the active high-severity " +
+        "report, preserving the failed task, failed run, detector evidence, rationale, actor and timestamp as durable " +
+        "audit history. Append-only: it changes NO task, run, or result state. Fails closed (non-zero, naming the fact) " +
+        "for an unknown incident, an unsupported kind, an unsupported outcome, a missing rationale, a project mismatch, " +
+        "or an incident whose current identity no longer matches the record you inspected."
+    )
+    .action((taskId: string, opts: { rationale: string; outcome: string; actor?: string; identity: string; project?: string; json?: boolean }) => {
+      ensureForgeDirs();
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const result: AdjudicateResult = performAdjudicate(taskId, {
+        outcome: opts.outcome,
+        rationale: opts.rationale,
+        actor: resolveActor(opts.actor),
+        projectDir,
+        expectedIdentity: opts.identity,
+      });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind !== "adjudicated") process.exit(1);
+        return;
+      }
+
+      if (result.kind === "unknown") {
+        process.stderr.write(`forge ops adjudicate: unknown incident — no live orphaned_work_may_persist incident for task '${result.id}'\n`);
+        process.exit(1);
+      }
+      if (result.kind === "refused") {
+        process.stderr.write(`forge ops adjudicate: refused — ${result.reason}\n`);
+        process.exit(1);
+      }
+      console.log(`Adjudicated orphaned_work_may_persist incident for task ${result.taskId} (${result.outcome}).`);
+      console.log(`  actor: ${result.actor}  at: ${result.at}`);
+      console.log(`  identity: ${result.identity}`);
+      console.log(`  failed task, failed run, and detector evidence left untouched (audit-only).`);
+    });
+}
+
+/** WHO is adjudicating. An explicit --actor wins; otherwise the current OS user,
+ *  so the durable audit event is never blank. Never throws — a userInfo() failure
+ *  in a minimal environment falls back to "unknown". */
+function resolveActor(explicit?: string): string {
+  const trimmed = explicit?.trim();
+  if (trimmed) return trimmed;
+  try {
+    const name = userInfo().username;
+    return name && name.length > 0 ? name : "unknown";
+  } catch {
+    return "unknown";
+  }
 }

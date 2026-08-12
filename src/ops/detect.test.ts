@@ -8,6 +8,7 @@ import { logEvent } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
 import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, detectStuckRun, detectContainerReapFailed, detectResurrectedGateDecision, runOpsCheck } from "./detect.js";
 import { makeIncident } from "./incident.js";
+import { computeAdjudicationIdentity } from "./adjudication.js";
 import { renderHuman } from "../cli/commands/ops.js";
 
 let db: DatabaseInstance;
@@ -393,6 +394,237 @@ test("detectOrphanedWorkMayPersist: a CLEAN-worktree orphaned_needs_finalize tas
   const incidents = detectOrphanedWorkMayPersist(db);
   assert.equal(incidents.length, 1, "clean worktree must not hide an unfinalized result");
   assert.equal(incidents[0]!.kind, "orphaned_needs_finalize");
+});
+
+// ── FG-703: operator-authorized adjudication suppression ────────────────────
+//
+// detectOrphanedWorkMayPersist drops an incident iff the task's LATEST
+// ops.adjudicated record names EXACTLY the identity of the incident computed
+// from the current latest task.failed payload. Suppression is gated on that
+// identity record, never on run status — so FG-549's active/failed-parent
+// behavior is untouched, and a materially-changed failure reappears as new.
+
+/** Record an ops.adjudicated event carrying the identity the detector will
+ *  recompute from the SAME (runId, taskId, failureKind, evidence) — the one
+ *  canonical function, never re-derived on either side. */
+function adjudicate(runId: string, taskId: string, failureKind: string, evidence: Record<string, unknown> | undefined): void {
+  const identity = computeAdjudicationIdentity({ runId, taskId, failureKind, evidence: evidence as never });
+  logEvent("ops.adjudicated", {
+    runId,
+    taskId,
+    payload: { identity, outcome: "no_unique_work", rationale: "no unique work — audited", actor: "steve" },
+  });
+}
+
+const worktreeEvidence = (changedFiles: string[], over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  containerName: "forge-adj",
+  containerLiveness: "gone",
+  resultState: "absent",
+  recoverableStdoutResult: false,
+  worktreePathChecked: "/wt",
+  changedFiles,
+  source: "worktree",
+  ...over,
+});
+
+test("FG-703 (a): a matching ops.adjudicated record suppresses an orphaned_work_may_persist incident under an ACTIVE run", () => {
+  insertRun(mkRun("run-adj-a", "active"));
+  insertTask(mkTask("task-adj-a", "run-adj-a", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-adj-a", taskId: "task-adj-a", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1, "precondition: raises before adjudication");
+  adjudicate("run-adj-a", "task-adj-a", "orphaned_work_may_persist", evidence);
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "a matching adjudication for THIS identity suppresses the incident");
+});
+
+test("FG-703 (b): the SAME task with NO adjudication still raises the incident", () => {
+  insertRun(mkRun("run-adj-b", "active"));
+  insertTask(mkTask("task-adj-b", "run-adj-b", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-adj-b", taskId: "task-adj-b", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1, "no adjudication record → incident is unresolved and visible");
+});
+
+test("FG-703 (c1): a materially-changed task.failed (resultState absent→valid) reappears — recorded identity no longer matches", () => {
+  insertRun(mkRun("run-adj-c1", "active"));
+  insertTask(mkTask("task-adj-c1", "run-adj-c1", "failed"));
+  const ev1 = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-adj-c1", taskId: "task-adj-c1", payload: { failure_kind: "orphaned_work_may_persist", error: "first", evidence: ev1 } });
+  adjudicate("run-adj-c1", "task-adj-c1", "orphaned_work_may_persist", ev1);
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "suppressed against the adjudicated identity");
+
+  // The WORK materially changed — a fresh task.failed with resultState valid.
+  const ev2 = worktreeEvidence(["?? f.txt"], { resultState: "valid" });
+  logEvent("task.failed", { runId: "run-adj-c1", taskId: "task-adj-c1", payload: { failure_kind: "orphaned_work_may_persist", error: "second", evidence: ev2 } });
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1, "materially-changed work → identity drift → reappears as unresolved");
+});
+
+test("FG-703 (c2): a materially-changed WORKTREE changed-file SET reappears — the set is identity-bearing when source is worktree", () => {
+  insertRun(mkRun("run-adj-c2", "active"));
+  insertTask(mkTask("task-adj-c2", "run-adj-c2", "failed"));
+  const ev1 = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-adj-c2", taskId: "task-adj-c2", payload: { failure_kind: "orphaned_work_may_persist", error: "first", evidence: ev1 } });
+  adjudicate("run-adj-c2", "task-adj-c2", "orphaned_work_may_persist", ev1);
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "suppressed against the adjudicated identity");
+
+  const ev2 = worktreeEvidence(["?? g.txt", "M other.ts"]); // a genuinely different worktree file set
+  logEvent("task.failed", { runId: "run-adj-c2", taskId: "task-adj-c2", payload: { failure_kind: "orphaned_work_may_persist", error: "second", evidence: ev2 } });
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1, "a different worktree file set → identity drift → reappears");
+});
+
+test("FG-703 (c3): mere REORDERING of the same worktree file set stays suppressed — identity is a SET, not a sequence", () => {
+  insertRun(mkRun("run-adj-c3", "active"));
+  insertTask(mkTask("task-adj-c3", "run-adj-c3", "failed"));
+  const ev1 = worktreeEvidence(["M a.ts", "?? b.txt"]);
+  logEvent("task.failed", { runId: "run-adj-c3", taskId: "task-adj-c3", payload: { failure_kind: "orphaned_work_may_persist", error: "first", evidence: ev1 } });
+  adjudicate("run-adj-c3", "task-adj-c3", "orphaned_work_may_persist", ev1);
+
+  const ev2 = worktreeEvidence(["?? b.txt", "M a.ts"]); // same set, different order
+  logEvent("task.failed", { runId: "run-adj-c3", taskId: "task-adj-c3", payload: { failure_kind: "orphaned_work_may_persist", error: "second", evidence: ev2 } });
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "same file SET (reordered) → identity stable → stays suppressed");
+});
+
+test("FG-703 (d): suppression is gated on identity, NOT run status — a stale/non-matching adjudication never suppresses a fresh incident (FG-549 preserved)", () => {
+  // Active parent, but the recorded adjudication names a DIFFERENT identity —
+  // e.g. it was decided against an earlier, materially-different failure.
+  insertRun(mkRun("run-adj-d", "active"));
+  insertTask(mkTask("task-adj-d", "run-adj-d", "failed"));
+  const current = worktreeEvidence(["?? current.txt"]);
+  logEvent("task.failed", { runId: "run-adj-d", taskId: "task-adj-d", payload: { failure_kind: "orphaned_work_may_persist", error: "current", evidence: current } });
+  // adjudicate a DIFFERENT (stale) identity, as if from a prior distinct incident.
+  adjudicate("run-adj-d", "task-adj-d", "orphaned_work_may_persist", worktreeEvidence(["?? stale.txt"]));
+
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1, "a stale adjudication for another identity must not let a genuinely new incident inherit it");
+});
+
+test("FG-703 (d2): a FAILED parent run with no adjudication still raises an UNADJUDICATED incident (FG-549 unchanged)", () => {
+  insertRun(mkRun("run-adj-d2", "failed"));
+  insertTask(mkTask("task-adj-d2", "run-adj-d2", "failed"));
+  logEvent("task.failed", { runId: "run-adj-d2", taskId: "task-adj-d2", payload: { failure_kind: "orphaned_work_may_persist", error: "x", evidence: worktreeEvidence(["?? f.txt"]) } });
+
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 1, "a failed parent still raises — suppression never keys on run status");
+});
+
+test("FG-703 (e): shared-checkout churn (project_dir_shared changedFiles count/paths change) does NOT un-suppress", () => {
+  insertRun(mkRun("run-adj-e", "active"));
+  insertTask(mkTask("task-adj-e", "run-adj-e", "failed"));
+  const ev1 = worktreeEvidence(["M a.ts", "M b.ts"], { source: "project_dir_shared", worktreePathChecked: "/shared/project" });
+  logEvent("task.failed", { runId: "run-adj-e", taskId: "task-adj-e", payload: { failure_kind: "orphaned_work_may_persist", error: "first", evidence: ev1 } });
+  adjudicate("run-adj-e", "task-adj-e", "orphaned_work_may_persist", ev1);
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "suppressed at first");
+
+  // The shared dirty checkout churns: a different count and different paths, but
+  // the same SHARED source — a volatile fact that must NOT bind identity.
+  const ev2 = worktreeEvidence(["M a.ts", "M b.ts", "?? c.ts", "?? d.ts"], { source: "project_dir_shared", worktreePathChecked: "/shared/project" });
+  logEvent("task.failed", { runId: "run-adj-e", taskId: "task-adj-e", payload: { failure_kind: "orphaned_work_may_persist", error: "second", evidence: ev2 } });
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "shared-checkout changed-file churn stays suppressed — it is volatile, not identity-bearing");
+});
+
+test("FG-703 (scope): an oom_killed incident is NOT suppressed even with a matching identity record — out of adjudication scope", () => {
+  insertRun(mkRun("run-adj-scope", "active"));
+  insertTask(mkTask("task-adj-scope", "run-adj-scope", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"], { oomKilled: true, exitCode: 137 });
+  logEvent("task.failed", { runId: "run-adj-scope", taskId: "task-adj-scope", payload: { failure_kind: "oom_killed", error: "oom", evidence } });
+  // Even a record whose identity matches the oom_killed facts must not suppress —
+  // only the orphaned_work_may_persist incident kind is adjudicable.
+  adjudicate("run-adj-scope", "task-adj-scope", "oom_killed", evidence);
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1, "oom_killed is out of scope — never suppressed");
+  assert.equal(incidents[0]!.kind, "oom_killed");
+});
+
+test("FG-703: a suppressed incident is excluded from the composed runOpsCheck list", () => {
+  insertRun(mkRun("run-adj-compose", "active"));
+  insertTask(mkTask("task-adj-compose", "run-adj-compose", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-adj-compose", taskId: "task-adj-compose", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+  adjudicate("run-adj-compose", "task-adj-compose", "orphaned_work_may_persist", evidence);
+
+  assert.deepEqual(
+    runOpsCheck().filter((i) => i.kind === "orphaned_work_may_persist"),
+    [],
+    "runOpsCheck's default (suppressing) path excludes the adjudicated incident",
+  );
+});
+
+// ── FG-703: the identity surface an operator copies into --identity ─────────
+//
+// Every emitted orphaned_work_may_persist incident must carry the canonical
+// identity — the exact `--identity` compare-and-set token the write path
+// recomputes — and nothing else must. The value a check REPORTS has to be
+// byte-identical to what computeAdjudicationIdentity (the write path's own
+// function) produces, or the operator copies a value the write refuses as drift.
+
+test("FG-703 (identity): an unadjudicated orphaned_work_may_persist incident carries a non-empty identity byte-identical to the write path's compute", () => {
+  insertRun(mkRun("run-id", "active"));
+  insertTask(mkTask("task-id", "run-id", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-id", taskId: "task-id", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const reported = incidents[0]!.identity;
+  assert.ok(reported && /^[0-9a-f]{64}$/.test(reported), "the incident carries a non-empty sha256 identity");
+  // The write path recomputes identity from the SAME structured facts; the value
+  // the operator copies must be exactly what `forge ops adjudicate --identity`
+  // will demand — a mismatch here is silent and total.
+  const writePathIdentity = computeAdjudicationIdentity({ runId: "run-id", taskId: "task-id", failureKind: "orphaned_work_may_persist", evidence: evidence as never });
+  assert.equal(reported, writePathIdentity, "reported identity == write-path identity (copyable, accepted, not refused as drift)");
+});
+
+test("FG-703 (identity): the production shape — a container_crash under a failed parent, source project_dir_shared — carries a copyable identity", () => {
+  insertRun(mkRun("run-prod", "failed"));
+  insertTask(mkTask("task-prod", "run-prod", "failed"));
+  const evidence = worktreeEvidence(["M a.ts", "M b.ts"], {
+    source: "project_dir_shared",
+    worktreePathChecked: "/shared/project",
+    containerExitedEventObserved: true,
+    exitCode: 1,
+    oomKilled: false,
+  });
+  logEvent("task.failed", { runId: "run-prod", taskId: "task-prod", payload: { failure_kind: "container_crash", error: "crash", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0]!.kind, "orphaned_work_may_persist", "container_crash presents as an orphaned_work_may_persist incident");
+  assert.equal(
+    incidents[0]!.identity,
+    computeAdjudicationIdentity({ runId: "run-prod", taskId: "task-prod", failureKind: "container_crash", evidence: evidence as never }),
+    "the reported identity matches the write path for the exact production incident shape",
+  );
+});
+
+test("FG-703 (identity): incident kinds with no adjudication path carry NO identity", () => {
+  // A retry_orphan (pending task under a terminal run) — no adjudication path.
+  insertRun(mkRun("run-noid", "complete"));
+  insertTask(mkTask("task-noid", "run-noid", "pending"));
+  const orphan = detectRetryOrphan(db);
+  assert.equal(orphan.length, 1);
+  assert.equal(orphan[0]!.identity, undefined, "retry_orphan has no adjudication path — no identity");
+
+  // An oom_killed incident — an adjudicable-looking sibling kind, but out of scope.
+  insertRun(mkRun("run-oomid", "active"));
+  insertTask(mkTask("task-oomid", "run-oomid", "failed"));
+  logEvent("task.failed", { runId: "run-oomid", taskId: "task-oomid", payload: { failure_kind: "oom_killed", error: "oom", evidence: worktreeEvidence(["?? f.txt"], { oomKilled: true, exitCode: 137 }) } });
+  const oom = detectOrphanedWorkMayPersist(db).filter((i) => i.kind === "oom_killed");
+  assert.equal(oom.length, 1);
+  assert.equal(oom[0]!.identity, undefined, "oom_killed is not adjudicable — no identity");
+});
+
+test("FG-703 (identity): renderHuman prints the identity for an adjudicable incident, copyable into --identity", () => {
+  insertRun(mkRun("run-render", "active"));
+  insertTask(mkTask("task-render", "run-render", "failed"));
+  const evidence = worktreeEvidence(["?? f.txt"]);
+  logEvent("task.failed", { runId: "run-render", taskId: "task-render", payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  const rendered = renderHuman(incidents);
+  const identity = incidents[0]!.identity!;
+  assert.match(rendered, new RegExp(`identity: ${identity}`), "the human render shows the exact identity");
+  assert.match(rendered, new RegExp(`forge ops adjudicate task-render --identity ${identity}`), "the render spells out the copyable adjudicate command");
 });
 
 // ── detectStuckRun (FG-414) ─────────────────────────────────────────────────
