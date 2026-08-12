@@ -1,8 +1,12 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import {
   computeAdjudicationIdentity,
+  incidentKindForFailureKind,
   adjudicatedIdentitiesForTask,
   performAdjudicate,
   type AdjudicationIdentityInput,
@@ -176,15 +180,28 @@ test("identity is defined even when no evidence is present, and differs from evi
 
 let db: DatabaseInstance;
 let prevDb: DatabaseInstance | null;
+// A REAL project dir on disk — the project-match guard now canonicalizes through
+// the FG-693 filesystem-identity contract (realpath), so the run's project and
+// the scoped project must be resolvable paths, not fabricated strings.
+let projectDir: string;
+const tmpDirs: string[] = [];
+
+function mkTmpDir(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(d);
+  return d;
+}
 
 beforeEach(() => {
   db = makeInMemoryDb();
   // logEvent writes through the global handle; point it at this test DB so the
   // read helper (which we call with `db`) sees the events logEvent inserts.
   prevDb = setDbForTest(db);
+  projectDir = mkTmpDir("forge-fg703-project-");
 });
 afterEach(() => {
   if (prevDb) setDbForTest(prevDb);
+  for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 // Record an ops.adjudicated event exactly the way performAdjudicate (step 4) will:
@@ -255,12 +272,10 @@ test("adjudicatedIdentitiesForTask: a malformed/identity-less payload records no
 // beforeEach above) so getTask/getRun/logEvent and the correlated latest-failed
 // read all resolve to it.
 
-const PROJECT = "/tmp/forge-fg703-project";
-
 function seedRun(id: string, opts: { status?: string; projectDir?: string | null } = {}): void {
   db.prepare(
     `INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(id, "build", "fg703", opts.status ?? "active", "2026-08-12T00:00:00Z", opts.projectDir === undefined ? PROJECT : opts.projectDir);
+  ).run(id, "build", "fg703", opts.status ?? "active", "2026-08-12T00:00:00Z", opts.projectDir === undefined ? projectDir : opts.projectDir);
 }
 
 function seedTask(id: string, runId: string, opts: { status?: string; result?: unknown } = {}): void {
@@ -288,8 +303,23 @@ function adjudicatedCount(taskId: string): number {
   return (db.prepare(`SELECT COUNT(*) AS c FROM events WHERE event_type = 'ops.adjudicated' AND task_id = ?`).get(taskId) as { c: number }).c;
 }
 
+/** The canonical incident identity for run1/t1 given its failure kind + evidence
+ *  — the CAS token the operator supplies. Defaults to the worktree evidence tuple
+ *  the valid-path tests seed. */
+function identityFor(opts: { failureKind?: string; evidence?: OrphanEvidence } = {}): string {
+  return computeAdjudicationIdentity({
+    runId: "run1",
+    taskId: "t1",
+    failureKind: opts.failureKind ?? "orphaned_work_may_persist",
+    evidence: opts.evidence ?? worktreeEvidence(),
+  });
+}
+
+// --identity is REQUIRED (FG-703 FIX 1): a default matching the seeded worktree
+// evidence keeps the valid-path cases green; a case seeding other evidence/kind
+// overrides expectedIdentity to match.
 function validInput(overrides: Partial<Parameters<typeof performAdjudicate>[1]> = {}): Parameters<typeof performAdjudicate>[1] {
-  return { outcome: "no_unique_work", rationale: "operator inspected the worktree; no unique work to salvage", actor: "steve", projectDir: PROJECT, ...overrides };
+  return { outcome: "no_unique_work", rationale: "operator inspected the worktree; no unique work to salvage", actor: "steve", projectDir, expectedIdentity: identityFor(), ...overrides };
 }
 
 test("performAdjudicate: a valid adjudication writes exactly ONE ops.adjudicated event with the audit record + current identity", () => {
@@ -386,15 +416,34 @@ test("performAdjudicate: fails closed on a MISSING/empty rationale, writing no e
   assert.equal(adjudicatedCount("t1"), 0);
 });
 
-test("performAdjudicate: fails closed on a PROJECT MISMATCH, writing no event", () => {
-  seedRun("run1", { projectDir: "/some/other/project" });
+test("performAdjudicate: fails closed on a PROJECT MISMATCH (a genuinely different tree), writing no event", () => {
+  const otherProject = mkTmpDir("forge-fg703-other-");
+  seedRun("run1", { projectDir: otherProject });
   seedTask("t1", "run1");
   seedFailed("t1", "run1", { evidence: worktreeEvidence() });
 
-  const res = performAdjudicate("t1", validInput({ projectDir: PROJECT }));
+  const res = performAdjudicate("t1", validInput({ projectDir }));
   assert.equal(res.kind, "refused");
   assert.match((res as { reason: string }).reason, /project mismatch/);
   assert.equal(adjudicatedCount("t1"), 0);
+});
+
+// FG-703 FIX 3: the project match canonicalizes through the FG-693 filesystem-
+// identity contract, so a legitimately-matching project reached via a symlinked
+// (or otherwise differently-spelled) path is ACCEPTED — it no longer fails closed
+// on raw string inequality — while a genuinely different tree is still refused.
+test("performAdjudicate: a matching project reached through a SYMLINKED path is accepted (canonical path identity, not string equality)", () => {
+  seedRun("run1", { projectDir }); // the run's project is the real dir
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  // The operator is scoped through a symlink that resolves to the SAME tree.
+  const link = join(mkTmpDir("forge-fg703-linkparent-"), "linked-project");
+  symlinkSync(projectDir, link);
+
+  const res = performAdjudicate("t1", validInput({ projectDir: link }));
+  assert.equal(res.kind, "adjudicated", "a symlinked spelling of the same project must not fail closed");
+  assert.equal(adjudicatedCount("t1"), 1);
 });
 
 test("performAdjudicate: fails closed on IDENTITY DRIFT (supplied identity != current), naming both, writing no event", () => {
@@ -429,9 +478,9 @@ test("performAdjudicate: after the work materially changes, a RE-adjudication re
   seedTask("t1", "run1");
   seedFailed("t1", "run1", { evidence: worktreeEvidence({ changedFiles: ["src/a.ts"] }) });
 
-  const res1 = performAdjudicate("t1", validInput());
-  assert.equal(res1.kind, "adjudicated");
   const identityA = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts"] })));
+  const res1 = performAdjudicate("t1", validInput({ expectedIdentity: identityA }));
+  assert.equal(res1.kind, "adjudicated");
   assert.deepEqual([...adjudicatedIdentitiesForTask(db, "t1")], [identityA]);
 
   // The worktree changed-file SET materially changes → a NEW task.failed lands →
@@ -440,8 +489,65 @@ test("performAdjudicate: after the work materially changes, a RE-adjudication re
   const identityB = computeAdjudicationIdentity(baseInput(worktreeEvidence({ changedFiles: ["src/a.ts", "src/b.ts"] })));
   assert.notEqual(identityA, identityB);
 
-  const res2 = performAdjudicate("t1", validInput());
+  const res2 = performAdjudicate("t1", validInput({ expectedIdentity: identityB }));
   assert.equal(res2.kind, "adjudicated");
   assert.equal(adjudicatedCount("t1"), 2, "a second, superseding audit event — the first is never rewritten");
   assert.deepEqual([...adjudicatedIdentitiesForTask(db, "t1")], [identityB], "the current recorded identity is the new one");
 });
+
+// ── FG-703 FIX 1: --identity is REQUIRED — a missing token cannot fall open ────
+
+test("performAdjudicate: fails closed when NO expectedIdentity matches (an unmatched token can never adjudicate)", () => {
+  seedRun("run1");
+  seedTask("t1", "run1");
+  seedFailed("t1", "run1", { evidence: worktreeEvidence() });
+
+  // An empty/absent inspected identity is not a bypass: it simply does not equal
+  // the current identity, so the drift guard refuses and nothing is written.
+  const res = performAdjudicate("t1", validInput({ expectedIdentity: "" }));
+  assert.equal(res.kind, "refused");
+  assert.match((res as { reason: string }).reason, /identity drift/);
+  assert.equal(adjudicatedCount("t1"), 0, "no ops.adjudicated event was appended");
+});
+
+// ── FG-703 FIX 2: scope on the INCIDENT kind the detector emits, via the shared
+//    mapping — not the raw failure_kind. The four kinds that collapse to an
+//    orphaned_work_may_persist incident are adjudicable; kinds that map to another
+//    incident are refused by name; and the mapping cannot silently narrow. ──
+
+test("incidentKindForFailureKind: the shared mapping collapses every non-(oom_killed|orphaned_needs_finalize) kind to orphaned_work_may_persist", () => {
+  assert.equal(incidentKindForFailureKind("oom_killed"), "oom_killed");
+  assert.equal(incidentKindForFailureKind("orphaned_needs_finalize"), "orphaned_needs_finalize");
+  for (const collapsed of ["container_crash", "idle_timeout", "result_missing", "fanout_wave_orphaned", "some_future_kind"]) {
+    assert.equal(incidentKindForFailureKind(collapsed), "orphaned_work_may_persist", `${collapsed} must present as an orphaned_work_may_persist incident`);
+  }
+});
+
+for (const collapsedKind of ["container_crash", "idle_timeout", "result_missing", "fanout_wave_orphaned"]) {
+  test(`performAdjudicate: a ${collapsedKind} task presenting as an orphaned_work_may_persist incident IS adjudicable`, () => {
+    seedRun("run1");
+    seedTask("t1", "run1");
+    seedFailed("t1", "run1", { failureKind: collapsedKind, evidence: worktreeEvidence() });
+
+    const res = performAdjudicate("t1", validInput({ expectedIdentity: identityFor({ failureKind: collapsedKind }) }));
+    assert.equal(res.kind, "adjudicated", `${collapsedKind} collapses to orphaned_work_may_persist and must adjudicate`);
+    assert.equal(adjudicatedCount("t1"), 1);
+    // The recorded incident kind is the collapsed INCIDENT kind, not the raw failure_kind.
+    const payload = JSON.parse((db.prepare(`SELECT payload FROM events WHERE event_type = 'ops.adjudicated' AND task_id = 't1'`).get() as { payload: string }).payload) as Record<string, unknown>;
+    assert.equal(payload["kind"], "orphaned_work_may_persist");
+  });
+}
+
+for (const otherKind of ["oom_killed", "orphaned_needs_finalize"]) {
+  test(`performAdjudicate: a ${otherKind} task is refused by name (maps to a DIFFERENT incident kind)`, () => {
+    seedRun("run1");
+    seedTask("t1", "run1");
+    seedFailed("t1", "run1", { failureKind: otherKind, evidence: worktreeEvidence() });
+
+    const res = performAdjudicate("t1", validInput({ expectedIdentity: identityFor({ failureKind: otherKind }) }));
+    assert.equal(res.kind, "refused");
+    assert.match((res as { reason: string }).reason, /unsupported incident kind/);
+    assert.match((res as { reason: string }).reason, new RegExp(otherKind));
+    assert.equal(adjudicatedCount("t1"), 0);
+  });
+}

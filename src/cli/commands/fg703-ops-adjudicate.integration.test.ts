@@ -154,6 +154,15 @@ function adjudicatedCount(taskId: string): number {
   return readDb((rdb) => (rdb.prepare(`SELECT COUNT(*) AS c FROM events WHERE event_type = 'ops.adjudicated' AND task_id = ?`).get(taskId) as { c: number }).c);
 }
 
+/** The canonical identity for an incident — the REQUIRED --identity token. */
+function identityOf(o: { runId: string; taskId: string; evidence: OrphanEvidence; failureKind?: string }): string {
+  return computeAdjudicationIdentity({ runId: o.runId, taskId: o.taskId, failureKind: o.failureKind ?? "orphaned_work_may_persist", evidence: o.evidence });
+}
+
+// A well-formed but wrong identity — enough to satisfy the CLI's requiredOption on
+// the fail-closed cases that refuse BEFORE the identity gate is ever reached.
+const DUMMY_IDENTITY = "0".repeat(64);
+
 // ── valid adjudication, end to end ────────────────────────────────────────────
 
 test("integ forge ops adjudicate: a valid adjudication exits 0, records exactly ONE ops.adjudicated event, and changes no task/run/result/task.failed state", () => {
@@ -163,7 +172,7 @@ test("integ forge ops adjudicate: a valid adjudication exits 0, records exactly 
 
   const failedBefore = readDb((rdb) => rdb.prepare(`SELECT payload FROM events WHERE event_type = 'task.failed' AND task_id = 't1'`).all());
 
-  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "inspected the diff; no unique work", "--outcome", "no_unique_work", "--json"]);
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "inspected the diff; no unique work", "--outcome", "no_unique_work", "--identity", identityOf({ runId: "run1", taskId: "t1", evidence }), "--json"]);
   assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
   const parsed = JSON.parse(result.stdout) as { kind: string; taskId: string; runId: string; identity: string; outcome: string; actor: string; at: string };
   assert.equal(parsed.kind, "adjudicated");
@@ -187,9 +196,10 @@ test("integ forge ops adjudicate: a valid adjudication exits 0, records exactly 
 
 test("integ forge ops adjudicate (plain): a valid adjudication prints the audit summary and the audit-only disclaimer", () => {
   const projectDir = makeProjectDir();
-  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence: worktreeEvidence({ containerName: "forge-t1" }) });
+  const evidence = worktreeEvidence({ containerName: "forge-t1" });
+  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence });
 
-  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work", "--actor", "steve@bargelt.com"]);
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work", "--actor", "steve@bargelt.com", "--identity", identityOf({ runId: "run1", taskId: "t1", evidence })]);
   assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.match(result.stdout, /Adjudicated orphaned_work_may_persist incident for task t1 \(no_unique_work\)/);
   assert.match(result.stdout, /actor: steve@bargelt\.com/);
@@ -200,7 +210,7 @@ test("integ forge ops adjudicate (plain): a valid adjudication prints the audit 
 
 test("integ forge ops adjudicate: UNKNOWN incident exits 1, names it, writes no event", () => {
   const projectDir = makeProjectDir();
-  const result = runForge(["ops", "adjudicate", "ghost", "--project", projectDir, "--rationale", "x"]);
+  const result = runForge(["ops", "adjudicate", "ghost", "--project", projectDir, "--rationale", "x", "--identity", DUMMY_IDENTITY]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /unknown incident/);
   assert.equal(adjudicatedCount("ghost"), 0);
@@ -210,7 +220,7 @@ test("integ forge ops adjudicate: UNSUPPORTED KIND (oom_killed) exits 1, names t
   const projectDir = makeProjectDir();
   seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, failureKind: "oom_killed", evidence: worktreeEvidence({ containerName: "forge-t1", oomKilled: true }) });
 
-  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "x"]);
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "x", "--identity", DUMMY_IDENTITY]);
   assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.match(result.stderr, /refused/);
   assert.match(result.stderr, /unsupported incident kind/);
@@ -222,7 +232,7 @@ test("integ forge ops adjudicate: UNSUPPORTED OUTCOME exits 1, writes no event",
   const projectDir = makeProjectDir();
   seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence: worktreeEvidence({ containerName: "forge-t1" }) });
 
-  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "x", "--outcome", "salvage_it"]);
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "x", "--outcome", "salvage_it", "--identity", DUMMY_IDENTITY]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /unsupported outcome/);
   assert.equal(adjudicatedCount("t1"), 0);
@@ -232,7 +242,7 @@ test("integ forge ops adjudicate: MISSING/empty rationale exits 1, writes no eve
   const projectDir = makeProjectDir();
   seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence: worktreeEvidence({ containerName: "forge-t1" }) });
 
-  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", ""]);
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "", "--identity", DUMMY_IDENTITY]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /missing rationale/);
   assert.equal(adjudicatedCount("t1"), 0);
@@ -244,7 +254,7 @@ test("integ forge ops adjudicate: PROJECT MISMATCH exits 1, writes no event", ()
   seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence: worktreeEvidence({ containerName: "forge-t1" }) });
 
   // Adjudicate while scoped to a DIFFERENT project than the incident's run.
-  const result = runForge(["ops", "adjudicate", "t1", "--project", otherProject, "--rationale", "x"]);
+  const result = runForge(["ops", "adjudicate", "t1", "--project", otherProject, "--rationale", "x", "--identity", DUMMY_IDENTITY]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /project mismatch/);
   assert.equal(adjudicatedCount("t1"), 0);
@@ -275,6 +285,42 @@ test("integ forge ops adjudicate: a MATCHING --identity is accepted (TOCTOU CAS 
   const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "x", "--identity", inspected, "--json"]);
   assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.equal(adjudicatedCount("t1"), 1);
+});
+
+// ── FG-703 FIX 1: --identity is a requiredOption — omitting it is refused ──────
+
+test("integ forge ops adjudicate: WITHOUT --identity the CLI refuses (requiredOption), exits non-zero, and writes NO event", () => {
+  const projectDir = makeProjectDir();
+  const evidence = worktreeEvidence({ containerName: "forge-t1" });
+  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence });
+
+  // A fully valid invocation EXCEPT the mandatory inspected identity is omitted.
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work"]);
+  assert.notEqual(result.status, 0, `expected non-zero\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stderr, /--identity/, "the refusal names the missing required option");
+  assert.equal(adjudicatedCount("t1"), 0, "nothing was written on the missing-identity refusal");
+});
+
+// ── FG-703 FIX 2: a container_crash incident presents as orphaned_work_may_persist
+//    and IS adjudicable end to end (the four production incidents are container_crash). ─
+
+test("integ forge ops adjudicate: a container_crash task (presenting as orphaned_work_may_persist) IS adjudicable via the CLI", () => {
+  const projectDir = makeProjectDir();
+  const evidence = worktreeEvidence({ containerName: "forge-t1", exitCode: 139 });
+  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, failureKind: "container_crash", evidence });
+
+  const identity = identityOf({ runId: "run1", taskId: "t1", evidence, failureKind: "container_crash" });
+  const result = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "crashed; no unique work", "--identity", identity, "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const parsed = JSON.parse(result.stdout) as { kind: string; identity: string };
+  assert.equal(parsed.kind, "adjudicated");
+  assert.equal(parsed.identity, identity);
+  assert.equal(adjudicatedCount("t1"), 1);
+  // The durable record's incident kind is the collapsed INCIDENT kind, not the raw failure_kind.
+  readDb((rdb) => {
+    const payload = JSON.parse((rdb.prepare(`SELECT payload FROM events WHERE event_type = 'ops.adjudicated' AND task_id = 't1'`).get() as { payload: string }).payload) as Record<string, unknown>;
+    assert.equal(payload["kind"], "orphaned_work_may_persist");
+  });
 });
 
 // ── AC7/AC8 proxy: four shared-checkout incidents, adjudicated via the CLI ─────
@@ -314,7 +360,10 @@ test("integ forge ops adjudicate (AC7/AC8): FOUR project_dir_shared failed tasks
 
   // Adjudicate each of the four via the CLI. Every one succeeds and records its identity.
   for (let i = 0; i < taskIds.length; i++) {
-    const res = runForge(["ops", "adjudicate", taskIds[i]!, "--project", projectDir, "--rationale", "shared checkout; this task produced no unique work", "--json"]);
+    // The inspected identity ignores the shared checkout's volatile changed-file
+    // count, so it is computed from the same project_dir_shared shape.
+    const inspected = identityOf({ runId: "run-shared", taskId: taskIds[i]!, evidence: sharedEvidence({ containerName: `forge-${taskIds[i]!}` }) });
+    const res = runForge(["ops", "adjudicate", taskIds[i]!, "--project", projectDir, "--rationale", "shared checkout; this task produced no unique work", "--identity", inspected, "--json"]);
     assert.equal(res.status, 0, `adjudicate ${taskIds[i]} expected exit 0\nstdout: ${res.stdout}\nstderr: ${res.stderr}`);
     const parsed = JSON.parse(res.stdout) as { kind: string; identity: string };
     assert.equal(parsed.kind, "adjudicated");

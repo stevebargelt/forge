@@ -471,7 +471,7 @@ export function registerOps(program: Command): void {
     .requiredOption("--rationale <text>", "why the incident is retired — recorded as durable audit history (must be non-empty)")
     .option("--outcome <outcome>", "the disposition; only 'no_unique_work' is accepted", "no_unique_work")
     .option("--actor <who>", "who is adjudicating (defaults to the current OS user); recorded in the audit event")
-    .option("--identity <sha>", "the incident identity you inspected (from a prior check); the write refuses on drift")
+    .requiredOption("--identity <sha>", "the incident identity you inspected (from a prior check); REQUIRED — the write refuses on drift and there is no way to adjudicate without naming it")
     .option("--project <dir>", "scope to a specific project dir (default: cwd)")
     .option("--json", "emit JSON result")
     .description(
@@ -481,7 +481,7 @@ export function registerOps(program: Command): void {
         "for an unknown incident, an unsupported kind, an unsupported outcome, a missing rationale, a project mismatch, " +
         "or an incident whose current identity no longer matches the record you inspected."
     )
-    .action((taskId: string, opts: { rationale: string; outcome: string; actor?: string; identity?: string; project?: string; json?: boolean }) => {
+    .action((taskId: string, opts: { rationale: string; outcome: string; actor?: string; identity: string; project?: string; json?: boolean }) => {
       ensureForgeDirs();
       const projectDir = resolve(opts.project ?? process.cwd());
       const result: AdjudicateResult = performAdjudicate(taskId, {

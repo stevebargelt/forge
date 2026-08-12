@@ -19,7 +19,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { Incident, IncidentAdjudication } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
-import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity } from "./adjudication.js";
+import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity, incidentKindForFailureKind } from "./adjudication.js";
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { taskDir } from "../util/paths.js";
@@ -393,12 +393,10 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
                 : failureKind === "result_missing"
                   ? `task ${row.taskId} (${row.phase}) — container exited cleanly but no result.json was ever produced (result missing after a clean exit, not a killed agent)`
                   : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
-    const incidentKind =
-      failureKind === "oom_killed"
-        ? "oom_killed"
-        : failureKind === "orphaned_needs_finalize"
-          ? "orphaned_needs_finalize"
-          : "orphaned_work_may_persist";
+    // The ONE shared mapping (adjudication.ts) both this detector and the
+    // adjudication write read, so "which failure kind presents as an
+    // orphaned_work_may_persist incident" cannot drift between the two sides.
+    const incidentKind = incidentKindForFailureKind(failureKind);
     // FG-703: suppression at the detector choke point. SCOPE is exactly the
     // orphaned_work_may_persist incident kind (the brief's only adjudicable
     // kind) — oom_killed / orphaned_needs_finalize are out of scope and never

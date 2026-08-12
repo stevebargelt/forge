@@ -43,6 +43,7 @@
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { sha256OfString } from "../util/content-digest.js";
+import { provenSameOnly } from "../util/path-identity.js";
 import { getDb, writeTransaction } from "../store/db.js";
 import { getTask } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
@@ -179,13 +180,33 @@ export function adjudicatedIdentitiesForTask(db: DatabaseInstance, taskId: strin
 // The whole surface FAILS CLOSED. Every refusal names the blocking fact and writes
 // no event. Refusals (brief constraint 6):
 //   - unknown incident        (no such task, or no live failed-task incident for it)
-//   - unsupported incident kind (the task's current failure_kind is not
-//                                orphaned_work_may_persist)
+//   - unsupported incident kind (the task's current failure_kind does not present
+//                                as an orphaned_work_may_persist incident under the
+//                                detector's shared collapse mapping)
 //   - unsupported outcome      (anything other than no_unique_work)
 //   - missing/empty rationale
 //   - project mismatch         (the incident's run does not belong to the scoped project)
 //   - identity drift           (the incident's CURRENT identity no longer matches
 //                               the record the operator inspected)
+
+/** The incident kind a raw `failure_kind` presents as in `forge ops check`. The
+ *  detector COLLAPSES many raw failure kinds into one incident kind: oom_killed
+ *  and orphaned_needs_finalize keep their own kind; EVERY other failure kind
+ *  (container_crash, idle_timeout, result_missing, fanout_wave_orphaned, and any
+ *  future addition) presents as an orphaned_work_may_persist incident. */
+export type IncidentKind = "oom_killed" | "orphaned_needs_finalize" | "orphaned_work_may_persist";
+
+/** The ONE shared source of truth for "which failure kind presents as which
+ *  incident kind". BOTH the detector (which EMITS the incident — detect.ts) and
+ *  the adjudication write (which SCOPES on it — performAdjudicate) call this, so
+ *  the set of failure kinds that present as an adjudicable orphaned_work_may_persist
+ *  incident can never drift into two divergent literal lists. Anything that is not
+ *  oom_killed or orphaned_needs_finalize collapses to orphaned_work_may_persist. */
+export function incidentKindForFailureKind(failureKind: string): IncidentKind {
+  if (failureKind === "oom_killed") return "oom_killed";
+  if (failureKind === "orphaned_needs_finalize") return "orphaned_needs_finalize";
+  return "orphaned_work_may_persist";
+}
 
 /** The one incident kind this verb may retire (brief constraint 2). */
 const SUPPORTED_KIND = "orphaned_work_may_persist";
@@ -204,12 +225,13 @@ export type AdjudicateInput = {
   /** The project the operator is scoped to (cwd or --project, resolved). The
    *  incident's run must belong to it — a cross-project adjudication fails closed. */
   projectDir: string;
-  /** OPTIONAL compare-and-set token: the incident identity the operator INSPECTED.
-   *  When supplied, the write refuses unless it still equals the identity recomputed
-   *  from the current latest task.failed — the TOCTOU guard against adjudicating a
-   *  record that materially changed since inspection (threat-model risk #4). When
-   *  omitted, only the in-transaction self-consistency recompute guards the write. */
-  expectedIdentity?: string | undefined;
+  /** REQUIRED compare-and-set token: the incident identity the operator INSPECTED.
+   *  There is no supported way to adjudicate without naming the identity you
+   *  inspected — the write refuses unless this still equals the identity recomputed
+   *  from the current latest task.failed, both before the write and again under the
+   *  write lock (the TOCTOU guard against adjudicating a record that materially
+   *  changed since inspection — threat-model risk #4). */
+  expectedIdentity: string;
 };
 
 export type AdjudicateResult =
@@ -279,15 +301,21 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
   const payload = latestFailedPayload(db, incidentId);
   if (!payload) return { kind: "unknown", id: incidentId };
 
-  // ── Scope: exactly orphaned_work_may_persist × no_unique_work ──
+  // ── Scope: exactly orphaned_work_may_persist × no_unique_work. Scope on the
+  //    INCIDENT kind the detector EMITS (via the shared mapping), not the raw
+  //    failure_kind: container_crash / idle_timeout / result_missing /
+  //    fanout_wave_orphaned all present as an orphaned_work_may_persist incident
+  //    and must be adjudicable. A kind that maps to another incident (oom_killed,
+  //    orphaned_needs_finalize) is still refused by name. ──
   const failureKind = payload["failure_kind"];
-  if (typeof failureKind !== "string" || failureKind !== SUPPORTED_KIND) {
+  const incidentKind = typeof failureKind === "string" ? incidentKindForFailureKind(failureKind) : undefined;
+  if (incidentKind !== SUPPORTED_KIND) {
     return {
       kind: "refused",
       id: incidentId,
-      reason: `unsupported incident kind: task ${incidentId}'s current failure_kind is ${
-        typeof failureKind === "string" ? failureKind : "unrecorded"
-      }, not ${SUPPORTED_KIND} — this verb adjudicates only ${SUPPORTED_KIND} incidents`,
+      reason: `unsupported incident kind: task ${incidentId}'s failure_kind ${
+        typeof failureKind === "string" ? failureKind : "(unrecorded)"
+      } presents as ${incidentKind ? `an ${incidentKind}` : "no"} incident, not a ${SUPPORTED_KIND} incident — this verb adjudicates only ${SUPPORTED_KIND} incidents`,
     };
   }
   if (input.outcome !== SUPPORTED_OUTCOME) {
@@ -314,7 +342,12 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
     // A failed task whose run is gone cannot have its project confirmed — fail closed.
     return { kind: "refused", id: incidentId, reason: `project mismatch: run ${task.runId} for task ${incidentId} not found` };
   }
-  if ((run.projectDir ?? null) !== input.projectDir) {
+  // FG-693: compare through the canonical filesystem-identity contract, not raw
+  // string equality — a legitimately-matching project reached through a symlinked
+  // or differently-spelled path must not fail closed. ACTING-class projection
+  // (provenSameOnly): an unproven identity never authorizes the write, so a
+  // genuine mismatch (or an unresolvable path) is still refused by name.
+  if (run.projectDir == null || !provenSameOnly(run.projectDir, input.projectDir)) {
     return {
       kind: "refused",
       id: incidentId,
@@ -326,7 +359,7 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
   //    function. If the operator supplied the identity they inspected and it no
   //    longer matches, refuse by naming both (identity drift). ──
   const currentIdentity = computeAdjudicationIdentity(identityInputFor(task.runId, incidentId, payload));
-  if (input.expectedIdentity !== undefined && input.expectedIdentity !== currentIdentity) {
+  if (input.expectedIdentity !== currentIdentity) {
     return {
       kind: "refused",
       id: incidentId,
@@ -350,11 +383,12 @@ export function performAdjudicate(incidentId: string, input: AdjudicateInput): A
       return { kind: "refused", id: incidentId, reason: `identity drift: task ${incidentId} is now ${liveStatus ?? "gone"}, no longer a live ${SUPPORTED_KIND} incident — nothing was written` };
     }
     const livePayload = latestFailedPayload(db, incidentId);
-    if (!livePayload || livePayload["failure_kind"] !== SUPPORTED_KIND) {
-      return { kind: "refused", id: incidentId, reason: `identity drift: task ${incidentId}'s current failure is no longer ${SUPPORTED_KIND} — nothing was written` };
+    const liveFailureKind = livePayload?.["failure_kind"];
+    if (!livePayload || typeof liveFailureKind !== "string" || incidentKindForFailureKind(liveFailureKind) !== SUPPORTED_KIND) {
+      return { kind: "refused", id: incidentId, reason: `identity drift: task ${incidentId}'s current failure no longer presents as a ${SUPPORTED_KIND} incident — nothing was written` };
     }
     const writeIdentity = computeAdjudicationIdentity(identityInputFor(task.runId, incidentId, livePayload));
-    if (writeIdentity !== currentIdentity || (input.expectedIdentity !== undefined && writeIdentity !== input.expectedIdentity)) {
+    if (writeIdentity !== currentIdentity || writeIdentity !== input.expectedIdentity) {
       return {
         kind: "refused",
         id: incidentId,

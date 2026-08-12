@@ -27,6 +27,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { SCHEMA_SQL } from "../../store/schema.js";
 import { applyMigrations } from "../../store/db.js";
+import { computeAdjudicationIdentity } from "../../ops/adjudication.js";
 import type { OrphanEvidence } from "../../v2/failure-kind.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -136,6 +137,11 @@ function adjudicatedCount(taskId: string): number {
   return readDb((rdb) => (rdb.prepare(`SELECT COUNT(*) AS c FROM events WHERE event_type = 'ops.adjudicated' AND task_id = ?`).get(taskId) as { c: number }).c);
 }
 
+/** The REQUIRED --identity token for an orphaned_work_may_persist incident. */
+function identityOf(runId: string, taskId: string, evidence: OrphanEvidence): string {
+  return computeAdjudicationIdentity({ runId, taskId, failureKind: "orphaned_work_may_persist", evidence });
+}
+
 // ── the HUMAN read surface ────────────────────────────────────────────────────
 
 test("integ forge ops check --include-adjudicated (human): surfaces an adjudicated incident WITH its original evidence + audit record; the default check omits it", () => {
@@ -149,7 +155,7 @@ test("integ forge ops check --include-adjudicated (human): surfaces an adjudicat
   assert.match(before.stdout, /orphaned_work_may_persist/, "precondition: the incident is live before adjudication");
 
   // Adjudicate it through the real CLI (records one ops.adjudicated event).
-  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "inspected the diff; no unique work here", "--actor", "steve@bargelt.com"]);
+  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "inspected the diff; no unique work here", "--actor", "steve@bargelt.com", "--identity", identityOf("run1", "t1", evidence)]);
   assert.equal(adj.status, 0, `adjudicate expected exit 0\nstdout: ${adj.stdout}\nstderr: ${adj.stderr}`);
   assert.equal(adjudicatedCount("t1"), 1);
 
@@ -185,7 +191,7 @@ test("integ forge ops check --json --include-adjudicated: the annotated record i
   const evidence = worktreeEvidence({ containerName: "forge-t1" });
   seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence });
 
-  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work", "--actor", "steve@bargelt.com"]);
+  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work", "--actor", "steve@bargelt.com", "--identity", identityOf("run1", "t1", evidence)]);
   assert.equal(adj.status, 0, `stdout: ${adj.stdout}\nstderr: ${adj.stderr}`);
 
   // Default --json: the adjudicated incident is suppressed, and NO incident carries
@@ -217,14 +223,15 @@ test("integ forge ops check --json --include-adjudicated: the annotated record i
 
 test("integ forge ops check: adjudicating one incident hides ONLY it — an unrelated high-severity incident stays visible in BOTH default and --include-adjudicated views", () => {
   const projectDir = makeProjectDir();
-  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence: worktreeEvidence({ containerName: "forge-t1" }) });
+  const evidence = worktreeEvidence({ containerName: "forge-t1" });
+  seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence });
 
   // An UNRELATED high-severity incident: a pending task under a terminal (complete)
   // run — a retry_orphan. It must stay visible throughout.
   insertRunRow({ id: "run-orphan", status: "complete", projectDir });
   insertTaskRow({ id: "orphan-task", runId: "run-orphan", status: "pending" });
 
-  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work"]);
+  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work", "--identity", identityOf("run1", "t1", evidence)]);
   assert.equal(adj.status, 0, `stdout: ${adj.stdout}\nstderr: ${adj.stderr}`);
 
   // Default view: the orphaned-work incident is gone, the retry_orphan remains.
@@ -247,7 +254,7 @@ test("integ forge ops check --include-adjudicated: a materially-changed incident
   const ev1 = worktreeEvidence({ containerName: "forge-t1", changedFiles: ["src/a.ts"] });
   seedOrphanIncident({ runId: "run1", taskId: "t1", projectDir, evidence: ev1 });
 
-  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work"]);
+  const adj = runForge(["ops", "adjudicate", "t1", "--project", projectDir, "--rationale", "no unique work", "--identity", identityOf("run1", "t1", ev1)]);
   assert.equal(adj.status, 0, `stdout: ${adj.stdout}\nstderr: ${adj.stderr}`);
 
   // Suppressed at the adjudicated identity.
