@@ -72,6 +72,46 @@ test(
 );
 
 test(
+  "RF-3 CLI: a credential-bearing FORGE_ var is REDACTED in meta.json and in `forge launch show`, yet reaches the workload with its real value; an ordinary gate keeps its value",
+  { skip: hasTmux ? false : "tmux not available" },
+  async () => {
+    const home = mkdtempSync(join(tmpdir(), "fg626-cli-redact-"));
+    const secret = "AWS_ACCESS_KEY_ID=AKIAEXAMPLE,AWS_SECRET_ACCESS_KEY=topsecretvalue,AWS_SESSION_TOKEN=sessiontok";
+    try {
+      // The workload writes the value it actually sees to a side file OUTSIDE the launch
+      // record — never to its stdout (that log tail is rendered by `forge launch show`) and
+      // never embedded in argv (that is recorded as meta.command). Both would leak the secret
+      // through a surface RF-3 does not govern, masking whether the ENV RECORD is redacted.
+      const seen = join(home, "seen-creds.txt");
+      const probe = `require('fs').writeFileSync(${JSON.stringify(seen)}, process.env.FORGE_AWS_CREDS_FOR_TEST || 'ABSENT')`;
+      const meta = launch(
+        home,
+        ["--name", "redact", "--", process.execPath, "-e", probe],
+        { FORGE_AWS_CREDS_FOR_TEST: secret, FORGE_WORKTREES: "1" },
+      );
+      await waitFor("the launched workload output", () => existsSync(seen));
+
+      // The workload got the REAL value — redaction is audit-surface only, the gate is armed.
+      assert.equal(readFileSync(seen, "utf8"), secret, "the workload saw the un-redacted credential value");
+
+      // The durable record on disk carries the NAME but NOT the secret material.
+      const metaJson = readFileSync(join(home, "launches", meta.id, "meta.json"), "utf8");
+      assert.ok(!metaJson.includes("topsecretvalue"), "no secret material is written into the durable launch record");
+      assert.match(metaJson, /FORGE_AWS_CREDS_FOR_TEST/, "the forwarded credential's NAME is still recorded (the gate is shown armed)");
+
+      // `forge launch show` renders the credential redacted, but the ordinary gate verbatim.
+      const human = forge(home, ["launch", "show", meta.id]);
+      assert.equal(human.status, 0, `forge launch show failed: ${human.stderr}`);
+      assert.ok(!human.stdout.includes("topsecretvalue"), "launch show never prints the secret material");
+      assert.match(human.stdout, /FORGE_AWS_CREDS_FOR_TEST=«redacted»/, "launch show renders the credential value redacted, by name");
+      assert.match(human.stdout, /env fwd:.*FORGE_WORKTREES=1/, "an ordinary gate keeps its value in launch show");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "FG-626 CLI: --require-control-toolchain preserves both forwarded FORGE_ env and the pinned control-node PATH",
   { skip: hasTmux ? false : "tmux not available" },
   async () => {

@@ -13,6 +13,9 @@ import {
   LAUNCHES_DIR,
   listLaunches,
   planForgeEnvForwarding,
+  redactForwardedEnvForRecord,
+  isSecretForgeEnvName,
+  REDACTED_ENV_VALUE,
   startLaunch,
   type LaunchProfile,
   type TmuxRunner,
@@ -86,6 +89,64 @@ test("FG-626: a FORGE_ value that cannot survive the session env (a newline) is 
 test("FG-626: an empty-string FORGE_ value is forwarded (present-but-empty is a real state, not absent)", () => {
   const plan = planForgeEnvForwarding({ FORGE_NOTIFY: "" });
   assert.deepEqual(plan.forwarded, [{ name: "FORGE_NOTIFY", value: "" }]);
+});
+
+// ── RF-3: credential-bearing FORGE_ values are redacted at the point of RECORDING ─
+
+test("RF-3: redaction is a property of the NAME — credential names redact, ordinary gates do not", () => {
+  assert.equal(isSecretForgeEnvName("FORGE_AWS_CREDS_FOR_TEST"), true, "a CREDS name is secret");
+  assert.equal(isSecretForgeEnvName("FORGE_CREDS_REFRESH"), true, "the adjacent CREDS name is secret");
+  assert.equal(isSecretForgeEnvName("FORGE_TOKEN"), true, "an injected TOKEN name is secret");
+  assert.equal(isSecretForgeEnvName("FORGE_WORKTREES"), false, "an ordinary gate is not secret");
+  assert.equal(isSecretForgeEnvName("FORGE_CI_POLL_SECONDS"), false, "an ordinary gate is not secret");
+  assert.equal(isSecretForgeEnvName("FORGE_AUTH_MODE"), false, "a mode selector is not a credential and keeps its value");
+});
+
+test("RF-3: redactForwardedEnvForRecord redacts the credential VALUE but keeps the NAME, and leaves ordinary gates intact", () => {
+  const redacted = redactForwardedEnvForRecord({
+    forwarded: [
+      { name: "FORGE_AWS_CREDS_FOR_TEST", value: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t" },
+      { name: "FORGE_WORKTREES", value: "1" },
+    ],
+    dropped: [{ name: "FORGE_RELEASE_ID", reason: "release identity" }],
+  });
+  assert.deepEqual(
+    redacted.forwarded,
+    [
+      { name: "FORGE_AWS_CREDS_FOR_TEST", value: REDACTED_ENV_VALUE, redacted: true },
+      { name: "FORGE_WORKTREES", value: "1" },
+    ],
+    "the credential value is replaced with the marker (name preserved); the ordinary gate keeps its value verbatim",
+  );
+  assert.ok(!redacted.forwarded[0]!.value.includes("AWS_SECRET_ACCESS_KEY"), "no secret material survives into the record");
+  assert.deepEqual(redacted.dropped, [{ name: "FORGE_RELEASE_ID", reason: "release identity" }], "dropped audit reasons pass through unchanged");
+});
+
+test("RF-3: startLaunch RECORDS the credential redacted, but FORWARDS the real value to the workload", () => {
+  const stub = tmuxStub();
+  const meta = startLaunch([process.execPath, "-e", "0"], {
+    name: "fg626redact",
+    tmux: stub.tmux,
+    env: { ...process.env, FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t", FORGE_WORKTREES: "1" },
+  });
+
+  // Recorded surface: the credential name is present but its value is redacted; the
+  // ordinary gate keeps its value so the audit can still distinguish =1 from =0.
+  const rec = meta.forwardedEnv!.forwarded;
+  const creds = rec.find((f) => f.name === "FORGE_AWS_CREDS_FOR_TEST")!;
+  assert.equal(creds.value, REDACTED_ENV_VALUE, "the credential value is redacted in the durable record");
+  assert.equal(creds.redacted, true, "and flagged as a deliberate redaction");
+  assert.ok(rec.some((f) => f.name === "FORGE_WORKTREES" && f.value === "1" && !f.redacted), "the ordinary gate keeps its recorded value");
+  assert.ok(!JSON.stringify(meta.forwardedEnv).includes("AWS_SECRET_ACCESS_KEY"), "no secret material anywhere in the recorded env");
+
+  // Workload surface: the real credential value still reaches the session env unredacted —
+  // redaction is an audit-surface concern only, never a functional one.
+  const pins = envPins(stub.calls.find((c) => c[0] === "new-session")!);
+  assert.ok(
+    pins.includes("FORGE_AWS_CREDS_FOR_TEST=AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t"),
+    "the workload receives the REAL credential value — the gate is armed, only the record is redacted",
+  );
+  assert.ok(pins.includes("FORGE_WORKTREES=1"), "the ordinary gate reaches the workload too");
 });
 
 // ── the session env startLaunch builds from the plan ─────────────────────────────

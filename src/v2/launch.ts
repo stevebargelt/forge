@@ -132,10 +132,14 @@ export type LaunchMeta = {
   // FG-626: the per-invocation FORGE_-prefixed environment forwarded into the launched
   // workload, and any FORGE_ var deliberately dropped (with the reason). Recorded so an
   // operator can audit what env-gated behavior the workload actually ran under, and so a
-  // drop is warnable by name. Values are recorded because forge's own FORGE_ gates
-  // (FORGE_WORKTREES, FORGE_CI_POLL_SECONDS, …) are configuration, not secrets — auth
-  // material is never FORGE_-prefixed and is never swept here. Optional so a record
-  // written before FG-626 still loads.
+  // drop is warnable by name. Ordinary env-gate values (FORGE_WORKTREES,
+  // FORGE_CI_POLL_SECONDS, …) are recorded because the audit needs to distinguish =1 from
+  // =0 and 30 from 3000. RF-3: a FORGE_ NAME can carry credential material anyway
+  // (FORGE_AWS_CREDS_FOR_TEST, FORGE_CREDS_REFRESH, an injected FORGE_TOKEN), so a
+  // credential-bearing value is REDACTED at the point of recording — the NAME is still
+  // recorded (the gate is shown armed) but its value never lands in this world-readable
+  // record. The workload still receives the real value; redaction is audit-surface only.
+  // Optional so a record written before FG-626 still loads.
   forwardedEnv?: ForgeEnvForwarding;
 };
 
@@ -315,9 +319,46 @@ export function shellQuote(arg: string): string {
 // was dropped). Recorded on the launch so an operator can audit after the fact
 // exactly what env-gated behavior the workload actually ran under, and so a drop
 // can be WARNED about by name — never silently lost.
-export type ForwardedEnvVar = { name: string; value: string };
+export type ForwardedEnvVar = { name: string; value: string; redacted?: boolean };
 export type DroppedEnvVar = { name: string; reason: string };
 export type ForgeEnvForwarding = { forwarded: ForwardedEnvVar[]; dropped: DroppedEnvVar[] };
+
+// RF-3: the marker a credential-bearing forwarded value is replaced with in the durable
+// launch record and in `forge launch show`. It is not a value a caller could set (the
+// workload still gets the real value), so it is unambiguously "redacted", not literal.
+export const REDACTED_ENV_VALUE = "«redacted»";
+
+// RF-3: name segments that mark a FORGE_ variable as carrying secret material. Redaction
+// is a property of the NAME, decided here, NOT a scan of the value — an ordinary gate
+// (FORGE_WORKTREES, FORGE_CI_POLL_SECONDS) keeps its recorded value, while a credential
+// name (FORGE_AWS_CREDS_FOR_TEST, FORGE_CREDS_REFRESH, an injected FORGE_TOKEN) does not.
+// Segments are deliberately specific (ACCESS_KEY/API_KEY, not a bare KEY) so a benign gate
+// is never redacted into uselessness.
+const SECRET_ENV_NAME_SEGMENTS: readonly string[] = [
+  "CRED", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASSPHRASE",
+  "PRIVATE_KEY", "ACCESS_KEY", "API_KEY", "APIKEY",
+];
+
+/** RF-3: does this variable NAME mark it as credential-bearing? A name-based property,
+ *  applied at the point of recording — never a scan of the value. */
+export function isSecretForgeEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return SECRET_ENV_NAME_SEGMENTS.some((seg) => upper.includes(seg));
+}
+
+/** RF-3: the launch-record view of a forwarding plan — every forwarded NAME preserved,
+ *  but a credential-bearing value replaced with the redaction marker so it never lands in
+ *  meta.json or in `forge launch show`. PURE; does NOT alter what the workload receives
+ *  (that path reads the un-redacted plan). Dropped entries are audit reasons, not values,
+ *  and pass through unchanged. */
+export function redactForwardedEnvForRecord(forwarding: ForgeEnvForwarding): ForgeEnvForwarding {
+  return {
+    forwarded: forwarding.forwarded.map((v) =>
+      isSecretForgeEnvName(v.name) ? { name: v.name, value: REDACTED_ENV_VALUE, redacted: true } : v,
+    ),
+    dropped: forwarding.dropped,
+  };
+}
 
 // FG-626: FORGE_-prefixed variables that must NEVER be forwarded from the caller's
 // per-invocation env into the launched workload, each mapped to the reason so the
@@ -1243,8 +1284,13 @@ export function startLaunch(argv: string[], opts: { id?: string; name?: string; 
 
   // FG-626: decide the per-invocation FORGE_ env to forward BEFORE the record is
   // published, so the forwarded/dropped set is part of the durable launch record from
-  // its first write and a drop can be warned about by the caller.
+  // its first write and a drop can be warned about by the caller. `forwardedEnv` carries
+  // the REAL values — the workload receives these (the `-e` args below). RF-3: the durable
+  // record instead stores the redacted view, so a credential-bearing FORGE_ value
+  // (FORGE_AWS_CREDS_FOR_TEST, an injected FORGE_TOKEN) never lands in meta.json or in
+  // `forge launch show`, while its name and ordinary gate values are still recorded.
   const forwardedEnv = planForgeEnvForwarding(opts.env ?? process.env);
+  const recordedForwardedEnv = redactForwardedEnvForRecord(forwardedEnv);
 
   const meta: LaunchMeta = {
     id,
@@ -1256,7 +1302,7 @@ export function startLaunch(argv: string[], opts: { id?: string; name?: string; 
     logPath: join(dir, "out.log"),
     cwd,
     tmuxServerCwd: serverCwd,
-    forwardedEnv,
+    forwardedEnv: recordedForwardedEnv,
     // FG-569 (R1): captured here, in the submitting CLI, INDEPENDENTLY of the
     // recorder (R2) — the CLI is gone by the time anyone inspects this launch.
     control: collectControlRuntime(),
