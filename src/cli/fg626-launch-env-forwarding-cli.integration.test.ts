@@ -33,7 +33,8 @@ function nonSecretForgeEnvAllowlist(): string[] {
   const declaration = source.match(/const NON_SECRET_FORGE_ENV_ALLOWLIST:[\s\S]*?new Set\(\[([\s\S]*?)\]\);/);
   assert.ok(declaration, "launch.ts declares the FG-707 non-secret FORGE_ allowlist");
   const names = [...declaration[1]!.matchAll(/"(FORGE_[A-Z0-9_]+)"/g)].map((match) => match[1]!);
-  assert.equal(names.length, 11, "FG-707 has exactly the eleven explicitly-reviewed safe names");
+  assert.equal(names.length, 10, "FG-707 has exactly the ten explicitly-reviewed safe names");
+  assert.ok(!names.includes("FORGE_CONTROLLER_ID"), "FG-707/RF-4: the lease-fencing controller identity is NOT allowlisted");
   return names;
 }
 
@@ -143,6 +144,43 @@ test(
       for (const [name, value] of Object.entries(allowlistedValues)) {
         assert.ok(human.stdout.includes(`${name}=${value}`), `${name} keeps its value in launch show`);
       }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "FG-707/RF-4 CLI: FORGE_CONTROLLER_ID is a lease-fencing identity, not configuration — its VALUE is REDACTED in meta.json and `forge launch show` while the workload still receives the real value",
+  { skip: hasTmux ? false : "tmux not available" },
+  async () => {
+    const home = mkdtempSync(join(tmpdir(), "fg707-controller-id-"));
+    const controllerCredential = "controller-lease-credential-abc123";
+    try {
+      const seen = join(home, "seen-controller-id.txt");
+      const probe = `require('fs').writeFileSync(${JSON.stringify(seen)}, process.env.FORGE_CONTROLLER_ID)`;
+      const meta = launch(
+        home,
+        ["--name", "controller", "--", process.execPath, "-e", probe],
+        { FORGE_CONTROLLER_ID: controllerCredential },
+      );
+      await waitFor("the launched workload output", () => existsSync(seen));
+
+      // The workload still receives the REAL controller id — redaction never disarms the gate.
+      assert.equal(readFileSync(seen, "utf8"), controllerCredential, "the workload sees the un-redacted controller id");
+
+      // The durable record carries the NAME (the audit shows a controller id WAS forwarded)
+      // but not the VALUE — whoever presents it could claim/renew a continuation lease.
+      const metaJson = readFileSync(join(home, "launches", meta.id, "meta.json"), "utf8");
+      assert.ok(!metaJson.includes(controllerCredential), "no controller-id credential material is written into the durable launch record");
+      const recorded = (JSON.parse(metaJson) as Launch).forwardedEnv!.forwarded;
+      const controllerId = recorded.find((f) => f.name === "FORGE_CONTROLLER_ID")!;
+      assert.equal(controllerId.value, "«redacted»", "FORGE_CONTROLLER_ID's NAME is recorded with a redacted value in meta.json");
+
+      const human = forge(home, ["launch", "show", meta.id]);
+      assert.equal(human.status, 0, `forge launch show failed: ${human.stderr}`);
+      assert.ok(!human.stdout.includes(controllerCredential), "launch show never prints the controller-id credential material");
+      assert.match(human.stdout, /FORGE_CONTROLLER_ID=«redacted»/, "launch show renders FORGE_CONTROLLER_ID redacted, by name");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

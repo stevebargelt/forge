@@ -355,8 +355,14 @@ const NON_SECRET_FORGE_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
   // CI wait tuning — numeric knobs; 30 vs 3000 is exactly what the audit distinguishes.
   "FORGE_CI_POLL_SECONDS",
   "FORGE_CI_WAIT_TIMEOUT_SECONDS",
-  // Orchestration identity — an opaque controller id, not a secret; audit needs which one.
-  "FORGE_CONTROLLER_ID",
+  // FG-707/RF-4: FORGE_CONTROLLER_ID is DELIBERATELY ABSENT — do not add it back. It is not
+  // configuration, it is the lease-fencing controller IDENTITY: whoever presents it can claim
+  // or renew a continuation lease (continue.ts precedence --owner → FORGE_CONTROLLER_ID →
+  // CLAUDE_CODE_SESSION_ID) and campaign instance ownership (campaign.ts). That makes it
+  // capability-adjacent, so recording its value verbatim would persist a caller-supplied
+  // credential into the world-readable record and `forge launch show`. Its NAME is still
+  // recorded (the audit shows a controller id WAS forwarded, and lease ownership is already on
+  // the continuation rows), but its VALUE is redacted like any other unlisted name.
   // Boolean escape-hatch gates whose on/off the audit needs; neither holds anything secret.
   "FORGE_NO_BROWSER",
   "FORGE_NO_NM_SHADOW",

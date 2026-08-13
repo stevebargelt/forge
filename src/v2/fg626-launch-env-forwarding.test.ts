@@ -97,10 +97,12 @@ test("FG-707: only an allowlisted gate NAME keeps its recorded value; every othe
   // On the allowlist: the audit needs these values.
   assert.equal(isAllowlistedForgeEnvName("FORGE_WORKTREES"), true, "an enumerated worktree gate keeps its value");
   assert.equal(isAllowlistedForgeEnvName("FORGE_CI_POLL_SECONDS"), true, "an enumerated CI knob keeps its value");
-  assert.equal(isAllowlistedForgeEnvName("FORGE_CONTROLLER_ID"), true, "an enumerated controller id keeps its value");
   // Not on the allowlist → redacted. A credential name, obviously.
   assert.equal(isAllowlistedForgeEnvName("FORGE_AWS_CREDS_FOR_TEST"), false, "a credential name is not on the allowlist");
   assert.equal(isAllowlistedForgeEnvName("FORGE_TOKEN"), false, "an injected TOKEN name is not on the allowlist");
+  // FG-707/RF-4: FORGE_CONTROLLER_ID is the lease-fencing controller identity, not
+  // configuration — capability-adjacent, so its value is redacted like any other unlisted name.
+  assert.equal(isAllowlistedForgeEnvName("FORGE_CONTROLLER_ID"), false, "the lease-fencing controller id is redacted, not allowlisted");
   // AC2: FORGE_AUTH_MODE is a mode selector, NOT a credential — but under fail-closed an
   // unlisted name is redacted regardless. This is the FG-626 recheck's own counterexample.
   assert.equal(isAllowlistedForgeEnvName("FORGE_AUTH_MODE"), false, "FORGE_AUTH_MODE is not allowlisted, so its value is redacted");
