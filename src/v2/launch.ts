@@ -132,14 +132,14 @@ export type LaunchMeta = {
   // FG-626: the per-invocation FORGE_-prefixed environment forwarded into the launched
   // workload, and any FORGE_ var deliberately dropped (with the reason). Recorded so an
   // operator can audit what env-gated behavior the workload actually ran under, and so a
-  // drop is warnable by name. Ordinary env-gate values (FORGE_WORKTREES,
-  // FORGE_CI_POLL_SECONDS, …) are recorded because the audit needs to distinguish =1 from
-  // =0 and 30 from 3000. RF-3: a FORGE_ NAME can carry credential material anyway
-  // (FORGE_AWS_CREDS_FOR_TEST, FORGE_CREDS_REFRESH, an injected FORGE_TOKEN), so a
-  // credential-bearing value is REDACTED at the point of recording — the NAME is still
-  // recorded (the gate is shown armed) but its value never lands in this world-readable
-  // record. The workload still receives the real value; redaction is audit-surface only.
-  // Optional so a record written before FG-626 still loads.
+  // drop is warnable by name. FG-707: the recorded VALUE is kept ONLY for an allowlisted
+  // gate name (FORGE_WORKTREES, FORGE_CI_POLL_SECONDS, …), because the audit needs to
+  // distinguish =1 from =0 and 30 from 3000. EVERY other FORGE_ name has its value REDACTED
+  // at the point of recording — the NAME is still recorded (the gate is shown armed) but its
+  // value never lands in this world-readable record. This is fail-closed: a credential-bearing
+  // FORGE_ name we never enumerated (FORGE_AWS_CREDS_FOR_TEST, an injected FORGE_TOKEN) is
+  // redacted the moment it exists. The workload still receives the real value; redaction is
+  // audit-surface only. Optional so a record written before FG-626 still loads.
   forwardedEnv?: ForgeEnvForwarding;
 };
 
@@ -328,33 +328,65 @@ export type ForgeEnvForwarding = { forwarded: ForwardedEnvVar[]; dropped: Droppe
 // workload still gets the real value), so it is unambiguously "redacted", not literal.
 export const REDACTED_ENV_VALUE = "«redacted»";
 
-// RF-3: name segments that mark a FORGE_ variable as carrying secret material. Redaction
-// is a property of the NAME, decided here, NOT a scan of the value — an ordinary gate
-// (FORGE_WORKTREES, FORGE_CI_POLL_SECONDS) keeps its recorded value, while a credential
-// name (FORGE_AWS_CREDS_FOR_TEST, FORGE_CREDS_REFRESH, an injected FORGE_TOKEN) does not.
-// Segments are deliberately specific (ACCESS_KEY/API_KEY, not a bare KEY) so a benign gate
-// is never redacted into uselessness.
-const SECRET_ENV_NAME_SEGMENTS: readonly string[] = [
-  "CRED", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASSPHRASE",
-  "PRIVATE_KEY", "ACCESS_KEY", "API_KEY", "APIKEY",
-];
+// FG-707: the fail-closed ALLOWLIST of FORGE_ gate names whose VALUE is safe to record in
+// the world-readable launch record and print in `forge launch show`. This is the ONE rule:
+// a name IN this set keeps its recorded value; EVERY other FORGE_ name has its value
+// redacted (the NAME is still recorded, so the gate is shown armed). An unlisted name is
+// redacted BY DESIGN, not by omission — a credential-bearing FORGE_ name we never enumerated
+// (FORGE_AWS_CREDS_FOR_TEST, an injected FORGE_TOKEN, tomorrow's unforeseen secret gate) is
+// therefore redacted the moment it exists, with no denylist to keep chasing. This inverts
+// FG-626's RF-3 denylist, which failed OPEN: any credential name it had not thought to list
+// leaked verbatim.
+//
+// Membership is earned by "the value is genuine audit signal AND carries no secret": the
+// audit needs to distinguish FORGE_WORKTREES=1 from =0 and FORGE_CI_POLL_SECONDS=30 from
+// =3000, and none of these hold anything sensitive. When in doubt, LEAVE A NAME OUT — the
+// cost of omission is a redacted value (the NAME still audits that the gate fired), while the
+// cost of a wrong inclusion is a leaked secret. FORGE_AUTH_MODE is deliberately NOT here:
+// it is a mode selector (the literal `mount`), not a credential, but it is not a gate whose
+// value the audit needs, so under fail-closed it is redacted — the FG-626 recheck's own
+// counterexample made concrete.
+const NON_SECRET_FORGE_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+  // Worktree gates — booleans the audit must read exactly (=1 vs =0 changes isolation).
+  "FORGE_WORKTREES",
+  "FORGE_NO_WORKTREES",
+  "FORGE_WORKTREE_IGNORE_DIRTY",
+  "FORGE_WORKTREES_EPHEMERAL",
+  // CI wait tuning — numeric knobs; 30 vs 3000 is exactly what the audit distinguishes.
+  "FORGE_CI_POLL_SECONDS",
+  "FORGE_CI_WAIT_TIMEOUT_SECONDS",
+  // FG-707/RF-4: FORGE_CONTROLLER_ID is DELIBERATELY ABSENT — do not add it back. It is not
+  // configuration, it is the lease-fencing controller IDENTITY: whoever presents it can claim
+  // or renew a continuation lease (continue.ts precedence --owner → FORGE_CONTROLLER_ID →
+  // CLAUDE_CODE_SESSION_ID) and campaign instance ownership (campaign.ts). That makes it
+  // capability-adjacent, so recording its value verbatim would persist a caller-supplied
+  // credential into the world-readable record and `forge launch show`. Its NAME is still
+  // recorded (the audit shows a controller id WAS forwarded, and lease ownership is already on
+  // the continuation rows), but its VALUE is redacted like any other unlisted name.
+  // Boolean escape-hatch gates whose on/off the audit needs; neither holds anything secret.
+  "FORGE_NO_BROWSER",
+  "FORGE_NO_NM_SHADOW",
+  // Non-secret mode/selector gates whose VALUE changes observable behavior.
+  "FORGE_CONTAINER_RETENTION",
+  "FORGE_NOTIFY_ON",
+]);
 
-/** RF-3: does this variable NAME mark it as credential-bearing? A name-based property,
- *  applied at the point of recording — never a scan of the value. */
-export function isSecretForgeEnvName(name: string): boolean {
-  const upper = name.toUpperCase();
-  return SECRET_ENV_NAME_SEGMENTS.some((seg) => upper.includes(seg));
+/** FG-707: may this variable's VALUE be recorded verbatim? True IFF the NAME is on the
+ *  fail-closed allowlist above. A name-based property, decided at the point of recording —
+ *  never a scan of the value. Any name NOT listed is redacted. */
+export function isAllowlistedForgeEnvName(name: string): boolean {
+  return NON_SECRET_FORGE_ENV_ALLOWLIST.has(name);
 }
 
-/** RF-3: the launch-record view of a forwarding plan — every forwarded NAME preserved,
- *  but a credential-bearing value replaced with the redaction marker so it never lands in
- *  meta.json or in `forge launch show`. PURE; does NOT alter what the workload receives
- *  (that path reads the un-redacted plan). Dropped entries are audit reasons, not values,
- *  and pass through unchanged. */
+/** FG-707: the launch-record view of a forwarding plan — every forwarded NAME preserved, but
+ *  the value recorded verbatim ONLY for an allowlisted gate; every other value is replaced
+ *  with the redaction marker so no unenumerated FORGE_ secret ever lands in meta.json or in
+ *  `forge launch show`. PURE; does NOT alter what the workload receives (that path reads the
+ *  un-redacted plan). Dropped entries are audit reasons, not values, and pass through unchanged. */
 export function redactForwardedEnvForRecord(forwarding: ForgeEnvForwarding): ForgeEnvForwarding {
   return {
     forwarded: forwarding.forwarded.map((v) =>
-      isSecretForgeEnvName(v.name) ? { name: v.name, value: REDACTED_ENV_VALUE, redacted: true } : v,
+      isAllowlistedForgeEnvName(v.name) ? v : { name: v.name, value: REDACTED_ENV_VALUE, redacted: true },
     ),
     dropped: forwarding.dropped,
   };
