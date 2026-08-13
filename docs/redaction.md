@@ -45,6 +45,22 @@ config references, not credential material.
   secrets) — only an exit code and a generic reason.
 - Reds never receive auth state, regardless of profile `roles`.
 
+## Launch env forwarding (FG-626 / RF-3)
+
+`forge launch run` forwards every `FORGE_`-prefixed variable on the invocation into
+the launched workload, and records the forwarded/dropped set on the durable launch
+record (`meta.json`) for audit — see `docs/concepts.md` → **Durable launch**. A
+`FORGE_`-prefixed name can still carry credential material (an injected
+`FORGE_TOKEN`, `FORGE_AWS_CREDS_FOR_TEST`, …), so the recorded value is redacted by
+**name**, not by scanning the value: `isSecretForgeEnvName` (`src/v2/launch.ts`)
+matches credential-shaped segments (`CRED`, `SECRET`, `TOKEN`,
+`PASSWORD`/`PASSWD`/`PASSPHRASE`, `PRIVATE_KEY`, `ACCESS_KEY`, `API_KEY`/`APIKEY`);
+a match is replaced with the `«redacted»` marker in `meta.json` and in `forge
+launch show`, while an ordinary gate (`FORGE_WORKTREES`, `FORGE_CI_POLL_SECONDS`)
+keeps its recorded value. The workload itself always receives the real,
+un-redacted value over the `-e` channel — redaction applies only to the durable
+record and its human rendering, never to what the launched command sees.
+
 ## Events / exports
 
 Lifecycle event payloads are booleans + safe text by design (the Crawl
