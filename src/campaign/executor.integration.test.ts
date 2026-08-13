@@ -3605,7 +3605,7 @@ test("FG-488: drive loop no-progress bound — active run + zero dispatch + unch
       status: "active",
       createdAt: "2026-01-01T00:00:00Z",
       projectDir: args.projectDir,
-    });
+    }, args.projectIdentity);
     insertTask({
       id: "task-fg488-stuck",
       runId: STUCK_RUN_ID,
@@ -3688,7 +3688,7 @@ test("FG-490: thrown runNextFn parks the campaign (running->paused) with a recov
       status: "active",
       createdAt: "2026-01-01T00:00:00Z",
       projectDir: args.projectDir,
-    });
+    }, args.projectIdentity);
     return { runId: RUN_ID };
   };
 
@@ -3776,7 +3776,7 @@ test("FG-490 review F8: parkCampaignOnDriveThrow clears a stale outcome/blockerK
       status: "active",
       createdAt: "2026-01-01T00:00:00Z",
       projectDir: args.projectDir,
-    });
+    }, args.projectIdentity);
     return { runId: RUN_ID };
   };
 
@@ -3885,7 +3885,7 @@ test("FG-490 review (round 2, F1): thrown startRunFn parks the item directly at 
         status: "active",
         createdAt: "2026-01-01T00:00:00Z",
         projectDir: args.projectDir,
-      });
+      }, args.projectIdentity);
       return { runId: RESUME_RUN_ID };
     },
     runNextFn: async () => {
@@ -3916,7 +3916,7 @@ test("FG-490: if the park-transition itself fails (DB error), the original drive
       status: "active",
       createdAt: "2026-01-01T00:00:00Z",
       projectDir: args.projectDir,
-    });
+    }, args.projectIdentity);
     return { runId: RUN_ID };
   };
 

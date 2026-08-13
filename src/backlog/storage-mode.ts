@@ -155,6 +155,86 @@ function resolveUncached(projectDir: string): BacklogStore {
   return storeFor(projectDir, row.projectKey);
 }
 
+// FG-663: the durable PROJECT identity captured on a run at CREATION, while the
+// checkout is still readable. A run records its project as data, so a later
+// checkout deletion can never orphan the run into "Unknown repository" — read
+// models attribute it from this stored value, never by re-deriving from a
+// project_dir that may be gone.
+//
+// Precedence mirrors resolveUncached's PURE-READER ladder, but resolves to a
+// single stored identity string rather than to a store — and every rung is
+// anchored to THIS checkout's own repository evidence, so a git-tracked declared
+// key can never attribute a run to a repository it does not belong to (RF-3):
+//   (a) the pk- this checkout's evidence maps to in the registry — the durable
+//       arbiter wins outright when it knows this evidence
+//   (b) else a declared config project_key (pk-), but ONLY when it is not
+//       registered to a DIFFERENT repository's evidence (else degrade to (c))
+//   (c) else the resolved repo- evidence key (remote > git-common-dir > path)
+//
+// The read side (dashboard scopeProjectIdentities) derives a project's scope
+// identity set by the SAME rule, so a run captured here is always a member of its
+// own project's scope and never of another's (FG-663 RF-2/RF-3 symmetry).
+//
+// It is a PURE READER, exactly like the rest of this module (see the header): it
+// NEVER calls resolveAndClaimProjectKey / writeProjectKey / writeBacklogConfig,
+// never mints a registry row, never heals config, never dirties git, and never
+// goes through resolveBacklogStore — that path THROWS on a config/registry
+// conflict (storeForConfigKey), and capture must DEGRADE, not refuse: a run is
+// real regardless of whether its checkout's identity is internally consistent.
+// It never throws — any failure degrades to null so run creation is never blocked
+// by identity capture — and a genuinely non-git, config-less directory degrades
+// to its stable path-source repo- key (AC6) rather than being attributed
+// elsewhere. READS NEVER WRITE holds by construction: it composes only readers.
+export function resolveProjectIdentity(projectDir: string): string | null {
+  try {
+    const declared = readBacklogConfig(projectDir).projectKey;
+
+    // The evidence key anchors identity to THIS checkout's own repository. It is
+    // both the fallback identity (AC6: a non-git, config-less dir degrades to its
+    // stable path-source repo- key) and the arbiter a declared key is cross-checked
+    // against below — resolved BEFORE any registry read so a declared key can never
+    // be trusted without corroboration. (A throw here — no git available — degrades
+    // to null in the catch rather than trusting an unverifiable declared key.)
+    const evidenceKey = computeRepositoryEvidence(projectDir).key;
+
+    // No store on this host: no registry to cross-check, and no registered project
+    // a copied key could forge into. The declared (git-tracked, clone-inherited)
+    // key is the durable identity; else this checkout's evidence. Probing the
+    // registry here would CREATE forge.db purely to find nothing (resolveUncached
+    // guard) — in the insertRun caller the store is always open.
+    if (!storeExists()) return declared ?? evidenceKey;
+
+    // The registry is the durable arbiter of which project owns this checkout's
+    // evidence. If it knows this evidence, that mapping WINS: a declared key that
+    // disagrees is stale config, one that agrees is redundant. This is also the
+    // read-side scope's first member (scopeProjectIdentities), so a run captured
+    // here is always a member of its own project scope (FG-663 RF-2 symmetry).
+    const registered = registryByEvidence(evidenceKey);
+    if (registered) return registered.projectKey;
+
+    if (declared) {
+      // FG-663 (RF-3): .forge/config.yml is git-tracked and freely copyable, so a
+      // declared key is checkout-controlled evidence. Trust it ONLY when it is not
+      // registered to a DIFFERENT repository's evidence; otherwise a copied config
+      // would let this checkout's runs join the victim project's scope. Degrade to
+      // our OWN evidence — the run is attributed to its true repository, never a
+      // forged one. When the declared key is unregistered (a pre-cutover clone),
+      // it is trusted, and scopeProjectIdentities reads the same key back so the
+      // run still scopes to its project (RF-2).
+      const owner = registryByKey(declared);
+      if (owner && owner.repoEvidenceKey !== evidenceKey) return evidenceKey;
+      return declared;
+    }
+
+    return evidenceKey;
+  } catch {
+    // Capture NEVER blocks run creation. A run with a NULL project_identity is a
+    // legacy-shaped row the read side already tolerates (live fallback path); a
+    // thrown identity would instead lose the run entirely.
+    return null;
+  }
+}
+
 export function resolveBacklogStore(projectDir: string): BacklogStore {
   const key = resolve(projectDir);
   const now = Date.now();

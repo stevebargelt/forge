@@ -12,6 +12,8 @@ Example: `forge new research-synthesis "litellm-eval" --question "Does LiteLLM s
 
 The directory mounted at `/project` in the agent container. Recorded on each run as `runs.project_dir`. Implementer agents see it read-write; red agents see it read-only at the OS level (FORGE-DEC-006).
 
+`project_dir` is audit evidence and display, not identity — it decides nothing (FG-693), and it is unreadable the moment a disposable clone is deleted. What the dashboard actually keys and tags a run by is `runs.project_identity`: a durable project key resolved once at run creation — from the project's own declared `project_key` (`.forge/config.yml`, FG-608) when present, else the resolved repository evidence — and read back verbatim thereafter, never re-derived from `project_dir`. That's why a run whose checkout is later deleted still shows its correct project instead of "Unknown repository" (FG-663). See [Durable project identity](SCHEMA-CONTRACT.md#durable-project-identity-project_identity-fg-663) for the full resolution precedence and how it reconciles with `project_dir_canonical`.
+
 On `forge new` / `forge invoke`, forge resolves the mount target before launching any container (FG-374, FORGE-DEC-022):
 
 - **Not inside a git repo** — mounts cwd (or `--project <dir>`) unchanged.

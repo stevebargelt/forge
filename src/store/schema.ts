@@ -101,7 +101,18 @@ CREATE TABLE IF NOT EXISTS runs (
   -- FG-638: exactly one review authority model per run. NOT NULL with a DEFAULT so a
   -- row written by a binary that predates the ledger (or by an INSERT that omits the
   -- column) reads back the legacy verdict/blocked_by_red model rather than NULL.
-  review_mode     TEXT NOT NULL DEFAULT 'legacy_verdict'
+  review_mode     TEXT NOT NULL DEFAULT 'legacy_verdict',
+  -- FG-663: the DURABLE project a run belongs to, captured at CREATION while the
+  -- checkout is still readable, and read back thereafter — NEVER re-derived from a
+  -- project_dir that may be gone. This is SAME-PROJECT identity and is orthogonal to
+  -- project_dir_canonical (SAME-CHECKOUT identity): a disposable clone and its
+  -- canonical checkout share this value but differ in project_dir_canonical. Holds a
+  -- pk- key (the declared/registered project_key) when the checkout declares or maps to
+  -- one, else the resolved repo- evidence key captured at creation, else NULL when
+  -- there is no project_dir. Nullable with NO default: a pre-FG-663 row's project was
+  -- never captured, and NULL is the only honest reading — legacy rows fall back to the
+  -- live read-time resolution path. See the resolver in src/store/runs.ts.
+  project_identity TEXT
 );
 -- FG-563 (CP1, FIX5): the check-before-spawn hot path (runByDispatchKey, fired on
 -- every continuation wake/dispatch) resolves the ONE physical run created under a
@@ -1567,6 +1578,12 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // migration time — would mint proof that does not exist, since resolving a spelling
   // TODAY says nothing about the tree it named when the row was written.
   { table: "runs", column: "project_dir_canonical", ddl: "ALTER TABLE runs ADD COLUMN project_dir_canonical TEXT" },
+  // FG-663: the durable project a run belongs to. Nullable with NO default, for the
+  // same reason as project_dir_canonical above: a pre-FG-663 row's project was never
+  // captured, so NULL is the only honest reading — any default would attribute those
+  // rows to a project nothing proved they belong to. Additive-only, no user_version
+  // bump: safe for a concurrent deployed peer binary (FG-568/BD-15).
+  { table: "runs", column: "project_identity", ddl: "ALTER TABLE runs ADD COLUMN project_identity TEXT" },
 
   { table: "tasks", column: "parent_id", ddl: "ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id)" },
   { table: "tasks", column: "agent_alias", ddl: "ALTER TABLE tasks ADD COLUMN agent_alias TEXT" },
@@ -2026,6 +2043,18 @@ export const CANONICAL_IDENTITY_INDEXES: CanonicalIdentityIndex[] = [
     column: "project_dir_canonical",
     index: "idx_runs_project_canonical",
     ddl: "CREATE INDEX IF NOT EXISTS idx_runs_project_canonical ON runs(project_dir_canonical)",
+  },
+  {
+    // FG-663: the same-project identity lookup. Rides the identical guarded, post-ALTER
+    // application path as the FG-693 canonical indexes above (table present, column
+    // present), so on an aged store it is created only after ADDITIVE_COLUMNS has added
+    // runs.project_identity. Plain non-unique: many runs share one project identity, and
+    // NULL is the common value on legacy rows. Backs the project-scoped identity arm the
+    // dashboard reads add (FG-663 AC5).
+    table: "runs",
+    column: "project_identity",
+    index: "idx_runs_project_identity",
+    ddl: "CREATE INDEX IF NOT EXISTS idx_runs_project_identity ON runs(project_identity)",
   },
   {
     table: "campaigns",
