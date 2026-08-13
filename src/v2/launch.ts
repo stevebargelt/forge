@@ -129,6 +129,18 @@ export type LaunchMeta = {
   // so a later reader can name the LAUNCHER's condition instead of blaming the child;
   // optional so a record written before FG-614 still loads.
   tmuxServerCwd?: TmuxServerCwd;
+  // FG-626: the per-invocation FORGE_-prefixed environment forwarded into the launched
+  // workload, and any FORGE_ var deliberately dropped (with the reason). Recorded so an
+  // operator can audit what env-gated behavior the workload actually ran under, and so a
+  // drop is warnable by name. Ordinary env-gate values (FORGE_WORKTREES,
+  // FORGE_CI_POLL_SECONDS, …) are recorded because the audit needs to distinguish =1 from
+  // =0 and 30 from 3000. RF-3: a FORGE_ NAME can carry credential material anyway
+  // (FORGE_AWS_CREDS_FOR_TEST, FORGE_CREDS_REFRESH, an injected FORGE_TOKEN), so a
+  // credential-bearing value is REDACTED at the point of recording — the NAME is still
+  // recorded (the gate is shown armed) but its value never lands in this world-readable
+  // record. The workload still receives the real value; redaction is audit-surface only.
+  // Optional so a record written before FG-626 still loads.
+  forwardedEnv?: ForgeEnvForwarding;
 };
 
 export type LaunchStatus =
@@ -300,6 +312,93 @@ export function parseExitRecord(raw: string): ExitRecord | undefined {
 /** POSIX single-quote escaping: safe to embed in a sh -c '<...>' string. */
 export function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;
+}
+
+// FG-626: a per-invocation FORGE_-prefixed variable forwarded into the launched
+// workload's environment, or one deliberately NOT forwarded (with the reason it
+// was dropped). Recorded on the launch so an operator can audit after the fact
+// exactly what env-gated behavior the workload actually ran under, and so a drop
+// can be WARNED about by name — never silently lost.
+export type ForwardedEnvVar = { name: string; value: string; redacted?: boolean };
+export type DroppedEnvVar = { name: string; reason: string };
+export type ForgeEnvForwarding = { forwarded: ForwardedEnvVar[]; dropped: DroppedEnvVar[] };
+
+// RF-3: the marker a credential-bearing forwarded value is replaced with in the durable
+// launch record and in `forge launch show`. It is not a value a caller could set (the
+// workload still gets the real value), so it is unambiguously "redacted", not literal.
+export const REDACTED_ENV_VALUE = "«redacted»";
+
+// RF-3: name segments that mark a FORGE_ variable as carrying secret material. Redaction
+// is a property of the NAME, decided here, NOT a scan of the value — an ordinary gate
+// (FORGE_WORKTREES, FORGE_CI_POLL_SECONDS) keeps its recorded value, while a credential
+// name (FORGE_AWS_CREDS_FOR_TEST, FORGE_CREDS_REFRESH, an injected FORGE_TOKEN) does not.
+// Segments are deliberately specific (ACCESS_KEY/API_KEY, not a bare KEY) so a benign gate
+// is never redacted into uselessness.
+const SECRET_ENV_NAME_SEGMENTS: readonly string[] = [
+  "CRED", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASSPHRASE",
+  "PRIVATE_KEY", "ACCESS_KEY", "API_KEY", "APIKEY",
+];
+
+/** RF-3: does this variable NAME mark it as credential-bearing? A name-based property,
+ *  applied at the point of recording — never a scan of the value. */
+export function isSecretForgeEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return SECRET_ENV_NAME_SEGMENTS.some((seg) => upper.includes(seg));
+}
+
+/** RF-3: the launch-record view of a forwarding plan — every forwarded NAME preserved,
+ *  but a credential-bearing value replaced with the redaction marker so it never lands in
+ *  meta.json or in `forge launch show`. PURE; does NOT alter what the workload receives
+ *  (that path reads the un-redacted plan). Dropped entries are audit reasons, not values,
+ *  and pass through unchanged. */
+export function redactForwardedEnvForRecord(forwarding: ForgeEnvForwarding): ForgeEnvForwarding {
+  return {
+    forwarded: forwarding.forwarded.map((v) =>
+      isSecretForgeEnvName(v.name) ? { name: v.name, value: REDACTED_ENV_VALUE, redacted: true } : v,
+    ),
+    dropped: forwarding.dropped,
+  };
+}
+
+// FG-626: FORGE_-prefixed variables that must NEVER be forwarded from the caller's
+// per-invocation env into the launched workload, each mapped to the reason so the
+// operator can be told by name. A drop here is a WARN, not a silent loss.
+const FORWARD_EXCLUDED: ReadonlyMap<string, string> = new Map([
+  // FG-569 (R2): the release identity is derived from forge's OWN release manifest
+  // (trustedReleaseId), NEVER read from ambient or forwarded env — a caller can set
+  // FORGE_RELEASE_ID to any value, so it cannot distinguish a genuine release from a
+  // poisoned dev launch. Forwarding it into the workload would reopen exactly the
+  // channel FG-569 closed, so it is dropped and the operator is told it was.
+  ["FORGE_RELEASE_ID", "the release identity is derived from forge's own release manifest (FG-569), never forwarded from caller env"],
+]);
+
+/** FG-626: decide which per-invocation FORGE_-prefixed variables are forwarded into a
+ *  launched workload and which are dropped (with a reason). PURE — reads only the env
+ *  it is handed. Only FORGE_-prefixed names are considered at all: PATH, TMUX,
+ *  TMUX_TMPDIR and auth vars are not FORGE_-prefixed and so are never swept along
+ *  (constraint 3 — whole-env forwarding is a strictly larger blast radius than this
+ *  needs). A name in FORWARD_EXCLUDED, or a value that cannot survive the tmux session
+ *  environment intact (a newline — `new-session -e` carries one VAR=VALUE argv element),
+ *  is DROPPED rather than forwarded — so it is warned about, never silently lost. */
+export function planForgeEnvForwarding(env: NodeJS.ProcessEnv): ForgeEnvForwarding {
+  const forwarded: ForwardedEnvVar[] = [];
+  const dropped: DroppedEnvVar[] = [];
+  for (const name of Object.keys(env).sort()) {
+    if (!name.startsWith("FORGE_")) continue;
+    const value = env[name];
+    if (value === undefined) continue;
+    const excludedReason = FORWARD_EXCLUDED.get(name);
+    if (excludedReason !== undefined) {
+      dropped.push({ name, reason: excludedReason });
+      continue;
+    }
+    if (value.includes("\n")) {
+      dropped.push({ name, reason: "the value contains a newline, which cannot be carried through the tmux session environment intact" });
+      continue;
+    }
+    forwarded.push({ name, value });
+  }
+  return { forwarded, dropped };
 }
 
 // FG-569 (R2): the TRUSTED release id — derived from the running forge's OWN
@@ -1115,7 +1214,7 @@ export function allocateLaunchId(name: string): string {
  *  callers whose durable pointer to this container must be committed BEFORE the
  *  container can exist; supplying an id that is already taken is refused rather than
  *  allowed to clobber another launch's record. */
-export function startLaunch(argv: string[], opts: { id?: string; name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
+export function startLaunch(argv: string[], opts: { id?: string; name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile; env?: NodeJS.ProcessEnv } = {}): LaunchMeta {
   if (argv.length === 0) throw new Error("forge launch run: no command given");
   // FG-555: refuse-before-execute. When a Forge-owned caller declares the
   // execution-environment contract, assert the toolchain BEFORE anything is
@@ -1183,6 +1282,16 @@ export function startLaunch(argv: string[], opts: { id?: string; name?: string; 
   }
   mkdirSync(dir, { recursive: true });
 
+  // FG-626: decide the per-invocation FORGE_ env to forward BEFORE the record is
+  // published, so the forwarded/dropped set is part of the durable launch record from
+  // its first write and a drop can be warned about by the caller. `forwardedEnv` carries
+  // the REAL values — the workload receives these (the `-e` args below). RF-3: the durable
+  // record instead stores the redacted view, so a credential-bearing FORGE_ value
+  // (FORGE_AWS_CREDS_FOR_TEST, an injected FORGE_TOKEN) never lands in meta.json or in
+  // `forge launch show`, while its name and ordinary gate values are still recorded.
+  const forwardedEnv = planForgeEnvForwarding(opts.env ?? process.env);
+  const recordedForwardedEnv = redactForwardedEnvForRecord(forwardedEnv);
+
   const meta: LaunchMeta = {
     id,
     command: argv,
@@ -1193,6 +1302,7 @@ export function startLaunch(argv: string[], opts: { id?: string; name?: string; 
     logPath: join(dir, "out.log"),
     cwd,
     tmuxServerCwd: serverCwd,
+    forwardedEnv: recordedForwardedEnv,
     // FG-569 (R1): captured here, in the submitting CLI, INDEPENDENTLY of the
     // recorder (R2) — the CLI is gone by the time anyone inspects this launch.
     control: collectControlRuntime(),
@@ -1240,7 +1350,20 @@ export function startLaunch(argv: string[], opts: { id?: string; name?: string; 
     // and workload resolve the contracted toolchain — never an ambient login
     // shell's PATH. Absent a profile, the session inherits the launcher env as
     // before.
-    const sessionEnv = opts.profile ? ["-e", `PATH=${opts.profile.path}`] : [];
+    //
+    // FG-626: forward the per-invocation FORGE_-prefixed variables through the SAME
+    // `new-session -e` channel — the mandated dispatch path (`forge launch run`) must
+    // carry the env-gated behaviors forge exists to gate (FORGE_WORKTREES, FORGE_CI_*,
+    // …), which a tmux session otherwise silently drops (it inherits only what the tmux
+    // SERVER had when it first started, never this invocation's env). The PATH pin is
+    // appended LAST so it WINS over any forwarded variable (tmux applies -e left to
+    // right): the FG-555 contract's pinned PATH must never be clobbered. Forwarded vars
+    // are FORGE_-prefixed and PATH is not, so they cannot collide today — appending the
+    // pin last is the belt-and-suspenders guarantee that a future forwarded PATH-like
+    // name still cannot defeat the contract.
+    const forwardedEnvArgs = forwardedEnv.forwarded.flatMap((v) => ["-e", `${v.name}=${v.value}`]);
+    const pathPin = opts.profile ? ["-e", `PATH=${opts.profile.path}`] : [];
+    const sessionEnv = [...forwardedEnvArgs, ...pathPin];
     tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, ...sessionEnv, "cat"]);
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);

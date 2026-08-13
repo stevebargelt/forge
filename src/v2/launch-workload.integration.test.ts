@@ -396,10 +396,19 @@ test("FG-555 contract pins the session PATH via `new-session -e` — the workloa
   // passes; the point under test is the pinned PATH reaching the tmux session.
   startLaunch([process.execPath, "-e", "0"], { name: "pinpath", tmux: stub.tmux, profile });
 
+  // FG-626 forwards per-invocation FORGE_ vars through the SAME `-e` channel, so the PATH
+  // pin is no longer necessarily the first -e. Locate the PATH pin specifically: it must
+  // be present exactly once as the contract's value, and LAST so it wins over any forwarded
+  // variable (constraint 1).
   const newSession = stub.calls.find((c) => c[0] === "new-session")!;
-  const eIdx = newSession.indexOf("-e");
-  assert.ok(eIdx >= 0, "new-session carries an -e env pin under the contract");
-  assert.equal(newSession[eIdx + 1], `PATH=${pinned}`, "the session PATH is the contract's pinned PATH, not the ambient one");
+  const pins: string[] = [];
+  for (let i = 0; i < newSession.length; i++) if (newSession[i] === "-e") pins.push(newSession[i + 1]!);
+  assert.deepEqual(
+    pins.filter((p) => p.startsWith("PATH=")),
+    [`PATH=${pinned}`],
+    "the session PATH is the contract's pinned PATH exactly once, not the ambient one",
+  );
+  assert.equal(pins[pins.length - 1], `PATH=${pinned}`, "the PATH pin is applied last, so it wins over any forwarded FORGE_ variable");
 });
 
 test("FG-555 readLaunch surfaces R3/R4 from workload.json; malformed is omitted (never guessed); absent reads as not-recorded", () => {

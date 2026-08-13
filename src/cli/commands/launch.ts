@@ -95,6 +95,17 @@ function renderView(v: LaunchView, logTailLines = 15): string {
   } else {
     lines.push(`workload: not recorded (launch predates R3/R4 capture, or the recorder has not run yet)`);
   }
+  // FG-626: the per-invocation FORGE_ env the workload actually ran under — the audit
+  // record for which env gates were armed. `forwarded` names each var carried into the
+  // workload; `dropped` names each FORGE_ var that did NOT survive, with the reason, so
+  // a silently-disarmed gate is impossible to miss after the fact.
+  if (v.forwardedEnv) {
+    const fwd = v.forwardedEnv.forwarded;
+    lines.push(`env fwd:  ${fwd.length === 0 ? "none (no FORGE_ variables on the invocation)" : fwd.map((e) => `${e.name}=${e.value}`).join("  ")}`);
+    for (const d of v.forwardedEnv.dropped) {
+      lines.push(`env drop: ${d.name} — NOT forwarded: ${d.reason}`);
+    }
+  }
   if (v.forgeIds.runIds.length > 0) lines.push(`runs:     ${v.forgeIds.runIds.join(", ")}`);
   if (v.forgeIds.taskIds.length > 0) lines.push(`tasks:    ${v.forgeIds.taskIds.join(", ")}`);
   if (logTailLines > 0) {
@@ -173,6 +184,14 @@ export function registerLaunch(program: Command): void {
       if (meta.tmuxServerCwd?.state === "missing") {
         console.error(tmuxServerCwdDiagnosis(meta.tmuxServerCwd));
         console.error("");
+      }
+      // FG-626: a FORGE_ variable present on THIS invocation that did NOT survive into the
+      // workload is NEVER dropped silently — the operator is warned, by name, with the
+      // reason. This is the backstop for the invariant "no env gate is silently disarmed":
+      // a caller who believes a gate is armed and finds it named here knows it is not. On
+      // stderr, so --json stays clean.
+      for (const d of meta.forwardedEnv?.dropped ?? []) {
+        console.error(`forge launch: WARNING — ${d.name} was NOT forwarded into the launched command and will not survive into it: ${d.reason}`);
       }
       if (opts.json) {
         console.log(JSON.stringify(meta, null, 2));
