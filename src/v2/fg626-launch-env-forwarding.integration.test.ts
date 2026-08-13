@@ -11,11 +11,11 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LAUNCHES_DIR, readLaunch, startLaunch, type TmuxRunner } from "./launch.js";
+import { LAUNCHES_DIR, controlRuntimeProfile, readLaunch, startLaunch, type TmuxRunner } from "./launch.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -109,5 +109,82 @@ test(
       meta.forwardedEnv?.dropped.some((d) => d.name === "FORGE_RELEASE_ID"),
       "the drop is durably recorded on the launch (audit), not only printed",
     );
+  },
+);
+
+test(
+  "FG-706: a bare node workload uses the recorder's pinned PATH for both R3 and execution despite a pre-existing hostile tmux-server PATH",
+  { skip: hasTmux ? false : "tmux not available" },
+  async () => {
+    // Start this server ourselves, before invoking forge, so its PATH is conclusively
+    // hostile. This is the real failure shape: `new-session -e PATH=…` does not replace
+    // this server value for a respawned pane. The socket is private and recorded in
+    // `sockets`, so teardown can only kill this test's server.
+    const sock = mkdtempSync("/tmp/fg706-sock-");
+    const hostileBin = mkdtempSync(join(scratch, "hostile-bin-"));
+    const hostileNodeRan = join(hostileBin, "ambient-node-ran");
+    const serverPath = `${hostileBin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+    sockets.push(sock);
+    writeFileSync(
+      join(hostileBin, "node"),
+      `#!/bin/sh\nprintf ambient-node-ran > ${JSON.stringify(hostileNodeRan)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    );
+    chmodSync(join(hostileBin, "node"), 0o755);
+    const serverEnv = { ...process.env, TMUX_TMPDIR: sock, PATH: serverPath };
+    assert.equal(
+      spawnSync("tmux", ["new-session", "-d", "-s", "fg706-hostile-server", "cat"], { encoding: "utf8", env: serverEnv }).status,
+      0,
+      "the private tmux server with the hostile PATH starts",
+    );
+    const tmux: TmuxRunner = (args) => execFileSync("tmux", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", env: serverEnv });
+    const profile = controlRuntimeProfile({ label: "control-runtime" });
+    const recorded = mkdtempSync(join(scratch, "fg706-pinned-"));
+    const meta = startLaunch(
+      ["node", "-e", "process.stdout.write('WORKLOAD_PATH=' + process.env.PATH + '\\nWORKLOAD_EXEC=' + process.execPath + '\\n')"],
+      { name: "fg706pinned", cwd: recorded, tmux, profile },
+    );
+
+    await waitFor("the profiled hostile-server launch to exit", () => existsSync(join(LAUNCHES_DIR, meta.id, "exit")));
+    const view = readLaunch(meta.id, tmux)!;
+    const log = readFileSync(view.logPath, "utf8");
+    const observedPath = log.match(/WORKLOAD_PATH=(.*)/)?.[1];
+    const observedExec = log.match(/WORKLOAD_EXEC=(.*)/)?.[1];
+    assert.equal(view.status.state, "exited_ok", "the bare-node workload completed under the profile");
+    assert.equal(observedPath, profile.path, "the WORKLOAD observed the pinned PATH, never the hostile tmux-server PATH");
+    assert.equal(observedPath!.split(":")[0], dirname(process.execPath), "the workload PATH begins with forge's control-node directory");
+    assert.equal(view.workload?.r3.kind, "derived", "bare argv[0] is resolved by the recorder as derived R3");
+    assert.equal(view.workload?.r3.kind === "derived" ? view.workload.r3.execPath : undefined, observedExec, "R3 records the same node executable that the workload actually ran");
+    assert.equal(observedExec, process.execPath, "the pinned resolver selected forge's control node, not the hostile server's node");
+    assert.equal(existsSync(hostileNodeRan), false, "the hostile tmux-server node was never invoked for either the probe or workload");
+  },
+);
+
+test(
+  "FG-706: without --require-control-toolchain the workload retains the pre-existing tmux-server PATH",
+  { skip: hasTmux ? false : "tmux not available" },
+  async () => {
+    const sock = mkdtempSync("/tmp/fg706-unprofiled-sock-");
+    const hostileBin = mkdtempSync(join(scratch, "unprofiled-bin-"));
+    const serverPath = `${hostileBin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+    sockets.push(sock);
+    const serverEnv = { ...process.env, TMUX_TMPDIR: sock, PATH: serverPath };
+    assert.equal(
+      spawnSync("tmux", ["new-session", "-d", "-s", "fg706-unprofiled-server", "cat"], { encoding: "utf8", env: serverEnv }).status,
+      0,
+      "the private unprofiled tmux server starts",
+    );
+    const tmux: TmuxRunner = (args) => execFileSync("tmux", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", env: serverEnv });
+    const recorded = mkdtempSync(join(scratch, "fg706-unprofiled-"));
+    const meta = startLaunch(
+      [process.execPath, "-e", "process.stdout.write('WORKLOAD_PATH=' + process.env.PATH + '\\n')"],
+      { name: "fg706unprofiled", cwd: recorded, tmux },
+    );
+
+    await waitFor("the unprofiled hostile-server launch to exit", () => existsSync(join(LAUNCHES_DIR, meta.id, "exit")));
+    const view = readLaunch(meta.id, tmux)!;
+    const observedPath = readFileSync(view.logPath, "utf8").match(/WORKLOAD_PATH=(.*)/)?.[1];
+    assert.equal(view.status.state, "exited_ok", "the unprofiled workload completed");
+    assert.equal(observedPath, serverPath, "without a profile, forge leaves the workload PATH inherited from its tmux server");
+    assert.equal(view.workload?.profile, undefined, "no control-toolchain profile is fabricated for an unprofiled launch");
   },
 );

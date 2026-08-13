@@ -213,15 +213,17 @@ test(
       assert.equal(shown.status, 0, `profiled launch show failed: ${shown.stderr}`);
       const view = JSON.parse(shown.stdout) as Launch;
       assert.equal(view.workload?.profile?.label, "control-runtime", "the durable workload profile identifies the control-runtime contract");
-      // Deliberately do NOT assert the workload-observed PATH: tmux's session-env
-      // pin does not reach a respawn-pane workload (FG-706). This FG-626 seam
-      // proves that forwarding neither displaces nor duplicates the session pin.
+      // FG-706: the control-toolchain PATH pin is applied inside the recorder, NOT via the
+      // tmux session env (tmux overrides `-e PATH=` with the server's own PATH, so it never
+      // reached the workload). So the session env must NOT carry a PATH pin — the workload-
+      // observed PATH is asserted end-to-end in launch-provenance-cli.integration.test.ts.
+      // This FG-626 seam proves only that forwarding rides the `-e` channel undisturbed.
       const sessionPath = spawnSync("tmux", ["show-environment", "-t", meta.tmuxSession, "PATH"], { encoding: "utf8" });
-      assert.equal(sessionPath.status, 0, `tmux could not read the launched session PATH: ${sessionPath.stderr}`);
-      assert.deepEqual(
-        sessionPath.stdout.trim().split("\n"),
-        [`PATH=${view.workload!.profile!.path}`],
-        "the profile PATH is present exactly once as the final tmux session value after forwarding",
+      // `show-environment` prints `-PATH` (or a non-zero status) when PATH is not a session
+      // variable — either way it must NOT report `PATH=<profile path>` set by forge.
+      assert.ok(
+        !sessionPath.stdout.includes(`PATH=${view.workload!.profile!.path}`),
+        "FG-706: forge no longer writes the inert profile PATH onto the tmux session env",
       );
     } finally {
       rmSync(home, { recursive: true, force: true });
