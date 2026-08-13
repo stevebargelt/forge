@@ -22,6 +22,21 @@ const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;
 type Launch = { id: string; logPath: string; tmuxSession: string; status?: { state: string }; forwardedEnv?: { forwarded: { name: string; value: string }[]; dropped: { name: string; reason: string }[] }; workload?: { profile?: { label?: string; path: string; requireAbi: string } } };
 type CliResult = { status: number | null; stdout: string; stderr: string };
 
+/**
+ * FG-707 deliberately drives its record assertions from the production allowlist rather
+ * than sampling names in this spec. The list is module-private (not part of the launch
+ * API), so read its declaration from the source that owns it; the count prevents a broad
+ * regex from silently accepting an unrelated set of strings.
+ */
+function nonSecretForgeEnvAllowlist(): string[] {
+  const source = readFileSync(resolve(repoRoot, "src", "v2", "launch.ts"), "utf8");
+  const declaration = source.match(/const NON_SECRET_FORGE_ENV_ALLOWLIST:[\s\S]*?new Set\(\[([\s\S]*?)\]\);/);
+  assert.ok(declaration, "launch.ts declares the FG-707 non-secret FORGE_ allowlist");
+  const names = [...declaration[1]!.matchAll(/"(FORGE_[A-Z0-9_]+)"/g)].map((match) => match[1]!);
+  assert.equal(names.length, 11, "FG-707 has exactly the eleven explicitly-reviewed safe names");
+  return names;
+}
+
 function forge(home: string, args: string[], env: NodeJS.ProcessEnv = {}): CliResult {
   const result = spawnSync(tsx, [entry, ...args], {
     cwd: repoRoot,
@@ -72,39 +87,62 @@ test(
 );
 
 test(
-  "RF-3 CLI: a credential-bearing FORGE_ var is REDACTED in meta.json and in `forge launch show`, yet reaches the workload with its real value; an ordinary gate keeps its value",
+  "FG-707 CLI: fail-closed allowlist — unlisted FORGE_ names (credential, FORGE_AUTH_MODE, an arbitrary name) are REDACTED in meta.json and `forge launch show`; allowlisted gates keep their value; the real value still reaches the workload",
   { skip: hasTmux ? false : "tmux not available" },
   async () => {
-    const home = mkdtempSync(join(tmpdir(), "fg626-cli-redact-"));
+    const home = mkdtempSync(join(tmpdir(), "fg707-cli-redact-"));
     const secret = "AWS_ACCESS_KEY_ID=AKIAEXAMPLE,AWS_SECRET_ACCESS_KEY=topsecretvalue,AWS_SESSION_TOKEN=sessiontok";
+    const allowlisted = nonSecretForgeEnvAllowlist();
+    const allowlistedValues = Object.fromEntries(allowlisted.map((name, index) => [name, `allowlisted-value-${index}`]));
     try {
-      // The workload writes the value it actually sees to a side file OUTSIDE the launch
+      // The workload writes the values it actually sees to a side file OUTSIDE the launch
       // record — never to its stdout (that log tail is rendered by `forge launch show`) and
-      // never embedded in argv (that is recorded as meta.command). Both would leak the secret
-      // through a surface RF-3 does not govern, masking whether the ENV RECORD is redacted.
-      const seen = join(home, "seen-creds.txt");
-      const probe = `require('fs').writeFileSync(${JSON.stringify(seen)}, process.env.FORGE_AWS_CREDS_FOR_TEST || 'ABSENT')`;
+      // never embedded in argv (that is recorded as meta.command). Both would leak through a
+      // surface redaction does not govern, masking whether the ENV RECORD is redacted.
+      const seen = join(home, "seen-env.txt");
+      const probe = `require('fs').writeFileSync(${JSON.stringify(seen)}, [process.env.FORGE_AWS_CREDS_FOR_TEST, process.env.FORGE_AUTH_MODE, process.env.FORGE_SOMETHING_UNKNOWN].join('|'))`;
       const meta = launch(
         home,
         ["--name", "redact", "--", process.execPath, "-e", probe],
-        { FORGE_AWS_CREDS_FOR_TEST: secret, FORGE_WORKTREES: "1" },
+        {
+          FORGE_AWS_CREDS_FOR_TEST: secret,
+          FORGE_AUTH_MODE: "mount",
+          FORGE_SOMETHING_UNKNOWN: "arbitraryunlistedvalue",
+          ...allowlistedValues,
+        },
       );
       await waitFor("the launched workload output", () => existsSync(seen));
 
-      // The workload got the REAL value — redaction is audit-surface only, the gate is armed.
-      assert.equal(readFileSync(seen, "utf8"), secret, "the workload saw the un-redacted credential value");
+      // AC5: the workload got the REAL values — redaction is audit-surface only, gates armed.
+      assert.equal(readFileSync(seen, "utf8"), `${secret}|mount|arbitraryunlistedvalue`, "the workload saw every un-redacted value");
 
-      // The durable record on disk carries the NAME but NOT the secret material.
+      // AC2/AC3: the durable record on disk carries the NAMES but not the unlisted VALUES.
       const metaJson = readFileSync(join(home, "launches", meta.id, "meta.json"), "utf8");
-      assert.ok(!metaJson.includes("topsecretvalue"), "no secret material is written into the durable launch record");
-      assert.match(metaJson, /FORGE_AWS_CREDS_FOR_TEST/, "the forwarded credential's NAME is still recorded (the gate is shown armed)");
+      assert.ok(!metaJson.includes("topsecretvalue"), "no credential material is written into the durable launch record");
+      assert.ok(!metaJson.includes("arbitraryunlistedvalue"), "an arbitrary unlisted value is not written into the durable launch record");
+      const recorded = (JSON.parse(metaJson) as Launch).forwardedEnv!.forwarded;
+      const byName = (n: string) => recorded.find((f) => f.name === n)!;
+      assert.equal(byName("FORGE_AWS_CREDS_FOR_TEST").value, "«redacted»", "the credential's NAME is recorded with a redacted value");
+      // AC2: FORGE_AUTH_MODE's NAME is recorded, but its value redacted — not 'mount'.
+      assert.equal(byName("FORGE_AUTH_MODE").value, "«redacted»", "FORGE_AUTH_MODE is redacted in meta.json (not allowlisted)");
+      // Property: EVERY explicitly reviewed allowlist member reaches the durable record
+      // verbatim. Reading the production list above means a newly added safe gate cannot
+      // quietly escape this regression coverage.
+      for (const [name, value] of Object.entries(allowlistedValues)) {
+        assert.equal(byName(name).value, value, `${name} keeps its value in meta.json`);
+      }
 
-      // `forge launch show` renders the credential redacted, but the ordinary gate verbatim.
+      // `forge launch show` renders unlisted values redacted, allowlisted gates verbatim.
       const human = forge(home, ["launch", "show", meta.id]);
       assert.equal(human.status, 0, `forge launch show failed: ${human.stderr}`);
-      assert.ok(!human.stdout.includes("topsecretvalue"), "launch show never prints the secret material");
+      assert.ok(!human.stdout.includes("topsecretvalue"), "launch show never prints the credential material");
+      assert.ok(!human.stdout.includes("arbitraryunlistedvalue"), "launch show never prints the arbitrary unlisted value");
       assert.match(human.stdout, /FORGE_AWS_CREDS_FOR_TEST=«redacted»/, "launch show renders the credential value redacted, by name");
-      assert.match(human.stdout, /env fwd:.*FORGE_WORKTREES=1/, "an ordinary gate keeps its value in launch show");
+      assert.match(human.stdout, /FORGE_AUTH_MODE=«redacted»/, "AC2: launch show renders FORGE_AUTH_MODE redacted, by name");
+      assert.match(human.stdout, /FORGE_SOMETHING_UNKNOWN=«redacted»/, "AC3: launch show renders an arbitrary unlisted name redacted, by name");
+      for (const [name, value] of Object.entries(allowlistedValues)) {
+        assert.ok(human.stdout.includes(`${name}=${value}`), `${name} keeps its value in launch show`);
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

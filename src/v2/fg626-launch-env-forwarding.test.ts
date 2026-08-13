@@ -14,7 +14,7 @@ import {
   listLaunches,
   planForgeEnvForwarding,
   redactForwardedEnvForRecord,
-  isSecretForgeEnvName,
+  isAllowlistedForgeEnvName,
   REDACTED_ENV_VALUE,
   startLaunch,
   type LaunchProfile,
@@ -91,22 +91,32 @@ test("FG-626: an empty-string FORGE_ value is forwarded (present-but-empty is a 
   assert.deepEqual(plan.forwarded, [{ name: "FORGE_NOTIFY", value: "" }]);
 });
 
-// ── RF-3: credential-bearing FORGE_ values are redacted at the point of RECORDING ─
+// ── FG-707: recording is a fail-closed ALLOWLIST — only enumerated gate values are kept ─
 
-test("RF-3: redaction is a property of the NAME — credential names redact, ordinary gates do not", () => {
-  assert.equal(isSecretForgeEnvName("FORGE_AWS_CREDS_FOR_TEST"), true, "a CREDS name is secret");
-  assert.equal(isSecretForgeEnvName("FORGE_CREDS_REFRESH"), true, "the adjacent CREDS name is secret");
-  assert.equal(isSecretForgeEnvName("FORGE_TOKEN"), true, "an injected TOKEN name is secret");
-  assert.equal(isSecretForgeEnvName("FORGE_WORKTREES"), false, "an ordinary gate is not secret");
-  assert.equal(isSecretForgeEnvName("FORGE_CI_POLL_SECONDS"), false, "an ordinary gate is not secret");
-  assert.equal(isSecretForgeEnvName("FORGE_AUTH_MODE"), false, "a mode selector is not a credential and keeps its value");
+test("FG-707: only an allowlisted gate NAME keeps its recorded value; every other FORGE_ name is redacted BY DESIGN", () => {
+  // On the allowlist: the audit needs these values.
+  assert.equal(isAllowlistedForgeEnvName("FORGE_WORKTREES"), true, "an enumerated worktree gate keeps its value");
+  assert.equal(isAllowlistedForgeEnvName("FORGE_CI_POLL_SECONDS"), true, "an enumerated CI knob keeps its value");
+  assert.equal(isAllowlistedForgeEnvName("FORGE_CONTROLLER_ID"), true, "an enumerated controller id keeps its value");
+  // Not on the allowlist → redacted. A credential name, obviously.
+  assert.equal(isAllowlistedForgeEnvName("FORGE_AWS_CREDS_FOR_TEST"), false, "a credential name is not on the allowlist");
+  assert.equal(isAllowlistedForgeEnvName("FORGE_TOKEN"), false, "an injected TOKEN name is not on the allowlist");
+  // AC2: FORGE_AUTH_MODE is a mode selector, NOT a credential — but under fail-closed an
+  // unlisted name is redacted regardless. This is the FG-626 recheck's own counterexample.
+  assert.equal(isAllowlistedForgeEnvName("FORGE_AUTH_MODE"), false, "FORGE_AUTH_MODE is not allowlisted, so its value is redacted");
+  // AC3: an arbitrary unlisted name is redacted — the defining fail-closed property. A name we
+  // never enumerated (a future secret gate) is redacted the moment it exists, not by omission.
+  assert.equal(isAllowlistedForgeEnvName("FORGE_SOMETHING_UNKNOWN"), false, "an arbitrary unlisted name is redacted");
 });
 
-test("RF-3: redactForwardedEnvForRecord redacts the credential VALUE but keeps the NAME, and leaves ordinary gates intact", () => {
+test("FG-707: redactForwardedEnvForRecord keeps allowlisted values verbatim and redacts everything else, name preserved", () => {
   const redacted = redactForwardedEnvForRecord({
     forwarded: [
       { name: "FORGE_AWS_CREDS_FOR_TEST", value: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t" },
+      { name: "FORGE_AUTH_MODE", value: "mount" },
+      { name: "FORGE_SOMETHING_UNKNOWN", value: "arbitrary" },
       { name: "FORGE_WORKTREES", value: "1" },
+      { name: "FORGE_CI_POLL_SECONDS", value: "30" },
     ],
     dropped: [{ name: "FORGE_RELEASE_ID", reason: "release identity" }],
   });
@@ -114,20 +124,40 @@ test("RF-3: redactForwardedEnvForRecord redacts the credential VALUE but keeps t
     redacted.forwarded,
     [
       { name: "FORGE_AWS_CREDS_FOR_TEST", value: REDACTED_ENV_VALUE, redacted: true },
+      { name: "FORGE_AUTH_MODE", value: REDACTED_ENV_VALUE, redacted: true },
+      { name: "FORGE_SOMETHING_UNKNOWN", value: REDACTED_ENV_VALUE, redacted: true },
       { name: "FORGE_WORKTREES", value: "1" },
+      { name: "FORGE_CI_POLL_SECONDS", value: "30" },
     ],
-    "the credential value is replaced with the marker (name preserved); the ordinary gate keeps its value verbatim",
+    "unlisted names (credential, mode selector, arbitrary) are all redacted; allowlisted gates keep their value verbatim",
   );
   assert.ok(!redacted.forwarded[0]!.value.includes("AWS_SECRET_ACCESS_KEY"), "no secret material survives into the record");
   assert.deepEqual(redacted.dropped, [{ name: "FORGE_RELEASE_ID", reason: "release identity" }], "dropped audit reasons pass through unchanged");
 });
 
-test("RF-3: startLaunch RECORDS the credential redacted, but FORWARDS the real value to the workload", () => {
+test("FG-707: allowlist membership is exact — prefix, suffix, and casing near-misses are redacted", () => {
+  const nearMisses = ["FORGE_WORKTREES_X", "FORGE_CI_POLL_SECONDS_EXTRA", "forge_worktrees"];
+  const redacted = redactForwardedEnvForRecord({
+    forwarded: nearMisses.map((name) => ({ name, value: `attacker-controlled-${name}` })),
+    dropped: [],
+  });
+
+  assert.deepEqual(
+    redacted.forwarded,
+    nearMisses.map((name) => ({ name, value: REDACTED_ENV_VALUE, redacted: true })),
+    "only an exact, case-sensitive allowlist member can retain its audit value",
+  );
+  for (const name of nearMisses) {
+    assert.equal(isAllowlistedForgeEnvName(name), false, `${name} is not an allowlist member`);
+  }
+});
+
+test("FG-707: startLaunch RECORDS an unlisted value redacted, but FORWARDS the real value to the workload", () => {
   const stub = tmuxStub();
   const meta = startLaunch([process.execPath, "-e", "0"], {
     name: "fg626redact",
     tmux: stub.tmux,
-    env: { ...process.env, FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t", FORGE_WORKTREES: "1" },
+    env: { ...process.env, FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t", FORGE_AUTH_MODE: "mount", FORGE_WORKTREES: "1" },
   });
 
   // Recorded surface: the credential name is present but its value is redacted; the
@@ -136,16 +166,22 @@ test("RF-3: startLaunch RECORDS the credential redacted, but FORWARDS the real v
   const creds = rec.find((f) => f.name === "FORGE_AWS_CREDS_FOR_TEST")!;
   assert.equal(creds.value, REDACTED_ENV_VALUE, "the credential value is redacted in the durable record");
   assert.equal(creds.redacted, true, "and flagged as a deliberate redaction");
+  // AC2: FORGE_AUTH_MODE is unlisted, so its value is redacted in meta.json too — the
+  // fail-closed counterexample, proven on the durable record surface.
+  const authMode = rec.find((f) => f.name === "FORGE_AUTH_MODE")!;
+  assert.equal(authMode.value, REDACTED_ENV_VALUE, "FORGE_AUTH_MODE is redacted in the durable record (not on the allowlist)");
+  assert.equal(authMode.redacted, true, "and flagged as a deliberate redaction");
   assert.ok(rec.some((f) => f.name === "FORGE_WORKTREES" && f.value === "1" && !f.redacted), "the ordinary gate keeps its recorded value");
   assert.ok(!JSON.stringify(meta.forwardedEnv).includes("AWS_SECRET_ACCESS_KEY"), "no secret material anywhere in the recorded env");
 
-  // Workload surface: the real credential value still reaches the session env unredacted —
-  // redaction is an audit-surface concern only, never a functional one.
+  // Workload surface: the real values still reach the session env unredacted — redaction is
+  // an audit-surface concern only, never a functional one.
   const pins = envPins(stub.calls.find((c) => c[0] === "new-session")!);
   assert.ok(
     pins.includes("FORGE_AWS_CREDS_FOR_TEST=AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t"),
     "the workload receives the REAL credential value — the gate is armed, only the record is redacted",
   );
+  assert.ok(pins.includes("FORGE_AUTH_MODE=mount"), "the workload receives the REAL FORGE_AUTH_MODE value — redaction never disarms the gate");
   assert.ok(pins.includes("FORGE_WORKTREES=1"), "the ordinary gate reaches the workload too");
 });
 
