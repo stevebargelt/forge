@@ -213,15 +213,17 @@ test("FG-626: startLaunch forwards the FORGE_ vars into the session via `new-ses
   assert.ok(!fwd.some((f) => f.name === "PATH"), "PATH is never in the recorded forwarded set");
 });
 
-// ── constraint 1: the FG-555 PATH pin is never clobbered by a forwarded variable ─
+// ── constraint 1: forwarding is independent of the FG-555 PATH pin ────────────────
 
-test("FG-626 (constraint 1): a forwarded FORGE_ var does NOT clobber the FG-555 pinned PATH", () => {
+test("FG-626 (constraint 1): forwarding a FORGE_ var never puts PATH on the session env — the FG-706 recorder pin is what protects the workload, not the session env", () => {
   const stub = tmuxStub();
   const pinned = `${dirname(process.execPath)}:/fg626-pin-marker`;
   const profile: LaunchProfile = { path: pinned, requireAbi: process.versions.modules, label: "control-runtime" };
   // A direct node interpreter (provable under the fail-closed contract), so the guard
-  // passes; the point under test is that forwarding does not disturb the pin. The ambient
-  // PATH is deliberately hostile so a leak would be visible.
+  // passes; the point under test is that forwarding rides the `-e` channel while the PATH
+  // pin does NOT — FG-706 moved the pin into the recorder because tmux cannot carry PATH
+  // to a respawn-pane workload. The ambient PATH is deliberately hostile so a leak of it
+  // onto the session env would be visible.
   startLaunch([process.execPath, "-e", "0"], {
     name: "fg626pin",
     tmux: stub.tmux,
@@ -233,12 +235,10 @@ test("FG-626 (constraint 1): a forwarded FORGE_ var does NOT clobber the FG-555 
   const pins = envPins(newSession);
   assert.deepEqual(
     pins.filter((p) => p.startsWith("PATH=")),
-    [`PATH=${pinned}`],
-    "PATH is pinned to the contract EXACTLY once — never the ambient/forwarded one",
+    [],
+    "no PATH is written to the session env — never the pinned one (that lives in the recorder) and never the ambient/forwarded one",
   );
-  assert.ok(pins.includes("FORGE_WORKTREES=1"), "the FORGE_ var is still forwarded alongside the pin");
-  // The pin is the LAST -e so it wins even if a name ever collided.
-  assert.equal(pins[pins.length - 1], `PATH=${pinned}`, "the PATH pin is applied last, so it wins over any forwarded variable");
+  assert.ok(pins.includes("FORGE_WORKTREES=1"), "the FORGE_ var is still forwarded through the `-e` channel");
 });
 
 // ── constraint 2: a caller-supplied FORGE_RELEASE_ID never becomes the recorded id ─

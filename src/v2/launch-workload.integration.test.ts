@@ -386,29 +386,45 @@ test("FG-555 contract satisfied: the matching control toolchain is NOT refused �
   assert.ok(stub.calls.some((c) => c[0] === "new-session"), "a matching toolchain proceeds to create the session");
 });
 
-test("FG-555 contract pins the session PATH via `new-session -e` — the workload never inherits an ambient login-shell PATH", () => {
-  const stub = tmuxStub();
-  // node resolves to the real control node (dir first) so the guard passes; the
-  // point under test is the pinned PATH reaching the tmux session.
-  const pinned = `${dirname(process.execPath)}:/fg555-pinned-marker`;
+test("FG-706 contract pins the WORKLOAD's PATH inside the recorder — the workload observes the pinned PATH, and the session env carries NO inert PATH pin", () => {
+  // FG-706: tmux cannot carry PATH into a respawn-pane workload (`new-session -e PATH=`
+  // is overridden by the tmux server's own PATH), so pinning it in the session env was
+  // inert — the workload observed the ambient PATH. The pin now lives in the recorder,
+  // which mutates its own PATH before it resolves R3, probes the interpreter, and spawns
+  // argv[0] directly. Two facts here: (1) the WORKLOAD observes the pinned PATH even when
+  // spawned under a deliberately-hostile ambient env, and (2) startLaunch no longer emits
+  // an `-e PATH=` the workload would never have seen.
+  const marker = "/fg706-pinned-marker";
+  const pinned = `${dirname(process.execPath)}:${marker}`;
   const profile: LaunchProfile = { path: pinned, requireAbi: process.versions.modules, label: "control-runtime" };
-  // A direct node interpreter (provable under the fail-closed contract) so the guard
-  // passes; the point under test is the pinned PATH reaching the tmux session.
-  startLaunch([process.execPath, "-e", "0"], { name: "pinpath", tmux: stub.tmux, profile });
 
-  // FG-626 forwards per-invocation FORGE_ vars through the SAME `-e` channel, so the PATH
-  // pin is no longer necessarily the first -e. Locate the PATH pin specifically: it must
-  // be present exactly once as the contract's value, and LAST so it wins over any forwarded
-  // variable (constraint 1).
+  // (1) Run the REAL recorder (via /bin/sh, exactly as the tmux pane does) under a hostile
+  // ambient PATH. The workload prints its OWN observed process.env.PATH — the fact FG-706
+  // turns on, which the session-env pin never delivered.
+  const { workload, log } = runRecorder(
+    [process.execPath, "-e", "process.stdout.write('WLPATH=' + process.env.PATH + '\\n')"],
+    { ...process.env, PATH: "/hostile/ambient/bin:/usr/bin" },
+    profile,
+  );
+  assert.ok(workload, "the recorder wrote workload.json under the pinned profile");
+  const observed = log.match(/WLPATH=(.*)/)?.[1];
+  assert.ok(observed, "the workload printed its observed PATH");
+  assert.equal(observed, pinned, "the WORKLOAD observes the pinned profile PATH exactly — not the hostile ambient env it was spawned under");
+  assert.equal(observed!.split(":")[0], dirname(process.execPath), "the workload PATH BEGINS with the control-node-first pinned entry");
+
+  // (2) startLaunch no longer writes a session-env PATH pin — it would be inert, and
+  // leaving it in place is exactly the trap FG-706 removed. Forwarded FORGE_ vars still ride
+  // the `-e` channel; only the PATH pin is gone.
+  const stub = tmuxStub();
+  startLaunch([process.execPath, "-e", "0"], { name: "pinpath", tmux: stub.tmux, profile });
   const newSession = stub.calls.find((c) => c[0] === "new-session")!;
   const pins: string[] = [];
   for (let i = 0; i < newSession.length; i++) if (newSession[i] === "-e") pins.push(newSession[i + 1]!);
   assert.deepEqual(
     pins.filter((p) => p.startsWith("PATH=")),
-    [`PATH=${pinned}`],
-    "the session PATH is the contract's pinned PATH exactly once, not the ambient one",
+    [],
+    "FG-706: the session env carries NO PATH pin — the recorder owns the pin, so no inert PATH is written here",
   );
-  assert.equal(pins[pins.length - 1], `PATH=${pinned}`, "the PATH pin is applied last, so it wins over any forwarded FORGE_ variable");
 });
 
 test("FG-555 readLaunch surfaces R3/R4 from workload.json; malformed is omitted (never guessed); absent reads as not-recorded", () => {

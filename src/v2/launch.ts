@@ -482,6 +482,18 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
   return [
     `const{spawnSync}=require("child_process"),fs=require("fs"),pth=require("path");`,
     `const[e,l,rt,...a]=process.argv.slice(1);`,
+    // FG-706: APPLY THE PIN HERE — the seam the whole contract actually reaches the
+    // workload through. tmux CANNOT carry PATH into a respawn-pane workload (`-e PATH=`
+    // is overridden by the tmux server's own PATH, proven on the host), so pinning it in
+    // startLaunch's `new-session -e` was inert. The recorder spawns argv[0] DIRECTLY, so
+    // mutating THIS process's PATH here makes both the child's inherited env AND spawnSync's
+    // own PATH lookup use the pinned toolchain. It MUST precede every PATH-dependent step
+    // below — the R3 provenance walk, the effective-interpreter probe, and the spawn — so
+    // R3 records the executable that ACTUALLY runs (resolved under the pinned PATH), never
+    // one resolved against the ambient PATH while the workload runs under the pinned one.
+    // The profile (or null) is baked in as a JSON literal — the SAME trusted, ambient-env-
+    // independent channel as releaseId — so nothing here re-derives the contract.
+    `const _pin=${profileLiteral};if(_pin&&typeof _pin.path==="string"&&_pin.path!==""){process.env.PATH=_pin.path;}`,
     `fs.writeFileSync(rt,JSON.stringify({execPath:process.execPath,abi:process.versions.modules,nodeVersion:process.version,releaseId:${releaseIdLiteral}}));`,
     // FG-555 (R3/R4): resolve argv[0] and classify a nested shell HERE, in the
     // recorder — the environment the command actually runs under (mirrors the pure
@@ -900,8 +912,9 @@ function toolchainRefusal(profile: LaunchProfile, effectiveArgv0: string, catego
 
 /** Refuse-before-execute (FG-555). The OPERATOR-DECIDED contract (the FG-555
  *  pinned-PATH-trust decision, Option A — this is the intended shape, not a gap):
- *  the pinned control PATH (`new-session -e PATH=<control-node-dir>:<orig>`) IS the
- *  protection. Under `--require-control-toolchain` the contract runs a command BEFORE
+ *  the pinned control PATH (control-node-first, applied to the workload inside the
+ *  recorder — FG-706, since tmux cannot carry PATH into a respawn-pane workload) IS
+ *  the protection. Under `--require-control-toolchain` the contract runs a command BEFORE
  *  any tmux session exists ONLY for an ALLOWED effective argv[0], and refuses the rest
  *  with ONE named message. After skipping leading `VAR=VAL` assignments that do NOT
  *  mutate PATH and a bounded set of non-PATH-mutating exec-prefixes (see
@@ -1377,25 +1390,22 @@ export function startLaunch(argv: string[], opts: { id?: string; name?: string; 
     // baked into the recorder wrapper as a JSON literal, so the recorded id cannot
     // be forged by a caller-supplied FORGE_RELEASE_ID and does not depend on tmux
     // propagating any client env var into the session.
-    // FG-555: when the caller declared the contract, pin the session PATH to the
-    // contract's (control-node-first) PATH via `new-session -e`, so the recorder
-    // and workload resolve the contracted toolchain — never an ambient login
-    // shell's PATH. Absent a profile, the session inherits the launcher env as
-    // before.
-    //
-    // FG-626: forward the per-invocation FORGE_-prefixed variables through the SAME
+    // FG-626: forward the per-invocation FORGE_-prefixed variables through the
     // `new-session -e` channel — the mandated dispatch path (`forge launch run`) must
     // carry the env-gated behaviors forge exists to gate (FORGE_WORKTREES, FORGE_CI_*,
     // …), which a tmux session otherwise silently drops (it inherits only what the tmux
-    // SERVER had when it first started, never this invocation's env). The PATH pin is
-    // appended LAST so it WINS over any forwarded variable (tmux applies -e left to
-    // right): the FG-555 contract's pinned PATH must never be clobbered. Forwarded vars
-    // are FORGE_-prefixed and PATH is not, so they cannot collide today — appending the
-    // pin last is the belt-and-suspenders guarantee that a future forwarded PATH-like
-    // name still cannot defeat the contract.
-    const forwardedEnvArgs = forwardedEnv.forwarded.flatMap((v) => ["-e", `${v.name}=${v.value}`]);
-    const pathPin = opts.profile ? ["-e", `PATH=${opts.profile.path}`] : [];
-    const sessionEnv = [...forwardedEnvArgs, ...pathPin];
+    // SERVER had when it first started, never this invocation's env). These names are
+    // ABSENT from the server's environment, so `-e` genuinely carries them through.
+    //
+    // FG-706: the FG-555 control-toolchain PATH pin is DELIBERATELY NOT set here. A
+    // `new-session -e PATH=` is inert for the workload — the tmux server overrides PATH
+    // with its own value, so a respawn-pane workload never observed the pinned PATH
+    // (reproduced on the host). The pin is now applied where it actually reaches the
+    // workload: inside the recorder (exitRecorderScript), which mutates its own PATH
+    // before it resolves R3, probes the interpreter, and spawns argv[0] directly. The
+    // authoritative record of the pin is workload.profile.path, not the session env —
+    // so nothing is lost by not writing a PATH the workload would never have seen.
+    const sessionEnv = forwardedEnv.forwarded.flatMap((v) => ["-e", `${v.name}=${v.value}`]);
     tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, ...sessionEnv, "cat"]);
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);

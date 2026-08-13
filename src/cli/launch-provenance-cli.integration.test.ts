@@ -252,6 +252,40 @@ test("FG-555 CLI positive wiring: `forge launch run --require-control-toolchain`
   }
 });
 
+test("FG-706 CLI: the launched WORKLOAD observes the pinned control PATH end-to-end — not the ambient login-shell PATH the tmux server carried", () => {
+  const home = freshHome();
+  // The fact AC2 turns on: what the WORKLOAD observes, through the REAL launch path
+  // (bin/forge → tmux → recorder → workload). The prior tests asserted argv construction
+  // and the session env, both of which were correct while the workload PATH was wrong.
+  // The workload writes its OWN observed process.env.PATH to a side file (not stdout — a
+  // log tail is a different surface). A hostile marker dir is prepended to the ambient
+  // PATH so the pinned first entry (the control-node dir) is distinguishable from it, and
+  // the marker appears in the pinned profile PATH but never in the tmux server's PATH — so
+  // a workload that fell back to the server PATH would fail the exact-equality assertion.
+  const seen = join(home, "wl-path.txt");
+  const hostileFirst = "/fg706-ambient-not-pinned";
+  try {
+    const probe = `require('fs').writeFileSync(${JSON.stringify(seen)}, process.env.PATH || '')`;
+    const r = spawnSync(
+      forgeBin,
+      ["launch", "run", "--json", "--require-control-toolchain", "--name", "wlpath", "--", process.execPath, "-e", probe],
+      { encoding: "utf8", env: { ...process.env, FORGE_HOME: home, PATH: `${hostileFirst}:${process.env.PATH ?? ""}` } },
+    );
+    assert.equal(r.status, 0, `launch failed (${r.status}): ${r.stderr}\n${r.stdout}`);
+    const meta = JSON.parse(r.stdout);
+    const v = showJsonWhenDone(home, meta.id);
+    assert.equal(v.status.state, "exited_ok", "the pinned-PATH workload ran to completion under the contract");
+
+    const observed = readFileSync(seen, "utf8");
+    const pinned = v.workload.profile.path;
+    assert.equal(observed, pinned, "the WORKLOAD observed the recorded pinned profile PATH exactly — the pin reached the workload, not just the session env");
+    assert.equal(observed.split(":")[0], dirname(process.execPath), "AC1: the workload PATH BEGINS with the control-node-first pinned entry");
+    assert.notEqual(observed.split(":")[0], hostileFirst, "the workload never observed the ambient login-shell PATH first");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("FG-555 CLI runtime provenance: `forge launch run --require-control-toolchain -- node …` serializes the effective interpreter's ABI/version AND the pinned profile in --json, and renders both in the human view", () => {
   const home = freshHome();
   try {
