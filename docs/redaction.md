@@ -45,21 +45,29 @@ config references, not credential material.
   secrets) — only an exit code and a generic reason.
 - Reds never receive auth state, regardless of profile `roles`.
 
-## Launch env forwarding (FG-626 / RF-3)
+## Launch env forwarding (FG-626 / FG-707)
 
 `forge launch run` forwards every `FORGE_`-prefixed variable on the invocation into
 the launched workload, and records the forwarded/dropped set on the durable launch
-record (`meta.json`) for audit — see `docs/concepts.md` → **Durable launch**. A
-`FORGE_`-prefixed name can still carry credential material (an injected
-`FORGE_TOKEN`, `FORGE_AWS_CREDS_FOR_TEST`, …), so the recorded value is redacted by
-**name**, not by scanning the value: `isSecretForgeEnvName` (`src/v2/launch.ts`)
-matches credential-shaped segments (`CRED`, `SECRET`, `TOKEN`,
-`PASSWORD`/`PASSWD`/`PASSPHRASE`, `PRIVATE_KEY`, `ACCESS_KEY`, `API_KEY`/`APIKEY`);
-a match is replaced with the `«redacted»` marker in `meta.json` and in `forge
-launch show`, while an ordinary gate (`FORGE_WORKTREES`, `FORGE_CI_POLL_SECONDS`)
-keeps its recorded value. The workload itself always receives the real,
-un-redacted value over the `-e` channel — redaction applies only to the durable
-record and its human rendering, never to what the launched command sees.
+record (`meta.json`) for audit — see `docs/concepts.md` → **Durable launch**. The
+recorded value is redacted by a **fail-closed allowlist**, not a scan of the value:
+`isAllowlistedForgeEnvName` (`src/v2/launch.ts`) checks the NAME against
+`NON_SECRET_FORGE_ENV_ALLOWLIST` — ten gate names (`FORGE_WORKTREES`,
+`FORGE_NO_WORKTREES`, `FORGE_WORKTREE_IGNORE_DIRTY`, `FORGE_WORKTREES_EPHEMERAL`,
+`FORGE_CI_POLL_SECONDS`, `FORGE_CI_WAIT_TIMEOUT_SECONDS`, `FORGE_NO_BROWSER`,
+`FORGE_NO_NM_SHADOW`, `FORGE_CONTAINER_RETENTION`, `FORGE_NOTIFY_ON`) whose value
+the audit genuinely needs and which carry no secret. A name on that list keeps its
+recorded value; **every other name is redacted by default** — including
+`FORGE_CONTROLLER_ID` (the lease-fencing controller identity: capability-adjacent,
+not configuration — see `docs/concepts.md` → **Campaign** → **Crash recovery**) and any
+credential-bearing name never enumerated (an injected `FORGE_TOKEN`,
+`FORGE_AWS_CREDS_FOR_TEST`, …) — replaced with the `«redacted»` marker in
+`meta.json` and in `forge launch show`. This inverts FG-626's original RF-3
+denylist, which matched credential-shaped name segments (`CRED`, `SECRET`,
+`TOKEN`, …) and failed **open**: a credential-bearing name that matched no listed
+segment was recorded and printed verbatim. The workload itself always receives the
+real, un-redacted value over the `-e` channel — redaction applies only to the
+durable record and its human rendering, never to what the launched command sees.
 
 ## Events / exports
 
