@@ -9,6 +9,16 @@ export type EventType =
   | "run.reconciled"
   | "run.cancelled"
   | "run.abandoned"
+  // FG-635: an invoke finalize attempt could NOT settle the run because its workflow
+  // EXISTS but failed to load (schema-invalid, malformed YAML, unreadable, a torn seed
+  // generation) — so forge cannot enumerate the phases and cannot prove every one is
+  // terminal. The run is deliberately left open (its phase coverage is unknowable), and
+  // this is the durable, operator-readable record of WHY it is not closing, so the
+  // recovery is "fix the workflow or `forge cancel`" rather than a mystery. Distinct
+  // from an external/unregistered-workflow run (#201), which has no registered
+  // definition, stays invoke-shaped, and completes normally with no such event. Payload:
+  // { workflow, workflowLoadError, source: "invoke" }.
+  | "run.finalize_blocked"
   | "task.created"
   | "task.started"
   | "task.completed"
