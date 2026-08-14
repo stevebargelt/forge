@@ -12,13 +12,24 @@
 // only re-enters failed tasks, and reconcile never completes a workflow primary
 // (it fails them unfinalized).
 //
-// Two ingestion paths complete an implementer result WITHOUT this evaluator,
-// both knowingly:
-//   - `forge invoke` ad-hoc completions call markTaskComplete directly
-//     (invoke.ts). Ungated for now — a human/orchestrator reads every invoke
-//     result. Whether to gate it is FG-525.
+// Two further ingestion paths complete an implementer result WITHOUT going
+// through finalizePrimary. FG-524 routes both through THIS evaluator — the one
+// {held, reason} outcome — and differs only in the CALLER's response, never in
+// the reading of the contract:
 //   - Fanout implementer CHILDREN finalize via markTaskComplete, not
-//     finalizePrimary, so the contract does not see them. Deferred as FG-524.
+//     finalizePrimary. Each completed child is evaluated once here; if any child
+//     is held, the fanout PARENT lands `awaiting_gate` with a reason naming the
+//     offending child(ren), before reds run and before the integration branch is
+//     published. Recovery verb: `forge gate <parentId> --advance` re-enters
+//     dispatch and publishes the reused children. (FG-524)
+//   - `forge invoke` ad-hoc completions call markTaskComplete directly
+//     (invoke.ts). Policy is WARN, not hold: an implementer completion that fails
+//     the contract still completes, but the evaluator's named reason is emitted
+//     on the read surface the orchestrator consumes programmatically between
+//     turns. WARN (not hold) because a held ad-hoc invoke has no workflow run to
+//     advance through, so it would strand with no recovery verb; the earlier
+//     "a human reads every invoke result" premise is stale under unattended
+//     `forge launch run` (tmux-owned, detached). (was FG-525, absorbed into FG-524)
 //
 // Fail-safe direction: a held task lands `awaiting_gate` with a named reason.
 // Over-holding is recoverable (forge gate --advance/--reject); a silent advance
