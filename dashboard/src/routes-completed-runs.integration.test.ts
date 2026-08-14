@@ -14,11 +14,20 @@ const TEST_PORT = 18792;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-completed-runs-route-"));
 
-// One clock reading for the whole fixture — see routes-agent-runtime's note.
-const SEEDED_AT = Date.now();
+// One clock reading for the whole fixture. FG-709 also permits the integration
+// runner to place that reading at every UTC hour; the route and fixture then
+// agree on the same clock without changing production behavior.
+const realDateNow = Date.now;
+const configuredNow = Number(process.env.FG_709_TEST_NOW);
+const SEEDED_AT = Number.isFinite(configuredNow) ? configuredNow : realDateNow();
+if (Number.isFinite(configuredNow)) Date.now = () => SEEDED_AT;
 const iso = (msAgo: number) => new Date(SEEDED_AT - msAgo).toISOString();
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
+const TODAY_START = Math.floor(SEEDED_AT / DAY) * DAY;
+// Seed current-day completions only in the part of the UTC day that has
+// elapsed at this module's clock. The route reads at the same or a later time.
+const completedToday = (msBeforeNow: number) => new Date(Math.max(TODAY_START, SEEDED_AT - msBeforeNow)).toISOString();
 
 {
   const db = new Database(join(tmpHome, "forge.db"));
@@ -31,8 +40,10 @@ const DAY = 86_400_000;
   const insertTask = db.prepare("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?)");
 
   // Counted. Two inside 1d, one more inside 7d, one only inside 90d/all.
-  insertRun.run("r-1", "One", "feature", "/proj/main", "complete", iso(3 * HOUR), iso(2 * HOUR));
-  insertRun.run("r-2", "Two", "invoke", "/proj/main", "complete", iso(2 * HOUR), iso(HOUR));
+  // At UTC midnight these clamp to the bucket start rather than becoming
+  // future rows that the production query correctly rejects.
+  insertRun.run("r-1", "One", "feature", "/proj/main", "complete", completedToday(2), completedToday(1));
+  insertRun.run("r-2", "Two", "invoke", "/proj/main", "complete", completedToday(4), completedToday(3));
   insertRun.run("r-3", "Three", "review", "/proj/main", "complete", iso(4 * DAY), iso(3 * DAY));
   insertRun.run("r-4", "Four", "feature", "/proj/main", "complete", iso(61 * DAY), iso(60 * DAY));
 
@@ -64,6 +75,7 @@ const { server } = await import("./server.js");
 after(() => {
   server.closeAllConnections?.();
   server.close();
+  Date.now = realDateNow;
 });
 
 type CountBucket = { bucketStart: string; completedRuns: number; partial: boolean };

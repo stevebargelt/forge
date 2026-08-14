@@ -25,9 +25,20 @@ const DAY = 24 * HOUR;
 const WEEK = 7 * DAY;
 const PROJECT = "/proj/fg-690";
 const OTHER_PROJECT = "/proj/other";
-const NOW = Date.now();
+// FG-709: accept a test-only clock position so this HTTP integration flow can
+// be proven at every UTC hour without changing the production route's clock.
+const realDateNow = Date.now;
+const configuredNow = Number(process.env.FG_709_TEST_NOW);
+const NOW = Number.isFinite(configuredNow) ? configuredNow : realDateNow();
+if (Number.isFinite(configuredNow)) Date.now = () => NOW;
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
 const day = (ms: number) => new Date(Math.floor(ms / DAY) * DAY).toISOString();
+const TODAY_START = Math.floor(NOW / DAY) * DAY;
+// Current-day fixtures must not be future-dated at the route's clock.  The
+// route can read its clock after this module does in normal runs, so clamping
+// against this earlier reading keeps the completion in today's bucket and at
+// or before the route's now even at UTC midnight.
+const completedToday = (msBeforeNow: number) => new Date(Math.max(TODAY_START, NOW - msBeforeNow)).toISOString();
 
 {
   const database = new Database(join(forgeHome, "forge.db"));
@@ -44,6 +55,8 @@ const day = (ms: number) => new Date(Math.floor(ms / DAY) * DAY).toISOString();
   );
   const addTask = (id: string, role: string, completedAgo: number, duration: number, status = "complete") =>
     task.run(id, "r-main", "implementation", role, status, "{}", ago(50 * DAY), ago(completedAgo + duration), ago(completedAgo));
+  const addTaskAt = (id: string, role: string, completedAt: string, duration: number, status = "complete") =>
+    task.run(id, "r-main", "implementation", role, status, "{}", ago(50 * DAY), new Date(Date.parse(completedAt) - duration).toISOString(), completedAt);
   const started = (id: string, atAgo: number) =>
     event.run("r-main", id, "container.started", JSON.stringify({ containerName: id }), ago(atAgo));
   const exited = (id: string, atAgo: number, type = "container.exited") =>
@@ -54,10 +67,12 @@ const day = (ms: number) => new Date(Math.floor(ms / DAY) * DAY).toISOString();
   run.run("r-main", "feature", "FG-690", "complete", ago(50 * DAY), PROJECT);
   run.run("r-other", "feature", "Other", "complete", ago(50 * DAY), OTHER_PROJECT);
 
-  // Same bucket and role: only this one genuinely executed.
-  addTask("real-red", "red-wide", 2 * HOUR, 84_000);
-  started("real-red", 2 * HOUR + 84_000);
-  exited("real-red", 2 * HOUR);
+  // Same UTC-day bucket and role: only this one genuinely executed. Clamp the
+  // completion into today's elapsed portion; its start may precede midnight.
+  const realRedCompletedAt = completedToday(1);
+  addTaskAt("real-red", "red-wide", realRedCompletedAt, 84_000);
+  event.run("r-main", "real-red", "container.started", JSON.stringify({ containerName: "real-red" }), new Date(Date.parse(realRedCompletedAt) - 84_000).toISOString());
+  event.run("r-main", "real-red", "container.exited", JSON.stringify({ exitCode: 1 }), realRedCompletedAt);
   addTask("phantom-red", "red-wide", 90 * MINUTE, 5 * HOUR + 21 * MINUTE, "failed");
   exited("phantom-red", 90 * MINUTE);
   failed("phantom-red", 90 * MINUTE, "container_crash");
@@ -134,7 +149,7 @@ process.env.PORT = String(PORT);
 process.env.HOST = "127.0.0.1";
 
 const { server } = await import("./server.js");
-after(() => { server.closeAllConnections?.(); server.close(); });
+after(() => { server.closeAllConnections?.(); server.close(); Date.now = realDateNow; });
 
 type Bucket = { bucketStart: string; averageMs: number | null; sampleCount: number; partial: boolean };
 type Trends = {
@@ -176,7 +191,7 @@ test("failed starts vanish consistently from every served aggregate while a same
     const series = body.byRole.find((candidate) => candidate.role === summary.role)!;
     assert.equal(total(series.buckets), summary.sampleCount, `${summary.role} series and summary agree`);
   }
-  const sameDay = day(NOW - 90 * MINUTE);
+  const sameDay = day(TODAY_START);
   assert.deepEqual(bucketAt(body.overall, sameDay), {
     bucketStart: sameDay, averageMs: 84_000, sampleCount: 1, partial: bucketAt(body.overall, sameDay).partial,
   });
