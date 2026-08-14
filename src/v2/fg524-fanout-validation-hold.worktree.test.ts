@@ -37,6 +37,8 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { gate } from "./gate.js";
 import { integrationWorktreeDir } from "../util/paths.js";
+import { integrationBranchName, integrationBranchExists } from "./worktree-lifecycle.js";
+import { failureKindForTask } from "./failure-kind.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
@@ -791,5 +793,136 @@ test("fg524 (5) RF-2: a validation-held WORKTREE fanout with NO reds PUBLISHES t
     execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
     baseSha,
     "the target advanced — the reused children were actually shipped, not dropped with the branch",
+  );
+});
+
+// ─── (6) RF-1 (review-0d62a33de7c3): a validation-held WORKTREE fanout whose
+//         integration branch has DISAPPEARED must FAIL LOUDLY on advance, not
+//         silently complete over the (now unrecoverable) child work.
+//
+//         The sibling blocked_by_red path already refuses this exact state — worktree
+//         mode on, integration branch gone — with a named merge_conflict failure
+//         (fg353 test 8). A validation hold reaches the SAME re-entry with
+//         redsAlreadyRan=false; before RF-1 the loud-failure arm required
+//         redsAlreadyRan, so the validation-hold path fell through to the in-place
+//         markTaskComplete and asserted success over the dropped branch. Asserted with
+//         a step that DECLARES reds — the arm the original no-reds framing would have
+//         missed, since a step with reds re-enters gate.ts even when the branch is
+//         gone. ──
+
+test("fg524 (6) RF-1: a validation-held WORKTREE fanout whose integration branch has vanished FAILS LOUDLY on advance — it does NOT silently complete over the dropped child work", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+  process.env.FORGE_WORKTREES_EPHEMERAL = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  ensureImplementerWorkflowYaml();
+
+  const { runId } = startRun({
+    workflow: FANOUT_IMPLEMENTER_WF,
+    title: "fg524 RF-1 missing integration branch on validation-hold advance",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  let currentWave: string[] = [];
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args);
+    currentWave.push(taskId);
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      // The OFFENDING child: complete with NO tests_run and NO waiver — holds the parent.
+      if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 3 });
+    } else if (taskId.startsWith("task-red-build-")) {
+      writeTaskResult(stdoutPath, PASS_VERDICT);
+    } else {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    }
+    return 0;
+  };
+
+  // ── Wave 1: source ─────────────────────────────────────────────────────────
+  await runNext({ runId, workflow: FANOUT_IMPLEMENTER_WF, dockerExec: stubExec });
+
+  // ── Wave 2: fanout — the non-compliant child holds the PARENT, before any red ──
+  const wave2 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_WF, dockerExec: stubExec });
+  assert.ok(wave2.awaitingGate.includes("build"), "the fanout build step must land awaiting_gate");
+
+  const parent = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  const parentId = parent.id;
+  assert.equal(parent.status, "awaiting_gate", "the parent is held awaiting_gate");
+  assert.equal(
+    verdictsForTask(parentId).length,
+    0,
+    "no verdict exists — the reds never ran (the hold fires before reds; redsAlreadyRan will be false on advance)",
+  );
+
+  // ── Absent the integration branch (and its worktree) — lost state between the
+  //    hold and the advance. This is the state fg353 test 8 exercises for the
+  //    blocked_by_red sibling; here it is a VALIDATION hold. ──
+  const integPath = integrationWorktreeDir(runId, parentId);
+  const intBranch = integrationBranchName(runId, parentId);
+  assert.ok(existsSync(integPath), "integration worktree must exist before manual deletion");
+  execFileSync("git", ["worktree", "remove", "--force", integPath], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["branch", "-D", intBranch], { cwd: repo, stdio: "ignore" });
+  assert.equal(
+    integrationBranchExists(repo, runId, parentId),
+    false,
+    "precondition: the integration branch is gone before the advance",
+  );
+
+  // ── Advance the validation hold. The step declares reds, so gate.ts re-enters
+  //    (pending + gateForced) even with the branch gone — routing the decision to
+  //    runNext, exactly where the loud-failure arm lives. ──
+  await gate(parentId, "advance", "steve advances a validation hold whose branch has vanished");
+  const parentAfterGate = tasksForRun(runId).find((t) => t.id === parentId)!;
+  assert.equal(parentAfterGate.status, "pending", "advance re-enters dispatch (pending), it does not complete in place");
+  assert.strictEqual(parentAfterGate.taskPackage?.inputs?.["gateForced"], true, "gateForced set for the re-entry");
+
+  // ── Wave 3: re-entry with the branch gone → FAIL LOUDLY, never silently complete ──
+  currentWave = [];
+  const wave3 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_WF, dockerExec: stubExec });
+  assert.deepEqual(
+    wave3.failedSteps,
+    ["build"],
+    "build must FAIL on the advance re-entry when the integration branch is missing",
+  );
+  assert.deepEqual(
+    wave3.completedSteps,
+    [],
+    "build must NOT silently complete over the dropped child work",
+  );
+
+  const finalParent = tasksForRun(runId).find((t) => t.id === parentId)!;
+  assert.equal(finalParent.status, "failed", "the parent is FAILED, not silently complete");
+  assert.equal(
+    failureKindForTask(parentId),
+    "merge_conflict",
+    "the named failure kind is merge_conflict — the same the blocked_by_red sibling raises",
+  );
+
+  // Nothing was published: the child work is NOT on the target, and no publication landed.
+  assert.equal(
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
+    baseSha,
+    "the target did NOT advance — no child work was shipped over the missing branch",
+  );
+  assert.equal(existsSync(join(repo, "child0.ts")), false, "child0.ts must NOT reach the target — the merge never happened");
+  assert.equal(existsSync(join(repo, "child1.ts")), false, "child1.ts must NOT reach the target — the merge never happened");
+  assert.equal(
+    allPublicationAttempts().filter((a) => a.state === "published" && a.taskId === parentId).length,
+    0,
+    "no publication attempt succeeded for the parent whose branch vanished",
   );
 });

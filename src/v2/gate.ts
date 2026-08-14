@@ -47,7 +47,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { isRunSettled, isOnRejectRecoveryTask, classifyRunTerminalState } from "./ready-queue.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
-import { isWorktreeModeEnabled, integrationBranchExists } from "./worktree-lifecycle.js";
+import { isWorktreeModeEnabled } from "./worktree-lifecycle.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -286,19 +286,27 @@ export async function gate(
     // integration branch carries every child's work and must still be republished on
     // advance (the FG-353/FG-425 publish-on-advance invariant). So re-entry triggers
     // on the union of both needs: reds to run in either mode (the non-worktree arm the
-    // follow-up added), OR a worktree hold with a captured integration branch even at
-    // zero reds. Only a non-worktree step with no reds genuinely has nothing to do and
-    // completes in place (its children wrote directly to projectDir — see runNext's
-    // re-entry, which runs reds and/or publishes accordingly).
-    const worktreePublishReentry =
-      isWorktreeModeEnabled() &&
-      typeof run.projectDir === "string" &&
-      integrationBranchExists(run.projectDir, run.id, taskId);
+    // follow-up added), OR ANY worktree hold — because a worktree fanout parent's
+    // children ALWAYS wrote to a captured integration branch, so its advance always
+    // has publishing to do.
+    //
+    // FG-524 (RF-1): route on worktree mode ALONE, NOT on the branch still existing.
+    // Gating re-entry on integrationBranchExists made the branch-missing case fall
+    // through to the in-place markTaskComplete below — a silent completion that claims
+    // success over child work that is, with the branch gone, already unrecoverable.
+    // The branch-existence decision belongs in the re-entry (runNext), which publishes
+    // when the branch is present and fails LOUDLY when it is absent (the sibling of
+    // the redsAlreadyRan loud-failure arm), never completing in place over lost work.
+    // Only a non-worktree step with no reds genuinely has nothing to do and completes
+    // in place (its children wrote directly to projectDir — see runNext's re-entry,
+    // which runs reds and/or publishes accordingly).
+    const worktreeFanoutReentry =
+      isWorktreeModeEnabled() && typeof run.projectDir === "string";
     const validationHeldFanoutReentry =
       task.status === "awaiting_gate" &&
       isFanoutParent &&
       verdictsForTask(taskId).length === 0 &&
-      (step.reds.length > 0 || worktreePublishReentry);
+      (step.reds.length > 0 || worktreeFanoutReentry);
     const needsPublishReentry =
       (blocked && (isFanoutParent || typeof task.worktreePath === "string")) ||
       validationHeldFanoutReentry;

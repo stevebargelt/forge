@@ -2550,10 +2550,18 @@ async function dispatchFanoutStep(args: {
         );
         if (published === "red_rejected") return await landFanoutBlockedByRed(savedResult);
         if (published !== "complete") return published;
-      } else if (isWorktreeModeEnabled() && redsAlreadyRan) {
-        // Worktree mode is on and reds already ran (integration was built and
-        // reviewed) but the integration branch is now missing — inconsistent state.
-        // Fail loudly rather than silently completing without merging child work to HEAD.
+      } else if (isWorktreeModeEnabled()) {
+        // Worktree mode is on but the integration branch is now missing (both
+        // branch-present arms above are exhausted) — inconsistent state. This covers
+        // BOTH re-entry shapes: a blocked_by_red override (redsAlreadyRan, integration
+        // was built and reviewed) AND an FG-524 validation hold (redsAlreadyRan=false,
+        // the branch was captured before any red ran). In either shape the child work
+        // lives ONLY on that branch, so with it gone the work is unrecoverable — fail
+        // LOUDLY rather than silently completing without merging child work to HEAD.
+        // FG-524 (RF-1): the loud failure must NOT depend on redsAlreadyRan — the
+        // validation-hold path used to fall through here to the in-place markTaskComplete
+        // below and assert success over the dropped branch, the exact silent-advance the
+        // sibling blocked_by_red path already refuses.
         failTask(existingParent.id, {
           runId: args.runId,
           kind: "merge_conflict",
