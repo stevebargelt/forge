@@ -1509,9 +1509,9 @@ defaults:
       projectDir,
     });
 
-    // Single result shape satisfies every container: plan needs `items` (the
-    // fanout array); children and reds just need to report complete.
-    const exec = makeStubExec({ status: "complete", items: ["a", "b", "c"] });
+    // FG-524 contract: this shared result also completes implementer fanout children.
+    // Plan needs `items` (the fanout array); children and reds just need to report complete.
+    const exec = makeStubExec({ status: "complete", tests_run: 1, items: ["a", "b", "c"] });
 
     // Spy that delegates to the REAL loader — proves both call count and that
     // the memoized receipt still reflects real provenance (source: "project").
@@ -2312,7 +2312,8 @@ test("runNext: fanout reds — build fanout dispatches authoritative reds on the
   const exec = makeRoutingExec([
     { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", steps: ["s1", "s2"] } },
     { matches: (id) => id.startsWith("task-red-build-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
-    { matches: (id) => id.startsWith("task-build-"), result: { status: "complete", diff_summary: "did the thing", files_modified: [] } },
+    // FG-524 contract: implementer fanout children report validation so reds dispatch.
+    { matches: (id) => id.startsWith("task-build-"), result: { status: "complete", tests_run: 1, diff_summary: "did the thing", files_modified: [] } },
   ]);
   await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
   await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
@@ -2332,7 +2333,8 @@ test("runNext: fanout reds — an authoritative red fail blocks the fanout paren
   const exec = makeRoutingExec([
     { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", steps: ["s1"] } },
     { matches: (id) => id.startsWith("task-red-build-"), result: { status: "complete", verdict: "fail", confidence: 0.9, findings: [{ severity: "high", summary: "broken", evidence: "x" }] } },
-    { matches: (id) => id.startsWith("task-build-"), result: { status: "complete", diff_summary: "did the thing", files_modified: [] } },
+    // FG-524 contract: implementer fanout children report validation so red failure remains authoritative.
+    { matches: (id) => id.startsWith("task-build-"), result: { status: "complete", tests_run: 1, diff_summary: "did the thing", files_modified: [] } },
   ]);
   await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
   await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });

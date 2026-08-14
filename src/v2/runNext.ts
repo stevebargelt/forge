@@ -2383,6 +2383,70 @@ async function dispatchFanoutStep(args: {
   const requestedChanges = typeof rc === "string" ? rc : undefined;
   let pendingHasChildren = false;
 
+  // FG-425 / FG-524: the reds+publish helpers are defined HERE — before the
+  // gateForced re-entry block below — so BOTH the first-pass flow (bottom of this
+  // function) and the validation-hold advance re-entry (below) call the SAME reds
+  // implementation. They are parameterized on the aggregate result because the two
+  // callers hold it under different names (`parentResult` computed below vs the
+  // re-entry's `savedResult` read from disk); both are the same {status, children}
+  // aggregate.
+  let redAggregate: RedAggregate | undefined;
+  // FG-676: the fanout twin of dispatchSingleStep's flag — same CAS, same reason.
+  let terminalDuringReds = false;
+
+  const runFanoutRedsAgainst = async (dir: string, primaryResult: unknown): Promise<ValidationResult> => {
+    if (step.reds.length === 0) return { ok: true };
+    crashPoint("dispatchFanoutStep:before-awaiting-red");
+    if (!setTaskStatus(parentId, "awaiting_red")) {
+      terminalDuringReds = true;
+      return {
+        ok: false,
+        error: `task ${parentId} reached ${getTask(parentId)?.status ?? "a terminal status"} while its candidate was validating — refusing to run reds against, or publish, a task that is already decided`,
+      };
+    }
+    crashPoint("dispatchFanoutStep:between-awaiting-red-status-and-event");
+    logEvent("task.awaiting_red", { runId: args.runId, taskId: parentId });
+    crashPoint("dispatchFanoutStep:after-awaiting-red");
+    redAggregate = await dispatchReds({
+      runId: args.runId,
+      workflow: args.workflow,
+      step,
+      primaryTaskId: parentId,
+      primaryResult,
+      projectDir: dir,
+      designDir: args.designDir,
+      runMetadata: args.runMetadata,
+      dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
+    });
+    return redRejection(redAggregate);
+  };
+
+  const landFanoutBlockedByRed = async (primaryResult: unknown): Promise<string> => {
+    // FG-482: status + result written together in one CAS'd UPDATE — the task is
+    // never observable as awaiting_gate mid-transition. If the CAS lost a race (task
+    // no longer awaiting_red), report its actual status rather than logging/notifying
+    // a transition that didn't happen.
+    let blockedByRedApplied = false;
+    crashPoint("dispatchFanoutStep:before-blocked-by-red");
+    writeTransaction(() => {
+      blockedByRedApplied = markTaskBlockedByRed(parentId, primaryResult);
+      crashPoint("dispatchFanoutStep:inside-blocked-by-red-txn");
+      if (blockedByRedApplied) {
+        logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
+      }
+    });
+    crashPoint("dispatchFanoutStep:after-blocked-by-red");
+    if (!blockedByRedApplied) {
+      return getTask(parentId)?.status ?? "failed";
+    }
+    const runForNotify = getRun(args.runId);
+    if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
+    // Integration branch + child worktrees retained for inspection on blocked_by_red.
+    return "blocked_by_red";
+  };
+
   // Defense-in-depth: if a running/awaiting_red primary already has fan-out
   // children, this is a re-entrant dispatch (computeReadyQueue can be tricked by
   // pending child/red tasks in the phase). Return without creating a duplicate wave.
@@ -2446,10 +2510,58 @@ async function dispatchFanoutStep(args: {
           { reEntry: true },
         );
         if (published !== "complete") return published;
-      } else if (isWorktreeModeEnabled() && redsAlreadyRan) {
-        // Worktree mode is on and reds already ran (integration was built and
-        // reviewed) but the integration branch is now missing — inconsistent state.
-        // Fail loudly rather than silently completing without merging child work to HEAD.
+      } else if (
+        isWorktreeModeEnabled() &&
+        !redsAlreadyRan &&
+        integrationBranchExists(args.projectDir, args.runId, existingParent.id)
+      ) {
+        // FG-524 validation-hold advance: the parent was held at awaiting_gate by the
+        // per-child validation contract (below), which fires BEFORE reds — so on this
+        // advance no verdicts exist (redsAlreadyRan=false) and the integration branch
+        // was captured but never published. The human advanced the gate; publish the
+        // REUSED (never re-dispatched) children now, running the reds inside the
+        // publisher's validation span exactly like the first-pass path. This is the
+        // FG-353/FG-425 publish-on-advance invariant: a validation-held worktree
+        // parent must republish, not complete in place and drop the integration branch.
+        const childTasksForPublish: ChildOutcome[] = allTasks
+          .filter(
+            (t) =>
+              t.parentId === existingParent.id &&
+              !t.agentRole.startsWith("red-") &&
+              t.status === "complete",
+          )
+          .map((t, index): ChildOutcome => ({
+            childTaskId: t.id,
+            index,
+            value: undefined,
+            status: "complete",
+            ...(typeof t.worktreePath === "string" ? { worktreePath: t.worktreePath } : {}),
+          }));
+        const published = await publishFanoutIntegration(
+          args,
+          existingParent.id,
+          savedResult,
+          childTasksForPublish,
+          {
+            alsoValidate: (candidateDir) => runFanoutRedsAgainst(candidateDir, savedResult),
+            redRejected: () => redAggregate?.authoritativeFail === true,
+            terminallyDecided: () => terminalDuringReds,
+          },
+        );
+        if (published === "red_rejected") return await landFanoutBlockedByRed(savedResult);
+        if (published !== "complete") return published;
+      } else if (isWorktreeModeEnabled()) {
+        // Worktree mode is on but the integration branch is now missing (both
+        // branch-present arms above are exhausted) — inconsistent state. This covers
+        // BOTH re-entry shapes: a blocked_by_red override (redsAlreadyRan, integration
+        // was built and reviewed) AND an FG-524 validation hold (redsAlreadyRan=false,
+        // the branch was captured before any red ran). In either shape the child work
+        // lives ONLY on that branch, so with it gone the work is unrecoverable — fail
+        // LOUDLY rather than silently completing without merging child work to HEAD.
+        // FG-524 (RF-1): the loud failure must NOT depend on redsAlreadyRan — the
+        // validation-hold path used to fall through here to the in-place markTaskComplete
+        // below and assert success over the dropped branch, the exact silent-advance the
+        // sibling blocked_by_red path already refuses.
         failTask(existingParent.id, {
           runId: args.runId,
           kind: "merge_conflict",
@@ -2460,11 +2572,28 @@ async function dispatchFanoutStep(args: {
           result: savedResult,
         });
         return "failed";
+      } else if (!isWorktreeModeEnabled() && !redsAlreadyRan && step.reds.length > 0) {
+        // FG-524 non-worktree validation-hold advance: the parent was held at
+        // awaiting_gate by the per-child validation contract (below), which fires
+        // BEFORE reds — so on this advance no verdicts exist (redsAlreadyRan=false).
+        // A non-worktree fanout published nothing (its children wrote directly to
+        // projectDir), so there is no integration branch to republish — but the step's
+        // reds STILL never ran. Completing in place here would ship the children's work
+        // red-unreviewed, the exact silent-advance gap FG-524 closes. Run the reds NOW
+        // against projectDir, exactly as the first-pass non-worktree path does: a
+        // rejection lands the parent blocked_by_red, a pass falls through to the
+        // in-place complete below. (A non-worktree blocked_by_red re-entry, by
+        // contrast, has redsAlreadyRan=true — its reds already returned a verdict the
+        // human overrode — so it skips this and completes in place, unchanged.)
+        const reds = await runFanoutRedsAgainst(args.projectDir, savedResult);
+        if (terminalDuringReds) return getTask(existingParent.id)?.status ?? "failed";
+        if (!reds.ok) return await landFanoutBlockedByRed(savedResult);
       }
-      // For non-worktree re-entry (or worktree re-entry before reds ran),
-      // complete directly — the human advance decision was already recorded when
-      // gate advance --force ran, so re-gating via finalizePrimary would bounce
-      // a verdict/human gate back to awaiting_gate instead of completing (FG-353).
+      // For a non-worktree re-entry whose reds already ran (a blocked_by_red parent the
+      // human overrode) — or whose reds just passed above, or a step with no reds —
+      // complete directly. The human advance decision was already recorded when gate
+      // advance ran, so re-gating via finalizePrimary would bounce a verdict/human gate
+      // back to awaiting_gate instead of completing (FG-353).
       if (!markTaskComplete(existingParent.id, savedResult)) {
         return getTask(existingParent.id)?.status ?? "failed";
       }
@@ -2877,79 +3006,82 @@ async function dispatchFanoutStep(args: {
   //   - An AD-1 moved-base rebuild re-runs the FULL validation set (gate AND reds)
   //     for the NEW candidateSha. Re-running only the gate would publish a rebuilt
   //     tree that no red ever saw.
-  let redAggregate: RedAggregate | undefined;
-  // FG-676: the fanout twin of dispatchSingleStep's flag — same CAS, same reason.
-  let terminalDuringReds = false;
+  // The runFanoutRedsAgainst / landFanoutBlockedByRed helpers and their
+  // redAggregate/terminalDuringReds state are declared near the top of this
+  // function (before the gateForced re-entry block) so the validation-hold advance
+  // path and this first-pass path share ONE reds implementation.
 
-  const runFanoutRedsAgainst = async (dir: string): Promise<ValidationResult> => {
-    if (step.reds.length === 0) return { ok: true };
-    crashPoint("dispatchFanoutStep:before-awaiting-red");
-    if (!setTaskStatus(parentId, "awaiting_red")) {
-      terminalDuringReds = true;
-      return {
-        ok: false,
-        error: `task ${parentId} reached ${getTask(parentId)?.status ?? "a terminal status"} while its candidate was validating — refusing to run reds against, or publish, a task that is already decided`,
-      };
+  // FG-524: validate each completed implementer CHILD through the ONE evaluator
+  // BEFORE any reds run or anything is published — mirroring
+  // holdIfValidationContractFails for a primary, but landing the hold on the PARENT.
+  // A fanout parent's own result is a synthetic {status, children} aggregate that
+  // never carries tests_run, so the parent itself is deliberately exempt; the real
+  // implementer work lives on the children. Placed AFTER the integration worktree is
+  // built (above) so the captured integration branch exists — that is what
+  // `forge gate <parentId> --advance` republishes (the gateForced re-entry case
+  // added above). The evaluator returns held:false for non-implementer roles
+  // (reds, test-engineer, docs, research, …), so those children never hold.
+  const validationHeldChildren: { index: number; childTaskId: string; reason: string }[] = [];
+  for (const child of childOutcomes) {
+    if (child.status !== "complete") continue;
+    const childRole = getTask(child.childTaskId)?.agentRole ?? "";
+    const contract = evaluateValidationContract({ role: childRole, result: child.result });
+    if (contract.held) {
+      validationHeldChildren.push({ index: child.index, childTaskId: child.childTaskId, reason: contract.reason });
+    } else if (contract.waiver !== undefined) {
+      // The waiver advances the child, but it must leave a record — same as the
+      // primary path's validation_waiver decision event.
+      logEvent("task.decision", {
+        runId: args.runId,
+        taskId: child.childTaskId,
+        payload: { kind: "validation_waiver", reason: contract.waiver },
+      });
     }
-    crashPoint("dispatchFanoutStep:between-awaiting-red-status-and-event");
-    logEvent("task.awaiting_red", { runId: args.runId, taskId: parentId });
-    crashPoint("dispatchFanoutStep:after-awaiting-red");
-    redAggregate = await dispatchReds({
-      runId: args.runId,
-      workflow: args.workflow,
-      step,
-      primaryTaskId: parentId,
-      primaryResult: parentResult,
-      projectDir: dir,
-      designDir: args.designDir,
-      runMetadata: args.runMetadata,
-      dockerExec: args.dockerExec,
-      getModelPolicy: args.getModelPolicy,
-      seedGeneration: args.seedGeneration,
-    });
-    return redRejection(redAggregate);
-  };
-
-  const landFanoutBlockedByRed = async (): Promise<string> => {
-    // FG-482: status + result written together in one CAS'd UPDATE — the task is
-    // never observable as awaiting_gate mid-transition. If the CAS lost a race (task
-    // no longer awaiting_red), report its actual status rather than logging/notifying
-    // a transition that didn't happen.
-    let blockedByRedApplied = false;
-    crashPoint("dispatchFanoutStep:before-blocked-by-red");
-    writeTransaction(() => {
-      blockedByRedApplied = markTaskBlockedByRed(parentId, parentResult);
-      crashPoint("dispatchFanoutStep:inside-blocked-by-red-txn");
-      if (blockedByRedApplied) {
-        logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
-      }
-    });
-    crashPoint("dispatchFanoutStep:after-blocked-by-red");
-    if (!blockedByRedApplied) {
+  }
+  if (validationHeldChildren.length > 0) {
+    const named = validationHeldChildren
+      .map((c) => `child[${c.index}] ${c.childTaskId}: ${c.reason}`)
+      .join("; ");
+    const reason =
+      `validation contract: ${validationHeldChildren.length} fanout implementer child(ren) held — ${named}. ` +
+      `Recover with \`forge gate ${parentId} --advance\` (republishes the reused children) or \`--reject\`.`;
+    // Fail-safe: hold the PARENT for a gate decision rather than publish. CAS'd so a
+    // concurrent cancel that already failed the parent isn't resurrected.
+    // fg524_parent_validation_hold — see the FG-530 write-surface allowlist entry.
+    if (!markTaskHeldForGate(parentId, parentResult)) {
       return getTask(parentId)?.status ?? "failed";
     }
-    const runForNotify = getRun(args.runId);
-    if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
-    // Integration branch + child worktrees retained for inspection on blocked_by_red.
-    return "blocked_by_red";
-  };
+    // The status→event boundary here is the SAME markTaskHeldForGate + logEvent shape
+    // holdIfValidationContractFails uses for a primary; its crash-safety is already
+    // proven by that path's FG-530 probe, so no separate probe is added here (a
+    // missing event on a crash leaves the durable awaiting_gate status intact —
+    // recoverable via `forge gate --advance`).
+    logEvent("task.awaiting_gate", {
+      runId: args.runId,
+      taskId: parentId,
+      payload: { kind: "validation_contract", reason },
+    });
+    notifyGateAwaiting(parentId);
+    // Integration branch + child worktrees retained: the advance republishes them.
+    return "awaiting_gate";
+  }
 
   if (integrationWorktreePath) {
     const published = await publishFanoutIntegration(args, parentId, parentResult, childOutcomes, {
-      alsoValidate: (candidateDir) => runFanoutRedsAgainst(candidateDir),
+      alsoValidate: (candidateDir) => runFanoutRedsAgainst(candidateDir, parentResult),
       redRejected: () => redAggregate?.authoritativeFail === true,
       terminallyDecided: () => terminalDuringReds,
     });
-    if (published === "red_rejected") return await landFanoutBlockedByRed();
+    if (published === "red_rejected") return await landFanoutBlockedByRed(parentResult);
     if (published !== "complete") return published;
   } else if (step.reds.length > 0) {
     // Non-worktree mode: no integration branch, no candidate, no publisher. Reds
     // run against the project directory, exactly as they always did.
-    const reds = await runFanoutRedsAgainst(args.projectDir);
+    const reds = await runFanoutRedsAgainst(args.projectDir, parentResult);
     // FG-676: decided mid-flight — the row is terminal and stays exactly as the
     // human left it.
     if (terminalDuringReds) return getTask(parentId)?.status ?? "failed";
-    if (!reds.ok) return await landFanoutBlockedByRed();
+    if (!reds.ok) return await landFanoutBlockedByRed(parentResult);
   }
 
   return finalizePrimary(parentId, args.runId, step.gate, parentResult).status;
@@ -3420,9 +3552,17 @@ async function runOrderedWave(args: {
  *  exact commit it validated. Nothing is ever built, tested, or reviewed inside the
  *  publish target.
  *
- *  `redsAlreadyRan` is the gate-forced re-entry case: a human has already overridden
- *  the reds with a recorded rationale, so validation is the gate alone — re-dispatching
- *  reds there would just re-collect the verdicts the human already overrode.
+ *  gateForced now marks TWO distinct re-entry reasons, and `redsAlreadyRan`
+ *  (verdictsForTask(parent).length > 0, checked by the caller) is the discriminator
+ *  between them:
+ *    - redsAlreadyRan=true — the human-override re-entry: a human force-advanced a
+ *      blocked_by_red parent whose reds ALREADY ran and returned a verdict, so
+ *      validation here is the gate alone; re-dispatching reds would just re-collect
+ *      the verdicts the human already overrode.
+ *    - redsAlreadyRan=false — FG-524's validation-hold re-entry: the parent was held
+ *      at awaiting_gate by the per-child validation contract, which fires BEFORE any
+ *      red ran, so NO verdict exists. The reds must still run — they are folded in via
+ *      alsoValidate here, exactly as on the first pass.
  *
  *  Returns "complete" when the publication landed; otherwise the task status the
  *  caller must return (worktrees and branches retained for inspection). */
@@ -3433,9 +3573,14 @@ async function publishFanoutIntegration(
   childOutcomes: ChildOutcome[],
   opts: {
     /** The reds, folded into the SAME validation set the publication is gated on.
-     *  Omitted on the gate-forced re-entry: a human already overrode the reds with a
-     *  recorded rationale, which is what gateForced MEANS. The integration gate still
-     *  runs — overriding a red is not overriding a broken build. */
+     *  Supplied on the first pass AND on FG-524's validation-hold re-entry
+     *  (redsAlreadyRan=false), where the reds have not yet run and must. Omitted ONLY
+     *  on the human-override re-entry (redsAlreadyRan=true, a force-advanced
+     *  blocked_by_red parent): the human already overrode the reds with a recorded
+     *  rationale, so re-dispatching would just re-collect the verdicts they overrode.
+     *  gateForced no longer means only that — redsAlreadyRan is what tells the two
+     *  apart. The integration gate still runs either way — overriding a red is not
+     *  overriding a broken build. */
     alsoValidate?: (candidateDir: string, candidateSha: string) => Promise<ValidationResult>;
     /** True once an authoritative red has REJECTED the candidate. Distinguishes the
      *  one refusal that is a human decision (blocked_by_red) from every other one

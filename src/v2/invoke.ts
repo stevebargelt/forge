@@ -69,6 +69,7 @@ import { emitAgentProgressEvents } from "./agent-progress.js";
 import { inferredResultFrom } from "./inferred-result.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
+import { evaluateValidationContract } from "./validation-contract.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -161,6 +162,30 @@ function reapContainerAndReportFailure(containerName: string, taskSucceeded: boo
     } catch {
       // best-effort — a logging failure must never fail the run
     }
+  }
+}
+
+// FG-524: WARN policy for the `forge invoke` completion seam. Both of this file's
+// markTaskComplete sites (the FG-337 inferred-result path and the main completion)
+// route implementer completions through the ONE shared validation-contract
+// evaluator before completing. Unlike the workflow PRIMARY seam
+// (holdIfValidationContractFails in runNext.ts) and the fanout-child seam (which
+// hold the parent at awaiting_gate), invoke does NOT hold: an ad-hoc invoke has no
+// workflow run to advance a held task through, so a hold would strand it. Instead
+// a contract failure is surfaced as an advisory task.validation_warning carrying
+// the evaluator's OWN named reason — the same {held, reason} outcome the other
+// seams act on, read differently. This adds no second reading of the contract, no
+// invoke-local waiver list, and no severity vocabulary: waiver semantics
+// (no_validation_reason) and role membership (IMPLEMENTER_ROLES) are the
+// evaluator's, verbatim. Non-implementer invokes get held:false and never warn.
+function warnIfValidationContractFails(runId: string, taskId: string, agentRole: string, result: unknown): void {
+  const contract = evaluateValidationContract({ role: agentRole, result });
+  if (contract.held) {
+    logEvent("task.validation_warning", {
+      runId,
+      taskId,
+      payload: { kind: "validation_contract", reason: contract.reason },
+    });
   }
 }
 
@@ -1366,6 +1391,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
         closeRunIfIdle(finalStatus === "complete");
         return { runId, taskId, status: finalStatus, result: inferred, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
       }
+      // FG-524 (RF-1): WARN only AFTER the CAS succeeds, same ordering as the main
+      // completion seam — a lost CAS race must record no warning. inferredResultFrom
+      // only fires for narrative roles today (requiresStructuredResult gates it), so
+      // the evaluator returns held:false here in practice, but the ordering keeps the
+      // policy true for every invoke completion path.
+      warnIfValidationContractFails(runId, taskId, agentRole, inferred);
       logEvent("task.completed", { runId, taskId });
       reapContainerAndReportFailure(containerName, true, runId, taskId);
       closeRunIfIdle(true);
@@ -1397,11 +1428,15 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // message would then replace the agent's own, more accurate reason. A task that
   // says it failed fails for the reason it gave.
   //
-  // BOUNDED per BD-4: this reads the agent's declared `status` and nothing else.
-  // It does not consult the validation contract — IMPLEMENTER_ROLES, the tests_run
-  // gate and invoke's ungated ad-hoc completions are untouched (FG-524/FG-525 stay
-  // undecided). Blast radius stated plainly: this is every invoke role, reds,
-  // research and architect dispatches included.
+  // BOUNDED per BD-4: this reads the agent's declared `status` and nothing else —
+  // it is the failed-declaration seam, orthogonal to the tests_run contract. The
+  // validation contract IS now consulted for invoke, just below and at the
+  // inferred-result path, under FG-524's WARN policy (see
+  // warnIfValidationContractFails): an implementer `complete` result with no
+  // tests_run and no waiver still completes but emits an advisory
+  // task.validation_warning; it is not held, because an ad-hoc invoke has no run
+  // to advance a held task through. Blast radius of THIS seam stated plainly: it
+  // is every invoke role, reds, research and architect dispatches included.
   if (agentDeclaredFailure(result)) {
     const error = agentReportedFailureMessage(result);
     failTask(taskId, { runId, kind: "agent_reported_failure", error, result });
@@ -1439,6 +1474,14 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     closeRunIfIdle(finalStatus === "complete");
     return { runId, taskId, status: finalStatus, result, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
   }
+  // FG-524 (RF-1): WARN only AFTER the completion CAS reports success (implementer
+  // roles only; the evaluator returns held:false for every other role and for a
+  // waivered/compliant result). Emitting it before the CAS recorded a
+  // task.validation_warning even when a concurrent cancel won the race and the task
+  // never completed on this path — a spurious advisory in a ledger the orchestrator
+  // reads programmatically. Ordered here, the warning event set means completions
+  // that failed validation and nothing else.
+  warnIfValidationContractFails(runId, taskId, agentRole, result);
   logEvent("task.completed", { runId, taskId });
   // FG-492 review: task marked complete with a valid result — nothing left to
   // investigate on this container, reap it now instead of leaving it to

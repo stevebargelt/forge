@@ -9,6 +9,8 @@
 
 ---
 
+> **Amended by FG-524 (2026-08-14).** The force-advance bullet below ("`gateForced`... runs the publication step alone — no agent re-dispatch, no reds re-collected") described the only `gateForced` re-entry that existed at the time: a human overriding an already-rejected red. FG-524 added a second `gateForced` reason — a fanout parent held at `awaiting_gate` by a *per-child validation-contract* failure, whose reds have never run at all — and that re-entry DOES re-collect the reds, folding them into the same publication validation span exactly as the first pass does. `redsAlreadyRan` (a verdict exists vs. not) is what tells the two re-entry reasons apart; "no reds re-collected" now describes only the human-override case. See [Validation contract](../../docs/concepts.md#validation-contract).
+
 ## Context
 
 FG-357 added a post-merge integration gate: after a run's task branch merged into the project's checked-out HEAD, forge ran the project's own `test:unit` suite against that tree and failed the run if it broke. The gate worked, but it was wired backwards.

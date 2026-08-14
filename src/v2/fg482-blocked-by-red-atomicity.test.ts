@@ -204,7 +204,10 @@ function makeFanoutExec(): DockerExecFn {
       result = { status: "complete", claims: ["claim-a"] };
     } else {
       // fanout child, e.g. task-build-0-...
-      result = { status: "complete", files_modified: [] };
+      // FG-524: implementer children carry tests_run so the validation contract does
+      // not hold the parent before the reds run — this suite exercises the
+      // blocked_by_red CAS, not validation.
+      result = { status: "complete", files_modified: [], tests_run: 4 };
     }
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "");
@@ -252,7 +255,9 @@ function makeFanoutExecWithConcurrentCancel(runId: string): DockerExecFn {
     } else if (taskId.startsWith("task-plan-")) {
       result = { status: "complete", claims: ["claim-a"] };
     } else {
-      result = { status: "complete", files_modified: [] };
+      // FG-524: implementer child carries tests_run so the validation contract does
+      // not hold the parent before the reds run.
+      result = { status: "complete", files_modified: [], tests_run: 4 };
     }
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "");

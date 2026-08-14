@@ -27,6 +27,16 @@ export type EventType =
   | "task.blocked_by_red"
   | "task.awaiting_red"
   | "task.awaiting_gate"
+  // FG-524: the WARN counterpart to task.awaiting_gate for the `forge invoke`
+  // completion seam. An ad-hoc implementer invoke returned status=complete
+  // without a tests_run value and without a no_validation_reason waiver, so the
+  // SHARED validation-contract evaluator flagged it — but invoke policy is WARN,
+  // not hold: the task still completes normally and this event carries the
+  // evaluator's named reason onto the surface the orchestrator reads
+  // programmatically between turns. There is no hold and no recovery verb (the
+  // task completed), so unlike task.awaiting_gate this is advisory, not a gate.
+  // Payload: { kind: "validation_contract", reason }.
+  | "task.validation_warning"
   // FG-425 (AC5): the task's publication attempt lost the publication window with
   // its ref advance already on the target. Non-terminal — no claim is made about
   // what landed until AD-5 convergence settles the attempt.

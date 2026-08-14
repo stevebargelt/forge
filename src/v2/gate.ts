@@ -47,6 +47,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { isRunSettled, isOnRejectRecoveryTask, classifyRunTerminalState } from "./ready-queue.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
+import { isWorktreeModeEnabled } from "./worktree-lifecycle.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -262,7 +263,53 @@ export async function gate(
     //
     // A task with no worktree published nothing and has nothing to publish (the
     // non-worktree path never enters the publisher): complete it in place, as before.
-    const needsPublishReentry = blocked && (isFanoutParent || typeof task.worktreePath === "string");
+    // FG-524: a validation-held fanout parent (awaiting_gate, NOT blocked_by_red) was
+    // held by the per-child validation contract, which fires BEFORE any red ran (the
+    // pre-reds hold inherited from FG-523). Advancing it MUST run the step's reds — a
+    // blocked_by_red parent completes in place because its reds already ran and
+    // returned a verdict, but a validation-held parent's reds have never run, so
+    // completing it in place would ship child work red-unreviewed: the exact
+    // silent-advance gap FG-524 exists to close, recreated in a new place. Route BOTH
+    // worktree shapes through the gateForced re-entry so dispatchFanoutStep runs the
+    // reds now; only what the re-entry then does differs by mode:
+    //   - worktree: the children's work lives ONLY on a captured-but-unpublished
+    //     integration branch, so re-entry republishes it, running the reds inside the
+    //     publisher's validation span (completing in place would also drop the branch —
+    //     the FG-353/FG-425 publish-on-advance invariant);
+    //   - non-worktree: the children wrote directly to projectDir, so there is nothing
+    //     to publish — but the reds still never ran, so re-entry runs them against
+    //     projectDir before completing (or lands blocked_by_red if a red rejects).
+    // The discriminator between "run the reds" and "complete in place" is a verdict's
+    // existence, checked in dispatchFanoutStep as redsAlreadyRan: a validation hold
+    // fires before any red writes one. A step with no reds has nothing to RUN — but
+    // "nothing to run" is not "nothing to PUBLISH": in worktree mode the captured
+    // integration branch carries every child's work and must still be republished on
+    // advance (the FG-353/FG-425 publish-on-advance invariant). So re-entry triggers
+    // on the union of both needs: reds to run in either mode (the non-worktree arm the
+    // follow-up added), OR ANY worktree hold — because a worktree fanout parent's
+    // children ALWAYS wrote to a captured integration branch, so its advance always
+    // has publishing to do.
+    //
+    // FG-524 (RF-1): route on worktree mode ALONE, NOT on the branch still existing.
+    // Gating re-entry on integrationBranchExists made the branch-missing case fall
+    // through to the in-place markTaskComplete below — a silent completion that claims
+    // success over child work that is, with the branch gone, already unrecoverable.
+    // The branch-existence decision belongs in the re-entry (runNext), which publishes
+    // when the branch is present and fails LOUDLY when it is absent (the sibling of
+    // the redsAlreadyRan loud-failure arm), never completing in place over lost work.
+    // Only a non-worktree step with no reds genuinely has nothing to do and completes
+    // in place (its children wrote directly to projectDir — see runNext's re-entry,
+    // which runs reds and/or publishes accordingly).
+    const worktreeFanoutReentry =
+      isWorktreeModeEnabled() && typeof run.projectDir === "string";
+    const validationHeldFanoutReentry =
+      task.status === "awaiting_gate" &&
+      isFanoutParent &&
+      verdictsForTask(taskId).length === 0 &&
+      (step.reds.length > 0 || worktreeFanoutReentry);
+    const needsPublishReentry =
+      (blocked && (isFanoutParent || typeof task.worktreePath === "string")) ||
+      validationHeldFanoutReentry;
     if (needsPublishReentry) {
       // Set gateForced in inputs so dispatch detects re-entry, then transition to
       // pending so the runner picks it up.
