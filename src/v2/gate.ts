@@ -47,6 +47,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { isRunSettled, isOnRejectRecoveryTask, classifyRunTerminalState } from "./ready-queue.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
+import { isWorktreeModeEnabled, integrationBranchExists } from "./worktree-lifecycle.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -262,7 +263,24 @@ export async function gate(
     //
     // A task with no worktree published nothing and has nothing to publish (the
     // non-worktree path never enters the publisher): complete it in place, as before.
-    const needsPublishReentry = blocked && (isFanoutParent || typeof task.worktreePath === "string");
+    // FG-524: a validation-held fanout parent (awaiting_gate, NOT blocked_by_red)
+    // in worktree mode has a captured-but-unpublished integration branch — its
+    // children's work lives ONLY there until it publishes. Completing it in place at
+    // gate.ts's bottom branch would drop that branch (the FG-353/FG-425
+    // publish-on-advance invariant). Route it through the same gateForced re-entry so
+    // dispatchFanoutStep republishes the reused children (running the reds now, since
+    // the validation hold fired before any red ran). A NON-worktree fanout parent
+    // published nothing — its children wrote to projectDir — so it keeps the in-place
+    // complete below, exactly as a non-worktree blocked_by_red parent does.
+    const validationHeldFanoutRepublish =
+      task.status === "awaiting_gate" &&
+      isFanoutParent &&
+      isWorktreeModeEnabled() &&
+      typeof run.projectDir === "string" &&
+      integrationBranchExists(run.projectDir, run.id, taskId);
+    const needsPublishReentry =
+      (blocked && (isFanoutParent || typeof task.worktreePath === "string")) ||
+      validationHeldFanoutRepublish;
     if (needsPublishReentry) {
       // Set gateForced in inputs so dispatch detects re-entry, then transition to
       // pending so the runner picks it up.

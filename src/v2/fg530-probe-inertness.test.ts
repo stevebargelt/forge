@@ -862,6 +862,25 @@ const ALLOWLIST: Allow[] = [
       "fails the just-minted parent on the no-upstream-array error path. Nothing ran; a crash before it leaves a pending or " +
       "running parent with zero children, which reconcile's fanout pass skips (no children) and the ready queue re-derives.",
   },
+  // ── runNext.ts: FG-524's fanout implementer-child validation hold ──────────
+  {
+    file: "v2/runNext.ts",
+    fn: "dispatchFanoutStep",
+    call: "markTaskHeldForGate",
+    near: "fg524_parent_validation_hold",
+    reason:
+      "holds the fanout PARENT at awaiting_gate when the single validation-contract evaluator holds any completed " +
+      "implementer CHILD (status=complete with no tests_run and no no_validation_reason waiver) — the fanout twin of " +
+      "holdIfValidationContractFails, run BEFORE the reds or any publish. The write is a single CAS'd UPDATE that lands " +
+      "status='awaiting_gate' AND the held result together (store/tasks.ts markTaskHeldForGate), so the row is complete " +
+      "and self-describing the instant it lands. A crash BEFORE it leaves the parent `running` with completed children " +
+      "and a built-but-UNPUBLISHED integration branch — the pre-hold state, no target mutated, which the next dispatch " +
+      "pass re-derives. A crash in the status→event gap leaves the parent durably awaiting_gate carrying the held result; " +
+      "only the task.awaiting_gate audit line is missing, and NOTHING reads that event to decide a transition (gate.ts's " +
+      "advance branches on task.status + taskPackage.inputs, and reconcile never revisits a non-running task). Recovery — " +
+      "`forge gate <parentId> --advance` — reads the status and republishes the retained children. Nothing is stranded, " +
+      "lost, or shipped without evidence.",
+  },
   // ── runNext.ts: FG-425's gate-forced single-primary re-entry ───────────────
   //
   // The single-primary analogue of dispatchFanoutStep's gateForced re-entry (whose
