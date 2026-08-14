@@ -17,13 +17,30 @@ const tmpHome = mkdtempSync(join(tmpdir(), "forge-completed-runs-route-"));
 // One clock reading for the whole fixture. FG-709 also permits the integration
 // runner to place that reading at every UTC hour; the route and fixture then
 // agree on the same clock without changing production behavior.
-const realDateNow = Date.now;
-const configuredNow = Number(process.env.FG_709_TEST_NOW);
-const SEEDED_AT = Number.isFinite(configuredNow) ? configuredNow : realDateNow();
-if (Number.isFinite(configuredNow)) Date.now = () => SEEDED_AT;
-const iso = (msAgo: number) => new Date(SEEDED_AT - msAgo).toISOString();
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
+// The oldest relative fixture (r-4's created_at) sits 61 days before the clock.
+// A configured clock earlier than that pushes fixtures before the epoch, where
+// the production query correctly rejects them and the `all` total silently
+// drops one — the confusing red RF-1 reported at epoch 0 (and, since Number("")
+// is 0, at an empty-string value). Refuse such a clock loudly instead.
+const OLDEST_FIXTURE_AGO = 61 * DAY;
+const realDateNow = Date.now;
+const rawConfiguredNow = process.env.FG_709_TEST_NOW;
+let SEEDED_AT = realDateNow();
+if (rawConfiguredNow !== undefined) {
+  const configuredNow = Number(rawConfiguredNow);
+  if (!Number.isFinite(configuredNow) || configuredNow < OLDEST_FIXTURE_AGO) {
+    throw new Error(
+      `FG_709_TEST_NOW must be a finite epoch-ms instant at least ${OLDEST_FIXTURE_AGO} ms ` +
+        `after the epoch (${OLDEST_FIXTURE_AGO / DAY} days, this file's oldest fixture); ` +
+        `got ${JSON.stringify(rawConfiguredNow)}`,
+    );
+  }
+  SEEDED_AT = configuredNow;
+  Date.now = () => SEEDED_AT;
+}
+const iso = (msAgo: number) => new Date(SEEDED_AT - msAgo).toISOString();
 const TODAY_START = Math.floor(SEEDED_AT / DAY) * DAY;
 // Seed current-day completions only in the part of the UTC day that has
 // elapsed at this module's clock. The route reads at the same or a later time.

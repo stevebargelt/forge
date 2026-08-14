@@ -27,10 +27,26 @@ const PROJECT = "/proj/fg-690";
 const OTHER_PROJECT = "/proj/other";
 // FG-709: accept a test-only clock position so this HTTP integration flow can
 // be proven at every UTC hour without changing the production route's clock.
+// The oldest relative fixture (the run/task created_at) sits 50 days back; a
+// configured clock earlier than that pushes fixtures before the epoch. Refuse
+// such a clock loudly (RF-1) rather than fall back or produce a misleading red
+// — Number("") is 0, so an empty-string value is refused too.
+const OLDEST_FIXTURE_AGO = 50 * DAY;
 const realDateNow = Date.now;
-const configuredNow = Number(process.env.FG_709_TEST_NOW);
-const NOW = Number.isFinite(configuredNow) ? configuredNow : realDateNow();
-if (Number.isFinite(configuredNow)) Date.now = () => NOW;
+const rawConfiguredNow = process.env.FG_709_TEST_NOW;
+let NOW = realDateNow();
+if (rawConfiguredNow !== undefined) {
+  const configuredNow = Number(rawConfiguredNow);
+  if (!Number.isFinite(configuredNow) || configuredNow < OLDEST_FIXTURE_AGO) {
+    throw new Error(
+      `FG_709_TEST_NOW must be a finite epoch-ms instant at least ${OLDEST_FIXTURE_AGO} ms ` +
+        `after the epoch (${OLDEST_FIXTURE_AGO / DAY} days, this file's oldest fixture); ` +
+        `got ${JSON.stringify(rawConfiguredNow)}`,
+    );
+  }
+  NOW = configuredNow;
+  Date.now = () => NOW;
+}
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
 const day = (ms: number) => new Date(Math.floor(ms / DAY) * DAY).toISOString();
 const TODAY_START = Math.floor(NOW / DAY) * DAY;
