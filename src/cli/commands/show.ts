@@ -1114,6 +1114,24 @@ function workspaceSummary(payload: unknown): string | undefined {
   return parts.length > 0 ? ` — ${parts.join("  ")}` : undefined;
 }
 
+/** FG-640/RF-2: run.finalize_blocked is the durable record of WHY a run will not
+ *  settle — payloadSummary prints key NAMES, so it rendered as `{workflow,
+ *  workflowLoadError, source}` and named neither the workflow nor the reason, leaving
+ *  the operator the actionable half only by diffing the task list against the workflow
+ *  (FG-635 AC4 requires it be recorded AND visible). Like workspaceSummary, this prints
+ *  the VALUES. The stored error is already bounded at the write path (invoke.ts,
+ *  boundLoadErrorForRecord); take the first line here too so the timeline stays one
+ *  line per event regardless of what a historical event happens to carry. */
+export function finalizeBlockedSummary(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== "object") return undefined;
+  const p = payload as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof p["workflow"] === "string") parts.push(p["workflow"]);
+  if (typeof p["workflowLoadError"] === "string")
+    parts.push(p["workflowLoadError"].split("\n", 1)[0] ?? "");
+  return parts.length > 0 ? ` — ${parts.join(": ")}` : undefined;
+}
+
 function eventSummary(e: Event): string {
   if (
     e.eventType === "task.workspace_reaped" ||
@@ -1121,6 +1139,9 @@ function eventSummary(e: Event): string {
     e.eventType === "task.workspace_reap_deferred"
   ) {
     return workspaceSummary(e.payload) ?? payloadSummary(e.payload);
+  }
+  if (e.eventType === "run.finalize_blocked") {
+    return finalizeBlockedSummary(e.payload) ?? payloadSummary(e.payload);
   }
   return payloadSummary(e.payload);
 }

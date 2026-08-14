@@ -31,6 +31,7 @@ import {
   listPresentArtifacts,
   deriveNextCommandForTask,
   deriveNextCommandForRun,
+  finalizeBlockedSummary,
   groupFailedByKind,
   getBlockerTasks,
   showReconcileStep,
@@ -1046,6 +1047,39 @@ test("deriveNextCommandForRun: all complete → —", () => {
 
 test("deriveNextCommandForRun: empty tasks → —", () => {
   assert.equal(deriveNextCommandForRun(RUN.id, []), "—");
+});
+
+// ─── finalizeBlockedSummary (FG-640/RF-2) ────────────────────────────────────
+
+test("finalizeBlockedSummary: renders the workflow name and load error VALUES, not key names", () => {
+  const summary = finalizeBlockedSummary({
+    workflow: "feature",
+    workflowLoadError: "workflow 'feature' (…): schema validation failed",
+    source: "invoke",
+  });
+  // The AC4 gap: payloadSummary rendered `{workflow, workflowLoadError, source}` and
+  // named neither the workflow nor the reason. This prints both.
+  assert.ok(summary, "a finalize_blocked payload yields a value summary");
+  assert.match(summary!, /feature/, "the workflow is named");
+  assert.match(summary!, /schema validation failed/, "the reason is shown");
+  assert.doesNotMatch(summary!, /workflowLoadError|\bsource\b/, "no bare key names");
+});
+
+test("finalizeBlockedSummary: collapses a multi-line stored error to its first line", () => {
+  const summary = finalizeBlockedSummary({
+    workflow: "feature",
+    workflowLoadError: "first line\nmalicious\nsource\ncontext",
+  });
+  assert.ok(summary);
+  assert.doesNotMatch(summary!, /\n/, "the timeline stays one line per event");
+  assert.match(summary!, /first line/);
+  assert.doesNotMatch(summary!, /malicious/);
+});
+
+test("finalizeBlockedSummary: returns undefined when there is nothing to name", () => {
+  assert.equal(finalizeBlockedSummary(null), undefined);
+  assert.equal(finalizeBlockedSummary("not an object"), undefined);
+  assert.equal(finalizeBlockedSummary({ source: "invoke" }), undefined);
 });
 
 // ─── groupFailedByKind ───────────────────────────────────────────────────────

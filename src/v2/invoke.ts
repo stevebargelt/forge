@@ -54,7 +54,8 @@ import {
   GIT_UNAVAILABLE_EXIT_CODE,
   type SpawnContext,
 } from "./spawn.js";
-import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
+import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflow, WorkflowNotFoundError } from "./loader.js";
+import { taskHasPipelineFinalize } from "./run-kind.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
@@ -503,6 +504,119 @@ export type DispatchInvokeTaskArgs = {
   dockerExec?: DockerExecFn;
 };
 
+// FG-635: how to classify a run against its workflow at the invoke finalize site.
+// The two loader failure modes are NOT the same and must not share a branch:
+//
+//   - "classify" (workflow=undefined) — the invoke sentinel run ("invoke"/
+//     "invoke_chain") has no phases (taskHasPipelineFinalize is the discriminator), and
+//     a run whose workflow has NO registered definition (an EXTERNAL/attached run forge
+//     only pins invokes to, #201 — a WorkflowNotFoundError) owns no phases forge could
+//     check. Both are legitimately invoke-shaped: the top-level tasks carry the outcome.
+//     This is the pre-FG-635 behavior for such runs and does NOT re-open the defect — a
+//     forge pipeline run reaches here with its anchored seed generation and loads, so
+//     `feature`'s guaranteed `docs` phase is still seen.
+//   - "classify" with a loaded workflow — a loadable pipeline workflow: its
+//     undispatched-and-reachable phases keep the run open.
+//   - "load_failed" — the workflow EXISTS but failed to load (schema-invalid, malformed
+//     YAML, unreadable, a torn/absent seed generation). Forge cannot enumerate the
+//     phases, so it CANNOT establish that every one is terminal — it must NOT claim the
+//     run complete. The caller leaves the run open and records the reason.
+//
+// The two failure modes are told apart on the failure ITSELF (WorkflowNotFoundError vs
+// any other Error), not by pre-checking the filesystem — see loader.ts's
+// WorkflowNotFoundError, which is thrown ONLY for the genuine not-found case.
+type FinalizeWorkflowResolution =
+  | { kind: "classify"; workflow: Workflow | undefined }
+  | { kind: "load_failed"; workflow: string; error: string };
+
+function resolveFinalizeWorkflow(
+  run: Run | undefined,
+  seedGeneration?: SeedGeneration | null,
+): FinalizeWorkflowResolution {
+  if (!run || !taskHasPipelineFinalize(run)) return { kind: "classify", workflow: undefined };
+  try {
+    return {
+      kind: "classify",
+      workflow: loadWorkflow(run.workflow, { projectDir: run.projectDir, seedGeneration }),
+    };
+  } catch (e) {
+    // Case 1 — no registered definition (external/#201): forge owns no phases, so the
+    // run stays invoke-shaped and still completes exactly as it does today.
+    if (e instanceof WorkflowNotFoundError) return { kind: "classify", workflow: undefined };
+    // Case 2 — the workflow is present but unloadable: phase coverage is unknowable.
+    return { kind: "load_failed", workflow: run.workflow, error: (e as Error).message };
+  }
+}
+
+// FG-640/RF-1: the workflow load error becomes workflowLoadError on the durable
+// run.finalize_blocked event, stored in the shared host DB and rendered by the
+// dashboard / `forge show`. A YAML parser diagnostic can echo the offending source
+// line and arbitrary surrounding context, so the RAW message is the wrong SHAPE for a
+// durable record — its size and content are whatever happens to be in the file. Bound
+// it in the same spirit as payloadSummary's 60-char slice for a string payload: keep
+// the loader's own message text (run.finalize_blocked exists to tell the operator WHY),
+// but only its FIRST LINE, length-capped — never scrub or genericize it (AC4).
+const MAX_FINALIZE_ERROR_LEN = 500;
+function boundLoadErrorForRecord(message: string): string {
+  const firstLine = message.split("\n", 1)[0] ?? "";
+  return firstLine.length > MAX_FINALIZE_ERROR_LEN
+    ? firstLine.slice(0, MAX_FINALIZE_ERROR_LEN) + "…"
+    : firstLine;
+}
+
+// FG-635: finalize a run reached through the invoke dispatch path, classified
+// against its ACTUAL workflow. closeRunIfIdle used to pass `undefined` for the
+// workflow, which forced classifyRunTerminalState's invoke-shape branch (only the
+// top-level tasks) even for a pipeline run that an ad-hoc task was attached to via
+// `forge invoke --run`. A guaranteed phase (e.g. feature's `docs`) that had not yet
+// been dispatched was then invisible, and the ad-hoc task's completion false-settled
+// the run `complete` with docs never run.
+//
+// The invoke sentinel run (workflow="invoke"/"invoke_chain") genuinely has no
+// phases: taskHasPipelineFinalize is false there, so the workflow stays undefined
+// and a real invoke run still settles on its top-level tasks alone (AC5 inverse).
+export function finalizeInvokeRunIfSettled(
+  runId: string,
+  extra: { succeeded: boolean; owned: boolean },
+  seedGeneration?: SeedGeneration | null,
+): boolean {
+  const run = getRun(runId);
+  const resolved = resolveFinalizeWorkflow(run, seedGeneration);
+  // FG-635 (AC2/AC4): the workflow exists but could not be loaded, so its phase list is
+  // unknowable and forge cannot prove every non-skipped phase is terminal. Do NOT settle
+  // the run — leave it open and record WHY, the smallest honest surface an operator needs
+  // to see the run is not closing (and to fix the workflow or `forge cancel`). This is
+  // the fail-CLOSED replacement for the old broad catch that silently downgraded to
+  // invoke-shape classification and false-settled the run `complete` phase-blind.
+  if (resolved.kind === "load_failed") {
+    logEvent("run.finalize_blocked", {
+      runId,
+      payload: {
+        workflow: resolved.workflow,
+        workflowLoadError: boundLoadErrorForRecord(resolved.error),
+        source: "invoke",
+      },
+    });
+    return false;
+  }
+  const classification = classifyRunTerminalState(resolved.workflow, tasksForRun(runId));
+  if (!classification) return false;
+  // finalizeRunIfSettled re-reads the run and only writes when it's still
+  // "active" — a no-op (false, no write, no event) when it's already terminal
+  // (idempotent close) or abandoned (a concurrent `forge cancel` won the race;
+  // its cancellation is authoritative and must not be flipped back, AWN-2/FG-484).
+  return finalizeRunIfSettled(runId, classification.status, "invoke", {
+    source: "invoke",
+    succeeded: extra.succeeded,
+    owned: extra.owned,
+    // FG-635 (AC4): name the undispatched-yet-terminal phase(s) on the finalize
+    // event, so "docs never ran" is visible on the record and not inferable only
+    // by diffing the task list against the workflow. Mirrors runNext/gate's payload.
+    failedPhases: classification.failedPhases.join(",") || undefined,
+    unreachablePhases: classification.unreachablePhases.join(",") || undefined,
+  });
+}
+
 // FG-507: the spawn → result-ingestion → run-finalization half of `invoke`,
 // against a task row that already exists. `forge invoke` calls it right after
 // minting its row; `forge retry` calls it against the lineage-linked row it
@@ -528,24 +642,15 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // that left attached runs leaked-active with nothing to close them. Applies
   // to owned AND attached runs; the owns-run case still closes its lone task.
   //
-  // FG-585: the shared classifier decides the terminal state for the invoke run
-  // shape (no workflow steps → it reads the top-level tasks). A settled invoke
+  // FG-585: the shared classifier decides the terminal state. A settled invoke
   // run whose task(s) ended `failed` closes as `failed`, not a false `complete`.
-  // Returns null while any top-level task is still non-terminal (a parallel
-  // sibling invoke under the same run keeps it active until the last finishes).
+  // FG-635: for an ad-hoc task attached to a pipeline run (`forge invoke --run`),
+  // the classifier reads that run's ACTUAL workflow, so a guaranteed phase not yet
+  // dispatched (e.g. feature's `docs`) keeps the run open instead of false-settling
+  // it on the ad-hoc task's completion. A genuine invoke/external run has no phases
+  // and still settles on its top-level tasks alone (see finalizeInvokeRunIfSettled).
   const closeRunIfIdle = (succeeded: boolean): void => {
-    const classification = classifyRunTerminalState(undefined, tasksForRun(runId));
-    if (!classification) return;
-    // finalizeRunIfSettled re-reads the run and only writes when it's still
-    // "active" — a no-op (false, no write, no event) when it's already
-    // terminal (idempotent close) or abandoned (a concurrent `forge cancel`
-    // won the race; its cancellation is authoritative and must not be
-    // flipped back, AWN-2/FG-484).
-    finalizeRunIfSettled(runId, classification.status, "invoke", {
-      source: "invoke",
-      succeeded,
-      owned: args.ownsRun,
-    });
+    finalizeInvokeRunIfSettled(runId, { succeeded, owned: args.ownsRun }, seedGeneration);
   };
 
   // FG-612: the pre-container chokepoint for callers that reach

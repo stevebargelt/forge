@@ -40,6 +40,25 @@ function forgeHome(): string {
   return process.env.FORGE_HOME ?? join(homedir(), ".forge");
 }
 
+/** FG-635: the ONE load failure that means "forge has no registered definition for
+ *  this workflow name" — the project override is absent AND no `<name>.yml` exists in
+ *  the published generation. It is thrown ONLY for that genuine not-found case, never
+ *  for a workflow that exists but fails to parse/validate. Callers that must keep an
+ *  external/unregistered run (#201) completing while refusing to fabricate a phase list
+ *  for a broken-but-present workflow distinguish the two on this type — see
+ *  resolveFinalizeWorkflow in invoke.ts. A YAML parse error, a schema-validation
+ *  failure, a name mismatch, a torn seed generation, or a missing generation are all
+ *  plain `Error`s: the workflow is present (or forge is misconfigured), so its phase
+ *  coverage is unknowable and the run must not be claimed complete. */
+export class WorkflowNotFoundError extends Error {
+  readonly workflowName: string;
+  constructor(workflowName: string, message: string) {
+    super(message);
+    this.name = "WorkflowNotFoundError";
+    this.workflowName = workflowName;
+  }
+}
+
 export type LoadContext = {
   /** Absolute path to the project dir. Used to look up the project's override. */
   projectDir?: string;
@@ -219,7 +238,10 @@ export function loadWorkflow(name: string, ctx: LoadContext = {}): Workflow {
     if (!generation) throw noCompleteGenerationError("workflows");
     path = join(generationCategoryDir(generation, "workflows"), `${name}.yml`);
     if (!existsSync(path)) {
-      throw new Error(`workflow '${name}' not found at ${path} (or project override)`);
+      throw new WorkflowNotFoundError(
+        name,
+        `workflow '${name}' not found at ${path} (or project override)`,
+      );
     }
   }
   const raw = readFileSync(path, "utf8");
@@ -402,7 +424,10 @@ export function loadWorkflowWithSource(
     if (!generation) throw noCompleteGenerationError("workflows");
     path = join(generationCategoryDir(generation, "workflows"), `${name}.yml`);
     if (!existsSync(path)) {
-      throw new Error(`workflow '${name}' not found at ${path} (or project override)`);
+      throw new WorkflowNotFoundError(
+        name,
+        `workflow '${name}' not found at ${path} (or project override)`,
+      );
     }
   }
   const raw = readFileSync(path, "utf8");
