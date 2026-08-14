@@ -19,9 +19,15 @@
 //   - Fanout implementer CHILDREN finalize via markTaskComplete, not
 //     finalizePrimary. Each completed child is evaluated once here; if any child
 //     is held, the fanout PARENT lands `awaiting_gate` with a reason naming the
-//     offending child(ren), before reds run and before the integration branch is
-//     published. Recovery verb: `forge gate <parentId> --advance` re-enters
-//     dispatch and publishes the reused children. (FG-524)
+//     offending child(ren), before the step's reds run. Recovery verb:
+//     `forge gate <parentId> --advance` re-enters dispatch and runs the reds in
+//     EITHER mode — that is the invariant the hold protects. What re-entry does with
+//     the children's work is mode-dependent: in worktree mode their work lives only
+//     on a captured, unpublished integration branch, so advance republishes the
+//     retained children with the reds folded into the publisher's validation span;
+//     in non-worktree mode the children wrote directly to projectDir, so there is
+//     nothing to publish and advance runs the reds against projectDir and completes
+//     in place (landing `blocked_by_red` if a red rejects). (FG-524)
 //   - `forge invoke` ad-hoc completions call markTaskComplete directly
 //     (invoke.ts). Policy is WARN, not hold: an implementer completion that fails
 //     the contract still completes, but the evaluator's named reason is emitted
