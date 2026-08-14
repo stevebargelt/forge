@@ -175,7 +175,9 @@ function makeFg364Exec(state: { redRound: number }): DockerExecFn {
             }
           : { status: "complete", verdict: "pass", confidence: 0.9, findings: [] };
     } else if (taskId.startsWith("task-build-")) {
-      result = { status: "complete", diff_summary: "implemented", files_modified: [] };
+      // FG-524: implementer children carry tests_run so the validation contract
+      // does not hold the parent — this suite exercises request-changes, not validation.
+      result = { status: "complete", tests_run: 1, diff_summary: "implemented", files_modified: [] };
     } else if (taskId.startsWith("task-docs-")) {
       result = { status: "complete" };
     } else {
@@ -458,7 +460,9 @@ function makeFg364ExecMultiBatch(state: { redRound: number }): DockerExecFn {
             }
           : { status: "complete", verdict: "pass", confidence: 0.9, findings: [] };
     } else if (taskId.startsWith("task-build-")) {
-      result = { status: "complete", diff_summary: "implemented", files_modified: [] };
+      // FG-524: implementer children carry tests_run so the validation contract
+      // does not hold the parent — this suite exercises request-changes, not validation.
+      result = { status: "complete", tests_run: 1, diff_summary: "implemented", files_modified: [] };
     } else if (taskId.startsWith("task-docs-")) {
       result = { status: "complete" };
     } else {
@@ -808,7 +812,8 @@ test("FG-368: anyFailed — fanout child failure with parent completing doesn't 
         // Exit code 1 + empty result.json (pre-initialized to "") → container_crash → child fails.
         return 1;
       }
-      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", diff_summary: "ok", files_modified: [] }));
+      // FG-524: implementer child carries tests_run so the validation contract is satisfied.
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1, diff_summary: "ok", files_modified: [] }));
       return 0;
     }
     if (taskId.startsWith("task-docs-")) {
@@ -1072,7 +1077,8 @@ steps:
         // exit code 1 + empty result.json (pre-initialized by runContainer) → container_crash → child fails
         return 1;
       }
-      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", diff_summary: "ok", files_modified: [] }));
+      // FG-524: implementer child carries tests_run so the validation contract is satisfied.
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1, diff_summary: "ok", files_modified: [] }));
       return 0;
     }
     writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
