@@ -23,7 +23,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -36,6 +36,7 @@ import { verdictsForTask } from "../store/verdicts.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { gate } from "./gate.js";
+import { performCancel } from "../cli/commands/cancel.js";
 import { integrationWorktreeDir } from "../util/paths.js";
 import { integrationBranchName, integrationBranchExists } from "./worktree-lifecycle.js";
 import { failureKindForTask } from "./failure-kind.js";
@@ -147,6 +148,94 @@ beforeEach(() => {
   }
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   ensureRuntime();
+});
+
+// ─── FG-712: a child cancelled after its container returns but before its
+// completion CAS must be treated as failed by the aggregate. The cancel goes
+// through performCancel (the production `forge cancel` path), not a mocked CAS.
+// Its valid result is deliberately missing tests_run: if this outcome were still
+// reported complete, the parent would incorrectly validation-hold it as well as
+// merge/publish its captured worktree.
+
+test("FG-712: a fanout child whose completion CAS loses to forge cancel is failed and excluded from validation and publication", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+  process.env.FORGE_WORKTREES_EPHEMERAL = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  const dockerBin = makeTmpDir();
+  const dockerLog = join(dockerBin, "docker-calls.log");
+  writeFileSync(dockerLog, "");
+  writeFileSync(dockerBin + "/docker", `#!/bin/sh\necho "$@" >> "${dockerLog}"\n`);
+  chmodSync(dockerBin + "/docker", 0o755);
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${dockerBin}:${priorPath ?? ""}`;
+
+  try {
+    const { runId } = startRun({
+      workflow: FANOUT_IMPLEMENTER_NO_REDS_WF,
+      title: "FG-712 fanout lost completion CAS",
+      inputs: {},
+      projectDir: repo,
+    });
+
+    const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+      const taskId = extractTaskId(args);
+      const projectMount = findProjectMountHost(args);
+      writeFileSync(stderrPath, "");
+      if (taskId.startsWith("task-source-")) {
+        writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["cancelled", "published"] });
+      } else if (taskId.startsWith("task-build-0-")) {
+        if (projectMount) writeFileSync(join(projectMount, "cancelled-child.ts"), "export const cancelled = true;\n");
+        writeTaskResult(stdoutPath, { status: "complete" });
+        // The container has produced a valid result, then the real cancel path
+        // wins before runFanoutChild reaches markTaskComplete.
+        const cancelled = performCancel(taskId, {}, () => {}, () => true);
+        assert.equal(cancelled.kind, "task-cancelled", "precondition: forge cancel must terminally fail the live child row");
+      } else if (taskId.startsWith("task-build-1-")) {
+        if (projectMount) writeFileSync(join(projectMount, "published-child.ts"), "export const published = true;\n");
+        writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+      } else {
+        writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+      }
+      return 0;
+    };
+
+    await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+    const wave = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+    assert.deepEqual(wave.completedSteps, ["build"], "continue mode publishes only the genuinely completed sibling");
+    assert.deepEqual(wave.awaitingGate, [], "the cancelled child's result is not sent to validation");
+
+    const parent = tasksForRun(runId).find((task) => task.phase === "build" && task.parentId === undefined)!;
+    const children = tasksForRun(runId).filter((task) => task.parentId === parent.id && !task.agentRole.startsWith("red-"));
+    const lost = children.find((task) => task.taskPackage.inputs["fanoutIndex"] === 0)!;
+    const completed = children.find((task) => task.taskPackage.inputs["fanoutIndex"] === 1)!;
+    assert.equal(lost.status, "failed", "the cancelled child remains terminally failed after its completion CAS loses");
+    assert.equal(failureKindForTask(lost.id), "cancelled", "the production cancel decision remains durable");
+    assert.equal(eventsForTask(lost.id).some((event) => event.eventType === "task.completed"), false, "lost-CAS child is never announced as completed");
+
+    const aggregate = parent.result as { status: string; children: Array<{ childTaskId: string; status: string; result?: unknown }> };
+    const lostOutcome = aggregate.children.find((child) => child.childTaskId === lost.id)!;
+    assert.equal(lostOutcome.status, "failed", "runFanoutChild returns the lost-CAS outcome as failed to the aggregate");
+    assert.equal(lostOutcome.result, undefined, "the cancelled result is unavailable to validation or publication");
+    assert.equal(aggregate.status, "partial", "the parent does not count the cancelled child as completed");
+    assert.equal(completed.status, "complete", "the unaffected sibling still completes");
+
+    assert.equal(existsSync(join(repo, "cancelled-child.ts")), false, "cancelled child worktree is never merged or published");
+    assert.ok(existsSync(join(repo, "published-child.ts")), "the genuinely completed sibling is still published");
+    assert.equal(allPublicationAttempts().filter((attempt) => attempt.taskId === parent.id && attempt.state === "published").length, 1, "only the aggregate of completed children is published");
+
+    // FG-492's retention invariant remains in force: retain a child whose CAS
+    // lost. The sibling and source are reaped, but no docker rm targets the lost
+    // child (fg492-gate-container-reap.test.ts covers the shared reap mechanism).
+    const dockerCalls = readFileSync(dockerLog, "utf8");
+    assert.doesNotMatch(dockerCalls, new RegExp(`rm -f -v forge-${lost.id}`), "lost-CAS child container is retained, not reaped");
+    assert.match(dockerCalls, new RegExp(`rm -f -v forge-${completed.id}`), "completed sibling still follows the normal reap path");
+  } finally {
+    process.env.PATH = priorPath;
+  }
 });
 
 afterEach(() => {

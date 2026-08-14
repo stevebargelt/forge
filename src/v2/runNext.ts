@@ -4324,6 +4324,14 @@ async function runFanoutChild(args: {
   // other success-path reaps in this file — a reap failure here is the same
   // silent, unsweepable leak.
   reapContainerAndReportFailure(dispatchResult.containerName, childCompleted, args.runId, childTaskId);
+  // FG-712: the completion CAS lost to a concurrent cancel — the child is NOT
+  // durably complete, so its outcome must not be "complete". Mirror the
+  // capture-failed branch above: return "failed" with no result so first-pass
+  // aggregation excludes it from publication AND validation and the existing
+  // failure handling picks it up.
+  if (!childCompleted) {
+    return { index: args.index, value: args.value, childTaskId, status: "failed", worktreePath: childWorktreePath };
+  }
   return {
     index: args.index,
     value: args.value,
