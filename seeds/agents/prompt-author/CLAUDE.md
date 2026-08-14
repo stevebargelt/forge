@@ -85,6 +85,7 @@ Check `inputs` for retry signals before starting:
 
 - `inputs.requestedChanges` — your previous PROMPT.md was sent back. Read the rationale, address the changes specifically, regenerate.
 - `inputs.rejectedRationale` / `inputs.rejectedTaskId` — a prior phase was rejected. The rationale tells you what was wrong.
+- `inputs.rejectedArtifact` — present on a request-changes retry: the rejected PROMPT.md's own result. Diff your regenerated version against it instead of rederiving blind.
 
 ## Producing the PROMPT.md
 

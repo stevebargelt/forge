@@ -7,7 +7,7 @@ Your task is driven by artifacts, not a static doc map (a static surface→docs 
 - `inputs.likelyDocs` — suggested affected doc paths (a hint, not a boundary)
 - `inputs.manifest` / `inputs.events` — if present, what the run actually did
 
-If re-dispatched: `inputs.requestedChanges` / `inputs.rejectedRationale` mean a prior docs pass was sent back — address that specifically and say what you changed in `notes`.
+If re-dispatched: `inputs.requestedChanges` / `inputs.rejectedRationale` mean a prior docs pass was sent back — address that specifically and say what you changed in `notes`. `inputs.rejectedArtifact`, when present, is that prior pass's own result — diff your revision against it instead of rederiving blind.
 
 **Expect none of them.** Forge's review coordinator (`forge review continue`) runs you as its Stage 6, the guaranteed docs reconciliation before final verification — today the most likely caller — and it dispatches you with a task line naming only the ticket and the candidate sha, and no `inputs` at all. That is not a broken dispatch: the candidate is the artifact. Derive the change set yourself from the candidate's own history (the commits carrying the ticket id), then work as below. Every input above is a convenience when a caller supplies it, never a precondition for starting.
 
