@@ -199,3 +199,65 @@ test("FG-630: request-changes on a result-less task omits rejectedArtifact (no n
   assert.equal(inputs["rejectedTaskId"], primary.id, "lineage still carried");
   assert.equal(inputs["requestedChanges"], "no artifact");
 });
+
+// RF-2: a retry row already carries a rejectedArtifact (from its own minting).
+// If that retry reaches the gate with NO result and is request-changed, the
+// fresh replacement must CLEAR the inherited artifact, not carry it stale paired
+// with the new rejectedTaskId. Would FAIL when rejectedArtifact is merely
+// omitted from the merge (the inherited one survives the input spread).
+test("FG-630 (RF-2): fresh mint clears an inherited rejectedArtifact when the retry has no result", async () => {
+  const retry = awaitingGatePrimary("task-plan-retry-noresult", "plan", "tech-lead", {
+    result: null,
+    inputs: {
+      seededInput: "keep-me",
+      rejectedArtifact: { status: "complete", summary: "STALE artifact from prior retry" },
+      rejectedTaskId: "task-plan-older",
+    },
+  });
+
+  const { nextTasks } = await gate(retry.id, "request-changes", "still wrong", {});
+  const inputs = nextTasks[0]!.taskPackage.inputs as Record<string, unknown>;
+
+  assert.ok(
+    !("rejectedArtifact" in inputs),
+    "the inherited stale artifact must be cleared, not carried forward",
+  );
+  assert.equal(inputs["rejectedTaskId"], retry.id, "rejectedTaskId advances to the current retry");
+  assert.equal(inputs["seededInput"], "keep-me", "unrelated inputs preserved");
+});
+
+// RF-1: dedup path. A first (result-bearing) request-changes sets rejectedArtifact
+// on the pending replacement. A second, result-LESS request-changes must CLEAR
+// that artifact on the same row rather than leaving it stale paired with the new
+// rejectedTaskId. Would FAIL when the merge omits rejectedArtifact (the prior
+// row's value persists).
+test("FG-630 (RF-1): dedup clears the stale rejectedArtifact when the newer request-changes has no result", async () => {
+  const first = awaitingGatePrimary("task-plan-first", "plan", "tech-lead");
+  const { nextTasks: firstFollow } = await gate(first.id, "request-changes", "first pass", {});
+  const replacementId = firstFollow[0]!.id;
+  // Sanity: the prior result-bearing pass DID set the artifact on the pending row.
+  assert.deepEqual(
+    (getTask(replacementId)!.taskPackage.inputs as Record<string, unknown>)["rejectedArtifact"],
+    PERSISTED_RESULT,
+  );
+
+  const secondNoResult = awaitingGatePrimary("task-plan-second-noresult", "plan", "tech-lead", {
+    result: null,
+  });
+  const { nextTasks: secondFollow } = await gate(
+    secondNoResult.id,
+    "request-changes",
+    "second pass",
+    {},
+  );
+
+  assert.equal(secondFollow[0]!.id, replacementId, "dedup updates the same pending row");
+  const inputs = getTask(replacementId)!.taskPackage.inputs as Record<string, unknown>;
+  assert.ok(
+    !("rejectedArtifact" in inputs),
+    "the stale artifact from the prior result-bearing pass must be cleared",
+  );
+  assert.equal(inputs["rejectedTaskId"], secondNoResult.id, "rejectedTaskId advances to the newer task");
+  assert.equal(inputs["requestedChanges"], "second pass");
+  assert.equal(inputs["seededInput"], "keep-me", "dedup merge preserves existing inputs");
+});

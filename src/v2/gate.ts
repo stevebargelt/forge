@@ -507,13 +507,21 @@ export async function gate(
     // delta-statement field or enforcement machinery is added.
     // task.result may be large — embed it as-is (no truncation); omit the input
     // entirely when there is no result rather than writing null.
+    // FG-630 (RF-1/RF-2): present the rejected artifact when this task HAS a
+    // result; when it does not, set the key to `undefined` so the merges below
+    // actively CLEAR any stale artifact rather than leaving it paired with the
+    // new rejectedTaskId. Two inheritance paths make omission (a partial merge)
+    // wrong: a retry row already carries its own `rejectedArtifact` from a prior
+    // result-bearing request-changes (fresh mint spreads task.taskPackage.inputs
+    // first), and the dedup path merge-updates only the supplied fields onto the
+    // existing pending row. `undefined` drops the key on JSON serialization
+    // (getTask reloads both paths), so the invariant holds: omitted, never null.
+    const hasResult = task.result !== undefined && task.result !== null;
     const retryLineageInputs: Record<string, unknown> = {
       requestedChanges: rationale ?? "",
       rejectedRationale: rationale ?? "",
       rejectedTaskId: taskId,
-      ...(task.result !== undefined && task.result !== null
-        ? { rejectedArtifact: task.result }
-        : {}),
+      rejectedArtifact: hasResult ? task.result : undefined,
     };
 
     // Dedup: if a pending replacement primary already exists for this phase,
@@ -574,7 +582,9 @@ export async function gate(
         taskId: newId,
         payload: { from: "request-changes" },
       });
-      nextTasks = [newTask];
+      // Reload from the store so a cleared (undefined) rejectedArtifact is
+      // dropped from the returned object, matching the dedup path's getTask.
+      nextTasks = [getTask(newId)!];
     }
   }
   crashPoint("gate:after-branch");
