@@ -548,6 +548,22 @@ function resolveFinalizeWorkflow(
   }
 }
 
+// FG-640/RF-1: the workflow load error becomes workflowLoadError on the durable
+// run.finalize_blocked event, stored in the shared host DB and rendered by the
+// dashboard / `forge show`. A YAML parser diagnostic can echo the offending source
+// line and arbitrary surrounding context, so the RAW message is the wrong SHAPE for a
+// durable record — its size and content are whatever happens to be in the file. Bound
+// it in the same spirit as payloadSummary's 60-char slice for a string payload: keep
+// the loader's own message text (run.finalize_blocked exists to tell the operator WHY),
+// but only its FIRST LINE, length-capped — never scrub or genericize it (AC4).
+const MAX_FINALIZE_ERROR_LEN = 500;
+function boundLoadErrorForRecord(message: string): string {
+  const firstLine = message.split("\n", 1)[0] ?? "";
+  return firstLine.length > MAX_FINALIZE_ERROR_LEN
+    ? firstLine.slice(0, MAX_FINALIZE_ERROR_LEN) + "…"
+    : firstLine;
+}
+
 // FG-635: finalize a run reached through the invoke dispatch path, classified
 // against its ACTUAL workflow. closeRunIfIdle used to pass `undefined` for the
 // workflow, which forced classifyRunTerminalState's invoke-shape branch (only the
@@ -577,7 +593,7 @@ export function finalizeInvokeRunIfSettled(
       runId,
       payload: {
         workflow: resolved.workflow,
-        workflowLoadError: resolved.error,
+        workflowLoadError: boundLoadErrorForRecord(resolved.error),
         source: "invoke",
       },
     });

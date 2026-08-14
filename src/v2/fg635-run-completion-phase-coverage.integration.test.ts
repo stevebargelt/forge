@@ -262,6 +262,13 @@ test("FG-635 an invalid pipeline workflow that fails to load keeps the run open 
     /schema validation failed/,
     "the event carries the loader error so an operator can see WHY",
   );
+  // FG-640/RF-1: the loader's message is bounded before it becomes a durable field —
+  // FIRST LINE only, length-capped — so a YAML diagnostic's echoed source line and its
+  // surrounding context cannot flow file-controlled into the shared host DB / dashboard.
+  // The raw zod message is multi-line; the stored value must be the first line alone.
+  const stored = String(payload["workflowLoadError"]);
+  assert.ok(!stored.includes("\n"), "the stored error is a single line, not the raw multi-line diagnostic");
+  assert.ok(stored.length <= 501, "the stored error is length-capped, not unbounded");
 });
 
 test("FG-635 a not-found workflow and a present-but-unloadable workflow settle differently", () => {
