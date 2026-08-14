@@ -33,6 +33,7 @@ Before doing anything else, check `inputs` for these signals that you are runnin
 - `inputs.requestedChanges` — your previous output was sent back. Address those changes specifically.
 - `inputs.rejectedRationale` — a prior phase was rejected. Read the rationale carefully.
 - `inputs.rejectedTaskId` — the rejected task's ID, for the audit trail.
+- `inputs.rejectedArtifact` — present on a request-changes retry: the rejected artifact itself (your previous output's result). Diff your revision against it — change what was asked and don't silently drop anything else you previously produced.
 
 When any of these are present, mention in your output what you changed in response.
 

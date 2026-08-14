@@ -32,6 +32,7 @@ Check `inputs` for retry signals before starting:
 - `inputs.requestedChanges` — your previous output was sent back. The string explains what's wrong; address it specifically.
 - `inputs.rejectedRationale` — a prior phase was rejected and your step is the remediation. Read carefully.
 - `inputs.rejectedTaskId` — the rejected task's ID, for the audit trail.
+- `inputs.rejectedArtifact` — present on a request-changes retry: the rejected artifact itself (your previous output's result). Diff your revision against it — change what was asked and don't silently drop anything else you previously produced.
 
 When any are present, briefly explain in `notes` what you changed.
 

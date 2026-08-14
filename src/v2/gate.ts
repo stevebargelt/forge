@@ -496,16 +496,37 @@ export async function gate(
     });
     crashPoint("gate:request-changes:between-fail-and-replacement-mint");
 
+    // FG-630: the follow-up revises the rejected artifact, so it must be able to
+    // SEE it. Carry the rejected task's id and rationale (mirroring the reject →
+    // on_reject lineage above) plus the rejected artifact itself — the prior
+    // task's result.json — under `rejectedArtifact`, so the retrying agent diffs
+    // its revision against what was rejected instead of silently re-deriving a
+    // plan it cannot see. `requestedChanges` stays because the seeds document it
+    // specifically for the request-changes case. AC5 is "enabled, not enforced":
+    // the artifact is present for the agent to diff against; no required
+    // delta-statement field or enforcement machinery is added.
+    // task.result may be large — embed it as-is (no truncation); omit the input
+    // entirely when there is no result rather than writing null.
+    const retryLineageInputs: Record<string, unknown> = {
+      requestedChanges: rationale ?? "",
+      rejectedRationale: rationale ?? "",
+      rejectedTaskId: taskId,
+      ...(task.result !== undefined && task.result !== null
+        ? { rejectedArtifact: task.result }
+        : {}),
+    };
+
     // Dedup: if a pending replacement primary already exists for this phase,
     // update its requestedChanges instead of creating a second pending primary.
     // dispatchFanoutStep .find() picks the oldest pending; two pending primaries
-    // would silently orphan the newer rationale.
+    // would silently orphan the newer rationale. updateTaskPackageInputs merges,
+    // so other inputs on the existing row are preserved.
     const existingPending = tasksForRun(task.runId).find(
       (t) => t.phase === task.phase && t.parentId === undefined && t.status === "pending",
     );
 
     if (existingPending) {
-      updateTaskPackageInputs(existingPending.id, { requestedChanges: rationale ?? "" });
+      updateTaskPackageInputs(existingPending.id, retryLineageInputs);
       crashPoint("gate:request-changes:dedup:between-inputs-and-event");
       const updatedPending = getTask(existingPending.id);
       if (!updatedPending) {
@@ -531,7 +552,7 @@ export async function gate(
         composedSystemPrompt: "",
         inputs: {
           ...task.taskPackage.inputs,
-          requestedChanges: rationale ?? "",
+          ...retryLineageInputs,
         },
       };
       const newTask: Task = {
