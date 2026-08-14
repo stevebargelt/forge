@@ -2564,11 +2564,28 @@ async function dispatchFanoutStep(args: {
           result: savedResult,
         });
         return "failed";
+      } else if (!isWorktreeModeEnabled() && !redsAlreadyRan && step.reds.length > 0) {
+        // FG-524 non-worktree validation-hold advance: the parent was held at
+        // awaiting_gate by the per-child validation contract (below), which fires
+        // BEFORE reds — so on this advance no verdicts exist (redsAlreadyRan=false).
+        // A non-worktree fanout published nothing (its children wrote directly to
+        // projectDir), so there is no integration branch to republish — but the step's
+        // reds STILL never ran. Completing in place here would ship the children's work
+        // red-unreviewed, the exact silent-advance gap FG-524 closes. Run the reds NOW
+        // against projectDir, exactly as the first-pass non-worktree path does: a
+        // rejection lands the parent blocked_by_red, a pass falls through to the
+        // in-place complete below. (A non-worktree blocked_by_red re-entry, by
+        // contrast, has redsAlreadyRan=true — its reds already returned a verdict the
+        // human overrode — so it skips this and completes in place, unchanged.)
+        const reds = await runFanoutRedsAgainst(args.projectDir, savedResult);
+        if (terminalDuringReds) return getTask(existingParent.id)?.status ?? "failed";
+        if (!reds.ok) return await landFanoutBlockedByRed(savedResult);
       }
-      // For non-worktree re-entry (or worktree re-entry before reds ran),
-      // complete directly — the human advance decision was already recorded when
-      // gate advance --force ran, so re-gating via finalizePrimary would bounce
-      // a verdict/human gate back to awaiting_gate instead of completing (FG-353).
+      // For a non-worktree re-entry whose reds already ran (a blocked_by_red parent the
+      // human overrode) — or whose reds just passed above, or a step with no reds —
+      // complete directly. The human advance decision was already recorded when gate
+      // advance ran, so re-gating via finalizePrimary would bounce a verdict/human gate
+      // back to awaiting_gate instead of completing (FG-353).
       if (!markTaskComplete(existingParent.id, savedResult)) {
         return getTask(existingParent.id)?.status ?? "failed";
       }
@@ -3527,9 +3544,17 @@ async function runOrderedWave(args: {
  *  exact commit it validated. Nothing is ever built, tested, or reviewed inside the
  *  publish target.
  *
- *  `redsAlreadyRan` is the gate-forced re-entry case: a human has already overridden
- *  the reds with a recorded rationale, so validation is the gate alone — re-dispatching
- *  reds there would just re-collect the verdicts the human already overrode.
+ *  gateForced now marks TWO distinct re-entry reasons, and `redsAlreadyRan`
+ *  (verdictsForTask(parent).length > 0, checked by the caller) is the discriminator
+ *  between them:
+ *    - redsAlreadyRan=true — the human-override re-entry: a human force-advanced a
+ *      blocked_by_red parent whose reds ALREADY ran and returned a verdict, so
+ *      validation here is the gate alone; re-dispatching reds would just re-collect
+ *      the verdicts the human already overrode.
+ *    - redsAlreadyRan=false — FG-524's validation-hold re-entry: the parent was held
+ *      at awaiting_gate by the per-child validation contract, which fires BEFORE any
+ *      red ran, so NO verdict exists. The reds must still run — they are folded in via
+ *      alsoValidate here, exactly as on the first pass.
  *
  *  Returns "complete" when the publication landed; otherwise the task status the
  *  caller must return (worktrees and branches retained for inspection). */
@@ -3540,9 +3565,14 @@ async function publishFanoutIntegration(
   childOutcomes: ChildOutcome[],
   opts: {
     /** The reds, folded into the SAME validation set the publication is gated on.
-     *  Omitted on the gate-forced re-entry: a human already overrode the reds with a
-     *  recorded rationale, which is what gateForced MEANS. The integration gate still
-     *  runs — overriding a red is not overriding a broken build. */
+     *  Supplied on the first pass AND on FG-524's validation-hold re-entry
+     *  (redsAlreadyRan=false), where the reds have not yet run and must. Omitted ONLY
+     *  on the human-override re-entry (redsAlreadyRan=true, a force-advanced
+     *  blocked_by_red parent): the human already overrode the reds with a recorded
+     *  rationale, so re-dispatching would just re-collect the verdicts they overrode.
+     *  gateForced no longer means only that — redsAlreadyRan is what tells the two
+     *  apart. The integration gate still runs either way — overriding a red is not
+     *  overriding a broken build. */
     alsoValidate?: (candidateDir: string, candidateSha: string) => Promise<ValidationResult>;
     /** True once an authoritative red has REJECTED the candidate. Distinguishes the
      *  one refusal that is a human decision (blocked_by_red) from every other one

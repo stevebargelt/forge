@@ -32,6 +32,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
 import { eventsForTask } from "../store/events.js";
 import { allPublicationAttempts } from "../store/publications.js";
+import { verdictsForTask } from "../store/verdicts.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { gate } from "./gate.js";
@@ -506,4 +507,115 @@ test("fg524 (3): a NON-implementer (docs) fanout child completing without tests_
     (e) => e.eventType === "task.awaiting_gate" && (e.payload as { kind?: string })?.kind === "validation_contract",
   );
   assert.equal(holdEvent, undefined, "no validation_contract hold for a non-implementer child");
+});
+
+// ─── (4) NON-worktree validation-held advance: the step's reds MUST run on the
+//         advance re-entry — a non-worktree fanout published nothing, but its
+//         children's work must not reach `complete` red-unreviewed (FG-524 item 1). ──
+
+test("fg524 (4): a NON-worktree validation-held fanout parent runs the step's reds on advance — child work never completes red-unreviewed", async () => {
+  // Non-worktree mode: children write directly to projectDir, there is no
+  // integration branch. The hold still fires BEFORE any red runs (inherited from
+  // FG-523), so the advance must RUN the reds now rather than complete in place.
+  process.env.FORGE_NO_WORKTREES = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  ensureImplementerWorkflowYaml();
+
+  const { runId } = startRun({
+    workflow: FANOUT_IMPLEMENTER_WF,
+    title: "fg524 non-worktree validation hold",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  let currentWave: string[] = [];
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args);
+    currentWave.push(taskId);
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      // The OFFENDING child: complete with NO tests_run and NO waiver.
+      if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 3 });
+    } else if (taskId.startsWith("task-red-build-")) {
+      writeTaskResult(stdoutPath, PASS_VERDICT);
+    } else {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    }
+    return 0;
+  };
+
+  // ── Wave 1: source ─────────────────────────────────────────────────────────
+  currentWave = [];
+  const wave1 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_WF, dockerExec: stubExec });
+  assert.deepEqual(wave1.completedSteps, ["source"], "source completes in wave 1");
+
+  // ── Wave 2: fanout — the non-compliant child holds the PARENT, before any red ──
+  currentWave = [];
+  const wave2 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_WF, dockerExec: stubExec });
+  assert.ok(wave2.awaitingGate.includes("build"), "the fanout build step must land awaiting_gate");
+  assert.deepEqual(wave2.failedSteps, [], "the held parent must NOT wedge the run into a failure");
+  assert.equal(
+    currentWave.some((id) => id.startsWith("task-red-build-")),
+    false,
+    "no red is dispatched in wave 2 — the validation hold fires BEFORE the reds",
+  );
+
+  const parent = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  const parentId = parent.id;
+  assert.equal(parent.status, "awaiting_gate", "the parent is held awaiting_gate in non-worktree mode too");
+  assert.equal(
+    verdictsForTask(parentId).length,
+    0,
+    "no verdict exists while the parent is held — the reds have never run",
+  );
+
+  // ── Recovery: forge gate <parentId> --advance ──────────────────────────────
+  await gate(parentId, "advance", "steve advances the non-worktree validation hold");
+  const parentAfterGate = tasksForRun(runId).find((t) => t.id === parentId)!;
+  assert.equal(
+    parentAfterGate.status,
+    "pending",
+    "advance re-enters dispatch (pending), it does NOT complete in place — the reds still have to run",
+  );
+  assert.strictEqual(parentAfterGate.taskPackage?.inputs?.["gateForced"], true, "gateForced set for the re-entry");
+
+  // ── Wave 3: re-entry RUNS the reds against projectDir, then completes ───────
+  currentWave = [];
+  const wave3 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_WF, dockerExec: stubExec });
+  assert.deepEqual(wave3.completedSteps, ["build"], "build completes on the advance re-entry");
+  assert.deepEqual(wave3.failedSteps, [], "no step fails on re-entry");
+
+  const finalParent = tasksForRun(runId).find((t) => t.id === parentId)!;
+  assert.equal(finalParent.status, "complete", "parent completes after the reds run on advance");
+
+  // THE INVARIANT: the reds actually ran on the non-worktree advance — child work
+  // did not reach `complete` red-unreviewed.
+  assert.equal(
+    currentWave.some((id) => id.startsWith("task-red-build-")),
+    true,
+    "the step's red IS dispatched on the non-worktree advance re-entry — child work is never completed red-unreviewed",
+  );
+  assert.ok(
+    verdictsForTask(parentId).length > 0,
+    "a verdict now exists — the reds ran before the parent completed",
+  );
+
+  // The children were REUSED, never re-dispatched.
+  assert.equal(
+    currentWave.some((id) => id.startsWith("task-build-0-") || id.startsWith("task-build-1-")),
+    false,
+    "the completed children are reused on re-entry, never re-dispatched",
+  );
+  const childrenAfter = tasksForRun(runId).filter((t) => t.parentId === parentId && !t.agentRole.startsWith("red-"));
+  assert.equal(childrenAfter.length, 2, "no new children were created on re-entry");
 });
