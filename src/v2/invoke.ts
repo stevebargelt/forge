@@ -1383,11 +1383,6 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     const inferred = inferredResultFrom(a, agentRole);
     if (inferred) {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
-      // FG-524: WARN before completing. inferredResultFrom only fires for
-      // narrative roles today (requiresStructuredResult gates it), so the
-      // evaluator returns held:false here in practice — but routing this seam
-      // through it too keeps the policy true for every invoke completion path.
-      warnIfValidationContractFails(runId, taskId, agentRole, inferred);
       if (!markTaskComplete(taskId, inferred)) {
         const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
         // FG-492 review: reap only if the task actually ended up complete —
@@ -1396,6 +1391,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
         closeRunIfIdle(finalStatus === "complete");
         return { runId, taskId, status: finalStatus, result: inferred, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
       }
+      // FG-524 (RF-1): WARN only AFTER the CAS succeeds, same ordering as the main
+      // completion seam — a lost CAS race must record no warning. inferredResultFrom
+      // only fires for narrative roles today (requiresStructuredResult gates it), so
+      // the evaluator returns held:false here in practice, but the ordering keeps the
+      // policy true for every invoke completion path.
+      warnIfValidationContractFails(runId, taskId, agentRole, inferred);
       logEvent("task.completed", { runId, taskId });
       reapContainerAndReportFailure(containerName, true, runId, taskId);
       closeRunIfIdle(true);
@@ -1462,10 +1463,6 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     }
   }
 
-  // FG-524: WARN before completing (implementer roles only; the evaluator returns
-  // held:false for every other role and for a waivered/compliant result).
-  warnIfValidationContractFails(runId, taskId, agentRole, result);
-
   // AWN-2 task-level race: a concurrent `forge cancel` may have already marked
   // this task failed (failure_kind=cancelled) while the container ran. The CAS in
   // markTaskComplete refuses to overwrite a terminal task — only emit
@@ -1477,6 +1474,14 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     closeRunIfIdle(finalStatus === "complete");
     return { runId, taskId, status: finalStatus, result, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
   }
+  // FG-524 (RF-1): WARN only AFTER the completion CAS reports success (implementer
+  // roles only; the evaluator returns held:false for every other role and for a
+  // waivered/compliant result). Emitting it before the CAS recorded a
+  // task.validation_warning even when a concurrent cancel won the race and the task
+  // never completed on this path — a spurious advisory in a ledger the orchestrator
+  // reads programmatically. Ordered here, the warning event set means completions
+  // that failed validation and nothing else.
+  warnIfValidationContractFails(runId, taskId, agentRole, result);
   logEvent("task.completed", { runId, taskId });
   // FG-492 review: task marked complete with a valid result — nothing left to
   // investigate on this container, reap it now instead of leaving it to

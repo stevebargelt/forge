@@ -32,9 +32,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { basename } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
-import { getTask } from "../store/tasks.js";
+import { getTask, markTaskFailed } from "../store/tasks.js";
 import { eventsForTask } from "../store/events.js";
 
 // ---------------------------------------------------------------------------
@@ -228,6 +229,61 @@ test("FG-524 invoke: a non-implementer invoke without tests_run is unaffected (n
 // narrative role silently (never a spurious warning), proving the seam is wired
 // without changing narrative behavior.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RF-1 (review-011263445508): the WARN is emitted only AFTER the completion CAS
+// succeeds. A concurrent cancel that terminalizes the task while the container
+// runs makes markTaskComplete's CAS lose — the task never completes on this
+// path, so no advisory task.validation_warning may be recorded for it. Before
+// the fix the warning was emitted before the CAS, so a lost race left a spurious
+// warning in a ledger the orchestrator reads programmatically.
+// ---------------------------------------------------------------------------
+
+// Docker exec stub that FAILS the task (as a concurrent `forge cancel` would)
+// before returning, so the subsequent completion CAS in invoke loses the race.
+// The task dir is the parent of the stdout path; its basename is the taskId.
+function makeCancellingResultExec(result: unknown): DockerExecFn {
+  return async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    markTaskFailed(basename(dir), "cancelled");
+    return 0;
+  };
+}
+
+test("FG-524 RF-1 invoke: a non-compliant implementer whose completion CAS LOSES records no warning", async () => {
+  ensurePiRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg524-rf1-"));
+  try {
+    // A non-compliant implementer result — WOULD warn on a winning completion.
+    const result = { status: "complete", diff_summary: "did work", notes: "no tests reported" };
+    const r = await invoke({
+      agentRole: "backend-specialist",
+      task: "an ad-hoc backend change that loses the completion race",
+      projectDir,
+      runtimeName: "pi-stub",
+      dockerExec: makeCancellingResultExec(result),
+    });
+
+    // The CAS lost to the concurrent cancel: the task is failed, not complete.
+    assert.equal(r.status, "failed", "a lost completion CAS must report failed");
+    assert.equal(getTask(r.taskId)!.status, "failed");
+    // And crucially: NO warning was recorded for a task that never completed.
+    assert.equal(
+      warningEvents(r.taskId).length,
+      0,
+      "a task whose completion CAS lost must record no validation_warning",
+    );
+    const evTypes = eventsForTask(r.taskId).map((e) => e.eventType);
+    assert.ok(!evTypes.includes("task.completed"), "no task.completed on the lost-CAS path");
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
 
 function makePiNoResultExec(stdoutJsonl: string): DockerExecFn {
   return async ({ stdoutPath, stderrPath }) => {

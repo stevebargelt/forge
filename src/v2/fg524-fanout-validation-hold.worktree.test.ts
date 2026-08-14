@@ -93,6 +93,34 @@ const FANOUT_NONIMPL_WF: Workflow = {
   ],
 };
 
+// Same as FANOUT_IMPLEMENTER_WF but the build step declares NO reds. This is the
+// RF-2 (review-011263445508) case: a validation-held worktree fanout with zero reds
+// must still REPUBLISH the captured integration branch on advance, not complete in
+// place and drop it.
+const FANOUT_IMPLEMENTER_NO_REDS_WF: Workflow = {
+  name: "fg524-fanout-impl-noreds-test",
+  description: "FG-524 RF-2: validation-held worktree fanout with no reds must publish on advance",
+  review_mode: "legacy_verdict",
+  inputs: [],
+  steps: [
+    { id: "source", agent: "planner", gate: "auto", manual: false, depends_on: [], runtime: "fg524-test", reds: [] },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["source"],
+      runtime: "fg524-test",
+      reds: [],
+      fanout: {
+        from_upstream: { step: "source", array_key: "items", input_key: "item" },
+        max_concurrency: 2,
+        failure_mode: "continue",
+      },
+    },
+  ],
+};
+
 // ─── Shared harness ───────────────────────────────────────────────────────────
 
 let db: DatabaseInstance;
@@ -213,6 +241,42 @@ steps:
       - agent: red-narrow
         authority: authoritative
         gate_on_verdict: true
+    fanout:
+      from_upstream:
+        step: source
+        array_key: items
+        input_key: item
+      max_concurrency: 2
+      failure_mode: continue
+`,
+  );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
+}
+
+// The no-reds variant's YAML (gate() reloads the workflow from disk by name).
+function ensureImplementerNoRedsWorkflowYaml(): void {
+  const wfPath = join(process.env.FORGE_HOME!, "workflows", "fg524-fanout-impl-noreds-test.yml");
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: fg524-fanout-impl-noreds-test
+description: "FG-524 RF-2: validation-held worktree fanout with no reds must publish on advance"
+inputs: []
+steps:
+  - id: source
+    agent: planner
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: fg524-test
+    reds: []
+  - id: build
+    agent: engineer
+    gate: auto
+    manual: false
+    depends_on: [source]
+    runtime: fg524-test
+    reds: []
     fanout:
       from_upstream:
         step: source
@@ -618,4 +682,114 @@ test("fg524 (4): a NON-worktree validation-held fanout parent runs the step's re
   );
   const childrenAfter = tasksForRun(runId).filter((t) => t.parentId === parentId && !t.agentRole.startsWith("red-"));
   assert.equal(childrenAfter.length, 2, "no new children were created on re-entry");
+});
+
+// ─── (5) RF-2 (review-011263445508): a validation-held WORKTREE fanout with NO
+//         reds must PUBLISH the captured integration branch on advance, not
+//         complete in place and drop it. The build gate condition used to require
+//         step.reds.length > 0, so a no-reds step in worktree mode fell through to
+//         the in-place markTaskComplete and silently dropped every child's work. ──
+
+test("fg524 (5) RF-2: a validation-held WORKTREE fanout with NO reds PUBLISHES the reused children on advance — the integration branch is not dropped", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+  process.env.FORGE_WORKTREES_EPHEMERAL = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  ensureImplementerNoRedsWorkflowYaml();
+
+  const { runId } = startRun({
+    workflow: FANOUT_IMPLEMENTER_NO_REDS_WF,
+    title: "fg524 RF-2 no-reds worktree publish",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  let currentWave: string[] = [];
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args);
+    currentWave.push(taskId);
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      // The OFFENDING child: complete with NO tests_run and NO waiver — holds the parent.
+      if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 3 });
+    } else {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    }
+    return 0;
+  };
+
+  // ── Wave 1: source ─────────────────────────────────────────────────────────
+  await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+
+  // ── Wave 2: fanout — the non-compliant child holds the PARENT (no reds involved) ──
+  const wave2 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+  assert.ok(wave2.awaitingGate.includes("build"), "the no-reds fanout build step must land awaiting_gate");
+  assert.deepEqual(wave2.failedSteps, [], "the held parent must NOT wedge the run into a failure");
+
+  const parent = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  const parentId = parent.id;
+  assert.equal(parent.status, "awaiting_gate", "the parent is held awaiting_gate");
+  assert.equal(verdictsForTask(parentId).length, 0, "no verdict exists — this step has no reds and none ran");
+
+  // Nothing published while held: the integration branch was captured and retained.
+  assert.equal(
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
+    baseSha,
+    "nothing is published while the parent is held",
+  );
+  assert.ok(
+    existsSync(integrationWorktreeDir(runId, parentId)),
+    "integration worktree retained for the advance to republish",
+  );
+
+  // ── Recovery: forge gate <parentId> --advance ──────────────────────────────
+  await gate(parentId, "advance", "steve advances the no-reds worktree validation hold");
+  const parentAfterGate = tasksForRun(runId).find((t) => t.id === parentId)!;
+  // THE FIX: with zero reds, a worktree hold must STILL re-enter to publish — not
+  // complete in place. Before RF-2 this asserted "complete" (branch dropped).
+  assert.equal(
+    parentAfterGate.status,
+    "pending",
+    "advance re-enters dispatch (pending) to PUBLISH — it must NOT complete in place and drop the branch",
+  );
+  assert.strictEqual(parentAfterGate.taskPackage?.inputs?.["gateForced"], true, "gateForced set for the re-entry");
+
+  // ── Wave 3: re-entry PUBLISHES the reused children ─────────────────────────
+  currentWave = [];
+  const wave3 = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+  assert.deepEqual(wave3.completedSteps, ["build"], "build completes on the advance re-entry");
+  assert.deepEqual(wave3.failedSteps, [], "no step fails on re-entry");
+
+  const finalParent = tasksForRun(runId).find((t) => t.id === parentId)!;
+  assert.equal(finalParent.status, "complete", "parent completes after the advance republish");
+
+  // The children were REUSED, never re-dispatched.
+  assert.equal(
+    currentWave.some((id) => id.startsWith("task-build-0-") || id.startsWith("task-build-1-")),
+    false,
+    "the completed children are reused on re-entry, never re-dispatched",
+  );
+
+  // THE INVARIANT: the captured integration branch was PUBLISHED, not dropped.
+  const published = allPublicationAttempts().filter((a) => a.state === "published" && a.taskId === parentId);
+  assert.equal(published.length, 1, "the advance re-entry published exactly once");
+  assert.ok(existsSync(join(repo, "child0.ts")), "the offending child's work is published on advance");
+  assert.ok(existsSync(join(repo, "child1.ts")), "the sibling child's work is published on advance");
+  assert.notEqual(
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
+    baseSha,
+    "the target advanced — the reused children were actually shipped, not dropped with the branch",
+  );
 });

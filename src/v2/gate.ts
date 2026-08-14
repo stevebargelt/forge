@@ -47,6 +47,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { isRunSettled, isOnRejectRecoveryTask, classifyRunTerminalState } from "./ready-queue.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
+import { isWorktreeModeEnabled, integrationBranchExists } from "./worktree-lifecycle.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -280,13 +281,24 @@ export async function gate(
     //     projectDir before completing (or lands blocked_by_red if a red rejects).
     // The discriminator between "run the reds" and "complete in place" is a verdict's
     // existence, checked in dispatchFanoutStep as redsAlreadyRan: a validation hold
-    // fires before any red writes one. A step with no reds has nothing to run, so it
-    // is (correctly) excluded here and completes in place.
+    // fires before any red writes one. A step with no reds has nothing to RUN — but
+    // "nothing to run" is not "nothing to PUBLISH": in worktree mode the captured
+    // integration branch carries every child's work and must still be republished on
+    // advance (the FG-353/FG-425 publish-on-advance invariant). So re-entry triggers
+    // on the union of both needs: reds to run in either mode (the non-worktree arm the
+    // follow-up added), OR a worktree hold with a captured integration branch even at
+    // zero reds. Only a non-worktree step with no reds genuinely has nothing to do and
+    // completes in place (its children wrote directly to projectDir — see runNext's
+    // re-entry, which runs reds and/or publishes accordingly).
+    const worktreePublishReentry =
+      isWorktreeModeEnabled() &&
+      typeof run.projectDir === "string" &&
+      integrationBranchExists(run.projectDir, run.id, taskId);
     const validationHeldFanoutReentry =
       task.status === "awaiting_gate" &&
       isFanoutParent &&
-      step.reds.length > 0 &&
-      verdictsForTask(taskId).length === 0;
+      verdictsForTask(taskId).length === 0 &&
+      (step.reds.length > 0 || worktreePublishReentry);
     const needsPublishReentry =
       (blocked && (isFanoutParent || typeof task.worktreePath === "string")) ||
       validationHeldFanoutReentry;
