@@ -552,9 +552,8 @@ test("fg678 (e3): results that do NOT declare failure are untouched — complete
 });
 
 test("fg678 (e4): the declared-failure seam is bounded — it reads `status` only, and does not gate on tests_run (BD-4)", async () => {
-  // FG-524/FG-525 stay undecided: an ad-hoc invoke completion is NOT gated on
-  // validation evidence by this ticket. An implementer role reporting complete
-  // with zero tests still completes here; only a self-declared FAILURE fails.
+  // This seam reads status only; FG-524 separately WARNs at invoke completion
+  // without failing the task. This non-implementer role is exempt either way.
   const project = makeProject("e4");
   const res = await invoke({
     agentRole: "test-engineer",
