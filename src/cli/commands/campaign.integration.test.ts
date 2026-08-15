@@ -5012,6 +5012,7 @@ function writeRunNextThrowWorkflow(): void {
   writeFileSync(join(projectDir, ".forge", "workflows", "feature.yml"), yaml);
 
   const policyYaml = [
+    "schema_version: 2",
     "model_profiles:",
     "  main:",
     "    provider: anthropic",

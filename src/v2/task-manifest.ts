@@ -148,6 +148,11 @@ export type TaskManifest = {
     costTier: string;
     resolvedBy: string;
     runtime: string;
+    // FG-560: the two provenance axes, distinct from resolvedBy (profile
+    // selection). capabilitySource = explicit | role-derived; mappingPath =
+    // exact | default-fallback. Present in every policy-mode manifest.
+    capabilitySource: string;
+    mappingPath: string;
   };
   // FG-350: RECORDED dispatch-time control-plane provenance. Optional: pre-FG-350
   // manifests omit it. Consumers must degrade gracefully when absent (legacy path).

@@ -11,7 +11,7 @@ import { provisionModelPolicy } from "./setup.js";
 
 const ACTIVE = join(FORGE_HOME, "model-policy.yml");
 const SEED = join(FORGE_HOME, "model-policy.example.yml");
-const SEED_BODY = "# seed\non_unavailable: fail\nmodel_profiles:\n  p:\n    provider: anthropic\n    auth: subscription\n    map:\n      default: { model: m, cost_tier: standard }\ndefaults:\n  profile: p\n  activity: {}\n";
+const SEED_BODY = "# seed\non_unavailable: fail\nschema_version: 2\nmodel_profiles:\n  p:\n    provider: anthropic\n    auth: subscription\n    map:\n      default: { model: m, cost_tier: standard }\ndefaults:\n  profile: p\n  activity: {}\n";
 
 function clean(): void {
   rmSync(ACTIVE, { force: true });

@@ -17,6 +17,12 @@
 # A profile owns POLICY (provider + auth intent + capability->model/cost map).
 # The runtime YAML still owns EXECUTION (image, command, mounts, prompt/result).
 
+# FG-560: the policy schema version. Required — the dispatch loader refuses any
+# policy that omits it (a v1/legacy file) with a `forge upgrade` directive, since
+# `forge upgrade` is the sole migration authority and ordinary loading is strictly
+# read-only. Current schema version is 2.
+schema_version: 2
+
 # Global default when a resolved profile has no working auth in this environment.
 # fail = clear error naming the provider + missing auth (never silently run a
 # different model than policy specified). Override per-profile below.

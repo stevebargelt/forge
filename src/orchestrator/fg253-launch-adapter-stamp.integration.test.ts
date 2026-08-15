@@ -48,6 +48,7 @@ const FAKE_CLAUDE = join(HERE, "__fixtures__", "fake-claude.js");
 const OTHER_GENERATION: AdapterStamp = "release-fg253-othergen-0001";
 
 const POLICY = `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic

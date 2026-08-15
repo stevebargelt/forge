@@ -54,6 +54,7 @@ const DOC = join(REPO_ROOT, "docs", "how-to-orchestrator-launcher.md");
  *  flip the orchestrator to it with one `overrides.agents.orchestrator` line —
  *  which is also exactly what an operator types (AC3). */
 const CLAUDE_POLICY = `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic
@@ -360,6 +361,7 @@ test("integ FG-576 D5: the generic command resolves the SAME policy to Codex, an
 
 test("integ FG-576 AC5: an unsupported runtime refuses through the shortcut too, naming profile, runtime and a remedy", () => {
   usePolicy(`
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic

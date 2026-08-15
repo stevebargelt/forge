@@ -156,6 +156,16 @@ CREATE TABLE IF NOT EXISTS tasks (
   resolved_provider TEXT,
   resolved_auth     TEXT,
   resolved_by       TEXT,
+  -- FG-560: two INDEPENDENT provenance axes, distinct from resolved_by (which
+  -- records how the PROFILE was selected). resolved_capability_source is where the
+  -- capability alias came from ('explicit' from the step activity vs 'role-derived'
+  -- from the agent default); resolved_mapping_path is how the concrete model was
+  -- read out of the profile map ('exact' hit vs 'default-fallback' to map.default).
+  -- Null in legacy mode (no model-policy.yml) and for pre-FG-560 rows. On the aged
+  -- host DB the CREATE below no-ops, so the ALTER in ADDITIVE_COLUMNS is what adds
+  -- these columns there — mirroring the resolved_* columns exactly.
+  resolved_capability_source TEXT,
+  resolved_mapping_path      TEXT,
   -- FG-351: per-task git worktree path. Null when worktree mode is disabled (default).
   -- Set BEFORE runContainer and readable after process restart. Task branch identity
   -- is deterministically derived as forge/<runId>/<taskId> — no separate DB column needed.
@@ -1597,6 +1607,11 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "tasks", column: "resolved_provider", ddl: "ALTER TABLE tasks ADD COLUMN resolved_provider TEXT" },
   { table: "tasks", column: "resolved_auth", ddl: "ALTER TABLE tasks ADD COLUMN resolved_auth TEXT" },
   { table: "tasks", column: "resolved_by", ddl: "ALTER TABLE tasks ADD COLUMN resolved_by TEXT" },
+  // FG-560: the two provenance axes. Mirror the resolved_* entries above — nullable,
+  // idempotent (PRAGMA-guarded in db.ts), so the aged host DB gains them without a
+  // rebuild and a fresh DB gets them from SCHEMA_SQL's CREATE.
+  { table: "tasks", column: "resolved_capability_source", ddl: "ALTER TABLE tasks ADD COLUMN resolved_capability_source TEXT" },
+  { table: "tasks", column: "resolved_mapping_path", ddl: "ALTER TABLE tasks ADD COLUMN resolved_mapping_path TEXT" },
   // FG-351 / FG-621: the private-clone path and the commit it was created at.
   { table: "tasks", column: "worktree_path", ddl: "ALTER TABLE tasks ADD COLUMN worktree_path TEXT" },
   { table: "tasks", column: "base_sha", ddl: "ALTER TABLE tasks ADD COLUMN base_sha TEXT" },

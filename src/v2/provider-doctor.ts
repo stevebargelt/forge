@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { hasAwsSsoConfigured, readOauthHint, codexAuthFile, apiKeyEnvForProvider } from "../util/creds.js";
 import type { EffectiveAuth, ModelResolution } from "./model-resolution.js";
+import { isActivityUnmapped, activityUnmappedMessage, ACTIVITY_UNMAPPED_REASON } from "./model-resolution.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
 
 export type ProbeStatus = "available" | "unavailable" | "unknown";
@@ -150,6 +151,21 @@ export function checkToolCapability(
       `Fix: set tool_capable: true on the capability entry in your model-policy.yml, ` +
       `or switch to a profile using a tool-capable model (anthropic or openai).`,
   };
+}
+
+// FG-560: dispatch-time fail-closed gate for the activity_unmapped refusal. An
+// EXPLICIT workflow activity that only resolves via map.default on a profile that
+// DOES map named activities was demanded but not honored — silently running the
+// profile default is worse than a loud stop. Modeled off resolveModel's OUTCOME
+// (never a thrown Error), so the best-effort create-time stamping helper cannot
+// swallow it: the dispatch preflight inspects it here, and `forge model resolve
+// --json` reads the SAME `outcome` field. The reason string leads with
+// ACTIVITY_UNMAPPED_REASON so both surfaces name the identical machine-readable code.
+// A role-derived default-fallback (legacy-equivalent) and default-only profiles are
+// never refused — isActivityUnmapped already encodes that.
+export function checkActivityMapped(res: ModelResolution): AvailabilityCheck {
+  if (!isActivityUnmapped(res)) return { ok: true };
+  return { ok: false, reason: activityUnmappedMessage(res) ?? ACTIVITY_UNMAPPED_REASON };
 }
 
 // Dispatch-time fail-loud gate (ADR §6). Runs only in policy mode. CONSERVATIVE:

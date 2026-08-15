@@ -99,6 +99,7 @@ result:
 //   pi-capable     : pi-stub runtime, tool_capable:true
 //   claude-api     : anthropic/api (binds to claude-apikey runtime, non-pi)
 const FG339_POLICY = `on_unavailable: fail
+schema_version: 2
 model_profiles:
   pi-non-capable:
     provider: anthropic

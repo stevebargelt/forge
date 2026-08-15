@@ -328,6 +328,12 @@ export type TaskModelFields = {
   resolvedProvider?: string;
   resolvedAuth?: string;
   resolvedBy?: string;
+  /** FG-560 axis 1 — where the capability alias came from ("explicit" |
+   *  "role-derived"). Omitted in legacy mode (no policy => no provenance). */
+  resolvedCapabilitySource?: string;
+  /** FG-560 axis 2 — how the concrete model was read from the profile map
+   *  ("exact" | "default-fallback"). Omitted in legacy mode. */
+  resolvedMappingPath?: string;
 };
 
 export function taskModelFields(
@@ -345,6 +351,10 @@ export function taskModelFields(
     resolvedProvider: res.provider,
     resolvedAuth: res.auth,
     resolvedBy: res.resolvedBy,
+    // FG-560: mapping-path provenance is a SEPARATE axis from profile-selection
+    // provenance (resolvedBy) — carried alongside it, never standing in for it.
+    resolvedCapabilitySource: res.capabilitySource,
+    resolvedMappingPath: res.mappingPath,
   };
 }
 
@@ -352,7 +362,7 @@ export function taskModelFields(
 // Returns undefined in legacy mode (resolvedBy="legacy") so the manifest simply
 // omits the block, matching pre-AWN-7 manifests.
 export function manifestModelBlock(res: ModelResolution):
-  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string }
+  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string; capabilitySource: string; mappingPath: string }
   | undefined {
   if (res.resolvedBy === "legacy") return undefined;
   return {
@@ -364,5 +374,10 @@ export function manifestModelBlock(res: ModelResolution):
     costTier: res.costTier ?? "",
     resolvedBy: res.resolvedBy,
     runtime: res.runtime,
+    // FG-560: both provenance axes travel in the manifest model block too, so
+    // "which mapping path resolved this model" is answerable from the durable
+    // dispatch manifest, not only the task row.
+    capabilitySource: res.capabilitySource ?? "",
+    mappingPath: res.mappingPath ?? "",
   };
 }

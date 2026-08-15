@@ -38,6 +38,7 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const CANONICAL_TEMPLATE = join(REPO_ROOT, "seeds", "orchestrator-template.md");
 
 const POLICY = `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic

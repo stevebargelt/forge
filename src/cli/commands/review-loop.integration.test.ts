@@ -2620,6 +2620,7 @@ test("FG-502 CLI end-to-end: computeInRangeDocsPaths threads through registerRev
 // and a reviewer model_error gets ONE same-round retry on the fallback profile.
 
 const FG513_POLICY_WITH_OVERRIDE = `
+schema_version: 2
 model_profiles:
   prof-a:
     provider: anthropic
@@ -2643,6 +2644,7 @@ overrides:
 `;
 
 const FG513_POLICY_NO_OVERRIDE = `
+schema_version: 2
 model_profiles:
   prof-b:
     provider: anthropic

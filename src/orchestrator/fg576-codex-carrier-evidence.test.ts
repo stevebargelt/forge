@@ -54,6 +54,7 @@ import { guardPassthrough, mintSessionKey, planLaunch } from "./launch.js";
 import type { AdapterLaunchContext, OrchestratorAdapter } from "./adapter.js";
 
 const POLICY = `
+schema_version: 2
 model_profiles:
   codex-subscription:
     provider: openai

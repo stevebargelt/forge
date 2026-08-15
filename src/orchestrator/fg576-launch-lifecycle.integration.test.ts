@@ -58,6 +58,7 @@ const CLI_ARGV = ["--import", LOADER, CLI_ENTRY];
 const FAKE_CLAUDE = join(HERE, "__fixtures__", "fake-claude.js");
 
 const POLICY = `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic
@@ -646,6 +647,7 @@ test("integ FG-576 AC5: an unsupported runtime fails before spawn, naming the pr
   writeFileSync(
     join(roots.home, "model-policy.yml"),
     `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic

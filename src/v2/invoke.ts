@@ -58,7 +58,7 @@ import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflow, Workflo
 import { taskHasPipelineFinalize } from "./run-kind.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
-import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
+import { checkResolvedAvailability, checkToolCapability, checkActivityMapped } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -767,6 +767,22 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // runtime, not from the upstream provider name.
   const runtimeMeta = resolveRuntimeMetadata(runtime);
 
+  // FG-560: fail-closed BEFORE spawning on an activity_unmapped resolution — an
+  // EXPLICIT step activity that would only resolve via map.default. Inspected from
+  // the resolution OUTCOME (not a thrown Error the create-time stamp could swallow),
+  // and names the same activity_unmapped reason `forge model resolve --json` reads.
+  // A no-op in legacy mode and for role-derived default-fallback.
+  const activityMapped = checkActivityMapped(resolution);
+  if (!activityMapped.ok) {
+    logEvent("model.profile_unavailable", {
+      runId,
+      taskId,
+      payload: { profile: resolution.profile, provider: resolution.provider, auth: resolution.auth, capability: "activity", reason: activityMapped.reason },
+    });
+    failTask(taskId, { runId, kind: classify({}), error: activityMapped.reason });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error: activityMapped.reason };
+  }
   // AWN-7: fail loud BEFORE spawning if the resolved auth is unavailable (policy
   // mode, on_unavailable=fail). A no-op in legacy mode. Then record the resolution.
   const availability = checkResolvedAvailability(resolution);

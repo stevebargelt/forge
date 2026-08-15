@@ -72,7 +72,7 @@ import {
   manifestModelBlock,
   type ModelResolution,
 } from "./model-resolution.js";
-import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
+import { checkResolvedAvailability, checkToolCapability, checkActivityMapped } from "./provider-doctor.js";
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { fillClosedCommit } from "../backlog/structured.js";
@@ -4518,6 +4518,26 @@ async function runContainer(args: {
 
   // AWN-7: fail loud BEFORE spawning if the resolved auth is unavailable (policy
   // mode, on_unavailable=fail). A no-op in legacy mode. Then record the resolution.
+  // FG-560: fail-closed BEFORE spawning on an activity_unmapped resolution — an
+  // EXPLICIT step activity that would only resolve via map.default. Inspected from
+  // the resolution OUTCOME (not a thrown Error), naming the same activity_unmapped
+  // reason `forge model resolve --json` reads. No-op in legacy / role-derived paths.
+  const activityMapped = checkActivityMapped(args.resolution);
+  if (!activityMapped.ok) {
+    logEvent("model.profile_unavailable", {
+      runId: args.runId,
+      taskId: args.taskId,
+      payload: {
+        profile: args.resolution.profile,
+        provider: args.resolution.provider,
+        auth: args.resolution.auth,
+        capability: "activity",
+        reason: activityMapped.reason,
+      },
+    });
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: activityMapped.reason });
+    return { kind: "failed", error: activityMapped.reason };
+  }
   const availability = checkResolvedAvailability(args.resolution);
   if (!availability.ok) {
     logEvent("model.profile_unavailable", {

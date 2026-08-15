@@ -37,6 +37,7 @@ result:
 
 const POLICY = `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic
@@ -255,6 +256,7 @@ test("policy: capability with no mapping and no default fails loud", () => {
   // A profile that maps only "review" — request "reasoning" via --profile path.
   const narrow = `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   narrow:
     provider: anthropic
@@ -287,6 +289,7 @@ test("detectAuthMode: env precedence bedrock > api > subscription", () => {
 test("policy: openai + subscription profile binds runtime to codex-subscription", () => {
   writeFileSync(join(homeDir, "model-policy.yml"), `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   codex-sub:
     provider: openai
@@ -309,6 +312,7 @@ defaults:
 
 const PI_POLICY = `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   pi-groq-cheap-reds:
     provider: groq
@@ -363,6 +367,7 @@ test("#265: an unmapped capability on a pi profile fails loud (no fake fallback)
 // meant to fall to the default — it must NEVER be flagged activity_unmapped.
 const PI_DEFAULT_ONLY = `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   pi-groq:
     provider: groq

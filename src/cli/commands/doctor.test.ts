@@ -45,6 +45,7 @@ import { adapterStampForAssetRoot, resolveAdapterStampForAssetRoot } from "../..
 // selectable via --profile (not in defaults/overrides).
 const PROJECT_POLICY = `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   proj-default:
     provider: groq

@@ -106,6 +106,7 @@ test("invoke: policy mode stamps the resolution record on the task row + manifes
     join(projectDir, ".forge", "model-policy.yml"),
     `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   claude-api:
     provider: anthropic
@@ -160,6 +161,7 @@ test("invoke: policy mode fails loud when the resolved auth is unavailable", asy
     join(projectDir, ".forge", "model-policy.yml"),
     `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   claude-api:
     provider: anthropic
@@ -214,6 +216,7 @@ test("invoke: a pi-groq profile fails loud before dispatch when GROQ_API_KEY is 
     join(projectDir, ".forge", "model-policy.yml"),
     `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   pi-groq:
     provider: groq
@@ -245,6 +248,134 @@ defaults:
     if (savedGroq === undefined) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = savedGroq;
   }
+});
+
+// FG-560 step 3: BOTH provenance axes travel into the durable row + manifest, and an
+// exact map hit is distinguishable from a map.default fall-through by the recorded
+// provenance. Two tasks under ONE profile: an explicit exact hit vs a role-derived
+// default-fallback.
+test("invoke: policy mode records mapping-path + capability-source provenance; exact vs default-fallback differ", async () => {
+  setupApikeyRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-policy-provenance-"));
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".forge", "model-policy.yml"),
+    `
+schema_version: 2
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      review:  { model: review-model,  cost_tier: standard }
+      default: { model: default-model, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: {}
+`
+  );
+
+  // Task A — explicit activity 'review' with an EXACT map entry.
+  const a = await invoke({
+    agentRole: "engineer",
+    task: "exact hit",
+    projectDir,
+    modelAlias: "review",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(a.status, "complete");
+  const taskA = getTask(a.taskId)!;
+  assert.equal(taskA.agentModel, "review-model");
+  assert.equal(taskA.resolvedCapabilitySource, "explicit");
+  assert.equal(taskA.resolvedMappingPath, "exact");
+
+  // Task B — tech-lead derives 'reasoning' (role-derived), absent from the map, so it
+  // falls through to map.default. NOT refused (role-derived default-fallback is valid).
+  const b = await invoke({
+    agentRole: "tech-lead",
+    task: "default fallback",
+    projectDir,
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(b.status, "complete");
+  const taskB = getTask(b.taskId)!;
+  assert.equal(taskB.agentModel, "default-model");
+  assert.equal(taskB.resolvedCapabilitySource, "role-derived");
+  assert.equal(taskB.resolvedMappingPath, "default-fallback");
+
+  // The two rows are DISTINGUISHABLE by the recorded mapping-path provenance.
+  assert.notEqual(taskA.resolvedMappingPath, taskB.resolvedMappingPath);
+
+  // Both axes also travel into the durable manifest model block.
+  const manA = JSON.parse(readFileSync(join(taskDir(a.runId, a.taskId), "manifest.json"), "utf8")) as TaskManifest;
+  const manB = JSON.parse(readFileSync(join(taskDir(b.runId, b.taskId), "manifest.json"), "utf8")) as TaskManifest;
+  assert.equal(manA.model!.capabilitySource, "explicit");
+  assert.equal(manA.model!.mappingPath, "exact");
+  assert.equal(manB.model!.capabilitySource, "role-derived");
+  assert.equal(manB.model!.mappingPath, "default-fallback");
+});
+
+// FG-560 step 4: an EXPLICIT activity that only resolves via map.default on a profile
+// that maps named activities is refused BEFORE the container starts — the same
+// activity_unmapped reason a `forge model resolve --json` consumer reads — and is NOT
+// swallowed by best-effort create-time stamping.
+test("invoke: an explicit unmapped activity is refused before dispatch (activity_unmapped), container never runs", async () => {
+  setupApikeyRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-policy-unmapped-"));
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".forge", "model-policy.yml"),
+    `
+schema_version: 2
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      review:  { model: review-model,  cost_tier: standard }
+      default: { model: default-model, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: {}
+`
+  );
+
+  let dockerCalled = false;
+  const spyExec: DockerExecFn = async (a) => {
+    dockerCalled = true;
+    return makeStubExec({ status: "complete" })(a);
+  };
+
+  // 'reasoning' is explicit, absent from the map, and the profile is NOT default-only.
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "should not run",
+    projectDir,
+    modelAlias: "reasoning",
+    dockerExec: spyExec,
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /activity_unmapped/);
+  assert.equal(dockerCalled, false, "container must not spawn on an activity_unmapped refusal");
+  const events = eventsForTask(r.taskId).map((e) => e.eventType);
+  assert.ok(events.includes("model.profile_unavailable"), `expected model.profile_unavailable in ${events.join(",")}`);
+  assert.ok(!events.includes("container.started"), "no container.started on an activity_unmapped refusal");
+
+  // Negative half: the SAME policy dispatches fine for a role-derived default-fallback.
+  const ok = await invoke({
+    agentRole: "tech-lead",
+    task: "role-derived default is fine",
+    projectDir,
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(ok.status, "complete", "role-derived default-fallback must NOT be refused");
 });
 
 test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke' workflow", async () => {
