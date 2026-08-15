@@ -20,6 +20,12 @@ import {
   type OperatorWorkflowId,
 } from "../../v2/operator-workflows.js";
 import { currentAdapterStamp } from "../../v2/adapter-stamp.js";
+// FG-546: the four-way docs-surfaces classifier is the SINGLE decision point that
+// init, upgrade, doctor, and dry-run all consume. The provisioning side-effect
+// keys off the verdict, never off bare file existence — so a customized file
+// (valid OR invalid) is never mistaken for the known generated template and never
+// auto-overwritten.
+import { classifyDocsSurfaces } from "../../v2/contract.js";
 // One predicate, not two: the drift detector already owns "is this link forge's own
 // pre-FG-253 artifact?", and an installer that answered it differently would migrate
 // what doctor calls the operator's — or leave standing a remedy that converges nothing.
@@ -136,7 +142,7 @@ export function registerInit(program: Command): void {
         console.log(`  backlog/:         ${describeBacklogScaffoldPlan(projectDir)}`);
         console.log(`  config.yml:       ${options.prefix ? `WOULD write prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
         console.log(`  model-policy.yml: ${describeSeedProvisionPlan(forgeProjectDir, "model-policy.yml")}`);
-        console.log(`  docs-surfaces.yml:${describeSeedProvisionPlan(forgeProjectDir, "docs-surfaces.yml")}`);
+        console.log(`  docs-surfaces.yml:${describeDocsSurfacesProvisionPlan(projectDir)}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         console.log(`  operator adapters: ${describeClaudeCommandsPlan(adaptersPlan)}`);
@@ -162,7 +168,7 @@ export function registerInit(program: Command): void {
         writeBacklogConfig(projectDir, { prefix: options.prefix });
       }
       const modelPolicyResult = provisionSeedFile(forgeProjectDir, "model-policy.yml", "model-policy.example.yml");
-      const docsSurfacesResult = provisionSeedFile(forgeProjectDir, "docs-surfaces.yml", "docs-surfaces.example.yml");
+      const docsSurfacesOutcome = provisionDocsSurfaces(projectDir);
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
       const adaptersResult = installHooks ? executeOperatorAdapters(adaptersPlan) : { summary: "skipped (--no-install-hooks)", outcomes: [] };
@@ -175,7 +181,10 @@ export function registerInit(program: Command): void {
       console.log(`  backlog/:         ${backlogScaffoldResult}`);
       console.log(`  config.yml:       ${options.prefix ? `wrote prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
       console.log(`  model-policy.yml: ${modelPolicyResult}`);
-      console.log(`  docs-surfaces.yml:${docsSurfacesResult}`);
+      console.log(`  docs-surfaces.yml:${docsSurfacesStatusLine(docsSurfacesOutcome)}`);
+      if (docsSurfacesOutcome.action === "requires-operator-repair") {
+        console.warn(`        ${docsSurfacesRepairWarning(docsSurfacesOutcome.path, docsSurfacesOutcome.detail)}`);
+      }
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
       console.log(`  operator adapters: ${adaptersResult.summary}`);
@@ -412,6 +421,100 @@ export function provisionSeedFile(forgeDir: string, targetName: string, seedName
 
 function describeSeedProvisionPlan(forgeDir: string, targetName: string): string {
   return existsSync(join(forgeDir, targetName)) ? "already exists" : "WOULD create";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FG-546: docs-surfaces provisioning — detect / create / migrate / preserve /
+// requires-operator-repair, driven by the shared classifier rather than a bare
+// existsSync short-circuit.
+//
+// WHY THIS IS NOT provisionSeedFile. provisionSeedFile copies only when the
+// target is absent and never touches an existing file. That was the bug FG-546
+// fixes: the old seed emitted a schema-INVALID object shape, so every project
+// initialized before this change holds a file forge's own loader rejects — and
+// "preserve whatever exists" left them broken forever. The classifier lets us
+// tell forge's own known-legacy generated template (safe to regenerate to the
+// corrected bytes) apart from an operator-authored file (valid OR invalid — never
+// auto-overwritten). The write side-effect keys off the VERDICT, never off file
+// existence.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type DocsSurfacesProvisionOutcome =
+  | { action: "created"; path: string }
+  | { action: "migrated"; path: string }
+  | { action: "preserved"; path: string }
+  | { action: "requires-operator-repair"; path: string; detail: string }
+  | { action: "seed-missing"; path: string };
+
+// Provision <projectDir>/.forge/docs-surfaces.yml from the four-way verdict.
+// Shared by `forge init` and `forge upgrade` (step 5) so the two paths cannot
+// drift. Pure with respect to console output: the caller reports/warns from the
+// returned outcome (init and upgrade have different reporting conventions).
+export function provisionDocsSurfaces(projectDir: string): DocsSurfacesProvisionOutcome {
+  const { verdict, path, detail } = classifyDocsSurfaces(projectDir);
+  switch (verdict) {
+    case "valid-project":
+      // Includes the corrected generated form — so a rerun is a clean no-op.
+      return { action: "preserved", path };
+    case "customized-invalid":
+      // Neither valid nor the known template ⇒ treated as operator-authored.
+      // NEVER written over; the caller emits an actionable warning/failure.
+      return { action: "requires-operator-repair", path, detail: detail ?? "invalid docs-surfaces config" };
+    case "missing": {
+      const seedPath = resolveSeedPath("docs-surfaces.example.yml");
+      if (!seedPath) return { action: "seed-missing", path };
+      mkdirSync(dirname(path), { recursive: true });
+      copyFileSync(seedPath, path);
+      return { action: "created", path };
+    }
+    case "known-legacy-generated": {
+      // The exact frozen legacy object template forge's own seed produced.
+      // Migrate by REGENERATING to the corrected seed bytes — there is nothing
+      // meaningful to transform out of the placeholder legacy entries.
+      const seedPath = resolveSeedPath("docs-surfaces.example.yml");
+      if (!seedPath) return { action: "seed-missing", path };
+      copyFileSync(seedPath, path);
+      return { action: "migrated", path };
+    }
+  }
+}
+
+// One-line status for the real-run report. No leading space: the label
+// "docs-surfaces.yml:" is one column wider than the sibling labels, so the value
+// column already lines up (see the console.log block above).
+export function docsSurfacesStatusLine(outcome: DocsSurfacesProvisionOutcome): string {
+  switch (outcome.action) {
+    case "created":                   return "created";
+    case "migrated":                  return "migrated legacy template → corrected form";
+    case "preserved":                 return "already exists (no-op)";
+    case "requires-operator-repair":  return "INVALID — left untouched, operator repair required";
+    case "seed-missing":              return "skipped (seed docs-surfaces.example.yml not found)";
+  }
+}
+
+// Dry-run forecast (AC8): which of create / migrate / preserve /
+// requires-operator-repair the real run would do — from the SAME classifier, so
+// the forecast cannot disagree with what the run then does.
+export function describeDocsSurfacesProvisionPlan(projectDir: string): string {
+  const { verdict } = classifyDocsSurfaces(projectDir);
+  switch (verdict) {
+    case "missing":                 return "WOULD create";
+    case "known-legacy-generated":  return "WOULD migrate (legacy template → corrected form)";
+    case "valid-project":           return "would preserve (already valid, no-op)";
+    case "customized-invalid":      return "WOULD SKIP — invalid, requires operator repair (left untouched)";
+  }
+}
+
+// The actionable warning emitted (never a silent clobber) when a project holds a
+// customized-invalid docs-surfaces file. Names the file, the validation error,
+// and the repair action. Shared so init and upgrade word it identically.
+export function docsSurfacesRepairWarning(path: string, detail: string): string {
+  return (
+    `⚠ docs-surfaces config at ${path} is invalid (${detail}) and does not match forge's known ` +
+    `generated template, so it looks operator-authored — forge left it untouched. Repair: edit it to the ` +
+    `{ surfaces: [<path-prefix>, ...] } shape (see seeds/docs-surfaces.example.yml), or delete it and re-run ` +
+    `\`forge init\` / \`forge upgrade\` to regenerate the corrected default.`
+  );
 }
 
 function resolveSeedPath(seedName: string): string | undefined {
