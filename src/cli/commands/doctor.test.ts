@@ -20,6 +20,7 @@ import {
   gatherReleaseInputs,
   newestBuildInputMtime,
   renderDoctor,
+  renderDocsSurfaces,
   type DoctorFindings,
   type DoctorProbes,
 } from "./doctor.js";
@@ -445,6 +446,7 @@ function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
     protocolDrift: { entries: [], stale: [], ok: true },
     seedInstall: { kind: "healthy", generation: "/tmp/gen" },
     projectAdapters: { projectDir: "/tmp/p", projectIdentity, expectedStamp: "release-x", entries: [], stale: [], ok: true },
+    docsSurfaces: { verdict: "missing", path: "/tmp/p/.forge/docs-surfaces.yml" },
     project: projectIdentity,
     ...over,
   };
@@ -829,4 +831,128 @@ test("FG-693: a resolvable tree that is NOT the running one is a NAMED disagreem
   } finally {
     rmSync(foreign, { recursive: true, force: true });
   }
+});
+
+// ─────────── FG-546: `forge doctor` reports docs-surfaces config state ───────────
+//
+// AC7: doctor distinguishes the four states the shared classifier
+// (src/v2/contract.ts) adjudicates — valid project config, missing config, the
+// known generated legacy shape, and customized-invalid content — the last two
+// each naming their repair action. This is a reported diagnostic: read/dispatch
+// is fail-soft, so docs-surfaces state never moves the exit code. These tests
+// drive both the pure render/JSON faces over synthetic verdicts AND the real
+// gather path against on-disk fixtures, so doctor and the write side (init/
+// upgrade) can never disagree about the verdict.
+
+function writeDocsSurfaces(body: string): void {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "docs-surfaces.yml"), body);
+}
+
+// The exact frozen legacy object template forge's old seed emitted, dressed with
+// comments/whitespace to prove structural (not byte) matching.
+const LEGACY_DOCS_SURFACES = `# docs surfaces
+surfaces:
+  - name: readme       # user-facing entry point
+    kind: user-facing
+    path: README.md
+  - name: api-reference
+    kind: public-api
+    path: docs/api.md
+`;
+
+test("FG-546 renderDocsSurfaces: the four verdicts render distinctly", () => {
+  const valid = renderDocsSurfaces({ verdict: "valid-project", path: "/p/.forge/docs-surfaces.yml" });
+  const missing = renderDocsSurfaces({ verdict: "missing", path: "/p/.forge/docs-surfaces.yml" });
+  const legacy = renderDocsSurfaces({ verdict: "known-legacy-generated", path: "/p/.forge/docs-surfaces.yml" });
+  const invalid = renderDocsSurfaces({ verdict: "customized-invalid", path: "/p/.forge/docs-surfaces.yml", detail: "surfaces: Required" });
+
+  // Each state produces a distinct rendering.
+  const all = [valid, missing, legacy, invalid];
+  assert.equal(new Set(all).size, 4, "every verdict renders a distinct line");
+
+  // Valid/missing report cleanly — no scary framing, no remedy.
+  assert.match(valid, /OK/);
+  assert.doesNotMatch(valid, /forge upgrade|Fix:/);
+  assert.match(missing, /default/);
+  assert.doesNotMatch(missing, /forge upgrade|Fix:/);
+
+  // Legacy names the file and the auto-repair action (forge upgrade).
+  assert.match(legacy, /LEGACY/);
+  assert.match(legacy, /forge upgrade/);
+  assert.match(legacy, /\/p\/\.forge\/docs-surfaces\.yml/);
+
+  // Customized-invalid names the file, the validation error, and the operator
+  // repair action — and explicitly promises forge will NOT overwrite it.
+  assert.match(invalid, /INVALID/);
+  assert.match(invalid, /surfaces: Required/);
+  assert.match(invalid, /will not overwrite|not.*overwrite/i);
+  assert.doesNotMatch(invalid, /forge upgrade/); // customized files are the operator's to fix
+});
+
+test("FG-546 doctor: docs-surfaces state never moves the exit code (fail-soft diagnostic)", () => {
+  for (const v of ["valid-project", "missing", "known-legacy-generated", "customized-invalid"] as const) {
+    const f = findings({ docsSurfaces: { verdict: v, path: "/tmp/p/.forge/docs-surfaces.yml", detail: "x" } });
+    assert.equal(doctorReady(f), true, `${v} is a reported diagnostic, not a readiness fail`);
+  }
+});
+
+test("FG-546 doctor --json: carries the classifier verdict a script can branch on", () => {
+  const f = findings({ docsSurfaces: { verdict: "customized-invalid", path: "/tmp/p/.forge/docs-surfaces.yml", detail: "surfaces: Required" } });
+  const payload = JSON.parse(JSON.stringify(doctorJson(f))) as { docsSurfaces: DoctorFindings["docsSurfaces"] };
+  assert.deepEqual(payload.docsSurfaces, { verdict: "customized-invalid", path: "/tmp/p/.forge/docs-surfaces.yml", detail: "surfaces: Required" });
+  // The human section renders the same verdict — the two faces cannot disagree.
+  assert.match(renderDoctor(f), /INVALID/);
+});
+
+test("FG-546 doctor (real gather): a valid project docs-surfaces file reads as valid-project", () => {
+  writeDocsSurfaces("surfaces:\n  - src/cli/\n  - src/v2/contract.ts\n");
+  const f = gatherDoctorFindings(projectDir);
+  assert.equal(f.docsSurfaces.verdict, "valid-project");
+  assert.match(renderDoctor(f), /Docs-surfaces config: OK/);
+});
+
+test("FG-546 doctor (real gather): no file reads as missing and reports cleanly", () => {
+  const f = gatherDoctorFindings(projectDir);
+  assert.equal(f.docsSurfaces.verdict, "missing");
+  const human = renderDoctor(f);
+  assert.match(human, /Docs-surfaces config: default/);
+  assert.doesNotMatch(human, /Docs-surfaces config: (LEGACY|INVALID)/);
+});
+
+test("FG-546 doctor (real gather): the exact legacy template reads as known-legacy-generated with the upgrade remedy", () => {
+  writeDocsSurfaces(LEGACY_DOCS_SURFACES);
+  const f = gatherDoctorFindings(projectDir);
+  assert.equal(f.docsSurfaces.verdict, "known-legacy-generated");
+  const human = renderDoctor(f);
+  assert.match(human, /Docs-surfaces config: LEGACY/);
+  assert.match(human, /forge upgrade/);
+  // JSON encodes the same verdict for a script.
+  const payload = JSON.parse(JSON.stringify(doctorJson(f))) as { docsSurfaces: DoctorFindings["docsSurfaces"] };
+  assert.equal(payload.docsSurfaces.verdict, "known-legacy-generated");
+});
+
+test("FG-546 doctor (real gather): a hand-authored invalid file reads as customized-invalid, never legacy", () => {
+  // Not the frozen 2-entry template — a 1-entry object variant. Structurally
+  // deviant => customized-invalid, so doctor must NOT advise auto-repair.
+  writeDocsSurfaces("surfaces:\n  - name: custom\n    kind: mine\n    path: CHANGELOG.md\n");
+  const f = gatherDoctorFindings(projectDir);
+  assert.equal(f.docsSurfaces.verdict, "customized-invalid");
+  assert.ok((f.docsSurfaces.detail ?? "").length > 0, "the schema validation error is carried");
+  assert.match(renderDoctor(f), /Docs-surfaces config: INVALID/);
+  // The docs-surfaces SECTION itself must not advise auto-repair (forge upgrade
+  // clobbers nothing here); assert against the isolated section, since the full
+  // doctor output legitimately mentions `forge upgrade` in other sections.
+  assert.doesNotMatch(renderDocsSurfaces(f.docsSurfaces), /forge upgrade/);
+});
+
+test("FG-546 `forge doctor`: the real action renders docs-surfaces state, human and --json alike", async () => {
+  writeDocsSurfaces(LEGACY_DOCS_SURFACES);
+  const human = await runRegisteredDoctor(projectDir, []);
+  assert.match(human.out, /Docs-surfaces config: LEGACY/);
+  assert.match(human.out, /forge upgrade/);
+
+  const json = await runRegisteredDoctor(projectDir, ["--json"]);
+  const payload = JSON.parse(json.out) as { docsSurfaces: { verdict: string } };
+  assert.equal(payload.docsSurfaces.verdict, "known-legacy-generated");
 });
