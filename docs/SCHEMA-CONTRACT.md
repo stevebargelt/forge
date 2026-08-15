@@ -545,6 +545,8 @@ controlPlane: {
 
 `source` values: `host` = resolved from the forge host installation; `project` = overridden by the project's `.forge/` directory; `synthetic` = built in-memory (no YAML file, always the case for `forge invoke` workflows); `absent` = no file found, legacy resolution used; `built-in` = forge's built-in default (project `.forge/docs-surfaces.yml` absent or invalid).
 
+The read/dispatch resolution of `docs-surfaces.yml` is **fail-soft**: a present-but-invalid file (whether it is the known legacy generated template or a hand-authored customized file) resolves as `source: built-in` with a warning, never a crash. The *write* side — `forge init` / `forge upgrade` — is where an invalid file is repaired: it migrates the exact known legacy generated template to the corrected form, and preserves a customized-invalid file untouched with an actionable warning (see `docs/concepts.md` → Docs impact). `forge doctor` distinguishes the four states (valid / missing / known-legacy / customized-invalid).
+
 The block stores **no secrets, token material, or auth file paths** — only config file paths and resolved counts.
 
 ## Agent-output shapes the dashboard renders
