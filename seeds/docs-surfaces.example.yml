@@ -1,18 +1,29 @@
 # forge — docs surfaces (EXAMPLE / opt-in)
 #
 # Copy this to <project>/.forge/docs-surfaces.yml to tell forge which
-# documentation surfaces exist in this project and where to find them.
-# Forge uses this when flagging docs_impact on completed tasks so the
-# orchestrator can route doc updates to the right place.
+# OPERATOR-FACING surfaces exist in this project.
 #
-# Each entry names a surface, its kind, and its path (relative to the
-# project root). Add, remove, or rename entries to match your project.
+# `surfaces` is a list of path PREFIXES (relative to the project root),
+# each naming source or config that defines operator-visible behavior:
+# commands, flags, defaults, output shapes, config contracts, provisioned
+# artifacts. When a completed task's changed files touch one of these
+# prefixes, forge flags docs_impact so the orchestrator can route a
+# documentation-reconciliation follow-up — the changed surface may have
+# made durable operator docs stale.
+#
+# These are NOT documentation destinations (README.md, an API-reference
+# page). They are the CODE/CONFIG paths whose change TRIGGERS a docs
+# review. A path matches when the changed file equals the prefix or starts
+# with it, so a trailing "/" scopes a whole directory.
+#
+# Writing this file fully REPLACES forge's built-in defaults (it is not a
+# merge). The list below is modeled on forge's own OPERATOR_SURFACES
+# (src/v2/contract.ts) — replace these entries with the surfaces that
+# define YOUR project's operator-facing behavior.
 
 surfaces:
-  - name: readme
-    kind: user-facing
-    path: README.md
-
-  - name: api-reference
-    kind: public-api
-    path: docs/api.md
+  - src/cli/ # commands + flags the operator invokes
+  - seeds/workflows/ # workflow shapes
+  - seeds/runtimes/ # provider/auth runtimes
+  - src/v2/contract.ts # the task-contract shape operators/agents declare
+  - scripts/install-seeds.sh # what `forge upgrade` provisions
