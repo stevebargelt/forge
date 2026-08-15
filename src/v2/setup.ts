@@ -13,6 +13,7 @@
 // testable with plain fixtures.
 
 import type { CheckStatus, ReleaseCheck, ReleaseReport, ReleaseInputs } from "./release-doctor.js";
+import type { ModelPolicyStatus } from "./model-policy-status.js";
 
 export type SetupStepStatus = CheckStatus | "created" | "would-create";
 
@@ -56,6 +57,29 @@ export function modelPolicyStep(action: ProvisionAction): SetupStep {
       return { name, status: "would-create", detail: "absent — would create from model-policy.example.yml", next: "run `forge setup` (without --dry-run) to create it" };
     case "no-seed":
       return { name, status: "fail", detail: "absent and no model-policy.example.yml seed found", next: "run `forge upgrade` to install seeds first" };
+  }
+}
+
+// FG-560: the setup surface reflects the model-policy SCHEMA VERSION. A freshly
+// provisioned host policy (copied from the schema_version-2 example) reads as
+// current; a pre-existing v1/needs-human host is directed at `forge upgrade`
+// (non-blocking warn — setup never migrates, `forge upgrade` is the sole authority);
+// a newer-than-supported policy is flagged 'upgrade Forge'.
+export function modelPolicyVersionStep(status: ModelPolicyStatus): SetupStep {
+  const name = "model-policy schema";
+  const host = status.host;
+  if (host.state === "reachable-no-policy") {
+    return { name, status: "skip", detail: "no host policy — legacy mode (schema versioning applies once a policy exists)" };
+  }
+  switch (host.action) {
+    case "none":
+      return { name, status: "ok", detail: "host policy is schema_version 2 (current)" };
+    case "forge-upgrade":
+      return { name, status: "warn", detail: host.detail, next: "run `forge upgrade` to migrate the host policy to schema_version 2" };
+    case "resolve-then-upgrade":
+      return { name, status: "warn", detail: host.detail, next: "resolve the flagged alias, then run `forge upgrade`" };
+    case "upgrade-forge":
+      return { name, status: "warn", detail: host.detail, next: "upgrade Forge to read this newer policy" };
   }
 }
 
