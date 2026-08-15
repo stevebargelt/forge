@@ -4,21 +4,16 @@
 
 import { h } from "preact";
 import htm from "htm";
-import { marked } from "marked";
+// FG-643 — markdown is parsed AND sanitized behind this single boundary. Every
+// dangerouslySetInnerHTML below (and in backlog.js / main.js, which import `md`
+// from here) flows through it; `marked` is never called directly outside
+// markdown.js. Re-exported so existing `import { md } from "./renderers.js"`
+// consumers keep working while going through the sanitizer.
+import { md, mdInline } from "./markdown.js";
 
 const html = htm.bind(h);
 
-// ---- markdown ----
-export function md(s) {
-  if (typeof s !== "string") return "";
-  try { return marked.parse(s, { breaks: true, gfm: true }); }
-  catch { return s; }
-}
-export function mdInline(s) {
-  if (typeof s !== "string") return "";
-  try { return marked.parseInline(s, { breaks: false, gfm: true }); }
-  catch { return s; }
-}
+export { md, mdInline };
 
 // ---- badges ----
 function sevBadge(sev) {
@@ -37,10 +32,13 @@ function verdictBadge(v) {
   return html`<span class="badge ${cls}">${v}</span>`;
 }
 
-// Helper: render markdown into a div via dangerouslySetInnerHTML.
+// Helper: render markdown into a span via dangerouslySetInnerHTML. Each branch
+// feeds the sink a DIRECT md()/mdInline() call so the FG-643 source guard can
+// statically prove the HTML came through the sanitizing boundary.
 function MD({ source, inline }) {
-  const r = inline ? mdInline(source) : md(source);
-  return html`<span class="md" dangerouslySetInnerHTML=${{ __html: r }}></span>`;
+  return inline
+    ? html`<span class="md" dangerouslySetInnerHTML=${{ __html: mdInline(source) }}></span>`
+    : html`<div class="md" dangerouslySetInnerHTML=${{ __html: md(source) }}></div>`;
 }
 
 // ---- architect ----

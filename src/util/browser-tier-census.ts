@@ -80,6 +80,10 @@ export const BROWSER_TIER_DIR = join(
 // count-chart legibility sweep.
 // FG-663 adds `fg663-deleted-checkout` (1 test): a run written from a disposable
 // checkout remains visibly attributed to its project after that checkout is gone.
+// FG-643 adds `fg643-sanitize-markdown` (1 test): a hostile ticket body stored
+// through the real backlog path renders inert in a real browser — no
+// script/handler/navigation executes, stored bytes unchanged, a benign control
+// still renders.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
@@ -87,6 +91,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "completed-runs.test.ts": 8,
   "completed-runs-real-store.test.ts": 2,
   "fg591-queue-board.test.ts": 6,
+  "fg643-sanitize-markdown.test.ts": 1,
   "fg663-deleted-checkout.test.ts": 1,
   "fg679-current-activity.test.ts": 13,
   "fg694-home-in-flight.test.ts": 9,
