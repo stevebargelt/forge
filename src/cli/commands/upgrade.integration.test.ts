@@ -1785,3 +1785,195 @@ test("FG-253 step 5: --dry-run reports `would-install` and writes nothing", () =
     for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
   }
 });
+
+// ─────────── FG-546: docs-surfaces detect / migrate / preserve / repair on UPGRADE ───────────
+//
+// The load-bearing half of the ticket. `forge upgrade` never re-runs seed
+// provisioning (grep: 0 provisionSeedFile calls), so correcting the seed and adding
+// migration to `forge init` alone would leave every already-initialized project
+// (constellation, trakt-letterboxd, forge-scratch-workspace) holding the invalid
+// legacy object template forever. These drive the REAL runUpgrade [4/4] block from
+// inside a prepared project and read the bytes it actually wrote — the migration
+// keys off the four-way verdict, never bare file existence, so a customized file
+// (valid OR invalid) is never mistaken for the generated template and never
+// clobbered. Distinct from the host-seed cache ([3/4]), which is asserted unchanged.
+
+import { classifyDocsSurfaces, resolveDocsSurfacesReceipt } from "../../v2/contract.js";
+
+const FG546_LEGACY_DOCS_SURFACES = [
+  "# an old operator comment (comment/whitespace-insensitive match)",
+  "surfaces:",
+  "  - name: readme",
+  "    kind: user-facing",
+  "    path: README.md",
+  "  - name: api-reference",
+  "    kind: public-api",
+  "    path: docs/api.md",
+  "",
+].join("\n");
+
+function writeProjectDocsSurfaces(project: string, content: string): string {
+  const p = join(project, ".forge", "docs-surfaces.yml");
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, content);
+  return p;
+}
+
+test("FG-546 (upgrade): the EXACT legacy object template is migrated in place to the corrected form (source:project, no warning)", () => {
+  const assets = assetTree("fg546-up-migrate-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg546-up-migrate-proj-", { legacyLinks: false });
+  try {
+    const p = writeProjectDocsSurfaces(project, FG546_LEGACY_DOCS_SURFACES);
+    assert.equal(classifyDocsSurfaces(project).verdict, "known-legacy-generated", "precondition: recognized legacy shape");
+
+    const r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+
+    assert.equal(r.result.docsSurfaces, "migrated");
+    assert.match(r.stdout, /docs-surfaces:\s+migrated legacy template/i, "the human [4/4] sub-line names the migration");
+    const after = readFileSync(p, "utf8");
+    assert.ok(!after.includes("kind:"), "the meaningless legacy object entries must be gone");
+    assert.equal(classifyDocsSurfaces(project).verdict, "valid-project");
+
+    // Routes through the SAME production resolver dispatch uses.
+    const { receipt, warning } = resolveDocsSurfacesReceipt(project);
+    assert.equal(receipt.source, "project", "the migrated file resolves as source:project");
+    assert.equal(warning, undefined, "no invalid-config warning after migration");
+
+    // The host-seed cache ([3/4]) is untouched by this — it still ran normally.
+    assert.equal(r.result.assetInstall, "installed", "the host-seed-cache path is unchanged");
+    assert.equal(r.exitCode, undefined, "a migration that did exactly what was asked keeps the success code");
+    assert.deepEqual(r.result.unresolved, []);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-546 (upgrade): a project with NO docs-surfaces file gets the corrected seed created", () => {
+  const assets = assetTree("fg546-up-create-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg546-up-create-proj-", { legacyLinks: false });
+  try {
+    assert.equal(classifyDocsSurfaces(project).verdict, "missing", "precondition: no file yet");
+    const r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+
+    assert.equal(r.result.docsSurfaces, "created");
+    assert.match(r.stdout, /docs-surfaces:\s+created/i);
+    assert.equal(classifyDocsSurfaces(project).verdict, "valid-project");
+    const { receipt } = resolveDocsSurfacesReceipt(project);
+    assert.equal(receipt.source, "project");
+    assert.equal(r.exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-546 (upgrade): the corrected form is idempotent — a rerun preserves it as a no-op", () => {
+  const assets = assetTree("fg546-up-idem-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg546-up-idem-proj-", { legacyLinks: false });
+  try {
+    writeProjectDocsSurfaces(project, FG546_LEGACY_DOCS_SURFACES);
+    const first = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(first.result.docsSurfaces, "migrated");
+    const bytes = readFileSync(join(project, ".forge", "docs-surfaces.yml"), "utf8");
+
+    const second = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(second.result.docsSurfaces, "preserved", "the corrected form is valid-project ⇒ a clean no-op");
+    assert.match(second.stdout, /docs-surfaces:\s+already exists/i);
+    assert.equal(readFileSync(join(project, ".forge", "docs-surfaces.yml"), "utf8"), bytes, "no re-migration on rerun");
+    assert.equal(second.exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-546 (upgrade): a customized-VALID (Pixtron string-list) file is preserved unchanged", () => {
+  const assets = assetTree("fg546-up-preserve-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg546-up-preserve-proj-", { legacyLinks: false });
+  try {
+    const custom = "surfaces:\n  - src/mine/\n  - config/mine.ts\n";
+    const p = writeProjectDocsSurfaces(project, custom);
+    const r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+
+    assert.equal(r.result.docsSurfaces, "preserved");
+    assert.equal(readFileSync(p, "utf8"), custom, "a valid operator file must never be rewritten");
+    assert.equal(r.exitCode, undefined);
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-546 (upgrade): a customized-INVALID file is NEVER clobbered — actionable warning names file + error + repair, on the console AND --json", () => {
+  const assets = assetTree("fg546-up-repair-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg546-up-repair-proj-", { legacyLinks: false });
+  try {
+    // A single-entry object shape: structurally different from the frozen legacy
+    // template ⇒ customized-invalid, never migrated.
+    const custom = "surfaces:\n  - name: only-one\n    path: README.md\n";
+    const p = writeProjectDocsSurfaces(project, custom);
+    assert.equal(classifyDocsSurfaces(project).verdict, "customized-invalid", "precondition: hand-authored invalid, not the legacy template");
+
+    const r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+
+    // Never clobbered — survives byte-for-byte.
+    assert.equal(readFileSync(p, "utf8"), custom, "customized-invalid file must survive byte-for-byte");
+    assert.equal(r.result.docsSurfaces, "requires-operator-repair");
+    // Actionable warning on the human surface: names the file + repair action.
+    assert.match(r.warnings, /docs-surfaces\.yml/, "warning names the file");
+    assert.match(r.warnings, /repair|delete it and re-run|forge init|forge upgrade/i, "warning names the repair action");
+    assert.match(r.warnings, /invalid/i, "warning flags the config as invalid");
+    // …and on --json: the SAME named guidance, so a script reads it too.
+    assert.ok(r.result.docsSurfacesRepair && /docs-surfaces\.yml/.test(r.result.docsSurfacesRepair), "docsSurfacesRepair carries the named guidance");
+    // Not a permanent upgrade failure: forge preserving a file it does not own is
+    // the command working (parallel to a slash-command user-override).
+    assert.equal(r.result.ok, true);
+    assert.equal(r.exitCode, undefined);
+    assert.ok(!r.result.unresolved.some((u) => /docs-surfaces/.test(u)), "docs-surfaces repair contributes no unresolved reason");
+
+    // Production fallback: an invalid project file resolves to the built-in default
+    // set WITH a warning (fail-soft on the read/dispatch side).
+    const { receipt, warning } = resolveDocsSurfacesReceipt(project);
+    assert.equal(receipt.source, "built-in", "an invalid project file falls back to the built-in surfaces");
+    assert.ok(warning, "the read/dispatch surface warns on the invalid file");
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-546 (upgrade dry-run): forecasts create / migrate / preserve / repair and writes nothing", () => {
+  const assets = assetTree("fg546-up-dry-", "CLEAN", { manifest: false });
+  fenceTemplate(assets);
+  const project = legacyProject("fg546-up-dry-proj-", { legacyLinks: false });
+  try {
+    // create
+    let r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true, dryRun: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(r.result.docsSurfaces, "would-create");
+    assert.match(r.stdout, /docs-surfaces:\s+WOULD create/i);
+    assert.equal(existsSync(join(project, ".forge", "docs-surfaces.yml")), false, "a dry run writes nothing");
+
+    // migrate
+    const p = writeProjectDocsSurfaces(project, FG546_LEGACY_DOCS_SURFACES);
+    r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true, dryRun: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(r.result.docsSurfaces, "would-migrate");
+    assert.match(r.stdout, /docs-surfaces:\s+WOULD migrate/i);
+    assert.equal(readFileSync(p, "utf8"), FG546_LEGACY_DOCS_SURFACES, "dry run does not migrate on disk");
+
+    // preserve (valid)
+    writeProjectDocsSurfaces(project, "surfaces:\n  - src/mine/\n");
+    r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true, dryRun: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(r.result.docsSurfaces, "preserved");
+    assert.match(r.stdout, /docs-surfaces:\s+would preserve/i);
+
+    // requires-operator-repair (customized-invalid)
+    writeProjectDocsSurfaces(project, "surfaces:\n  - name: x\n    path: y\n");
+    r = upgradeIn(project, () => drive({ skipGit: true, skipNpm: true, dryRun: true }, { mode: "dev", assetsDir: assets, devDir: assets }));
+    assert.equal(r.result.docsSurfaces, "requires-operator-repair");
+    assert.match(r.stdout, /docs-surfaces:\s+WOULD SKIP.*repair/i);
+    assert.match(r.warnings, /docs-surfaces\.yml/, "the dry-run repair warning still names the file");
+  } finally {
+    for (const d of [assets, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
