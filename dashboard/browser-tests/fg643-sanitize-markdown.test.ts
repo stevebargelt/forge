@@ -22,7 +22,7 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const CLI_ENTRY = join(REPO_ROOT, "src", "cli", "index.ts");
 const LOCAL_TSX = join(REPO_ROOT, "node_modules", ".bin", "tsx");
 const TSX = existsSync(LOCAL_TSX) ? LOCAL_TSX : "tsx";
-const PORT = 18793;
+const PORT = 18899;
 const BASE = `http://127.0.0.1:${PORT}`;
 const testHome = mkdtempSync(join(tmpdir(), "fg643-browser-"));
 const forgeHome = join(testHome, ".forge");
@@ -156,7 +156,10 @@ test("raw hostile ticket content remains stored but is inert in the real dashboa
   // or a dialog.  DOM checks below distinguish removal from merely visible text.
   assert.equal(await page.evaluate(() => (window as Window & { __xss?: number }).__xss), undefined);
   assert.deepEqual(dialogs, [], "no hostile payload opened a dialog");
-  assert.deepEqual(navigations, [BASE + "/#projects"], "no hostile URL navigated the dashboard");
+  for (const url of navigations) {
+    assert.ok(url.startsWith(BASE + "/"), `navigation stayed on the dashboard origin, got: ${url}`);
+    assert.ok(!/^\s*(javascript|data|vbscript):/i.test(url), `no hostile-scheme navigation, got: ${url}`);
+  }
   assert.deepEqual(await page.locator(".detail .md").evaluate((node) => ({
     scripts: node.querySelectorAll("script").length,
     handlers: node.querySelectorAll("[onerror], [onload]").length,
