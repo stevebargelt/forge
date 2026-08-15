@@ -38,6 +38,11 @@ model_profiles:
       review:    { model: claude-sonnet-4-6, cost_tier: standard }
       fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
       default:   { model: claude-sonnet-4-6, cost_tier: standard }
+      # FG-560: spec-writer/fast-orchestrator are the orchestrator-facing capability
+      # names — copied from reasoning/fast so `--model spec-writer` resolves to an
+      # EXACT map hit rather than falling through to map.default.
+      spec-writer: { model: claude-opus-5, cost_tier: premium }
+      fast-orchestrator: { model: claude-haiku-4-5, cost_tier: cheap }
 
   # AWS Bedrock. Work-account Bedrock does NOT expose Opus — `reasoning` maps to
   # Sonnet (strongest available there). This is why a profile owns its own map.
@@ -50,6 +55,8 @@ model_profiles:
       review:    { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
       fast:      { model: us.anthropic.claude-haiku-4-5-20251001-v1:0, cost_tier: cheap }
       default:   { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      spec-writer: { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      fast-orchestrator: { model: us.anthropic.claude-haiku-4-5-20251001-v1:0, cost_tier: cheap }
 
   # Anthropic API key (escape hatch).
   claude-api:
@@ -60,6 +67,8 @@ model_profiles:
       review:    { model: claude-sonnet-4-6, cost_tier: standard }
       fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
       default:   { model: claude-sonnet-4-6, cost_tier: standard }
+      spec-writer: { model: claude-opus-5, cost_tier: premium }
+      fast-orchestrator: { model: claude-haiku-4-5, cost_tier: cheap }
 
   # Codex (OpenAI) via ChatGPT subscription — the AWN-7 Walk second provider.
   # Runs the `codex` CLI in a container (codex exec --json); auth is the host's
@@ -75,6 +84,8 @@ model_profiles:
       review:    { model: gpt-5.6-terra, cost_tier: standard }
       fast:      { model: gpt-5.6-luna, cost_tier: cheap }
       default:   { model: gpt-5.6-terra, cost_tier: standard }
+      spec-writer: { model: gpt-5.6-sol, cost_tier: premium }
+      fast-orchestrator: { model: gpt-5.6-luna, cost_tier: cheap }
 
   # pi via Groq API key. Requires GROQ_API_KEY in the host env; `forge providers
   # doctor` reports groq/api availability. A dispatch fails loud before running if
@@ -102,6 +113,8 @@ defaults:
     reasoning: claude-subscription
     review:    claude-subscription
     fast:      claude-subscription
+    spec-writer: claude-subscription
+    fast-orchestrator: claude-subscription
 
 overrides:
   # agent role -> profile. Pin specific agents to a specific provider/auth. This

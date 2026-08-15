@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   adapterNotInstalledReason,
@@ -46,6 +47,24 @@ import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../..
 import { gatherReleaseInputs } from "./doctor.js";
 import { assetRoot, devCheckoutDir, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
 import { publishSeedGeneration } from "../../v2/seed-generation.js";
+// FG-560: `forge upgrade` is the SOLE authority that migrates model-policy.yml.
+// Step 7 COMPOSES evidence-based discovery (step 6) with the per-file
+// classifier/writer (step 5): it enumerates the host policy plus every discovered
+// project policy, migrates each safely-migratable file ATOMICALLY per-file, and
+// leaves unresolved files (needs-human-decision / unreachable / newer-unsupported)
+// UNCHANGED. It NEVER routes through loadModelPolicy — that dispatch read path
+// refuses a v1 file, but the migrator must READ that same file to repair it.
+import {
+  discoverModelPolicies,
+  type DiscoveredPolicy,
+  type PolicyDiscovery,
+  type PolicyState,
+} from "../../v2/model-policy-discovery.js";
+import {
+  migrateModelPolicyFile,
+  type MigrateIO,
+  type MigrationVerdict,
+} from "../../v2/model-policy-migration.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -196,6 +215,56 @@ export type SeedGenerationOutcome = "published" | "would-publish" | "not-run" | 
  *  a host this upgrade never touched. */
 export type AuthoredRetentionOutcome = "none" | "retained" | "not-run";
 
+// FG-560: the fleet-level model-policy migration outcome. Aggregated from the
+// per-file reports below, but atomicity is PER-FILE (never a cross-fleet
+// transaction): a fleet where some migrate and others are unreachable is the
+// expected steady state, reported per-file, never rolled back as a unit.
+//   none            no policy file discovered anywhere.
+//   all-current     every discovered policy is already schema_version 2.
+//   migrated        ≥1 file was migrated (real run); nothing needs a human.
+//   would-migrate   dry-run forecast: ≥1 file WOULD migrate; nothing needs a human.
+//   action-required ≥1 file needs a human / is unreachable / is newer-unsupported —
+//                   left UNCHANGED, so the overall result is NON-SUCCESS.
+//   failed          a discovered file could not be migrated (write/parse failure) —
+//                   the original was left intact.
+//   not-run         the migration step did not run.
+export type ModelPolicyMigrationOutcome =
+  | "none"
+  | "all-current"
+  | "migrated"
+  | "would-migrate"
+  | "action-required"
+  | "failed"
+  | "not-run";
+
+/** The per-file action, derived from the discovery state + the ONE migration
+ *  verdict. `migrated`/`would-migrate` differ ONLY on dry-run — both key off the
+ *  same verdict, so the dry-run forecast matches the real run file-for-file. */
+export type ModelPolicyFileAction =
+  | "migrated"
+  | "would-migrate"
+  | "current"
+  | "needs-human-decision"
+  | "newer-unsupported"
+  | "unreachable"
+  | "no-policy"
+  | "known-no-path"
+  | "failed";
+
+/** One discovered policy's migration report. This is the per-file classification a
+ *  script reads from --json AND the human summary renders — one source, so they
+ *  cannot disagree. */
+export interface ModelPolicyFileReport {
+  scope: "host" | "project";
+  projectDir: string | null;
+  policyPath: string | null;
+  discoveryState: PolicyState;
+  /** The step-5 verdict when the file was inspected (has-policy); null otherwise. */
+  verdict: MigrationVerdict | null;
+  action: ModelPolicyFileAction;
+  detail: string | null;
+}
+
 // FG-581: `failed` and `failed-not-neutralized` are BOTH compile failures, split
 // on whether the stale policy could be taken off disk. `failed` = neutralized
 // (quarantined or removed) → routing is genuinely fail-closed. `failed-not-neutralized`
@@ -299,6 +368,7 @@ export type UpgradeStepOutcomes = {
   npmInstall: NpmInstallOutcome;
   assetInstall: AssetInstallOutcome;
   seedGeneration: SeedGenerationOutcome;
+  modelPolicy: ModelPolicyMigrationOutcome;
   authoredRetention: AuthoredRetentionOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
@@ -379,6 +449,28 @@ const SEED_GENERATION: Record<SeedGenerationOutcome, Resolution> = {
 const AUTHORED_RETENTION: Record<AuthoredRetentionOutcome, Resolution> = {
   none: resolved,
   retained: resolved,
+  "not-run": resolved,
+};
+
+// FG-560: a migrated / would-migrate / already-current / nothing-found fleet is the
+// command working — resolved. `action-required` is unresolved because a file was
+// LEFT UNCHANGED that a human (or a newer forge) must resolve, and `failed` is
+// unresolved because a discovered file could not be repaired (its original is
+// intact, but the policy is still not current). Both flow into the exit code, the
+// closing line, and --json from this ONE table. Mirrors the docs-surfaces split:
+// the would-* forecasts are resolved exactly as their real-run counterparts are, so
+// dry-run and real run agree.
+const MODEL_POLICY: Record<ModelPolicyMigrationOutcome, Resolution> = {
+  none: resolved,
+  "all-current": resolved,
+  migrated: resolved,
+  "would-migrate": resolved,
+  "action-required": unresolvedBecause(
+    "model-policy migration: one or more policies were left unchanged and still need attention (needs-human-decision / newer-unsupported / unreachable) — resolve them and re-run forge upgrade",
+  ),
+  failed: unresolvedBecause(
+    "model-policy migration: a discovered policy could not be migrated — its original was left intact; see the warning above",
+  ),
   "not-run": resolved,
 };
 
@@ -483,6 +575,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "npmInstall": return NPM_INSTALL[step.outcome];
     case "assetInstall": return ASSET_INSTALL[step.outcome];
     case "seedGeneration": return SEED_GENERATION[step.outcome];
+    case "modelPolicy": return MODEL_POLICY[step.outcome];
     case "authoredRetention": return AUTHORED_RETENTION[step.outcome];
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
     case "projectInit": return PROJECT_INIT[step.outcome];
@@ -547,6 +640,113 @@ export function classifyAdapterOutcomes(outcomes: readonly AdapterOutcome[]): Ad
   return "installed";
 }
 
+// ── FG-560 (step 7): the discovery × per-file migration composition ──────────────
+
+/** Map a single discovered policy to its migration report. The SAME verdict drives
+ *  dry-run and real run — only `migrated` vs `would-migrate` differs — so the
+ *  forecast matches the applied result file-for-file. A has-policy file is migrated
+ *  ATOMICALLY (per the step-5 writer); every other discovery state is reported
+ *  as-is and never written. */
+function reportForDiscoveredPolicy(
+  d: DiscoveredPolicy,
+  dryRun: boolean,
+  io?: MigrateIO,
+): ModelPolicyFileReport {
+  const base = {
+    scope: d.scope,
+    projectDir: d.projectDir,
+    policyPath: d.policyPath,
+    discoveryState: d.state,
+    verdict: null as MigrationVerdict | null,
+    detail: null as string | null,
+  };
+  switch (d.state) {
+    case "reachable-no-policy":
+      return { ...base, action: "no-policy" };
+    case "known-but-no-path":
+      return { ...base, action: "known-no-path" };
+    case "unreachable-deleted":
+      return {
+        ...base,
+        action: "unreachable",
+        detail: "recorded checkout no longer resolves — cannot inspect or migrate its policy",
+      };
+    case "has-policy": {
+      try {
+        const res = migrateModelPolicyFile(d.policyPath!, { dryRun, io });
+        const v = res.migration.verdict;
+        let action: ModelPolicyFileAction;
+        if (v === "current") action = "current";
+        else if (v === "needs-human-decision") action = "needs-human-decision";
+        else if (v === "newer-unsupported") action = "newer-unsupported";
+        else action = dryRun ? "would-migrate" : "migrated"; // migratable | changed-if-applied
+        return { ...base, verdict: v, action, detail: modelPolicyDetail(res.migration.verdict, res.migration) };
+      } catch (e) {
+        return { ...base, action: "failed", detail: (e as Error).message };
+      }
+    }
+  }
+}
+
+/** A short, per-file human detail: which aliases were/would be added, or which
+ *  mappings need a human. Null when there is nothing extra to say. */
+function modelPolicyDetail(
+  verdict: MigrationVerdict,
+  m: { additions: { target: string; dest: string }[]; humanDecisions: { target: string; dest: string }[] },
+): string | null {
+  if (verdict === "needs-human-decision") {
+    return `unresolved: ${m.humanDecisions.map((h) => `${h.target}.${h.dest}`).join(", ")}`;
+  }
+  if (verdict === "migratable" || verdict === "changed-if-applied") {
+    if (m.additions.length === 0) return null;
+    return `adds ${m.additions.map((a) => `${a.target}.${a.dest}`).join(", ")}`;
+  }
+  return null;
+}
+
+/** Aggregate the per-file reports into ONE fleet outcome, in priority order:
+ *  failed > action-required > migrated > would-migrate > all-current > none. */
+function aggregateModelPolicyOutcome(files: ModelPolicyFileReport[]): ModelPolicyMigrationOutcome {
+  if (files.some((f) => f.action === "failed")) return "failed";
+  if (files.some((f) => f.action === "needs-human-decision" || f.action === "newer-unsupported" || f.action === "unreachable")) {
+    return "action-required";
+  }
+  if (files.some((f) => f.action === "migrated")) return "migrated";
+  if (files.some((f) => f.action === "would-migrate")) return "would-migrate";
+  if (files.some((f) => f.action === "current")) return "all-current";
+  return "none";
+}
+
+/** Compose discovery with the per-file migration: enumerate the host + every
+ *  discovered project policy, migrate each safely-migratable file atomically, leave
+ *  the rest untouched. Discovery is best-effort/historical — this reports which
+ *  policies were inspected and never mutates or prunes the registry. */
+export function migrateDiscoveredPolicies(
+  discovery: PolicyDiscovery,
+  dryRun: boolean,
+  io?: MigrateIO,
+): { outcome: ModelPolicyMigrationOutcome; files: ModelPolicyFileReport[] } {
+  const files = [discovery.host, ...discovery.projects].map((d) => reportForDiscoveredPolicy(d, dryRun, io));
+  return { outcome: aggregateModelPolicyOutcome(files), files };
+}
+
+/** The one-line fleet summary — counts by action, honest that discovery is
+ *  historical/best-effort (it never claims fleet-wide completeness). */
+function summarizeModelPolicies(files: ModelPolicyFileReport[], dryRun: boolean): string {
+  const n = (a: ModelPolicyFileAction) => files.filter((f) => f.action === a).length;
+  const parts: string[] = [];
+  const migrated = dryRun ? n("would-migrate") : n("migrated");
+  if (migrated > 0) parts.push(`${migrated} ${dryRun ? "would migrate" : "migrated"}`);
+  if (n("current") > 0) parts.push(`${n("current")} already current`);
+  if (n("needs-human-decision") > 0) parts.push(`${n("needs-human-decision")} need human decision`);
+  if (n("newer-unsupported") > 0) parts.push(`${n("newer-unsupported")} newer-unsupported`);
+  if (n("unreachable") > 0) parts.push(`${n("unreachable")} unreachable`);
+  if (n("failed") > 0) parts.push(`${n("failed")} failed`);
+  if (n("no-policy") + n("known-no-path") > 0) parts.push(`${n("no-policy") + n("known-no-path")} no policy`);
+  const body = parts.length > 0 ? parts.join(", ") : "nothing discovered";
+  return `${body} (historical/best-effort discovery — not a fleet-completeness claim)`;
+}
+
 export type UpgradeOptions = {
   dryRun?: boolean;
   skipGit?: boolean;
@@ -584,6 +784,13 @@ export type UpgradeResult = {
    *  path. Threaded onto --json so a script reads the same named refusal the human
    *  warning prints. */
   seedGenerationError: string | null;
+  /** FG-560: the fleet-level model-policy migration outcome — flows into
+   *  `unresolved`, the exit code, and the closing line. */
+  modelPolicy: ModelPolicyMigrationOutcome;
+  /** FG-560: the per-file migration classification a script reads — the SAME
+   *  reports the human summary renders, so the two cannot disagree. One entry per
+   *  discovered policy (host + every discovered project). */
+  modelPolicies: ModelPolicyFileReport[];
   authoredRetention: AuthoredRetentionOutcome;
   /** FG-578: the seed files forge did NOT overwrite because the OPERATOR authors
    *  them (forge-raci.md, agents/, constraints/) and their copy diverges from
@@ -943,6 +1150,62 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         }
       }
 
+      // Step 3 (cont.): FG-560 — model-policy.yml migration. `forge upgrade` is the
+      // SOLE authority that rewrites an operator's model-policy.yml; ordinary loading
+      // never writes. This enumerates the host policy plus every project Forge has a
+      // durable evidence row for, migrates each safely-migratable file ATOMICALLY
+      // per-file, and leaves unresolved files (needs-human-decision / unreachable /
+      // newer-unsupported) UNCHANGED. Atomicity is PER-FILE, never a cross-fleet
+      // transaction. Discovery is historical/best-effort: it reports which projects
+      // were inspected and NEVER mutates or prunes the registry. Runs on BOTH the
+      // dry-run and real branches; the dry-run forecast matches the real run
+      // file-for-file because both key off the same per-file verdict.
+      let modelPolicy: ModelPolicyMigrationOutcome = "not-run";
+      let modelPolicies: ModelPolicyFileReport[] = [];
+      {
+        let discovery: PolicyDiscovery | null = null;
+        try {
+          discovery = discoverModelPolicies();
+        } catch (e) {
+          // Project enumeration reads the store; if that read fails we degrade to a
+          // HOST-ONLY migration rather than crashing upgrade — the host policy needs
+          // no store to find. The registry is never mutated either way.
+          warn(`        ⚠ model-policy: project discovery unavailable (${(e as Error).message}) — migrating the host policy only`);
+        }
+        if (discovery) {
+          const migrated = migrateDiscoveredPolicies(discovery, dryRun);
+          modelPolicy = migrated.outcome;
+          modelPolicies = migrated.files;
+        } else {
+          const forgeHome = process.env.FORGE_HOME ?? join(homedir(), ".forge");
+          const hostPath = join(forgeHome, "model-policy.yml");
+          const synthetic: DiscoveredPolicy = {
+            scope: "host",
+            state: existsSync(hostPath) ? "has-policy" : "reachable-no-policy",
+            projectDir: forgeHome,
+            canonicalDir: null,
+            policyPath: existsSync(hostPath) ? hostPath : null,
+            identityKey: "host",
+            projectKey: null,
+            evidenceSources: [],
+            lastSeenAt: null,
+          };
+          modelPolicies = [reportForDiscoveredPolicy(synthetic, dryRun)];
+          modelPolicy = aggregateModelPolicyOutcome(modelPolicies);
+        }
+        say(`        → model-policy: ${summarizeModelPolicies(modelPolicies, dryRun)}`);
+        for (const f of modelPolicies) {
+          const where = f.scope === "host" ? "host" : (f.projectDir ?? "(unknown project)");
+          const suffix = f.detail ? ` — ${f.detail}` : "";
+          if (f.action === "migrated") say(`            ${where}: migrated${suffix}`);
+          else if (f.action === "would-migrate") say(`            ${where}: would migrate${suffix}`);
+          else if (f.action === "needs-human-decision") warn(`            ⚠ ${where}: NEEDS HUMAN DECISION — left unchanged${suffix}`);
+          else if (f.action === "newer-unsupported") warn(`            ⚠ ${where}: newer than this forge understands — left unchanged; upgrade Forge`);
+          else if (f.action === "unreachable") warn(`            ⚠ ${where}: unreachable${suffix}`);
+          else if (f.action === "failed") warn(`            ⚠ ${where}: migration FAILED — original left intact${suffix}`);
+        }
+      }
+
       // Step 4: re-init current project — CLAUDE.md orchestrator block + all
       // hook installs (commit-msg, claude session hooks, slash commands).
       // Re-running the install plans is idempotent: already-current entries
@@ -1143,6 +1406,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         npmInstall,
         assetInstall,
         seedGeneration,
+        modelPolicy,
         authoredRetention,
         routingPolicy,
         projectInit,
@@ -1188,6 +1452,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         assetInstall,
         seedGeneration,
         seedGenerationError,
+        modelPolicy,
+        modelPolicies,
         authoredRetention,
         authoredRetentions,
         routingPolicy,
