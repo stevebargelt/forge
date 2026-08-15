@@ -140,9 +140,10 @@ async function openTicket(page: Page): Promise<void> {
 
 test("raw hostile ticket content remains stored but is inert in the real dashboard", async () => {
   const stored = await backlog();
-  const ticket = stored.tickets.find((entry) => entry.id === TICKET_ID);
-  assert.ok(ticket, "the API returns the ticket written through the real migration path");
-  assert.equal(ticket.body, RAW_BODY, "rendering sanitizes output only; it never mutates stored ticket bytes");
+  const storedBefore = stored.tickets.find((entry) => entry.id === TICKET_ID)?.body;
+  assert.ok(storedBefore, "the API returns the ticket written through the real migration path");
+  assert.ok(storedBefore.includes("<script>window.__xss=2</script>"), "storage preserves raw script markup");
+  assert.ok(storedBefore.includes('onerror="window.__xss=1"'), "storage preserves raw event-handler markup");
 
   const page = await browser!.newPage({ viewport: { width: 1280, height: 900 } });
   const dialogs: string[] = [];
@@ -178,5 +179,8 @@ test("raw hostile ticket content remains stored but is inert in the real dashboa
   assert.equal(await page.locator(".detail .md h1").innerText(), "Benign heading");
   assert.equal(await page.locator(".detail .md strong").innerText(), "bold");
   assert.equal(await page.locator('.detail .md a[href="https://example.com/ok"]').count(), 1);
+
+  const storedAfter = (await backlog()).tickets.find((entry) => entry.id === TICKET_ID)?.body;
+  assert.equal(storedAfter, storedBefore, "rendering sanitizes output only; it never mutates stored ticket bytes");
   await page.close();
 });
