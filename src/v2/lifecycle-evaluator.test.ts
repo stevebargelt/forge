@@ -584,15 +584,16 @@ test("PARITY (reconcile): finalizeOrphanedPrimaries sweeps exactly the same rows
   }
 });
 
-// ----- the disagreements the migration-freeze rule says to REPORT, not fix -----
+// ----- the recorded disagreements, now RESOLVED: both sites are migrated -----
 //
-// These two consumers were NOT migrated. The tests below pin the exact shapes on
-// which the legacy heuristic and the classifier disagree, so the disagreement is
-// a recorded fact rather than a claim in a PR description. See FG-477 notes.
+// FG-527 migrated retry.ts (fanoutParentOf) and runNext.ts (dispatchFanoutStep)
+// off the legacy `red-` role-name-prefix heuristic and onto this classifier. These
+// two cells used to PIN the divergence as a recorded fact; they now assert that the
+// migrated call sites AGREE with the classifier. The retired legacy predicates are
+// kept verbatim as fixtures so the resolved divergence stays visible in the diff.
 
-/** retry.ts (current, unmigrated): fanoutParentOf's kind test — parent shares the
- *  child's phase and the child's role does not start with `red-`. Parent lookup
- *  inlined against the row set (retry.ts reads it from the DB). */
+/** retry.ts BEFORE FG-527: fanoutParentOf's `red-` prefix heuristic. Kept only to
+ *  show what the classifier replaced — retry.ts no longer computes this. */
 function legacyIsFanoutChildForRetry(task: Task, tasks: Task[]): boolean {
   if (task.parentId === undefined) return false;
   if (task.agentRole.startsWith("red-")) return false;
@@ -600,32 +601,45 @@ function legacyIsFanoutChildForRetry(task: Task, tasks: Task[]): boolean {
   return parent !== undefined && parent.phase === task.phase;
 }
 
-test("DISAGREEMENT (retry.ts, unmigrated): the `red-` prefix heuristic calls a shipping-reviewer red a fanout child", () => {
+/** retry.ts AFTER FG-527: fanoutParentOf refuses `forge retry` iff the row is a
+ *  `fanout_child` per the classifier — which is exactly this. */
+function migratedIsFanoutChildForRetry(workflow: Workflow, tasks: Task[], id: string): boolean {
+  return kindOf(workflow, tasks, id) === "fanout_child";
+}
+
+test("AGREEMENT (retry.ts, migrated): a shipping-reviewer red on a fanout step is red_review, so retry is ALLOWED", () => {
   // feature.yml's `build` step is a FANOUT step whose reds include
   // `shipping-reviewer` — a red whose agent name does not start with `red-`.
   const parent = mkTask({ id: "p", phase: "build" });
   const red = mkTask({ id: "r", phase: "build", parentId: "p", agentRole: "shipping-reviewer", status: "failed" });
   const tasks = [parent, red];
 
-  // Legacy: a fanout child ⇒ `forge retry r` throws FanoutChildRetryError.
-  assert.equal(legacyIsFanoutChildForRetry(red, tasks), true);
-  // Classifier: a red review ⇒ retry would be allowed. A REAL decision change,
-  // so retry.ts keeps its legacy predicate until FG-477's later slice decides.
+  // The classifier calls it red_review, and the migrated retry site follows it:
+  // NOT a fanout child, so `forge retry r` is allowed (no FanoutChildRetryError).
   assert.equal(kindOf(WORKFLOW, tasks, "r"), "red_review");
+  assert.equal(migratedIsFanoutChildForRetry(WORKFLOW, tasks, "r"), false);
+  // The resolved divergence: the retired legacy heuristic called it a fanout child.
+  assert.equal(legacyIsFanoutChildForRetry(red, tasks), true);
 
-  // The `red-`-prefixed red is where the two agree — which is why the legacy
-  // heuristic has survived: every red in the shipped seeds but one is `red-*`.
+  // A genuine fanout child (a non-red parented row) is still `fanout_child`, so
+  // retry is still refused — the guard did not go slack.
+  const child = mkTask({ id: "c", phase: "build", parentId: "p", agentRole: "engineer", status: "failed" });
+  assert.equal(kindOf(WORKFLOW, [parent, child], "c"), "fanout_child");
+  assert.equal(migratedIsFanoutChildForRetry(WORKFLOW, [parent, child], "c"), true);
+
+  // The `red-`-prefixed red is where classifier and the retired heuristic always
+  // agreed — every shipped red but shipping-reviewer is `red-*`.
   const redWide = mkTask({ id: "rw", phase: "build", parentId: "p", agentRole: "red-wide", status: "failed" });
-  assert.equal(legacyIsFanoutChildForRetry(redWide, [parent, redWide]), false);
   assert.equal(kindOf(WORKFLOW, [parent, redWide], "rw"), "red_review");
+  assert.equal(migratedIsFanoutChildForRetry(WORKFLOW, [parent, redWide], "rw"), false);
+  assert.equal(legacyIsFanoutChildForRetry(redWide, [parent, redWide]), false);
 });
 
-test("DISAGREEMENT (runNext dispatchFanoutStep, unmigrated): its parent lookup does not exclude ad-hoc invoke rows", () => {
-  // dispatchFanoutStep's existingParent = phase + parentId undefined + pending,
-  // with no FG-507 ad-hoc exclusion (dispatchSingleStep's has one). On a workflow
-  // whose FANOUT step is named `task`, a pending invoke row would be adopted as
-  // the fanout parent. The classifier excludes it; migrating that site would
-  // therefore change behavior, so it is left alone and reported.
+test("AGREEMENT (runNext dispatchFanoutStep, migrated): its parent lookup excludes ad-hoc invoke rows", () => {
+  // On a workflow whose FANOUT step is named `task`, a pending invoke row would be
+  // adopted as the fanout parent by the pre-migration lookup (phase + parentId
+  // undefined + pending). The migrated lookup uses isWorkflowPrimaryRow, which the
+  // classifier excludes (adhoc_invoke) — matching dispatchSingleStep's FG-507 guard.
   const wf = mkWorkflow([
     mkStep({
       id: "task",
@@ -639,7 +653,19 @@ test("DISAGREEMENT (runNext dispatchFanoutStep, unmigrated): its parent lookup d
     } as Partial<Step> & { id: string }),
   ]);
   const invoked = mkTask({ id: "inv", phase: "task", status: "pending", dispatchSource: "invoke" });
+  const genuineParent = mkTask({ id: "par", phase: "task", status: "pending", dispatchSource: "workflow" });
+  const tasks = [invoked, genuineParent];
+  const kinds = classifyTaskLineage(wf, tasks);
+
+  // The migrated lookup adopts the genuine fanout parent and never the ad-hoc row.
+  const migratedParent = tasks.find(
+    (t) => t.phase === "task" && t.status === "pending" && isWorkflowPrimaryRow(kinds.get(t.id)!),
+  );
+  assert.equal(migratedParent?.id, "par");
+  assert.equal(kinds.get("inv"), "adhoc_invoke");
+
+  // The resolved divergence: the pre-migration lookup, with no FG-507 exclusion,
+  // would have adopted the invoke row as the fanout parent.
   const legacyParent = [invoked].find((t) => t.phase === "task" && t.parentId === undefined && t.status === "pending");
   assert.equal(legacyParent?.id, "inv");
-  assert.equal(kindOf(wf, [invoked], "inv"), "adhoc_invoke");
 });

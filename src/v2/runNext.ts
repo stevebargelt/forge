@@ -2370,13 +2370,23 @@ async function dispatchFanoutStep(args: {
   // primary row to represent the step in tasks-for-run; fanout children
   // hang off it via parentId.
   const allTasks = tasksForRun(args.runId);
+  // FG-527: this step's lineage, classified once. It REPLACES this function's
+  // `red-` role-name-prefix child filters (a red whose agent name lacks that
+  // prefix — feature.yml's shipping-reviewer — is otherwise miscounted as a
+  // fanout child) and closes the parent lookup's missing FG-507 ad-hoc exclusion.
+  const kinds = classifyTaskLineage(args.workflow, allTasks);
+  const isFanoutChildOf = (t: Task, parent: string): boolean =>
+    t.parentId === parent && kinds.get(t.id) === "fanout_child";
   // Prefer the PENDING primary (created by gate request-changes on a prior
   // blocked_by_red/failed parent). Old failed/blocked parents are audit records
   // and must NOT be reused as the live fan-out parent for the new child wave —
   // doing so attaches retry children to the dead lineage and wedges the run
   // (FG-364). A pending primary is the only one actively waiting to be dispatched.
+  // FG-527: isWorkflowPrimaryRow (as dispatchSingleStep already uses) excludes an
+  // ad-hoc `forge invoke` row that lands in phase `task` on a workflow whose FANOUT
+  // step is named `task` — it must never be adopted as the fanout parent (FG-507).
   const existingParent = allTasks.find(
-    (t) => t.phase === step.id && t.parentId === undefined && t.status === "pending",
+    (t) => t.phase === step.id && t.status === "pending" && isWorkflowPrimaryRow(kinds.get(t.id)!),
   );
   const parentId = existingParent?.id ?? newTaskId(step.id);
   const rc = existingParent?.taskPackage.inputs["requestedChanges"];
@@ -2455,7 +2465,7 @@ async function dispatchFanoutStep(args: {
       t.phase === step.id &&
       t.parentId === undefined &&
       (t.status === "running" || t.status === "awaiting_red") &&
-      allTasks.some((c) => c.parentId === t.id && !c.agentRole.startsWith("red-")),
+      allTasks.some((c) => isFanoutChildOf(c, t.id)),
   );
   if (activeWithChildren) return activeWithChildren.status;
   if (existingParent) {
@@ -2489,12 +2499,7 @@ async function dispatchFanoutStep(args: {
         // re-dispatched (redsAlreadyRan): a human already overrode their verdict
         // with a recorded rationale, which is what gateForced means.
         const childTasksForCleanup: ChildOutcome[] = allTasks
-          .filter(
-            (t) =>
-              t.parentId === existingParent.id &&
-              !t.agentRole.startsWith("red-") &&
-              t.status === "complete",
-          )
+          .filter((t) => isFanoutChildOf(t, existingParent.id) && t.status === "complete")
           .map((t, index): ChildOutcome => ({
             childTaskId: t.id,
             index,
@@ -2524,12 +2529,7 @@ async function dispatchFanoutStep(args: {
         // FG-353/FG-425 publish-on-advance invariant: a validation-held worktree
         // parent must republish, not complete in place and drop the integration branch.
         const childTasksForPublish: ChildOutcome[] = allTasks
-          .filter(
-            (t) =>
-              t.parentId === existingParent.id &&
-              !t.agentRole.startsWith("red-") &&
-              t.status === "complete",
-          )
+          .filter((t) => isFanoutChildOf(t, existingParent.id) && t.status === "complete")
           .map((t, index): ChildOutcome => ({
             childTaskId: t.id,
             index,
@@ -2606,9 +2606,7 @@ async function dispatchFanoutStep(args: {
     // pending parent that already has children is precisely the RESUME shape
     // reconcile produces after a crash, and refusing it there would strand the
     // chain forever instead of converging it (AC9).
-    pendingHasChildren = allTasks.some(
-      (c) => c.parentId === existingParent.id && !c.agentRole.startsWith("red-"),
-    );
+    pendingHasChildren = allTasks.some((c) => isFanoutChildOf(c, existingParent.id));
   }
 
   // Read the upstream array. The fanout source is fanout.from_upstream.step,

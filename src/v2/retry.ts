@@ -32,6 +32,9 @@ import {
   type ReDriveDisposition,
 } from "./re-drive-eligibility.js";
 import { taskDispatchKind } from "./run-kind.js";
+import { loadWorkflow } from "./loader.js";
+import type { Workflow } from "./schema.js";
+import { classifyTaskLineage } from "./lifecycle-evaluator.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
 import { resolveSeedGeneration } from "./seed-generation.js";
@@ -487,19 +490,37 @@ function planRetryDispatch(task: Task, run: Run): AdHocDispatchPlan | undefined 
   return planAdHocRedispatch(task, run);
 }
 
-/** Is `task` a fanout child? True iff it has a parent, that parent shares its
- *  phase (fanout children run in the SAME phase as their synthetic parent —
- *  gate.ts's reject->on_reject children land in a DIFFERENT phase, the on_reject
- *  target, so phase equality alone rules those out), and it isn't itself a red
- *  reviewer (reds also share parentId+phase with an ordinary primary, but are
- *  always prefixed "red-" — see runNext.ts's own `!agentRole.startsWith("red-")`
- *  filters for the same discriminator). */
-function fanoutParentOf(task: Task): Task | undefined {
+/** Is `task` a fanout child? Answered by the FG-477 lineage classifier
+ *  (`fanout_child`), which REPLACES the legacy `red-` role-name prefix (FG-527).
+ *  A red whose agent name does not start with `red-` — feature.yml's
+ *  `shipping-reviewer` — is classified `red_review`, so `forge retry` now permits
+ *  retrying it; a genuine fanout child is still `fanout_child` and refused.
+ *  Returns the parent row so the caller can name it in the refusal.
+ *
+ *  The workflow is loaded because red_review-vs-fanout_child is a workflow
+ *  question (the step's declared reds), not a name-prefix guess.
+ *
+ *  FG-527 fix: a load failure must NOT fall through to "retryable" — that is a
+ *  fail-OPEN on a structural guard. Any run whose workflow name cannot resolve
+ *  would then let a fanout child be retried, minting a stray primary in the
+ *  fanout phase (exactly the corruption FanoutChildRetryError exists to prevent).
+ *  So on load failure we classify with a DEGRADED empty-steps workflow instead of
+ *  bailing: classifyTaskLineage resolves a parented, non-recovery row whose phase
+ *  has no matching declared red (there are none — steps is empty) to
+ *  `fanout_child`, so it is refused. This over-refuses a red_review whose workflow
+ *  won't load, which is the correct fail-safe direction — refusal is recoverable
+ *  via `--force`, a wrongly-permitted fanout-child retry corrupts state. */
+function fanoutParentOf(task: Task, run: Run): Task | undefined {
   if (task.parentId === undefined) return undefined;
-  if (task.agentRole.startsWith("red-")) return undefined;
-  const parent = getTask(task.parentId);
-  if (!parent || parent.phase !== task.phase) return undefined;
-  return parent;
+  let workflow: Workflow;
+  try {
+    workflow = loadWorkflow(run.workflow, run.projectDir ? { projectDir: run.projectDir } : {});
+  } catch {
+    workflow = { name: run.workflow, description: run.workflow, review_mode: "legacy_verdict", inputs: [], steps: [] };
+  }
+  const kinds = classifyTaskLineage(workflow, tasksForRun(task.runId));
+  if (kinds.get(task.id) !== "fanout_child") return undefined;
+  return getTask(task.parentId);
 }
 
 export type RetryOutcome = {
@@ -546,7 +567,13 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     );
   }
 
-  const fanoutParent = fanoutParentOf(task);
+  // One read of the run row serves three consumers below: the FG-527 fanout-child
+  // classifier (it loads the run's workflow to tell a red_review from a
+  // fanout_child), the FG-688 redirect (its status is one of the re-drive guard's
+  // live-state clauses), and planRetryDispatch.
+  const run = getRun(task.runId);
+
+  const fanoutParent = run ? fanoutParentOf(task, run) : undefined;
   if (fanoutParent && !opts?.force) {
     throw new FanoutChildRetryError(taskId, fanoutParent.id);
   }
@@ -555,11 +582,6 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   // rejection, red block) would just re-run identical work — refuse unless --force.
   const failureKind = failureKindForTask(taskId);
   const disposition = retryPolicy(failureKind, taskId);
-
-  // Read here rather than just before planRetryDispatch below: the FG-688 redirect
-  // needs the run row too — its status is one of the live-state clauses the
-  // re-drive guard enforces — and one read serves both.
-  const run = getRun(task.runId);
 
   // FG-688: checked BEFORE the generic policy refusal below, so an ordered wave
   // parent gets the message that names its actual forward verb rather than the
