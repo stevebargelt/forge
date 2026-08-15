@@ -90,6 +90,110 @@ export function resolveDocsSurfacesReceipt(projectDir: string): {
   }
 }
 
+// ------------------------------------------------------------------
+// FG-546: docs-surfaces classifier + frozen legacy fingerprint
+// ------------------------------------------------------------------
+
+/** The four mutually-exclusive states a project's `.forge/docs-surfaces.yml`
+ *  can be in, as seen by init/upgrade/doctor. */
+export type DocsSurfacesVerdict =
+  | "valid-project" // present and conforms to DocsSurfacesFileSchema (incl. the corrected generated form)
+  | "missing" // no file on disk
+  | "known-legacy-generated" // structurally matches the exact bad template forge's own seed used to emit
+  | "customized-invalid"; // present but neither valid nor the known template — hand-authored / edited
+
+export interface DocsSurfacesClassification {
+  verdict: DocsSurfacesVerdict;
+  /** The path that was classified (…/.forge/docs-surfaces.yml). */
+  path: string;
+  /** Schema validation-error detail — only set on `customized-invalid`. */
+  detail?: string;
+}
+
+/** FROZEN historical fingerprint of the exact object-shaped template forge's
+ *  own `seeds/docs-surfaces.example.yml` used to generate (pre-FG-546). This is
+ *  a LITERAL, deliberately decoupled from the live seed — the seed is being
+ *  rewritten by this same change, so re-reading seeds/ to build the fingerprint
+ *  would recognize nothing and leave already-initialized projects unrepairable.
+ *  Detection is matched by parsed YAML STRUCTURE against this shape (so comments
+ *  and whitespace don't matter), biased strict: ANY structural deviation from
+ *  this exact two-entry object form falls to `customized-invalid` and is never
+ *  migrated. Never edit this to track the seed. */
+export const LEGACY_DOCS_SURFACES_TEMPLATE = {
+  surfaces: [
+    { name: "readme", kind: "user-facing", path: "README.md" },
+    { name: "api-reference", kind: "public-api", path: "docs/api.md" },
+  ],
+} as const;
+
+/** Order-sensitive structural equality: arrays compared element-by-element in
+ *  order, objects compared by key SET (so YAML key ordering / comments /
+ *  whitespace are irrelevant), primitives by strict ===. Any extra key, renamed
+ *  key, reordered or added/removed array element => not equal. */
+function structurallyEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((x, i) => structurallyEqual(x, b[i]));
+  }
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const ak = Object.keys(a as Record<string, unknown>);
+    const bk = Object.keys(b as Record<string, unknown>);
+    if (ak.length !== bk.length) return false;
+    if (!ak.every((k) => bk.includes(k))) return false;
+    return ak.every((k) =>
+      structurallyEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])
+    );
+  }
+  return false;
+}
+
+/** True iff `parsed` is EXACTLY the frozen legacy generated template (structure,
+ *  not bytes). Comment/whitespace-insensitive; strict on everything else. */
+export function isKnownLegacyDocsSurfaces(parsed: unknown): boolean {
+  return structurallyEqual(parsed, LEGACY_DOCS_SURFACES_TEMPLATE);
+}
+
+/** Classify a project's `.forge/docs-surfaces.yml` into exactly one of the four
+ *  verdicts. This is the SINGLE decision point that init, upgrade, doctor, and
+ *  dry-run all consume — the write side-effect keys off the verdict, never off
+ *  bare file existence, so a customized file (valid OR invalid) is never
+ *  mistaken for the generated template and never auto-overwritten.
+ *
+ *  Order of adjudication for a present file:
+ *   1. unreadable / unparseable YAML   → customized-invalid (parse error detail)
+ *   2. conforms to the schema          → valid-project (includes the corrected form → idempotent reruns)
+ *   3. exact frozen legacy structure   → known-legacy-generated (safe to migrate)
+ *   4. otherwise                       → customized-invalid (schema-error detail) */
+export function classifyDocsSurfaces(projectDir: string): DocsSurfacesClassification {
+  const path = join(projectDir, ".forge", "docs-surfaces.yml");
+  if (!existsSync(path)) return { verdict: "missing", path };
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    return { verdict: "customized-invalid", path, detail: (e as Error).message };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (e) {
+    return { verdict: "customized-invalid", path, detail: (e as Error).message };
+  }
+
+  const checked = DocsSurfacesFileSchema.safeParse(parsed);
+  if (checked.success) return { verdict: "valid-project", path };
+
+  // Invalid against the schema. Only the EXACT frozen template is migratable;
+  // everything else is treated as operator-authored and left untouched.
+  if (isKnownLegacyDocsSurfaces(parsed)) return { verdict: "known-legacy-generated", path };
+
+  const detail = checked.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  return { verdict: "customized-invalid", path, detail };
+}
+
 function matchesSurface(path: string, surfaces: readonly string[]): string | null {
   const p = path.replace(/^\.?\//, "");
   for (const s of surfaces) {
