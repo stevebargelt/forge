@@ -86,7 +86,7 @@ import { logEvent } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
 import { hostConfigPath } from "../util/paths.js";
 import { safeLockfileHash } from "./dependency-provisioning.js";
-import { controlRuntimeProfile } from "./launch.js";
+import { controlRuntimeProfile, REDACTED_ENV_VALUE } from "./launch.js";
 import { classifySelfHostDispatch, forgeSourceRootIdentity } from "./self-host-guard.js";
 import { describeIdentity } from "../util/path-identity.js";
 import {
@@ -202,6 +202,76 @@ const STDERR_TAIL_CHARS = 2000;
 export function tailOf(output: string, chars: number = STDERR_TAIL_CHARS): string {
   const trimmed = output.trim();
   return trimmed.length <= chars ? trimmed : `…${trimmed.slice(trimmed.length - chars)}`;
+}
+
+// FG-634 — REDACTION POLICY FOR OPERATOR SECRETS ON READINESS AUDIT SURFACES.
+// AC1: this comment IS the policy of record. Read it before touching any of the
+// three fields it names.
+//
+// WHAT IS TREATED AS A POTENTIAL OPERATOR SECRET. Three free-text fields that this
+// module PERSISTS into the durable readiness record and/or emits in a `logEvent`
+// payload, all of which can carry operator credentials:
+//   1. setupCommand   — the operator-authored `hostVerificationSetup` contract
+//                       (FORGE_HOST_VERIFICATION_SETUP / ~/.forge/config.json). An
+//                       operator whose install pulls from an authenticated mirror
+//                       embeds `//user:pass@host` or a registry token in it.
+//   2. stderrTail     — the tail of combined setup output. An `npm ci` against an
+//                       authenticated registry echoes `//registry/:_authToken=…`,
+//                       `Authorization: Bearer …`, or a `//user:pass@` URL on failure.
+//   3. refusal command — the per-step argv string / the raw ambiguous contract that
+//                       a refusal records; same provenance as setupCommand.
+//
+// THE RULE. Redact credential-SHAPED substrings STRUCTURALLY, at the PERSISTENCE
+// BOUNDARY (on the way INTO the record and the event payload), never at render time —
+// so a secret is gone the moment it would be written, and no downstream reader (the
+// dashboard timeline, a backup of the event store, `forge` surfaces) has to remember
+// to redact. This is AUDIT-SURFACE-ONLY: the value handed to the actual setup child
+// and used for execution is the REAL, un-redacted one (same discipline as launch.ts's
+// REDACTED_ENV_VALUE — the workload still gets the real value, only the record is
+// redacted). Redaction keeps the surrounding STRUCTURE legible (the key name, the URL
+// host, the header scheme) so the record still audits WHAT ran; it only blanks the
+// secret value. It is idempotent — `«redacted»` matches none of the patterns — so
+// applying it twice on a value that flows through more than one boundary is harmless.
+//
+// WHY, given forge is a single-user local tool. FG-643 established that "local-only,
+// therefore safe" is NOT a safe assumption for these surfaces: the dashboard can be
+// network-reachable, and the durable event store OUTLIVES the session and can be
+// backed up or copied off-box. So the cheap, fail-closed move is to never let a
+// credential-shaped value reach the persisted surface in the first place. This is the
+// FG-707 philosophy applied to free text instead of env names: structural, and when a
+// substring looks like a credential, redact the VALUE and keep the shape for audit.
+//
+// SCOPE DISCIPLINE (do not widen carelessly). The redactor prefers the STRUCTURAL
+// patterns below (basic-auth URLs, `_authToken=`, `Authorization:` headers, secret-
+// shaped `NAME=`) over any entropy heuristic. A blanket "redact long high-entropy
+// runs" pass was DELIBERATELY NOT ADDED: it would mangle legitimate readiness output —
+// 40-char git SHAs, lockfile digests, node ABI hashes, module-not-found paths — which
+// is exactly the audit signal these fields exist to carry. When adding a pattern,
+// prefer one anchored to a credential's structure over one anchored to its length.
+const REDACT_URL_BASIC_AUTH = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/g;
+// npm/.npmrc credential lines: `//registry.example.com/:_authToken=…`, `_auth=…`,
+// `_password=…`. The leading char class keeps the registry host/path prefix for audit.
+const REDACT_NPM_AUTH = /((?:^|[\s;&"'`([])[\w./:\-[\]]*(?:_authToken|_auth|_password))(\s*=\s*)(\S+)/gi;
+// Environment-assignment secrets: a shell/identifier NAME ending in a secret-shaped
+// suffix (`*_TOKEN=`, `*_SECRET=`, `*_KEY=`, `*PASSWORD=`), value redacted, name kept.
+const REDACT_ENV_SECRET = /((?:^|[\s;&"'`([])[A-Za-z_][A-Za-z0-9_]*(?:_TOKEN|_SECRET|_KEY|PASSWORD))(\s*=\s*)(\S+)/g;
+// `Authorization: Bearer …` / `Authorization: Basic …` (and the `token`/`Digest`
+// schemes), scheme kept, credential blanked.
+const REDACT_AUTH_HEADER = /(Authorization\s*:\s*(?:Bearer|Basic|Token|Digest)\s+)(\S+)/gi;
+
+/** FG-634: blank credential-shaped substrings while keeping the surrounding structure
+ *  legible for audit. Applied ONLY on the way into a durable readiness record or a
+ *  `logEvent` payload — never to the value handed to the setup child (see the policy
+ *  comment above). Structural and conservative by design: it redacts the four
+ *  credential shapes operator setup/stderr actually carry and leaves ordinary output
+ *  (error tails, SHAs, paths) intact. Idempotent: `«redacted»` matches no pattern. */
+export function redactSecrets(s: string): string {
+  if (!s) return s;
+  return s
+    .replace(REDACT_URL_BASIC_AUTH, `$1${REDACTED_ENV_VALUE}@`)
+    .replace(REDACT_NPM_AUTH, `$1$2${REDACTED_ENV_VALUE}`)
+    .replace(REDACT_ENV_SECRET, `$1$2${REDACTED_ENV_VALUE}`)
+    .replace(REDACT_AUTH_HEADER, `$1${REDACTED_ENV_VALUE}`);
 }
 
 function defaultRunSetup(
@@ -594,6 +664,29 @@ export function resolveVerificationInterpreter(pinnedPath: string): string | und
  *  whatever a build script happens to echo, and it keeps the setup child from
  *  depending on ambient operator state that the next host would not have. It does
  *  NOT contain a hostile candidate, and nothing on this path does. */
+// FG-634 — HOME POLICY, DECIDED: keep the operator's REAL HOME in the passthrough.
+// Do not scope, sandbox, or override it here without reading this through.
+//
+// The tradeoff. Forwarding HOME transitively grants the setup child read access to
+// `~/.npmrc` (registry auth tokens) and `~/.forge`. A scoped/fake HOME would withhold
+// that — but the setup COMMAND is operator-authored HOST config (FG-566's provenance
+// invariant: it comes from FORGE_HOST_VERIFICATION_SETUP / ~/.forge/config.json or the
+// literal `npm ci`, NEVER from the workspace/candidate under test), so the code that
+// reads HOME here is the operator's own, not attacker content. In a single-user local
+// tool, HOME is the operator's own home; scoping it defends the operator against
+// themselves and buys no real security.
+//
+// What it WOULD cost: npm resolves `~/.npmrc` registry auth and its on-disk cache off
+// HOME. A scoped HOME that does not faithfully reproduce `~/.npmrc` breaks exactly the
+// authenticated private-registry installs that work today — turning a green setup into
+// a spurious `setup_failed` for auth reasons. That is the concrete regression AC3
+// warns against, traded for no gain against a non-attacker command. So HOME stays real.
+//
+// (A scoped HOME that PROVABLY preserved `~/.npmrc` auth resolution and the npm cache
+// would be acceptable — but it is not worth the risk of silently breaking authed
+// installs, so the safe default is to keep the real HOME. Credential LEAKAGE from the
+// install — a token echoed into setup output — is handled separately and defensively
+// by redactSecrets at the persistence boundary, per the FG-634 policy above.)
 const SETUP_ENV_PASSTHROUGH = [
   "HOME", "TMPDIR", "LANG", "LC_ALL",
   "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
@@ -671,15 +764,23 @@ function refuse(
   detail: string,
   extra: { exitStatus?: number | null; stderrTail?: string } = {},
 ): HostReadinessOutcome {
+  // FG-634: redact at THIS chokepoint so every refusal arm's `command` and
+  // `stderrTail` land redacted in BOTH the returned refusal object and the
+  // `host_readiness.refused` event below — an operator's registry token in an
+  // ambiguous-contract `raw`, or an `_authToken=`/`Authorization:` line an authed
+  // `npm ci` echoed into stderr, never reaches the durable store or the timeline.
   const refusal: HostReadinessRefusal = {
     reason,
     workspace: req.workspace,
-    command,
+    command: redactSecrets(command),
     exitStatus: extra.exitStatus ?? null,
-    stderrTail: extra.stderrTail ?? "",
-    message:
+    stderrTail: redactSecrets(extra.stderrTail ?? ""),
+    // Defense in depth: `detail` is built from fixed strings today, but it is the
+    // operator-facing text the timeline renders, so it passes through the redactor too.
+    message: redactSecrets(
       `verification_environment_unavailable: ${req.label} could not establish an execution-ready verification ` +
-      `environment in ${req.workspace} (${reason}). ${detail}`,
+        `environment in ${req.workspace} (${reason}). ${detail}`,
+    ),
   };
   logEvent("host_readiness.refused", {
     ...(req.runId ? { runId: req.runId } : {}),
@@ -709,7 +810,10 @@ function ready(req: HostReadinessRequest, evidence: HostReadinessEvidence): Host
       abi: evidence.abi,
       requiredAbi: evidence.requiredAbi,
       interpreter: evidence.interpreter,
-      setupCommand: evidence.setupCommand,
+      // FG-634: redacted here too. Fresh-path evidence.setupCommand is already
+      // redacted at the boundary; this also catches a reused record written by a
+      // pre-FG-634 forge whose setupCommand was persisted un-redacted. Idempotent.
+      setupCommand: redactSecrets(evidence.setupCommand),
       reused: evidence.reused,
       coveredCommandSet: evidence.coveredCommandSet,
       label: req.label,
@@ -907,7 +1011,10 @@ export async function prepareHostVerification(
       ...binding,
       requiredAbi,
       interpreter,
-      setupCommand: record!.setupCommand,
+      // FG-634: redact on reuse too — a record written by a pre-FG-634 forge may
+      // carry an un-redacted setupCommand, and the returned evidence must not
+      // reintroduce it downstream. Current records are already redacted (no-op).
+      setupCommand: redactSecrets(record!.setupCommand),
       coveredCommandSet: req.coveredCommandSet,
       reused: true,
     });
@@ -925,7 +1032,8 @@ export async function prepareHostVerification(
         ...binding,
         requiredAbi,
         interpreter,
-        setupCommand: current!.setupCommand,
+        // FG-634: redact on reuse (see the sibling reuse arm above).
+        setupCommand: redactSecrets(current!.setupCommand),
         coveredCommandSet: req.coveredCommandSet,
         reused: true,
       });
@@ -954,7 +1062,13 @@ export async function prepareHostVerification(
       );
     }
     const { steps } = contract;
-    const setupCommand = formatSetupSteps(steps);
+    // FG-634: the AUDIT rendering of the contract — redacted here, at the boundary,
+    // so the credential-shaped substrings an operator's `hostVerificationSetup` may
+    // embed (a `//user:pass@` mirror URL, a registry token) never reach the durable
+    // `preparing`/`ready` record OR the `host_readiness.ready` evidence/event. The
+    // EXECUTED value is the per-step `step` argv below, which is NEVER redacted — the
+    // setup child still runs the operator's real command. Redaction is audit-only.
+    const setupCommand = redactSecrets(formatSetupSteps(steps));
 
     // Compared BEFORE/AFTER rather than asserted absolutely clean: the review-loop
     // dirty-tree arm legitimately starts dirty, and what FG-621 AC 6 requires is
