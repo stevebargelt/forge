@@ -30,6 +30,7 @@ import {
   type ProjectAdapterReport,
 } from "../../v2/seed-drift.js";
 import { inspectSeedInstall, type SeedInstallState } from "../../v2/seed-generation.js";
+import { classifyDocsSurfaces, type DocsSurfacesClassification } from "../../v2/contract.js";
 import {
   buildReleaseReport,
   renderReleaseReport,
@@ -315,6 +316,13 @@ export type DoctorFindings = {
   seedInstall: SeedInstallState;
   /** FG-253: the orientation/handoff adapters in the project doctor was invoked in. */
   projectAdapters: ProjectAdapterReport;
+  /** FG-546: the four-way state of this project's .forge/docs-surfaces.yml, as
+   *  the ONE shared classifier (src/v2/contract.ts) adjudicated it — the same
+   *  verdict init/upgrade key their write side-effect off. A reported diagnostic:
+   *  read/dispatch is fail-soft (warn + fall back to OPERATOR_SURFACES), so this
+   *  never moves the exit code, but doctor names invalid/legacy config and its
+   *  repair action so an operator can see and fix it. */
+  docsSurfaces: DocsSurfacesClassification;
   /** FG-693: WHICH TREE doctor read, as the one contract (util/path-identity.ts)
    *  proved it — not as the ambient spelling doctor happened to be handed.
    *
@@ -351,6 +359,11 @@ export function gatherDoctorFindings(projectDir: string = process.cwd(), imageNa
     // FG-693: the identity resolved above is HANDED IN, so doctor's findings and the
     // adapter report cannot disagree about which tree was read.
     projectAdapters: detectProjectAdapterDrift(projectDir, currentAdapterStamp(), project),
+    // FG-546: one classifier owns the four-way docs-surfaces decision; doctor
+    // consumes the verdict rather than re-deriving it, so it can never disagree
+    // with the write side (init/upgrade) about whether a file is the migratable
+    // legacy template, a customized file, valid, or missing.
+    docsSurfaces: classifyDocsSurfaces(projectDir),
   };
 }
 
@@ -361,11 +374,40 @@ export function doctorJson(f: DoctorFindings): unknown {
     protocolDrift: f.protocolDrift,
     seedInstall: f.seedInstall,
     projectAdapters: f.projectAdapters,
+    // FG-546: the docs-surfaces verdict a script can branch on — same value the
+    // human section renders, so the two renderings can never disagree.
+    docsSurfaces: f.docsSurfaces,
     // FG-693: the proven identity of the tree doctor read, for a script that must
     // decide whether two doctor runs describe the same checkout. The as-written
     // spelling stays on projectAdapters.projectDir for display.
     project: f.project,
   };
+}
+
+/** FG-546: render the docs-surfaces verdict as a distinct, human-readable line
+ *  per state. Valid/missing report cleanly (no scary framing); the two broken
+ *  states each name the file, the problem, and the repair action — legacy is
+ *  operator-safe to auto-repair (`forge upgrade`), customized-invalid is NOT
+ *  (forge never clobbers operator-authored config, so the operator fixes it). */
+export function renderDocsSurfaces(c: DocsSurfacesClassification): string {
+  switch (c.verdict) {
+    case "valid-project":
+      return `Docs-surfaces config: OK — valid project config (${c.path}).`;
+    case "missing":
+      return `Docs-surfaces config: default — no project config; forge's built-in operator surfaces are in effect (write ${c.path} to override).`;
+    case "known-legacy-generated":
+      return (
+        `Docs-surfaces config: LEGACY (repairable) — ${c.path} matches forge's old generated template, which the runtime rejects.\n` +
+        `  This is a forge-generated file (safe to regenerate).\n` +
+        `  Fix: forge upgrade (migrates it in place to the corrected docs-surfaces.yml).`
+      );
+    case "customized-invalid":
+      return (
+        `Docs-surfaces config: INVALID — ${c.path} is not valid and is NOT forge's generated template, so forge will not overwrite it.\n` +
+        `  Validation error: ${c.detail ?? "does not conform to { surfaces: [<path-prefix>, ...] }"}\n` +
+        `  Fix: edit ${c.path} to \`{ surfaces: [<path-prefix>, ...] }\`, or delete it to restore forge's built-in defaults.`
+      );
+  }
 }
 
 export function renderDoctor(f: DoctorFindings): string {
@@ -376,6 +418,7 @@ export function renderDoctor(f: DoctorFindings): string {
   push(renderSeedDrift(f.seedDrift));
   push(renderProtocolDrift(f.protocolDrift));
   push(renderProjectAdapterDrift(f.projectAdapters));
+  push(renderDocsSurfaces(f.docsSurfaces));
   if (f.seedInstall.kind === "incomplete") {
     out.push(
       `\nSeed install: INCOMPLETE (repairable) — ${f.seedInstall.reason}\n` +

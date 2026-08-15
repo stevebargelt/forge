@@ -22,9 +22,24 @@ import {
   planGitignoreEntries,
   warnExecutedAdapterOverrides,
   warnOperatorAdapterOverrides,
+  // FG-546: the docs-surfaces detect/create/migrate/preserve/repair helper is
+  // shared with `forge init` (step 4) so the two provisioning paths cannot drift.
+  // upgrade REQUIRES it: it never re-runs seed provisioning, so correcting the
+  // seed + migrating in init alone would leave already-initialized projects
+  // (constellation, trakt-letterboxd, forge-scratch-workspace) holding the invalid
+  // legacy template forever.
+  provisionDocsSurfaces,
+  describeDocsSurfacesProvisionPlan,
+  docsSurfacesStatusLine,
+  docsSurfacesRepairWarning,
   type AdapterDecision,
   type AdapterOutcome,
+  type DocsSurfacesProvisionOutcome,
 } from "./init.js";
+// FG-546: the SINGLE four-way classifier init/upgrade/doctor/dry-run all consume.
+// The dry-run forecast reads the verdict directly (no write) so it cannot disagree
+// with the real run's provisioning decision.
+import { classifyDocsSurfaces, type DocsSurfacesVerdict } from "../../v2/contract.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../../v2/release-doctor.js";
@@ -228,6 +243,57 @@ export type AdapterSurfacesOutcome =
 
 export type ReleaseCheckOutcome = "ran" | "skipped-dry-run" | "skipped-asset-install" | "failed";
 
+// FG-546: the docs-surfaces provisioning outcome, reported inside the [4/4]
+// project-init block (NOT its own numbered step — it is project config, distinct
+// from the host-seed cache at [3/4]). One variant per verdict-driven action, plus
+// the dry-run forecasts and `not-run` (project init did not run at all). The write
+// keys off the four-way verdict, never bare file existence, so a customized file
+// (valid OR invalid) is never mistaken for the generated template and never
+// clobbered.
+//   created / migrated / preserved            — the real-run write outcomes
+//   would-create / would-migrate              — dry-run forecasts of a real write
+//   requires-operator-repair                  — customized-invalid: LEFT UNTOUCHED,
+//                                                warned (dry + real share it: no
+//                                                write happens on either path)
+//   seed-missing                              — forge's own seed is absent, so it
+//                                                could not provision (a forge-install
+//                                                defect, like a missing template)
+//   not-run                                   — the [4/4] block did not run
+export type DocsSurfacesOutcome =
+  | "created"
+  | "migrated"
+  | "preserved"
+  | "would-create"
+  | "would-migrate"
+  | "requires-operator-repair"
+  | "seed-missing"
+  | "not-run";
+
+/** Map the real-run provision outcome onto the reported step outcome. Total over
+ *  DocsSurfacesProvisionOutcome, so a new provision action breaks this switch. */
+function docsSurfacesOutcomeOf(o: DocsSurfacesProvisionOutcome): DocsSurfacesOutcome {
+  switch (o.action) {
+    case "created":                  return "created";
+    case "migrated":                 return "migrated";
+    case "preserved":                return "preserved";
+    case "requires-operator-repair": return "requires-operator-repair";
+    case "seed-missing":             return "seed-missing";
+  }
+}
+
+/** The dry-run forecast, from the SAME verdict the real run keys off — so the
+ *  forecast cannot disagree with what the run then does. A `valid-project` (incl.
+ *  the corrected generated form) is a no-op ⇒ `preserved`; `customized-invalid`
+ *  is left untouched on both paths ⇒ the shared repair outcome. */
+function docsSurfacesDryRunOutcome(verdict: DocsSurfacesVerdict): DocsSurfacesOutcome {
+  switch (verdict) {
+    case "missing":                 return "would-create";
+    case "known-legacy-generated":  return "would-migrate";
+    case "valid-project":           return "preserved";
+    case "customized-invalid":      return "requires-operator-repair";
+  }
+}
+
 export type UpgradeStepOutcomes = {
   gitPull: GitPullOutcome;
   npmInstall: NpmInstallOutcome;
@@ -236,6 +302,7 @@ export type UpgradeStepOutcomes = {
   authoredRetention: AuthoredRetentionOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
+  docsSurfaces: DocsSurfacesOutcome;
   slashCommands: SlashCommandsOutcome;
   adapterSurfaces: AdapterSurfacesOutcome;
   imageRebuild: ImageRebuildOutcome;
@@ -342,6 +409,27 @@ const PROJECT_INIT: Record<ProjectInitOutcome, Resolution> = {
   "needs-markers": unresolvedBecause("orchestrator block NOT refreshed — needs manual markers"),
 };
 
+// FG-546: create / migrate / preserve are the command working; the dry-run
+// forecasts of a real write likewise. `requires-operator-repair` is RESOLVED for
+// the same reason `user-override` (slash commands / adapters) is: forge declining
+// to overwrite a file it does not own is the command working, and an exit code
+// that fires forever on every project holding a hand-authored docs-surfaces file
+// is noise, not signal — the never-clobber guarantee is upheld, and the actionable
+// ⚠ (named file + validation error + repair) is where the operator SEES it. It is
+// symmetric with `forge init`, which warns without failing. `seed-missing` IS
+// unresolved: forge's own bundled seed is absent, so it could not provision —
+// the same class of forge-install defect as `template-not-found`.
+const DOCS_SURFACES: Record<DocsSurfacesOutcome, Resolution> = {
+  created: resolved,
+  migrated: resolved,
+  preserved: resolved,
+  "would-create": resolved,
+  "would-migrate": resolved,
+  "requires-operator-repair": resolved,
+  "seed-missing": unresolvedBecause("docs-surfaces NOT provisioned — forge's bundled docs-surfaces.example.yml seed was not found in the executing tree"),
+  "not-run": resolved,
+};
+
 // A project-local override is the PROJECT's standing answer, not a failed
 // request: forge declining to clobber a file it does not own is the command
 // working. So it is resolved — an exit code that fires forever on every project
@@ -398,6 +486,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "authoredRetention": return AUTHORED_RETENTION[step.outcome];
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
     case "projectInit": return PROJECT_INIT[step.outcome];
+    case "docsSurfaces": return DOCS_SURFACES[step.outcome];
     case "slashCommands": return SLASH_COMMANDS[step.outcome];
     case "adapterSurfaces": return ADAPTER_SURFACES[step.outcome];
     case "imageRebuild": return IMAGE_REBUILD[step.outcome];
@@ -510,6 +599,16 @@ export type UpgradeResult = {
    *  classification reason. Null on every non-failure path. */
   routingPolicyError: string | null;
   projectInit: ProjectInitOutcome;
+  /** FG-546: the docs-surfaces provisioning outcome for the project's own
+   *  .forge/docs-surfaces.yml — created / migrated / preserved / (dry-run) would-*
+   *  / requires-operator-repair / seed-missing / not-run. Reported alongside the
+   *  [4/4] project init; distinct from the host-seed cache ([3/4]). */
+  docsSurfaces: DocsSurfacesOutcome;
+  /** FG-546: on `requires-operator-repair` (a customized-invalid file forge left
+   *  untouched), the actionable warning naming the file + validation error +
+   *  repair action — the SAME text the human ⚠ prints, so a --json consumer reads
+   *  the same named guidance. Null on every other path. */
+  docsSurfacesRepair: string | null;
   slashCommands: SlashCommandsOutcome;
   /** The commands forge did NOT install because the project already owns that
    *  path — the same set the human ⚠ names, so a script sees it too. */
@@ -849,6 +948,10 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // Re-running the install plans is idempotent: already-current entries
       // no-op; updates apply when the template/source has moved.
       let projectInit: ProjectInitOutcome;
+      // FG-546: default `not-run` — a project the [4/4] block skips (not a forge
+      // project, or --skip-project) never gets its docs-surfaces classified.
+      let docsSurfaces: DocsSurfacesOutcome = "not-run";
+      let docsSurfacesRepair: string | null = null;
       let slashCommands: SlashCommandsOutcome = "not-run";
       let slashCommandOverrides: string[] = [];
       let adapterSurfaces: AdapterSurfacesOutcome = "not-run";
@@ -900,6 +1003,32 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
             projectInit = "refreshed";
             writeFileSync(projectClaudeMd, result.content);
             say(`[4/4] project init: ${result.action} orchestrator block`);
+          }
+        }
+
+        // FG-546: docs-surfaces detect / create / migrate / preserve / repair —
+        // the SAME classifier-driven helper `forge init` uses (step 4). upgrade
+        // never re-runs seed provisioning, so this is the ONLY path that repairs a
+        // project already holding the invalid legacy object template. Keyed off the
+        // four-way verdict, never bare file existence: a customized file (valid OR
+        // invalid) is never mistaken for the generated template and never
+        // auto-overwritten. Distinct from the host-seed cache ([3/4]) — this is the
+        // project's own .forge/ config. Runs on BOTH the dry-run and real branches.
+        if (dryRun) {
+          const { verdict, path, detail } = classifyDocsSurfaces(cwd);
+          docsSurfaces = docsSurfacesDryRunOutcome(verdict);
+          say(`        docs-surfaces:     ${describeDocsSurfacesProvisionPlan(cwd)}`);
+          if (verdict === "customized-invalid") {
+            docsSurfacesRepair = docsSurfacesRepairWarning(path, detail ?? "invalid docs-surfaces config");
+            warn(`        ${docsSurfacesRepair}`);
+          }
+        } else {
+          const outcome = provisionDocsSurfaces(cwd);
+          docsSurfaces = docsSurfacesOutcomeOf(outcome);
+          say(`        docs-surfaces:     ${docsSurfacesStatusLine(outcome)}`);
+          if (outcome.action === "requires-operator-repair") {
+            docsSurfacesRepair = docsSurfacesRepairWarning(outcome.path, outcome.detail);
+            warn(`        ${docsSurfacesRepair}`);
           }
         }
 
@@ -1017,6 +1146,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         authoredRetention,
         routingPolicy,
         projectInit,
+        docsSurfaces,
         slashCommands,
         adapterSurfaces,
         imageRebuild,
@@ -1063,6 +1193,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         routingPolicy,
         routingPolicyError,
         projectInit,
+        docsSurfaces,
+        docsSurfacesRepair,
         slashCommands,
         slashCommandOverrides,
         adapterSurfaces,

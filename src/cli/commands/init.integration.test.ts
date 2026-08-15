@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { currentAdapterStamp, executeHookPlan, forgeAdapterPaths, planCommitMsgHook } from "./init.js";
 import { parseAdapterMarker } from "../../v2/operator-workflows.js";
+import { classifyDocsSurfaces, resolveDocsSurfacesReceipt } from "../../v2/contract.js";
 import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -133,6 +134,118 @@ test("integ FG-332: running forge init twice does not clobber .forge/docs-surfac
   // docs-surfaces.yml must not have been overwritten.
   const surfacesAfter = readFileSync(docsSurfacesPath, "utf8");
   assert.equal(surfacesAfter, customSurfaces, ".forge/docs-surfaces.yml must not be clobbered by second forge init");
+});
+
+// ─── FG-546: docs-surfaces detect / create / migrate / preserve / repair ──────
+
+const LEGACY_DOCS_SURFACES_YAML = [
+  "surfaces:",
+  "  - name: readme",
+  "    kind: user-facing",
+  "    path: README.md",
+  "  - name: api-reference",
+  "    kind: public-api",
+  "    path: docs/api.md",
+  "",
+].join("\n");
+
+function writeProjectDocsSurfaces(content: string): string {
+  const p = join(projectDir, ".forge", "docs-surfaces.yml");
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, content);
+  return p;
+}
+
+test("integ FG-546: fresh init provisions a production-valid docs-surfaces.yml (source:project, no warning)", () => {
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(res.status, 0, `forge init failed: ${res.stderr}`);
+  assert.match(res.stdout, /docs-surfaces\.yml:created/, "init should report created");
+
+  // The provisioned seed resolves through the REAL production classifier + receipt.
+  assert.equal(classifyDocsSurfaces(projectDir).verdict, "valid-project");
+  const { receipt, warning } = resolveDocsSurfacesReceipt(projectDir);
+  assert.equal(receipt.source, "project", "fresh seed must resolve as source:project");
+  assert.equal(warning, undefined, "no invalid-config warning for the corrected seed");
+});
+
+test("integ FG-546: init MIGRATES the exact known legacy object template to the corrected form", () => {
+  const p = writeProjectDocsSurfaces(LEGACY_DOCS_SURFACES_YAML);
+  assert.equal(classifyDocsSurfaces(projectDir).verdict, "known-legacy-generated", "precondition: recognized legacy shape");
+
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(res.status, 0, `forge init failed: ${res.stderr}`);
+  assert.match(res.stdout, /docs-surfaces\.yml:migrated/i, "init should report migrated");
+
+  const after = readFileSync(p, "utf8");
+  assert.ok(!after.includes("kind:"), "legacy object entries must be replaced by the corrected form");
+  assert.equal(classifyDocsSurfaces(projectDir).verdict, "valid-project");
+
+  // Rerun is a clean no-op (idempotent migration).
+  const rerun = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(rerun.status, 0);
+  assert.match(rerun.stdout, /docs-surfaces\.yml:already exists|no-op/i, "rerun on corrected form is a preserve no-op");
+  assert.equal(readFileSync(p, "utf8"), after, "no re-migration on rerun");
+});
+
+test("integ FG-546: init PRESERVES a customized-valid (string-list) file unchanged", () => {
+  const custom = "surfaces:\n  - src/mine/\n  - config/mine.ts\n";
+  const p = writeProjectDocsSurfaces(custom);
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(res.status, 0, `forge init failed: ${res.stderr}`);
+  assert.equal(readFileSync(p, "utf8"), custom, "a valid operator file must never be rewritten");
+});
+
+test("integ FG-546: init NEVER clobbers a customized-invalid file — emits an actionable warning naming file + repair", () => {
+  const custom = "surfaces:\n  - name: only-one\n    path: README.md\n";
+  const p = writeProjectDocsSurfaces(custom);
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(res.status, 0, `forge init failed: ${res.stderr}`);
+  // The file survives byte-for-byte.
+  assert.equal(readFileSync(p, "utf8"), custom, "customized-invalid file must survive byte-for-byte");
+  // An actionable warning names the file and the repair action (stderr or stdout).
+  const combined = res.stdout + res.stderr;
+  assert.match(combined, /INVALID|invalid/, "must flag the config as invalid");
+  assert.match(combined, /docs-surfaces\.yml/, "warning must name the file");
+  assert.match(combined, /repair|delete it and re-run|forge init/i, "warning must name the repair action");
+});
+
+test("integ FG-546: dry-run forecasts create / migrate / preserve / repair for docs-surfaces", () => {
+  // create
+  const created = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  assert.match(created.stdout, /docs-surfaces\.yml:WOULD create/i);
+
+  // migrate
+  writeProjectDocsSurfaces(LEGACY_DOCS_SURFACES_YAML);
+  const migrate = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  assert.match(migrate.stdout, /docs-surfaces\.yml:WOULD migrate/i);
+
+  // preserve
+  writeProjectDocsSurfaces("surfaces:\n  - src/mine/\n");
+  const preserve = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  assert.match(preserve.stdout, /docs-surfaces\.yml:would preserve/i);
+
+  // requires-operator-repair
+  writeProjectDocsSurfaces("surfaces:\n  - name: x\n    path: y\n");
+  const repair = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  assert.match(repair.stdout, /docs-surfaces\.yml:WOULD SKIP.*repair/i);
+});
+
+test("integ FG-546 RF-3: init --dry-run emits the actionable repair warning for customized-invalid (file + error + repair action)", () => {
+  // AC8: dry-run must forecast the 'requires operator repair' state with the SAME
+  // actionable warning the live write path emits — not just the generic forecast.
+  writeProjectDocsSurfaces("surfaces:\n  - name: x\n    path: y\n");
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  const out = res.stdout + res.stderr;
+  // Names the file.
+  assert.match(out, /docs-surfaces\.yml/);
+  // Names the repair action (edit to the { surfaces: [...] } shape / re-run).
+  assert.match(out, /Repair:/);
+  assert.match(out, /forge init.*forge upgrade|forge upgrade/);
+  // And still leaves the file untouched (dry-run writes nothing).
+  assert.equal(
+    readFileSync(join(projectDir, ".forge", "docs-surfaces.yml"), "utf8"),
+    "surfaces:\n  - name: x\n    path: y\n"
+  );
 });
 
 // ─── FG-332: second run output should confirm no-op for already-created items ─

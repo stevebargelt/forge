@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -8,6 +8,9 @@ import {
   docsImpactSuggestion,
   loadOperatorSurfaces,
   OPERATOR_SURFACES,
+  classifyDocsSurfaces,
+  isKnownLegacyDocsSurfaces,
+  LEGACY_DOCS_SURFACES_TEMPLATE,
 } from "./contract.js";
 
 let dir: string;
@@ -95,4 +98,173 @@ test("loadOperatorSurfaces: malformed file → fail-soft to defaults (advisory m
   assert.deepEqual(loadOperatorSurfaces(dir), OPERATOR_SURFACES);
   writeDocsSurfaces(dir, ":\n  : not yaml :\n");
   assert.deepEqual(loadOperatorSurfaces(dir), OPERATOR_SURFACES);
+});
+
+// ------------------------------------------------------------------
+// FG-546: docs-surfaces four-way classifier + legacy fingerprint
+// ------------------------------------------------------------------
+
+// The exact legacy generated template, as bytes the old seed emitted (comments
+// and blank line included on purpose — detection must be comment/whitespace-insensitive).
+const LEGACY_SEED_BYTES = `# forge — docs surfaces (EXAMPLE / opt-in)
+#
+# Copy this to <project>/.forge/docs-surfaces.yml ...
+
+surfaces:
+  - name: readme
+    kind: user-facing
+    path: README.md
+
+  - name: api-reference
+    kind: public-api
+    path: docs/api.md
+`;
+
+test("classifyDocsSurfaces: absent file → missing", () => {
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "missing");
+  assert.equal(c.detail, undefined);
+});
+
+test("classifyDocsSurfaces: valid string-list → valid-project (no detail)", () => {
+  writeDocsSurfaces(dir, "surfaces:\n  - src/routes/\n  - public/\n");
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "valid-project");
+  assert.equal(c.detail, undefined);
+});
+
+test("classifyDocsSurfaces: corrected generated form → valid-project (idempotent rerun)", () => {
+  // A comment-rich, multi-line string list — what the corrected seed provisions.
+  writeDocsSurfaces(
+    dir,
+    [
+      "# forge — docs surfaces",
+      "surfaces:",
+      "  - src/cli/            # commands + flags",
+      "  - seeds/workflows/    # workflow shapes",
+      "  - src/v2/contract.ts  # the task-contract shape",
+      "",
+    ].join("\n")
+  );
+  assert.equal(classifyDocsSurfaces(dir).verdict, "valid-project");
+});
+
+test("classifyDocsSurfaces: exact legacy object template → known-legacy-generated", () => {
+  writeDocsSurfaces(dir, LEGACY_SEED_BYTES);
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "known-legacy-generated");
+  assert.equal(c.detail, undefined);
+});
+
+test("classifyDocsSurfaces: legacy template with edited comments/whitespace still recognized", () => {
+  const reflowed = `surfaces:
+  - {name: readme, kind: user-facing, path: README.md}   # inline flow form
+  - name: api-reference
+    path: docs/api.md
+    kind: public-api
+`; // reordered KEYS within an entry + flow style — structure is identical
+  writeDocsSurfaces(dir, reflowed);
+  assert.equal(classifyDocsSurfaces(dir).verdict, "known-legacy-generated");
+});
+
+test("classifyDocsSurfaces: structural deviations fall to customized-invalid, never migrate", () => {
+  // Extra third entry.
+  writeDocsSurfaces(
+    dir,
+    LEGACY_SEED_BYTES + "  - name: changelog\n    kind: user-facing\n    path: CHANGELOG.md\n"
+  );
+  assert.equal(classifyDocsSurfaces(dir).verdict, "customized-invalid");
+
+  // Renamed key (title instead of name).
+  writeDocsSurfaces(
+    dir,
+    "surfaces:\n  - title: readme\n    kind: user-facing\n    path: README.md\n  - name: api-reference\n    kind: public-api\n    path: docs/api.md\n"
+  );
+  assert.equal(classifyDocsSurfaces(dir).verdict, "customized-invalid");
+
+  // Reordered ARRAY entries (order-sensitive).
+  writeDocsSurfaces(
+    dir,
+    "surfaces:\n  - name: api-reference\n    kind: public-api\n    path: docs/api.md\n  - name: readme\n    kind: user-facing\n    path: README.md\n"
+  );
+  assert.equal(classifyDocsSurfaces(dir).verdict, "customized-invalid");
+
+  // Extra key inside an entry.
+  writeDocsSurfaces(
+    dir,
+    "surfaces:\n  - name: readme\n    kind: user-facing\n    path: README.md\n    owner: docs-team\n  - name: api-reference\n    kind: public-api\n    path: docs/api.md\n"
+  );
+  assert.equal(classifyDocsSurfaces(dir).verdict, "customized-invalid");
+
+  // Changed value.
+  writeDocsSurfaces(
+    dir,
+    "surfaces:\n  - name: readme\n    kind: user-facing\n    path: README.rst\n  - name: api-reference\n    kind: public-api\n    path: docs/api.md\n"
+  );
+  assert.equal(classifyDocsSurfaces(dir).verdict, "customized-invalid");
+
+  // Only one entry.
+  writeDocsSurfaces(dir, "surfaces:\n  - name: readme\n    kind: user-facing\n    path: README.md\n");
+  assert.equal(classifyDocsSurfaces(dir).verdict, "customized-invalid");
+});
+
+test("classifyDocsSurfaces: hand-authored invalid → customized-invalid WITH validation detail", () => {
+  writeDocsSurfaces(dir, "surfaces: not-a-list\n");
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "customized-invalid");
+  assert.ok(c.detail && c.detail.length > 0, "must carry a schema validation-error detail");
+  assert.match(c.detail!, /surfaces/);
+
+  // Unknown key rejected by .strict().
+  writeDocsSurfaces(dir, "wrong_key: [a]\n");
+  const c2 = classifyDocsSurfaces(dir);
+  assert.equal(c2.verdict, "customized-invalid");
+  assert.ok(c2.detail && c2.detail.length > 0);
+});
+
+test("classifyDocsSurfaces RF-2: a DANGLING docs-surfaces.yml symlink is NOT 'missing' — customized-invalid, never followed", () => {
+  // A dangling symlink at .forge/docs-surfaces.yml. existsSync follows it and
+  // reads false → the old code classified it 'missing' and provisioning then
+  // copied the seed THROUGH the link, outside .forge. It must classify as
+  // customized-invalid so no provision/migrate write follows it.
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  symlinkSync(join(dir, "..", "escape-target.yml"), join(dir, ".forge", "docs-surfaces.yml"));
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "customized-invalid");
+  assert.match(c.detail ?? "", /symlink/i);
+});
+
+test("classifyDocsSurfaces RF-1: a RESOLVING docs-surfaces.yml symlink is customized-invalid too (a symlink is never the frozen legacy shape)", () => {
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  // Point the link at a real, schema-valid file. Following it would read
+  // 'valid-project'; we must NOT follow it — a symlink is operator-authored.
+  writeFileSync(join(dir, "real-surfaces.yml"), "surfaces:\n  - src/mine/\n");
+  symlinkSync(join(dir, "real-surfaces.yml"), join(dir, ".forge", "docs-surfaces.yml"));
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "customized-invalid");
+  assert.match(c.detail ?? "", /symlink/i);
+});
+
+test("classifyDocsSurfaces: unparseable YAML → customized-invalid with parse detail", () => {
+  writeDocsSurfaces(dir, "surfaces:\n  - [unterminated\n");
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "customized-invalid");
+  assert.ok(c.detail && c.detail.length > 0);
+});
+
+test("isKnownLegacyDocsSurfaces / LEGACY_DOCS_SURFACES_TEMPLATE: frozen literal, strict match", () => {
+  assert.ok(isKnownLegacyDocsSurfaces(LEGACY_DOCS_SURFACES_TEMPLATE));
+  // A structural clone from independent literals still matches (structure, not identity).
+  assert.ok(
+    isKnownLegacyDocsSurfaces({
+      surfaces: [
+        { name: "readme", kind: "user-facing", path: "README.md" },
+        { name: "api-reference", kind: "public-api", path: "docs/api.md" },
+      ],
+    })
+  );
+  // A valid string-list is NOT the legacy shape.
+  assert.equal(isKnownLegacyDocsSurfaces({ surfaces: ["src/cli/"] }), false);
+  assert.equal(isKnownLegacyDocsSurfaces(null), false);
+  assert.equal(isKnownLegacyDocsSurfaces({}), false);
 });
