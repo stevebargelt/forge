@@ -139,6 +139,28 @@ test("FG-634: redacts *_TOKEN / *_SECRET / *_KEY / *PASSWORD env assignments, ke
   assert.doesNotMatch(out, /abc123|zzz|kkk|\bpw\b/);
 });
 
+test("FG-634 (RF-1): an empty-username basic-auth URL still redacts the password", () => {
+  // `scheme://:password@host` — the username is empty, which previously slipped past
+  // the redactor's mandatory-username pattern and leaked the token.
+  const out = redactSecrets("npm ci --registry https://:s3cr3tPassw0rd@mirror.example.com/");
+  assert.match(out, /https:\/\/«redacted»@mirror\.example\.com\//);
+  assert.doesNotMatch(out, /s3cr3tPassw0rd/);
+});
+
+test("FG-634 (RF-3): a quoted whitespace-containing secret value is redacted whole, not just to the first space", () => {
+  const single = redactSecrets("DB_PASSWORD='correct horse battery staple'");
+  assert.match(single, /DB_PASSWORD=«redacted»/);
+  assert.doesNotMatch(single, /horse|battery|staple/);
+
+  const dbl = redactSecrets('API_SECRET="a b c d"');
+  assert.match(dbl, /API_SECRET=«redacted»/);
+  assert.doesNotMatch(dbl, /\bb\b|\bc\b|\bd\b/);
+
+  const back = redactSecrets("DEPLOY_KEY=`k1 k2 k3`");
+  assert.match(back, /DEPLOY_KEY=«redacted»/);
+  assert.doesNotMatch(back, /k2|k3/);
+});
+
 test("FG-634: redacts Authorization Bearer/Basic headers, keeps the scheme", () => {
   const out = redactSecrets("Authorization: Bearer eyJhbG.tok.en\nAuthorization: Basic dXNlcjpwYXNz");
   assert.match(out, /Authorization: Bearer «redacted»/);
@@ -211,6 +233,18 @@ test("FG-634 (finding 2): a credential-shaped stderrTail is redacted in the refu
   const payload = eventPayload("host_readiness.refused");
   assert.doesNotMatch(String(payload.stderrTail), /npm_leakedTOKENvalue|eyJleY\.leaked\.jwt/);
   assert.match(String(payload.stderrTail), /«redacted»/);
+});
+
+test("FG-634 (RF-2): the refused event carries the redacted refusal message", async () => {
+  const ws = workspace();
+  const failed: SetupRun = { ok: false, status: 1, timedOut: false, stderrTail: "boom" };
+  const outcome = await prepare(ws, deps([], failed));
+  assert.equal(outcome.kind, "refused");
+  const refusal = (outcome as { refusal: { message: string } }).refusal;
+
+  const payload = eventPayload("host_readiness.refused");
+  assert.equal(payload.message, refusal.message, "event message must equal the refusal object's message");
+  assert.match(String(payload.message), /verification_environment_unavailable/);
 });
 
 test("FG-634 (finding 2, false-positive guard): a benign stderrTail is recorded intact", async () => {

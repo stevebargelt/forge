@@ -248,13 +248,18 @@ export function tailOf(output: string, chars: number = STDERR_TAIL_CHARS): strin
 // 40-char git SHAs, lockfile digests, node ABI hashes, module-not-found paths — which
 // is exactly the audit signal these fields exist to carry. When adding a pattern,
 // prefer one anchored to a credential's structure over one anchored to its length.
-const REDACT_URL_BASIC_AUTH = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/g;
+// The username is optional (`*`, not `+`) so an empty-username form —
+// `scheme://:password@host` — still redacts the password rather than slipping past.
+const REDACT_URL_BASIC_AUTH = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/g;
 // npm/.npmrc credential lines: `//registry.example.com/:_authToken=…`, `_auth=…`,
 // `_password=…`. The leading char class keeps the registry host/path prefix for audit.
-const REDACT_NPM_AUTH = /((?:^|[\s;&"'`([])[\w./:\-[\]]*(?:_authToken|_auth|_password))(\s*=\s*)(\S+)/gi;
+const REDACT_NPM_AUTH = /((?:^|[\s;&"'`([])[\w./:\-[\]]*(?:_authToken|_auth|_password))(\s*=\s*)("[^"]*"|'[^']*'|`[^`]*`|\S+)/gi;
 // Environment-assignment secrets: a shell/identifier NAME ending in a secret-shaped
 // suffix (`*_TOKEN=`, `*_SECRET=`, `*_KEY=`, `*PASSWORD=`), value redacted, name kept.
-const REDACT_ENV_SECRET = /((?:^|[\s;&"'`([])[A-Za-z_][A-Za-z0-9_]*(?:_TOKEN|_SECRET|_KEY|PASSWORD))(\s*=\s*)(\S+)/g;
+// The value alternates a quoted run (single/double/back-quoted, which may contain
+// spaces) before the bare `\S+` fallback — otherwise `PASSWORD='a b c'` would redact
+// only up to the first space and leak the rest.
+const REDACT_ENV_SECRET = /((?:^|[\s;&"'`([])[A-Za-z_][A-Za-z0-9_]*(?:_TOKEN|_SECRET|_KEY|PASSWORD))(\s*=\s*)("[^"]*"|'[^']*'|`[^`]*`|\S+)/g;
 // `Authorization: Bearer …` / `Authorization: Basic …` (and the `token`/`Digest`
 // schemes), scheme kept, credential blanked.
 const REDACT_AUTH_HEADER = /(Authorization\s*:\s*(?:Bearer|Basic|Token|Digest)\s+)(\S+)/gi;
@@ -791,6 +796,9 @@ function refuse(
       command: refusal.command,
       exitStatus: refusal.exitStatus,
       stderrTail: refusal.stderrTail,
+      // Carry the already-redacted refusal message so the durable event has parity
+      // with the refusal object (the message is redacted at construction above).
+      message: refusal.message,
       label: req.label,
       treeSha: req.treeSha,
     },
