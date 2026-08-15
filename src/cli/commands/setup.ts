@@ -15,12 +15,14 @@ import { buildReleaseReport } from "../../v2/release-doctor.js";
 import {
   planConfigProvision,
   modelPolicyStep,
+  modelPolicyVersionStep,
   routingPolicyStep,
   reviewLoopReadiness,
   buildSetupReport,
   renderSetupReport,
   type SetupStep,
 } from "../../v2/setup.js";
+import { buildModelPolicyStatus } from "../../v2/model-policy-status.js";
 
 const MODEL_POLICY_PATH = join(FORGE_HOME, "model-policy.yml");
 const MODEL_POLICY_SEED = join(FORGE_HOME, "model-policy.example.yml");
@@ -64,7 +66,14 @@ export function registerSetup(program: Command): void {
     .action((opts: { dryRun?: boolean; reviewProfile?: string }) => {
       const dryRun = opts.dryRun ?? false;
       // Provision FIRST so the release check below sees the just-created policy.
-      const provisioning = [provisionModelPolicy(dryRun), provisionRoutingPolicy(dryRun)];
+      // FG-560: after provisioning, classify the (now-present) host policy's schema
+      // version so setup reflects schema_version 2 — read-only, `forge upgrade` owns
+      // any migration.
+      const provisioning = [
+        provisionModelPolicy(dryRun),
+        modelPolicyVersionStep(buildModelPolicyStatus({ forgeHome: FORGE_HOME })),
+        provisionRoutingPolicy(dryRun),
+      ];
       const inputs = gatherReleaseInputs(undefined, { projectDir: process.cwd() });
       const release = buildReleaseReport(inputs);
       const reviewLoop = reviewLoopReadiness(inputs, opts.reviewProfile ?? "codex-subscription");

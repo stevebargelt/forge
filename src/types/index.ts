@@ -143,6 +143,10 @@ export type Task = {
   resolvedProvider?: string; // e.g. "anthropic"
   resolvedAuth?: string; // EFFECTIVE auth mode — never "auto"
   resolvedBy?: string; // rule that selected the profile (e.g. "overrides.agents.red-security")
+  // FG-560: two INDEPENDENT provenance axes, distinct from resolvedBy (profile
+  // selection). Undefined in legacy mode (no policy => no provenance).
+  resolvedCapabilitySource?: string; // "explicit" | "role-derived"
+  resolvedMappingPath?: string; // "exact" | "default-fallback"
   status: TaskStatus;
   taskPackage: TaskPackage;
   result?: unknown;

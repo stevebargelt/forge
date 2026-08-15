@@ -1,0 +1,14 @@
+# A policy owned by a newer Forge. It must never be downgraded.
+schema_version: 3
+model_profiles:
+  future:
+    provider: anthropic
+    auth: subscription
+    map:
+      reasoning: { model: future-reasoning, cost_tier: premium }
+      fast: { model: future-fast, cost_tier: cheap }
+      default: { model: future-default, cost_tier: standard }
+      spec-writer: { model: future-reasoning, cost_tier: premium }
+      fast-orchestrator: { model: future-fast, cost_tier: cheap }
+defaults:
+  profile: future

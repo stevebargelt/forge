@@ -45,6 +45,7 @@ import { adapterStampForAssetRoot, resolveAdapterStampForAssetRoot } from "../..
 // selectable via --profile (not in defaults/overrides).
 const PROJECT_POLICY = `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   proj-default:
     provider: groq
@@ -447,6 +448,17 @@ function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
     seedInstall: { kind: "healthy", generation: "/tmp/gen" },
     projectAdapters: { projectDir: "/tmp/p", projectIdentity, expectedStamp: "release-x", entries: [], stale: [], ok: true },
     docsSurfaces: { verdict: "missing", path: "/tmp/p/.forge/docs-surfaces.yml" },
+    // FG-560: a benign default status fixture — host policy current, no projects.
+    modelPolicyStatus: {
+      host: { scope: "host", state: "reachable-no-policy", projectDir: "/tmp/home", policyPath: null, verdict: null, schemaVersionFound: null, action: "none", detail: "no policy file — legacy mode (runtime.models)" },
+      projects: [],
+      completeness: "historical-best-effort",
+      registeredInspected: 0,
+      registeredUnreachable: 0,
+      registeredNoPath: 0,
+      hostNeedsUpgrade: false,
+      anyNewerUnsupported: false,
+    },
     project: projectIdentity,
     ...over,
   };

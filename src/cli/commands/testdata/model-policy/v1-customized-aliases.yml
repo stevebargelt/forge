@@ -1,0 +1,27 @@
+# Hand-authored legacy policy. Keep this banner and every comment verbatim.
+on_unavailable: fail # operator-selected availability behavior
+unknown_operator_key: retain-me
+model_profiles:
+  custom:
+    # Local provider and custom model must survive a migration.
+    provider: ollama
+    runtime: pi-apikey
+    auth: api
+    map:
+      reasoning: { model: qwen2.5-coder:32b, cost_tier: cheap, tool_capable: true }
+      fast: { model: qwen2.5-coder:7b, cost_tier: cheap, tool_capable: true }
+      default: { model: qwen2.5-coder:7b, cost_tier: cheap, tool_capable: true }
+      # These are deliberate operator choices, not canonical copies.
+      spec-writer: { model: operator-spec-model, cost_tier: premium, tool_capable: true }
+      fast-orchestrator: { model: operator-fast-model, cost_tier: standard, tool_capable: true }
+defaults:
+  profile: custom
+  activity:
+    reasoning: custom
+    fast: custom
+    # Preserve this pre-existing alias too.
+    spec-writer: custom
+    fast-orchestrator: custom
+overrides:
+  agents:
+    engineer: custom # custom agent override

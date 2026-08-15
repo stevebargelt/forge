@@ -192,6 +192,7 @@ test("loadRuntime: project override replaces workspace YAML", () => {
 });
 
 const VALID_POLICY = `
+schema_version: 2
 on_unavailable: fail
 model_profiles:
   claude-subscription:

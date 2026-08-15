@@ -21,6 +21,10 @@ import { docsImpactSuggestion, loadOperatorSurfaces } from "../../v2/contract.js
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
 import { reviewsForRun, summarizeReview, type ReviewSummary } from "../../store/reviews.js";
 import { loadWorkflow } from "../../v2/loader.js";
+import {
+  mappingPathSummary,
+  isActivityUnmappedProvenance,
+} from "../../v2/model-provenance.js";
 import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
 import {
   ORCHESTRATOR_RECEIPT_COLUMNS,
@@ -1352,6 +1356,22 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
                 diagnostic: {
                   containerName: `forge-${task.id}`,
                   runtime: runtimeMeta ?? null,
+                  // FG-560: mapping-path provenance a script can read alongside the
+                  // task row's resolvedBy. Null in legacy mode (no resolvedMappingPath).
+                  // activityUnmapped names the refusal shape readably even though
+                  // dispatch would have refused such a task before it ran.
+                  modelProvenance: task.resolvedMappingPath
+                    ? {
+                        mappingPath: task.resolvedMappingPath,
+                        capabilitySource: task.resolvedCapabilitySource ?? null,
+                        resolvedBy: task.resolvedBy ?? null,
+                        summary: mappingPathSummary(task.resolvedMappingPath, task.resolvedCapabilitySource),
+                        activityUnmapped: isActivityUnmappedProvenance(
+                          task.resolvedMappingPath,
+                          task.resolvedCapabilitySource,
+                        ),
+                      }
+                    : null,
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   gateHold: holdReason, // FG-523: null unless held with a named reason
@@ -1438,6 +1458,23 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
           console.log(
             `  profile:   ${task.resolvedProfile} (${task.resolvedProvider}/${task.resolvedAuth}) — ${task.resolvedBy}`
           );
+        }
+        // FG-560: the mapping-path axis on its OWN line, distinct from the
+        // profile-selection provenance above. A default fallback reads distinctly
+        // and (dispatch refuses it, so this is defensive) an explicit-activity
+        // default-fallback is named as the activity_unmapped refusal, never as a
+        // satisfied activity. Undefined in legacy mode → nothing printed.
+        {
+          const mappingSummary = mappingPathSummary(task.resolvedMappingPath, task.resolvedCapabilitySource);
+          if (mappingSummary) {
+            console.log(`  mapping:   ${mappingSummary}`);
+            if (isActivityUnmappedProvenance(task.resolvedMappingPath, task.resolvedCapabilitySource)) {
+              console.log(
+                `  ⚠ activity_unmapped: explicit activity '${task.agentAlias ?? ""}' resolved only via map.default ` +
+                  `('${task.agentModel ?? ""}') — run \`forge model resolve ${task.agentRole} --activity ${task.agentAlias ?? ""} --json\` for the full refusal.`,
+              );
+            }
+          }
         }
         // #292: runtime EXECUTION facts, distinct from the model SELECTION above.
         if (runtimeMeta) {

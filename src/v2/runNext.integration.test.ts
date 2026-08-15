@@ -999,6 +999,7 @@ test("runNext: run-level --profile (metadata.modelProfile) pins primary AND red,
   // assertion proves run.profile beats overrides.agents, not just the default.
   writeFileSync(policyPath, `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   default-api:
     provider: anthropic
@@ -1080,6 +1081,130 @@ result:
       assert.equal(red.resolvedBy, "run.profile");
       assert.equal(red.agentModel, "model-pinned-review");
     }
+  } finally {
+    rmSync(policyPath, { force: true });
+  }
+});
+
+// FG-560 step 4: a workflow STEP declaring an explicit activity that the selected
+// profile does not map (and is not default-only) is refused BEFORE the container
+// starts, with the activity_unmapped reason — and a role-derived / exact step is not.
+test("runNext: a workflow step whose explicit activity is unmapped is blocked with activity_unmapped; an exact one proceeds", async () => {
+  const policyPath = join(process.env.FORGE_HOME!, "model-policy.yml");
+  const apikeyRuntimePath = join(process.env.FORGE_HOME!, "runtimes", "claude-apikey.yml");
+  process.env.ANTHROPIC_API_KEY = "sk-stub"; // makes auth:api available (probeAuth)
+
+  writeFileSync(policyPath, `
+schema_version: 2
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      review:  { model: model-review,  cost_tier: standard }
+      default: { model: model-default, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: {}
+`);
+  if (!existsSync(apikeyRuntimePath)) {
+    mkdirSync(dirname(apikeyRuntimePath), { recursive: true });
+    writeFileSync(apikeyRuntimePath, `name: claude-apikey
+description: test stub apikey runtime
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
+
+  try {
+    // Explicit 'reasoning' activity is absent from claude-api's map (review/default),
+    // which is NOT default-only → activity_unmapped, refused before dispatch.
+    const BLOCKED_WF: Workflow = {
+      name: "test-activity-unmapped",
+      description: "one step with an explicit unmapped activity",
+      review_mode: "legacy_verdict",
+      inputs: [],
+      steps: [{ id: "work", agent: "engineer", activity: "reasoning", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+    };
+    const blocked = startRun({ workflow: BLOCKED_WF, title: "unmapped", inputs: {}, projectDir: "/tmp/test-project" });
+
+    let dockerCalled = false;
+    const spyExec: DockerExecFn = async (a) => {
+      dockerCalled = true;
+      return makeStubExec({ status: "complete" })(a);
+    };
+    await runNext({ runId: blocked.runId, workflow: BLOCKED_WF, dockerExec: spyExec });
+
+    const blockedPrimary = tasksForRun(blocked.runId).find((t) => t.phase === "work")!;
+    assert.equal(blockedPrimary.status, "failed");
+    assert.match(blockedPrimary.error ?? "", /activity_unmapped/);
+    assert.equal(dockerCalled, false, "container must not spawn on an activity_unmapped step");
+    const blockedEvents = eventsForTask(blockedPrimary.id).map((e) => e.eventType);
+    assert.ok(blockedEvents.includes("model.profile_unavailable"));
+    assert.ok(!blockedEvents.includes("container.started"), "no container.started on an activity_unmapped refusal");
+
+    // Negative: an EXACT explicit activity on the same profile dispatches normally.
+    const OK_WF: Workflow = {
+      name: "test-activity-mapped",
+      description: "one step with an explicit exact activity",
+      review_mode: "legacy_verdict",
+      inputs: [],
+      steps: [{ id: "work", agent: "engineer", activity: "review", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+    };
+    const ok = startRun({ workflow: OK_WF, title: "mapped", inputs: {}, projectDir: "/tmp/test-project" });
+    let okDockerCalled = false;
+    const okExec: DockerExecFn = async (a) => {
+      okDockerCalled = true;
+      return makeStubExec({ status: "complete" })(a);
+    };
+    await runNext({ runId: ok.runId, workflow: OK_WF, dockerExec: okExec });
+    const okPrimary = tasksForRun(ok.runId).find((t) => t.phase === "work")!;
+    // Dispatch PROCEEDED (container ran); it was not refused by the activity gate.
+    // The stub's tests-less "complete" is then held at awaiting_gate by the
+    // validation contract — that is downstream of, and orthogonal to, the FG-560 gate.
+    assert.equal(okDockerCalled, true, "an exact explicit activity must dispatch (container runs)");
+    assert.notEqual(okPrimary.status, "failed");
+    const okEvents = eventsForTask(okPrimary.id).map((e) => e.eventType);
+    assert.ok(okEvents.includes("container.started"), "exact activity must reach container.started");
+    assert.equal(okPrimary.agentModel, "model-review");
+    assert.equal(okPrimary.resolvedMappingPath, "exact");
+    assert.equal(okPrimary.resolvedCapabilitySource, "explicit");
+
+    // The other allowed negative half: with no step activity, the role-derived
+    // capability may use map.default. This must dispatch rather than inheriting
+    // the explicit-activity refusal above.
+    const DEFAULT_FALLBACK_WF: Workflow = {
+      name: "test-role-derived-default-fallback",
+      description: "role-derived capability uses the profile default",
+      review_mode: "legacy_verdict",
+      inputs: [],
+      steps: [{ id: "work", agent: "tech-lead", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+    };
+    const fallback = startRun({ workflow: DEFAULT_FALLBACK_WF, title: "fallback", inputs: {}, projectDir: "/tmp/test-project" });
+    let fallbackDockerCalled = false;
+    await runNext({ runId: fallback.runId, workflow: DEFAULT_FALLBACK_WF, dockerExec: async (a) => {
+      fallbackDockerCalled = true;
+      return makeStubExec({ status: "complete" })(a);
+    } });
+    const fallbackPrimary = tasksForRun(fallback.runId).find((t) => t.phase === "work")!;
+    assert.equal(fallbackDockerCalled, true, "role-derived default-fallback must reach the container");
+    assert.notEqual(fallbackPrimary.status, "failed");
+    assert.equal(fallbackPrimary.resolvedMappingPath, "default-fallback");
+    assert.equal(fallbackPrimary.resolvedCapabilitySource, "role-derived");
   } finally {
     rmSync(policyPath, { force: true });
   }
@@ -1490,6 +1615,7 @@ result:
   mkdirSync(join(projectDir, ".forge"), { recursive: true });
   writeFileSync(join(projectDir, ".forge", "model-policy.yml"), `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   claude-api:
     provider: anthropic
@@ -2501,6 +2627,7 @@ test("runNext: a pi profile threads the resolved upstream provider into pi's --p
   process.env.GROQ_API_KEY = "gsk-test";
   writeFileSync(policyPath, `
 on_unavailable: fail
+schema_version: 2
 model_profiles:
   pi-groq:
     provider: groq

@@ -20,6 +20,7 @@ Create one of (project wins over user; it's file-level replacement, not merge):
 - Project: `<project>/.forge/model-policy.yml`
 
 ```yaml
+schema_version: 2               # required — see "Schema versioning" below
 on_unavailable: fail            # fail loud if the resolved auth isn't available
 model_profiles:
   claude-subscription:
@@ -29,6 +30,13 @@ model_profiles:
       reasoning: { model: claude-opus-4-8,   cost_tier: premium }
       review:    { model: claude-sonnet-4-6, cost_tier: standard }
       default:   { model: claude-sonnet-4-6, cost_tier: standard }
+      # spec-writer/fast-orchestrator are the orchestrator-facing activity names
+      # (`forge invoke … --model spec-writer` / `fast-orchestrator`). Map them so
+      # those EXPLICIT activities hit the map directly instead of falling through
+      # to map.default — an explicit activity that hits default is refused
+      # `activity_unmapped` (see below). `forge upgrade` seeds these same aliases.
+      spec-writer:       { model: claude-opus-4-8,  cost_tier: premium }
+      fast-orchestrator: { model: claude-haiku-4-5, cost_tier: cheap }
   claude-bedrock:
     provider: anthropic
     auth: bedrock
@@ -39,6 +47,8 @@ defaults:
   activity:
     reasoning: claude-subscription
     review: claude-subscription
+    spec-writer: claude-subscription
+    fast-orchestrator: claude-subscription
 overrides:
   agents:
     red-security: claude-bedrock # this role always runs on bedrock
@@ -48,6 +58,90 @@ overrides:
 (`CLAUDE_CODE_USE_BEDROCK` → bedrock, `ANTHROPIC_API_KEY` → api, else
 subscription); a *pinned* auth (`bedrock`/`api`/`subscription`) fails loud if
 unavailable rather than silently switching.
+
+## Schema versioning and migration
+
+`model-policy.yml` carries a root `schema_version`; the current version is `2`.
+A file with no `schema_version` key is a v1 (legacy) file.
+
+**Ordinary policy loading is strictly read-only.** Every dispatch that reads
+`model-policy.yml` checks the version BEFORE anything else and never rewrites,
+migrates, or reinterprets the file:
+
+- **absent / older than current** — refused, naming `forge upgrade` as the fix.
+- **current** — proceeds normally.
+- **newer than this forge understands** — refused, naming "upgrade Forge" —
+  forge never downgrades or reinterprets a newer file as an older schema.
+
+**`forge upgrade` is the SOLE migration authority.** It is the only thing that
+ever rewrites your `model-policy.yml`. The migration:
+
+- Copies `reasoning` → `spec-writer` and `fast` → `fast-orchestrator` in
+  `defaults.activity` and in each profile's `map`, wherever the destination
+  alias is missing and its source exists. **Both existing capability names are
+  kept** — this adds compatibility aliases, it does not rename or remove
+  `reasoning`/`fast`.
+- Never overwrites an alias you already defined.
+- Never guesses: if a destination alias is missing AND its source is also
+  missing, that map needs a human decision and the **whole file** is left
+  unchanged (comments, key order, and unrelated keys are always preserved —
+  it's a targeted edit, not a reserialize).
+- A profile whose map is only `{ default: ... }` (an intentional catch-all,
+  e.g. a pi profile) is out of scope for the alias migration and never flagged.
+- Stamps `schema_version: 2` once the file is otherwise migratable.
+- Writes atomically (temp file + validate + rename), leaving the original byte-
+  identical and loadable if anything goes wrong.
+- Is idempotent — re-running it against an already-current file is a no-op.
+
+Run it dry first to see the forecast without writing anything:
+
+```bash
+forge upgrade --dry-run       # per-file forecast: current / migratable /
+                               # changed-if-applied / needs-human-decision /
+                               # newer-unsupported — matches the real run file-
+                               # for-file, and writes nothing
+forge upgrade                 # migrates every safely-migratable file atomically,
+                               # per file; leaves the rest unchanged
+```
+
+`forge upgrade` enumerates the host policy plus every project policy it has
+discovered (see below) and reports a per-file outcome. It exits non-success
+while any file still needs attention. `--json` carries a `modelPolicies` array
+(one entry per discovered policy, with its `verdict`/`action`/`detail`) so a
+script can act on the same per-file result the human summary prints — see
+[Upgrading forge](how-to-upgrade.md) for the full `forge upgrade` contract.
+
+**If a file lands on `needs-human-decision`:** open it, add the missing alias
+entry (or its source) by hand, and re-run `forge upgrade` — it will pick the
+now-resolvable file up on the next pass. **`unreachable`** means the recorded
+checkout no longer resolves on this host (nothing to migrate until it does).
+**`newer-unsupported`** means this forge binary is older than the policy's
+`schema_version` — upgrade Forge itself, never the file.
+
+### Discovery is historical and best-effort — never a fleet inventory
+
+`forge upgrade` (and `forge doctor` / the setup surface, read-only) enumerate
+the host policy plus every project Forge has a **durable evidence row** for —
+drawn from prior runs, campaigns, and host verifications. This is explicitly
+**not** a claim of fleet-wide completeness: a project forge has never
+dispatched against is invisible to discovery, by design. Each project resolves
+to one of four states:
+
+| State | Meaning |
+| --- | --- |
+| `has-policy` | a reachable checkout with a `.forge/model-policy.yml` |
+| `reachable-no-policy` | a reachable checkout with no policy file (legacy mode) |
+| `unreachable-deleted` | evidence exists, but no recorded directory resolves now |
+| `known-but-no-path` | a registered project with no path evidence at all |
+
+Discovery never mutates or prunes anything it reads, and migration never
+merges a host policy into a project's — project-over-host stays full-file
+replacement, exactly as ordinary resolution does (see
+[Turn it on](#turn-it-on) above).
+
+`forge doctor` and the setup surface report host + discovered project policy
+version/migration state **read-only**, and point at `forge upgrade` for
+anything that needs it — they never migrate anything themselves.
 
 ## Profile-selection precedence (highest wins)
 
@@ -60,6 +154,34 @@ unavailable rather than silently switching.
 
 The concrete model is then `profile.map[capability]` (falling back to
 `map.default`); an unmapped capability with no `default` fails loud.
+
+### `activity_unmapped` — an explicit activity that isn't mapped
+
+Every resolution carries a **mapping-path** provenance axis, separate from
+which profile was selected: `exact` (the capability hit `profile.map`
+directly) or `default-fallback` (it fell through to `map.default`).
+
+When a workflow step names an activity **explicitly** and that activity falls
+through to `map.default` on a profile that otherwise maps named activities,
+forge refuses the dispatch **before the container starts** — `activity_unmapped`
+— rather than silently running the profile's default model for a capability
+you asked for by name. A **role-derived** default-fallback (no explicit
+activity was requested) stays valid, and a profile whose map is *only*
+`default` (an intentional catch-all) is never flagged either way.
+
+```bash
+forge model resolve <agent> --activity <name> --project <dir> --json
+```
+
+reports the refusal machine-readably: the agent, the activity, the selected
+profile, how the profile was selected (`resolvedBy` — a separate axis from
+mapping-path), the mappings the profile DOES have, the `map.default` model
+(labelled diagnostic-only — it is never what would have dispatched), and the
+policy path. `forge show <task-id>` and the dashboard render the same
+mapping-path axis on every resolved task, distinctly from `resolvedBy`, so a
+default-fallback is never displayed as though it satisfied an explicit
+activity. Fix it by adding the activity to the profile's map, or by dropping
+the explicit `activity:` to accept the profile default.
 
 ## When a policy edit takes effect
 
@@ -129,9 +251,11 @@ the policy entry sets `tool_capable`, and the inferred value for pi vs non-pi
 runtimes) and **`dispatchable`** (whether the role can actually be dispatched to
 this model). If `dispatchable: no`, the fix is shown inline.
 
-Every policy-mode task writes provider + model + auth + `resolvedBy` into its
-`manifest.json` and emits `model.profile_resolved` (or
-`model.profile_unavailable` when the gate fails).
+Every policy-mode task writes provider + model + auth + `resolvedBy` (plus the
+`capabilitySource` / `mappingPath` provenance axes described
+[above](#activity_unmapped--an-explicit-activity-that-isnt-mapped)) into its
+`manifest.json` and emits `model.profile_resolved` (or `model.profile_unavailable`
+when a gate fails — activity-unmapped, availability, or tool-capability).
 
 ## Mixed-provider (Walk — shipped)
 

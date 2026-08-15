@@ -106,6 +106,7 @@ result:
 }
 
 const FG251_POLICY = `on_unavailable: fail
+schema_version: 2
 model_profiles:
   pi-non-capable:
     provider: anthropic

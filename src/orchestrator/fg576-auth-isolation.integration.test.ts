@@ -16,7 +16,7 @@ type Roots = { base: string; home: string; project: string; bin: string; state: 
 let roots: Roots;
 
 function policy(defaultProfile: "codex" | "claude"): string {
-  return `model_profiles:\n  codex:\n    provider: openai\n    auth: subscription\n    map:\n      default: { model: gpt-5.6-terra, cost_tier: standard }\n  claude:\n    provider: anthropic\n    auth: api\n    map:\n      default: { model: claude-sonnet-4-6, cost_tier: standard }\ndefaults:\n  profile: ${defaultProfile}\n  activity: {}\n`;
+  return `schema_version: 2\nmodel_profiles:\n  codex:\n    provider: openai\n    auth: subscription\n    map:\n      default: { model: gpt-5.6-terra, cost_tier: standard }\n  claude:\n    provider: anthropic\n    auth: api\n    map:\n      default: { model: claude-sonnet-4-6, cost_tier: standard }\ndefaults:\n  profile: ${defaultProfile}\n  activity: {}\n`;
 }
 function setup(): Roots {
   const base = mkdtempSync(join(tmpdir(), "fg576-isolation-"));

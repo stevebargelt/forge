@@ -30,6 +30,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 const PROFILES = `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic

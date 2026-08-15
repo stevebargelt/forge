@@ -578,6 +578,11 @@ export type ActivityEntry = {
   checkoutName: string | null;
   agentRole: string;
   agentModel: string | null;
+  // FG-560: the mapping-path provenance axis (durable resolution record, step 3).
+  // "exact" = the activity was mapped directly; "default-fallback" = it fell through
+  // to map.default. null in legacy mode (no policy). SEPARATE from resolvedBy.
+  mappingPath: string | null;
+  capabilitySource: string | null; // "explicit" | "role-derived" | null (legacy)
   phase: string;
   status: string;
   completedAt: string;
@@ -591,7 +596,7 @@ export type ActivityEntry = {
  *  Used for the activity feed. */
 export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectScope): ActivityEntry[] {
   let sql = `
-    SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.started_at, t.completed_at,
+    SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.started_at, t.completed_at${tasksModelProvenanceSelect()},
            r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
@@ -616,6 +621,10 @@ export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectSc
     phase: string;
     agent_role: string;
     agent_model: string | null;
+    // Optional: absent (not just null) on an unmigrated store, where the SELECT
+    // omits the columns — mapped through `?? null` below so rendering is unchanged.
+    resolved_mapping_path?: string | null;
+    resolved_capability_source?: string | null;
     status: string;
     result: string | null;
     started_at: string | null;
@@ -645,6 +654,8 @@ export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectSc
       checkoutName: r.project_dir ? basename(r.project_dir) : null,
       agentRole: r.agent_role,
       agentModel: r.agent_model,
+      mappingPath: r.resolved_mapping_path ?? null,
+      capabilitySource: r.resolved_capability_source ?? null,
       phase: r.phase,
       status: r.status,
       completedAt: r.completed_at,
@@ -667,6 +678,10 @@ export type InFlightEntry = {
   taskId: string;
   agentRole: string;
   agentModel: string | null;
+  // FG-560: mapping-path provenance (durable resolution record, step 3). null in
+  // legacy mode. SEPARATE axis from the profile-selection provenance.
+  mappingPath: string | null;
+  capabilitySource: string | null;
   phase: string;
   status: string;
   startedAt: string | null;
@@ -697,7 +712,7 @@ export type InFlightEntry = {
 export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightEntry[] {
   const project = scopeSql("runs", "r", scope);
   const rows = db().prepare(`
-    SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
+    SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at${tasksModelProvenanceSelect()},
            r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
@@ -711,6 +726,8 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
     phase: string;
     agent_role: string;
     agent_model: string | null;
+    resolved_mapping_path?: string | null;
+    resolved_capability_source?: string | null;
     status: string;
     started_at: string | null;
     title: string;
@@ -763,6 +780,8 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
       taskId: r.id,
       agentRole: r.agent_role,
       agentModel: r.agent_model,
+      mappingPath: r.resolved_mapping_path ?? null,
+      capabilitySource: r.resolved_capability_source ?? null,
       phase: r.phase,
       status: r.status,
       startedAt: r.started_at,
@@ -883,7 +902,7 @@ export type GateRow = {
 export function taskDetail(taskId: string): TaskDetail | null {
   const taskRow = db().prepare(`
     SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
-           t.error, t.started_at,
+           t.error, t.started_at${tasksModelProvenanceSelect()},
            r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
@@ -896,6 +915,8 @@ export function taskDetail(taskId: string): TaskDetail | null {
         phase: string;
         agent_role: string;
         agent_model: string | null;
+        resolved_mapping_path?: string | null;
+        resolved_capability_source?: string | null;
         status: string;
         result: string | null;
         completed_at: string | null;
@@ -922,6 +943,8 @@ export function taskDetail(taskId: string): TaskDetail | null {
     checkoutName: taskRow.project_dir ? basename(taskRow.project_dir) : null,
     agentRole: taskRow.agent_role,
     agentModel: taskRow.agent_model,
+    mappingPath: taskRow.resolved_mapping_path ?? null,
+    capabilitySource: taskRow.resolved_capability_source ?? null,
     phase: taskRow.phase,
     status: taskRow.status,
     completedAt: taskRow.completed_at ?? "",
@@ -2055,6 +2078,30 @@ const projectPresentationCache = new Map<string, { at: number; value: ProjectPre
 // applies the migration under this long-lived read handle.
 function runsProjectIdentitySelect(): string {
   return hasRunsProjectIdentity() ? ", r.project_identity" : "";
+}
+
+// FG-560: does the OPEN store carry the additive task provenance columns
+// (resolved_mapping_path / resolved_capability_source, added in step 3)? Same
+// posture as hasRunsProjectIdentity: this read-only handle may point at an aged
+// store a peer forge has not migrated yet, so naming the columns unconditionally
+// would fail every task query on it. Un-memoized — PRAGMA reads the schema already
+// held for this connection, and a cached `false` would go stale the instant a peer
+// applies the migration. A store predating the `tasks` table fails closed to false.
+function hasTasksModelProvenance(): boolean {
+  try {
+    return (db().prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>).some(
+      (col) => col.name === "resolved_mapping_path",
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The SELECT fragment for the task provenance axes, or "" on an unmigrated store —
+ *  so a legacy/aged store keeps rendering badges exactly as before (null provenance)
+ *  rather than throwing at prepare time. */
+function tasksModelProvenanceSelect(): string {
+  return hasTasksModelProvenance() ? ", t.resolved_mapping_path, t.resolved_capability_source" : "";
 }
 
 function normalizeStoredIdentityToEvidenceKey(storedIdentity: string): string {

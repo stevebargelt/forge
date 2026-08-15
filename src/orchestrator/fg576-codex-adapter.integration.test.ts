@@ -63,6 +63,7 @@ const CLI_ARGV = ["--import", LOADER, CLI_ENTRY];
 const FAKE_CODEX = join(HERE, "__fixtures__", "fake-codex.js");
 
 const POLICY = `
+schema_version: 2
 model_profiles:
   codex-subscription:
     provider: openai

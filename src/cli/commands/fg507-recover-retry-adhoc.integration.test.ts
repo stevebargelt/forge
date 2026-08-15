@@ -146,6 +146,7 @@ function policyProjectDir(): string {
   writeFileSync(
     join(dir, ".forge", "model-policy.yml"),
     `
+schema_version: 2
 model_profiles:
   ambient:
     provider: anthropic

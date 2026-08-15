@@ -447,6 +447,19 @@ export function resolveRuntimeMetadata(rt: Runtime): RuntimeMetadata {
 //   runtime  owns EXECUTION   — image + command + mounts + prompt/result + env detect
 //   forge    owns BINDING     — (provider, effective_auth) -> runtime YAML name
 
+// FG-560: the model-policy versioning anchor. `model-policy.yml` is an
+// operator-owned config surface, so it carries an explicit schema_version and is
+// migrated ONLY by `forge upgrade` (the sole migration authority) — ordinary
+// policy loading is strictly read-only and never rewrites or reinterprets a file.
+//
+// Current = 2. The dispatch loaders (loadModelPolicy / loadModelPolicyWithSource)
+// gate on this BEFORE Zod runs: a v1 file (no schema_version) or any older-known
+// version is refused with a `forge upgrade` directive and left byte-identical; a
+// newer-unknown version fails loud ('upgrade Forge') and is NEVER downgraded or
+// reinterpreted as an older schema. Bump this (and add a migration in
+// model-policy-migration.ts) whenever the policy shape changes incompatibly.
+export const CURRENT_MODEL_POLICY_SCHEMA_VERSION = 2;
+
 // Coarse, hand-maintained per-model label (ADR §9). NOT a computed dollar figure
 // — OAuth/subscription has no per-token cost and prices drift. Guardrails reason
 // over the qualitative tier of the resolved (profile, model).
@@ -504,6 +517,17 @@ const ModelProfileSchema = z
 
 export const ModelPolicySchema = z
   .object({
+    // FG-560: the schema version anchor. Current = 2 (see
+    // CURRENT_MODEL_POLICY_SCHEMA_VERSION). The dispatch READ-path enforces
+    // explicit presence + currency via the loader version gate BEFORE this schema
+    // runs, so by the time Zod sees the document schema_version is always 2. Kept
+    // `.default(2)` here (rather than required) purely so a legacy-shaped object
+    // handed straight to ModelPolicySchema.safeParse — internal tools/tests, never
+    // the dispatch path — still validates; the migration engine and seed write the
+    // key explicitly, and the loader gate refuses any file that omits it.
+    schema_version: z
+      .literal(CURRENT_MODEL_POLICY_SCHEMA_VERSION)
+      .default(CURRENT_MODEL_POLICY_SCHEMA_VERSION),
     // Global default; per-profile on_unavailable overrides it. Defaults to fail
     // (fail loud — never silently run a different model than policy specified).
     on_unavailable: OnUnavailableSchema.default("fail"),

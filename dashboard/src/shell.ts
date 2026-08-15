@@ -219,6 +219,52 @@ section.feed { margin-top: 24px; }
   margin-left: 6px;
   vertical-align: middle;
 }
+/* FG-560: mapping-path provenance made visible. An EXACT activity mapping keeps
+ * the neutral accent badge and carries an "exact" tag; a map.default FALLBACK is
+ * tinted amber and carries a "default" tag so it is distinguishable at a glance
+ * from an exact hit. An EXPLICIT activity that fell to default (the activity_unmapped
+ * shape dispatch refuses) is escalated to a red outline. Colour and hover are never
+ * the only signal — the visible tag text carries the same meaning for non-colour,
+ * keyboard and touch channels (RF-1). */
+.model-badge-exact {
+  border: 1px solid rgba(122, 159, 255, 0.35);
+}
+.model-badge-exact .model-badge-tag {
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: rgba(122, 159, 255, 0.24);
+  color: #cfdcff;
+}
+.model-badge-default-fallback {
+  background: rgba(224, 168, 83, 0.16);
+  color: #e0a853;
+  border: 1px solid rgba(224, 168, 83, 0.4);
+}
+.model-badge-default-fallback .model-badge-tag {
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: rgba(224, 168, 83, 0.28);
+  color: #ffd9a0;
+}
+.model-badge-unmapped {
+  background: rgba(240, 110, 110, 0.16);
+  color: #f06e6e;
+  border: 1px solid rgba(240, 110, 110, 0.5);
+}
+.model-badge-unmapped .model-badge-tag {
+  background: rgba(240, 110, 110, 0.3);
+  color: #ffc9c9;
+}
 /* Per-project identity chip. Background color is injected inline from the
  * resolved projectColor (.vscode titleBar.activeBackground or hash fallback);
  * white text is hard-coded because dashboard's dark theme guarantees the

@@ -1,9 +1,20 @@
 import type { Command } from "commander";
 import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { resolveModel, type ModelResolution } from "../../v2/model-resolution.js";
+import {
+  resolveModel,
+  isActivityUnmapped,
+  activityUnmappedMessage,
+  type ModelResolution,
+} from "../../v2/model-resolution.js";
+import {
+  mappingPathSummary,
+  buildActivityUnmappedDetail,
+  renderActivityUnmapped,
+  type ActivityUnmappedDetail,
+} from "../../v2/model-provenance.js";
 import { probeAuth, type AuthProbe } from "../../v2/provider-doctor.js";
-import { loadRuntime } from "../../v2/loader.js";
+import { loadRuntime, loadModelPolicyWithSource } from "../../v2/loader.js";
 import { resolveRuntimeMetadata } from "../../v2/schema.js";
 import { requiresStructuredResult } from "../../v2/role-capabilities.js";
 
@@ -55,6 +66,41 @@ export function registerModel(program: Command): void {
 
         const legacy = resolution.resolvedBy === "legacy";
 
+        // FG-560: the mapping-path axis (exact vs default-fallback) is SEPARATE
+        // from resolvedBy (profile selection). In policy mode surface it on both
+        // human + JSON; when the resolution is the activity_unmapped refusal, build
+        // the full machine-readable detail — the available mappings and the policy
+        // path come from the SAME policy load the resolver used, so a script can
+        // read the refusal without re-resolving.
+        const mappingSummary = legacy
+          ? undefined
+          : mappingPathSummary(resolution.mappingPath, resolution.capabilitySource);
+        let unmapped: ActivityUnmappedDetail | undefined;
+        if (!legacy && isActivityUnmapped(resolution)) {
+          let availableMappings: string[] = [];
+          let policyPath: string | null = null;
+          try {
+            const loaded = loadModelPolicyWithSource({ projectDir });
+            if (loaded.policy && resolution.profile) {
+              availableMappings = Object.keys(loaded.policy.model_profiles[resolution.profile]?.map ?? {});
+            }
+            if (loaded.policy) policyPath = loaded.path;
+          } catch {
+            // A policy that fails to load is reported by the resolution path itself;
+            // the refusal detail simply omits the mappings/path it could not read.
+          }
+          unmapped = buildActivityUnmappedDetail({
+            agent,
+            activity: resolution.alias ?? opts.activity ?? "",
+            profile: resolution.profile ?? "",
+            resolutionSource: resolution.resolvedBy,
+            availableMappings,
+            diagnosticDefaultModel: resolution.model,
+            policyPath,
+            message: activityUnmappedMessage(resolution) ?? "",
+          });
+        }
+
         // FG-339: compute tool capability and dispatchability for policy-mode resolutions.
         let effectiveToolCapable: boolean | undefined;
         let dispatchable: boolean | undefined;
@@ -72,9 +118,14 @@ export function registerModel(program: Command): void {
 
         if (opts.json) {
           console.log(JSON.stringify({
+            // `resolution` already carries mappingPath / capabilitySource / outcome
+            // (the two provenance axes + the refusal outcome); spread verbatim.
             ...resolution,
             ...(probe ? { availability: probe } : {}),
             ...(!legacy && effectiveToolCapable !== undefined ? { toolCapable: resolution.toolCapable, effectiveToolCapable, dispatchable } : {}),
+            // FG-560: the activity_unmapped refusal as a structured block a script
+            // can branch on — present ONLY when the resolution is that refusal.
+            ...(unmapped ? { activityUnmapped: unmapped } : {}),
           }, null, 2));
           return;
         }
@@ -92,6 +143,10 @@ export function registerModel(program: Command): void {
         }
         line("runtime:", resolution.runtime);
         line("resolved by:", resolution.resolvedBy);
+        // FG-560: the mapping-path axis, on its OWN line so it never reads as part
+        // of the profile-selection provenance above. A default fallback is labelled
+        // distinctly by mappingPathSummary.
+        if (mappingSummary) line("mapping:", mappingSummary);
         if (!legacy) {
           if (toolCapabilityNote) {
             console.log(`  ${toolCapabilityNote}`);
@@ -110,6 +165,13 @@ export function registerModel(program: Command): void {
           const icon = probe.status === "available" ? "✓" : probe.status === "unavailable" ? "✗" : "?";
           console.log("");
           console.log(`  availability: ${icon} ${probe.mode} — ${probe.status} (${probe.detail})`);
+        }
+        // FG-560: the fail-closed refusal, rendered readably. Dispatch would REFUSE
+        // this resolution (an explicit activity that only resolves via map.default),
+        // so name it here as a dry-run — same fields the --json block carries.
+        if (unmapped) {
+          console.log("");
+          for (const l of renderActivityUnmapped(unmapped)) console.log(`  ${l}`);
         }
       }
     );

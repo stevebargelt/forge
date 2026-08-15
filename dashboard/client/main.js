@@ -1662,6 +1662,39 @@ function ProjectChip({ entry }) {
   `;
 }
 
+// FG-560: the per-task model badge, with mapping-path provenance made VISIBLE.
+// The mapping-path axis (exact vs default-fallback) is SEPARATE from the profile-
+// selection provenance — an exact activity mapping and a map.default fallback must
+// be distinguishable at a glance. BOTH carry a visible text marker ("exact" /
+// "default") plus a tooltip: colour and hover are never the ONLY signal, so the
+// state is perceivable by keyboard, touch and assistive-tech users, not just by a
+// mouse hover (RF-1). A default fallback additionally gets a distinct class and a
+// tooltip saying the activity was NOT mapped. A legacy task (no policy →
+// mappingPath null) renders exactly as before: a plain badge, no marker, no
+// provenance tooltip. Shared across every task surface so they agree.
+function ModelBadge({ entry }) {
+  if (!entry.agentModel) return null;
+  const mappingPath = entry.mappingPath;
+  const explicit = entry.capabilitySource === "explicit";
+  if (mappingPath === "default-fallback") {
+    // A default fallback. When the activity was EXPLICIT this is the shape dispatch
+    // refuses (activity_unmapped) — flag it more loudly; otherwise it is a benign
+    // role-derived catch-all, still marked distinct from an exact hit.
+    const title = explicit
+      ? "map.default fallback — the EXPLICIT activity is NOT mapped in this profile (activity_unmapped)"
+      : "map.default fallback — no activity-specific mapping for this task";
+    return html`<span
+      class=${"model-badge model-badge-default-fallback" + (explicit ? " model-badge-unmapped" : "")}
+      title=${title}
+    >${entry.agentModel}<span class="model-badge-tag">default</span></span>`;
+  }
+  if (mappingPath === "exact") {
+    return html`<span class="model-badge model-badge-exact" title="exact activity mapping — the activity is mapped directly in this profile">${entry.agentModel}<span class="model-badge-tag">exact</span></span>`;
+  }
+  // Legacy / pre-policy task: no mapping-path provenance. Unchanged rendering.
+  return html`<span class="model-badge">${entry.agentModel}</span>`;
+}
+
 // FG-576 (AC7/AC11) — the project-scoped interactive orchestrator panel.
 //
 // Each row is a receipt JOINED to the launcher-owned liveness record, so it says
@@ -1889,7 +1922,7 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
         <div>
           <${ProjectChip} entry=${task} />
           <strong>${task.agentRole}</strong>
-          ${task.agentModel ? html`<span class="model-badge">${task.agentModel}</span>` : null}
+          <${ModelBadge} entry=${task} />
           <span class="faint"> ·</span> <span class="muted">${task.runTitle}</span>
         </div>
         <div class="faint mono" style="font-size: 11px;">
@@ -1909,7 +1942,7 @@ function FeedCard({ entry, onClick }) {
         <div>
           <${ProjectChip} entry=${entry} />
           <span class="agent">${entry.agentRole}</span>
-          ${entry.agentModel ? html`<span class="model-badge">${entry.agentModel}</span>` : null}
+          <${ModelBadge} entry=${entry} />
           <span class="faint"> · </span>
           <span class="context">${entry.runTitle}</span>
         </div>
@@ -2029,7 +2062,7 @@ function TaskDetail({ taskId, onClose }) {
         <span class="close" onClick=${onClose}>×</span>
         <h1>
           ${detail.task.agentRole}
-          ${detail.task.agentModel ? html`<span class="model-badge">${detail.task.agentModel}</span>` : null}
+          <${ModelBadge} entry=${detail.task} />
           <span class="muted"> ·</span> <span class="muted">${detail.task.runTitle}</span>
         </h1>
         <div class="faint mono" style="font-size: 11px; margin: 8px 0 16px;">

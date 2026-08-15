@@ -62,6 +62,7 @@ import {
 import type { AdapterLaunchContext } from "./adapter.js";
 
 const POLICY = `
+schema_version: 2
 model_profiles:
   claude-subscription:
     provider: anthropic

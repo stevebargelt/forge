@@ -11,7 +11,7 @@ import { listOrchestratorReceiptsForProject } from "../store/orchestrator-receip
 import { loadHeartbeats } from "../util/orchestrator-heartbeats.js";
 const here = dirname(fileURLToPath(import.meta.url)), repo = resolve(here, "..", ".."), cli = ["--import", join(repo, "bin", "forge-loader.mjs"), join(repo, "src", "cli", "index.ts")];
 let base = "", home = "", project = "", bin = "", db = "", record = "", heartbeats = "";
-const policy = `model_profiles:\n  claude:\n    provider: anthropic\n    auth: api\n    map:\n      default: { model: claude-sonnet-4-6, cost_tier: standard }\ndefaults:\n  profile: claude\n  activity: {}\n`;
+const policy = `schema_version: 2\nmodel_profiles:\n  claude:\n    provider: anthropic\n    auth: api\n    map:\n      default: { model: claude-sonnet-4-6, cost_tier: standard }\ndefaults:\n  profile: claude\n  activity: {}\n`;
 function env(extra: Record<string, string> = {}) { return { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: db, FORGE_ORCHESTRATORS_DIR: heartbeats, PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_RECORD: record, ANTHROPIC_API_KEY: "fixture", ...extra }; }
 function run(extra: Record<string, string> = {}) { const r = spawnSync(process.execPath, [...cli, "orchestrator"], { cwd: project, env: env(extra), encoding: "utf8", timeout: 30_000 }); closeDb(); return { status: r.status, stderr: r.stderr ?? "" }; }
 function receipts() { process.env.FORGE_DB_PATH = db; process.env.FORGE_HOME = home; closeDb(); return listOrchestratorReceiptsForProject(project); }

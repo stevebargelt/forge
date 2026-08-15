@@ -1,0 +1,16 @@
+# Legacy policy used by the FG-560 mixed-fleet acceptance matrix.
+on_unavailable: fail
+model_profiles:
+  sub:
+    provider: anthropic
+    auth: subscription
+    map:
+      reasoning: { model: claude-opus-5, cost_tier: premium }
+      review: { model: claude-sonnet-4-6, cost_tier: standard }
+      fast: { model: claude-haiku-4-5, cost_tier: cheap }
+      default: { model: claude-sonnet-4-6, cost_tier: standard }
+defaults:
+  profile: sub
+  activity:
+    reasoning: sub
+    fast: sub

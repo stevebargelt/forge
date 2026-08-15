@@ -35,7 +35,7 @@ import { taskDispatchKind } from "./run-kind.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
 import { resolveSeedGeneration } from "./seed-generation.js";
-import { resolveModel, taskModelFields, type ModelResolution } from "./model-resolution.js";
+import { resolveModel, taskModelFields, isActivityUnmapped, activityUnmappedMessage, ACTIVITY_UNMAPPED_REASON, type ModelResolution } from "./model-resolution.js";
 import {
   dispatchInvokeTask,
   invokeWorkflowShape,
@@ -414,6 +414,14 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     runtimeName,
     ctx: { projectDir },
   });
+  // FG-560: an EXPLICIT activity that would only resolve via map.default is refused
+  // here, BEFORE any row is written — a retry must not re-dispatch an unmapped
+  // explicit activity any more than a fresh invoke would. Modeled off the resolution
+  // OUTCOME (not a thrown Error), naming the same activity_unmapped reason the
+  // dispatch gate and `forge model resolve --json` surface.
+  if (isActivityUnmapped(resolution)) {
+    refuse(activityUnmappedMessage(resolution) ?? ACTIVITY_UNMAPPED_REASON);
+  }
   const { step, workflow } = invokeWorkflowShape(task.agentRole, task.agentAlias, runtimeName);
   // FG-654: a retry RE-VERIFIES against today's required protocol and re-stamps; it never
   // replays the original task's stamp. A retry after a `forge upgrade` genuinely runs a

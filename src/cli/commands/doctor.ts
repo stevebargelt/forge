@@ -32,6 +32,11 @@ import {
 import { inspectSeedInstall, type SeedInstallState } from "../../v2/seed-generation.js";
 import { classifyDocsSurfaces, type DocsSurfacesClassification } from "../../v2/contract.js";
 import {
+  buildModelPolicyStatus,
+  renderModelPolicyStatus,
+  type ModelPolicyStatus,
+} from "../../v2/model-policy-status.js";
+import {
   buildReleaseReport,
   renderReleaseReport,
   type ReleaseInputs,
@@ -323,6 +328,12 @@ export type DoctorFindings = {
    *  never moves the exit code, but doctor names invalid/legacy config and its
    *  repair action so an operator can see and fix it. */
   docsSurfaces: DocsSurfacesClassification;
+  /** FG-560: read-only model-policy migration status — the host policy plus every
+   *  discovered project policy, each classified (current / needs-upgrade-v1 /
+   *  changed-if-applied / needs-human-decision / newer-unsupported / unreachable) by
+   *  COMPOSING discovery (step 6) with the classifier (step 5). Doctor NEVER writes;
+   *  `forge upgrade` is the sole migration authority. */
+  modelPolicyStatus: ModelPolicyStatus;
   /** FG-693: WHICH TREE doctor read, as the one contract (util/path-identity.ts)
    *  proved it — not as the ambient spelling doctor happened to be handed.
    *
@@ -364,6 +375,10 @@ export function gatherDoctorFindings(projectDir: string = process.cwd(), imageNa
     // with the write side (init/upgrade) about whether a file is the migratable
     // legacy template, a customized file, valid, or missing.
     docsSurfaces: classifyDocsSurfaces(projectDir),
+    // FG-560: compose discovery + the per-file classifier into a read-only status.
+    // forgeHome pinned to FORGE_HOME so the host row is the SAME policy doctor's
+    // other checks read; projectDir seeds project discovery from this checkout.
+    modelPolicyStatus: buildModelPolicyStatus({ forgeHome: FORGE_HOME }),
   };
 }
 
@@ -377,6 +392,9 @@ export function doctorJson(f: DoctorFindings): unknown {
     // FG-546: the docs-surfaces verdict a script can branch on — same value the
     // human section renders, so the two renderings can never disagree.
     docsSurfaces: f.docsSurfaces,
+    // FG-560: the model-policy migration status a script can branch on — same value
+    // the human section renders, so the two renderings can never disagree.
+    modelPolicyStatus: f.modelPolicyStatus,
     // FG-693: the proven identity of the tree doctor read, for a script that must
     // decide whether two doctor runs describe the same checkout. The as-written
     // spelling stays on projectAdapters.projectDir for display.
@@ -419,6 +437,7 @@ export function renderDoctor(f: DoctorFindings): string {
   push(renderProtocolDrift(f.protocolDrift));
   push(renderProjectAdapterDrift(f.projectAdapters));
   push(renderDocsSurfaces(f.docsSurfaces));
+  push(renderModelPolicyStatus(f.modelPolicyStatus));
   if (f.seedInstall.kind === "incomplete") {
     out.push(
       `\nSeed install: INCOMPLETE (repairable) — ${f.seedInstall.reason}\n` +

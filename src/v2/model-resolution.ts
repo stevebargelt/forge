@@ -35,6 +35,26 @@ import type { SeedGeneration } from "./seed-generation.js";
 // resolves to one of these, and only the resolved value is ever recorded.
 export type EffectiveAuth = "subscription" | "api" | "bedrock";
 
+// FG-560: two INDEPENDENT provenance axes, distinct from `resolvedBy` (which
+// records how the PROFILE was selected).
+//
+//   capabilitySource — where the capability alias came from:
+//     "explicit"     the workflow step's `activity:` (stepAlias) demanded it
+//     "role-derived" it fell out of defaultActivityForRole (no explicit intent)
+//
+//   mappingPath — how the concrete model was read out of the chosen profile:
+//     "exact"            profile.map[capability] hit directly
+//     "default-fallback" capability absent → fell through to profile.map["default"]
+//
+// The two combine into the `activity_unmapped` fail-closed refusal: an EXPLICIT
+// activity that only resolves via map.default was demanded but not honored, so a
+// silent default is worse than a loud stop. A ROLE-DERIVED default-fallback is
+// legacy-equivalent and stays valid. Default-only profiles (a map with just
+// "default", e.g. pi-groq) are intentional catch-alls and are NEVER flagged.
+export type CapabilitySource = "explicit" | "role-derived";
+export type MappingPath = "exact" | "default-fallback";
+export type ResolutionOutcome = "resolved" | "activity_unmapped";
+
 export type ModelResolution = {
   /** Capability alias from pass 1 (e.g. "review"). undefined in legacy mode. */
   alias: string | undefined;
@@ -59,6 +79,17 @@ export type ModelResolution = {
   /** Whether the resolved model supports tool calls. Undefined = unset in policy
    *  (defaults at dispatch time: non-pi runtimes default true, pi defaults false). */
   toolCapable?: boolean;
+  /** FG-560 axis 1 — where the capability alias came from. undefined in legacy mode. */
+  capabilitySource?: CapabilitySource;
+  /** FG-560 axis 2 — how the concrete model was read from the profile map.
+   *  undefined in legacy mode. */
+  mappingPath?: MappingPath;
+  /** FG-560 — resolution outcome. "resolved" for every honored resolution;
+   *  "activity_unmapped" when an EXPLICIT activity fell to map.default on a
+   *  non-default-only profile (a fail-closed refusal that is inspectable WITHOUT
+   *  throwing, so the dispatch preflight and `forge model resolve --json` read the
+   *  same fact). undefined in legacy mode. */
+  outcome?: ResolutionOutcome;
 };
 
 // Pass-1 fallback: agent role -> default capability activity. Small + local for
@@ -171,7 +202,9 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
   }
 
   // ---- Policy mode ----
-  // Pass 1 — capability (task intent).
+  // Pass 1 — capability (task intent). Axis 1: an explicit step `activity:`
+  // (stepAlias) is the operator's demand; anything else is role-derived.
+  const capabilitySource: CapabilitySource = opts.stepAlias ? "explicit" : "role-derived";
   const capability = opts.stepAlias ?? defaultActivityForRole(opts.agentRole);
 
   // Pass 2 — profile (who runs it). Highest wins.
@@ -206,14 +239,34 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
   // Effective auth — resolve "auto" to a concrete mode; record only the concrete.
   const auth: EffectiveAuth = profile.auth === "auto" ? detectAuthMode() : profile.auth;
 
-  // Concrete model: capability mapping, with "default" as the within-profile fallback.
-  const entry = profile.map[capability] ?? profile.map["default"];
+  // Concrete model: capability mapping, with "default" as the within-profile
+  // fallback. Axis 2: an exact map hit vs a fall-through to map.default.
+  const exactEntry = profile.map[capability];
+  const entry = exactEntry ?? profile.map["default"];
   if (!entry) {
+    // Hard fail-loud stays a throw: no exact mapping AND no default to fall to,
+    // so there is nothing to run at all (unchanged pre-FG-560 behavior).
     throw new Error(
       `profile '${profileName}' has no mapping for capability '${capability}' ` +
         `and no 'default' (mapped: ${Object.keys(profile.map).join(", ")})`
     );
   }
+  const mappingPath: MappingPath = exactEntry ? "exact" : "default-fallback";
+
+  // A default-only profile (map is just "default") is an intentional catch-all —
+  // every activity resolves via the default there, so it is NEVER a refusal.
+  const mapKeys = Object.keys(profile.map);
+  const isDefaultOnly = mapKeys.length === 1 && mapKeys[0] === "default";
+
+  // FG-560 fail-closed refusal, as an OUTCOME not a throw: an EXPLICIT activity
+  // that only resolves via map.default on a profile that DOES map named
+  // activities. Role-derived default-fallback and default-only profiles stay
+  // "resolved". The fields below still describe the would-be resolution so the
+  // outcome is inspectable (forge model resolve --json / the dispatch gate).
+  const outcome: ResolutionOutcome =
+    capabilitySource === "explicit" && mappingPath === "default-fallback" && !isDefaultOnly
+      ? "activity_unmapped"
+      : "resolved";
 
   // #265: an explicit profile.runtime wins (a pi runtime fronts many upstream
   // providers, so the (provider, auth) binding table can't select it). provider
@@ -233,7 +286,35 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
     runtime,
     onUnavailable: profile.on_unavailable ?? policy.on_unavailable,
     toolCapable: entry.tool_capable,
+    capabilitySource,
+    mappingPath,
+    outcome,
   };
+}
+
+// FG-560 — the stable machine-readable reason code carried on refusals, so the
+// dispatch preflight (step 4) and `forge model resolve --json` (step 9) name the
+// same thing. Kept as a const, not an inline literal, so a rename is one edit.
+export const ACTIVITY_UNMAPPED_REASON = "activity_unmapped";
+
+/** True when a resolution is the fail-closed refusal (explicit activity that only
+ *  resolved via map.default on a profile that maps named activities). Inspectable
+ *  without throwing — the caller decides whether to block dispatch or render it. */
+export function isActivityUnmapped(res: ModelResolution): boolean {
+  return res.outcome === "activity_unmapped";
+}
+
+/** A readable, deterministic explanation of an activity_unmapped refusal for
+ *  human + --json surfaces. Safe to call on any resolution; returns undefined
+ *  when there is nothing to refuse. */
+export function activityUnmappedMessage(res: ModelResolution): string | undefined {
+  if (!isActivityUnmapped(res)) return undefined;
+  return (
+    `${ACTIVITY_UNMAPPED_REASON}: explicit activity '${res.alias}' is not mapped in ` +
+    `profile '${res.profile}'; it would fall through to map.default ('${res.model}'). ` +
+    `Add a '${res.alias}' entry to the profile map, or drop the explicit activity to ` +
+    `accept the profile default.`
+  );
 }
 
 // The task-row fields a resolution implies. Use at every task-creation site so
@@ -247,6 +328,12 @@ export type TaskModelFields = {
   resolvedProvider?: string;
   resolvedAuth?: string;
   resolvedBy?: string;
+  /** FG-560 axis 1 — where the capability alias came from ("explicit" |
+   *  "role-derived"). Omitted in legacy mode (no policy => no provenance). */
+  resolvedCapabilitySource?: string;
+  /** FG-560 axis 2 — how the concrete model was read from the profile map
+   *  ("exact" | "default-fallback"). Omitted in legacy mode. */
+  resolvedMappingPath?: string;
 };
 
 export function taskModelFields(
@@ -264,6 +351,10 @@ export function taskModelFields(
     resolvedProvider: res.provider,
     resolvedAuth: res.auth,
     resolvedBy: res.resolvedBy,
+    // FG-560: mapping-path provenance is a SEPARATE axis from profile-selection
+    // provenance (resolvedBy) — carried alongside it, never standing in for it.
+    resolvedCapabilitySource: res.capabilitySource,
+    resolvedMappingPath: res.mappingPath,
   };
 }
 
@@ -271,7 +362,7 @@ export function taskModelFields(
 // Returns undefined in legacy mode (resolvedBy="legacy") so the manifest simply
 // omits the block, matching pre-AWN-7 manifests.
 export function manifestModelBlock(res: ModelResolution):
-  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string }
+  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string; capabilitySource: string; mappingPath: string }
   | undefined {
   if (res.resolvedBy === "legacy") return undefined;
   return {
@@ -283,5 +374,10 @@ export function manifestModelBlock(res: ModelResolution):
     costTier: res.costTier ?? "",
     resolvedBy: res.resolvedBy,
     runtime: res.runtime,
+    // FG-560: both provenance axes travel in the manifest model block too, so
+    // "which mapping path resolved this model" is answerable from the durable
+    // dispatch manifest, not only the task row.
+    capabilitySource: res.capabilitySource ?? "",
+    mappingPath: res.mappingPath ?? "",
   };
 }
