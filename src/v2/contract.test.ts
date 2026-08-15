@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -220,6 +220,29 @@ test("classifyDocsSurfaces: hand-authored invalid → customized-invalid WITH va
   const c2 = classifyDocsSurfaces(dir);
   assert.equal(c2.verdict, "customized-invalid");
   assert.ok(c2.detail && c2.detail.length > 0);
+});
+
+test("classifyDocsSurfaces RF-2: a DANGLING docs-surfaces.yml symlink is NOT 'missing' — customized-invalid, never followed", () => {
+  // A dangling symlink at .forge/docs-surfaces.yml. existsSync follows it and
+  // reads false → the old code classified it 'missing' and provisioning then
+  // copied the seed THROUGH the link, outside .forge. It must classify as
+  // customized-invalid so no provision/migrate write follows it.
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  symlinkSync(join(dir, "..", "escape-target.yml"), join(dir, ".forge", "docs-surfaces.yml"));
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "customized-invalid");
+  assert.match(c.detail ?? "", /symlink/i);
+});
+
+test("classifyDocsSurfaces RF-1: a RESOLVING docs-surfaces.yml symlink is customized-invalid too (a symlink is never the frozen legacy shape)", () => {
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  // Point the link at a real, schema-valid file. Following it would read
+  // 'valid-project'; we must NOT follow it — a symlink is operator-authored.
+  writeFileSync(join(dir, "real-surfaces.yml"), "surfaces:\n  - src/mine/\n");
+  symlinkSync(join(dir, "real-surfaces.yml"), join(dir, ".forge", "docs-surfaces.yml"));
+  const c = classifyDocsSurfaces(dir);
+  assert.equal(c.verdict, "customized-invalid");
+  assert.match(c.detail ?? "", /symlink/i);
 });
 
 test("classifyDocsSurfaces: unparseable YAML → customized-invalid with parse detail", () => {

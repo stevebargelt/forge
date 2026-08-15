@@ -143,6 +143,15 @@ export function registerInit(program: Command): void {
         console.log(`  config.yml:       ${options.prefix ? `WOULD write prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
         console.log(`  model-policy.yml: ${describeSeedProvisionPlan(forgeProjectDir, "model-policy.yml")}`);
         console.log(`  docs-surfaces.yml:${describeDocsSurfacesProvisionPlan(projectDir)}`);
+        // AC8 (RF-3): dry-run must forecast the 'requires operator repair' state
+        // with the SAME actionable warning the live write path emits — name the
+        // file, the validation error, and the repair action — not just the generic
+        // forecast line. Routed through the shared classifier so it cannot disagree
+        // with what the real run then does.
+        const docsSurfacesForecast = classifyDocsSurfaces(projectDir);
+        if (docsSurfacesForecast.verdict === "customized-invalid") {
+          console.warn(`        ${docsSurfacesRepairWarning(docsSurfacesForecast.path, docsSurfacesForecast.detail ?? "invalid docs-surfaces config")}`);
+        }
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         console.log(`  operator adapters: ${describeClaudeCommandsPlan(adaptersPlan)}`);
@@ -464,7 +473,7 @@ export function provisionDocsSurfaces(projectDir: string): DocsSurfacesProvision
       const seedPath = resolveSeedPath("docs-surfaces.example.yml");
       if (!seedPath) return { action: "seed-missing", path };
       mkdirSync(dirname(path), { recursive: true });
-      copyFileSync(seedPath, path);
+      atomicWriteSeed(seedPath, path);
       return { action: "created", path };
     }
     case "known-legacy-generated": {
@@ -473,10 +482,25 @@ export function provisionDocsSurfaces(projectDir: string): DocsSurfacesProvision
       // meaningful to transform out of the placeholder legacy entries.
       const seedPath = resolveSeedPath("docs-surfaces.example.yml");
       if (!seedPath) return { action: "seed-missing", path };
-      copyFileSync(seedPath, path);
+      atomicWriteSeed(seedPath, path);
       return { action: "migrated", path };
     }
   }
+}
+
+// FG-546 (RF-1): copy the seed to the target atomically and symlink-safely.
+// copyFileSync FOLLOWS a symlink at the destination — a docs-surfaces.yml planted
+// as a symlink would have the seed written THROUGH it, outside .forge. Writing a
+// temp file in the same dir and rename()-ing it over the target replaces the entry
+// itself (a symlink there is unlinked, never written through) and never leaves a
+// half-written file if the process dies mid-copy. The classifier already routes
+// any symlink to customized-invalid, so this branch never sees one — this is the
+// defense-in-depth that makes the write incapable of escaping regardless.
+function atomicWriteSeed(seedPath: string, target: string): void {
+  const tmp = join(dirname(target), `.docs-surfaces.forge-${process.pid}.tmp`);
+  try { unlinkSync(tmp); } catch { /* no stale temp to clear */ }
+  copyFileSync(seedPath, tmp);
+  renameSync(tmp, target);
 }
 
 // One-line status for the real-run report. No leading space: the label

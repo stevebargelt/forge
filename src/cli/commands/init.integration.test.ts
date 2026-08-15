@@ -230,6 +230,24 @@ test("integ FG-546: dry-run forecasts create / migrate / preserve / repair for d
   assert.match(repair.stdout, /docs-surfaces\.yml:WOULD SKIP.*repair/i);
 });
 
+test("integ FG-546 RF-3: init --dry-run emits the actionable repair warning for customized-invalid (file + error + repair action)", () => {
+  // AC8: dry-run must forecast the 'requires operator repair' state with the SAME
+  // actionable warning the live write path emits — not just the generic forecast.
+  writeProjectDocsSurfaces("surfaces:\n  - name: x\n    path: y\n");
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  const out = res.stdout + res.stderr;
+  // Names the file.
+  assert.match(out, /docs-surfaces\.yml/);
+  // Names the repair action (edit to the { surfaces: [...] } shape / re-run).
+  assert.match(out, /Repair:/);
+  assert.match(out, /forge init.*forge upgrade|forge upgrade/);
+  // And still leaves the file untouched (dry-run writes nothing).
+  assert.equal(
+    readFileSync(join(projectDir, ".forge", "docs-surfaces.yml"), "utf8"),
+    "surfaces:\n  - name: x\n    path: y\n"
+  );
+});
+
 // ─── FG-332: second run output should confirm no-op for already-created items ─
 
 test("integ FG-332: second forge init run reports already-exists for backlog/ and seed files", () => {

@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -161,13 +161,34 @@ export function isKnownLegacyDocsSurfaces(parsed: unknown): boolean {
  *  mistaken for the generated template and never auto-overwritten.
  *
  *  Order of adjudication for a present file:
+ *   0. a SYMLINK at the path           → customized-invalid (never followed; see below)
  *   1. unreadable / unparseable YAML   → customized-invalid (parse error detail)
  *   2. conforms to the schema          → valid-project (includes the corrected form → idempotent reruns)
  *   3. exact frozen legacy structure   → known-legacy-generated (safe to migrate)
- *   4. otherwise                       → customized-invalid (schema-error detail) */
+ *   4. otherwise                       → customized-invalid (schema-error detail)
+ *
+ *  FG-546 (RF-1/RF-2): the presence check is lstat, NOT existsSync. existsSync
+ *  FOLLOWS a symlink, so a DANGLING docs-surfaces.yml symlink read as `missing`
+ *  and provisioning's copyFileSync then wrote the bundled seed THROUGH the link,
+ *  outside .forge — a write-outside-project hole. A symlink is by definition not
+ *  forge's frozen legacy generated shape, so ANY symlink here (dangling OR
+ *  resolving) is treated as operator-authored: customized-invalid → warn+preserve,
+ *  never on the provision/migrate write path. */
 export function classifyDocsSurfaces(projectDir: string): DocsSurfacesClassification {
   const path = join(projectDir, ".forge", "docs-surfaces.yml");
-  if (!existsSync(path)) return { verdict: "missing", path };
+  let linkStat;
+  try {
+    linkStat = lstatSync(path);
+  } catch {
+    return { verdict: "missing", path };
+  }
+  if (linkStat.isSymbolicLink()) {
+    return {
+      verdict: "customized-invalid",
+      path,
+      detail: "is a symlink — forge does not follow symlinks for docs-surfaces config; treated as operator-authored and left untouched",
+    };
+  }
 
   let raw: string;
   try {

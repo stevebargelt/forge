@@ -1383,6 +1383,32 @@ test("FG-546 provisionDocsSurfaces: customized-INVALID is NEVER clobbered — re
   assert.equal(readFileSync(p, "utf8"), custom, "a customized-invalid file must survive byte-for-byte");
 });
 
+test("FG-546 RF-1: a dangling docs-surfaces.yml symlink is NEVER followed — no write escapes .forge", () => {
+  // Attacker-planted dangling symlink at .forge/docs-surfaces.yml pointing at a
+  // sibling OUTSIDE .forge. The old copyFileSync followed it and created the
+  // sibling with the bundled seed (write-outside-project). Provisioning must
+  // classify it as requires-operator-repair and touch nothing.
+  const escapeTarget = join(projectDir, "escape-target.yml");
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  symlinkSync(escapeTarget, docsSurfacesPath(projectDir));
+
+  const outcome = provisionDocsSurfaces(projectDir);
+  assert.equal(outcome.action, "requires-operator-repair");
+  assert.ok(!existsSync(escapeTarget), "the seed must NOT have been written through the symlink");
+  // The symlink entry itself is preserved, never overwritten.
+  assert.ok(lstatSync(docsSurfacesPath(projectDir)).isSymbolicLink(), "the symlink must survive untouched");
+});
+
+test("FG-546 RF-1: provisioning a missing file lands the seed as a real regular file (atomic write leaves no temp)", () => {
+  const outcome = provisionDocsSurfaces(projectDir);
+  assert.equal(outcome.action, "created");
+  const p = docsSurfacesPath(projectDir);
+  assert.ok(lstatSync(p).isFile() && !lstatSync(p).isSymbolicLink(), "written target is a regular file");
+  // The atomic temp file must not be left behind.
+  const leftovers = readdirSync(join(projectDir, ".forge")).filter((n) => n.includes(".tmp"));
+  assert.deepEqual(leftovers, [], "no atomic temp file should remain");
+});
+
 test("FG-546 describeDocsSurfacesProvisionPlan: forecasts create / migrate / preserve / repair from the same classifier", () => {
   // missing
   assert.match(describeDocsSurfacesProvisionPlan(projectDir), /WOULD create/);
