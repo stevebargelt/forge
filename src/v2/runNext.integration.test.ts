@@ -1183,6 +1183,28 @@ result:
     assert.equal(okPrimary.agentModel, "model-review");
     assert.equal(okPrimary.resolvedMappingPath, "exact");
     assert.equal(okPrimary.resolvedCapabilitySource, "explicit");
+
+    // The other allowed negative half: with no step activity, the role-derived
+    // capability may use map.default. This must dispatch rather than inheriting
+    // the explicit-activity refusal above.
+    const DEFAULT_FALLBACK_WF: Workflow = {
+      name: "test-role-derived-default-fallback",
+      description: "role-derived capability uses the profile default",
+      review_mode: "legacy_verdict",
+      inputs: [],
+      steps: [{ id: "work", agent: "tech-lead", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+    };
+    const fallback = startRun({ workflow: DEFAULT_FALLBACK_WF, title: "fallback", inputs: {}, projectDir: "/tmp/test-project" });
+    let fallbackDockerCalled = false;
+    await runNext({ runId: fallback.runId, workflow: DEFAULT_FALLBACK_WF, dockerExec: async (a) => {
+      fallbackDockerCalled = true;
+      return makeStubExec({ status: "complete" })(a);
+    } });
+    const fallbackPrimary = tasksForRun(fallback.runId).find((t) => t.phase === "work")!;
+    assert.equal(fallbackDockerCalled, true, "role-derived default-fallback must reach the container");
+    assert.notEqual(fallbackPrimary.status, "failed");
+    assert.equal(fallbackPrimary.resolvedMappingPath, "default-fallback");
+    assert.equal(fallbackPrimary.resolvedCapabilitySource, "role-derived");
   } finally {
     rmSync(policyPath, { force: true });
   }
