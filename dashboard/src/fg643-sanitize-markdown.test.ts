@@ -80,6 +80,27 @@ test("a non-checkbox <input> is dropped wholesale, task-list checkbox is kept", 
   assertAbsent(box, ["onfocus", "autofocus"]);
 });
 
+// RF-2: a permitted checkbox is display-only. Even when the raw Markdown omits
+// (or actively drops) `disabled`, the sanitizer must force it — an enabled live
+// control must never survive from attacker-controlled ticket text.
+test("checkbox input is forced disabled even when the source omits it", () => {
+  const bare = sanitizeHtml("<input type=checkbox>");
+  assert.ok(bare.includes("<input"));
+  assert.ok(bare.includes('type="checkbox"'));
+  assert.ok(bare.includes('disabled=""'), `expected forced disabled in ${JSON.stringify(bare)}`);
+});
+
+test("checkbox input carrying only `checked` is still forced disabled", () => {
+  const checked = sanitizeHtml('<input type="checkbox" checked>');
+  assert.ok(checked.includes('checked=""'));
+  assert.ok(checked.includes('disabled=""'), `expected forced disabled in ${JSON.stringify(checked)}`);
+});
+
+test("an author-supplied disabled is not duplicated", () => {
+  const once = sanitizeHtml('<input type="checkbox" disabled>');
+  assert.equal(once.match(/disabled=""/g)?.length, 1, `expected exactly one disabled in ${JSON.stringify(once)}`);
+});
+
 // ---- URL scheme handling: encoded + mixed-case + whitespace ---------------
 
 const HOSTILE_URLS = [

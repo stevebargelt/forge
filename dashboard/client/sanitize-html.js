@@ -169,6 +169,7 @@ function filterAttrs(tag, attrs) {
   let out = "";
   let hasTargetBlank = false;
   let relValue = null;
+  let hasDisabled = false;
   for (const { name, value } of attrs) {
     if (name.startsWith("on")) continue; // event handlers, always
     const kind = spec[name] ?? GLOBAL_ATTRS[name];
@@ -187,6 +188,7 @@ function filterAttrs(tag, attrs) {
         out += ` ${name}="${value.toLowerCase()}"`;
         break;
       case BOOL_ATTR:
+        if (name === "disabled") hasDisabled = true;
         out += ` ${name}=""`;
         break;
       case TEXT_ATTR:
@@ -205,6 +207,9 @@ function filterAttrs(tag, attrs) {
     if (hasTargetBlank && !/\bnoreferrer\b/i.test(rel)) rel = (rel + " noreferrer").trim();
     if (rel) out += ` rel="${escapeAttr(rel)}"`;
   }
+  // GFM task-list checkboxes are display-only. Force `disabled` so attacker
+  // raw Markdown can never leave a live, interactive control in rendered output.
+  if (tag === "input" && !hasDisabled) out += ` disabled=""`;
   return out;
 }
 

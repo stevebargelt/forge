@@ -38,7 +38,7 @@ function verdictBadge(v) {
 function MD({ source, inline }) {
   return inline
     ? html`<span class="md" dangerouslySetInnerHTML=${{ __html: mdInline(source) }}></span>`
-    : html`<span class="md" dangerouslySetInnerHTML=${{ __html: md(source) }}></span>`;
+    : html`<div class="md" dangerouslySetInnerHTML=${{ __html: md(source) }}></div>`;
 }
 
 // ---- architect ----
