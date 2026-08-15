@@ -7,7 +7,12 @@ import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveModel, detectAuthMode } from "./model-resolution.js";
+import {
+  resolveModel,
+  detectAuthMode,
+  isActivityUnmapped,
+  activityUnmappedMessage,
+} from "./model-resolution.js";
 
 const RUNTIME_OAUTH = `
 name: claude-oauth
@@ -350,6 +355,93 @@ test("#265: an unmapped capability on a pi profile fails loud (no fake fallback)
     () => resolveModel({ agentRole: "architecture-advisor", stepAlias: "reasoning", cliProfile: "pi-groq-cheap-reds" }),
     /no mapping for capability 'reasoning'/
   );
+});
+
+// ---- FG-560: mapping-path / capability-source provenance + activity_unmapped ----
+
+// A default-only pi profile (map is JUST "default"). Its explicit activities are
+// meant to fall to the default — it must NEVER be flagged activity_unmapped.
+const PI_DEFAULT_ONLY = `
+on_unavailable: fail
+model_profiles:
+  pi-groq:
+    provider: groq
+    auth: api
+    runtime: pi-apikey
+    map:
+      default: { model: llama-3.3-70b-versatile, cost_tier: cheap }
+defaults:
+  profile: pi-groq
+  activity: {}
+`;
+
+test("FG-560: explicit + exact map hit → resolved, mappingPath=exact", () => {
+  writePolicy();
+  const r = resolveModel({ agentRole: "engineer", stepAlias: "review" });
+  assert.equal(r.capabilitySource, "explicit");
+  assert.equal(r.mappingPath, "exact");
+  assert.equal(r.outcome, "resolved");
+  assert.equal(isActivityUnmapped(r), false);
+  assert.equal(activityUnmappedMessage(r), undefined);
+  assert.equal(r.model, "claude-sonnet-4-6");
+});
+
+test("FG-560: explicit + would-be default-fallback → activity_unmapped (inspectable, no throw)", () => {
+  writePolicy();
+  // "design" is a named activity absent from claude-subscription's map (which has
+  // reasoning/review/fast/default), and the profile is NOT default-only.
+  const r = resolveModel({ agentRole: "engineer", stepAlias: "design" });
+  assert.equal(r.capabilitySource, "explicit");
+  assert.equal(r.mappingPath, "default-fallback");
+  assert.equal(r.outcome, "activity_unmapped");
+  assert.equal(isActivityUnmapped(r), true);
+  // The would-be model is still populated so the refusal is inspectable.
+  assert.equal(r.model, "claude-sonnet-4-6");
+  const msg = activityUnmappedMessage(r);
+  assert.match(msg ?? "", /activity_unmapped/);
+  assert.match(msg ?? "", /'design'/);
+  assert.match(msg ?? "", /claude-subscription/);
+});
+
+test("FG-560: role-derived + exact map hit → resolved", () => {
+  writePolicy();
+  // tech-lead derives "reasoning", which claude-subscription maps exactly.
+  const r = resolveModel({ agentRole: "tech-lead" });
+  assert.equal(r.capabilitySource, "role-derived");
+  assert.equal(r.mappingPath, "exact");
+  assert.equal(r.outcome, "resolved");
+  assert.equal(r.alias, "reasoning");
+});
+
+test("FG-560: role-derived + default-fallback stays valid (legacy-equivalent), never refused", () => {
+  writePolicy();
+  // designer derives "design", absent from the map → falls to map.default. Because
+  // the capability was NOT explicitly demanded, this is a normal resolution.
+  const r = resolveModel({ agentRole: "designer" });
+  assert.equal(r.capabilitySource, "role-derived");
+  assert.equal(r.mappingPath, "default-fallback");
+  assert.equal(r.outcome, "resolved");
+  assert.equal(isActivityUnmapped(r), false);
+  assert.equal(r.model, "claude-sonnet-4-6");
+});
+
+test("FG-560: default-only profile (pi-groq) is never flagged, even for an explicit activity", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), PI_DEFAULT_ONLY);
+  const r = resolveModel({ agentRole: "red-wide", stepAlias: "review", cliProfile: "pi-groq" });
+  assert.equal(r.capabilitySource, "explicit");
+  assert.equal(r.mappingPath, "default-fallback"); // fell to default...
+  assert.equal(r.outcome, "resolved"); // ...but a default-only profile is intentional
+  assert.equal(isActivityUnmapped(r), false);
+  assert.equal(r.model, "llama-3.3-70b-versatile");
+});
+
+test("FG-560: legacy mode carries no policy provenance axes", () => {
+  writeRuntime();
+  const r = resolveModel({ agentRole: "engineer", stepAlias: "spec-writer", runtimeName: "claude-oauth" });
+  assert.equal(r.resolvedBy, "legacy");
+  assert.equal(r.capabilitySource, undefined);
+  assert.equal(r.mappingPath, undefined);
+  assert.equal(r.outcome, undefined);
 });
 
 // ---- Project policy replaces workspace policy (file-level, not merge) ----
