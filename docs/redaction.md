@@ -69,6 +69,30 @@ segment was recorded and printed verbatim. The workload itself always receives t
 real, un-redacted value over the `-e` channel — redaction applies only to the
 durable record and its human rendering, never to what the launched command sees.
 
+## Host-readiness records / events (FG-634)
+
+[Host verification readiness](concepts.md#host-verification-readiness) persists the
+setup command, the refusal command/message, and the setup output tail
+(`setupCommand`, `stderrTail`, the refusal's `command`/`message`) into the durable
+readiness record under `~/.forge/host-readiness/` and into the `host_readiness.ready`
+/ `host_readiness.refused` events the dashboard task timeline renders. Any of those
+four free-text fields can carry an operator credential — a `hostVerificationSetup`
+that pulls from an authenticated mirror embeds a basic-auth URL or a registry token,
+and a failing `npm ci` against an authenticated registry echoes one into stderr.
+
+`redactSecrets` (`src/v2/host-readiness.ts`) blanks credential-shaped substrings —
+URL basic-auth, npm `_authToken`/`_auth`/`_password`, `*_TOKEN`/`*_SECRET`/`*_KEY`/
+`PASSWORD=` assignments, `Authorization:` headers — with the `«redacted»` marker,
+reusing launch.ts's `REDACTED_ENV_VALUE` and the same fail-closed philosophy as
+**Launch env forwarding** above. It runs at the **persistence boundary**, on the way
+into the record and the event payload (including when an existing record is reused,
+not just when a fresh one is written), never at render time, so no downstream reader
+— dashboard, event-store backup, `forge` CLI — has to remember to redact. It is
+**audit-surface-only**: the setup child that actually executes the command still gets
+the real, un-redacted value, so install behavior is unchanged; only what gets written
+and displayed is. Ordinary (non-credential) command text and output pass through
+byte-intact.
+
 ## Events / exports
 
 Lifecycle event payloads are booleans + safe text by design (the Crawl
