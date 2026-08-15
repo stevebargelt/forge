@@ -14,7 +14,7 @@ import {
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
   type AuthoredRetentionOutcome, type UpgradeStepOutcomes, type SeedGenerationOutcome,
-  type AdapterSurfacesOutcome,
+  type AdapterSurfacesOutcome, type DocsSurfacesOutcome,
   parseRetainedLine,
 } from "./upgrade.js";
 import type { AdapterDecision, AdapterOutcome } from "./init.js";
@@ -402,6 +402,26 @@ const ADAPTER_SURFACES: Record<AdapterSurfacesOutcome, Verdict> = {
   "not-run": "resolved",
 };
 
+// FG-546: create / migrate / preserve (and the dry-run forecasts) are the command
+// working. `requires-operator-repair` is RESOLVED for the same reason
+// `user-override` is under SLASH_COMMANDS/ADAPTER_SURFACES — forge declining to
+// overwrite a file it does not own is the command working, the never-clobber
+// guarantee is upheld, and the actionable ⚠ (visible in --json as `docsSurfaces` +
+// `docsSurfacesRepair`) is where the operator SEES it; an exit code that fires
+// forever on a hand-authored file is noise. `seed-missing` IS unresolved: forge's
+// own bundled seed is absent, the same class of forge-install defect as
+// PROJECT_INIT's `template-not-found`.
+const DOCS_SURFACES: Record<DocsSurfacesOutcome, Verdict> = {
+  created: "resolved",
+  migrated: "resolved",
+  preserved: "resolved",
+  "would-create": "resolved",
+  "would-migrate": "resolved",
+  "requires-operator-repair": "resolved",
+  "seed-missing": "unresolved",
+  "not-run": "resolved",
+};
+
 const IMAGE_REBUILD: Record<ImageRebuildOutcome, Verdict> = {
   ran: "resolved",
   "would-rebuild": "resolved",
@@ -434,6 +454,7 @@ const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K
   authoredRetention: AUTHORED_RETENTION,
   routingPolicy: ROUTING_POLICY,
   projectInit: PROJECT_INIT,
+  docsSurfaces: DOCS_SURFACES,
   slashCommands: SLASH_COMMANDS,
   adapterSurfaces: ADAPTER_SURFACES,
   imageRebuild: IMAGE_REBUILD,
@@ -456,7 +477,9 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 8 + 5 + 5 + 5 + 4);
+  // FG-546: + 8 for DOCS_SURFACES (created/migrated/preserved/would-create/
+  // would-migrate/requires-operator-repair/seed-missing/not-run).
+  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 8 + 8 + 5 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -466,6 +489,7 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
     seedGeneration: "published",
     authoredRetention: "none", routingPolicy: "recompiled", projectInit: "refreshed",
+    docsSurfaces: "created",
     slashCommands: "installed", adapterSurfaces: "installed", imageRebuild: "ran", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(allClean), []);
@@ -481,6 +505,10 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     // FG-578: `retained` sits in the all-broken row deliberately — even here it
     // must not contribute a reason. The count below is the assertion.
     authoredRetention: "retained", routingPolicy: "failed", projectInit: "needs-markers",
+    // FG-546: `requires-operator-repair` sits in the all-broken row deliberately —
+    // even here it must not contribute a reason (forge declining to clobber a
+    // customized-invalid file is the command working; the ⚠ is where it is seen).
+    docsSurfaces: "requires-operator-repair",
     // FG-253 step 5: `user-override` sits in the all-broken row on BOTH surfaces
     // deliberately — even here neither may contribute a reason. The count is the
     // assertion.
@@ -503,7 +531,7 @@ test("FG-253 step 5: an adapter `user-override` is RESOLVED, and contributes no 
   const withOverride: UpgradeStepOutcomes = {
     gitPull: "skipped", npmInstall: "skipped", assetInstall: "installed",
     seedGeneration: "published", authoredRetention: "none", routingPolicy: "no-raci",
-    projectInit: "already-current", slashCommands: "user-override",
+    projectInit: "already-current", docsSurfaces: "preserved", slashCommands: "user-override",
     adapterSurfaces: "user-override", imageRebuild: "skipped", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(withOverride), []);
@@ -570,6 +598,43 @@ test("FG-253: a run that executed classifies from its OUTCOMES, so a skipped wri
   assert.equal(classifyAdapterEntries([{ decision: "install" }], false), "installed");
   assert.equal(classifyAdapterOutcomes([outcome("skipped-changed")]), "user-override");
   assert.equal(classifyAdapterOutcomes([outcome("written"), outcome("skipped-changed")]), "user-override");
+});
+
+// ─────────── FG-546: docs-surfaces as a reported [4/4] sub-step ───────────
+
+test("FG-546: docs-surfaces write outcomes are resolved; only a missing forge seed is unresolved", () => {
+  // The command working: created / migrated / preserved (and their dry-run
+  // forecasts) never fire exit 1.
+  for (const outcome of ["created", "migrated", "preserved", "would-create", "would-migrate", "not-run"] as const) {
+    assert.equal(classifyStep({ step: "docsSurfaces", outcome }).kind, "resolved", `${outcome} must be resolved`);
+  }
+  // The never-clobber guarantee upheld: a customized-invalid file forge left
+  // untouched is the command working — resolved, surfaced by the ⚠, never exit 1.
+  assert.equal(classifyStep({ step: "docsSurfaces", outcome: "requires-operator-repair" }).kind, "resolved");
+  // A missing forge-own seed is a forge-install defect, like a missing template.
+  const missing = classifyStep({ step: "docsSurfaces", outcome: "seed-missing" });
+  assert.equal(missing.kind, "unresolved");
+  if (missing.kind === "unresolved") assert.match(missing.reason, /docs-surfaces NOT provisioned/);
+});
+
+test("FG-546: a customized-invalid docs-surfaces file does not, by itself, make upgrade INCOMPLETE", () => {
+  // The parallel to the `user-override` acceptance: a project holding a
+  // hand-authored (invalid) docs-surfaces file is not a broken upgrade — forge
+  // preserved it and warned. Exit 0, ok:true.
+  const withRepair: UpgradeStepOutcomes = {
+    gitPull: "skipped", npmInstall: "skipped", assetInstall: "installed",
+    seedGeneration: "published", authoredRetention: "none", routingPolicy: "no-raci",
+    projectInit: "already-current", docsSurfaces: "requires-operator-repair",
+    slashCommands: "already-current", adapterSurfaces: "already-current",
+    imageRebuild: "skipped", releaseCheck: "ran",
+  };
+  assert.deepEqual(unresolvedReasons(withRepair), []);
+  // The guard: a genuine failure in the same set still reports — the emptiness is
+  // about the repair outcome specifically, not a vacuous row.
+  assert.deepEqual(
+    unresolvedReasons({ ...withRepair, docsSurfaces: "seed-missing" }),
+    ["docs-surfaces NOT provisioned — forge's bundled docs-surfaces.example.yml seed was not found in the executing tree"],
+  );
 });
 
 test("FG-577 (cell 3): a dirty dev checkout is NOT an operator-requested skip", () => {
