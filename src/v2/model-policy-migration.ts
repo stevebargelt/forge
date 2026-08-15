@@ -53,7 +53,7 @@ export type MigrationVerdict =
 
 /** The alias pairs FG-560 adds: a NEW orchestrator-facing name copied from an
  *  established capability. Ordered so additions land deterministically. */
-const ALIAS_PAIRS: ReadonlyArray<{ source: string; dest: string }> = [
+export const ALIAS_PAIRS: ReadonlyArray<{ source: string; dest: string }> = [
   { source: "reasoning", dest: "spec-writer" },
   { source: "fast", dest: "fast-orchestrator" },
 ];

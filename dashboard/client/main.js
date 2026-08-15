@@ -1665,10 +1665,13 @@ function ProjectChip({ entry }) {
 // FG-560: the per-task model badge, with mapping-path provenance made VISIBLE.
 // The mapping-path axis (exact vs default-fallback) is SEPARATE from the profile-
 // selection provenance — an exact activity mapping and a map.default fallback must
-// be distinguishable at a glance, so a default fallback carries a distinct class +
-// a "default" marker + a tooltip that says the activity was NOT mapped. A legacy
-// task (no policy → mappingPath null) renders exactly as before: a plain badge,
-// no marker, no provenance tooltip. Shared across every task surface so they agree.
+// be distinguishable at a glance. BOTH carry a visible text marker ("exact" /
+// "default") plus a tooltip: colour and hover are never the ONLY signal, so the
+// state is perceivable by keyboard, touch and assistive-tech users, not just by a
+// mouse hover (RF-1). A default fallback additionally gets a distinct class and a
+// tooltip saying the activity was NOT mapped. A legacy task (no policy →
+// mappingPath null) renders exactly as before: a plain badge, no marker, no
+// provenance tooltip. Shared across every task surface so they agree.
 function ModelBadge({ entry }) {
   if (!entry.agentModel) return null;
   const mappingPath = entry.mappingPath;
@@ -1686,7 +1689,7 @@ function ModelBadge({ entry }) {
     >${entry.agentModel}<span class="model-badge-tag">default</span></span>`;
   }
   if (mappingPath === "exact") {
-    return html`<span class="model-badge model-badge-exact" title="exact activity mapping — the activity is mapped directly in this profile">${entry.agentModel}</span>`;
+    return html`<span class="model-badge model-badge-exact" title="exact activity mapping — the activity is mapped directly in this profile">${entry.agentModel}<span class="model-badge-tag">exact</span></span>`;
   }
   // Legacy / pre-policy task: no mapping-path provenance. Unchanged rendering.
   return html`<span class="model-badge">${entry.agentModel}</span>`;
