@@ -22,6 +22,7 @@ import {
   WorkflowSchema,
   RuntimeSchema,
   ModelPolicySchema,
+  CURRENT_MODEL_POLICY_SCHEMA_VERSION,
   type Workflow,
   type Runtime,
   type ModelPolicy,
@@ -357,11 +358,76 @@ function detectRuntimeName(_ctx: LoadContext): string {
   return "claude-oauth";
 }
 
+/** FG-560: the dispatch-side schema-version gate for model-policy.yml. Runs on an
+ *  already-parsed policy document, AFTER YAML parse and BEFORE Zod validation, and
+ *  REFUSES anything that is not the current version. This is a strictly read-only
+ *  check — it NEVER writes, migrates, or reinterprets the file. `forge upgrade` is
+ *  the sole migration authority; ordinary policy loading must never silently
+ *  rewrite operator config.
+ *
+ *    - current (2)          → returns; caller proceeds to Zod validation as before
+ *    - absent (v1 file)     → migratable legacy policy: throw naming `forge upgrade`
+ *    - older-known (< 2)    → migratable: throw naming `forge upgrade`
+ *    - newer-unknown (> 2)  → this forge is too old: throw naming `upgrade Forge`,
+ *                             never downgrade / reinterpret as an older schema
+ *    - malformed value      → fail loud; never guess the version
+ *
+ *  A non-object document is left to Zod so the existing schema-validation error
+ *  surfaces unchanged (it is a malformed policy, not a version problem). */
+function assertCurrentModelPolicyVersion(parsed: unknown, path: string): void {
+  // Not a mapping → not a version question. Let ModelPolicySchema produce the
+  // usual validation error rather than mislabeling it as a legacy-version refusal.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
+
+  const sv = (parsed as Record<string, unknown>).schema_version;
+  const CURRENT = CURRENT_MODEL_POLICY_SCHEMA_VERSION;
+
+  if (sv === undefined) {
+    throw new Error(
+      `model-policy (${path}): this policy predates schema_version ${CURRENT} — no schema_version is declared, ` +
+        `so it is a v1 (legacy) file.\n` +
+        `Refusing to dispatch under a legacy policy. forge does NOT migrate or reinterpret policy during ordinary ` +
+        `loading (loading is strictly read-only), and the file is left byte-identical.\n` +
+        `Fix: run \`forge upgrade\` to migrate this policy to schema_version ${CURRENT}.`,
+    );
+  }
+
+  if (typeof sv !== "number" || !Number.isInteger(sv) || sv < 1) {
+    throw new Error(
+      `model-policy (${path}): schema_version must be a positive integer, got ${JSON.stringify(sv)}.\n` +
+        `Refusing to guess the policy version or reinterpret the file. Fix the file, or run \`forge upgrade\`.`,
+    );
+  }
+
+  if (sv === CURRENT) return; // current → proceed to Zod validation
+
+  if (sv < CURRENT) {
+    throw new Error(
+      `model-policy (${path}): schema_version ${sv} is an older policy version (current is ${CURRENT}).\n` +
+        `Refusing to dispatch. forge does NOT migrate or reinterpret policy during ordinary loading ` +
+        `(loading is strictly read-only), and the file is left byte-identical.\n` +
+        `Fix: run \`forge upgrade\` to migrate this policy to schema_version ${CURRENT}.`,
+    );
+  }
+
+  // sv > CURRENT: a newer policy than this forge understands. Fail loud and NEVER
+  // downgrade or reinterpret it as an older schema.
+  throw new Error(
+    `model-policy (${path}): schema_version ${sv} is newer than this forge understands (max supported: ${CURRENT}).\n` +
+      `Refusing to load — forge will NOT downgrade a newer policy or reinterpret it as an older schema.\n` +
+      `Fix: upgrade Forge to a release that supports schema_version ${sv}.`,
+  );
+}
+
 /** Load model-policy.yml if present. Policy is OPT-IN: returns undefined when no
  *  file exists at either the project or workspace path, and callers fall back to
  *  legacy runtime.models[alias] resolution (behavior unchanged). When present,
  *  the project file fully replaces the workspace file — same override semantics
  *  as workflows/runtimes. Throws (with the path) on parse / validation failure.
+ *
+ *  FG-560: a version gate runs between parse and validation — a v1/older file is
+ *  refused with a `forge upgrade` directive, a newer-unknown version fails loud
+ *  ('upgrade Forge'), and the file is NEVER rewritten (loading is read-only).
  *
  *  Note: this returns the single effective policy document. The ADR's §4 Pass-2
  *  precedence (project > user > forge-default) is applied by the resolver that
@@ -387,6 +453,7 @@ export function loadModelPolicy(ctx: LoadContext = {}): ModelPolicy | undefined 
   } catch (e) {
     throw new Error(`model-policy (${path}): YAML parse error — ${(e as Error).message}`);
   }
+  assertCurrentModelPolicyVersion(parsed, path);
   const result = ModelPolicySchema.safeParse(parsed);
   if (!result.success) {
     throw new Error(formatZodError(`model-policy (${path})`, result.error));
@@ -531,6 +598,7 @@ export function loadModelPolicyWithSource(ctx: LoadContext = {}): ModelPolicyWit
   } catch (e) {
     throw new Error(`model-policy (${path}): YAML parse error — ${(e as Error).message}`);
   }
+  assertCurrentModelPolicyVersion(parsed, path);
   const result = ModelPolicySchema.safeParse(parsed);
   if (!result.success) {
     throw new Error(formatZodError(`model-policy (${path})`, result.error));
