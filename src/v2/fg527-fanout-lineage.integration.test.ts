@@ -194,23 +194,37 @@ test("FG-527: a pending adhoc invoke in a fanout step named task is not adopted 
   assert.equal(tasksForRun(runId).filter((task) => task.parentId === parent.id).length, 2, "the real parent owns both fanout children");
 });
 
-test("FG-527: an unloadable workflow falls through the fanout guard to normal adhoc retry dispatch", async () => {
+test("FG-527: an unloadable-workflow fanout child is refused fail-CLOSED; --force overrides", async () => {
+  // The structural guard must fail CLOSED when the workflow won't load: a run whose
+  // workflow name cannot resolve must NOT let a fanout child be retried (that would
+  // mint a stray primary in the fanout phase). fanoutParentOf classifies against a
+  // degraded empty-steps workflow, so a parented non-recovery row resolves to
+  // fanout_child and is refused — recoverable via --force.
   const run: Run = { id: "run-fg527-unloadable", workflow: "missing-fg527-workflow", title: "fg527", status: "active", createdAt: "2026-08-15T00:00:00Z", projectDir: projectDir() };
   insertRun(run);
   insertTask({
     id: "former-parent", runId: run.id, phase: "task", agentRole: "engineer", status: "complete",
-    taskPackage: { taskId: "former-parent", runId: run.id, phase: "task", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    taskPackage: { taskId: "former-parent", runId: run.id, phase: "task", role: "engineer", inputs: {}, composedSystemPrompt: "", dispatchSource: "workflow" },
     createdAt: "2026-08-15T00:00:00Z",
   });
   const failed: Task = {
     id: "task-fg527-unloadable", runId: run.id, parentId: "former-parent", phase: "task", agentRole: "engineer", status: "failed", error: "boom",
-    taskPackage: { taskId: "task-fg527-unloadable", runId: run.id, phase: "task", role: "engineer", inputs: { task: "resume the original ad-hoc work" }, composedSystemPrompt: "", dispatchSource: "invoke" },
-    createdAt: "2026-08-15T00:00:00Z",
+    taskPackage: { taskId: "task-fg527-unloadable", runId: run.id, phase: "task", role: "engineer", inputs: { task: "resume the original fanout child" }, composedSystemPrompt: "", dispatchSource: "workflow" },
+    createdAt: "2026-08-15T00:00:01Z",
   };
   insertTask(failed);
   failTask(failed.id, { runId: run.id, kind: "container_crash", error: "boom" });
+  const before = tasksForRun(run.id).map((task) => task.id);
 
-  const out = await retry(failed.id);
-  assert.ok(out.adHoc, "the normal invoke retry plan is reached after the unloadable fanout-classification attempt");
+  await assert.rejects(() => retry(failed.id), (error: unknown) => {
+    assert.ok(error instanceof FanoutChildRetryError, `expected FanoutChildRetryError, got ${error}`);
+    assert.equal((error as FanoutChildRetryError).parentId, "former-parent");
+    return true;
+  });
+  assert.deepEqual(tasksForRun(run.id).map((task) => task.id), before, "no row created — refused before any write");
+
+  const out = await retry(failed.id, { force: true });
+  assert.ok(out.adHoc === undefined, "forced retry of a stamped child is a workflow step, not ad-hoc");
   assert.equal(out.newTask.status, "pending");
+  assert.equal(getTask(out.newTask.id)!.parentId, undefined, "the forced retry mints a fresh PRIMARY");
 });

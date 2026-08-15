@@ -33,6 +33,7 @@ import {
 } from "./re-drive-eligibility.js";
 import { taskDispatchKind } from "./run-kind.js";
 import { loadWorkflow } from "./loader.js";
+import type { Workflow } from "./schema.js";
 import { classifyTaskLineage } from "./lifecycle-evaluator.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
@@ -497,16 +498,25 @@ function planRetryDispatch(task: Task, run: Run): AdHocDispatchPlan | undefined 
  *  Returns the parent row so the caller can name it in the refusal.
  *
  *  The workflow is loaded because red_review-vs-fanout_child is a workflow
- *  question (the step's declared reds), not a name-prefix guess. When the
- *  workflow won't load we cannot classify — return undefined and let the normal
- *  retry flow (planRetryDispatch) surface the unloadable-workflow refusal. */
+ *  question (the step's declared reds), not a name-prefix guess.
+ *
+ *  FG-527 fix: a load failure must NOT fall through to "retryable" — that is a
+ *  fail-OPEN on a structural guard. Any run whose workflow name cannot resolve
+ *  would then let a fanout child be retried, minting a stray primary in the
+ *  fanout phase (exactly the corruption FanoutChildRetryError exists to prevent).
+ *  So on load failure we classify with a DEGRADED empty-steps workflow instead of
+ *  bailing: classifyTaskLineage resolves a parented, non-recovery row whose phase
+ *  has no matching declared red (there are none — steps is empty) to
+ *  `fanout_child`, so it is refused. This over-refuses a red_review whose workflow
+ *  won't load, which is the correct fail-safe direction — refusal is recoverable
+ *  via `--force`, a wrongly-permitted fanout-child retry corrupts state. */
 function fanoutParentOf(task: Task, run: Run): Task | undefined {
   if (task.parentId === undefined) return undefined;
-  let workflow;
+  let workflow: Workflow;
   try {
     workflow = loadWorkflow(run.workflow, run.projectDir ? { projectDir: run.projectDir } : {});
   } catch {
-    return undefined;
+    workflow = { name: run.workflow, description: run.workflow, review_mode: "legacy_verdict", inputs: [], steps: [] };
   }
   const kinds = classifyTaskLineage(workflow, tasksForRun(task.runId));
   if (kinds.get(task.id) !== "fanout_child") return undefined;

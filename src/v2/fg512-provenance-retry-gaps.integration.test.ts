@@ -189,6 +189,24 @@ test("FG-512 gap1 (red): retrying a runner-stamped RED row routes through the wo
       },
     ],
   };
+  // The red-vs-fanout_child distinction is a WORKFLOW question (the step's
+  // declared reds), so retry()'s classifier must be able to LOAD this workflow —
+  // otherwise fanoutParentOf fails CLOSED (FG-527) and over-refuses the red as a
+  // fanout child. Write the YAML to disk so the stamped red classifies as
+  // red_review, which is what this test is actually about.
+  const workflowDir = join(dir, ".forge", "workflows");
+  mkdirSync(workflowDir, { recursive: true });
+  writeFileSync(join(workflowDir, "fg512g-red.yml"), `name: fg512g-red
+description: primary with a red
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+    gate: auto
+    reds:
+      - agent: red-wide
+        authority: specialist
+`);
   const { runId } = startRun({ workflow: wf, title: "fg512g red", inputs: {}, projectDir: dir });
 
   const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
