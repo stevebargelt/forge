@@ -23,12 +23,15 @@ import {
   planCommitMsgHook,
   planGitignoreEntries,
   planOperatorAdapters,
+  provisionDocsSurfaces,
+  describeDocsSurfacesProvisionPlan,
   provisionSeedFile,
   scaffoldBacklogDirs,
   skippedClaudeCommands,
   skippedClaudeCommandOutcomes,
 } from "./init.js";
 import { isValidAdapterStamp, operatorSurface, parseAdapterMarker } from "../../v2/operator-workflows.js";
+import { classifyDocsSurfaces, loadOperatorSurfaces } from "../../v2/contract.js";
 import { currentAdapterStamp as driftAdapterStamp } from "../../v2/seed-drift.js";
 import { CODEX_DEPRECATED_PROMPT_DIRS } from "../../v2/render-codex-skills.js";
 
@@ -1300,5 +1303,97 @@ test("provisionSeedFile: skips docs-surfaces.yml when already present", () => {
   const result = provisionSeedFile(forgeDir, "docs-surfaces.yml", "docs-surfaces.example.yml");
   assert.match(result, /already exists/);
   assert.equal(readFileSync(join(forgeDir, "docs-surfaces.yml"), "utf8"), "# my custom surfaces\n", "existing file must not be overwritten");
+});
+
+// ----- FG-546: provisionDocsSurfaces (classifier-driven create/migrate/preserve/repair) -----
+
+const LEGACY_DOCS_SURFACES_YAML = [
+  "# some old operator comment",
+  "surfaces:",
+  "  - name: readme",
+  "    kind: user-facing",
+  "    path: README.md",
+  "  - name: api-reference",
+  "    kind: public-api",
+  "    path: docs/api.md",
+  "",
+].join("\n");
+
+function docsSurfacesPath(dir: string): string {
+  return join(dir, ".forge", "docs-surfaces.yml");
+}
+
+function writeDocsSurfaces(dir: string, content: string): string {
+  const p = docsSurfacesPath(dir);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, content);
+  return p;
+}
+
+test("FG-546 provisionDocsSurfaces: missing → creates the corrected seed (production-valid, source:project)", () => {
+  const outcome = provisionDocsSurfaces(projectDir);
+  assert.equal(outcome.action, "created");
+  const p = docsSurfacesPath(projectDir);
+  assert.ok(existsSync(p), "docs-surfaces.yml should be created");
+  // The written file resolves through the SAME production classifier as valid.
+  assert.equal(classifyDocsSurfaces(projectDir).verdict, "valid-project");
+  // And through the production loader with real path-prefix values (not defaults-fallback shape).
+  const surfaces = loadOperatorSurfaces(projectDir);
+  assert.ok(surfaces.length > 0 && surfaces.every((s) => typeof s === "string" && s.length > 0));
+});
+
+test("FG-546 provisionDocsSurfaces: known-legacy template → migrated to the corrected form", () => {
+  writeDocsSurfaces(projectDir, LEGACY_DOCS_SURFACES_YAML);
+  assert.equal(classifyDocsSurfaces(projectDir).verdict, "known-legacy-generated", "fixture must be the recognized legacy shape");
+
+  const outcome = provisionDocsSurfaces(projectDir);
+  assert.equal(outcome.action, "migrated");
+  // After migration the file is production-valid and no longer the legacy object shape.
+  const content = readFileSync(docsSurfacesPath(projectDir), "utf8");
+  assert.ok(!content.includes("kind:"), "the meaningless legacy object entries must be gone");
+  assert.equal(classifyDocsSurfaces(projectDir).verdict, "valid-project");
+});
+
+test("FG-546 provisionDocsSurfaces: idempotent — rerun on the corrected form is a preserve no-op", () => {
+  provisionDocsSurfaces(projectDir); // create
+  const bytes = readFileSync(docsSurfacesPath(projectDir), "utf8");
+  const rerun = provisionDocsSurfaces(projectDir);
+  assert.equal(rerun.action, "preserved");
+  assert.equal(readFileSync(docsSurfacesPath(projectDir), "utf8"), bytes, "corrected form must be byte-identical after a no-op rerun");
+});
+
+test("FG-546 provisionDocsSurfaces: customized-VALID (Pixtron string-list) is preserved unchanged", () => {
+  const custom = "surfaces:\n  - src/mine/\n  - config/mine.ts\n";
+  writeDocsSurfaces(projectDir, custom);
+  const outcome = provisionDocsSurfaces(projectDir);
+  assert.equal(outcome.action, "preserved");
+  assert.equal(readFileSync(docsSurfacesPath(projectDir), "utf8"), custom, "a valid operator file must never be rewritten");
+});
+
+test("FG-546 provisionDocsSurfaces: customized-INVALID is NEVER clobbered — repair outcome carries file + error detail", () => {
+  // A single-entry object shape: structurally different from the frozen legacy
+  // template ⇒ customized-invalid, never migrated.
+  const custom = "surfaces:\n  - name: only-one\n    path: README.md\n";
+  const p = writeDocsSurfaces(projectDir, custom);
+  const outcome = provisionDocsSurfaces(projectDir);
+  assert.equal(outcome.action, "requires-operator-repair");
+  if (outcome.action !== "requires-operator-repair") throw new Error("unreachable");
+  assert.equal(outcome.path, p);
+  assert.ok(outcome.detail && outcome.detail.length > 0, "must carry a validation-error detail");
+  assert.equal(readFileSync(p, "utf8"), custom, "a customized-invalid file must survive byte-for-byte");
+});
+
+test("FG-546 describeDocsSurfacesProvisionPlan: forecasts create / migrate / preserve / repair from the same classifier", () => {
+  // missing
+  assert.match(describeDocsSurfacesProvisionPlan(projectDir), /WOULD create/);
+  // known-legacy
+  writeDocsSurfaces(projectDir, LEGACY_DOCS_SURFACES_YAML);
+  assert.match(describeDocsSurfacesProvisionPlan(projectDir), /WOULD migrate/i);
+  // valid
+  writeDocsSurfaces(projectDir, "surfaces:\n  - src/mine/\n");
+  assert.match(describeDocsSurfacesProvisionPlan(projectDir), /preserve/i);
+  // customized-invalid
+  writeDocsSurfaces(projectDir, "surfaces:\n  - name: x\n    path: y\n");
+  assert.match(describeDocsSurfacesProvisionPlan(projectDir), /repair/i);
 });
 
