@@ -203,6 +203,22 @@ export function isPhasePrimaryRow(task: Task): boolean {
   return task.parentId === undefined && !isAdHocInvokeRow(task);
 }
 
+/** A fanout parent is a phase-primary row whose workflow STEP declares `fanout`
+ *  — the classifier's fanout-parent rule (LineageKind's `primary` doc: "a fanout
+ *  parent is just a primary whose step declares `fanout` — there is no separate
+ *  marker for it") lifted to a single-row predicate for gate.ts's re-entry
+ *  decision. The step-declared derivation is byte-identical, on gate-reachable
+ *  rows, to the retired `inputs.fanout === "object"` marker: that marker was
+ *  stamped ONLY on the parent row dispatchFanoutStep mints (runNext.ts) — always
+ *  a primary in a fanout step — and the one primary in a fanout step that lacks
+ *  it (the defensive-failure parent, emptyTaskPackage) is failTask'd immediately
+ *  and so never reaches a gateable status. The isPhasePrimaryRow guard keeps a
+ *  parented child in a fanout step (a red or fanout child) OUT of the derivation,
+ *  exactly as the marker did. */
+export function isFanoutParentRow(task: Task, step: Step): boolean {
+  return isPhasePrimaryRow(task) && step.fanout !== undefined;
+}
+
 /** The `fanout_child` cell of classifyTaskLineage for a caller with no workflow —
  *  reconcile's never-throw sweeps and recover's inspector, both of which must not
  *  take on a workflow load just to ask this.

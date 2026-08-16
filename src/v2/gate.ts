@@ -46,6 +46,7 @@ import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { isRunSettled, isOnRejectRecoveryTask, classifyRunTerminalState } from "./ready-queue.js";
+import { isFanoutParentRow } from "./lifecycle-evaluator.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { isWorktreeModeEnabled } from "./worktree-lifecycle.js";
 
@@ -248,7 +249,11 @@ export async function gate(
   let nextTasks: Task[] = [];
 
   if (decision === "advance") {
-    const isFanoutParent = typeof task.taskPackage?.inputs?.["fanout"] === "object";
+    // FG-720: fanout-parent-ness is the evaluator's canonical rule — a phase-primary
+    // row whose workflow STEP declares `fanout` — not the retired inputs marker. `step`
+    // is the workflow step for task.phase (findStep above); the derivation is byte-
+    // identical to `inputs.fanout === "object"` on every gate-reachable row.
+    const isFanoutParent = isFanoutParentRow(task, step);
     // FG-425: a blocked_by_red task's work is UNPUBLISHED. The publisher validates
     // the candidate (gate → reds → review) and only publishes if all of it passes,
     // so a red rejection means nothing reached the target. Force-advancing over that

@@ -16,6 +16,7 @@ import {
   classifyTaskLineage,
   isAdHocInvokeRow,
   isFanoutChildRow,
+  isFanoutParentRow,
   isOnRejectRecoveryRow,
   isPhasePrimaryRow,
   isWorkflowPrimaryRow,
@@ -768,4 +769,162 @@ test("resolveCompletedPhasePrimary: excludes parented (child) rows and other pha
 test("resolveCompletedPhasePrimary: no complete row => undefined", () => {
   assert.equal(resolveCompletedPhasePrimary([mkTask({ id: "f", phase: "a", status: "failed" })], "a"), undefined);
   assert.equal(resolveCompletedPhasePrimary([], "a"), undefined);
+});
+
+// ----- FG-720: gate.ts fanout-parent derivation consumes the evaluator -----
+//
+// gate.ts:251 used to read fanout-parent-ness from an inputs marker
+// (`typeof task.taskPackage?.inputs?.["fanout"] === "object"`). It now derives it
+// from the workflow step via isFanoutParentRow (a phase-primary row whose step
+// declares `fanout`). The preservation invariant is byte-identical re-entry on
+// every gate-reachable row.
+
+/** gate.ts BEFORE FG-720: the retired inputs-marker derivation of fanout-parent-ness.
+ *  Kept verbatim as the parity oracle. The runtime marker (runNext.ts) is
+ *  `{ from_upstream, count }`. */
+function legacyIsFanoutParent(task: Task): boolean {
+  return typeof task.taskPackage?.inputs?.["fanout"] === "object";
+}
+
+// gate.ts's two advance-branch re-entry booleans, reconstructed over the DERIVED
+// isFanoutParent so the four cases below assert on the actual re-entry decision,
+// not merely the predicate. Structurally identical to gate.ts:303-312.
+function reentry(opts: {
+  isFanoutParent: boolean;
+  status: Task["status"];
+  verdictCount: number;
+  stepRedsLen: number;
+  worktreeEnabled: boolean;
+  hasProjectDir: boolean;
+  worktreePath: boolean;
+}): { validationHeld: boolean; needsPublish: boolean } {
+  const blocked = opts.status === "blocked_by_red";
+  const worktreeFanoutReentry = opts.worktreeEnabled && opts.hasProjectDir;
+  const validationHeld =
+    opts.status === "awaiting_gate" &&
+    opts.isFanoutParent &&
+    opts.verdictCount === 0 &&
+    (opts.stepRedsLen > 0 || worktreeFanoutReentry);
+  const needsPublish =
+    (blocked && (opts.isFanoutParent || opts.worktreePath)) || validationHeld;
+  return { validationHeld, needsPublish };
+}
+
+// The runtime marker a real fanout parent carries — see dispatchFanoutStep
+// (runNext.ts): only the parent row is stamped, and it is always a primary in a
+// fanout step.
+const FANOUT_MARKER = { fanout: { from_upstream: { step: "plan", array_key: "steps", input_key: "step" }, count: 3 } };
+const buildStep = WORKFLOW.steps.find((s) => s.id === "build")!; // fanout, has reds
+const planStep = WORKFLOW.steps.find((s) => s.id === "plan")!; // non-fanout
+// A fanout step with NO reds, for the "completes in place" case (c).
+const NORED_FANOUT_STEP = mkStep({
+  id: "make",
+  agent: "engineer",
+  fanout: { from_upstream: { step: "seed", array_key: "items", input_key: "item" }, agent_map: {}, failure_mode: "continue" },
+} as Partial<Step> & { id: string });
+
+test("PARITY (gate.ts): isFanoutParentRow decides identically to the retired inputs marker on gate-reachable rows", () => {
+  // Every gate-reachable shape: a primary in a fanout step (real parent, carries
+  // the marker) vs a primary in a non-fanout step, across both gateable statuses.
+  for (const status of ["awaiting_gate", "blocked_by_red"] as Task["status"][]) {
+    const realParent = mkTask({ id: "fp", phase: "build", status, inputs: FANOUT_MARKER });
+    assert.equal(isFanoutParentRow(realParent, buildStep), true);
+    assert.equal(legacyIsFanoutParent(realParent), true, "oracle: real parent carries the marker");
+
+    const nonFanout = mkTask({ id: "np", phase: "plan", status });
+    assert.equal(isFanoutParentRow(nonFanout, planStep), false);
+    assert.equal(legacyIsFanoutParent(nonFanout), false);
+  }
+});
+
+test("DISCRIMINATION (gate.ts): a parented child in a fanout step is NOT a fanout parent — the isPhasePrimaryRow guard", () => {
+  // The one place a bare `step.fanout !== undefined` check would diverge from the
+  // retired marker: a red or fanout CHILD in a fanout step. The marker was never
+  // stamped on a child (only the parent), and isPhasePrimaryRow keeps children out.
+  const redChild = mkTask({ id: "r", phase: "build", parentId: "fp", agentRole: "red-wide", status: "blocked_by_red" });
+  assert.equal(isFanoutParentRow(redChild, buildStep), false);
+  assert.equal(legacyIsFanoutParent(redChild), false, "the marker never lived on a child either");
+
+  const fanoutChild = mkTask({ id: "c", phase: "build", parentId: "fp", agentRole: "engineer", status: "awaiting_gate", inputs: { fanoutIndex: 0 } });
+  assert.equal(isFanoutParentRow(fanoutChild, buildStep), false);
+  assert.equal(legacyIsFanoutParent(fanoutChild), false);
+});
+
+test("RE-ENTRY case (a): a blocked_by_red fanout parent re-enters (needsPublish)", () => {
+  const parent = mkTask({ id: "fp", phase: "build", status: "blocked_by_red", inputs: FANOUT_MARKER });
+  const isFanoutParent = isFanoutParentRow(parent, buildStep);
+  assert.equal(isFanoutParent, true);
+  const r = reentry({
+    isFanoutParent,
+    status: "blocked_by_red",
+    verdictCount: 1, // reds already ran (a verdict exists)
+    stepRedsLen: buildStep.reds.length,
+    worktreeEnabled: false,
+    hasProjectDir: true,
+    worktreePath: false,
+  });
+  assert.equal(r.needsPublish, true, "blocked_by_red fanout parent must re-enter, not complete in place");
+});
+
+test("RE-ENTRY case (b): a validation-held fanout parent (awaiting_gate, 0 verdicts, reds>0) re-enters", () => {
+  const parent = mkTask({ id: "fp", phase: "build", status: "awaiting_gate", inputs: FANOUT_MARKER });
+  const isFanoutParent = isFanoutParentRow(parent, buildStep);
+  assert.equal(isFanoutParent, true);
+  const r = reentry({
+    isFanoutParent,
+    status: "awaiting_gate",
+    verdictCount: 0,
+    stepRedsLen: buildStep.reds.length, // > 0
+    worktreeEnabled: false,
+    hasProjectDir: true,
+    worktreePath: false,
+  });
+  assert.equal(r.validationHeld, true);
+  assert.equal(r.needsPublish, true);
+
+  // The worktree arm of the same case: 0 reds but worktree mode enabled.
+  const rWorktree = reentry({
+    isFanoutParent,
+    status: "awaiting_gate",
+    verdictCount: 0,
+    stepRedsLen: 0,
+    worktreeEnabled: true,
+    hasProjectDir: true,
+    worktreePath: false,
+  });
+  assert.equal(rWorktree.validationHeld, true, "a worktree fanout parent re-enters even with no reds");
+});
+
+test("RE-ENTRY case (c): a non-worktree fanout parent with no reds completes in place", () => {
+  const parent = mkTask({ id: "fp", phase: "make", status: "awaiting_gate", inputs: FANOUT_MARKER });
+  const isFanoutParent = isFanoutParentRow(parent, NORED_FANOUT_STEP);
+  assert.equal(isFanoutParent, true, "still a fanout parent — the step declares fanout");
+  const r = reentry({
+    isFanoutParent,
+    status: "awaiting_gate",
+    verdictCount: 0,
+    stepRedsLen: 0, // no reds
+    worktreeEnabled: false, // non-worktree
+    hasProjectDir: true,
+    worktreePath: false,
+  });
+  assert.equal(r.validationHeld, false, "nothing to run and nothing to publish");
+  assert.equal(r.needsPublish, false, "completes in place");
+});
+
+test("RE-ENTRY case (d): a non-fanout gated task does NOT re-enter on the fanout arm", () => {
+  const task = mkTask({ id: "np", phase: "plan", status: "awaiting_gate" });
+  const isFanoutParent = isFanoutParentRow(task, planStep);
+  assert.equal(isFanoutParent, false);
+  const r = reentry({
+    isFanoutParent,
+    status: "awaiting_gate",
+    verdictCount: 0,
+    stepRedsLen: planStep.reds.length, // 0
+    worktreeEnabled: true, // even with worktree mode on, a non-fanout primary with no worktreePath does not re-enter
+    hasProjectDir: true,
+    worktreePath: false,
+  });
+  assert.equal(r.validationHeld, false);
+  assert.equal(r.needsPublish, false, "a plain gated step completes in place");
 });
