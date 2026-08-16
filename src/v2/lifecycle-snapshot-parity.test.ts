@@ -272,6 +272,26 @@ const diamond = mkWorkflow([
   mkStep("c", ["a"]),
   mkStep("d", ["b", "c"]),
 ]);
+const deepLinear = mkWorkflow([
+  mkStep("a"),
+  mkStep("b", ["a"]),
+  mkStep("c", ["b"]),
+  mkStep("d", ["c"]),
+  mkStep("e", ["d"]),
+]);
+const parallelPrimaries = mkWorkflow([mkStep("a"), mkStep("b"), mkStep("join", ["a", "b"])]);
+const fanoutPipeline = mkWorkflow([
+  mkStep("plan"),
+  {
+    ...mkStep("research", ["plan"]),
+    fanout: {
+      from_upstream: { step: "plan", array_key: "claims", input_key: "claim" },
+      max_concurrency: 2,
+      failure_mode: "fail-phase",
+    },
+  },
+  mkStep("publish", ["research"]),
+]);
 const withReds = mkWorkflow([mkStep("a", [], ["shipping-reviewer"])]);
 const taskStep = mkWorkflow([mkStep("task"), mkStep("downstream", ["task"])]);
 
@@ -317,6 +337,40 @@ const cases: Case[] = [
     name: "diamond both legs ready together",
     workflow: diamond,
     tasks: [mkTask({ id: "a1", phase: "a", status: "complete" })],
+  },
+  {
+    name: "deep dependency chain propagates unreachable through three blocked ancestors",
+    workflow: deepLinear,
+    tasks: [
+      mkTask({ id: "a1", phase: "a", status: "complete" }),
+      mkTask({ id: "b1", phase: "b", status: "failed" }),
+    ],
+  },
+  {
+    name: "multiple failed primary attempts in one phase are an own failure, not active",
+    workflow: linear,
+    tasks: [
+      mkTask({ id: "a1", phase: "a", status: "complete" }),
+      mkTask({ id: "b-old", phase: "b", status: "failed", createdAt: "2026-05-13T00:00:00.000Z" }),
+      mkTask({ id: "b-new", phase: "b", status: "failed", createdAt: "2026-05-13T00:00:01.000Z" }),
+    ],
+  },
+  {
+    name: "two independently failed primaries leave their join unreachable",
+    workflow: parallelPrimaries,
+    tasks: [
+      mkTask({ id: "a1", phase: "a", status: "failed" }),
+      mkTask({ id: "b1", phase: "b", status: "failed" }),
+    ],
+  },
+  {
+    name: "failed fanout parent is the failed phase and its dependent is unreachable",
+    workflow: fanoutPipeline,
+    tasks: [
+      mkTask({ id: "plan1", phase: "plan", status: "complete" }),
+      mkTask({ id: "research-parent", phase: "research", status: "failed" }),
+      mkTask({ id: "research-child", phase: "research", status: "complete", parentId: "research-parent" }),
+    ],
   },
   {
     name: "healed duplicate primary [complete older, failed newer] — phase closes",
