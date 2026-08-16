@@ -276,6 +276,21 @@ test("FG-664: evidence that DID execute records executed — the classifier is n
   );
 });
 
+test("FG-719: a PASSING cited test with environment_blocked:false records executed coverage, not blocked_environment", () => {
+  // The boolean `false` means 'nothing blocked the check'. It must normalize to absent, so
+  // the classifier reads the runner output rather than short-circuiting to blocked_environment
+  // (or failing the parse into not_executed).
+  assert.equal(
+    classifyRecheckCoverage({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: `ok 1 - ${TEST_NAME}`,
+      environment_blocked: false,
+    }),
+    "executed",
+  );
+});
+
 // ─── the resolved arm is unchanged ──────────────────────────────────────────
 
 test("FG-664: the resolved arm is unchanged — evidence kind, coverage and detail are exactly as before", () => {
