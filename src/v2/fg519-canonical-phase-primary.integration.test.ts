@@ -26,9 +26,11 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runNext, type DockerExecFn } from "./runNext.js";
+import { invoke, reactivateTerminalRun } from "./invoke.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask, insertTask } from "../store/tasks.js";
+import { getRun } from "../store/runs.js";
 import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { computeReadyQueue, resolvePhasePrimary } from "./ready-queue.js";
 import { deriveUpstream } from "./inputs.js";
@@ -71,7 +73,10 @@ type PrefixResult = { prefix: string; result: unknown };
 
 // Routing exec keyed by container --name (== forge-<taskId>). Records every task
 // id it was invoked for so a test can prove a specific row was actually dispatched.
-function makeRoutingExec(routes: PrefixResult[], invoked: string[]): DockerExecFn {
+function makeRoutingExec(
+  routes: PrefixResult[],
+  invoked: string[],
+): DockerExecFn {
   return async ({ args, stdoutPath, stderrPath }) => {
     const nameIdx = args.indexOf("--name");
     const fullName = nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "";
@@ -85,7 +90,9 @@ function makeRoutingExec(routes: PrefixResult[], invoked: string[]): DockerExecF
     writeFileSync(stderrPath, "");
     writeFileSync(
       join(dir, "result.json"),
-      JSON.stringify(route ? route.result : { status: "complete", tests_run: 1 }),
+      JSON.stringify(
+        route ? route.result : { status: "complete", tests_run: 1 },
+      ),
     );
     return 0;
   };
@@ -123,7 +130,15 @@ function mkTask(opts: {
 }
 
 function mkStep(id: string, depends_on: string[] = []): Step {
-  return { id, agent: `${id}-agent`, gate: "auto", manual: false, depends_on, runtime: "claude", reds: [] };
+  return {
+    id,
+    agent: `${id}-agent`,
+    gate: "auto",
+    manual: false,
+    depends_on,
+    runtime: "claude",
+    reds: [],
+  };
 }
 
 // ── (A) headline: real heal → real downstream dispatch carries the COMPLETE row ──
@@ -134,8 +149,24 @@ const BUILD_VERIFY_WF: Workflow = {
   review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
-    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
-    { id: "verify", agent: "test-engineer", gate: "auto", manual: false, depends_on: ["build"], runtime: "claude", reds: [] },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "claude",
+      reds: [],
+    },
+    {
+      id: "verify",
+      agent: "test-engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["build"],
+      runtime: "claude",
+      reds: [],
+    },
   ],
 };
 
@@ -147,7 +178,15 @@ test("FG-519 E2E: after a real duplicate-primary heal ([complete older, failed n
   const invoked: string[] = [];
   const exec = makeRoutingExec(
     [
-      { prefix: "task-build-", result: { status: "complete", tests_run: 1, buildMarker: BUILD_MARKER, plan: ["s1", "s2"] } },
+      {
+        prefix: "task-build-",
+        result: {
+          status: "complete",
+          tests_run: 1,
+          buildMarker: BUILD_MARKER,
+          plan: ["s1", "s2"],
+        },
+      },
       { prefix: "task-verify-", result: { status: "complete", tests_run: 1 } },
     ],
     invoked,
@@ -162,10 +201,23 @@ test("FG-519 E2E: after a real duplicate-primary heal ([complete older, failed n
 
   // Wave 1: real dispatch → build completes. The COMPLETE primary and its
   // result.json are produced by the real pipeline, not fabricated.
-  const wave1 = await runNext({ runId, workflow: BUILD_VERIFY_WF, dockerExec: exec });
-  assert.deepEqual(wave1.completedSteps, ["build"], "build must complete on wave 1");
+  const wave1 = await runNext({
+    runId,
+    workflow: BUILD_VERIFY_WF,
+    dockerExec: exec,
+  });
+  assert.deepEqual(
+    wave1.completedSteps,
+    ["build"],
+    "build must complete on wave 1",
+  );
 
-  const buildComplete = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined && t.status === "complete");
+  const buildComplete = tasksForRun(runId).find(
+    (t) =>
+      t.phase === "build" &&
+      t.parentId === undefined &&
+      t.status === "complete",
+  );
   assert.ok(buildComplete, "a complete build primary must exist");
 
   // Inject the duplicate-primary artifact: a second, NEWER pending primary in the
@@ -185,41 +237,270 @@ test("FG-519 E2E: after a real duplicate-primary heal ([complete older, failed n
   // — the exact healed-duplicate shape FG-519's ticket describes.
   const changes = finalizeOrphanedPrimaries(runId);
   assert.ok(
-    changes.some((c) => c.taskId === "task-build-DUPLICATE" && c.to === "failed"),
+    changes.some(
+      (c) => c.taskId === "task-build-DUPLICATE" && c.to === "failed",
+    ),
     "the real heal must fail the duplicate pending primary",
   );
   const dup = getTask("task-build-DUPLICATE")!;
   assert.equal(dup.status, "failed", "duplicate must be healed to failed");
-  assert.ok(dup.createdAt > buildComplete.createdAt, "duplicate must be the NEWER row (the status-blind pop() trap)");
+  assert.ok(
+    dup.createdAt > buildComplete.createdAt,
+    "duplicate must be the NEWER row (the status-blind pop() trap)",
+  );
 
   // Wave 2: real dispatch of the downstream step over the healed phase.
-  const wave2 = await runNext({ runId, workflow: BUILD_VERIFY_WF, dockerExec: exec });
-  assert.deepEqual(wave2.dispatchedSteps, ["verify"], "verify must dispatch; build must NOT be re-admitted");
+  const wave2 = await runNext({
+    runId,
+    workflow: BUILD_VERIFY_WF,
+    dockerExec: exec,
+  });
+  assert.deepEqual(
+    wave2.dispatchedSteps,
+    ["verify"],
+    "verify must dispatch; build must NOT be re-admitted",
+  );
 
-  const verifyTask = tasksForRun(runId).find((t) => t.phase === "verify" && t.parentId === undefined);
+  const verifyTask = tasksForRun(runId).find(
+    (t) => t.phase === "verify" && t.parentId === undefined,
+  );
   assert.ok(verifyTask, "verify task must exist");
-  assert.ok(invoked.some((id) => id.startsWith("task-verify-")), "a container must have been dispatched for verify");
+  assert.ok(
+    invoked.some((id) => id.startsWith("task-verify-")),
+    "a container must have been dispatched for verify",
+  );
 
   // The composed inputs the downstream agent received must name the COMPLETE row
   // and carry ITS result content — never the failed newer orphan (undefined).
-  const upstream = (verifyTask!.taskPackage.inputs as Record<string, unknown>)["upstream"] as Array<{
+  const upstream = (verifyTask!.taskPackage.inputs as Record<string, unknown>)[
+    "upstream"
+  ] as Array<{
     phase: string;
     taskId: string;
     result: { status?: string; buildMarker?: string } | undefined;
   }>;
   assert.ok(Array.isArray(upstream), "inputs.upstream must be present");
-  assert.equal(upstream.length, 1, "verify sees exactly one upstream entry (its single dep)");
+  assert.equal(
+    upstream.length,
+    1,
+    "verify sees exactly one upstream entry (its single dep)",
+  );
   assert.equal(upstream[0]!.phase, "build");
-  assert.equal(upstream[0]!.taskId, buildComplete.id, "upstream must name the COMPLETE build row, not the failed newer duplicate");
-  assert.notEqual(upstream[0]!.result, undefined, "FG-519: downstream result must not be undefined");
-  assert.equal(upstream[0]!.result!.buildMarker, BUILD_MARKER, "downstream must receive the complete row's ACTUAL result content");
+  assert.equal(
+    upstream[0]!.taskId,
+    buildComplete.id,
+    "upstream must name the COMPLETE build row, not the failed newer duplicate",
+  );
+  assert.notEqual(
+    upstream[0]!.result,
+    undefined,
+    "FG-519: downstream result must not be undefined",
+  );
+  assert.equal(
+    upstream[0]!.result!.buildMarker,
+    BUILD_MARKER,
+    "downstream must receive the complete row's ACTUAL result content",
+  );
 
   // End-to-end proof the value reached the container artifact on disk: the
   // rendered package.md (mounted into /task) contains the build marker.
   const pkgPath = join(taskDir(runId, verifyTask!.id), "package.md");
-  assert.ok(existsSync(pkgPath), "verify package.md must be written to the task dir");
+  assert.ok(
+    existsSync(pkgPath),
+    "verify package.md must be written to the task dir",
+  );
   const pkg = readFileSync(pkgPath, "utf8");
-  assert.match(pkg, new RegExp(BUILD_MARKER), "the container-facing package.md must carry the COMPLETE row's result content");
+  assert.match(
+    pkg,
+    new RegExp(BUILD_MARKER),
+    "the container-facing package.md must carry the COMPLETE row's result content",
+  );
+});
+
+// ── (A2) caller-universe invariant: real attached invoke collides with `task` ──
+
+const TASK_COLLISION_FANOUT_WF: Workflow = {
+  name: "fg519-task-collision-fanout",
+  description: "FG-717: unfiltered readers retain the attached-invoke universe",
+  review_mode: "legacy_verdict",
+  inputs: [],
+  steps: [
+    {
+      id: "task",
+      agent: "planner",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "claude",
+      reds: [],
+    },
+    {
+      id: "verify",
+      agent: "test-engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["task"],
+      runtime: "claude",
+      reds: [],
+    },
+    {
+      id: "fanout",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["task"],
+      runtime: "claude",
+      fanout: {
+        from_upstream: { step: "task", array_key: "lanes", input_key: "lane" },
+        failure_mode: "fail-phase",
+      },
+      reds: [],
+    },
+  ],
+};
+
+test("FG-717 E2E: a real attached ad-hoc invoke remains in deriveUpstream and fanout's unfiltered selector universe, while the ready queue still uses the workflow task phase", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  ensureRuntime();
+
+  const WORKFLOW_LANE = "workflow-lane";
+  const INVOKE_LANE = "invoke-lane";
+  const invoked: string[] = [];
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const taskId =
+      (nameIdx >= 0 ? args[nameIdx + 1] : "")?.replace(/^forge-/, "") ?? "";
+    invoked.push(taskId);
+    const dir = dirname(stdoutPath);
+    mkdirSync(dir, { recursive: true });
+    const task = getTask(taskId);
+    const isAttachedInvoke = task?.taskPackage.dispatchSource === "invoke";
+    const result = isAttachedInvoke
+      ? {
+          status: "complete",
+          lanes: [{ lane: INVOKE_LANE }],
+          marker: "AD_HOC_LATEST",
+        }
+      : taskId.startsWith("task-task-")
+        ? {
+            status: "complete",
+            lanes: [{ lane: WORKFLOW_LANE }],
+            marker: "WORKFLOW_PRIMARY",
+          }
+        : { status: "complete", tests_run: 1 };
+    writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const { runId } = startRun({
+    workflow: TASK_COLLISION_FANOUT_WF,
+    title: "fg717 caller universe",
+    inputs: {},
+    projectDir: "/tmp/test-project",
+  });
+
+  // Dispatch the workflow-owned `task` row through the real runner first.
+  const firstWave = await runNext({
+    runId,
+    workflow: TASK_COLLISION_FANOUT_WF,
+    dockerExec: exec,
+  });
+  assert.deepEqual(firstWave.completedSteps, ["task"]);
+  const workflowTask = tasksForRun(runId).find(
+    (t) => t.phase === "task" && t.taskPackage.dispatchSource !== "invoke",
+  );
+  assert.ok(
+    workflowTask && workflowTask.status === "complete",
+    "the workflow task must be a real completed primary",
+  );
+
+  // Then create a real `forge invoke --run` row in the same phase. It is later
+  // and complete, so the unfiltered selection contract must see it; it is not
+  // workflow lineage, so the ready queue must continue to ignore it.
+  const attached = await invoke({
+    runId,
+    agentRole: "research-specialist",
+    task: "ad-hoc work sharing the task phase",
+    projectDir: "/tmp/test-project",
+    dockerExec: exec,
+  });
+  assert.equal(
+    attached.status,
+    "complete",
+    "the attached invoke must complete through the real invoke path",
+  );
+  const adHocTask = getTask(attached.taskId)!;
+  assert.equal(adHocTask.phase, "task");
+  assert.equal(adHocTask.taskPackage.dispatchSource, "invoke");
+  assert.ok(
+    adHocTask.createdAt >= workflowTask.createdAt,
+    "the ad-hoc row is the latest completed parent-less task row",
+  );
+
+  const readyBeforeDispatch = computeReadyQueue(
+    TASK_COLLISION_FANOUT_WF,
+    tasksForRun(runId),
+  );
+  assert.deepEqual(
+    readyBeforeDispatch.map((step) => step.id),
+    ["verify", "fanout"],
+    "the ready queue excludes the ad-hoc row yet still recognizes the completed workflow task dependency",
+  );
+
+  // This inline test workflow is intentionally not installed in the seed
+  // generation. invoke's finalizer therefore cannot reload its shape and closes
+  // this otherwise-active test run through its invoke fallback. Re-open through
+  // the same production helper used by a real attached invoke/retry, then drive
+  // the actual runner consumers below.
+  reactivateTerminalRun(
+    runId,
+    getRun(runId)!.status,
+    "fg717 integration fixture",
+  );
+  assert.equal(getRun(runId)?.status, "active");
+
+  // One real runner wave drives both direct-input and fanout consumers.
+  const secondWave = await runNext({
+    runId,
+    workflow: TASK_COLLISION_FANOUT_WF,
+    dockerExec: exec,
+  });
+  assert.ok(
+    secondWave.completedSteps.includes("verify"),
+    JSON.stringify(secondWave),
+  );
+  assert.ok(
+    secondWave.completedSteps.includes("fanout"),
+    JSON.stringify(secondWave),
+  );
+
+  const verifyTask = tasksForRun(runId).find(
+    (t) => t.phase === "verify" && t.parentId === undefined,
+  )!;
+  const upstream = (verifyTask.taskPackage.inputs as Record<string, unknown>)[
+    "upstream"
+  ] as Array<{ taskId: string; result: { marker?: string } }>;
+  assert.equal(
+    upstream[0]?.taskId,
+    attached.taskId,
+    "deriveUpstream must retain its unfiltered caller universe and select the later attached invoke",
+  );
+  assert.equal(upstream[0]?.result.marker, "AD_HOC_LATEST");
+
+  const fanoutChild = tasksForRun(runId).find(
+    (t) => t.phase === "fanout" && t.parentId !== undefined,
+  )!;
+  assert.deepEqual(
+    (fanoutChild.taskPackage.inputs as Record<string, unknown>)["lane"],
+    { lane: INVOKE_LANE },
+    "runNext fanout must use the same unfiltered latest-complete selection as deriveUpstream",
+  );
+  assert.ok(
+    invoked.includes(attached.taskId),
+    "the ad-hoc row was actually dispatched rather than hand-built",
+  );
 });
 
 // ── (B) cross-site agreement on ONE mixed universe ──────────────────────────────
@@ -231,25 +512,65 @@ test("FG-519: the three consumers agree on the same COMPLETE row for one mixed p
   // The complete row is the ONLY one with a result.json on disk.
   const completeDir = join(runDir, "t-build-real");
   mkdirSync(completeDir, { recursive: true });
-  writeFileSync(join(completeDir, "result.json"), JSON.stringify({ status: "complete", marker: "REAL" }));
+  writeFileSync(
+    join(completeDir, "result.json"),
+    JSON.stringify({ status: "complete", marker: "REAL" }),
+  );
 
   const tasks: Task[] = [
-    mkTask({ id: "t-build-real", runId, phase: "build", status: "complete", createdAt: "2026-06-03T16:00:00.000Z", agentRole: "engineer" }),
+    mkTask({
+      id: "t-build-real",
+      runId,
+      phase: "build",
+      status: "complete",
+      createdAt: "2026-06-03T16:00:00.000Z",
+      agentRole: "engineer",
+    }),
     // failed NEWER — the row a status-blind pop() would have picked.
-    mkTask({ id: "t-build-heal", runId, phase: "build", status: "failed", createdAt: "2026-06-03T17:00:00.000Z" }),
+    mkTask({
+      id: "t-build-heal",
+      runId,
+      phase: "build",
+      status: "failed",
+      createdAt: "2026-06-03T17:00:00.000Z",
+    }),
     // red child (parent-tagged) — must be ignored by every consumer.
-    mkTask({ id: "t-build-red", runId, phase: "build", parentId: "t-build-real", status: "complete", createdAt: "2026-06-03T18:00:00.000Z", agentRole: "red-wide" }),
+    mkTask({
+      id: "t-build-red",
+      runId,
+      phase: "build",
+      parentId: "t-build-real",
+      status: "complete",
+      createdAt: "2026-06-03T18:00:00.000Z",
+      agentRole: "red-wide",
+    }),
   ];
 
   // Consumer 1: the canonical helper directly.
   const primary = resolvePhasePrimary(tasks, "build");
-  assert.equal(primary?.id, "t-build-real", "resolvePhasePrimary → the complete parent-less row");
+  assert.equal(
+    primary?.id,
+    "t-build-real",
+    "resolvePhasePrimary → the complete parent-less row",
+  );
 
   // Consumer 2: deriveUpstream (reads result.json off disk).
-  const upstream = deriveUpstream({ step: mkStep("verify", ["build"]), allTasks: tasks, runDir });
+  const upstream = deriveUpstream({
+    step: mkStep("verify", ["build"]),
+    allTasks: tasks,
+    runDir,
+  });
   assert.equal(upstream.length, 1);
-  assert.equal(upstream[0]!.taskId, "t-build-real", "deriveUpstream → the SAME complete row");
-  assert.deepEqual(upstream[0]!.result, { status: "complete", marker: "REAL" }, "and its real result content");
+  assert.equal(
+    upstream[0]!.taskId,
+    "t-build-real",
+    "deriveUpstream → the SAME complete row",
+  );
+  assert.deepEqual(
+    upstream[0]!.result,
+    { status: "complete", marker: "REAL" },
+    "and its real result content",
+  );
 
   // Consumer 3: computeReadyQueue dep-satisfaction + self-close.
   const wf: Workflow = {
@@ -260,10 +581,18 @@ test("FG-519: the three consumers agree on the same COMPLETE row for one mixed p
     steps: [mkStep("build"), mkStep("verify", ["build"])],
   };
   const ready = computeReadyQueue(wf, tasks);
-  assert.deepEqual(ready.map((s) => s.id), ["verify"], "build closes off the complete row; verify becomes ready off it — not re-admitted, not blocked by the failed newer row");
+  assert.deepEqual(
+    ready.map((s) => s.id),
+    ["verify"],
+    "build closes off the complete row; verify becomes ready off it — not re-admitted, not blocked by the failed newer row",
+  );
 
   // The FG-519 thesis: all three now pick the identical row.
-  assert.equal(primary!.id, upstream[0]!.taskId, "resolvePhasePrimary and deriveUpstream must agree on the phase-authoritative row");
+  assert.equal(
+    primary!.id,
+    upstream[0]!.taskId,
+    "resolvePhasePrimary and deriveUpstream must agree on the phase-authoritative row",
+  );
 });
 
 // ── (C) FG-475 recovery regression through the real ready queue → dispatch ───────
@@ -274,8 +603,25 @@ const INVESTIGATE_AUDIT_WF: Workflow = {
   review_mode: "legacy_verdict",
   inputs: [],
   steps: [
-    { id: "investigate", agent: "investigator", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
-    { id: "audit", agent: "auditor", gate: "human", manual: false, depends_on: ["investigate"], on_reject: "investigate", runtime: "claude", reds: [] },
+    {
+      id: "investigate",
+      agent: "investigator",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "claude",
+      reds: [],
+    },
+    {
+      id: "audit",
+      agent: "auditor",
+      gate: "human",
+      manual: false,
+      depends_on: ["investigate"],
+      on_reject: "investigate",
+      runtime: "claude",
+      reds: [],
+    },
   ],
 };
 
@@ -291,10 +637,37 @@ test("FG-519 regression: a live pending on_reject recovery task in a [complete +
   });
 
   // investigate: a complete primary AND a healed-duplicate failed-newer row.
-  insertTask(mkTask({ id: "t-inv-complete", runId, phase: "investigate", status: "complete", createdAt: "2026-07-01T10:00:00.000Z", agentRole: "investigator" }));
-  insertTask(mkTask({ id: "t-inv-healed", runId, phase: "investigate", status: "failed", createdAt: "2026-07-01T11:00:00.000Z", agentRole: "investigator" }));
+  insertTask(
+    mkTask({
+      id: "t-inv-complete",
+      runId,
+      phase: "investigate",
+      status: "complete",
+      createdAt: "2026-07-01T10:00:00.000Z",
+      agentRole: "investigator",
+    }),
+  );
+  insertTask(
+    mkTask({
+      id: "t-inv-healed",
+      runId,
+      phase: "investigate",
+      status: "failed",
+      createdAt: "2026-07-01T11:00:00.000Z",
+      agentRole: "investigator",
+    }),
+  );
   // audit: a rejected (failed) primary — the reject that fired on_reject back to investigate.
-  insertTask(mkTask({ id: "t-audit-rejected", runId, phase: "audit", status: "failed", createdAt: "2026-07-01T12:00:00.000Z", agentRole: "auditor" }));
+  insertTask(
+    mkTask({
+      id: "t-audit-rejected",
+      runId,
+      phase: "audit",
+      status: "failed",
+      createdAt: "2026-07-01T12:00:00.000Z",
+      agentRole: "auditor",
+    }),
+  );
   // The live recovery task gate.ts's reject branch minted: parent-tagged, carrying
   // rejectedTaskId, landing in the rejected primary's OWN phase (self-referencing on_reject).
   insertTask(
@@ -306,24 +679,52 @@ test("FG-519 regression: a live pending on_reject recovery task in a [complete +
       status: "pending",
       createdAt: "2026-07-01T13:00:00.000Z",
       agentRole: "investigator",
-      inputs: { rejectedTaskId: "t-audit-rejected", rejectedRationale: "needs another pass" },
+      inputs: {
+        rejectedTaskId: "t-audit-rejected",
+        rejectedRationale: "needs another pass",
+      },
     }),
   );
 
   const invoked: string[] = [];
-  const exec = makeRoutingExec([{ prefix: "task-", result: { status: "complete", tests_run: 1 } }], invoked);
+  const exec = makeRoutingExec(
+    [{ prefix: "task-", result: { status: "complete", tests_run: 1 } }],
+    invoked,
+  );
   await runNext({ runId, workflow: INVESTIGATE_AUDIT_WF, dockerExec: exec });
 
   // The carve-out: despite investigate having a COMPLETE primary, the live recovery
   // row re-admitted the phase and was actually dispatched and run.
   const recovery = getTask("t-inv-recovery")!;
-  assert.equal(recovery.status, "complete", "the pending on_reject recovery task must be dispatched and completed — the FG-475 carve-out must survive resolvePhasePrimary");
-  assert.ok(invoked.includes("t-inv-recovery"), "a container must have been dispatched for the recovery task specifically");
+  assert.equal(
+    recovery.status,
+    "complete",
+    "the pending on_reject recovery task must be dispatched and completed — the FG-475 carve-out must survive resolvePhasePrimary",
+  );
+  assert.ok(
+    invoked.includes("t-inv-recovery"),
+    "a container must have been dispatched for the recovery task specifically",
+  );
 
   // The other rows in the mixed phase are untouched; audit (only a failed primary,
   // no complete, no pending) is not re-dispatched.
-  assert.equal(getTask("t-inv-complete")!.status, "complete", "the complete primary is unchanged");
-  assert.equal(getTask("t-inv-healed")!.status, "failed", "the healed-duplicate failed row is unchanged");
-  assert.equal(getTask("t-audit-rejected")!.status, "failed", "audit's rejected primary must not be re-dispatched");
-  assert.ok(!invoked.includes("t-audit-rejected"), "no container for the rejected audit row");
+  assert.equal(
+    getTask("t-inv-complete")!.status,
+    "complete",
+    "the complete primary is unchanged",
+  );
+  assert.equal(
+    getTask("t-inv-healed")!.status,
+    "failed",
+    "the healed-duplicate failed row is unchanged",
+  );
+  assert.equal(
+    getTask("t-audit-rejected")!.status,
+    "failed",
+    "audit's rejected primary must not be re-dispatched",
+  );
+  assert.ok(
+    !invoked.includes("t-audit-rejected"),
+    "no container for the rejected audit row",
+  );
 });

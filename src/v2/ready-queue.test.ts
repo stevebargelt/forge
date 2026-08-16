@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, resolvePhasePrimary, classifyRunTerminalState, formatRunFailure } from "./ready-queue.js";
+import { resolveCompletedPhasePrimary } from "./lifecycle-evaluator.js";
 import type { Workflow } from "./schema.js";
 import type { Task, TaskPackage } from "../types/index.js";
 
@@ -289,6 +290,48 @@ test("resolvePhasePrimary: filters by the requested phase", () => {
     mkTask({ id: "b-c", phase: "b", status: "complete" }),
   ];
   assert.equal(resolvePhasePrimary(tasks, "b")?.id, "b-c");
+});
+
+// FG-717: resolvePhasePrimary is now a thin alias of the canonical evaluator
+// export. Same identity, same rule — the alias must resolve to the same function.
+test("resolvePhasePrimary is resolveCompletedPhasePrimary (FG-717 dedup)", () => {
+  assert.equal(resolvePhasePrimary, resolveCompletedPhasePrimary);
+});
+
+// FG-717 discriminating universe test: the ad-hoc exclusion is the CALLER's, not
+// the selection function's. A workflow whose step id collides with the invoke
+// phase ("task") holds both a workflow primary and a newer, COMPLETE ad-hoc
+// invoke row. The unfiltered consumers (runNext's fanout upstream read and
+// inputs.deriveUpstream both call resolveCompletedPhasePrimary directly on the
+// raw universe) still see the ad-hoc row; computeReadyQueue drops it first, so its
+// dep-satisfaction never does.
+test("FG-717: ad-hoc invoke row is seen by resolveCompletedPhasePrimary but excluded by computeReadyQueue", () => {
+  const universe = [
+    // The workflow primary for the "task" step — pending, so not complete.
+    mkTask({ id: "wf-primary", phase: "task", status: "pending", dispatchSource: "workflow", createdAt: "2026-05-13T00:00:00Z" }),
+    // A COMPLETE ad-hoc invoke row, newer — it WOULD be the latest completed
+    // parent-less row of phase "task" if provenance were ignored.
+    mkAdHocTask("adhoc", "complete"),
+  ];
+  // give the ad-hoc row the newest createdAt so it dominates any complete rows.
+  universe[1]!.createdAt = "2026-05-13T09:00:00Z";
+
+  // Unfiltered (deriveUpstream / runNext fanout upstream): the ad-hoc row wins.
+  assert.equal(
+    resolveCompletedPhasePrimary(universe, "task")?.id,
+    "adhoc",
+    "the selection function itself does NOT exclude ad-hoc rows",
+  );
+
+  // computeReadyQueue filters ad-hoc rows out first, so phase "task" has only the
+  // pending primary → no complete primary → a downstream dep on it is NOT met.
+  const workflow = mkWorkflow([
+    { id: "task", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "downstream", agent: "d", gate: "auto", manual: false, depends_on: ["task"], runtime: "claude", reds: [] },
+  ]);
+  const ready = computeReadyQueue(workflow, universe).map((s) => s.id);
+  assert.ok(!ready.includes("downstream"), "computeReadyQueue treats the ad-hoc row as absent — dep unmet");
+  assert.ok(ready.includes("task"), "the pending 'task' primary is still awaiting dispatch");
 });
 
 // FG-519 parity: a phase with [complete + failed-newer] still closes (the phase

@@ -19,6 +19,7 @@ import {
   isOnRejectRecoveryRow,
   isPhasePrimaryRow,
   isWorkflowPrimaryRow,
+  resolveCompletedPhasePrimary,
   type LineageKind,
 } from "./lifecycle-evaluator.js";
 import type { Workflow, Step } from "./schema.js";
@@ -726,4 +727,45 @@ test("AGREEMENT (runNext dispatchFanoutStep, migrated): its parent lookup exclud
   // would have adopted the invoke row as the fanout parent.
   const legacyParent = [invoked].find((t) => t.phase === "task" && t.parentId === undefined && t.status === "pending");
   assert.equal(legacyParent?.id, "inv");
+});
+
+// ----- resolveCompletedPhasePrimary: the FG-717-canonicalized selection rule -----
+// Latest (by createdAt) COMPLETE, parent-less row for a phase, over the handed
+// candidate universe. Selection only — no provenance filtering of its own.
+
+test("resolveCompletedPhasePrimary: latest-by-createdAt COMPLETE parent-less row", () => {
+  const rows = [
+    mkTask({ id: "old", phase: "a", status: "complete", createdAt: "2026-07-11T00:00:00Z" }),
+    mkTask({ id: "new", phase: "a", status: "complete", createdAt: "2026-07-11T04:00:00Z" }),
+  ];
+  assert.equal(resolveCompletedPhasePrimary(rows, "a")?.id, "new");
+});
+
+test("resolveCompletedPhasePrimary: order-insensitive for DISTINCT timestamps", () => {
+  const older = mkTask({ id: "old", phase: "a", status: "complete", createdAt: "2026-07-11T00:00:00Z" });
+  const newer = mkTask({ id: "new", phase: "a", status: "complete", createdAt: "2026-07-11T04:00:00Z" });
+  assert.equal(resolveCompletedPhasePrimary([older, newer], "a")?.id, "new");
+  assert.equal(resolveCompletedPhasePrimary([newer, older], "a")?.id, "new", "reordering distinct-timestamp inputs is a no-op");
+});
+
+test("resolveCompletedPhasePrimary: FG-519 healed duplicate [complete older, failed newer] => the complete row", () => {
+  const rows = [
+    mkTask({ id: "c", phase: "a", status: "complete", createdAt: "2026-07-11T00:00:00Z" }),
+    mkTask({ id: "f", phase: "a", status: "failed", createdAt: "2026-07-11T02:00:00Z" }),
+  ];
+  assert.equal(resolveCompletedPhasePrimary(rows, "a")?.id, "c");
+});
+
+test("resolveCompletedPhasePrimary: excludes parented (child) rows and other phases", () => {
+  const rows = [
+    mkTask({ id: "primary", phase: "a", status: "complete" }),
+    mkTask({ id: "child", phase: "a", parentId: "primary", status: "complete", agentRole: "red-wide" }),
+    mkTask({ id: "other", phase: "b", status: "complete" }),
+  ];
+  assert.equal(resolveCompletedPhasePrimary(rows, "a")?.id, "primary");
+});
+
+test("resolveCompletedPhasePrimary: no complete row => undefined", () => {
+  assert.equal(resolveCompletedPhasePrimary([mkTask({ id: "f", phase: "a", status: "failed" })], "a"), undefined);
+  assert.equal(resolveCompletedPhasePrimary([], "a"), undefined);
 });

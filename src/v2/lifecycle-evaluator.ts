@@ -230,3 +230,37 @@ export function isFanoutChildRow(task: Task): boolean {
     typeof task.taskPackage.inputs?.["fanoutIndex"] === "number"
   );
 }
+
+// FG-519/FG-477: the one canonical phase-primary resolution rule, shared by the
+// three sites that used to disagree — the ready queue (ready-queue.ts), inputs.
+// deriveUpstream, and runNext's fanout upstream read. Returns the latest (by
+// createdAt) COMPLETE, parent-less (parentId === undefined) task row for `phase`,
+// or undefined.
+//
+// It selects the latest COMPLETED parent-less output even when a NEWER FAILED
+// attempt exists (a healed duplicate-primary pair [complete older, failed newer]
+// resolves to the complete row, not the failed one whose result.json is missing)
+// — hence "CompletedPhasePrimary", not "step-attempt": canonical step state is
+// child C's concern, not this selector's.
+//
+// "parent-less" excludes red/fanout children; "COMPLETE" is what makes the row
+// safe for a downstream reader. Callers own the INPUT filtering (e.g.
+// computeReadyQueue drops ad-hoc invoke rows before calling); this canonicalizes
+// only the SELECTION rule over whatever row universe (`candidateRows`) it is
+// handed. It takes NO ad-hoc/workflow policy flag and does NOT filter the universe
+// itself — that would narrow the row set for callers who pass an unfiltered
+// universe (deriveUpstream, runNext's fanout upstream read), a behavior change
+// this migration must not make.
+//
+// Equal timestamps stay input-order-dependent (Array.sort is stable, so the last
+// same-timestamp row survives .pop()); adding a tie-break would be a behavior
+// change, not a refactor.
+export function resolveCompletedPhasePrimary(
+  candidateRows: Task[],
+  phase: string,
+): Task | undefined {
+  return candidateRows
+    .filter((t) => t.phase === phase && t.parentId === undefined && t.status === "complete")
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .pop();
+}

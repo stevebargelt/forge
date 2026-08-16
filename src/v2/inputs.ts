@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Step } from "./schema.js";
 import type { Task } from "../types/index.js";
-import { resolvePhasePrimary } from "./ready-queue.js";
+import { resolveCompletedPhasePrimary } from "./lifecycle-evaluator.js";
 
 export type UpstreamEntry = {
   phase: string;          // the upstream step's id (== phase under v2)
@@ -43,7 +43,7 @@ export function deriveUpstream(args: {
     // inputs. Selecting the latest complete row fixes that. A phase whose only
     // primaries are non-complete now resolves to undefined and yields no upstream
     // entry — the existing `if (!primary) continue` path, unchanged.
-    const primary = resolvePhasePrimary(args.allTasks, depId);
+    const primary = resolveCompletedPhasePrimary(args.allTasks, depId);
 
     if (!primary) continue;
 
