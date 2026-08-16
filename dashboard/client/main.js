@@ -10,6 +10,7 @@ import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
 import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
+import { ShippingAuditView } from "./shipping-audit.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
@@ -91,6 +92,9 @@ function App() {
   // Sequence token for the queue read — see pollQueue.
   const queueSeq = useRef(0);
   const [reviews, setReviews] = useState(null);
+  // FG-386: the shipping-audit projection, scoped to ONE project like the queue.
+  const [shippingAudit, setShippingAudit] = useState(null);
+  const shippingSeq = useRef(0);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
   // so a launched loop is visible before any task row exists for it.
@@ -356,6 +360,30 @@ function App() {
     return () => clearInterval(id);
   }, [pollReviews, view]);
 
+  const pollShippingAudit = useCallback(async () => {
+    // Scope-token like pollQueue: a read for the previous project must never
+    // overwrite the one just switched to.
+    const seq = (shippingSeq.current += 1);
+    if (!projectFilter) { setShippingAudit(null); return; }
+    try {
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const res = await fetch(`/api/shipping-audit${q}`);
+      if (seq !== shippingSeq.current) return;
+      if (res.ok) setShippingAudit(await res.json());
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== shippingSeq.current) return;
+      setError(String(e));
+    }
+  }, [projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "shipping") return;
+    pollShippingAudit();
+    const id = setInterval(pollShippingAudit, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollShippingAudit, view]);
+
   const pollBacklog = useCallback(async () => {
     if (!projectFilter) { setBacklog(null); return; }
     try {
@@ -472,6 +500,7 @@ function App() {
             <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
             <button class=${"tab " + (view === "queue" ? "tab-active" : "")} onClick=${() => switchView("queue")}>queue</button>
             <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
+            <button class=${"tab " + (view === "shipping" ? "tab-active" : "")} onClick=${() => switchView("shipping")}>shipping</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -538,6 +567,8 @@ function App() {
           />`
         : view === "reviews"
         ? html`<${ReviewsView} data=${reviews} />`
+        : view === "shipping"
+        ? html`<${ShippingAuditView} data=${shippingAudit} />`
         : view === "verify"
         ? html`<${VerificationsView}
             inProgress=${inProgressVerifications}

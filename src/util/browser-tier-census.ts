@@ -84,8 +84,14 @@ export const BROWSER_TIER_DIR = join(
 // through the real backlog path renders inert in a real browser — no
 // script/handler/navigation executes, stored bytes unchanged, a benign control
 // still renders.
+// FG-386 adds `fg386-shipping-audit` (4 tests): the read-only shipping-audit panel
+// in a real browser — every audit state as its own labelled badge with absence
+// rendered not_observed (never green), mechanical checks and model reviewer findings
+// in visually distinct blocks, a superseded row marked stale rather than a live pass,
+// and an open architecture question reading as needs-human on the review axis.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
+  "fg386-shipping-audit.test.ts": 4,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
   "completed-runs.test.ts": 8,

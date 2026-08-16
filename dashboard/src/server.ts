@@ -10,6 +10,7 @@
 // - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
 // - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
+// - GET /api/shipping-audit               per-ticket readiness + shipping-review + mechanical-check projection for ONE project, read-only (?projectKey|?projectDir, FG-386)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 // - GET /api/completed-runs               completed forge RUNS per bucket over the same window grid — a count, not a duration (FG-683)
 // - GET /api/queue                        the operator work-queue board: five projections + dispatcher panel + capacity context (?projectKey|?projectDir, FG-591)
@@ -32,7 +33,7 @@ import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
-  currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView,
+  currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -481,6 +482,28 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const message = err instanceof Error ? err.message : String(err);
       console.error("/api/reviews: reading the review ledger failed:", err);
       payload = JSON.stringify({ reviews: [], error: message });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  if (path === "/api/shipping-audit") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 200), 1, 500);
+    // Built BEFORE any byte is written — the /api/reviews precedent: a read that
+    // throws after writeHead cannot be reported and becomes a blank page.
+    let payload: string;
+    try {
+      const owner = resolveOwnerProject(projectsForDashboard(), projectKey, projectDir);
+      payload = JSON.stringify(shippingAudit(owner ?? null, limit));
+    } catch (err) {
+      // A store predating FG-382/384 has no readiness/reviews tables, and a
+      // read-only open never migrates them into existence (db.ts's policy). That
+      // is a legitimate state, not a fault: report it and keep the page up.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/shipping-audit: reading the shipping audit failed:", err);
+      payload = JSON.stringify({ projectKey: null, rows: [], degraded: [], error: message });
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;

@@ -2960,6 +2960,447 @@ export function reviewLedger(scope?: ProjectScope, limit = 25): ReviewLedgerEntr
   });
 }
 
+// ─── FG-386: Shipping-audit projection (READ-ONLY) ──────────────────────────
+//
+// A projection of already-persisted FG-382/383/384 evidence, keyed by ticket. It
+// invents no table, recomputes no assessment/audit, and makes NO outbound git/
+// provider/CI call while serving — every value below is read from a row that some
+// other subsystem already wrote.
+//
+// The three evidence sources it joins, all on (project_key, ticket_id):
+//   - readiness_assessments (FG-382): the deterministic readiness evaluator's
+//     stored outcome + gaps. STALE when its body_hash no longer matches the
+//     ticket's stored body_hash — a pure column comparison, the same definition
+//     src/store/queue.ts's readinessView uses, never a recompute.
+//   - reviews + review_findings (FG-384/FG-640): the shipping-reviewer ledger —
+//     the model-authored reviewer findings and the review's lifecycle state. Its
+//     candidate_sha is the superseded/staleness key.
+//   - host_verifications (FG-419/FG-487): the MECHANICAL shipping checks (typecheck/
+//     suite/CI gate rows, exit_code 0 = pass) recorded per ticket+commit. These are
+//     the persisted "done" mechanical checks; DoneAuditResult itself is computed
+//     on-demand from host/git state (src/done-audit) and is deliberately NOT read
+//     here — recomputing it would need exactly the outbound calls this projection
+//     forbids.
+//
+// "current head" is not knowable without a git call, so a review is marked stale
+// against the best PERSISTED proxy: the newest recorded mechanical-check commit for
+// the ticket. When that commit differs from the review's candidate_sha, newer
+// evidence exists at a different candidate and the review is superseded — surfaced
+// stale, never as a live pass. Mechanical checks (readiness gaps + host_verifications)
+// and model-authored reviewer findings are kept in distinct fields so the panel can
+// render them visually distinct while sharing one row.
+
+export type AuditCellStatus = "not_observed" | "running" | "passed" | "failed" | "needs_human" | "stale";
+
+const AUDIT_STATUS_PRIORITY: Record<AuditCellStatus, number> = {
+  needs_human: 5,
+  failed: 4,
+  stale: 3,
+  running: 2,
+  passed: 1,
+  not_observed: 0,
+};
+
+/** The row-level rollup: the most attention-demanding axis wins, so a ticket whose
+ *  readiness is green but whose review needs a human never reads as "passed". All
+ *  axes absent → not_observed (absence is NEVER green). */
+export function rollupAuditStatus(statuses: AuditCellStatus[]): AuditCellStatus {
+  let best: AuditCellStatus = "not_observed";
+  for (const s of statuses) if (AUDIT_STATUS_PRIORITY[s] > AUDIT_STATUS_PRIORITY[best]) best = s;
+  return best;
+}
+
+/** Readiness axis. Stale (body moved) dominates so superseded evidence is never a
+ *  live pass. `ready`/`exploratory` pass; `blocked` needs a human; `needs_refinement`
+ *  and any unknown outcome surface as failed — a gap to close, never green. */
+export function readinessCellStatus(outcome: string, stale: boolean): AuditCellStatus {
+  if (stale) return "stale";
+  if (outcome === "ready" || outcome === "exploratory") return "passed";
+  if (outcome === "blocked") return "needs_human";
+  return "failed";
+}
+
+/** Review axis. Superseded evidence is stale first of all; then an open architecture
+ *  question or an environment-blocked review needs a human; a settled review passed;
+ *  a failed review failed; anything still in flight is running. */
+export function reviewCellStatus(state: string, stale: boolean, openArchitectureQuestions: number): AuditCellStatus {
+  if (stale) return "stale";
+  if (openArchitectureQuestions > 0) return "needs_human";
+  if (state === "settled") return "passed";
+  if (state === "failed") return "failed";
+  if (state === "blocked_environment") return "needs_human";
+  return "running";
+}
+
+export type ShippingCheck = {
+  gateName: string;
+  status: "passed" | "failed";
+  source: "ci" | "host";
+  commitSha: string;
+  command: string;
+  recordedAt: string;
+  ciUrl: string | null;
+};
+
+export type ShippingAuditReadiness = {
+  outcome: string;
+  status: AuditCellStatus;
+  gaps: string[];
+  refinementProposal: string | null;
+  revision: number | null;
+  evaluatedAt: string;
+  stale: boolean;
+};
+
+export type ShippingAuditModelFinding = {
+  findingRef: string;
+  summary: string;
+  severity: string | null;
+  riskLens: string | null;
+  reachability: string | null;
+  disposition: string;
+  resolution: string | null;
+  file: string | null;
+  line: number | null;
+};
+
+export type AcceptedDeferral = {
+  findingRef: string;
+  summary: string;
+  followupTicketId: string | null;
+  decidedBy: string | null;
+};
+
+export type ShippingAuditReview = {
+  id: string;
+  runId: string | null;
+  subjectTaskId: string | null;
+  state: string;
+  status: AuditCellStatus;
+  candidateSha: string | null;
+  stale: boolean;
+  riskLenses: string[];
+  openArchitectureQuestions: number;
+  unresolvedFixNow: number;
+  modelFindings: ShippingAuditModelFinding[];
+  acceptedDeferrals: AcceptedDeferral[];
+};
+
+export type ShippingAuditCampaign = {
+  itemId: string;
+  campaignId: string;
+  lifecycleStatus: string;
+  outcome: string | null;
+  prUrl: string | null;
+};
+
+export type ShippingAuditRow = {
+  ticketId: string;
+  title: string | null;
+  status: AuditCellStatus;
+  readiness: ShippingAuditReadiness | null;
+  review: ShippingAuditReview | null;
+  shippingChecks: ShippingCheck[];
+  campaign: ShippingAuditCampaign | null;
+  runId: string | null;
+  taskIds: string[];
+  candidateSha: string | null;
+  links: { ticketId: string; runId: string | null; subjectTaskId: string | null; commit: string | null };
+};
+
+export type ShippingAudit = {
+  projectKey: string | null;
+  rows: ShippingAuditRow[];
+  degraded: string[];
+};
+
+/** A model-authored reviewer finding is the whole of review_findings — the ledger is
+ *  the reds' findings. Mechanical checks live in host_verifications / readiness gaps,
+ *  never here, which is what keeps the two visually separable in one row. */
+function toModelFinding(f: ReviewLedgerFinding): ShippingAuditModelFinding {
+  return {
+    findingRef: f.findingRef,
+    summary: f.summary,
+    severity: f.severity,
+    riskLens: f.riskLens,
+    reachability: f.reachability,
+    disposition: f.disposition,
+    resolution: f.resolution,
+    file: f.file,
+    line: f.line,
+  };
+}
+
+/** SQLite caps bound parameters (~999); a project's ticket set can in principle
+ *  exceed that, so every IN-list read is chunked. */
+function chunked<T>(items: readonly string[], read: (batch: string[]) => T[]): T[] {
+  const out: T[] = [];
+  for (let i = 0; i < items.length; i += 800) out.push(...read(items.slice(i, i + 800)));
+  return out;
+}
+
+/** The shipping-audit projection for ONE project, keyed by ticket. Reads persisted
+ *  rows only. `project` resolves to a project_key exactly as queueBoard does; a
+ *  project with no proven identity (or none selected) yields an empty projection
+ *  rather than a cross-project read. */
+export function shippingAudit(project: ProjectRecord | null, limit = 200): ShippingAudit {
+  const degraded: string[] = [];
+  const identity = project
+    ? (db()
+        .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
+        .get(project.key) as { project_key: string } | undefined)
+    : undefined;
+  const projectKey = identity?.project_key ?? null;
+  if (!projectKey) return { projectKey: null, rows: [], degraded };
+
+  const ticketRows = tolerantRead(
+    () =>
+      db()
+        .prepare(`SELECT ticket_id, title, body_hash FROM tickets WHERE project_key = ?`)
+        .all(projectKey) as Array<{ ticket_id: string; title: string; body_hash: string | null }>,
+    [],
+    "tickets",
+    degraded,
+  );
+  const ticketMeta = new Map(ticketRows.map((r) => [r.ticket_id, r]));
+  const ticketIds = ticketRows.map((r) => r.ticket_id);
+  if (ticketIds.length === 0) return { projectKey, rows: [], degraded };
+
+  const readinessByTicket = new Map<
+    string,
+    { bodyHash: string; outcome: string; gaps: string[]; refinementProposal: string | null; revision: number | null; evaluatedAt: string }
+  >();
+  for (const row of tolerantRead(
+    () =>
+      db()
+        .prepare(
+          `SELECT ticket_id, body_hash, outcome, gaps_json, refinement_proposal, revision, evaluated_at
+             FROM readiness_assessments WHERE project_key = ?`,
+        )
+        .all(projectKey) as Array<{
+        ticket_id: string;
+        body_hash: string;
+        outcome: string;
+        gaps_json: string;
+        refinement_proposal: string | null;
+        revision: number | null;
+        evaluated_at: string;
+      }>,
+    [],
+    "readiness_assessments",
+    degraded,
+  )) {
+    readinessByTicket.set(row.ticket_id, {
+      bodyHash: row.body_hash,
+      outcome: row.outcome,
+      gaps: (safeJsonParse(row.gaps_json) as string[] | undefined) ?? [],
+      refinementProposal: row.refinement_proposal,
+      revision: row.revision,
+      evaluatedAt: row.evaluated_at,
+    });
+  }
+
+  // Reviews for these tickets, newest first — the newest per ticket is the current
+  // one; findings are pulled for that set.
+  const reviewRows = tolerantRead(
+    () =>
+      chunked(ticketIds, (batch) =>
+        db()
+          .prepare(
+            `SELECT * FROM reviews WHERE ticket_id IN (${batch.map(() => "?").join(", ")})
+              ORDER BY updated_at DESC, id DESC`,
+          )
+          .all(...batch) as ReviewDbRow[],
+      ),
+    [],
+    "reviews",
+    degraded,
+  );
+  const currentReviewByTicket = new Map<string, ReviewDbRow>();
+  for (const r of reviewRows) {
+    if (r.ticket_id && !currentReviewByTicket.has(r.ticket_id)) currentReviewByTicket.set(r.ticket_id, r);
+  }
+  const currentReviewIds = [...currentReviewByTicket.values()].map((r) => r.id);
+  const findingsByReview = new Map<string, ReviewLedgerFinding[]>();
+  if (currentReviewIds.length > 0) {
+    for (const f of tolerantRead(
+      () =>
+        chunked(currentReviewIds, (batch) =>
+          db()
+            .prepare(`SELECT * FROM review_findings WHERE review_id IN (${batch.map(() => "?").join(", ")}) ORDER BY review_id ASC, ordinal ASC`)
+            .all(...batch) as ReviewFindingDbRow[],
+        ),
+      [],
+      "review_findings",
+      degraded,
+    )) {
+      const list = findingsByReview.get(f.review_id) ?? [];
+      list.push(rowToReviewFinding(f));
+      findingsByReview.set(f.review_id, list);
+    }
+  }
+
+  // Mechanical shipping checks — most recent recorded first; the newest commit is
+  // the persisted "head" proxy for review staleness.
+  const checksByTicket = new Map<string, ShippingCheck[]>();
+  const latestCheckCommitByTicket = new Map<string, string>();
+  for (const row of tolerantRead(
+    () =>
+      chunked(ticketIds, (batch) =>
+        db()
+          .prepare(
+            `SELECT ticket_id, commit_sha, gate_name, command, exit_code, source, ci_url, recorded_at
+               FROM host_verifications WHERE ticket_id IN (${batch.map(() => "?").join(", ")})
+              ORDER BY recorded_at DESC, id DESC`,
+          )
+          .all(...batch) as Array<{
+          ticket_id: string;
+          commit_sha: string;
+          gate_name: string;
+          command: string;
+          exit_code: number;
+          source: string;
+          ci_url: string | null;
+          recorded_at: string;
+        }>,
+      ),
+    [],
+    "host_verifications",
+    degraded,
+  )) {
+    const list = checksByTicket.get(row.ticket_id) ?? [];
+    list.push({
+      gateName: row.gate_name,
+      status: row.exit_code === 0 ? "passed" : "failed",
+      source: row.source === "ci" ? "ci" : "host",
+      commitSha: row.commit_sha,
+      command: row.command,
+      recordedAt: row.recorded_at,
+      ciUrl: row.ci_url,
+    });
+    checksByTicket.set(row.ticket_id, list);
+    if (!latestCheckCommitByTicket.has(row.ticket_id)) latestCheckCommitByTicket.set(row.ticket_id, row.commit_sha);
+  }
+
+  // Campaign item state (accepted-deferral / done outcome) for these tickets.
+  const campaignByTicket = new Map<string, ShippingAuditCampaign>();
+  for (const row of tolerantRead(
+    () =>
+      chunked(ticketIds, (batch) =>
+        db()
+          .prepare(
+            `SELECT ci.id AS id, ci.campaign_id AS campaign_id, ci.ticket_id AS ticket_id,
+                    ci.lifecycle_status AS lifecycle_status, ci.outcome AS outcome, ci.pr_url AS pr_url, ci.updated_at AS updated_at
+               FROM campaign_items ci
+              WHERE ci.ticket_id IN (${batch.map(() => "?").join(", ")})
+              ORDER BY ci.updated_at DESC`,
+          )
+          .all(...batch) as Array<{
+          id: string;
+          campaign_id: string;
+          ticket_id: string;
+          lifecycle_status: string;
+          outcome: string | null;
+          pr_url: string | null;
+        }>,
+      ),
+    [],
+    "campaign_items",
+    degraded,
+  )) {
+    if (!campaignByTicket.has(row.ticket_id)) {
+      campaignByTicket.set(row.ticket_id, {
+        itemId: row.id,
+        campaignId: row.campaign_id,
+        lifecycleStatus: row.lifecycle_status,
+        outcome: row.outcome,
+        prUrl: row.pr_url,
+      });
+    }
+  }
+
+  // The audit universe is the project's KNOWN tickets (left-joined with evidence), not
+  // only the tickets that happen to carry a readiness/review/check/campaign row. A
+  // known ticket with no evidence still yields a row: the rollup maps "all axes absent"
+  // to not_observed, so absence renders not_observed — never green, and never silently
+  // omitted (an omitted ticket is indistinguishable from a clean audit to an operator).
+  const rows: ShippingAuditRow[] = [];
+  for (const ticketId of ticketIds) {
+    const meta = ticketMeta.get(ticketId);
+    const rawReadiness = readinessByTicket.get(ticketId) ?? null;
+    let readiness: ShippingAuditReadiness | null = null;
+    if (rawReadiness) {
+      const currentHash = meta?.body_hash ?? null;
+      const stale = currentHash === null || currentHash !== rawReadiness.bodyHash;
+      readiness = {
+        outcome: rawReadiness.outcome,
+        status: readinessCellStatus(rawReadiness.outcome, stale),
+        gaps: rawReadiness.gaps,
+        refinementProposal: rawReadiness.refinementProposal,
+        revision: rawReadiness.revision,
+        evaluatedAt: rawReadiness.evaluatedAt,
+        stale,
+      };
+    }
+
+    const rawReview = currentReviewByTicket.get(ticketId) ?? null;
+    let review: ShippingAuditReview | null = null;
+    if (rawReview) {
+      const findings = findingsByReview.get(rawReview.id) ?? [];
+      const openArchitectureQuestions = findings.filter((f) => f.disposition === "architecture_question").length;
+      const unresolvedFixNow = findings.filter((f) => f.disposition === "fix_now" && f.resolution !== "resolved").length;
+      const latestCheckCommit = latestCheckCommitByTicket.get(ticketId);
+      const stale = latestCheckCommit !== undefined && rawReview.candidate_sha !== null && latestCheckCommit !== rawReview.candidate_sha;
+      review = {
+        id: rawReview.id,
+        runId: rawReview.run_id,
+        subjectTaskId: rawReview.subject_task_id,
+        state: rawReview.state,
+        status: reviewCellStatus(rawReview.state, stale, openArchitectureQuestions),
+        candidateSha: rawReview.candidate_sha,
+        stale,
+        riskLenses: riskLensesOf(rawReview.contract_json),
+        openArchitectureQuestions,
+        unresolvedFixNow,
+        modelFindings: findings.map(toModelFinding),
+        acceptedDeferrals: findings
+          .filter((f) => f.disposition === "deferred")
+          .map((f) => ({ findingRef: f.findingRef, summary: f.summary, followupTicketId: f.followupTicketId, decidedBy: f.decidedBy })),
+      };
+    }
+
+    const shippingChecks = checksByTicket.get(ticketId) ?? [];
+    const campaign = campaignByTicket.get(ticketId) ?? null;
+    const candidateSha = review?.candidateSha ?? latestCheckCommitByTicket.get(ticketId) ?? null;
+    const taskIds = review?.subjectTaskId ? [review.subjectTaskId] : [];
+
+    rows.push({
+      ticketId,
+      title: meta?.title ?? null,
+      status: rollupAuditStatus([readiness?.status ?? "not_observed", review?.status ?? "not_observed"]),
+      readiness,
+      review,
+      shippingChecks,
+      campaign,
+      runId: review?.runId ?? null,
+      taskIds,
+      candidateSha,
+      links: {
+        ticketId,
+        runId: review?.runId ?? null,
+        subjectTaskId: review?.subjectTaskId ?? null,
+        commit: candidateSha,
+      },
+    });
+  }
+
+  rows.sort((a, b) => {
+    const byStatus = AUDIT_STATUS_PRIORITY[b.status] - AUDIT_STATUS_PRIORITY[a.status];
+    return byStatus !== 0 ? byStatus : a.ticketId.localeCompare(b.ticketId);
+  });
+  return { projectKey, rows: rows.slice(0, limit), degraded };
+}
+
 // ── FG-679: Current activity — a READ-ONLY projection, and nothing else ──
 //
 // These entry points exist so the dashboard can answer "is something happening, or
