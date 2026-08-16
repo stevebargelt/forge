@@ -48,7 +48,7 @@ import {
 } from "./continuation-adapter.js";
 import { logEvent } from "../store/events.js";
 import { tasksForRun } from "../store/tasks.js";
-import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
+import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run, Task } from "../types/index.js";
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./planner.js";
 import { listTickets } from "../backlog/structured.js";
@@ -3405,12 +3405,23 @@ export function probeCampaignSystemRetryEvidence(
   // steps whose OWN primaries failed, selected via isPhasePrimaryRow — which
   // deliberately EXCLUDES ad-hoc invoke rows (a superseded/ad-hoc failed row must
   // not count as a phase failure). The INVOKE lane (workflow undefined) has no
-  // workflow steps at all: classifyInvokeTerminalState makes the failed top-level
-  // ad-hoc invoke row its OWN terminal phase, so the failed primary IS that
-  // ad-hoc row and must be selected via isAdHocInvokeRow. Reusing isPhasePrimaryRow
-  // there would drop the very row the classification named and refuse a genuine
-  // transient invoke failure (both predicates are evaluator-owned — no parentId scan).
-  const isFailedPrimary = workflow === undefined ? isAdHocInvokeRow : isPhasePrimaryRow;
+  // workflow steps at all: classifyInvokeTerminalState makes each failed TOP-LEVEL
+  // row (its whole universe is `parentId === undefined`) its own terminal phase, so
+  // the re-selection here must cover that SAME universe or it drops a row the
+  // classification already named. A top-level invoke-lane row is either an ad-hoc
+  // invoke row (dispatchSource "invoke" — the marker every `forge invoke` / campaign
+  // invoke-lane dispatch stamps) OR a marker-less top-level row (a legacy row, or a
+  // driven row whose dispatch did not stamp the marker), which isPhasePrimaryRow
+  // covers. FG-722 selected the invoke lane via isAdHocInvokeRow ALONE, which
+  // silently required the marker — so a marker-less top-level failed invoke row
+  // (e.g. a cancelled docs_only item) was counted into failedPhases but dropped
+  // here, collapsing the specific cancel refusal into the generic "no failed
+  // primary" one. `isPhasePrimaryRow(t) || isAdHocInvokeRow(t)` is exactly
+  // classifyInvokeTerminalState's top-level universe (ad-hoc invoke rows are always
+  // top-level), so the re-selection matches the classification row-for-row. Both
+  // predicates are evaluator-owned — no parentId scan.
+  const isFailedPrimary =
+    workflow === undefined ? (t: Task) => isPhasePrimaryRow(t) || isAdHocInvokeRow(t) : isPhasePrimaryRow;
   const failedPrimaries = failedPhases.flatMap((phase) =>
     runTasks.filter((t) => t.phase === phase && isFailedPrimary(t) && t.status === "failed"),
   );
