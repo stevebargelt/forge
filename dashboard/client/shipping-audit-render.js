@@ -36,6 +36,21 @@ export function shortSha(sha) {
   return sha ? String(sha).slice(0, 12) : "—";
 }
 
+/** The actionable failure message for a FAILED mechanical shipping check, or null for a
+ *  passing one. The store keeps no freeform log, so the message is composed from the
+ *  persisted evidence an operator acts on: the non-zero exit code, the reproduce
+ *  command (also shown as a token beside it), and — when present — the CI run to
+ *  inspect. A passed check has no failure to report. (FG-386 AC: failed checks with
+ *  actionable messages.) */
+export function auditCheckFailureMessage(check) {
+  if (!check || check.status !== "failed") return null;
+  const gate = check.gateName || "check";
+  const exit = typeof check.exitCode === "number" ? ` (exit ${check.exitCode})` : "";
+  const reproduce = check.command ? ` — reproduce with \`${check.command}\`` : "";
+  const inspect = check.ciUrl ? "; inspect the linked CI run" : "";
+  return `${gate} failed${exit}${reproduce}${inspect}`;
+}
+
 /** The one-line reason a row demands attention, in the same blocking order the
  *  ledger uses. Absence is stated as "not observed yet", never implied clean. */
 export function auditReason(row) {

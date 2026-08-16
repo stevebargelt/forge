@@ -3002,11 +3002,19 @@ const AUDIT_STATUS_PRIORITY: Record<AuditCellStatus, number> = {
 };
 
 /** The row-level rollup: the most attention-demanding axis wins, so a ticket whose
- *  readiness is green but whose review needs a human never reads as "passed". All
- *  axes absent → not_observed (absence is NEVER green). */
-export function rollupAuditStatus(statuses: AuditCellStatus[]): AuditCellStatus {
+ *  readiness is green but whose review needs a human never reads as "passed". A row is
+ *  GREEN only when the shipping REVIEW — the authoritative done gate (FG-372) — itself
+ *  passed: when the review axis is anything but passed, a passed readiness or
+ *  mechanical-check axis is demoted to not_observed so an incidental sub-check can never
+ *  green a review-absent row. The row then rolls up to the most attention-demanding of
+ *  the remaining present axes, else not_observed (absence is NEVER green). */
+export function rollupAuditStatus(reviewStatus: AuditCellStatus, otherStatuses: AuditCellStatus[]): AuditCellStatus {
+  const contributing =
+    reviewStatus === "passed"
+      ? [reviewStatus, ...otherStatuses]
+      : [reviewStatus, ...otherStatuses.map((s) => (s === "passed" ? "not_observed" : s) as AuditCellStatus)];
   let best: AuditCellStatus = "not_observed";
-  for (const s of statuses) if (AUDIT_STATUS_PRIORITY[s] > AUDIT_STATUS_PRIORITY[best]) best = s;
+  for (const s of contributing) if (AUDIT_STATUS_PRIORITY[s] > AUDIT_STATUS_PRIORITY[best]) best = s;
   return best;
 }
 
@@ -3038,6 +3046,7 @@ export type ShippingCheck = {
   source: "ci" | "host";
   commitSha: string;
   command: string;
+  exitCode: number;
   recordedAt: string;
   ciUrl: string | null;
 };
@@ -3177,8 +3186,8 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
   const ticketRows = tolerantRead(
     () =>
       db()
-        .prepare(`SELECT ticket_id, title, body_hash FROM tickets WHERE project_key = ?`)
-        .all(projectKey) as Array<{ ticket_id: string; title: string; body_hash: string | null }>,
+        .prepare(`SELECT ticket_id, title, body_hash, closed_commit FROM tickets WHERE project_key = ?`)
+        .all(projectKey) as Array<{ ticket_id: string; title: string; body_hash: string | null; closed_commit: string | null }>,
     [],
     "tickets",
     degraded,
@@ -3302,6 +3311,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
       source: row.source === "ci" ? "ci" : "host",
       commitSha: row.commit_sha,
       command: row.command,
+      exitCode: row.exit_code,
       recordedAt: row.recorded_at,
       ciUrl: row.ci_url,
     });
@@ -3377,11 +3387,15 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
       const findings = findingsByReview.get(rawReview.id) ?? [];
       const openArchitectureQuestions = findings.filter((f) => f.disposition === "architecture_question").length;
       const unresolvedFixNow = findings.filter((f) => f.disposition === "fix_now" && f.resolution !== "resolved").length;
-      const latestCheckCommit = latestCheckCommitByTicket.get(ticketId);
-      // Staleness is a pure column comparison. A review with NO candidate_sha cannot be
-      // shown to match the persisted head proxy, so a newer recorded check makes it
-      // stale rather than a live pass — absence/uncomparable is never green (RF-2/RF-6).
-      const stale = latestCheckCommit !== undefined && latestCheckCommit !== rawReview.candidate_sha;
+      // Staleness is a pure column comparison against the ticket's current head, read
+      // straight off persisted columns (no repository call). The head proxy is the commit
+      // that CLOSED the ticket when it is closed (tickets.closed_commit), else the newest
+      // recorded mechanical-check commit. A settled review whose candidate_sha no longer
+      // matches that head is superseded — surfaced stale, never a live pass (RF-3). A
+      // review with NO candidate_sha cannot be shown to match any head, so any known head
+      // makes it stale rather than green (RF-2/RF-6).
+      const ticketHead = meta?.closed_commit ?? latestCheckCommitByTicket.get(ticketId) ?? null;
+      const stale = ticketHead !== null && ticketHead !== rawReview.candidate_sha;
       review = {
         id: rawReview.id,
         runId: rawReview.run_id,
@@ -3409,7 +3423,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
     rows.push({
       ticketId,
       title: meta?.title ?? null,
-      status: rollupAuditStatus([readiness?.status ?? "not_observed", review?.status ?? "not_observed", checkStatus]),
+      status: rollupAuditStatus(review?.status ?? "not_observed", [readiness?.status ?? "not_observed", checkStatus]),
       readiness,
       review,
       shippingChecks,

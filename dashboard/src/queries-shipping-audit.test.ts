@@ -43,6 +43,18 @@ function ticket(id: string, bodyHash: string | null): void {
     .run(PK, id, "story", "active", `title ${id}`, "body", bodyHash, AT);
 }
 
+// A ticket that has been CLOSED at a specific head commit (tickets.closed_commit) — the
+// persisted head proxy the review-staleness comparison reads when no mechanical check
+// exists (RF-3).
+function ticketClosed(id: string, bodyHash: string, closedCommit: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO tickets (project_key, ticket_id, type, status, title, body, body_hash, closed, closed_commit, imported_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(PK, id, "story", "done", `title ${id}`, "body", bodyHash, AT, closedCommit, AT);
+}
+
 function readiness(id: string, bodyHash: string, outcome: string, gaps: string[]): void {
   getDb()
     .prepare(
@@ -240,6 +252,21 @@ function hostCheckOnRun(ticketId: string, runId: string, commitSha: string, gate
     review("review-109", "FG-109", "settled", null, null, "2026-08-16T09:15:00Z");
     hostCheck("FG-109", "sha-109-new", "test:all", 0, "host", "2026-08-16T11:30:00Z");
 
+    // FG-110 — RF-1: an incidental PASSING mechanical check, but NO readiness assessment
+    // and NO shipping review. The check passes on its own, yet the authoritative review
+    // axis is absent — so a passing sub-check must NOT green the row. It rolls up to
+    // not_observed (absence is never green), never passed.
+    ticket("FG-110", "h110");
+    hostCheck("FG-110", "sha-110", "typecheck", 0, "host", "2026-08-16T09:40:00Z");
+
+    // FG-111 — RF-3: a SETTLED review at an OLD candidate, with the ticket since CLOSED
+    // at a DIFFERENT head commit (tickets.closed_commit) and NO mechanical check recorded.
+    // The review's candidate_sha no longer matches the ticket's current head, so the review
+    // axis must read stale — a superseded settled review is never a live pass, even with
+    // no check commit to compare against.
+    ticketClosed("FG-111", "h111", "sha-111-head");
+    review("review-111", "FG-111", "settled", "sha-111-old", null, "2026-08-16T09:05:00Z");
+
     // FG-LEAK — this project owns the ticket but has recorded NO review of its own. An
     // UNSCOPED, NEWER review for the same ticket_id exists (run_id NULL — no project
     // could be captured for it). It must NOT surface here: unattributable evidence never
@@ -385,6 +412,32 @@ test("shippingAudit: a failed mechanical check makes a review-passed ticket fail
   assert.equal(row.status, "failed", "a failed done-audit check must never leave the row green");
 });
 
+test("shippingAudit: an incidental passing check with no readiness and no review is not_observed, never green (RF-1)", () => {
+  const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-110")!;
+  assert.ok(row);
+  // The review axis — the authoritative done gate — is absent …
+  assert.equal(row.readiness, null);
+  assert.equal(row.review, null);
+  // … and the only positive signal is one incidental passing mechanical check.
+  assert.equal(row.shippingChecks.length, 1);
+  assert.equal(row.shippingChecks[0]!.status, "passed");
+  // So the row must NOT read green: a passing sub-check never greens a review-absent row.
+  assert.equal(row.status, "not_observed", "a passing check alone must never green a review-absent row");
+});
+
+test("shippingAudit: a settled review whose candidate no longer matches the ticket's closed head is stale, even with no check (RF-3)", () => {
+  const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-111")!;
+  assert.ok(row);
+  // There is NO mechanical check to compare against — the head proxy is the ticket's
+  // closed_commit, and the settled review's candidate has drifted from it.
+  assert.equal(row.shippingChecks.length, 0, "no mechanical check exists for this ticket");
+  assert.equal(row.review?.state, "settled");
+  assert.equal(row.review?.candidateSha, "sha-111-old");
+  assert.equal(row.review?.stale, true, "candidate_sha drifted from the ticket's closed head");
+  assert.equal(row.review?.status, "stale");
+  assert.notEqual(row.status, "passed", "a superseded settled review must never leave the row a live pass");
+});
+
 test("shippingAudit: evidence never crosses projects — a shared ticket_id does not leak another project's review or checks (RF-2)", () => {
   const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-XPROJ")!;
   assert.ok(row, "the first project's own ticket must still be projected");
@@ -431,10 +484,19 @@ test("shippingCheckStatus: a failed check dominates, all-pass passes, no checks 
 });
 
 test("derive helpers: absence and staleness are never green; the rollup takes the most-attention axis", () => {
-  assert.equal(rollupAuditStatus(["passed", "not_observed"]), "passed");
-  assert.equal(rollupAuditStatus(["passed", "needs_human"]), "needs_human");
-  assert.equal(rollupAuditStatus(["not_observed", "not_observed"]), "not_observed");
-  assert.equal(rollupAuditStatus(["stale", "failed"]), "failed");
+  // review passed → the row can be green, and a passing readiness/check axis rides along.
+  assert.equal(rollupAuditStatus("passed", ["passed", "not_observed"]), "passed");
+  // a more-attention-demanding axis always outranks a passed review.
+  assert.equal(rollupAuditStatus("passed", ["needs_human", "not_observed"]), "needs_human");
+  // all axes absent → not_observed.
+  assert.equal(rollupAuditStatus("not_observed", ["not_observed", "not_observed"]), "not_observed");
+  assert.equal(rollupAuditStatus("failed", ["stale", "not_observed"]), "failed");
+  // RF-1: the review axis is the done gate. When it is NOT passed, a passing readiness or
+  // mechanical-check axis must never green the row — it demotes to not_observed, and the
+  // row rolls up to the most-attention-demanding remaining axis, else not_observed.
+  assert.equal(rollupAuditStatus("not_observed", ["passed", "passed"]), "not_observed");
+  assert.equal(rollupAuditStatus("running", ["passed", "passed"]), "running");
+  assert.equal(rollupAuditStatus("not_observed", ["passed", "failed"]), "failed");
 
   assert.equal(readinessCellStatus("ready", false), "passed");
   assert.equal(readinessCellStatus("exploratory", false), "passed");

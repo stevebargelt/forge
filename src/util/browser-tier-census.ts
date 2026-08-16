@@ -84,19 +84,20 @@ export const BROWSER_TIER_DIR = join(
 // through the real backlog path renders inert in a real browser — no
 // script/handler/navigation executes, stored bytes unchanged, a benign control
 // still renders.
-// FG-386 adds `fg386-shipping-audit` (8 tests): the read-only shipping-audit panel
+// FG-386 adds `fg386-shipping-audit` (9 tests): the read-only shipping-audit panel
 // in a real browser — every audit state as its own labelled badge with absence
 // rendered not_observed (never green), mechanical checks and model reviewer findings
-// in visually distinct blocks, a superseded row marked stale rather than a live pass,
-// an open architecture question reading as needs-human on the review axis, an
-// unselected project rendering the empty/unselected state rather than a perpetual
-// spinner, the details toggle exposing aria-expanded/aria-controls (RF-4), an
+// in visually distinct blocks, a failed mechanical check surfacing an actionable
+// failure message (gate + exit code + reproduce), a superseded row marked stale rather
+// than a live pass, an open architecture question reading as needs-human on the review
+// axis, an unselected project rendering the empty/unselected state rather than a
+// perpetual spinner, the details toggle exposing aria-expanded/aria-controls (RF-4), an
 // accepted-deferral follow-up ticket rendered as a link (RF-7), and a scope switch
 // clearing the panel so a failed new-scope response never retains the prior project's
 // rows (RF-3).
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
-  "fg386-shipping-audit.test.ts": 8,
+  "fg386-shipping-audit.test.ts": 9,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
   "completed-runs.test.ts": 8,

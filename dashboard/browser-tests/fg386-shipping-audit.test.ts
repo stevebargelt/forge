@@ -99,7 +99,7 @@ const auditFixture = {
         acceptedDeferrals: [],
       },
       shippingChecks: [
-        { gateName: "done mechanical shipping check", status: "failed", source: "ci", commitSha: "sha103candidate", command: "npm run verify", recordedAt: "t", ciUrl: "https://ci.example/run/103" },
+        { gateName: "done mechanical shipping check", status: "failed", source: "ci", commitSha: "sha103candidate", command: "npm run verify", exitCode: 2, recordedAt: "t", ciUrl: "https://ci.example/run/103" },
       ],
       campaign: null, runId: "run-103", taskIds: ["task-103"], candidateSha: "sha103candidate",
       links: { ticketId: "FG-103", runId: "run-103", subjectTaskId: "task-103", commit: "sha103candidate" },
@@ -223,6 +223,28 @@ test("FG-386: a failed mechanical blocker is failed and distinct from a model fi
   );
 
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, "shipping-audit-blocker.png"), fullPage: true });
+  await page.close();
+});
+
+test("FG-386: a failed mechanical check surfaces an actionable failure message (RF-2)", async () => {
+  const page = await newPage({ width: 1200, height: 1000 });
+  await openShipping(page);
+
+  const blocker = page.locator('[data-testid="audit-row"][data-status="failed"]').filter({ hasText: "FG-103" });
+  await blocker.getByRole("button", { name: "details" }).click();
+  const mechanical = blocker.locator('[data-testid="audit-mechanical"]');
+  await mechanical.waitFor();
+
+  // RF-2: a failed check surfaces its ACTIONABLE failure message — the gate that failed,
+  // its non-zero exit code, and how to reproduce — so the operator can act, not just see a
+  // red badge. A passing check has no such message.
+  const failureMessage = mechanical.locator('[data-testid="audit-check-message"]');
+  assert.equal(await failureMessage.count(), 1, "exactly the one failed check surfaces a failure message");
+  const messageText = await failureMessage.innerText();
+  assert.match(messageText, /done mechanical shipping check failed/, "the message names the failed gate");
+  assert.match(messageText, /exit 2/, "the message surfaces the non-zero exit code");
+  assert.match(messageText, /reproduce with/, "the message tells the operator how to reproduce it");
+
   await page.close();
 });
 

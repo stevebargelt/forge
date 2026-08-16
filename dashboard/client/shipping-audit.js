@@ -10,7 +10,7 @@
 import { h } from "preact";
 import { useState } from "preact/hooks";
 import htm from "htm";
-import { auditBadgeClass, auditStatusLabel, auditReason, shortSha } from "./shipping-audit-render.js";
+import { auditBadgeClass, auditStatusLabel, auditReason, auditCheckFailureMessage, shortSha } from "./shipping-audit-render.js";
 
 const html = htm.bind(h);
 
@@ -47,6 +47,9 @@ function MechanicalBlock({ readiness, checks }) {
                 ? html`<a class="mono" href=${c.ciUrl} target="_blank" rel="noreferrer noopener">${shortSha(c.commitSha)}</a>`
                 : html`<span class="audit-axis-label mono">${shortSha(c.commitSha)}</span>`}
               ${c.ciUrl ? html`<a class="audit-check-ci" href=${c.ciUrl} target="_blank" rel="noreferrer noopener">CI ↗</a>` : null}
+              ${c.status === "failed"
+                ? html`<div class="audit-check-message" data-testid="audit-check-message">${auditCheckFailureMessage(c)}</div>`
+                : null}
             </div>`)
         : null}
     </div>`;
