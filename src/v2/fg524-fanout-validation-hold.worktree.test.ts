@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { tasksForRun } from "../store/tasks.js";
+import { tasksForRun, updateTaskPackageInputs } from "../store/tasks.js";
 import { eventsForTask } from "../store/events.js";
 import { allPublicationAttempts } from "../store/publications.js";
 import { verdictsForTask } from "../store/verdicts.js";
@@ -506,6 +506,12 @@ test("fg524 (1): a fanout implementer child completing with no tests_run and no 
   // The integration branch was captured (built before the hold) and retained.
   assert.ok(existsSync(integrationWorktreeDir(runId, parentId)), "integration worktree retained for the advance to republish");
 
+  // FG-720: prove the gate seam uses the workflow declaration, not dispatch's
+  // retired `inputs.fanout` stamp. This is still the real parent produced by
+  // runNext; only the legacy compatibility marker is absent at decision time.
+  const { fanout: _retiredFanoutMarker, ...inputsWithoutRetiredMarker } = parent.taskPackage.inputs;
+  updateTaskPackageInputs(parentId, inputsWithoutRetiredMarker);
+
   // ── Recovery: forge gate <parentId> --advance (no --force: awaiting_gate) ───
   await gate(parentId, "advance", "steve advances the validation hold");
   const parentAfterGate = tasksForRun(runId).find((t) => t.id === parentId)!;
@@ -734,6 +740,11 @@ test("fg524 (4): a NON-worktree validation-held fanout parent runs the step's re
     "no verdict exists while the parent is held — the reds have never run",
   );
 
+  // FG-720: the validation-held re-entry remains keyed by the declaring fanout
+  // step when the old dispatch marker is absent.
+  const { fanout: _retiredFanoutMarker, ...inputsWithoutRetiredMarker } = parent.taskPackage.inputs;
+  updateTaskPackageInputs(parentId, inputsWithoutRetiredMarker);
+
   // ── Recovery: forge gate <parentId> --advance ──────────────────────────────
   await gate(parentId, "advance", "steve advances the non-worktree validation hold");
   const parentAfterGate = tasksForRun(runId).find((t) => t.id === parentId)!;
@@ -773,6 +784,57 @@ test("fg524 (4): a NON-worktree validation-held fanout parent runs the step's re
   );
   const childrenAfter = tasksForRun(runId).filter((t) => t.parentId === parentId && !t.agentRole.startsWith("red-"));
   assert.equal(childrenAfter.length, 2, "no new children were created on re-entry");
+});
+
+// FG-720 control: unlike the red-bearing hold above, a non-worktree fanout with
+// no reds has neither work to publish nor reds left to run. It must therefore
+// take gate.ts's in-place completion path even though it is a fanout parent.
+test("FG-720: a non-worktree no-reds fanout validation hold completes in place when advanced", async () => {
+  process.env.FORGE_NO_WORKTREES = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  ensureImplementerNoRedsWorkflowYaml();
+
+  const { runId } = startRun({
+    workflow: FANOUT_IMPLEMENTER_NO_REDS_WF,
+    title: "FG-720 non-worktree no-reds fanout completes in place",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    writeFileSync(stderrPath, "");
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    } else {
+      throw new Error(`unexpected dispatch for no-reds in-place control: ${taskId}`);
+    }
+    return 0;
+  };
+
+  await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+  const heldWave = await runNext({ runId, workflow: FANOUT_IMPLEMENTER_NO_REDS_WF, dockerExec: stubExec });
+  assert.ok(heldWave.awaitingGate.includes("build"), "validation holds the real fanout parent before gate advances it");
+
+  const parent = tasksForRun(runId).find((task) => task.phase === "build" && task.parentId === undefined)!;
+  assert.equal(parent.status, "awaiting_gate");
+  assert.equal(verdictsForTask(parent.id).length, 0, "the no-reds step has no verdicts");
+
+  // Removing the retired marker keeps this a regression test for the canonical
+  // evaluator derivation, not merely the old marker heuristic.
+  const { fanout: _retiredFanoutMarker, ...inputsWithoutRetiredMarker } = parent.taskPackage.inputs;
+  updateTaskPackageInputs(parent.id, inputsWithoutRetiredMarker);
+
+  await gate(parent.id, "advance", "nothing remains to publish or review");
+  const afterGate = tasksForRun(runId).find((task) => task.id === parent.id)!;
+  assert.equal(afterGate.status, "complete", "the no-reds, non-worktree parent completes in place");
+  assert.equal(afterGate.taskPackage.inputs["gateForced"], undefined, "no fanout re-entry is requested");
 });
 
 // ─── (5) RF-2 (review-011263445508): a validation-held WORKTREE fanout with NO

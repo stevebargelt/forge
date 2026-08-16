@@ -224,6 +224,11 @@ test("FG-523 F19 no-wedge: re-running the runner over a held task neither advanc
   // the extra runner pass, and the run then drains to completion.
   await gate(build.id, "advance", "verified by hand", {});
   assert.equal(getTask(build.id)!.status, "complete");
+  assert.equal(
+    getTask(build.id)!.taskPackage.inputs["gateForced"],
+    undefined,
+    "FG-720: a non-fanout gate must complete in place, never enter the fanout re-dispatch arm",
+  );
   const w2 = await runNext({ runId, workflow: wf, dockerExec: stubExec({ status: "complete" }) });
   assert.deepEqual(w2.completedSteps, ["after"], "the run drains once the gate is decided");
 });

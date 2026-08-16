@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { tasksForRun } from "../store/tasks.js";
+import { tasksForRun, updateTaskPackageInputs } from "../store/tasks.js";
 import { allPublicationAttempts } from "../store/publications.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
@@ -331,6 +331,13 @@ test("FG-425: force-advancing a blocked_by_red primary PUBLISHES the work it was
   const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
   assert.equal(primary.status, "blocked_by_red");
   assert.equal(git(repo, ["rev-parse", "HEAD"]), baseSha, "nothing published while blocked");
+
+  // FG-720: runNext stamped the retired marker while minting this real fanout
+  // parent. Remove it before the coordinator seam: the evaluator's step +
+  // phase-primary rule, rather than that implementation detail, must retain the
+  // FG-425 forced-publication re-entry.
+  const { fanout: _retiredFanoutMarker, ...inputsWithoutRetiredMarker } = primary.taskPackage.inputs;
+  updateTaskPackageInputs(primary.id, inputsWithoutRetiredMarker);
 
   // The human overrides the red, with the rationale the gate requires.
   await gate(primary.id, "advance", "overriding the red: the finding is a false positive", { force: true });
