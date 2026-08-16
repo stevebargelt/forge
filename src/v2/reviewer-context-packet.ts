@@ -5,7 +5,7 @@ import { verdictsForRun } from "../store/verdicts.js";
 import { readTicket } from "../backlog/structured.js";
 import { resolveBacklogStore } from "../backlog/storage-mode.js";
 import { dispatchEvidenceForTask, getTicket } from "../store/tickets.js";
-import type { ReviewerContextPacket, MissingContextItem, Finding } from "../types/index.js";
+import type { ReviewerContextPacket, MissingContextItem, Finding, RiskRedsPlan } from "../types/index.js";
 import { collectDoneAuditInputFor } from "../done-audit/collect.js";
 import { evaluateDoneAudit } from "../done-audit/done-audit.js";
 
@@ -28,6 +28,9 @@ export function assembleReviewerContextPacket(
   primaryTaskId: string,
   projectDir: string,
   primaryResultOverride?: unknown,
+  // FG-385: the orchestrator's advisory risk-targeted reds plan, if it authored one. The
+  // packet TRANSPORTS it; it never derives a plan from paths (that would be a classifier).
+  riskRedsPlan?: RiskRedsPlan,
 ): ReviewerContextPacket {
   const run = getRun(runId);
   if (!run) throw new Error(`assembleReviewerContextPacket: run not found: ${runId}`);
@@ -256,6 +259,7 @@ export function assembleReviewerContextPacket(
     verificationCommands,
     deferredScope,
     doneAudit,
+    riskRedsPlan: riskRedsPlan ?? null,
     missingContext,
   };
 }

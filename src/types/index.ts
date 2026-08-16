@@ -4,6 +4,12 @@
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 export type { DoneAuditResult };
 
+// FG-385: the risk-targeted reds plan the packet carries. Type-only import — erased at
+// runtime, so no module cycle with the v2 planner. The taxonomy that produces it lives
+// solely in src/v2/risk-reds-planner.ts (fg385-risk-taxonomy-source-guard.test.ts).
+import type { RiskRedsPlan } from "../v2/risk-reds-planner.js";
+export type { RiskRedsPlan };
+
 export type GateType = "human" | "auto" | "verdict";
 
 export type RedAuthority = "triage" | "specialist" | "authoritative";
@@ -278,6 +284,12 @@ export type ReviewerContextPacket = {
     followUpTicketId?: string;
   }>;
   doneAudit: DoneAuditResult | null;
+  // FG-385: the ADVISORY risk-targeted reds plan, when the orchestrator computed one and
+  // handed it in. The reviewer receives each selected lens's invariant/failure-modes/paths/
+  // evidence; selected/skipped/unavailable are all carried, so "not run" never reads as
+  // "passed". null when no plan was supplied — the packet transports it, it never derives
+  // one (deriving a plan from changed paths would be the path classifier the PRD refuses).
+  riskRedsPlan: RiskRedsPlan | null;
   missingContext: MissingContextItem[];
 };
 

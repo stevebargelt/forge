@@ -1627,11 +1627,28 @@ Fields:
 | `verificationCommands` | `Array<{command, context: "host"\|"container"}>` | Commands the engineer ran or recommends for verification |
 | `deferredScope` | `Array<{description, followUpTicketId?}>` | Scope items the engineer explicitly deferred; entries without `followUpTicketId` are unlinked |
 | `doneAudit` | `DoneAuditResult` \| `null` | Mechanical done-audit result — see [`doneAudit` in the packet](#doneaudit-in-the-packet) below |
+| `riskRedsPlan` | `RiskRedsPlan` \| `null` | The advisory risk-targeted reds plan, when the orchestrator computed one and passed it to `assembleReviewerContextPacket` — see [Risk-targeted reds plan](#risk-targeted-reds-plan-fg-385) below. `null` when no plan was supplied; the packet transports a plan, it never derives one |
 | `missingContext` | `Array<{field, reason, required}>` | Gaps the reviewer should account for; entries with `required: true` block dispatch |
 
 **Engineer evidence at review time.** The `engineerSummary`, `git`, `verificationCommands`, and `deferredScope` fields populate at review time from the in-hand primary task result (FG-418) — previously they were hollow because the DB `task.result` is `null` until after reds have run. For a fanout `build` phase, the evidence is aggregated from the fanout child tasks: `git.changedFiles` is the union of all children's `files_modified`; `verificationCommands` and `deferredScope` are accumulated across all children; `engineerSummary` contains the array of child results; `git.commitSha` and `git.diffRange` are taken from the last completed child that provided them.
 
 **Pre-fail on required missing context.** If any `missingContext` entry has `required: true`, the shipping-reviewer task is pre-failed with a descriptive error and excluded from dispatch — no agent call is made. Currently `backlog` is the only required field. `operatorAsk` is non-required — its absence is surfaced to the agent but does not block dispatch.
+
+### Risk-targeted reds plan (FG-385)
+
+`planRiskReds` (`src/v2/risk-reds-planner.ts`) is a bounded, pure, deterministic function that RECOMMENDS which risk lenses and per-lens attack specs the orchestrator should author into the `review_contract` — it is scoped to the same five-lens vocabulary as [risk-targeted lens selection](#review_disposition-gate) (`wide` / `narrow` / `frontend` / `backend` / `security`) and never touches `confirmContract` or any other write path. It is strictly advisory in both directions: `selectRedsForContract` remains the sole authority over which reds actually dispatch off the *authored* contract, and this planner does not read a diff or a filename to decide a lens — the orchestrator hands it named risk signals (`changedPathClasses: {signal, paths}[]` and `riskSignals`), the same "authored input, never inferred" discipline the contract itself requires (`review-contract.ts` refuses a path→lens classifier).
+
+`planRiskReds({ route, changedPathClasses, acceptanceRefs, protectedInvariants, riskSignals, availableLenses? })` returns a `RiskRedsPlan`: `selectedLenses`, `perLens` (one `{lens, invariant, failureModes, paths, evidenceStandard, blockerClasses}` entry per selected lens), `skipped` (`{lens, reason}` for every unselected lens), `unavailable` (`{lens, reason}` for a *selected* lens whose red role is not installed on the host), and a top-level `reason`. The single `RISK_REDS_TAXONOMY` table maps nine of the ten `risk-signal:*` vocabulary constants to a lens's invariant/failure-modes/evidence standard; a source guard (`fg385-risk-taxonomy-source-guard.test.ts`) asserts that vocabulary lives in exactly this one module, keyed either as a `risk-signal:` string literal or as a computed key indexing the exported `RISK_SIGNALS` array or its constants — a second taxonomy would be two renderings of the same coverage decision disagreeing with each other.
+
+Three outcomes, all recorded rather than inferred:
+
+- **Fail-closed WIDER.** An unrecognized signal, or no signals authored at all, is treated as an ambiguous high-risk control-plane change and selects `wide` + `security` rather than guessing coverage — mirroring the contract's own no-approved-contract fail-closed-wider.
+- **Docs-only.** When the only recognized signal is the tenth constant, `risk-signal:docs-only`, the plan selects no lens, with a recorded reason distinguishing "mechanically low-risk, none needed" from a lens dropped by omission.
+- **Every other recognized signal** unions its taxonomy lenses and merges their attack specs (paths, failure modes, blocker classes) across signals that share a lens.
+
+**`skipped` and `unavailable` are not the same state.** A lens no authored signal targets is `skipped`. A lens the plan *selected* but whose red role is not installed on the host is `unavailable` — distinct so "not run" can never be misread as "passed" (the same discipline `doneAudit` and coverage classification apply elsewhere in this lifecycle).
+
+**Not yet wired to a call site.** FG-385 shipped the planner, its taxonomy, and the packet's optional `riskRedsPlan` field/parameter; nothing in the CLI or review coordinator calls `planRiskReds` yet. `assembleReviewerContextPacket`'s `riskRedsPlan` argument is optional and `ReviewerContextPacket.riskRedsPlan` reads `null` until an orchestrator caller is wired to compute a plan and pass it in.
 
 ### `doneAudit` in the packet
 
