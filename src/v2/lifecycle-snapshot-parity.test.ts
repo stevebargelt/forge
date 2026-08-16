@@ -415,11 +415,30 @@ const cases: Case[] = [
     ],
   },
   {
-    name: "on_reject recovery to an already-complete phase re-admits + keeps active",
+    // SELF-recovery: on_reject === step.id, so the recovery row lands in the SAME
+    // phase 'a' as the primary that rejected it (rules-3 self-referencing shape).
+    name: "on_reject self-recovery (same phase) to an already-complete phase re-admits + keeps active",
     workflow: linear,
     tasks: [
       mkTask({ id: "a1", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00.000Z" }),
       mkRecovery("a-rec", "a", "pending", "a1", "2026-05-13T00:00:02.000Z"),
+    ],
+  },
+  {
+    // CROSS-PHASE recovery (FG-476, security-audit.yml's audit->investigate shape):
+    // a later phase 'c' rejected and fired on_reject back at phase 'a', which
+    // already has a complete primary. The recovery row lands in phase 'a' but is
+    // parented to the REJECTED row in phase 'c' — recovery.phase !== parent.phase.
+    // hasLiveRecovery must re-admit 'a' despite its complete primary, and the
+    // settle pass must keep 'a' active — proving the cross-phase target is under
+    // the parity guarantee, not just the same-phase self-recovery above.
+    name: "on_reject cross-phase recovery into an already-complete phase re-admits + keeps active",
+    workflow: linear,
+    tasks: [
+      mkTask({ id: "a1", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00.000Z" }),
+      mkTask({ id: "b1", phase: "b", status: "complete", createdAt: "2026-05-13T00:00:01.000Z" }),
+      mkTask({ id: "c1", phase: "c", status: "complete", createdAt: "2026-05-13T00:00:02.000Z" }),
+      mkRecovery("a-rec", "a", "pending", "c1", "2026-05-13T00:00:03.000Z"),
     ],
   },
   {
