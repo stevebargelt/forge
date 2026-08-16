@@ -11,11 +11,18 @@
 // what this guard scans for. Modeled on fg722-lifecycle-source-guard.test.ts — an
 // OCCURRENCE-PRECISE multiset allowlist, whitespace/multiline-robust, with self-tests.
 //
-// THE DETECTOR requires a real string-literal quote — double or single — immediately before
-// `risk-signal:`. That is the equivalent of fg722's `.parentId` member-access requirement:
-// it is what keeps PROSE that merely quotes the vocabulary with backticks (this file's own
-// comments, the planner's header) from tripping the gate. A reintroduced taxonomy is CODE,
-// and its keys are `"risk-signal:…"` / `'risk-signal:…'` string literals — those are caught.
+// THE DETECTORS. Three, because a second taxonomy has three ways to name the vocabulary:
+//  1. as `"risk-signal:…"` / `'risk-signal:…'` string literals — the re-typed keys (RF-1).
+//  2. by indexing the EXPORTED `RISK_SIGNALS` array as a computed key — `{ [RISK_SIGNALS[0]]:
+//     […] }` — a signal→lens mapping that names the vocabulary through its only exported
+//     handle and contains NO literal (RF-2, the bypass this guard was widened to close).
+//  3. by using a signal CONSTANT (`S_LIFECYCLE` …) as a computed key — `{ [S_LIFECYCLE]:
+//     […] }` — the same defect if those module-local constants are ever exported.
+// The literal detector still requires a real string-literal quote — double or single —
+// immediately before `risk-signal:` (fg722's `.parentId` member-access equivalent): it keeps
+// PROSE that merely quotes the vocabulary with backticks (this file's own comments, the
+// planner's header) from tripping the gate. The two computed-key detectors are likewise
+// occurrence-precise: they match the `[<vocabulary>]` construction, not a bare mention.
 //
 // THE ALLOWLIST is the inventory: the ten vocabulary constants in risk-reds-planner.ts, and
 // nothing else. Occurrence-precise (RF-1/RF-2 in fg722's terms): the entry declares its
@@ -37,7 +44,21 @@ const SRC_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // vocabulary without being code.
 const RISK_SIGNAL_LITERAL = /["']risk-signal:/;
 
-const DETECTORS: readonly RegExp[] = [RISK_SIGNAL_LITERAL];
+// A computed object key built by indexing the exported `RISK_SIGNALS` vocabulary array —
+// `[RISK_SIGNALS[0]]`, `[RISK_SIGNALS.at(0)]`. A `[` immediately precedes the identifier, so
+// plain value-position indexing (`signal: RISK_SIGNALS[0]`) and the type reads in the planner
+// (`(typeof RISK_SIGNALS)[number]`, `(RISK_SIGNALS as readonly string[])`) do NOT match. The
+// planner never keys anything off `RISK_SIGNALS`, so ANY occurrence is a second taxonomy.
+const RISK_SIGNALS_KEY = /\[\s*RISK_SIGNALS\b/;
+
+// A computed object key that is one of the ten signal constants (S_LIFECYCLE … S_DOCS_ONLY)
+// — `[S_LIFECYCLE]`. The planner uses exactly the nine non-docs constants this way, as
+// RISK_REDS_TAXONOMY's keys; that occurrence is allowlisted below and any other fails. Scoped
+// to the exact constant names so an unrelated `S_*` const elsewhere cannot false-positive.
+const SIGNAL_CONST_KEY =
+  /\[\s*S_(?:LIFECYCLE|GIT_PUBLICATION|AUTH_CREDENTIAL|ROUTING_POLICY|DB_STATE|TEST_INFRA|DONE_GATE|DASHBOARD|CROSS_MODULE|DOCS_ONLY)\s*\]/;
+
+const DETECTORS: readonly RegExp[] = [RISK_SIGNAL_LITERAL, RISK_SIGNALS_KEY, SIGNAL_CONST_KEY];
 
 interface AllowEntry {
   /** Label-relative file path (e.g. "src/v2/risk-reds-planner.ts"). Never a line number. */
@@ -58,6 +79,14 @@ const ALLOWLIST: readonly AllowEntry[] = [
     reason:
       "THE ONE taxonomy: the ten `risk-signal:` vocabulary constants (S_LIFECYCLE … S_DOCS_ONLY) that key the sole change-class→lens table. This is the single sanctioned location.",
   },
+  {
+    file: "src/v2/risk-reds-planner.ts",
+    pattern:
+      /\[\s*S_(?:LIFECYCLE|GIT_PUBLICATION|AUTH_CREDENTIAL|ROUTING_POLICY|DB_STATE|TEST_INFRA|DONE_GATE|DASHBOARD|CROSS_MODULE|DOCS_ONLY)\s*\]/,
+    count: 9,
+    reason:
+      "THE ONE taxonomy table: the nine non-docs signal constants used as RISK_REDS_TAXONOMY's computed keys (`[S_LIFECYCLE]` … `[S_CROSS_MODULE]`; docs-only is excluded from the table). The sole sanctioned constant-keyed mapping — any other file keying by these fails.",
+  },
 ];
 
 interface Hit {
@@ -65,6 +94,9 @@ interface Hit {
   readonly line: number;
   readonly text: string;
   readonly claimedBy: number[];
+  /** Which detector matched — its `source`, so the non-vacuity check can prove each detector
+   *  is pinned to the real taxonomy independently. */
+  readonly detector: string;
 }
 
 interface Span {
@@ -141,6 +173,7 @@ function scan(dir: string): { files: string[]; hits: Hit[] } {
           line: lineAt[hit.start] ?? 0,
           text: text.slice(Math.max(0, hit.start - 6), Math.min(text.length, hit.end + 40)).trim(),
           claimedBy,
+          detector: detector.source,
         });
       }
     }
@@ -203,7 +236,11 @@ test("FG-385: the risk taxonomy vocabulary lives in exactly one module", () => {
 test("FG-385: the sanctioned location actually carries the taxonomy (non-vacuous)", () => {
   const { hits } = scan(SRC_ROOT);
   const inPlanner = hits.filter((h) => h.file === "src/v2/risk-reds-planner.ts");
-  assert.equal(inPlanner.length, 10, "risk-reds-planner.ts must carry exactly the ten vocabulary constants — the guard is pinned to the real taxonomy, not an empty allowlist");
+  const literals = inPlanner.filter((h) => h.detector === RISK_SIGNAL_LITERAL.source);
+  const constKeys = inPlanner.filter((h) => h.detector === SIGNAL_CONST_KEY.source);
+  assert.equal(literals.length, 10, "risk-reds-planner.ts must carry exactly the ten `risk-signal:` vocabulary constants — the literal detector is pinned to the real taxonomy, not an empty allowlist");
+  assert.equal(constKeys.length, 9, "risk-reds-planner.ts must carry exactly the nine constant-keyed taxonomy entries — the constant-key detector is pinned to the real table, not an empty allowlist");
+  assert.equal(inPlanner.filter((h) => h.detector === RISK_SIGNALS_KEY.source).length, 0, "the planner never keys a mapping off RISK_SIGNALS — that detector exists only to catch a second taxonomy elsewhere");
 });
 
 // ------------------------------------------------- the gate guards itself ---
@@ -260,6 +297,54 @@ test("FG-385 guard (multiline): a whitespace-split taxonomy literal fails the ga
     },
     (dir) => {
       assert.throws(() => assertGateHolds(dir), /taxonomy vocabulary reference appears outside/, "a multiline reintroduction must fail the gate");
+    },
+  );
+});
+
+test("FG-385 guard (constant-keyed, RF-2): a second taxonomy keyed off exported RISK_SIGNALS fails the gate", () => {
+  // The RF-2 bypass: a second signal→lens mapping that names the vocabulary through its only
+  // exported handle (the RISK_SIGNALS array) instead of re-typing a `risk-signal:` literal.
+  // No literal appears, yet this IS a second taxonomy — the computed-key detector catches it.
+  withFixture(
+    {
+      "v2/review-wiring.ts": [
+        'import { RISK_SIGNALS } from "./risk-reds-planner.js";',
+        "const SECOND_TAXONOMY: Record<string, string[]> = {",
+        '  [RISK_SIGNALS[0]]: ["wide"],',
+        '  [RISK_SIGNALS[2]]: ["security"],',
+        "};",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /taxonomy vocabulary reference appears outside/,
+        "a constant-keyed second taxonomy built off RISK_SIGNALS must fail the gate even with no literal",
+      );
+    },
+  );
+});
+
+test("FG-385 guard (constant-keyed): a second taxonomy keyed by the signal constants fails the gate", () => {
+  // The same defect if the module-local S_* constants are ever exported and imported: a map
+  // keyed `[S_LIFECYCLE]` is a second taxonomy with no literal. Only the planner may key by
+  // these constants; the same construction anywhere else fails.
+  withFixture(
+    {
+      "v2/review-contract.ts": [
+        'import { S_LIFECYCLE, S_AUTH_CREDENTIAL } from "./risk-reds-planner.js";',
+        "const OTHER: Record<string, string[]> = {",
+        '  [S_LIFECYCLE]: ["backend"],',
+        '  [S_AUTH_CREDENTIAL]: ["security"],',
+        "};",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /taxonomy vocabulary reference appears outside/,
+        "a constant-keyed second taxonomy built off the S_* signal identifiers must fail the gate",
+      );
     },
   );
 });
