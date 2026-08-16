@@ -3165,11 +3165,13 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
 
   // Evidence rows (reviews / host_verifications / campaign_items) carry no project_key
   // of their own — they are keyed by ticket_id, which is unique only WITHIN a project.
-  // To keep the projection from crossing projects when two projects share a ticket_id,
-  // every evidence select is scoped through its owning run's durable project identity
-  // (runs.project_identity, which holds this project's pk- key or its repo- evidence
-  // key). A row with no run, or a run whose project was never captured, is unscoped and
-  // still surfaces — matching reviewLedger's established semantics.
+  // Since ticket_id collides across projects, every evidence select is scoped through
+  // its owning run's durable project identity (runs.project_identity, which holds this
+  // project's pk- key or its repo- evidence key), and ONLY rows whose run resolves to
+  // THIS project surface. A row with no run, or a run whose project was never captured,
+  // is unattributable: admitting it would let another project's unscoped, newer evidence
+  // win a shared ticket_id and cross into this projection (RF-1/RF-5). The projection
+  // never crosses projects, so unattributable evidence is dropped rather than surfaced.
   const scopeKeys = [projectKey, project!.key];
 
   const ticketRows = tolerantRead(
@@ -3228,7 +3230,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
           .prepare(
             `SELECT reviews.* FROM reviews LEFT JOIN runs ON runs.id = reviews.run_id
               WHERE reviews.ticket_id IN (${batch.map(() => "?").join(", ")})
-                AND (runs.project_identity IS NULL OR runs.project_identity IN (?, ?))
+                AND runs.project_identity IN (?, ?)
               ORDER BY reviews.updated_at DESC, reviews.id DESC`,
           )
           .all(...batch, ...scopeKeys) as ReviewDbRow[],
@@ -3275,7 +3277,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
                     host_verifications.ci_url, host_verifications.recorded_at
                FROM host_verifications LEFT JOIN runs ON runs.id = host_verifications.run_id
               WHERE host_verifications.ticket_id IN (${batch.map(() => "?").join(", ")})
-                AND (runs.project_identity IS NULL OR runs.project_identity IN (?, ?))
+                AND runs.project_identity IN (?, ?)
               ORDER BY host_verifications.recorded_at DESC, host_verifications.id DESC`,
           )
           .all(...batch, ...scopeKeys) as Array<{
@@ -3318,7 +3320,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
                     ci.lifecycle_status AS lifecycle_status, ci.outcome AS outcome, ci.pr_url AS pr_url, ci.updated_at AS updated_at
                FROM campaign_items ci LEFT JOIN runs r ON r.id = ci.run_id
               WHERE ci.ticket_id IN (${batch.map(() => "?").join(", ")})
-                AND (r.project_identity IS NULL OR r.project_identity IN (?, ?))
+                AND r.project_identity IN (?, ?)
               ORDER BY ci.updated_at DESC`,
           )
           .all(...batch, ...scopeKeys) as Array<{
@@ -3376,7 +3378,10 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
       const openArchitectureQuestions = findings.filter((f) => f.disposition === "architecture_question").length;
       const unresolvedFixNow = findings.filter((f) => f.disposition === "fix_now" && f.resolution !== "resolved").length;
       const latestCheckCommit = latestCheckCommitByTicket.get(ticketId);
-      const stale = latestCheckCommit !== undefined && rawReview.candidate_sha !== null && latestCheckCommit !== rawReview.candidate_sha;
+      // Staleness is a pure column comparison. A review with NO candidate_sha cannot be
+      // shown to match the persisted head proxy, so a newer recorded check makes it
+      // stale rather than a live pass — absence/uncomparable is never green (RF-2/RF-6).
+      const stale = latestCheckCommit !== undefined && latestCheckCommit !== rawReview.candidate_sha;
       review = {
         id: rawReview.id,
         runId: rawReview.run_id,

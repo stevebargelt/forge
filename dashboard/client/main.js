@@ -371,12 +371,27 @@ function App() {
       const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/shipping-audit${q}`);
       if (seq !== shippingSeq.current) return;
+      // Only the new scope's response may populate the panel. A failed fetch must NOT
+      // leave the prior scope's rows on screen labelled as the new project — drop to
+      // the loading state instead (RF-3).
       if (res.ok) setShippingAudit(await res.json());
+      else setShippingAudit(null);
       setNow(Date.now());
     } catch (e) {
       if (seq !== shippingSeq.current) return;
+      setShippingAudit(null);
       setError(String(e));
     }
+  }, [projectFilter, checkoutFilter]);
+
+  // Clear the panel the instant the scope changes so the previous project's evidence is
+  // never rendered under the new scope while its request is in flight (RF-3, the FG-699
+  // guard). The seq bump retires whatever read is still outstanding for the old scope;
+  // the null drops the view to its loading state until the new response arrives. Runs
+  // before the poll effect below, which then fires the scoped fetch.
+  useEffect(() => {
+    shippingSeq.current += 1;
+    setShippingAudit(null);
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {

@@ -89,21 +89,24 @@ function DeferralsBlock({ review }) {
       ${deferrals.map((d) => html`
         <div key=${d.findingRef}>
           <span class="mono">${d.findingRef}</span> ${d.summary}
-          ${d.followupTicketId ? html` <span class="mono">→ ${d.followupTicketId}</span>` : html` <span class="audit-axis-label">(no follow-up ticket)</span>`}
+          ${d.followupTicketId
+            ? html` <a class="mono audit-followup-link" href=${`#audit-ticket-${d.followupTicketId}`}>→ ${d.followupTicketId}</a>`
+            : html` <span class="audit-axis-label">(no follow-up ticket)</span>`}
         </div>`)}
     </div>`;
 }
 
 function AuditRow({ row, expanded, onToggle }) {
+  const detailsId = `audit-details-${row.ticketId}`;
   return html`
-    <div class="card audit-row" data-testid="audit-row" data-status=${row.status}>
+    <div class="card audit-row" data-testid="audit-row" data-status=${row.status} id=${`audit-ticket-${row.ticketId}`}>
       <div class="row audit-row-head">
         <div>
           <${StatusBadge} status=${row.status} />
           <strong class="mono" style="margin-left: 8px;">${row.ticketId}</strong>
           ${row.title ? html`<span class="muted" style="margin-left: 8px;">${row.title}</span>` : null}
         </div>
-        <button class="tab" onClick=${onToggle}>${expanded ? "hide" : "details"}</button>
+        <button class="tab" onClick=${onToggle} aria-expanded=${expanded} aria-controls=${detailsId}>${expanded ? "hide" : "details"}</button>
       </div>
 
       <div class="audit-axes">
@@ -126,6 +129,7 @@ function AuditRow({ row, expanded, onToggle }) {
 
       ${expanded
         ? html`
+          <div id=${detailsId}>
             <${MechanicalBlock} readiness=${row.readiness} checks=${row.shippingChecks || []} />
             <${ModelBlock} review=${row.review} />
             <${DeferralsBlock} review=${row.review} />
@@ -135,7 +139,8 @@ function AuditRow({ row, expanded, onToggle }) {
               ticket ${row.links.ticketId}
               ${row.links.commit ? html` · commit ${shortSha(row.links.commit)}` : null}
               ${row.campaign ? html` · campaign ${row.campaign.campaignId} (${row.campaign.lifecycleStatus}${row.campaign.outcome ? `/${row.campaign.outcome}` : ""})` : null}
-            </div>`
+            </div>
+          </div>`
         : null}
     </div>`;
 }

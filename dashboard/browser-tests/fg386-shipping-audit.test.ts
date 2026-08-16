@@ -35,6 +35,10 @@ const projectsFixture = [{
   lastRunAt: new Date().toISOString(),
   checkouts: [
     { projectDir: "/workspace/forge", projectDirs: ["/workspace/forge"], branch: "main", exists: true, runCount: 4, inFlightCount: 0, liveSessions: 0 },
+    // A second checkout so the scope banner offers a switch target. Its shipping-audit
+    // fetch is made to FAIL by the fixture server (RF-3): switching to it must never
+    // leave the first scope's rows on screen.
+    { projectDir: "/workspace/forge-wt", projectDirs: ["/workspace/forge-wt"], branch: "wt", exists: true, runCount: 1, inFlightCount: 0, liveSessions: 0 },
   ],
 }];
 
@@ -259,6 +263,56 @@ test("FG-386: an unselected project renders the empty/unselected state, never a 
   await page.close();
 });
 
+test("FG-386: the details toggle exposes aria-expanded and controls its details region (RF-4)", async () => {
+  const page = await newPage({ width: 1000, height: 900 });
+  await openShipping(page);
+
+  const row = page.locator('[data-testid="audit-row"]').filter({ hasText: "FG-100" });
+  const toggle = row.getByRole("button", { name: "details" });
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false", "a collapsed toggle reports aria-expanded=false to assistive tech");
+  const controls = await toggle.getAttribute("aria-controls");
+  assert.ok(controls, "the toggle names the region it controls");
+
+  await toggle.click();
+  const expandedToggle = row.getByRole("button", { name: "hide" });
+  assert.equal(await expandedToggle.getAttribute("aria-expanded"), "true", "an expanded toggle reports aria-expanded=true");
+  assert.equal(await row.locator(`#${controls}`).count(), 1, "the controlled details region is present and matches aria-controls");
+
+  await page.close();
+});
+
+test("FG-386: an accepted-deferral follow-up ticket renders as a link, not plain text (RF-7)", async () => {
+  const page = await newPage({ width: 1000, height: 900 });
+  await openShipping(page);
+
+  const row = page.locator('[data-testid="audit-row"]').filter({ hasText: "FG-100" });
+  await row.getByRole("button", { name: "details" }).click();
+  const deferrals = row.locator('[data-testid="audit-deferrals"]');
+  await deferrals.waitFor();
+
+  const link = deferrals.locator("a.audit-followup-link");
+  assert.equal(await link.count(), 1, "the follow-up ticket is rendered as a link");
+  assert.match(await link.innerText(), /FG-999/, "the link carries the follow-up ticket id");
+  assert.equal(await link.getAttribute("href"), "#audit-ticket-FG-999", "the link targets the follow-up ticket");
+
+  await page.close();
+});
+
+test("FG-386: switching scope clears the panel; a failed new-scope response never retains the prior project's rows (RF-3)", async () => {
+  const page = await newPage({ width: 1000, height: 900 });
+  await openShipping(page);
+  assert.ok((await page.locator('[data-testid="audit-row"]').count()) > 0, "the first scope shows its rows");
+
+  // Switch to a checkout whose audit fetch FAILS. The prior scope's rows must be gone
+  // immediately — never rendered under the new scope while it resolves, and never
+  // retained when it fails.
+  await page.locator('button[title="/workspace/forge-wt"]').click();
+  await page.getByText(/loading shipping audit/).waitFor();
+  assert.equal(await page.locator('[data-testid="audit-row"]').count(), 0, "no prior-scope rows survive the switch");
+
+  await page.close();
+});
+
 async function newPage(viewport: { width: number; height: number }): Promise<Page> {
   const page = await browser.newPage({ viewport });
   const errors: string[] = [];
@@ -292,6 +346,12 @@ function createFixtureServer(): Server {
       return;
     }
     if (url.pathname === "/api/shipping-audit") {
+      // RF-3: the second checkout's audit fetch fails. A failed new-scope response must
+      // not cause the panel to retain the prior scope's rows.
+      if (url.searchParams.get("projectDir") === "/workspace/forge-wt") {
+        res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "boom" }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(auditFixture));
       return;
     }

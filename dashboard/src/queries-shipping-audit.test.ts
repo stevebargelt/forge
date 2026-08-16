@@ -52,6 +52,16 @@ function readiness(id: string, bodyHash: string, outcome: string, gaps: string[]
     .run(PK, id, bodyHash, outcome, JSON.stringify(gaps), null, 1, AT);
 }
 
+// Every review and host-check belongs to a run whose durable project_identity is THIS
+// project (PK) — the projection now surfaces ONLY evidence attributable to the selected
+// project, so the fixture attaches the owning run (idempotently) exactly as production
+// does. `run-<ticketId>` is the per-ticket run the same-project evidence hangs off.
+function scopedRun(ticketId: string): void {
+  getDb()
+    .prepare(`INSERT OR IGNORE INTO runs (id, workflow, title, status, created_at, project_identity) VALUES (?,?,?,?,?,?)`)
+    .run(`run-${ticketId}`, "feature", `title ${ticketId}`, "active", AT, PK);
+}
+
 function review(
   id: string,
   ticketId: string,
@@ -60,6 +70,7 @@ function review(
   contractJson: string | null,
   updatedAt: string,
 ): void {
+  scopedRun(ticketId);
   getDb()
     .prepare(
       `INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
@@ -112,12 +123,13 @@ function finding(reviewId: string, ordinal: number, ref: string, over: Record<st
 }
 
 function hostCheck(ticketId: string, commitSha: string, gate: string, exit: number, source: string, recordedAt: string): void {
+  scopedRun(ticketId);
   getDb()
     .prepare(
-      `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, source, recorded_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
+      `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, source, recorded_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
     )
-    .run(ticketId, "/proj/shipaudit", commitSha, gate, `run ${gate}`, exit, source, recordedAt);
+    .run(ticketId, "/proj/shipaudit", commitSha, gate, `run ${gate}`, exit, `run-${ticketId}`, source, recordedAt);
 }
 
 // A run stamped with the DURABLE project it belongs to (runs.project_identity), the
@@ -217,6 +229,30 @@ function hostCheckOnRun(ticketId: string, runId: string, commitSha: string, gate
     readiness("FG-108", "h108", "ready", []);
     review("review-108", "FG-108", "settled", "sha-108", null, "2026-08-16T09:20:00Z");
     hostCheck("FG-108", "sha-108", "test:all", 1, "host", "2026-08-16T09:25:00Z");
+
+    // FG-109 — a SETTLED review with NO candidate_sha, plus a NEWER recorded check
+    // commit. A null candidate cannot be shown to match the persisted head proxy, so
+    // the review axis must read stale — never a live pass over newer evidence
+    // (RF-2/RF-6). The check itself passes, so only the null-candidate staleness makes
+    // the row non-green.
+    ticket("FG-109", "h109");
+    readiness("FG-109", "h109", "ready", []);
+    review("review-109", "FG-109", "settled", null, null, "2026-08-16T09:15:00Z");
+    hostCheck("FG-109", "sha-109-new", "test:all", 0, "host", "2026-08-16T11:30:00Z");
+
+    // FG-LEAK — this project owns the ticket but has recorded NO review of its own. An
+    // UNSCOPED, NEWER review for the same ticket_id exists (run_id NULL — no project
+    // could be captured for it). It must NOT surface here: unattributable evidence never
+    // crosses into a project's projection on a shared ticket_id (RF-1/RF-5).
+    ticket("FG-LEAK", "hleak");
+    getDb()
+      .prepare(
+        `INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
+                              trusted_remote_sha, contract_json, review_mode, state, created_at, updated_at, settled_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run("review-leak", null, "task-leak", "FG-LEAK", "base", "conf", "sha-leak", "remote", null,
+        "evidence_led", "settled", AT, "2026-08-16T13:00:00Z", "2026-08-16T13:00:00Z");
 
     // RF-2 cross-project isolation: a SECOND project owns a ticket with the SAME
     // ticket_id ("FG-XPROJ") plus a NEWER settled review and a FAILED mechanical check,
@@ -365,6 +401,27 @@ test("shippingAudit: evidence never crosses projects — a shared ticket_id does
   assert.equal(other.review?.id, "review-xproj-b");
   assert.equal(other.shippingChecks.length, 1);
   assert.equal(other.status, "failed");
+});
+
+test("shippingAudit: a settled review with NO candidate_sha is stale over newer check evidence, never a live pass (RF-2/RF-6)", () => {
+  const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-109")!;
+  assert.ok(row);
+  assert.equal(row.review?.candidateSha, null, "the review genuinely has no candidate sha");
+  assert.equal(row.review?.state, "settled");
+  // A null candidate cannot be staleness-compared to the newer recorded check, so the
+  // review axis is stale — NOT passed. Absence/uncomparable is never green.
+  assert.equal(row.review?.stale, true);
+  assert.equal(row.review?.status, "stale");
+  assert.notEqual(row.status, "passed", "a null-candidate review must not leave the row a live pass");
+});
+
+test("shippingAudit: an UNSCOPED newer review for a shared ticket_id does not leak into a project's projection (RF-1/RF-5)", () => {
+  const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-LEAK")!;
+  assert.ok(row, "the project's own ticket is still projected");
+  // The only review recorded for this ticket_id is unattributable (run_id NULL). It
+  // must NOT be selected as this project's current review — the review axis is absent.
+  assert.equal(row.review, null, "unscoped evidence must not surface under a selected project");
+  assert.equal(row.status, "not_observed");
 });
 
 test("shippingCheckStatus: a failed check dominates, all-pass passes, no checks is not_observed", () => {

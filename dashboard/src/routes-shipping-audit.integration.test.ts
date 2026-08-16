@@ -39,9 +39,11 @@ const dir = fixtureCheckout();
     getDb()
       .prepare(`INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at) VALUES (?,?,?,?)`)
       .run(PK, repositoryCheckoutIdentity(dir).key, "remote", AT);
+    // The run carries its DURABLE project_identity (FG-663+); every evidence select is
+    // scoped through it, so the projection surfaces only this project's evidence.
     getDb()
-      .prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?,?,?,?,?,?)`)
-      .run("run-shipaudit", "feature", "shipaudit fixture", "complete", AT, dir);
+      .prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir, project_identity) VALUES (?,?,?,?,?,?,?)`)
+      .run("run-shipaudit", "feature", "shipaudit fixture", "complete", AT, dir, PK);
 
     getDb()
       .prepare(
@@ -65,10 +67,10 @@ const dir = fixtureCheckout();
         '{"risk_lenses":["wide"]}', "evidence_led", "settled", AT, "2026-08-16T10:00:00Z", "2026-08-16T10:00:00Z");
     getDb()
       .prepare(
-        `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, source, recorded_at)
-         VALUES (?,?,?,?,?,?,?,?)`,
+        `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, source, recorded_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
       )
-      .run("FG-386", dir, "sha-386", "test:all", "npm run test:all", 0, "ci", "2026-08-16T10:05:00Z");
+      .run("FG-386", dir, "sha-386", "test:all", "npm run test:all", 0, "run-shipaudit", "ci", "2026-08-16T10:05:00Z");
   });
 }
 
