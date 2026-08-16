@@ -358,6 +358,22 @@ The coordinator's own audit half. Ordinary `events` rows, no schema change.
 - `review.lens_accepted` — payload `{ reviewId, lens, missingEvidence, rationale, candidateSha, acceptedBy, acceptedAt }`. The third route by which an absent lens clears (`forge review accept-lens`, operator authority). The payload NAMES the missing evidence and the candidate it was accepted against: an acceptance is a decision about one candidate's missing review, never a standing waiver.
 - `gate.decided` gains `gateKind: "review_disposition"` — **only** on the steps the new gate actually decides (an `evidence_led` workflow's `gate: verdict` step). A legacy run's payload is byte-identical to what it has always been, so the key's presence is itself the discriminator.
 
+### `shippingAudit` — the shipping-audit dashboard read path (FG-386)
+
+Not a new table — a read-only **projection** over four already-persisted evidence tables (`readiness_assessments`, `reviews`/`review_findings`, `host_verifications`, `campaign_items`), keyed by ticket, computed fresh on every read by `shippingAudit()` (`dashboard/src/queries.ts`) and served by `GET /api/shipping-audit` (see [response shape](#get-apishipping-audit-response-shape-shippingaudit) below). No new state machine, ledger, editor, recompute, or outbound provider/CI call while serving — it reads what FG-382/383/384 already wrote.
+
+**The audit universe is the project's known tickets, not just the ones carrying evidence.** `tickets` is LEFT-JOINed against every evidence table, so a ticket with no readiness/review/check/campaign row still yields a row rather than being silently omitted — an omitted ticket is indistinguishable from a clean audit to an operator, so absence renders `not_observed`, never green.
+
+**Row rollup.** Each row's `status` is the most attention-demanding of three axes — readiness, review, and the mechanical shipping-check axis — via `rollupAuditStatus`, over the priority order `not_observed < passed < running < stale < failed < needs_human`. A ticket whose readiness and review both pass but carries one FAILED mechanical `host_verifications` row still rolls up to `failed` — a done-audit blocker can never be laundered into green by a passing review (`shippingCheckStatus`: no recorded checks is `not_observed`, one `failed` check dominates, all-pass is `passed`).
+
+**Staleness is a pure column comparison, not a recompute.** Readiness is stale when the ticket's current `body_hash` no longer matches the hash the assessment was evaluated against. A review is stale when the newest recorded mechanical check's commit no longer matches the review's own `candidate_sha` — a newer candidate exists than the one the review covers. Neither case re-runs anything; both are read straight off persisted columns.
+
+**Cross-project scoping (evidence tables carry no `project_key` of their own).** `reviews`, `host_verifications`, and `campaign_items` are keyed by `ticket_id`, which is unique only *within* a project — two projects can legitimately own a ticket sharing the same id. Every evidence SELECT is therefore additionally scoped through its owning run's durable project identity: `LEFT JOIN runs ... WHERE runs.project_identity IS NULL OR runs.project_identity IN (?, ?)`, the two bind values being this project's resolved `project_key` and its `repo_evidence_key` (`ProjectRecord.key`) — either is a valid stamp on `runs.project_identity` depending on when the run was created (see [Durable project identity](#durable-project-identity-project_identity-fg-663)). A row whose run carries no project identity (or has no run at all) is left unscoped and still surfaces, matching `reviewLedger`'s established semantics — see [`reviews` / `review_findings` tables](#reviews--review_findings-tables-fg-638-dashboard-read-path) above.
+
+**Cell status vocabulary:** `not_observed | running | passed | failed | needs_human | stale`, shared across all three axes (`AuditCellStatus`).
+
+Like [`reviews` / `review_findings`](#reviews--review_findings-tables-fg-638-dashboard-read-path), this projection reads by direct SQL against the dashboard's own handle and is not joined to any CLI render — this file's standing dashboard-drift caveat applies here too.
+
 ### `fix_batches` / `fix_batch_results` tables (FG-639 FixBatch delivery)
 
 The durable FixBatch of PRD Appendix A — the unit of work Stage 5 of the [review coordinator](concepts.md#review-coordinator) hands to **one** fixer for the whole `fix_now` set. Two more brand-new tables arriving whole via `CREATE TABLE IF NOT EXISTS` on the additive-only open path; `user_version` untouched. **Like `continuations`, this is not part of the dashboard read contract** — documented here so a schema change is caught by this file's update-in-the-same-commit rule. They carry CHECK constraints for the same reason the review pair does: only new binaries ever write a table that never existed before, so the FG-585 old-vs-new enum hazard cannot arise.
@@ -776,6 +792,21 @@ Read-only (FG-638). Each entry is the `reviews` row camelCased — `id`, `runId`
 - `findings` — `ReviewLedgerFinding[]`, ordered by `ordinal`, each carrying `sources` parsed from `sources_json`.
 
 Disposition controls are deliberately **not** exposed: the ledger's write surface is `forge review disposition` on the CLI, and the dashboard stays read-only until that surface is proven.
+
+### `GET /api/shipping-audit` response shape (`ShippingAudit`)
+
+Read-only (FG-386). `?projectKey=<key>` or `?projectDir=<path>` selects the project (resolved the same way as the other project-scoped endpoints); an optional `?limit=` clamps row count to `[1, 500]` (default 200). See [`shippingAudit` — the shipping-audit dashboard read path](#shippingaudit--the-shipping-audit-dashboard-read-path-fg-386) above for the projection semantics. Shape:
+
+- `projectKey` — the resolved `project_key`, or `null` when no project is selected or its identity was never proven — in which case `rows` is always `[]`.
+- `rows` — `ShippingAuditRow[]`, most-attention-first (`rollupAuditStatus` priority, ties broken by `ticketId`): `{ ticketId, title, status, readiness, review, shippingChecks, campaign, runId, taskIds, candidateSha, links }`.
+  - `readiness` — `{ outcome, status, gaps, refinementProposal, revision, evaluatedAt, stale } | null`, `null` when no readiness assessment is recorded for the ticket.
+  - `review` — `{ id, runId, subjectTaskId, state, status, candidateSha, stale, riskLenses, openArchitectureQuestions, unresolvedFixNow, modelFindings, acceptedDeferrals } | null`. `modelFindings` is the review's findings mapped down to what an operator scans (`findingRef`, `summary`, `severity`, `riskLens`, `reachability`, `disposition`, `resolution`, `file`, `line`) — mechanical checks are never folded into this list, which is what keeps mechanical failures and model-authored findings visually distinct on the panel. `acceptedDeferrals` is the subset of findings dispositioned `deferred`.
+  - `shippingChecks` — `ShippingCheck[]`, the ticket's `host_verifications` rows read down to `{ gateName, status, source, commitSha, command, recordedAt, ciUrl }`; `status` is `passed`/`failed` derived from `exit_code`.
+  - `campaign` — `{ itemId, campaignId, lifecycleStatus, outcome, prUrl } | null`, the ticket's most recently updated `campaign_items` row in scope, or `null`.
+  - `links` — `{ ticketId, runId, subjectTaskId, commit }`, the operator-facing identifiers for drilling into the run/task/commit the row's evidence points at.
+- `degraded` — `string[]`, one `"<label>: <error message>"` note per evidence read (`tickets`, `readiness_assessments`, `reviews`, `review_findings`, `host_verifications`, `campaign_items`) that hit a missing-table/missing-column error and was tolerated as an empty result rather than failing the whole response — the same `tolerantRead` degradation pattern the rest of the dashboard's read surfaces use for a store predating the table in question.
+
+Any error `shippingAudit()` itself does not tolerate (e.g. a store with no `tickets` table at all) is caught by the route handler instead: the payload is built entirely before any byte is written (the `/api/reviews` precedent — a throw after `writeHead` cannot be reported and becomes a blank page), and on that outer catch the response is `{ projectKey: null, rows: [], degraded: [], error: <message> }` with a `200` status, so the page stays up.
 
 ### `GET /api/agent-runtime` response shape (`AgentRuntimeTrends`)
 
