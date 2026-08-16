@@ -55,7 +55,8 @@ import { listTickets } from "../backlog/structured.js";
 import { projectHasBacklog } from "../backlog/storage-mode.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, resolveRunProjectIdentity, updateRunStatus } from "../store/runs.js";
-import { computeReadyQueue } from "../v2/ready-queue.js";
+import { computeReadyQueue, classifyRunTerminalState } from "../v2/ready-queue.js";
+import { isPhasePrimaryRow } from "../v2/lifecycle-evaluator.js";
 import { taskHasPipelineFinalize } from "../v2/run-kind.js";
 import { newRunId, nowIso } from "../util/ids.js";
 import { failureKindForTask } from "../v2/failure-kind.js";
@@ -476,7 +477,7 @@ async function finalizeInvokeDispatch(
 // historical fail wedging the item forever — while still requiring at least
 // one task to have an actual authoritative verdict on record (a force-advance
 // alone can never substitute for authoritative review).
-function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string): void {
+function reconcileTerminalOutcome(run: Run, itemId: string, workflow: Workflow, projectDir?: string): void {
   // FG-585: `failed` is a real, evidence-bearing terminal (a required phase
   // failed / a downstream phase became unreachable). Route it through the SAME
   // authoritative attribution as `complete` — gate_rejected → scope/LOCAL,
@@ -556,20 +557,42 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
     // was never a reviewer verdict to evaluate, only a rejected gate. Blindly
     // defaulting to blockerKind:'campaign_system' here would pause the WHOLE
     // campaign (SHARED) for what is actually a LOCAL, per-item scope failure.
-    // Before falling back, classify EVERY failed primary task in the run through
-    // the exact failureKindForTask -> classifyFailureKind sequence finalizeInvokeDispatch
-    // already uses above, then apply SHARED-WINS precedence: if any failed primary
-    // classifies to a SHARED blockerKind (isSharedBlocker), the whole run stays
-    // campaign_system — a single shared infra/auth failure must never be masked
-    // by a later local gate_rejected on the same run. Only when every failed
-    // primary classifies LOCAL do we use that local kind (e.g. 'scope' for
-    // gate_rejected). A run with no failed primary at all still lands on
+    // FG-721 (FG-477 D2): the failed-primary SELECTION is the evaluator's terminal
+    // classification (classifyRunTerminalState -> failedPhases, the FG-718 projection
+    // over evaluateLifecycle().terminal), not an ad-hoc `parentId === undefined &&
+    // status === 'failed'` row scan. failedPhases is the set of workflow steps whose
+    // OWN primaries terminally failed with no complete replacement — so it excludes
+    // two shapes the old scan wrongly counted: a SUPERSEDED failed primary (a
+    // request-changes replacement completed the same phase; hasCompletePrimary drops
+    // it) and a failed AD-HOC invoke row (never a workflow phase). The BlockerKind
+    // thus reflects only genuine unsuperseded workflow-phase failures.
+    //
+    // Within each failed phase, EVERY terminally-failed primary attempt is
+    // classified (not just the latest) through the exact failureKindForTask ->
+    // classifyFailureKind sequence finalizeInvokeDispatch uses above, resolved via
+    // the evaluator's own phase-primary predicate (isPhasePrimaryRow) — not a
+    // re-derived parentId scan. Classifying every attempt preserves the SHARED-WINS
+    // guarantee within a phase: a phase whose earlier attempt container_crashed
+    // (SHARED) and whose retry then gate_rejected (LOCAL) must stay campaign_system,
+    // never downgrade to scope on the later attempt. The FailureKind -> BlockerKind
+    // translation stays HERE in src/campaign: the evaluator returns campaign-neutral
+    // step ids only, never a BlockerKind. SHARED-WINS precedence across phases: if any
+    // failed attempt classifies to a SHARED blockerKind (isSharedBlocker), the whole
+    // run stays campaign_system — a single shared infra/auth failure must never be
+    // masked by a later local gate_rejected on the same run. Only when every failed
+    // attempt classifies LOCAL do we use that local kind (e.g. 'scope' for
+    // gate_rejected). A run with no genuine failed phase still lands on
     // campaign_system, preserving today's behavior for that case.
-    const failedPrimaries = tasksForRun(run.id).filter((t) => t.parentId === undefined && t.status === "failed");
-    const failedBlockerKinds = failedPrimaries.map((t) => classifyFailureKind(failureKindForTask(t.id)));
+    const runTasks = tasksForRun(run.id);
+    const failedPhases = classifyRunTerminalState(workflow, runTasks)?.failedPhases ?? [];
+    const failedBlockerKinds = failedPhases.flatMap((phase) =>
+      runTasks
+        .filter((t) => t.phase === phase && isPhasePrimaryRow(t) && t.status === "failed")
+        .map((t) => classifyFailureKind(failureKindForTask(t.id))),
+    );
     const anySharedFailure = failedBlockerKinds.some((k) => isSharedBlocker(k));
     const unresolvedBlockerKind: BlockerKind =
-      failedPrimaries.length === 0 || anySharedFailure ? "campaign_system" : failedBlockerKinds[failedBlockerKinds.length - 1]!;
+      failedPhases.length === 0 || anySharedFailure ? "campaign_system" : failedBlockerKinds[failedBlockerKinds.length - 1]!;
     updateCampaignItem(itemId, {
       lifecycleStatus: "failed",
       outcome: "blocked",
@@ -786,7 +809,7 @@ export async function driveWorkflowItem(
         createdAt: nowIso(),
       };
       try {
-        reconcileTerminalOutcome(termRun, itemId, fns.projectDir);
+        reconcileTerminalOutcome(termRun, itemId, workflow, fns.projectDir);
       } catch (err) {
         throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
       }
