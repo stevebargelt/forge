@@ -22,14 +22,23 @@ let prev: DatabaseInstance | null;
 
 const RUN: Run = { id: "run-recover", workflow: "invoke", title: "recover test", status: "active", createdAt: "2026-06-01T00:00:00Z" };
 
+let fanoutSeq = 0;
 function mkTask(id: string, o: Partial<Task> = {}): Task {
+  const role = o.agentRole ?? "engineer";
+  // FG-716: a real fanout child carries the fanoutIndex dispatchFanoutChild stamps
+  // (runNext.ts). Model it so these parented fixtures are the fanout children they
+  // stand in for — recover's inspector now counts fanout children (isFanoutChildRow),
+  // not any child. A red child (role red-*) is minted by a different site and never
+  // carries it; leave those without one.
+  const inputs: Record<string, unknown> =
+    o.parentId !== undefined && !role.startsWith("red-") ? { fanoutIndex: fanoutSeq++ } : {};
   return {
     id,
     runId: o.runId ?? RUN.id,
     phase: o.phase ?? "task",
-    agentRole: o.agentRole ?? "engineer",
+    agentRole: role,
     status: o.status ?? "running",
-    taskPackage: { taskId: id, runId: o.runId ?? RUN.id, phase: o.phase ?? "task", role: o.agentRole ?? "engineer", inputs: {}, composedSystemPrompt: "" },
+    taskPackage: { taskId: id, runId: o.runId ?? RUN.id, phase: o.phase ?? "task", role, inputs, composedSystemPrompt: "" },
     createdAt: "2026-06-01T00:00:00Z",
     startedAt: "2026-06-01T00:00:01Z",
     ...o,
@@ -270,6 +279,36 @@ test("recover inspect: run id lists recoverable tasks and fanout parents", () =>
   const parentView = outcome.fanoutParents.find((f) => f.parentId === "parent-inspect")!;
   assert.equal(parentView.failureKind, "fanout_wave_orphaned");
   assert.match(parentView.recommendation, /--re-drive/);
+});
+
+// FG-716 (deliberate correction): a reds-but-no-fanout step — a parent with a red
+// review child and NO fanout child — is NOT a fanout parent. The pre-FG-716
+// isFanoutParent counted ANY child, so a red_review child alone miscounted the
+// step as a recoverable fanout wave. It now counts fanout children only
+// (isFanoutChildRow), so this parent is absent from the inspector's fanoutParents
+// and --re-drive refuses it.
+test("recover inspect: a step with only a red child (no fanout child) is NOT a recoverable fanout parent", () => {
+  insertTask(mkTask("parent-reds-only", { status: "failed", phase: "build" }));
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId: "parent-reds-only",
+    payload: { failure_kind: "fanout_wave_orphaned", error: "orphaned" },
+  });
+  // A red review child carries no fanoutIndex (mkTask leaves red-* roles without one).
+  insertTask(mkTask("child-red-only", { parentId: "parent-reds-only", phase: "build", agentRole: "red-wide", status: "complete" }));
+
+  const outcome = performInspect(RUN.id);
+  assert.equal(outcome.kind, "inspect-run");
+  if (outcome.kind !== "inspect-run") return;
+  assert.ok(
+    !outcome.fanoutParents.some((f) => f.parentId === "parent-reds-only"),
+    "a reds-but-no-fanout step must not be reported as a recoverable fanout parent",
+  );
+
+  const refused = performReDrive("parent-reds-only");
+  assert.equal(refused.kind, "re-drive-refused");
+  if (refused.kind !== "re-drive-refused") return;
+  assert.match(refused.reason, /not a fanout parent/);
 });
 
 // FG-479 review finding 2: forge recover <runId> (bulk run-level inspection)

@@ -202,3 +202,31 @@ export function isOnRejectRecoveryRow(task: Task): boolean {
 export function isPhasePrimaryRow(task: Task): boolean {
   return task.parentId === undefined && !isAdHocInvokeRow(task);
 }
+
+/** The `fanout_child` cell of classifyTaskLineage for a caller with no workflow —
+ *  reconcile's never-throw sweeps and recover's inspector, both of which must not
+ *  take on a workflow load just to ask this.
+ *
+ *  The classifier derives fanout_child by role: a parented, non-recovery row whose
+ *  agentRole is NOT one of its phase-step's reds (the fallback after rules 0/3/4).
+ *  This primitive instead reads `fanoutIndex`, which dispatchFanoutChild (runNext.ts)
+ *  stamps on EXACTLY the fanout children it mints and nothing else stamps (FG-584 D6).
+ *  The two coincide because those are the same rows: an invoke row is adhoc_invoke by
+ *  rule 0, a red child carries a red role and no fanoutIndex, a recovery row carries
+ *  rejectedTaskId, and a fanout child carries neither. A property test pins this
+ *  equivalence to the classifier over the generated corpus. fanoutIndex stays
+ *  ordering/diagnostics only — read here as a presence marker, never as an edge key.
+ *
+ *  The `!isAdHocInvokeRow` guard mirrors the classifier's rule-0 precedence
+ *  (dispatchSource === "invoke" => adhoc_invoke, before any lineage rule). It is not
+ *  production-reachable today — only dispatchFanoutChild stamps fanoutIndex, and it
+ *  stamps dispatchSource "workflow" — but a parented invoke row carrying fanoutIndex
+ *  is a shape the classifier calls adhoc_invoke, so this primitive must too. */
+export function isFanoutChildRow(task: Task): boolean {
+  return (
+    task.parentId !== undefined &&
+    !isAdHocInvokeRow(task) &&
+    !isOnRejectRecoveryRow(task) &&
+    typeof task.taskPackage.inputs?.["fanoutIndex"] === "number"
+  );
+}

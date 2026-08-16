@@ -42,7 +42,7 @@ import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 import type { OrphanEvidence, ContainerExitInfo, ContainerCausalEvidence } from "./failure-kind.js";
 import { parseDockerInspectState, failureKindForTask } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
-import { isPhasePrimaryRow } from "./lifecycle-evaluator.js";
+import { isPhasePrimaryRow, isFanoutChildRow } from "./lifecycle-evaluator.js";
 import { shouldRetainContainer } from "./docker-exec.js";
 import { liveRunLockHolder } from "../util/run-lock.js";
 import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
@@ -1420,13 +1420,15 @@ export function reconcileRun(
           }
 
           const result = readResult(runId, t.id);
-          const isFanoutParent = children.some(
-            (c) => typeof c.taskPackage.inputs["fanoutIndex"] === "number",
-          );
+          // FG-716: the fanout-parent test now goes through the canonical
+          // isFanoutChildRow primitive (workflow-free, reads the same fanoutIndex
+          // marker) instead of an inline check, keeping this sweep equal to the
+          // classifier without loading a workflow. Outcomes are unchanged: these
+          // children are all parented to t and non-recovery, so the primitive's
+          // added guards never fire here.
+          const isFanoutParent = children.some((c) => isFanoutChildRow(c));
           if (isFanoutParent) {
-            const waveChildren = children.filter(
-              (c) => typeof c.taskPackage.inputs["fanoutIndex"] === "number",
-            );
+            const waveChildren = children.filter((c) => isFanoutChildRow(c));
             const completeChildren = waveChildren.filter((c) => c.status === "complete");
             const error =
               `fanout parent orphaned at awaiting_red: the wave's ${completeChildren.length}/${waveChildren.length} completed children ` +

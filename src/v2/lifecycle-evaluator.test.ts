@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   classifyTaskLineage,
   isAdHocInvokeRow,
+  isFanoutChildRow,
   isOnRejectRecoveryRow,
   isPhasePrimaryRow,
   isWorkflowPrimaryRow,
@@ -327,14 +328,34 @@ function sampleTasks(r: () => number, n: number): Task[] {
         ? pick(r, tasks).id
         : "dangling-parent";
     const source = pick(r, SOURCES);
+    const phase = pick(r, PHASES);
+    const agentRole = pick(r, ROLES);
+    const createdAt = pick(r, TIMES);
+    const status = pick(r, STATUSES);
+    const marker = pick(r, MARKERS);
+    const inputs: Record<string, unknown> = { ...marker };
+    // Stamp fanoutIndex on any parented, non-recovery, non-red row — a SUPERSET of
+    // the rows dispatchFanoutChild (runNext.ts) actually mints (FG-584 D6), because
+    // proving TRUE equivalence needs the shape production can't reach too: a parented
+    // invoke row carrying fanoutIndex, which the classifier calls adhoc_invoke by
+    // rule 0 and isFanoutChildRow must therefore reject (FG-716 RF-1). Deliberately
+    // NOT excluding source === "invoke" here — that exclusion once masked the rule-0
+    // disagreement. Stamping deterministically (no extra r() draw) keeps the seeded
+    // stream — and every other property below — byte-identical.
+    const phaseReds = GEN_WORKFLOW.steps.find((s) => s.id === phase)?.reds ?? [];
+    const mintsFanoutChild =
+      parentId !== undefined &&
+      marker["rejectedTaskId"] === undefined &&
+      !phaseReds.some((rd) => rd.agent === agentRole);
+    if (mintsFanoutChild) inputs["fanoutIndex"] = i;
     tasks.push(
       mkTask({
         id,
-        phase: pick(r, PHASES),
-        agentRole: pick(r, ROLES),
-        createdAt: pick(r, TIMES),
-        status: pick(r, STATUSES),
-        inputs: { ...pick(r, MARKERS) },
+        phase,
+        agentRole,
+        createdAt,
+        status,
+        inputs,
         ...(parentId ? { parentId } : {}),
         ...(source ? { dispatchSource: source } : {}),
       }),
@@ -479,6 +500,43 @@ test("isPhasePrimaryRow is exactly the classifier's phase-primary rule (workflow
       );
     }
   }
+});
+
+test("isFanoutChildRow is exactly the classifier's fanout_child cell (workflow-free view)", () => {
+  // FG-716: prove the fanoutIndex-reading primitive picks exactly the rows the
+  // classifier calls fanout_child, over the corpus (which stamps fanoutIndex on
+  // every parented, non-recovery, non-red row — INCLUDING the unmintable parented
+  // invoke shape — see sampleTasks). A disagreement here is a real finding to
+  // report, not something to paper over.
+  for (const tasks of corpus()) {
+    const kinds = classifyTaskLineage(GEN_WORKFLOW, tasks);
+    for (const t of tasks) {
+      assert.equal(
+        isFanoutChildRow(t),
+        kinds.get(t.id) === "fanout_child",
+        `isFanoutChildRow drifted from the classifier on ${t.id} (kind=${kinds.get(t.id)}, fanoutIndex=${String(
+          t.taskPackage.inputs?.["fanoutIndex"],
+        )})`,
+      );
+    }
+  }
+});
+
+test("isFanoutChildRow rejects a parented invoke row carrying fanoutIndex — rule-0 precedence", () => {
+  // FG-716 RF-1: the discriminating shape. A parented invoke row that carries
+  // fanoutIndex satisfies isFanoutChildRow's other clauses, but rule 0
+  // (dispatchSource === "invoke" => adhoc_invoke) outranks lineage, so the
+  // classifier calls it adhoc_invoke and the primitive must reject it.
+  const parent = mkTask({ id: "a", phase: "plan" });
+  const invokeChild = mkTask({
+    id: "b",
+    phase: "plan",
+    parentId: "a",
+    dispatchSource: "invoke",
+    inputs: { fanoutIndex: 0 },
+  });
+  assert.equal(kindOf(GEN_WORKFLOW, [parent, invokeChild], "b"), "adhoc_invoke");
+  assert.equal(isFanoutChildRow(invokeChild), false);
 });
 
 // ----- 3. behavior parity per migrated consumer -----

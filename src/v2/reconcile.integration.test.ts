@@ -24,10 +24,11 @@ let prev: DatabaseInstance | null;
 
 const RUN: Run = { id: "run-rec", workflow: "invoke", title: "rec", status: "active", createdAt: "2026-05-30T00:00:00Z" };
 
-function mkTask(id: string, o: Partial<Task> = {}): Task {
+function mkTask(id: string, o: Partial<Task> & { inputs?: Record<string, unknown> } = {}): Task {
+  const { inputs, ...rest } = o;
   return { id, runId: o.runId ?? RUN.id, phase: "task", agentRole: "engineer", status: o.status ?? "running",
-    taskPackage: { taskId: id, runId: o.runId ?? RUN.id, phase: "task", role: "engineer", inputs: {}, composedSystemPrompt: "" },
-    createdAt: "2026-05-30T00:00:00Z", startedAt: "2026-05-30T00:00:01Z", ...o };
+    taskPackage: { taskId: id, runId: o.runId ?? RUN.id, phase: "task", role: "engineer", inputs: inputs ?? {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-30T00:00:00Z", startedAt: "2026-05-30T00:00:01Z", ...rest };
 }
 // Insert a CONTAINERIZED task (emits container.started — the signal reconcile
 // gates on). Most agent tasks; not session/manual tasks.
@@ -803,8 +804,10 @@ test("reconcile: a completed-phase child (red) task is never treated as an orpha
 // parent lifecycle — land fail-safe (re-drivable), never complete.
 test("FG-479 review finding 4: fanout parent stuck running, all children complete → parent still lands FAILED (finalize never ran), not complete", () => {
   insertTask(mkTask("fanout-parent-a", { status: "running" }));
-  insertTask(mkTask("fanout-child-a1", { parentId: "fanout-parent-a", status: "complete" }));
-  insertTask(mkTask("fanout-child-a2", { parentId: "fanout-parent-a", status: "complete" }));
+  // FG-716: real fanout children carry the fanoutIndex dispatchFanoutChild stamps —
+  // recover's --re-drive path (performReDrive) counts fanout children (isFanoutChildRow).
+  insertTask(mkTask("fanout-child-a1", { parentId: "fanout-parent-a", status: "complete", inputs: { fanoutIndex: 0 } }));
+  insertTask(mkTask("fanout-child-a2", { parentId: "fanout-parent-a", status: "complete", inputs: { fanoutIndex: 1 } }));
 
   const r = reconcileRun(RUN.id, ALIVE);
 

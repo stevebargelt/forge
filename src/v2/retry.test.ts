@@ -437,14 +437,16 @@ function fanoutWaveParent(
     taskPackage: { taskId: id, runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
     createdAt: "2026-05-30T00:00:00Z",
   });
-  for (const suffix of ["a", "b"]) {
+  // FG-716: a real fanout child carries the fanoutIndex dispatchFanoutChild stamps —
+  // recover's --re-drive path (performReDrive) counts fanout children (isFanoutChildRow).
+  ["a", "b"].forEach((suffix, index) => {
     insertTask({
       id: `${id}-${suffix}`, runId: RUN.id, parentId: id, phase: "build", agentRole: "engineer",
       status: (opts?.childStatus ?? "complete") as Task["status"],
-      taskPackage: { taskId: `${id}-${suffix}`, runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+      taskPackage: { taskId: `${id}-${suffix}`, runId: RUN.id, phase: "build", role: "engineer", inputs: { fanoutIndex: index }, composedSystemPrompt: "" },
       createdAt: "2026-05-30T00:00:00Z",
     });
-  }
+  });
   const ordered = opts?.ordered ?? true;
   if (ordered !== "no-event") {
     logEvent("integration.worktree_created", { runId: RUN.id, taskId: id, payload: { ordered } });
