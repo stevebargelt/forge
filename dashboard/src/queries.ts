@@ -3042,6 +3042,16 @@ export type ShippingCheck = {
   ciUrl: string | null;
 };
 
+/** Mechanical shipping-check axis. A single FAILED persisted check dominates — a
+ *  done-audit blocker is never green — all-pass reads passed, and no recorded checks
+ *  is not_observed (absence is never green). Folded into the row rollup so a failed
+ *  mechanical check can never leave a review-passed ticket showing green. */
+export function shippingCheckStatus(checks: ShippingCheck[]): AuditCellStatus {
+  if (checks.length === 0) return "not_observed";
+  if (checks.some((c) => c.status === "failed")) return "failed";
+  return "passed";
+}
+
 export type ShippingAuditReadiness = {
   outcome: string;
   status: AuditCellStatus;
@@ -3153,6 +3163,15 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
   const projectKey = identity?.project_key ?? null;
   if (!projectKey) return { projectKey: null, rows: [], degraded };
 
+  // Evidence rows (reviews / host_verifications / campaign_items) carry no project_key
+  // of their own — they are keyed by ticket_id, which is unique only WITHIN a project.
+  // To keep the projection from crossing projects when two projects share a ticket_id,
+  // every evidence select is scoped through its owning run's durable project identity
+  // (runs.project_identity, which holds this project's pk- key or its repo- evidence
+  // key). A row with no run, or a run whose project was never captured, is unscoped and
+  // still surfaces — matching reviewLedger's established semantics.
+  const scopeKeys = [projectKey, project!.key];
+
   const ticketRows = tolerantRead(
     () =>
       db()
@@ -3207,10 +3226,12 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
       chunked(ticketIds, (batch) =>
         db()
           .prepare(
-            `SELECT * FROM reviews WHERE ticket_id IN (${batch.map(() => "?").join(", ")})
-              ORDER BY updated_at DESC, id DESC`,
+            `SELECT reviews.* FROM reviews LEFT JOIN runs ON runs.id = reviews.run_id
+              WHERE reviews.ticket_id IN (${batch.map(() => "?").join(", ")})
+                AND (runs.project_identity IS NULL OR runs.project_identity IN (?, ?))
+              ORDER BY reviews.updated_at DESC, reviews.id DESC`,
           )
-          .all(...batch) as ReviewDbRow[],
+          .all(...batch, ...scopeKeys) as ReviewDbRow[],
       ),
     [],
     "reviews",
@@ -3249,11 +3270,15 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
       chunked(ticketIds, (batch) =>
         db()
           .prepare(
-            `SELECT ticket_id, commit_sha, gate_name, command, exit_code, source, ci_url, recorded_at
-               FROM host_verifications WHERE ticket_id IN (${batch.map(() => "?").join(", ")})
-              ORDER BY recorded_at DESC, id DESC`,
+            `SELECT host_verifications.ticket_id, host_verifications.commit_sha, host_verifications.gate_name,
+                    host_verifications.command, host_verifications.exit_code, host_verifications.source,
+                    host_verifications.ci_url, host_verifications.recorded_at
+               FROM host_verifications LEFT JOIN runs ON runs.id = host_verifications.run_id
+              WHERE host_verifications.ticket_id IN (${batch.map(() => "?").join(", ")})
+                AND (runs.project_identity IS NULL OR runs.project_identity IN (?, ?))
+              ORDER BY host_verifications.recorded_at DESC, host_verifications.id DESC`,
           )
-          .all(...batch) as Array<{
+          .all(...batch, ...scopeKeys) as Array<{
           ticket_id: string;
           commit_sha: string;
           gate_name: string;
@@ -3291,11 +3316,12 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
           .prepare(
             `SELECT ci.id AS id, ci.campaign_id AS campaign_id, ci.ticket_id AS ticket_id,
                     ci.lifecycle_status AS lifecycle_status, ci.outcome AS outcome, ci.pr_url AS pr_url, ci.updated_at AS updated_at
-               FROM campaign_items ci
+               FROM campaign_items ci LEFT JOIN runs r ON r.id = ci.run_id
               WHERE ci.ticket_id IN (${batch.map(() => "?").join(", ")})
+                AND (r.project_identity IS NULL OR r.project_identity IN (?, ?))
               ORDER BY ci.updated_at DESC`,
           )
-          .all(...batch) as Array<{
+          .all(...batch, ...scopeKeys) as Array<{
           id: string;
           campaign_id: string;
           ticket_id: string;
@@ -3370,6 +3396,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
     }
 
     const shippingChecks = checksByTicket.get(ticketId) ?? [];
+    const checkStatus = shippingCheckStatus(shippingChecks);
     const campaign = campaignByTicket.get(ticketId) ?? null;
     const candidateSha = review?.candidateSha ?? latestCheckCommitByTicket.get(ticketId) ?? null;
     const taskIds = review?.subjectTaskId ? [review.subjectTaskId] : [];
@@ -3377,7 +3404,7 @@ export function shippingAudit(project: ProjectRecord | null, limit = 200): Shipp
     rows.push({
       ticketId,
       title: meta?.title ?? null,
-      status: rollupAuditStatus([readiness?.status ?? "not_observed", review?.status ?? "not_observed"]),
+      status: rollupAuditStatus([readiness?.status ?? "not_observed", review?.status ?? "not_observed", checkStatus]),
       readiness,
       review,
       shippingChecks,

@@ -95,7 +95,7 @@ const auditFixture = {
         acceptedDeferrals: [],
       },
       shippingChecks: [
-        { gateName: "done mechanical shipping check", status: "failed", source: "ci", commitSha: "sha103candidate", command: "npm run verify", recordedAt: "t", ciUrl: null },
+        { gateName: "done mechanical shipping check", status: "failed", source: "ci", commitSha: "sha103candidate", command: "npm run verify", recordedAt: "t", ciUrl: "https://ci.example/run/103" },
       ],
       campaign: null, runId: "run-103", taskIds: ["task-103"], candidateSha: "sha103candidate",
       links: { ticketId: "FG-103", runId: "run-103", subjectTaskId: "task-103", commit: "sha103candidate" },
@@ -201,6 +201,13 @@ test("FG-386: a failed mechanical blocker is failed and distinct from a model fi
   assert.equal(await model.count(), 1, "the model reviewer-findings block must render");
   assert.match(await mechanical.innerText(), /done mechanical shipping check/, "the failed done check is in the mechanical block");
   assert.ok((await mechanical.locator(".badge.audit-failed").count()) >= 1, "the failed mechanical check carries failed styling");
+  // RF-5: a failed mechanical check is ACTIONABLE — its command is surfaced and its
+  // CI run is a link, so an operator can act on it from the panel.
+  assert.match(await mechanical.innerText(), /npm run verify/, "the failed check surfaces its command");
+  assert.ok(
+    (await mechanical.locator('a[href="https://ci.example/run/103"]').count()) >= 1,
+    "the failed check links to its CI run",
+  );
   assert.match(await model.innerText(), /model-authored reviewer finding/, "the reviewer finding is in the model block");
   assert.doesNotMatch(await model.innerText(), /done mechanical shipping check/, "mechanical failure wording must not be presented as a model finding");
   // The two blocks are distinct DOM nodes with distinct classes — the visual
@@ -237,6 +244,18 @@ test("FG-386: an open architecture question reads as needs-human on the review a
   assert.equal(await row.count(), 1);
   assert.match(await row.innerText(), /needs human/);
   assert.match(await row.innerText(), /architecture question/, "the row states the open architecture question as the reason");
+  await page.close();
+});
+
+test("FG-386: an unselected project renders the empty/unselected state, never a perpetual spinner (RF-3)", async () => {
+  const page = await newPage({ width: 1000, height: 800 });
+  // Reach the shipping view WITHOUT opening a project — projectFilter stays null.
+  await page.goto(`${baseUrl}/#projects`);
+  await page.getByRole("button", { name: "shipping" }).click();
+  await page.locator(".shipping-view").waitFor();
+  await page.locator('[data-testid="audit-no-project"]').waitFor();
+  assert.equal(await page.locator('[data-testid="audit-no-project"]').count(), 1, "an unselected project shows the select-a-project state");
+  assert.doesNotMatch(await page.locator(".shipping-view").innerText(), /loading shipping audit/, "it must not sit in a perpetual loading state");
   await page.close();
 });
 

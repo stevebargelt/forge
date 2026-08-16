@@ -364,7 +364,9 @@ function App() {
     // Scope-token like pollQueue: a read for the previous project must never
     // overwrite the one just switched to.
     const seq = (shippingSeq.current += 1);
-    if (!projectFilter) { setShippingAudit(null); return; }
+    // An unselected project is an EMPTY/unselected projection, not perpetual loading:
+    // render the "select a project" state (projectKey === null) rather than null data.
+    if (!projectFilter) { setShippingAudit({ projectKey: null, rows: [], degraded: [] }); return; }
     try {
       const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/shipping-audit${q}`);

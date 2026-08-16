@@ -38,11 +38,15 @@ function MechanicalBlock({ readiness, checks }) {
         : null}
       ${checks.length > 0
         ? checks.map((c, i) => html`
-            <div class="audit-check-row" key=${i}>
+            <div class="audit-check-row" data-testid="audit-check" key=${i}>
               <${StatusBadge} status=${c.status} />
               <span>${c.gateName}</span>
               <span class="audit-axis-label">${c.source}</span>
-              <span class="audit-axis-label">${shortSha(c.commitSha)}</span>
+              ${c.command ? html`<code class="audit-check-command">${c.command}</code>` : null}
+              ${c.ciUrl
+                ? html`<a class="mono" href=${c.ciUrl} target="_blank" rel="noreferrer noopener">${shortSha(c.commitSha)}</a>`
+                : html`<span class="audit-axis-label mono">${shortSha(c.commitSha)}</span>`}
+              ${c.ciUrl ? html`<a class="audit-check-ci" href=${c.ciUrl} target="_blank" rel="noreferrer noopener">CI ↗</a>` : null}
             </div>`)
         : null}
     </div>`;

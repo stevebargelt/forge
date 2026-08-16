@@ -41,12 +41,15 @@ export function shortSha(sha) {
 export function auditReason(row) {
   const readiness = row?.readiness ?? null;
   const review = row?.review ?? null;
-  if (!readiness && !review) return "no readiness or review evidence — not observed yet";
+  const checks = row?.shippingChecks ?? [];
+  const failedCheck = checks.find((c) => c.status === "failed");
+  if (!readiness && !review && checks.length === 0) return "no readiness or review evidence — not observed yet";
   if (review?.stale) return "review evidence superseded — a newer candidate exists";
   if (readiness?.stale) return "readiness stale — the ticket body changed since it was assessed";
   if ((review?.openArchitectureQuestions ?? 0) > 0) {
     return `${review.openArchitectureQuestions} open architecture question(s) — needs a human`;
   }
+  if (failedCheck) return `mechanical check failed: ${failedCheck.gateName}`;
   if ((review?.unresolvedFixNow ?? 0) > 0) return `${review.unresolvedFixNow} unresolved fix-now finding(s)`;
   if (readiness && readiness.status === "failed") return `readiness ${readiness.outcome}: ${readiness.gaps.length} gap(s)`;
   if (readiness && readiness.status === "needs_human") return `readiness ${readiness.outcome} — needs a human`;

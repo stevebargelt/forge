@@ -19,10 +19,15 @@ const {
   rollupAuditStatus,
   readinessCellStatus,
   reviewCellStatus,
+  shippingCheckStatus,
 } = await import("./queries.js");
 
 const PK = "pk-shipaudit";
 const EVIDENCE_KEY = "repo-shipaudit-evidence";
+// A SECOND project that shares a ticket_id with the first — the cross-project leak
+// fixture (RF-2): its evidence must never surface in the first project's projection.
+const PK2 = "pk-shipaudit-2";
+const EVIDENCE_KEY2 = "repo-shipaudit-evidence-2";
 const AT = "2026-08-16T09:00:00Z";
 
 // ProjectRecord is resolved to project_key through project_identity, exactly as
@@ -115,6 +120,43 @@ function hostCheck(ticketId: string, commitSha: string, gate: string, exit: numb
     .run(ticketId, "/proj/shipaudit", commitSha, gate, `run ${gate}`, exit, source, recordedAt);
 }
 
+// A run stamped with the DURABLE project it belongs to (runs.project_identity), the
+// key every evidence select is scoped through so a ticket_id shared across projects
+// cannot leak evidence between them.
+function run(id: string, projectIdentity: string): void {
+  getDb()
+    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_identity) VALUES (?,?,?,?,?,?)`)
+    .run(id, "campaign", "title", "active", AT, projectIdentity);
+}
+
+function ticketIn(pk: string, id: string, bodyHash: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO tickets (project_key, ticket_id, type, status, title, body, body_hash, imported_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+    )
+    .run(pk, id, "story", "active", `title ${id}`, "body", bodyHash, AT);
+}
+
+function reviewOnRun(id: string, runId: string, ticketId: string, candidateSha: string, updatedAt: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
+                            trusted_remote_sha, contract_json, review_mode, state, created_at, updated_at, settled_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(id, runId, `task-${ticketId}`, ticketId, "base", "conf", candidateSha, "remote", null, "evidence_led", "settled", AT, updatedAt, updatedAt);
+}
+
+function hostCheckOnRun(ticketId: string, runId: string, commitSha: string, gate: string, exit: number, recordedAt: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, source, recorded_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(ticketId, "/proj/other", commitSha, gate, `run ${gate}`, exit, runId, "host", recordedAt);
+}
+
 {
   writeTransaction(() => {
     getDb()
@@ -166,6 +208,33 @@ function hostCheck(ticketId: string, commitSha: string, gate: string, exit: numb
     // It must still be represented as not_observed; silently omitting it makes the
     // dashboard indistinguishable from a green audit.
     ticket("FG-107", "h107");
+
+    // FG-108 — readiness ready + a settled review + a FAILED mechanical check at the
+    // review's own candidate. Both the readiness and review axes pass, but the failed
+    // done-audit check must fold into the rollup and make the ROW failed — never green
+    // (RF-1 / RF-4).
+    ticket("FG-108", "h108");
+    readiness("FG-108", "h108", "ready", []);
+    review("review-108", "FG-108", "settled", "sha-108", null, "2026-08-16T09:20:00Z");
+    hostCheck("FG-108", "sha-108", "test:all", 1, "host", "2026-08-16T09:25:00Z");
+
+    // RF-2 cross-project isolation: a SECOND project owns a ticket with the SAME
+    // ticket_id ("FG-XPROJ") plus a NEWER settled review and a FAILED mechanical check,
+    // each tied to a run whose durable identity is the second project. When the first
+    // project is projected, none of the second project's evidence may leak in — the
+    // first project's own (older) review is the current one and its row has no checks.
+    getDb()
+      .prepare(`INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at) VALUES (?,?,?,?)`)
+      .run(PK2, EVIDENCE_KEY2, "remote", AT);
+    run("run-xproj-a", PK);
+    run("run-xproj-b", PK2);
+
+    ticketIn(PK, "FG-XPROJ", "hx");
+    reviewOnRun("review-xproj-a", "run-xproj-a", "FG-XPROJ", "sha-xproj-a", "2026-08-16T09:00:00Z");
+
+    ticketIn(PK2, "FG-XPROJ", "hx2");
+    reviewOnRun("review-xproj-b", "run-xproj-b", "FG-XPROJ", "sha-xproj-b", "2026-08-16T12:00:00Z");
+    hostCheckOnRun("FG-XPROJ", "run-xproj-b", "sha-xproj-b", "test:all", 1, "2026-08-16T12:05:00Z");
   });
 }
 
@@ -266,6 +335,42 @@ test("shippingAudit: rows are ordered most-attention-first and the limit bounds 
   assert.equal(rows[0]!.ticketId, "FG-104");
   assert.equal(rows[0]!.status, "needs_human");
   assert.equal(shippingAudit(PROJECT, 2).rows.length, 2);
+});
+
+test("shippingAudit: a failed mechanical check makes a review-passed ticket failed, never green (RF-1/RF-4)", () => {
+  const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-108")!;
+  assert.ok(row);
+  // Both derived axes pass on their own …
+  assert.equal(row.readiness?.status, "passed");
+  assert.equal(row.review?.status, "passed");
+  // … but the persisted mechanical check FAILED, and that folds into the rollup.
+  assert.equal(row.shippingChecks.length, 1);
+  assert.equal(row.shippingChecks[0]!.status, "failed");
+  assert.equal(row.status, "failed", "a failed done-audit check must never leave the row green");
+});
+
+test("shippingAudit: evidence never crosses projects — a shared ticket_id does not leak another project's review or checks (RF-2)", () => {
+  const row = shippingAudit(PROJECT).rows.find((r) => r.ticketId === "FG-XPROJ")!;
+  assert.ok(row, "the first project's own ticket must still be projected");
+  // The SECOND project's review is newer, but it belongs to another project and must
+  // not be selected as this ticket's current review.
+  assert.equal(row.review?.id, "review-xproj-a");
+  assert.equal(row.review?.candidateSha, "sha-xproj-a");
+  // The second project's FAILED mechanical check must not leak in and turn this row red.
+  assert.deepEqual(row.shippingChecks, []);
+  assert.equal(row.status, "passed");
+
+  // And the second project, projected on its own, sees ONLY its own evidence.
+  const other = shippingAudit({ key: EVIDENCE_KEY2 } as never).rows.find((r) => r.ticketId === "FG-XPROJ")!;
+  assert.equal(other.review?.id, "review-xproj-b");
+  assert.equal(other.shippingChecks.length, 1);
+  assert.equal(other.status, "failed");
+});
+
+test("shippingCheckStatus: a failed check dominates, all-pass passes, no checks is not_observed", () => {
+  assert.equal(shippingCheckStatus([]), "not_observed");
+  assert.equal(shippingCheckStatus([{ status: "passed" } as never]), "passed");
+  assert.equal(shippingCheckStatus([{ status: "passed" } as never, { status: "failed" } as never]), "failed");
 });
 
 test("derive helpers: absence and staleness are never green; the rollup takes the most-attention axis", () => {
