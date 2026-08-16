@@ -24,11 +24,23 @@
 //       prefix uses that remain decide READ-ONLY MOUNT MODE (capability/security),
 //       not lineage, plus the reviewer-task-id CONSTRUCTION sites.
 //
-// The ALLOWLIST is the inventory, and it is asserted EXACTLY (set-equality via the
-// no-unallowed-hits assertion + the every-entry-load-bearing assertion), so it cannot
-// silently grow: a NEW occurrence in any non-allowlisted file — or a reintroduction
-// in src/campaign/executor.ts — fails this test rather than sliding in. Each entry
-// carries the one-line reason it is not a lifecycle/terminal decision.
+// The ALLOWLIST is the inventory, and it is asserted by OCCURRENCE-PRECISE multiset
+// equality (RF-1/RF-2): every entry declares the EXACT number of occurrences it
+// accounts for (`count`, default 1), the gate rejects any hit no entry claims, rejects
+// any hit two entries both claim (an over-broad entry), and asserts each entry claims
+// EXACTLY its declared count. So the allowlist can neither silently grow — a NEW
+// occurrence in a non-allowlisted file, a reintroduction in src/campaign/executor.ts,
+// OR a SECOND matching occurrence added to an already-allowlisted file all fail — nor
+// keep a stale entry (an entry that now claims zero occurrences fails "exactly count").
+// Each entry carries the one-line reason it is not a lifecycle/terminal decision.
+//
+// The scan is WHITESPACE-NORMALIZED (RF-3): each file is collapsed to a single-spaced
+// string before matching, so a multiline / whitespace-padded form of either forbidden
+// construction — `task.parentId\n  === undefined`, `startsWith(\n  "red-"\n)` — is
+// caught exactly like its one-line form. Detectors run over that normalized text; an
+// allowlist entry claims a forbidden occurrence when its own (path-scoped) match SPANS
+// that occurrence, so entries match against the same normalized text and need no line
+// anchors. This closes the whitespace gap deferred as FG-723 in the same pass.
 //
 // NOTE ON SCOPE: FG-722's ticket enumerated the "interesting" confusable sites; the
 // realized inventory also carries the src/v2/runNext.ts drive-core scans (dispatch
@@ -65,7 +77,9 @@ const PARENTLESS_SCAN = /\.parentId\s*===\s*undefined/;
 //      styles are caught — double ("red-"), single ('red-'), and backtick (`red-`).
 //      The pre-RF-2 regex matched ONLY the double-quoted form, so a single-quoted
 //      startsWith('red-') reintroduced the lineage discriminator straight past the gate.
-const RED_PREFIX_TEST = /\.startsWith\((["'`])red-\1\)/;
+//      RF-3: `\s*` inside the parens so a multiline `startsWith(\n  "red-"\n)` (collapsed
+//      to `startsWith( "red-" )` by the normalizer) is caught too.
+const RED_PREFIX_TEST = /\.startsWith\(\s*(["'`])red-\1\s*\)/;
 // (2b) A `red-${...}` template literal (reviewer-task-id construction today; a future
 //      `taskId === `red-${id}`` discriminator would be caught here too).
 const RED_TEMPLATE = /`red-\$\{/;
@@ -82,6 +96,15 @@ interface AllowEntry {
   readonly pattern: RegExp;
   /** Why this occurrence is not a lifecycle/terminal decision. Every entry carries one. */
   readonly reason: string;
+  /**
+   * RF-1/RF-2: the EXACT number of occurrences this entry accounts for (default 1). The
+   * gate asserts each entry claims exactly this many hits — so an ADDITIONAL matching
+   * occurrence in an already-allowlisted file (count would rise to expected+1) fails,
+   * and a stale entry (count falls to 0) fails too. Only two entries legitimately claim
+   * more than one: runNext.ts's `args.parentId === undefined` dispatch-branch pair and
+   * its two `newTaskId(`red-${...}`)` reviewer-id construction sites.
+   */
+  readonly count?: number;
 }
 
 const ALLOWLIST: readonly AllowEntry[] = [
@@ -139,16 +162,23 @@ const ALLOWLIST: readonly AllowEntry[] = [
   {
     file: "src/v2/runNext.ts",
     pattern: /args\.parentId === undefined/,
-    reason: "Dispatch branch: keys off the NEW task's own parentId (primary vs child) to decide which existing rows to inspect before creating it; not a terminal-state scan.",
+    count: 2,
+    reason: "Dispatch branch: keys off the NEW task's own parentId (primary vs child) to decide which existing rows to inspect before creating it; not a terminal-state scan. Two sites: the phaseTasks gather and the existing-primary find.",
   },
   {
     file: "src/v2/runNext.ts",
-    pattern: /t\.parentId === undefined &&$/,
+    // RF-3: matches the NORMALIZED statement, not a `$`-anchored line — the liveness
+    // detector spans multiple physical lines, so anchoring the distinguishing
+    // `(t.status === "running" || t.status === "awaiting_red")` suffix is what scopes it.
+    pattern: /t\.parentId === undefined && \(t\.status === "running" \|\| t\.status === "awaiting_red"\)/,
     reason: "Liveness: part of the active-with-children (running|awaiting_red) fanout-parent detector — an in-flight-run check, not a terminal decision.",
   },
   {
     file: "src/v2/runNext.ts",
-    pattern: /t\.phase === step\.id && t\.parentId === undefined$/,
+    // RF-3: the manual-step existence find is `...t.parentId === undefined )` in
+    // normalized form; the trailing `)` distinguishes it from the two `t.phase ===
+    // step.id && t.parentId === undefined && ...` scans that continue past `undefined`.
+    pattern: /t\.phase === step\.id && t\.parentId === undefined\s*\)/,
     reason: "Pending-primary existence: locates a manual step's already-created primary so it is not spawned twice; a dispatch-existence check, not a terminal read.",
   },
   {
@@ -175,7 +205,8 @@ const ALLOWLIST: readonly AllowEntry[] = [
   {
     file: "src/v2/runNext.ts",
     pattern: /newTaskId\(`red-\$\{args\.step\.id\}`\)/,
-    reason: "Reviewer-task-id CONSTRUCTION (mints the red review task id from the step id); it builds an id, it does not discriminate lineage.",
+    count: 2,
+    reason: "Reviewer-task-id CONSTRUCTION (mints the red review task id from the step id); it builds an id, it does not discriminate lineage. Two sites: the pipeline red dispatch and the standalone red dispatch.",
   },
 ];
 
@@ -183,6 +214,54 @@ interface Hit {
   readonly file: string;
   readonly line: number;
   readonly text: string;
+  /** Indices into ALLOWLIST whose (path-scoped) match SPANS this occurrence. */
+  readonly claimedBy: number[];
+}
+
+interface Span {
+  readonly start: number;
+  readonly end: number;
+}
+
+const DETECTORS: readonly RegExp[] = [PARENTLESS_SCAN, RED_PREFIX_TEST, RED_TEMPLATE];
+
+/**
+ * RF-3: collapse every run of whitespace (spaces, tabs, and NEWLINES) to a single
+ * space so a construction split across physical lines matches exactly like its
+ * one-line form. `lineAt[i]` is the original source line of the normalized char at i,
+ * so a hit still reports the line the operator has to open.
+ */
+function normalize(body: string): { text: string; lineAt: number[] } {
+  const out: string[] = [];
+  const lineAt: number[] = [];
+  let line = 1;
+  let pendingWs = false;
+  for (const ch of body) {
+    if (ch === "\n") line += 1;
+    if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n" || ch === "\f" || ch === "\v") {
+      pendingWs = true;
+      continue;
+    }
+    if (pendingWs && out.length > 0) {
+      out.push(" ");
+      lineAt.push(line);
+    }
+    pendingWs = false;
+    out.push(ch);
+    lineAt.push(line);
+  }
+  return { text: out.join(""), lineAt };
+}
+
+function allMatches(text: string, pattern: RegExp): Span[] {
+  const re = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+  const spans: Span[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    spans.push({ start: m.index, end: m.index + m[0].length });
+    if (m.index === re.lastIndex) re.lastIndex += 1; // guard against a zero-width match
+  }
+  return spans;
 }
 
 function gatherSourceFiles(dir: string, root: string = dir): string[] {
@@ -211,24 +290,37 @@ function scan(dir: string): { files: string[]; hits: Hit[] } {
   for (const rel of files) {
     const label = `src/${rel}`;
     if (EVALUATOR_OWNED.includes(label)) continue;
-    const body = readFileSync(join(dir, rel), "utf8");
-    body.split("\n").forEach((text, i) => {
-      if (PARENTLESS_SCAN.test(text) || RED_PREFIX_TEST.test(text) || RED_TEMPLATE.test(text)) {
-        hits.push({ file: label, line: i + 1, text: text.trim() });
+    const { text, lineAt } = normalize(readFileSync(join(dir, rel), "utf8"));
+    // Each allowlist entry that is scoped to this file contributes its match spans
+    // once; an entry "claims" a forbidden occurrence when one of its spans CONTAINS it.
+    const entrySpans = ALLOWLIST.map((entry, idx) =>
+      entry.file === label ? { idx, spans: allMatches(text, entry.pattern) } : { idx, spans: [] as Span[] },
+    );
+    for (const detector of DETECTORS) {
+      for (const hit of allMatches(text, detector)) {
+        const claimedBy = entrySpans
+          .filter(({ spans }) => spans.some((s) => s.start <= hit.start && s.end >= hit.end))
+          .map(({ idx }) => idx);
+        hits.push({
+          file: label,
+          line: lineAt[hit.start] ?? 0,
+          text: text.slice(Math.max(0, hit.start - 6), Math.min(text.length, hit.end + 32)).trim(),
+          claimedBy,
+        });
       }
-    });
+    }
   }
   return { files, hits };
 }
 
-function matchingAllowEntry(hit: Hit): AllowEntry | undefined {
-  return ALLOWLIST.find((entry) => entry.file === hit.file && entry.pattern.test(hit.text));
-}
-
 /**
  * The gate proper. Asserts the vacuity precondition FIRST — a scan that found no
- * files is a guard that stopped guarding because the source layout moved — and only
- * then asserts zero unallowlisted hits.
+ * files is a guard that stopped guarding because the source layout moved — then that
+ * every occurrence is claimed by EXACTLY one allowlist entry, and finally (RF-1/RF-2)
+ * that each entry claims EXACTLY its declared occurrence count. The three together are
+ * multiset set-equality: the allowlist cannot silently grow (a new occurrence in a
+ * non-allowlisted file is unclaimed; a second occurrence in an allowlisted file pushes
+ * that entry's count over) and cannot keep a stale entry (its count falls to zero).
  */
 function assertGateHolds(dir: string): void {
   const { files, hits } = scan(dir);
@@ -236,13 +328,34 @@ function assertGateHolds(dir: string): void {
     files.length > 0,
     `FG-722 lifecycle source guard scanned no .ts files under ${dir} — the path or the layout changed and the gate is no longer guarding anything.`,
   );
-  const unallowed = hits.filter((hit) => !matchingAllowEntry(hit)).map((hit) => `${hit.file}:${hit.line}: ${hit.text}`);
+  const unallowed = hits.filter((hit) => hit.claimedBy.length === 0).map((hit) => `${hit.file}:${hit.line}: ${hit.text}`);
   assert.deepEqual(
     unallowed,
     [],
     `FG-722: an ad-hoc parent-less row scan or a red- lineage-discriminator used to reason about lifecycle/terminal state, outside the evaluator. ` +
       `Derive terminal/lifecycle state from the evaluator (src/v2/lifecycle-evaluator.ts / src/v2/ready-queue.ts) instead — classifyRunTerminalState / isPhasePrimaryRow / isRedReviewRow — ` +
       `or add an ALLOWLIST entry with the reason this is not a terminal decision:\n${unallowed.join("\n")}`,
+  );
+  const overclaimed = hits
+    .filter((hit) => hit.claimedBy.length > 1)
+    .map((hit) => `${hit.file}:${hit.line}: ${hit.text} — claimed by ${hit.claimedBy.map((i) => `${ALLOWLIST[i]!.pattern}`).join(", ")}`);
+  assert.deepEqual(
+    overclaimed,
+    [],
+    `FG-722: an occurrence is claimed by more than one ALLOWLIST entry — an over-broad entry defeats occurrence-precise counting. Tighten the patterns so each occurrence has exactly one owner:\n${overclaimed.join("\n")}`,
+  );
+  const countMismatch: string[] = [];
+  ALLOWLIST.forEach((entry, idx) => {
+    const actual = hits.filter((hit) => hit.claimedBy.length === 1 && hit.claimedBy[0] === idx).length;
+    const expected = entry.count ?? 1;
+    if (actual !== expected) {
+      countMismatch.push(`${entry.file} :: ${entry.pattern} — expected ${expected}, found ${actual}`);
+    }
+  });
+  assert.deepEqual(
+    countMismatch,
+    [],
+    `FG-722 allowlist occurrence count mismatch — the allowlist is asserted by set-equality, so this is either an ADDITIONAL forbidden occurrence added to an already-allowlisted file (found > expected) or a now-STALE entry (found 0). Fix the source or update the entry's count with its reason:\n${countMismatch.join("\n")}`,
   );
 }
 
@@ -445,18 +558,99 @@ test("FG-722 guard: the guard does not scan itself", () => {
   );
 });
 
-test("FG-722 guard: every allowlist entry is still load-bearing and carries a reason", () => {
+test("FG-722 guard: every allowlist entry is occurrence-precise, load-bearing, and carries a reason (RF-1/RF-2)", () => {
   const { hits } = scan(SRC_ROOT);
-  const stale: string[] = [];
-  for (const entry of ALLOWLIST) {
+  const problems: string[] = [];
+  ALLOWLIST.forEach((entry, idx) => {
     assert.ok(entry.reason.trim().length > 0, `allowlist entry for ${entry.file} must carry a reason`);
-    if (!hits.some((hit) => hit.file === entry.file && entry.pattern.test(hit.text))) {
-      stale.push(`${entry.file} :: ${entry.pattern}`);
+    const claimed = hits.filter((hit) => hit.claimedBy.length === 1 && hit.claimedBy[0] === idx).length;
+    const expected = entry.count ?? 1;
+    if (claimed !== expected) {
+      problems.push(`${entry.file} :: ${entry.pattern} — declares count ${expected}, claims ${claimed}`);
     }
-  }
+  });
   assert.deepEqual(
-    stale,
+    problems,
     [],
-    `Stale FG-722 allowlist entries — these no longer match anything, so they only widen the gate. Delete them:\n${stale.join("\n")}`,
+    `FG-722 allowlist entries must each claim EXACTLY their declared occurrence count — a stale entry claims 0, an under-counted entry hides an extra occurrence:\n${problems.join("\n")}`,
+  );
+  // Full multiset set-equality: every occurrence is accounted for exactly once, so the
+  // total hit count equals the sum of the declared counts. This is the RF-1/RF-2 guard
+  // stated positively — the allowlist can neither grow nor shrink silently.
+  const declared = ALLOWLIST.reduce((sum, e) => sum + (e.count ?? 1), 0);
+  assert.equal(
+    hits.length,
+    declared,
+    `FG-722: ${hits.length} forbidden occurrences in the tree but the allowlist declares ${declared} — the set-equality invariant is broken.`,
+  );
+  assert.ok(
+    hits.every((hit) => hit.claimedBy.length === 1),
+    "every occurrence must be claimed by exactly one allowlist entry",
+  );
+});
+
+test("FG-722 guard (RF-1/RF-2): a SECOND forbidden occurrence in an already-allowlisted file fails the gate", () => {
+  // The core RF-1/RF-2 gap: the pre-fix gate matched by (file, pattern) and tolerated
+  // ANY number of occurrences, so a NEW parent-less terminal scan added to a file that
+  // is ALREADY allowlisted for one such scan slipped in silently. Occurrence-precise
+  // counting makes the second occurrence push the entry's count past its declared 1.
+  withFixture(
+    {
+      "notify/trigger.ts": [
+        'const failed = tasks.find((t) => t.parentId === undefined && t.status === "failed");',
+        'const sneaked = more.find((t) => t.parentId === undefined && t.status === "failed");',
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /occurrence count mismatch[\s\S]*trigger\.ts[\s\S]*expected 1, found 2/,
+        "a second matching occurrence in an already-allowlisted file must fail the gate",
+      );
+    },
+  );
+});
+
+test("FG-722 guard (RF-3): a MULTILINE parent-less terminal scan in a non-allowlisted file fails the gate", () => {
+  // The RF-3 gap: the pre-fix scan tested each physical line independently, so a
+  // parent-less terminal scan split across lines produced no single matching line and
+  // evaded the gate. The whitespace-normalized scan collapses it back to one string.
+  withFixture(
+    {
+      "v2/multiline-consumer.ts": [
+        "const failed = tasks.filter(",
+        "  (t) =>",
+        "    t.parentId",
+        "      === undefined &&",
+        '      t.status === "failed",',
+        ");",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /ad-hoc parent-less row scan/,
+        "a parent-less terminal scan split across physical lines must fail the gate",
+      );
+    },
+  );
+});
+
+test("FG-722 guard (RF-3): a MULTILINE / whitespace-padded red- discriminator in a non-allowlisted file fails the gate", () => {
+  withFixture(
+    {
+      "v2/multiline-red.ts": [
+        "const isRed = task.agentRole.startsWith(",
+        '  "red-"',
+        ");",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /red- lineage-discriminator|ad-hoc parent-less/,
+        "a red- discriminator split across physical lines must fail the gate",
+      );
+    },
   );
 });
