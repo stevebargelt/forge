@@ -133,7 +133,19 @@ function countEvents(): number {
 // FG-511: the durable run/task evidence retryCampaignItem's probe reads back —
 // an abandoned run with one failed primary task per kind, each carrying a real
 // task.failed event written by the production writer.
+//
+// FG-722: the probe now selects failed primaries via the evaluator's terminal
+// classification (classifyRunTerminalState -> failedPhases), so it loads the run's
+// workflow. A project override (`.forge/workflows/feature.yml`) makes "feature"
+// loadable without publishing a seed generation; its single "implement" step matches
+// the seeded task phase so the failed primary is classified as a workflow-phase failure.
 function seedAbandonedRun(runId: string, failureKinds: FailureKind[]): void {
+  const wfDir = join(projectDir, ".forge", "workflows");
+  mkdirSync(wfDir, { recursive: true });
+  writeFileSync(
+    join(wfDir, "feature.yml"),
+    "name: feature\ndescription: fg722 parity fixture\ninputs: []\nsteps:\n  - id: implement\n    agent: engineer\n    gate: none\n    manual: false\n    depends_on: []\n    runtime: claude\n    reds: []\n",
+  );
   insertRun({ id: runId, workflow: "feature", title: runId, status: "abandoned", createdAt: nowIso(), projectDir });
   failureKinds.forEach((kind, i) => {
     const taskId = `${runId}-task-${i}`;

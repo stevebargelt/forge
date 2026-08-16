@@ -48,7 +48,7 @@ import {
 } from "./continuation-adapter.js";
 import { logEvent } from "../store/events.js";
 import { tasksForRun } from "../store/tasks.js";
-import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
+import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run, Task } from "../types/index.js";
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./planner.js";
 import { listTickets } from "../backlog/structured.js";
@@ -56,7 +56,7 @@ import { projectHasBacklog } from "../backlog/storage-mode.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, resolveRunProjectIdentity, updateRunStatus } from "../store/runs.js";
 import { computeReadyQueue, classifyRunTerminalState } from "../v2/ready-queue.js";
-import { isPhasePrimaryRow } from "../v2/lifecycle-evaluator.js";
+import { isPhasePrimaryRow, isAdHocInvokeRow } from "../v2/lifecycle-evaluator.js";
 import { taskHasPipelineFinalize } from "../v2/run-kind.js";
 import { newRunId, nowIso } from "../util/ids.js";
 import { failureKindForTask } from "../v2/failure-kind.js";
@@ -3366,7 +3366,65 @@ export function probeCampaignSystemRetryEvidence(
     );
   }
 
-  const failedPrimaries = tasksForRun(runId).filter((t) => t.parentId === undefined && t.status === "failed");
+  // FG-722 (FG-477 child E): the failed-primary SELECTION is the evaluator's
+  // terminal classification (classifyRunTerminalState -> failedPhases), exactly the
+  // migration FG-721 shipped in reconcileTerminalOutcome's fallback (same file).
+  // failedPhases is the set of steps whose OWN primaries terminally failed with no
+  // complete replacement, so on the PIPELINE lane this drops the two shapes the old
+  // `parentId === undefined && status === 'failed'` scan wrongly counted: a
+  // SUPERSEDED failed primary (a request-changes replacement completed the same
+  // phase) and a failed AD-HOC invoke row (never a workflow phase). Within each
+  // pipeline failed phase every terminally-failed primary is selected via the
+  // evaluator's own phase-primary predicate (isPhasePrimaryRow), not a re-derived
+  // parentId scan.
+  //
+  // Only a PIPELINE run has a loadable workflow YAML — mirror the executor's own
+  // taskHasPipelineFinalize guard (used at the resume liveness probe above). An
+  // invoke-family run (run.workflow 'invoke'/'invoke_chain') has no workflow file, so
+  // pass workflow=undefined and let classifyRunTerminalState take its invoke shape
+  // (the failed single-task ad-hoc row IS its own terminal phase). That invoke row
+  // is an AD-HOC row, which isPhasePrimaryRow deliberately EXCLUDES — so the
+  // selection below is LANE-AWARE: the invoke lane selects the failed primary via
+  // isAdHocInvokeRow, not isPhasePrimaryRow, or a genuine transient invoke failure
+  // would be dropped and wrongly refused. campaign.projectDir is guaranteed non-null
+  // by the ship-eligibility guard above. The FailureKind classification / evidence
+  // construction below stays in src/campaign.
+  const runTasks = tasksForRun(runId);
+  let workflow: Workflow | undefined;
+  if (taskHasPipelineFinalize(run)) {
+    try {
+      workflow = loadWorkflow(run.workflow, { projectDir: campaign.projectDir });
+    } catch {
+      return refuse(
+        `its run ${runId} workflow '${run.workflow}' could not be loaded, so its failed workflow phases cannot be classified; inspect it (\`forge show ${runId}\`), then re-plan or abandon`,
+      );
+    }
+  }
+  const failedPhases = classifyRunTerminalState(workflow, runTasks)?.failedPhases ?? [];
+  // Lane-aware primary selection. The PIPELINE lane's failed phases are workflow
+  // steps whose OWN primaries failed, selected via isPhasePrimaryRow — which
+  // deliberately EXCLUDES ad-hoc invoke rows (a superseded/ad-hoc failed row must
+  // not count as a phase failure). The INVOKE lane (workflow undefined) has no
+  // workflow steps at all: classifyInvokeTerminalState makes each failed TOP-LEVEL
+  // row (its whole universe is `parentId === undefined`) its own terminal phase, so
+  // the re-selection here must cover that SAME universe or it drops a row the
+  // classification already named. A top-level invoke-lane row is either an ad-hoc
+  // invoke row (dispatchSource "invoke" — the marker every `forge invoke` / campaign
+  // invoke-lane dispatch stamps) OR a marker-less top-level row (a legacy row, or a
+  // driven row whose dispatch did not stamp the marker), which isPhasePrimaryRow
+  // covers. FG-722 selected the invoke lane via isAdHocInvokeRow ALONE, which
+  // silently required the marker — so a marker-less top-level failed invoke row
+  // (e.g. a cancelled docs_only item) was counted into failedPhases but dropped
+  // here, collapsing the specific cancel refusal into the generic "no failed
+  // primary" one. `isPhasePrimaryRow(t) || isAdHocInvokeRow(t)` is exactly
+  // classifyInvokeTerminalState's top-level universe (ad-hoc invoke rows are always
+  // top-level), so the re-selection matches the classification row-for-row. Both
+  // predicates are evaluator-owned — no parentId scan.
+  const isFailedPrimary =
+    workflow === undefined ? (t: Task) => isPhasePrimaryRow(t) || isAdHocInvokeRow(t) : isPhasePrimaryRow;
+  const failedPrimaries = failedPhases.flatMap((phase) =>
+    runTasks.filter((t) => t.phase === phase && isFailedPrimary(t) && t.status === "failed"),
+  );
   if (failedPrimaries.length === 0) {
     return refuse(
       `its run ${runId} (status ${run.status}) recorded no failed primary task, so the failure kind cannot be classified — the driver may have died before any task failure landed; inspect it (\`forge show ${runId}\`), then re-plan or abandon`,
