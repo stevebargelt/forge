@@ -4495,6 +4495,17 @@ function seedCampaignSystemItem(dbPath: string, campaignId: string, failureKinds
   const runId = `run-${itemId}`;
   const now = new Date().toISOString();
 
+  // FG-722: the campaign_system retry probe now selects failed primaries via the
+  // evaluator (classifyRunTerminalState), so it loads the run's workflow. A project
+  // override makes "feature" loadable in the real CLI subprocess without publishing a
+  // seed generation; its "implement" step matches the seeded task phase below.
+  const wfDir = join(projectDir, ".forge", "workflows");
+  mkdirSync(wfDir, { recursive: true });
+  writeFileSync(
+    join(wfDir, "feature.yml"),
+    "name: feature\ndescription: fg722 cli parity fixture\ninputs: []\nsteps:\n  - id: implement\n    agent: engineer\n    gate: none\n    manual: false\n    depends_on: []\n    runtime: claude\n    reds: []\n",
+  );
+
   db.prepare("INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, 'feature', ?, 'abandoned', ?, ?)").run(runId, "FG-101", now, projectDir);
   failureKinds.forEach((kind, i) => {
     const taskId = `${runId}-task-${i}`;
@@ -4515,6 +4526,85 @@ function seedCampaignSystemItem(dbPath: string, campaignId: string, failureKinds
   return { itemId, runId };
 }
 
+// FG-722: a deliberately configurable durable fixture for the retry command's
+// evaluator seam.  Unlike seedCampaignSystemItem's FG-511 compatibility shape,
+// this can describe the two run kinds that the probe must distinguish: a pipeline
+// workflow (which must load YAML) and an invoke-family run (which must not try to
+// load YAML at all).  Rows are inserted in the same runs/tasks/events tables the
+// independently spawned `forge campaign retry` process reads.
+type Fg722RetryRow = {
+  id: string;
+  phase: string;
+  status: "failed" | "complete";
+  failureKind?: string;
+  dispatchSource: "workflow" | "invoke";
+  createdAt: string;
+};
+
+function seedFg722CampaignSystemItem(
+  dbPath: string,
+  campaignId: string,
+  options: {
+    workflow: string;
+    workflowSteps?: string[];
+    rows: Fg722RetryRow[];
+  },
+): { itemId: string; runId: string } {
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const itemId = (db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").get(campaignId) as { id: string }).id;
+  const runId = `run-${itemId}`;
+
+  if (options.workflowSteps) {
+    const wfDir = join(projectDir, ".forge", "workflows");
+    mkdirSync(wfDir, { recursive: true });
+    const steps = options.workflowSteps
+      .map((id) => `  - id: ${id}\n    agent: engineer\n    gate: none\n    manual: false\n    depends_on: []\n    runtime: claude\n    reds: []`)
+      .join("\n");
+    writeFileSync(join(wfDir, `${options.workflow}.yml`), `name: ${options.workflow}\ndescription: fg722 cli retry fixture\ninputs: []\nsteps:\n${steps}\n`);
+  }
+
+  db.prepare("INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, ?, ?, 'abandoned', ?, ?)")
+    .run(runId, options.workflow, "FG-101", "2024-01-01T00:00:00.000Z", projectDir);
+  for (const row of options.rows) {
+    const taskId = `${runId}-${row.id}`;
+    db.prepare(
+      "INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, created_at, error) VALUES (?, ?, ?, 'engineer', ?, ?, ?, ?)",
+    ).run(
+      taskId,
+      runId,
+      row.phase,
+      row.status,
+      JSON.stringify({ dispatchSource: row.dispatchSource }),
+      row.createdAt,
+      row.failureKind ? `seeded ${row.failureKind}` : null,
+    );
+    if (row.failureKind) {
+      db.prepare("INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, ?, 'task.failed', ?, ?)").run(
+        runId,
+        taskId,
+        JSON.stringify({ failure_kind: row.failureKind, error: `seeded ${row.failureKind}` }),
+        row.createdAt,
+      );
+    }
+  }
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = 'run ended without a terminal outcome' WHERE id = ?",
+  ).run(runId, itemId);
+  db.close();
+  return { itemId, runId };
+}
+
+function retryAuditEvidence(dbPath: string, runId: string): Array<{ taskId: string; failureKind: string; classified: string }> {
+  const db = new Database(dbPath, { readonly: true });
+  const row = db
+    .prepare("SELECT payload FROM events WHERE run_id = ? AND event_type = 'campaign_item.campaign_system_retried'")
+    .get(runId) as { payload: string } | undefined;
+  db.close();
+  assert.ok(row, "a successful campaign retry must record its evidence audit event");
+  return (JSON.parse(row.payload) as { evidence: Array<{ taskId: string; failureKind: string; classified: string }> }).evidence;
+}
+
 function planAndApprove(): string {
   const planResult = runForge(["campaign", "plan", "--tickets", "FG-101", "--project", projectDir, "--mode", "sequential", "--json"]);
   assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
@@ -4523,6 +4613,96 @@ function planAndApprove(): string {
   assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
   return campaignId;
 }
+
+test("integ FG-722: real `campaign retry` loads a pipeline workflow and audits the failed workflow phase evidence", () => {
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+  const { runId } = seedFg722CampaignSystemItem(dbPath, campaignId, {
+    workflow: "fg722-pipeline",
+    workflowSteps: ["implement"],
+    rows: [
+      { id: "pipeline-failure", phase: "implement", status: "failed", failureKind: "idle_timeout", dispatchSource: "workflow", createdAt: "2024-01-01T00:00:01.000Z" },
+    ],
+  });
+
+  const retry = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.equal(retry.status, 0, `pipeline retry failed\nstdout: ${retry.stdout}\nstderr: ${retry.stderr}`);
+  assert.deepEqual(
+    retryAuditEvidence(dbPath, runId).map(({ taskId, failureKind, classified }) => [taskId, failureKind, classified]),
+    [[`${runId}-pipeline-failure`, "idle_timeout", "infrastructure"]],
+    "the pipeline lane must classify the failed workflow phase through its loaded YAML",
+  );
+});
+
+test("integ FG-722: real `campaign retry` accepts an invoke-family failure without a workflow file", () => {
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+  const { runId } = seedFg722CampaignSystemItem(dbPath, campaignId, {
+    workflow: "invoke_chain",
+    // Deliberately no workflowSteps: invoke-family runs do not own workflow YAML.
+    rows: [
+      { id: "invoke-failure", phase: "task", status: "failed", failureKind: "idle_timeout", dispatchSource: "invoke", createdAt: "2024-01-01T00:00:01.000Z" },
+    ],
+  });
+
+  const retry = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.equal(retry.status, 0, `invoke-family retry must not refuse for no failed primary\nstdout: ${retry.stdout}\nstderr: ${retry.stderr}`);
+  assert.deepEqual(
+    retryAuditEvidence(dbPath, runId).map(({ taskId, failureKind, classified }) => [taskId, failureKind, classified]),
+    [[`${runId}-invoke-failure`, "idle_timeout", "infrastructure"]],
+    "the invoke terminal shape treats its failed single task as the terminal phase",
+  );
+});
+
+test("integ FG-722: real pipeline retry excludes a superseded primary and ad-hoc invoke failure from its audit evidence", () => {
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+  const { runId } = seedFg722CampaignSystemItem(dbPath, campaignId, {
+    workflow: "fg722-correction",
+    workflowSteps: ["implement", "verify"],
+    rows: [
+      // A request-changes replacement completed implement, superseding this failed
+      // primary.  The old parent-less failed-row scan would have reported it.
+      { id: "superseded-failure", phase: "implement", status: "failed", failureKind: "gate_rejected", dispatchSource: "workflow", createdAt: "2024-01-01T00:00:01.000Z" },
+      { id: "replacement-complete", phase: "implement", status: "complete", dispatchSource: "workflow", createdAt: "2024-01-01T00:00:02.000Z" },
+      // This is an attached ad-hoc invoke row, not a pipeline phase.
+      { id: "adhoc-failure", phase: "task", status: "failed", failureKind: "gate_rejected", dispatchSource: "invoke", createdAt: "2024-01-01T00:00:03.000Z" },
+      { id: "genuine-failure", phase: "verify", status: "failed", failureKind: "idle_timeout", dispatchSource: "workflow", createdAt: "2024-01-01T00:00:04.000Z" },
+    ],
+  });
+
+  const retry = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.equal(retry.status, 0, `only the genuine transient pipeline phase should control retry\nstdout: ${retry.stdout}\nstderr: ${retry.stderr}`);
+  assert.deepEqual(
+    retryAuditEvidence(dbPath, runId).map(({ taskId, failureKind, classified }) => [taskId, failureKind, classified]),
+    [[`${runId}-genuine-failure`, "idle_timeout", "infrastructure"]],
+    "superseded and ad-hoc failed rows must be absent from pipeline-lane retry evidence",
+  );
+});
+
+test("integ FG-722: real pipeline retry fails closed when its workflow YAML cannot be loaded", () => {
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+  const { itemId, runId } = seedFg722CampaignSystemItem(dbPath, campaignId, {
+    workflow: "fg722-missing-workflow",
+    // No matching file: a pipeline workflow load failure must be a refusal, not a crash.
+    rows: [
+      { id: "failed-before-load", phase: "implement", status: "failed", failureKind: "idle_timeout", dispatchSource: "workflow", createdAt: "2024-01-01T00:00:01.000Z" },
+    ],
+  });
+
+  const retry = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.notEqual(retry.status, 0, "an unloadable pipeline workflow must refuse retry");
+  assert.match(retry.stderr, /workflow 'fg722-missing-workflow' could not be loaded/i, `refusal must name the workflow-load failure\nstderr: ${retry.stderr}`);
+
+  const db = new Database(dbPath, { readonly: true });
+  const item = db.prepare("SELECT lifecycle_status, run_id FROM campaign_items WHERE id = ?").get(itemId) as { lifecycle_status: string; run_id: string | null };
+  const auditCount = (db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id = ? AND event_type = 'campaign_item.campaign_system_retried'").get(runId) as { n: number }).n;
+  db.close();
+  assert.equal(item.lifecycle_status, "failed", "a fail-safe refusal must not reset the campaign item");
+  assert.equal(item.run_id, runId, "a fail-safe refusal must retain the evidence linkage");
+  assert.equal(auditCount, 0, "a refused retry must not write an acceptance audit event");
+});
 
 test("integ FG-511: real `campaign retry` accepts a campaign_system item on transient run evidence — human and --json stdout, audit event, item reset", () => {
   const campaignId = planAndApprove();

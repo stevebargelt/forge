@@ -3366,7 +3366,39 @@ export function probeCampaignSystemRetryEvidence(
     );
   }
 
-  const failedPrimaries = tasksForRun(runId).filter((t) => t.parentId === undefined && t.status === "failed");
+  // FG-722 (FG-477 child E): the failed-primary SELECTION is the evaluator's
+  // terminal classification (classifyRunTerminalState -> failedPhases), exactly the
+  // migration FG-721 shipped in reconcileTerminalOutcome's fallback (same file).
+  // failedPhases is the set of steps whose OWN primaries terminally failed with no
+  // complete replacement, so this drops the two shapes the old
+  // `parentId === undefined && status === 'failed'` scan wrongly counted: a
+  // SUPERSEDED failed primary (a request-changes replacement completed the same
+  // phase) and a failed AD-HOC invoke row (never a workflow phase). Within each
+  // failed phase every terminally-failed primary is selected via the evaluator's own
+  // phase-primary predicate (isPhasePrimaryRow), not a re-derived parentId scan.
+  //
+  // Only a PIPELINE run has a loadable workflow YAML — mirror the executor's own
+  // taskHasPipelineFinalize guard (used at the resume liveness probe above). An
+  // invoke-family run (run.workflow 'invoke'/'invoke_chain') has no workflow file, so
+  // pass workflow=undefined and let classifyRunTerminalState take its invoke shape
+  // (the failed single-task row IS its own terminal phase). campaign.projectDir is
+  // guaranteed non-null by the ship-eligibility guard above. The FailureKind
+  // classification / evidence construction below stays in src/campaign.
+  const runTasks = tasksForRun(runId);
+  let workflow: Workflow | undefined;
+  if (taskHasPipelineFinalize(run)) {
+    try {
+      workflow = loadWorkflow(run.workflow, { projectDir: campaign.projectDir });
+    } catch {
+      return refuse(
+        `its run ${runId} workflow '${run.workflow}' could not be loaded, so its failed workflow phases cannot be classified; inspect it (\`forge show ${runId}\`), then re-plan or abandon`,
+      );
+    }
+  }
+  const failedPhases = classifyRunTerminalState(workflow, runTasks)?.failedPhases ?? [];
+  const failedPrimaries = failedPhases.flatMap((phase) =>
+    runTasks.filter((t) => t.phase === phase && isPhasePrimaryRow(t) && t.status === "failed"),
+  );
   if (failedPrimaries.length === 0) {
     return refuse(
       `its run ${runId} (status ${run.status}) recorded no failed primary task, so the failure kind cannot be classified — the driver may have died before any task failure landed; inspect it (\`forge show ${runId}\`), then re-plan or abandon`,
