@@ -1308,6 +1308,70 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
   color: var(--warn);
 }
 
+/* FG-386: shipping-audit projection.
+ *
+ * Every audit state carries its own label text as well as colour — a monochrome or
+ * colour-blind read still gets "not observed" vs "passed" from the badge itself,
+ * never from hue alone. not_observed is deliberately the dim neutral, never green:
+ * absence of evidence is not evidence of a pass.
+ *
+ * Mechanical evidence (readiness gaps, host-verification shipping checks) and
+ * MODEL-authored reviewer findings sit in visually distinct blocks — the mechanical
+ * block is monospace on a bordered neutral panel, the model block is a bordered
+ * card with a left accent — so the two are never mistaken for one kind of check. */
+.shipping-view { margin-top: 20px; }
+.audit-row { margin-bottom: 12px; }
+.audit-row-head { justify-content: space-between; align-items: baseline; }
+.audit-axes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.audit-axis-label { color: var(--fg-dim); margin-right: 6px; }
+.badge.audit-passed { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.badge.audit-failed { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.audit-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.badge.audit-needs_human { background: rgba(250, 204, 21, 0.18); color: var(--warn); }
+.badge.audit-stale { background: rgba(250, 204, 21, 0.15); color: var(--warn); font-style: italic; }
+.badge.audit-not_observed { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); font-style: italic; }
+.audit-mechanical {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.audit-mechanical h4, .audit-model h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+.audit-check-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+.audit-model {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.audit-model-finding { padding: 4px 0; border-top: 1px solid var(--border); }
+.audit-model-finding:first-of-type { border-top: none; }
+.audit-deferrals {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.audit-gaps { margin: 4px 0 0; padding-left: 18px; }
+.audit-stale-note { color: var(--warn); font-size: 11px; margin-top: 4px; }
+
 /* FG-591: the operator work queue / Kanban board.
  *
  * The two wait tones that MUST stay visually distinct are .queue-wait-blocker and

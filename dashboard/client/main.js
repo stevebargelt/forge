@@ -10,6 +10,7 @@ import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
 import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
+import { ShippingAuditView } from "./shipping-audit.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
@@ -91,6 +92,9 @@ function App() {
   // Sequence token for the queue read — see pollQueue.
   const queueSeq = useRef(0);
   const [reviews, setReviews] = useState(null);
+  // FG-386: the shipping-audit projection, scoped to ONE project like the queue.
+  const [shippingAudit, setShippingAudit] = useState(null);
+  const shippingSeq = useRef(0);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
   // so a launched loop is visible before any task row exists for it.
@@ -356,6 +360,47 @@ function App() {
     return () => clearInterval(id);
   }, [pollReviews, view]);
 
+  const pollShippingAudit = useCallback(async () => {
+    // Scope-token like pollQueue: a read for the previous project must never
+    // overwrite the one just switched to.
+    const seq = (shippingSeq.current += 1);
+    // An unselected project is an EMPTY/unselected projection, not perpetual loading:
+    // render the "select a project" state (projectKey === null) rather than null data.
+    if (!projectFilter) { setShippingAudit({ projectKey: null, rows: [], degraded: [] }); return; }
+    try {
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const res = await fetch(`/api/shipping-audit${q}`);
+      if (seq !== shippingSeq.current) return;
+      // Only the new scope's response may populate the panel. A failed fetch must NOT
+      // leave the prior scope's rows on screen labelled as the new project — drop to
+      // the loading state instead (RF-3).
+      if (res.ok) setShippingAudit(await res.json());
+      else setShippingAudit(null);
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== shippingSeq.current) return;
+      setShippingAudit(null);
+      setError(String(e));
+    }
+  }, [projectFilter, checkoutFilter]);
+
+  // Clear the panel the instant the scope changes so the previous project's evidence is
+  // never rendered under the new scope while its request is in flight (RF-3, the FG-699
+  // guard). The seq bump retires whatever read is still outstanding for the old scope;
+  // the null drops the view to its loading state until the new response arrives. Runs
+  // before the poll effect below, which then fires the scoped fetch.
+  useEffect(() => {
+    shippingSeq.current += 1;
+    setShippingAudit(null);
+  }, [projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "shipping") return;
+    pollShippingAudit();
+    const id = setInterval(pollShippingAudit, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollShippingAudit, view]);
+
   const pollBacklog = useCallback(async () => {
     if (!projectFilter) { setBacklog(null); return; }
     try {
@@ -472,6 +517,7 @@ function App() {
             <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
             <button class=${"tab " + (view === "queue" ? "tab-active" : "")} onClick=${() => switchView("queue")}>queue</button>
             <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
+            <button class=${"tab " + (view === "shipping" ? "tab-active" : "")} onClick=${() => switchView("shipping")}>shipping</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -538,6 +584,8 @@ function App() {
           />`
         : view === "reviews"
         ? html`<${ReviewsView} data=${reviews} />`
+        : view === "shipping"
+        ? html`<${ShippingAuditView} data=${shippingAudit} />`
         : view === "verify"
         ? html`<${VerificationsView}
             inProgress=${inProgressVerifications}
