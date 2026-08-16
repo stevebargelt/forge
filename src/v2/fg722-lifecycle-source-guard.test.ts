@@ -55,10 +55,17 @@ const SRC_ROOT = fileURLToPath(new URL("../", import.meta.url));
 //     merely quotes the idiom — the FG-721/FG-722 migration comments say
 //     "`parentId === undefined && status === 'failed'`" with a bare, dot-less
 //     `parentId` — is NOT matched. That precision is asserted below.
-const PARENTLESS_SCAN = /\.parentId === undefined/;
+//     `\s*` around the `===` so a whitespace-collapsed `parentId===undefined` (or
+//     any extra-spaced variant) cannot slip the scan — the same bypass class RF-2
+//     flagged for the red- discriminator, closed here too.
+const PARENTLESS_SCAN = /\.parentId\s*===\s*undefined/;
 
-// (2a) A `red-` prefix test used as a discriminator: `<x>.startsWith("red-")`.
-const RED_PREFIX_TEST = /\.startsWith\("red-"\)/;
+// (2a) A `red-` prefix test used as a discriminator: `<x>.startsWith(<q>red-<q>)`.
+//      RF-2: the quote is captured and back-referenced so ALL THREE JS string quote
+//      styles are caught — double ("red-"), single ('red-'), and backtick (`red-`).
+//      The pre-RF-2 regex matched ONLY the double-quoted form, so a single-quoted
+//      startsWith('red-') reintroduced the lineage discriminator straight past the gate.
+const RED_PREFIX_TEST = /\.startsWith\((["'`])red-\1\)/;
 // (2b) A `red-${...}` template literal (reviewer-task-id construction today; a future
 //      `taskId === `red-${id}`` discriminator would be caught here too).
 const RED_TEMPLATE = /`red-\$\{/;
@@ -324,6 +331,69 @@ test("FG-722 guard: a reintroduced red- lineage discriminator in a non-allowlist
         () => assertGateHolds(dir),
         /red- lineage-discriminator|ad-hoc parent-less/,
         'reintroducing `startsWith("red-")` as a discriminator must fail the gate',
+      );
+    },
+  );
+});
+
+test("FG-722 guard (RF-2): a SINGLE-quoted reintroduced startsWith('red-') in a non-allowlisted file fails the gate", () => {
+  // The RF-2 bypass: JS permits the discriminator argument in single quotes, which the
+  // pre-fix double-quote-only regex did not match — so the lineage discriminator the
+  // guard exists to catch could be reintroduced verbatim, just re-quoted.
+  withFixture(
+    {
+      "v2/single-quote-consumer.ts": [
+        "export function isRed(task: Task): boolean {",
+        "  return task.agentRole.startsWith('red-');",
+        "}",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /red- lineage-discriminator|ad-hoc parent-less/,
+        "reintroducing startsWith('red-') with SINGLE quotes must fail the gate",
+      );
+    },
+  );
+});
+
+test("FG-722 guard (RF-2): a BACKTICK-quoted reintroduced startsWith(`red-`) in a non-allowlisted file fails the gate", () => {
+  withFixture(
+    {
+      "v2/backtick-consumer.ts": [
+        "export function isRed(task: Task): boolean {",
+        "  return task.agentRole.startsWith(`red-`);",
+        "}",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /red- lineage-discriminator|ad-hoc parent-less/,
+        "reintroducing startsWith(`red-`) with BACKTICKS must fail the gate",
+      );
+    },
+  );
+});
+
+test("FG-722 guard (RF-2): a whitespace-collapsed parentId===undefined terminal scan still fails the gate", () => {
+  // The analogous whitespace bypass: the pre-fix `\.parentId === undefined` regex
+  // required exactly one space around `===`, so a collapsed `parentId===undefined`
+  // (or any extra-spaced variant) slipped past. The `\s*` widening closes it.
+  withFixture(
+    {
+      "campaign/executor.ts": [
+        "export function probe(tasks: Task[]): Task[] {",
+        '  return tasks.filter((t) => t.parentId===undefined && t.status === "failed");',
+        "}",
+      ].join("\n"),
+    },
+    (dir) => {
+      assert.throws(
+        () => assertGateHolds(dir),
+        /ad-hoc parent-less row scan/,
+        "a whitespace-collapsed parentId===undefined terminal scan must fail the gate",
       );
     },
   );

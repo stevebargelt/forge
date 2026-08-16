@@ -56,7 +56,7 @@ import { projectHasBacklog } from "../backlog/storage-mode.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, resolveRunProjectIdentity, updateRunStatus } from "../store/runs.js";
 import { computeReadyQueue, classifyRunTerminalState } from "../v2/ready-queue.js";
-import { isPhasePrimaryRow } from "../v2/lifecycle-evaluator.js";
+import { isPhasePrimaryRow, isAdHocInvokeRow } from "../v2/lifecycle-evaluator.js";
 import { taskHasPipelineFinalize } from "../v2/run-kind.js";
 import { newRunId, nowIso } from "../util/ids.js";
 import { failureKindForTask } from "../v2/failure-kind.js";
@@ -3370,20 +3370,25 @@ export function probeCampaignSystemRetryEvidence(
   // terminal classification (classifyRunTerminalState -> failedPhases), exactly the
   // migration FG-721 shipped in reconcileTerminalOutcome's fallback (same file).
   // failedPhases is the set of steps whose OWN primaries terminally failed with no
-  // complete replacement, so this drops the two shapes the old
+  // complete replacement, so on the PIPELINE lane this drops the two shapes the old
   // `parentId === undefined && status === 'failed'` scan wrongly counted: a
   // SUPERSEDED failed primary (a request-changes replacement completed the same
   // phase) and a failed AD-HOC invoke row (never a workflow phase). Within each
-  // failed phase every terminally-failed primary is selected via the evaluator's own
-  // phase-primary predicate (isPhasePrimaryRow), not a re-derived parentId scan.
+  // pipeline failed phase every terminally-failed primary is selected via the
+  // evaluator's own phase-primary predicate (isPhasePrimaryRow), not a re-derived
+  // parentId scan.
   //
   // Only a PIPELINE run has a loadable workflow YAML — mirror the executor's own
   // taskHasPipelineFinalize guard (used at the resume liveness probe above). An
   // invoke-family run (run.workflow 'invoke'/'invoke_chain') has no workflow file, so
   // pass workflow=undefined and let classifyRunTerminalState take its invoke shape
-  // (the failed single-task row IS its own terminal phase). campaign.projectDir is
-  // guaranteed non-null by the ship-eligibility guard above. The FailureKind
-  // classification / evidence construction below stays in src/campaign.
+  // (the failed single-task ad-hoc row IS its own terminal phase). That invoke row
+  // is an AD-HOC row, which isPhasePrimaryRow deliberately EXCLUDES — so the
+  // selection below is LANE-AWARE: the invoke lane selects the failed primary via
+  // isAdHocInvokeRow, not isPhasePrimaryRow, or a genuine transient invoke failure
+  // would be dropped and wrongly refused. campaign.projectDir is guaranteed non-null
+  // by the ship-eligibility guard above. The FailureKind classification / evidence
+  // construction below stays in src/campaign.
   const runTasks = tasksForRun(runId);
   let workflow: Workflow | undefined;
   if (taskHasPipelineFinalize(run)) {
@@ -3396,8 +3401,18 @@ export function probeCampaignSystemRetryEvidence(
     }
   }
   const failedPhases = classifyRunTerminalState(workflow, runTasks)?.failedPhases ?? [];
+  // Lane-aware primary selection. The PIPELINE lane's failed phases are workflow
+  // steps whose OWN primaries failed, selected via isPhasePrimaryRow — which
+  // deliberately EXCLUDES ad-hoc invoke rows (a superseded/ad-hoc failed row must
+  // not count as a phase failure). The INVOKE lane (workflow undefined) has no
+  // workflow steps at all: classifyInvokeTerminalState makes the failed top-level
+  // ad-hoc invoke row its OWN terminal phase, so the failed primary IS that
+  // ad-hoc row and must be selected via isAdHocInvokeRow. Reusing isPhasePrimaryRow
+  // there would drop the very row the classification named and refuse a genuine
+  // transient invoke failure (both predicates are evaluator-owned — no parentId scan).
+  const isFailedPrimary = workflow === undefined ? isAdHocInvokeRow : isPhasePrimaryRow;
   const failedPrimaries = failedPhases.flatMap((phase) =>
-    runTasks.filter((t) => t.phase === phase && isPhasePrimaryRow(t) && t.status === "failed"),
+    runTasks.filter((t) => t.phase === phase && isFailedPrimary(t) && t.status === "failed"),
   );
   if (failedPrimaries.length === 0) {
     return refuse(

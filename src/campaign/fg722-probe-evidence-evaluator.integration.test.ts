@@ -106,6 +106,28 @@ function setupItem(ticketId: string, steps: Array<{ id: string; depends_on?: str
   return { campaign: getCampaign(campaign.id)!, item: getCampaignItem(itemId)!, runId };
 }
 
+// RF-1: an INVOKE-lane item. The run's workflow is "invoke_chain" (a campaign quick
+// lane), so taskHasPipelineFinalize is false — the probe passes workflow=undefined and
+// classifyRunTerminalState takes its invoke shape, where the failed top-level ad-hoc
+// row IS its own terminal phase. No workflow YAML is written: an invoke-family run has
+// none.
+function setupInvokeLaneItem(ticketId: string): { campaign: Campaign; item: CampaignItem; runId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: ticketId, body: "" });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: [ticketId] }, { projectDir });
+  approveCampaign(campaign.id, { rationale: "approved" });
+  const itemId = listCampaignItems(campaign.id)[0]!.id;
+  const runId = `run-${itemId}`;
+  insertRun({ id: runId, workflow: "invoke_chain", title: runId, status: "abandoned", createdAt: "2024-01-01T00:00:00.000Z", projectDir });
+  updateCampaignItem(itemId, {
+    lifecycleStatus: "failed",
+    outcome: "blocked",
+    blockerKind: "campaign_system",
+    runId,
+    requestedHumanAction: "seeded campaign_system park",
+  });
+  return { campaign: getCampaign(campaign.id)!, item: getCampaignItem(itemId)!, runId };
+}
+
 function seedFailedPrimary(runId: string, phase: string, kind: FailureKind, createdAt: string): string {
   const taskId = `${runId}-${phase}-${createdAt}`;
   insertTask({
@@ -247,6 +269,47 @@ test("PARITY: a run whose failed primaries are all fresh (non-superseded, non-ad
   assert.deepEqual(probe.evidence, legacy, "the evaluator-derived evidence matches the old ad-hoc scan for an all-fresh run");
   // And the parity extends to the non-transient refusal shape the write path gates on.
   assert.equal(legacyScanBlockerKind(tasksForRun(runId)), "campaign_system", "sanity: a single transient failure is retryable under both derivations");
+});
+
+test("RF-1 INVOKE LANE: a genuine transient failed ad-hoc invoke run PRODUCES evidence — lane-aware selection does not refuse it", () => {
+  // The regression: for an invoke/invoke_chain run the probe passes workflow=undefined,
+  // classifyInvokeTerminalState reports failedPhases=[the ad-hoc row's phase], but the
+  // OLD row filter required isPhasePrimaryRow(t) — which EXCLUDES ad-hoc invoke rows —
+  // so failedPrimaries was empty and the probe wrongly refused "no failed primary" for a
+  // real transient invoke failure. With the lane-aware selection it produces evidence.
+  const { campaign, item, runId } = setupInvokeLaneItem("FG-722I");
+  const adhocTask = seedFailedAdhocInvoke(runId, "idle_timeout", "2024-01-01T00:00:01.000Z");
+
+  const probe = probeCampaignSystemRetryEvidence(campaign, item);
+  assert.ok(
+    probe.ok,
+    `the invoke lane must PRODUCE evidence for a genuine transient invoke failure, got refusal: ${!probe.ok ? probe.reason : ""}`,
+  );
+  assert.deepEqual(
+    probe.evidence,
+    [{ taskId: adhocTask, failureKind: "idle_timeout", classified: "infrastructure" }],
+    "the failed ad-hoc invoke row IS the invoke lane's terminal primary and must appear in the evidence",
+  );
+});
+
+test("RF-1 INVOKE LANE: a non-transient failed invoke run refuses naming the SELECTED task — not the empty-primary fall-through", () => {
+  // Proves the invoke row is actually SELECTED (not merely that any non-empty guard
+  // passes): a non-transient invoke failure must refuse with the task+classification,
+  // NOT the "no failed primary task" refusal the pre-fix empty set produced.
+  const { campaign, item, runId } = setupInvokeLaneItem("FG-722IN");
+  const adhocTask = seedFailedAdhocInvoke(runId, "gate_rejected", "2024-01-01T00:00:01.000Z");
+
+  const probe = probeCampaignSystemRetryEvidence(campaign, item);
+  assert.equal(probe.ok, false, "a non-transient invoke failure must still refuse the retry");
+  if (!probe.ok) {
+    assert.match(probe.reason, new RegExp(adhocTask), `reason must name the SELECTED invoke task, got: ${probe.reason}`);
+    assert.match(probe.reason, /'scope'/, "reason must name the classification");
+    assert.doesNotMatch(
+      probe.reason,
+      /no failed primary task/i,
+      "the invoke row must be selected — not fall through to the empty-primary refusal the pre-fix code hit",
+    );
+  }
 });
 
 test("PARITY: a non-transient fresh failed primary is still refused naming the task and its classification", () => {
