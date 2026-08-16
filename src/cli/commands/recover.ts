@@ -48,6 +48,7 @@ import type { ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { analyzeProviderFailure } from "../../v2/provider-failure.js";
 import { inferredResultFrom } from "../../v2/inferred-result.js";
+import { isFanoutChildRow } from "../../v2/lifecycle-evaluator.js";
 import { recoverStructuredStreamResult } from "../../v2/stream-result-recovery.js";
 
 // FG-455 p4 review finding 2: oom_killed carries the same worktree-evidence
@@ -395,8 +396,13 @@ export type FanoutParentView = {
   reDrive: ReDriveDisposition;
 };
 
+// FG-716: a fanout parent has at least one FANOUT child (a row dispatchFanoutChild
+// minted), not merely any child. A reds-but-no-fanout step — red children and no
+// fanout children — is NOT a fanout parent, correcting the earlier any-child miscount
+// that treated a red_review child as evidence of a wave. Uses the canonical
+// isFanoutChildRow primitive so this stays equal to the classifier.
 function isFanoutParent(task: Task, allTasks: Task[]): boolean {
-  return task.parentId === undefined && allTasks.some((t) => t.parentId === task.id);
+  return task.parentId === undefined && allTasks.some((t) => t.parentId === task.id && isFanoutChildRow(t));
 }
 
 // Is this a fanout parent in a state piece-2 reconcile would act on (settle) or

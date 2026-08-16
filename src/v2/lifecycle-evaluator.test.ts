@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   classifyTaskLineage,
   isAdHocInvokeRow,
+  isFanoutChildRow,
   isOnRejectRecoveryRow,
   isPhasePrimaryRow,
   isWorkflowPrimaryRow,
@@ -327,14 +328,34 @@ function sampleTasks(r: () => number, n: number): Task[] {
         ? pick(r, tasks).id
         : "dangling-parent";
     const source = pick(r, SOURCES);
+    const phase = pick(r, PHASES);
+    const agentRole = pick(r, ROLES);
+    const createdAt = pick(r, TIMES);
+    const status = pick(r, STATUSES);
+    const marker = pick(r, MARKERS);
+    const inputs: Record<string, unknown> = { ...marker };
+    // Model the ONE production site that stamps fanoutIndex: dispatchFanoutChild
+    // (runNext.ts) sets it on every fanout child it mints and nothing else does
+    // (FG-584 D6). A fanout child is a parented, non-invoke, non-recovery row whose
+    // role is NOT one of its phase-step's reds — reds and on_reject recovery rows
+    // are minted by other sites and never carry it. Stamping deterministically (no
+    // extra r() draw) keeps the seeded stream — and every other property below —
+    // byte-identical while giving isFanoutChildRow a realistic fanoutIndex to read.
+    const phaseReds = GEN_WORKFLOW.steps.find((s) => s.id === phase)?.reds ?? [];
+    const mintsFanoutChild =
+      parentId !== undefined &&
+      source !== "invoke" &&
+      marker["rejectedTaskId"] === undefined &&
+      !phaseReds.some((rd) => rd.agent === agentRole);
+    if (mintsFanoutChild) inputs["fanoutIndex"] = i;
     tasks.push(
       mkTask({
         id,
-        phase: pick(r, PHASES),
-        agentRole: pick(r, ROLES),
-        createdAt: pick(r, TIMES),
-        status: pick(r, STATUSES),
-        inputs: { ...pick(r, MARKERS) },
+        phase,
+        agentRole,
+        createdAt,
+        status,
+        inputs,
         ...(parentId ? { parentId } : {}),
         ...(source ? { dispatchSource: source } : {}),
       }),
@@ -476,6 +497,25 @@ test("isPhasePrimaryRow is exactly the classifier's phase-primary rule (workflow
         isPhasePrimaryRow(t),
         isWorkflowPrimaryRow(kinds.get(t.id)!),
         `isPhasePrimaryRow drifted from the classifier on ${t.id}`,
+      );
+    }
+  }
+});
+
+test("isFanoutChildRow is exactly the classifier's fanout_child cell (workflow-free view)", () => {
+  // FG-716: prove the fanoutIndex-reading primitive picks exactly the rows the
+  // classifier calls fanout_child, over the corpus (which stamps fanoutIndex on
+  // precisely the minted fanout children — see sampleTasks). A disagreement here
+  // is a real finding to report, not something to paper over.
+  for (const tasks of corpus()) {
+    const kinds = classifyTaskLineage(GEN_WORKFLOW, tasks);
+    for (const t of tasks) {
+      assert.equal(
+        isFanoutChildRow(t),
+        kinds.get(t.id) === "fanout_child",
+        `isFanoutChildRow drifted from the classifier on ${t.id} (kind=${kinds.get(t.id)}, fanoutIndex=${String(
+          t.taskPackage.inputs?.["fanoutIndex"],
+        )})`,
       );
     }
   }
