@@ -47,8 +47,8 @@ import { REVIEW_DISPATCH_ROLES, selectRedsForContract } from "./review-contract.
 import { approvedReviewContract } from "./review-gate.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir, cloneDir } from "../util/paths.js";
-import { computeReadyQueue, isRunSettled, resolvePhasePrimary, classifyRunTerminalState, type RunTerminalClassification } from "./ready-queue.js";
-import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator.js";
+import { computeReadyQueue, isRunSettled, classifyRunTerminalState, type RunTerminalClassification } from "./ready-queue.js";
+import { classifyTaskLineage, isWorkflowPrimaryRow, resolveCompletedPhasePrimary } from "./lifecycle-evaluator.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { verdictBlocksGate } from "./gate.js";
@@ -2613,7 +2613,7 @@ async function dispatchFanoutStep(args: {
   // and the value lives at result[array_key].
   // FG-519: canonical latest-complete parent-less primary — pure parity with the
   // prior inline filter/sort/pop (which already selected latest-complete here).
-  const upstreamTask = resolvePhasePrimary(allTasks, fanout.from_upstream.step);
+  const upstreamTask = resolveCompletedPhasePrimary(allTasks, fanout.from_upstream.step);
   if (!upstreamTask) {
     // Upstream hasn't completed; ready-queue logic should have prevented this.
     const upstreamMsg = "fanout: upstream not complete";

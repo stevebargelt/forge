@@ -24,6 +24,7 @@ import {
   isAdHocInvokeRow,
   isOnRejectRecoveryRow,
   isWorkflowPrimaryRow,
+  resolveCompletedPhasePrimary,
   type LineageKind,
 } from "./lifecycle-evaluator.js";
 
@@ -140,31 +141,12 @@ function hasCompletePrimary(tasks: Task[]): boolean {
   return tasks.some((t) => COMPLETE_LIKE.has(t.status));
 }
 
-// FG-519: the one canonical phase-primary resolution rule, shared by the three
-// sites that used to disagree — the ready queue (this file), inputs.deriveUpstream,
-// and runNext's fanout upstream read. Returns the latest (by createdAt) COMPLETE,
-// parent-less (parentId === undefined) task row for `phase`, or undefined.
-//
-// "parent-less" excludes red/fanout children; "COMPLETE" is what makes the row
-// safe for a downstream reader — a healed duplicate-primary pair ([complete
-// older, failed newer]) resolves to the complete row, not the failed one whose
-// result.json is missing. Callers own the INPUT filtering (e.g. computeReadyQueue
-// drops ad-hoc invoke rows before calling); this canonicalizes only the SELECTION
-// rule over whatever row universe it is handed.
-//
-// FG-477: deliberately NOT classifier-driven. Its `parentId === undefined` test is
-// rule 1/2's precondition (the classifier's primary + retry_replacement rows are
-// exactly the parent-less ones), but the classifier needs the workflow, and
-// threading one in here would ALSO apply the classifier's ad-hoc exclusion to
-// callers that pass an unfiltered row set (deriveUpstream, runNext's fanout
-// upstream read) — narrowing their row universe. That is a behavior change, not a
-// refactor, so it stays out of this slice (migration-freeze).
-export function resolvePhasePrimary(tasks: Task[], phase: string): Task | undefined {
-  return tasks
-    .filter((t) => t.phase === phase && t.parentId === undefined && COMPLETE_LIKE.has(t.status))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .pop();
-}
+// FG-717: the canonical phase-primary selection rule now lives in
+// lifecycle-evaluator.ts as resolveCompletedPhasePrimary. This is a thin alias so
+// computeReadyQueue's call sites read as before; the rule (and its FG-519/FG-477
+// rationale) is documented there. deriveUpstream and runNext import the evaluator
+// export directly — this wrapper is for the ready-queue call sites only.
+export const resolvePhasePrimary = resolveCompletedPhasePrimary;
 
 // Shared "is this run settled" reachability check, consumed identically by
 // gate.ts's finalizeRunIfDone (advance AND reject branches) and runNext.ts's
