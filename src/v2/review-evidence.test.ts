@@ -247,6 +247,43 @@ test("FG-639 / PRD #29: a blocked environment records blocked_environment, never
   assert.match(check.refusal, /never green and never resolved/);
 });
 
+test("FG-719: a PASSING regression_test with environment_blocked:false resolves — the field is absent, never not_executed", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "dedup keeps both when the invariants differ",
+      runner_output: TAP_GREEN_WITH_SKIP,
+      environment_blocked: false,
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-1" },
+  );
+  assert.equal(check.ok, true, "false means 'not blocked' — it must not wedge a passing test into not_executed");
+  if (!check.ok) return;
+  assert.equal(check.coverage, "executed");
+  assert.match(check.detail, new RegExp(`executed against ${SHA}`));
+  // The boolean is normalized away entirely: the stored evidence carries no environment_blocked.
+  assert.equal(
+    (check.evidence as { environment_blocked?: unknown }).environment_blocked,
+    undefined,
+    "the coerced field is absent in the stored evidence, not present-and-false",
+  );
+});
+
+test("FG-719: a boolean-true environment_blocked is refused with a schema-accurate reason, not the bare type error", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the container starts",
+      environment_blocked: true,
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-7" },
+  );
+  assert.equal(check.ok, false);
+  if (check.ok) return;
+  assert.match(check.refusal, /environment_blocked must be a non-empty reason string/);
+  assert.doesNotMatch(check.refusal, /expected string, received boolean/);
+});
+
 test("FG-639: an executed test resolves and reports the candidate it executed against", () => {
   const check = validateResolutionEvidence(
     { kind: "regression_test", test_name: "dedup keeps both when the invariants differ", runner_output: TAP_GREEN_WITH_SKIP },

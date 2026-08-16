@@ -74,6 +74,29 @@ const AlternateLaneSchema = z
 
 export type AlternateLaneClaim = z.infer<typeof AlternateLaneSchema>;
 
+/** `environment_blocked` is a REASON STRING or absent — never a boolean (FG-719). A
+ *  rechecker that emits `environment_blocked: false` means "not blocked", which is the field
+ *  ABSENT, not a present boolean. Before this normalizer that `false` failed schema parse and
+ *  the whole payload was recorded `not_executed`, silently degrading a PASSING regression_test
+ *  and wedging a resolved `demonstrated` fix_now. So a boolean is normalized at the boundary:
+ *  `false` coerces to absent (the check ran, nothing blocked it), and `true` — a claim of a
+ *  block that states no reason — is refused with a message naming the missing reason rather
+ *  than the bare "expected string, received boolean" a raw parse produces. */
+const EnvironmentBlockedSchema = z.preprocess(
+  (v) => (v === false ? undefined : v),
+  z
+    .string({
+      error: (issue) =>
+        issue.input === true
+          ? "environment_blocked must be a non-empty reason string naming what the environment could not " +
+            "run, or be omitted (false) when nothing was blocked — a bare `true` states no reason"
+          : undefined,
+    })
+    .trim()
+    .min(1)
+    .optional(),
+);
+
 const RegressionTestSchema = z
   .object({
     kind: z.literal("regression_test"),
@@ -83,8 +106,9 @@ const RegressionTestSchema = z
     /** Where it lives, for a reader. Not what execution is established from. */
     test_file: z.string().trim().min(1).optional(),
     runner_output: z.string().optional(),
-    /** Set when the environment could not run the check at all. */
-    environment_blocked: z.string().trim().min(1).optional(),
+    /** Set when the environment could not run the check at all. A non-empty reason string
+     *  or absent; a boolean `false` is normalized to absent (see EnvironmentBlockedSchema). */
+    environment_blocked: EnvironmentBlockedSchema,
     alternate_lane: AlternateLaneSchema.optional(),
   })
   .strict();

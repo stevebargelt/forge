@@ -1716,6 +1716,73 @@ test("FG-639 / PRD #29: the same skipped test resolves once a MANDATORY LANE nam
   assert.equal(shipping.status, "advanced");
 });
 
+// FG-719: this is deliberately through Stage 8 rather than a direct schema parse. The
+// coordinator must treat a legacy `false` as absent, write the proven resolution, and
+// advance normally; a genuine reason must still stop the review as blocked_environment.
+test("FG-719: a legacy environment_blocked false is normalized away and the coordinator records the resolved regression test", async () => {
+  const h = harness(
+    recheckerCiting(() => ({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: EXECUTED,
+      environment_blocked: false,
+    })),
+  );
+  const recheck = await driveToRecheck(h);
+
+  assert.equal(recheck.status, "advanced", recheck.message);
+  assert.match(recheck.message, /1 resolved, 0 unresolved/);
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, "resolved", "false means absent, not inconclusive");
+  assert.equal(f.resolutionEvidenceKind, "regression_test");
+  assert.equal(f.resolvedSha, "afterfix2");
+  assert.doesNotMatch(f.resolutionEvidence ?? "", /blocked_environment|could not execute/);
+  assert.notEqual(getReview(REVIEW)?.state, "blocked_environment");
+  assert.deepEqual(getReview(REVIEW)?.stageEvidence?.recheck?.meta?.results, [
+    { ref: "RF-1", resolution: "resolved", coverage: "executed" },
+  ]);
+});
+
+test("FG-719: an environment_blocked reason reaches the coordinator as blocked coverage instead of being dropped", async () => {
+  const h = harness(
+    recheckerCiting(() => ({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: EXECUTED,
+      environment_blocked: "the agent-dev-worker image is not built in this lane",
+    })),
+  );
+  const recheck = await driveToRecheck(h);
+
+  assert.equal(recheck.status, "stopped", recheck.message);
+  assert.match(recheck.message, /blocked_environment/);
+  assert.equal(getReview(REVIEW)?.state, "blocked_environment");
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, undefined, "blocked evidence must not be silently recorded as resolved");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.recheck, undefined, "the blocked stage writes no green completion record");
+});
+
+test("FG-719: a boolean true is recorded inconclusive with the actionable reason-string error instead of wedging recheck", async () => {
+  const h = harness(
+    recheckerCiting(() => ({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: EXECUTED,
+      environment_blocked: true,
+    })),
+  );
+  const recheck = await driveToRecheck(h);
+
+  assert.equal(recheck.status, "advanced", recheck.message);
+  assert.match(recheck.message, /0 resolved, 1 unresolved \(RF-1=inconclusive\)/);
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, "inconclusive", "an invalid claim must not be recorded as resolved");
+  assert.equal(f.resolutionEvidenceKind, "not_executed");
+  assert.match(f.resolutionEvidence ?? "", /environment_blocked must be a non-empty reason string naming what the environment could not run/);
+  assert.match(f.resolutionEvidence ?? "", /or be omitted \(false\) when nothing was blocked/);
+  assert.equal(getReview(REVIEW)?.state, "awaiting_disposition", "the completed stage returns control instead of wedging in rechecking");
+});
+
 test("FG-639 / PRD #29: an alternate lane at ANOTHER candidate is refused by name and the finding stays unresolved", async () => {
   const h = harness(
     recheckerCiting(() => ({
