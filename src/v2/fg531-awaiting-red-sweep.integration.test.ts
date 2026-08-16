@@ -162,6 +162,10 @@ test("FG-531 fanout-parent landing: fanout_wave_orphaned with recover --re-drive
       taskPackage: { taskId: `task-build-child-${i}`, runId: RUN.id, phase: "build", role: "engineer", inputs: { fanoutIndex: i }, composedSystemPrompt: "" },
     }));
   }
+  // The sweep now uses isFanoutChildRow. A completed red review is deliberately
+  // present beside the stamped wave rows so this regression covers the mixed
+  // production shape: review children must not hide or replace the fanout wave.
+  insertRedChild("task-build-parent-red", parent.id, "complete");
 
   reconcileRun(RUN.id, GONE);
 
@@ -174,6 +178,7 @@ test("FG-531 fanout-parent landing: fanout_wave_orphaned with recover --re-drive
     assert.equal(c.status, "complete", "a completed wave child is never touched");
     assert.deepEqual(c.result, { status: "complete", slice: i });
   }
+  assert.equal(getTask("task-build-parent-red")!.status, "complete", "the review child remains an audit record");
 });
 
 test("FG-531 idempotence: a second reconcile pass over the swept state changes nothing", () => {

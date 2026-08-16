@@ -14,6 +14,7 @@ import { failTask } from "./failure-kind.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { FanoutChildRetryError, retry } from "./retry.js";
+import { classifyTaskLineage, isFanoutChildRow } from "./lifecycle-evaluator.js";
 import type { Run, Task } from "../types/index.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
@@ -168,6 +169,29 @@ test("FG-527: a genuine fanout child remains refused before retry creates a row"
     return true;
   });
   assert.deepEqual(tasksForRun(runId).map((task) => task.id), before);
+});
+
+test("FG-716: runNext stamps every production fanout child, while its real red reviewer remains a red_review", async () => {
+  // This deliberately drives runNext rather than constructing Task rows.  The
+  // lifecycle evaluator property test's generated fanout rows carry fanoutIndex
+  // by construction; this is the independent proof that dispatchFanoutChild
+  // actually persists that marker in production.
+  const { runId, reviewer } = await dispatchFanoutWithReviewer();
+  const allTasks = tasksForRun(runId);
+  const parent = allTasks.find((task) => task.phase === "spread" && task.parentId === undefined)!;
+  const fanoutChildren = allTasks.filter(
+    (task) => task.parentId === parent.id && task.agentRole === "engineer",
+  );
+  const kinds = classifyTaskLineage(FANOUT_WITH_SHIPPING_REVIEWER, allTasks);
+
+  assert.equal(fanoutChildren.length, 2, "the real fanout wave minted both upstream items");
+  for (const child of fanoutChildren) {
+    assert.equal(isFanoutChildRow(child), true, `${child.id} carries dispatchFanoutChild's marker`);
+    assert.equal(kinds.get(child.id), "fanout_child", `${child.id} classifies as a fanout child`);
+  }
+
+  assert.equal(isFanoutChildRow(reviewer), false, "dispatchReds does not stamp fanoutIndex on reviews");
+  assert.equal(kinds.get(reviewer.id), "red_review", "the production reviewer remains distinct from a wave child");
 });
 
 test("FG-527: a pending adhoc invoke in a fanout step named task is not adopted as its parent", async () => {
