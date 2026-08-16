@@ -850,6 +850,93 @@ test("DISCRIMINATION (gate.ts): a parented child in a fanout step is NOT a fanou
   assert.equal(legacyIsFanoutParent(fanoutChild), false);
 });
 
+// A fanout parent is not always the row dispatchFanoutStep FRESHLY mints. Two
+// gate-reachable paths RE-MINT a phase-primary row in a fanout step by SPREADING
+// the prior parent's inputs, so the `{ from_upstream, count }` marker rides along
+// unchanged:
+//   - `forge retry` on a fanout parent — retry.ts:659: inputs = { ...prior, previous_failure }
+//   - a gate request-changes replacement — gate.ts:566: inputs = { ...prior, ...retryLineageInputs }
+// Both keep parentId undefined (a PRIMARY row, reused pending in the same step),
+// so isPhasePrimaryRow — and thus isFanoutParentRow — must still fire, in parity
+// with the retired marker. The FRESH-parent parity test above does not exercise
+// these; this pins the byte-identical invariant to the actual inputs-inheritance
+// path, so a future change that stopped spreading the parent inputs is caught.
+
+/** retry.ts:659 shape: `forge retry` on a fanout PARENT mints a fresh PRIMARY row
+ *  (parentId absent, dispatchSource "workflow") whose inputs SPREAD the prior
+ *  parent's — inheriting the fanout marker — plus previous_failure lineage. */
+function retryReplacementOfFanoutParent(prior: Task): Task {
+  return mkTask({
+    id: "fp-retry",
+    phase: prior.phase,
+    status: "awaiting_gate",
+    dispatchSource: "workflow",
+    inputs: {
+      ...prior.taskPackage.inputs,
+      previous_failure: { kind: "unknown", error: null, failedTaskId: prior.id },
+    },
+  });
+}
+
+/** gate.ts:566 shape: a request-changes replacement for a fanout PARENT mints a
+ *  fresh PRIMARY row (parentId absent, dispatchSource "workflow") whose inputs
+ *  SPREAD the prior parent's — inheriting the fanout marker — plus the
+ *  retry-lineage markers. It carries rejectedTaskId yet is NOT an on_reject
+ *  recovery, because parentId is undefined: it stays phase-primary. */
+function requestChangesReplacementOfFanoutParent(prior: Task): Task {
+  return mkTask({
+    id: "fp-rc",
+    phase: prior.phase,
+    status: "blocked_by_red",
+    dispatchSource: "workflow",
+    inputs: {
+      ...prior.taskPackage.inputs,
+      requestedChanges: "please fix",
+      rejectedRationale: "please fix",
+      rejectedTaskId: prior.id,
+    },
+  });
+}
+
+test("PARITY (gate.ts): isFanoutParentRow agrees with the retired marker on REUSED fanout-parent rows (retry / request-changes replacements)", () => {
+  const freshParent = mkTask({ id: "fp", phase: "build", status: "awaiting_gate", inputs: FANOUT_MARKER });
+  assert.equal(legacyIsFanoutParent(freshParent), true, "sanity: the fresh parent carries the marker to inherit");
+
+  const retryReplacement = retryReplacementOfFanoutParent(freshParent);
+  assert.equal(legacyIsFanoutParent(retryReplacement), true, "retry replacement inherits the marker via the inputs spread");
+  assert.equal(isFanoutParentRow(retryReplacement, buildStep), true, "and the step-declared derivation agrees");
+  assert.equal(isPhasePrimaryRow(retryReplacement), true, "a reused primary, not a child");
+  assert.equal(isOnRejectRecoveryRow(retryReplacement), false);
+
+  const rcReplacement = requestChangesReplacementOfFanoutParent(freshParent);
+  assert.equal(legacyIsFanoutParent(rcReplacement), true, "request-changes replacement inherits the marker via the inputs spread");
+  assert.equal(isFanoutParentRow(rcReplacement, buildStep), true, "and the step-declared derivation agrees");
+  assert.equal(isPhasePrimaryRow(rcReplacement), true);
+  // The discriminating check: rejectedTaskId on a parentId-less row is NOT a
+  // recovery — so the request-changes replacement stays a fanout parent.
+  assert.equal(isOnRejectRecoveryRow(rcReplacement), false, "rejectedTaskId without parentId is not an on_reject recovery");
+});
+
+test("DISCRIMINATION (gate.ts): a REUSED primary in a NON-fanout step is not a fanout parent — parity tracks step.fanout, not the reuse", () => {
+  // The mirror of the above: the same inputs-spread reuse on a NON-fanout primary
+  // must stay false on BOTH sides. This proves the reused-row parity is not an
+  // artifact of the marker riding the spread, but tracks the step's `fanout`
+  // declaration — a non-fanout parent never carried the marker to inherit.
+  const freshPlanPrimary = mkTask({ id: "pp", phase: "plan", status: "awaiting_gate" });
+  const retryReplacement = mkTask({
+    id: "pp-retry",
+    phase: "plan",
+    status: "awaiting_gate",
+    dispatchSource: "workflow",
+    inputs: {
+      ...freshPlanPrimary.taskPackage.inputs,
+      previous_failure: { kind: "unknown", error: null, failedTaskId: "pp" },
+    },
+  });
+  assert.equal(legacyIsFanoutParent(retryReplacement), false, "no marker to inherit from a non-fanout parent");
+  assert.equal(isFanoutParentRow(retryReplacement, planStep), false);
+});
+
 test("RE-ENTRY case (a): a blocked_by_red fanout parent re-enters (needsPublish)", () => {
   const parent = mkTask({ id: "fp", phase: "build", status: "blocked_by_red", inputs: FANOUT_MARKER });
   const isFanoutParent = isFanoutParentRow(parent, buildStep);
