@@ -82,6 +82,7 @@ Both modes write to the same `~/.forge/forge.db` and the same `~/.forge/runs/<ru
 | Path | What | Scope |
 |---|---|---|
 | `~/.forge/forge.db` | Run/task/verdict blackboard | Host-global; one DB, all projects |
+| `~/.forge/backups/<utc-stamp>/` | Point-in-time `forge.db` backups (`forge backup create`) | Host-global; see [Back up and restore the shared store](how-to-backup.md) |
 | `~/.forge/runs/<run-id>/` | Task packages, result.json, stderr | Host-global, keyed by run id |
 | `~/.forge/agents/<role>/` | Agent role seeds (CLAUDE.md per agent) | Host-global |
 | `~/.forge/constraints/*.md` | Suggest- and force-level constraints | Host-global |

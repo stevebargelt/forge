@@ -143,6 +143,15 @@ export function unitsDirIn(home: string): string {
   return join(home, "units");
 }
 
+// FG-669 — where `forge backup create` writes point-in-time snapshots of
+// ~/.forge/forge.db. Derived from a `home` argument (defaulting to FORGE_HOME),
+// NOT homedir(), for the same reason releasesDirIn is: setting FORGE_HOME isolates
+// a backup/restore round-trip completely from the operator's real ~/.forge, which is
+// the mechanism that keeps the backup integration tests off the live control plane.
+export function backupsDirIn(home: string): string {
+  return join(home, "backups");
+}
+
 export const RELEASES_DIR = releasesDirIn(FORGE_HOME);
 export const INTERPRETERS_DIR = interpretersDirIn(FORGE_HOME);
 export const CURRENT_LINK = currentLinkIn(FORGE_HOME);
