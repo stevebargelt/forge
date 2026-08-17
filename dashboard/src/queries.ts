@@ -1495,15 +1495,19 @@ export function agentRuntimeTrends(
           AND julianday(e.created_at) >= julianday(t.started_at)) AS attachedExit,
       -- FG-725: the coordinator-parent discriminator. hasChildren is the
       -- fanout signal -- a child sets parent_id to its parent's task id
-      -- (schema.ts:138) -- and containerStarted is whether this task ever ran a
+      -- (schema.ts:138) -- and containerStarted is whether THIS attempt ran a
       -- container of its own. A row with children and no container of its own is
-      -- the non-container coordinator agentObservedEndMs drops. Unbounded by
-      -- started_at on purpose: a coordinator has no container.started at any
-      -- point, so the coarse ever question is exactly the one to ask, and it
-      -- keeps the gate independent of the FG-690 per-attempt start evidence.
+      -- the non-container coordinator agentObservedEndMs drops. Bounded below by
+      -- started_at like every sibling subquery here: markTaskRunning
+      -- re-dispatches in place, so a task that is a fanout parent this attempt
+      -- but ran a real container in a PRIOR attempt would, taken globally, report
+      -- containerStarted=1 off that stale start and slip the coordinator gate --
+      -- reintroducing its multi-day gate wait as runtime. A genuine coordinator
+      -- has no container.started in ANY attempt, so the bound does not affect it.
       EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id) AS hasChildren,
       EXISTS (SELECT 1 FROM events cs
-        WHERE cs.task_id = t.id AND cs.event_type = 'container.started') AS containerStarted,
+        WHERE cs.task_id = t.id AND cs.event_type = 'container.started'
+          AND julianday(cs.created_at) >= julianday(t.started_at)) AS containerStarted,
       (SELECT f.payload FROM events f
         WHERE f.task_id = t.id AND f.event_type = 'task.failed'
           AND julianday(f.created_at) >= julianday(t.started_at)

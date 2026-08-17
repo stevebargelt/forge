@@ -275,6 +275,46 @@ test("a pre-instrumentation LEAF (no children, no exit) is still measured, but a
   );
 });
 
+test("a redispatched-in-place parent, now a fanout coordinator, whose ONLY container.started predates its current started_at is still excluded", () => {
+  // FG-725/RF-1: markTaskRunning re-dispatches in place — started_at moves to
+  // the new attempt while the prior attempt's events stay on the stream. A task
+  // that ran a real container in a PRIOR attempt and is a non-container fanout
+  // parent THIS attempt would, if containerStarted asked the coarse "ever" the
+  // OTHER subqueries do not, report containerStarted=1 off that stale start and
+  // slip the coordinator gate — recharting its multi-day gate wait as runtime.
+  // Bounding containerStarted at started_at, like every sibling subquery, closes
+  // it: the stale start is out of the current attempt, so the parent stays out.
+  withTasks(
+    [
+      {
+        id: "redispatched-parent", role: "engineer", status: "complete",
+        // current attempt: 2026-08-12T20:00 → gate-advanced 2026-08-16T04:00.
+        started: "2026-08-12T20:00:00.000Z", completed: "2026-08-16T04:00:00.000Z",
+        // the ONLY container.started belongs to a prior attempt, days before the
+        // current started_at — it must not vouch for this coordinator attempt.
+        events: [
+          started("2026-08-09T10:00:00.000Z"),
+          exited("2026-08-09T10:20:00.000Z"),
+        ],
+      },
+      {
+        id: "redispatched-child", role: "engineer", status: "complete", parentId: "redispatched-parent",
+        started: "2026-08-12T23:00:00.000Z", completed: "2026-08-12T23:40:00.000Z",
+        events: [started("2026-08-12T23:00:00.000Z"), exited("2026-08-12T23:40:00.000Z")],
+      },
+    ],
+    () => {
+      const result = trends();
+      assert.deepEqual(
+        result.roleSummary,
+        [{ role: "engineer", averageMs: 40 * MINUTE, sampleCount: 1 }],
+        "only the child is measured; the redispatched coordinator parent is excluded despite its prior-attempt container.started",
+      );
+      assert.equal(totalSamples(result.overall), 1, "the stale container.started does not reinstate the parent");
+    },
+  );
+});
+
 test("a parent that DID run a container of its own is still measured — the gate is children AND no container.started, not children alone", () => {
   // Defensive against over-exclusion: `hasChildren` on its own must not drop a
   // row. A task that has children but genuinely ran a container is measured off
