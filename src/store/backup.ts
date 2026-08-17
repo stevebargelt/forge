@@ -424,6 +424,17 @@ export async function restoreBackup(opts: {
 
   let stagedTemp: string | null = null;
   try {
+    // FRESH-RESTORE GUARD (FG-730). The PRIMARY disaster-recovery scenario: the store
+    // was lost (disk failure, deletion, fresh host) and we restore from backup INTO a
+    // FORGE_HOME with no live forge.db. When the target does not exist there is NO live
+    // store — nothing to refuse (no sidecars can exist without a main file) and nothing
+    // to quiesce (no live writers, and a read-only open of a non-existent file would
+    // itself throw "unable to open database file"). So we SKIP the refuse-if-dirty gate
+    // (step 1.5) AND the quiesce proof (step 5) exactly when the safety-backup step
+    // already skips (existsSync(targetPath) — see step 4), and go straight to
+    // stage + rename. The target-exists path below is UNCHANGED.
+    const targetExists = existsSync(targetPath);
+
     // Step 1.5 — REFUSE-IF-DIRTY. BEFORE opening any connection to the live store,
     // refuse if it still carries a WAL/SHM sidecar. An un-checkpointed WAL tail is
     // part of the live database state, and step 6 removes those sidecars before the
@@ -431,7 +442,8 @@ export async function restoreBackup(opts: {
     // remove→rename window (the AC4 hazard). A cleanly-stopped, fully-checkpointed
     // store has NO sidecars; requiring that here guarantees there is never an
     // un-checkpointed WAL tail to lose (the residual is eliminated, not accepted).
-    if (existsSync(`${targetPath}-wal`) || existsSync(`${targetPath}-shm`)) {
+    // Skipped on a fresh restore: with no live store there are no sidecars to lose.
+    if (targetExists && (existsSync(`${targetPath}-wal`) || existsSync(`${targetPath}-shm`))) {
       throw new RestoreRefusedError(
         `forge backup restore: refusing — the live store at ${targetPath} still carries a WAL/SHM ` +
           `sidecar (${targetPath}-wal / -shm), so it may hold an un-checkpointed WAL tail that a restore ` +
@@ -534,33 +546,41 @@ export async function restoreBackup(opts: {
     // applyMigrations, no opener registry / maintenance flag, and nothing cached
     // process-wide that would outlive the swap pointing at a soon-to-be-unlinked
     // inode). We NEVER switch journal_mode.
-    const keeper = new Database(targetPath, { readonly: true });
-    try {
-      const probe = new Database(targetPath);
+    //
+    // Skipped on a fresh restore (FG-730): there is no live store, so there are no
+    // writers to quiesce — and a read-only open of a non-existent forge.db would throw
+    // "unable to open database file", which is the very bug this guard fixes. The
+    // keeper/probe both open `targetPath`, so this whole block must not run when the
+    // target does not exist.
+    if (targetExists) {
+      const keeper = new Database(targetPath, { readonly: true });
       try {
-        probe.pragma("busy_timeout = 0");
-        // BEGIN EXCLUSIVE takes the writer lock immediately; under busy_timeout=0 it
-        // raises SQLITE_BUSY if an active writer holds the store. Success proves no
-        // active writer AT THAT INSTANT; we needed only the proof, so ROLLBACK at
-        // once (BEGIN EXCLUSIVE opened no changes to keep). Any throw ⇒ fail closed.
+        const probe = new Database(targetPath);
         try {
-          probe.exec("BEGIN EXCLUSIVE");
-          probe.exec("ROLLBACK");
-        } catch (e) {
-          throw new RestoreRefusedError(
-            `forge backup restore: refusing — could not acquire exclusive access to the live store ` +
-              `(quiesce required; another forge process holds it). Stop every forge process on this ` +
-              `FORGE_HOME and retry. Underlying: ${(e as Error).message}`,
-          );
+          probe.pragma("busy_timeout = 0");
+          // BEGIN EXCLUSIVE takes the writer lock immediately; under busy_timeout=0 it
+          // raises SQLITE_BUSY if an active writer holds the store. Success proves no
+          // active writer AT THAT INSTANT; we needed only the proof, so ROLLBACK at
+          // once (BEGIN EXCLUSIVE opened no changes to keep). Any throw ⇒ fail closed.
+          try {
+            probe.exec("BEGIN EXCLUSIVE");
+            probe.exec("ROLLBACK");
+          } catch (e) {
+            throw new RestoreRefusedError(
+              `forge backup restore: refusing — could not acquire exclusive access to the live store ` +
+                `(quiesce required; another forge process holds it). Stop every forge process on this ` +
+                `FORGE_HOME and retry. Underlying: ${(e as Error).message}`,
+            );
+          }
+        } finally {
+          // ORDERING IS LOAD-BEARING (verified): close the read-WRITE probe FIRST so the
+          // read-only keeper is what closes LAST. A read-write last close of a dirty WAL
+          // WOULD checkpoint-and-rewrite forge.db; a read-only last close never does.
+          probe.close();
         }
       } finally {
-        // ORDERING IS LOAD-BEARING (verified): close the read-WRITE probe FIRST so the
-        // read-only keeper is what closes LAST. A read-write last close of a dirty WAL
-        // WOULD checkpoint-and-rewrite forge.db; a read-only last close never does.
-        probe.close();
+        keeper.close();
       }
-    } finally {
-      keeper.close();
     }
 
     // TEST SEAM — a crash simulated HERE (exclusivity proven, before the rename) must
