@@ -93,6 +93,20 @@ the real, un-redacted value, so install behavior is unchanged; only what gets wr
 and displayed is. Ordinary (non-credential) command text and output pass through
 byte-intact.
 
+## `forge backup`
+
+Unlike every artifact above, `forge backup create` (FG-669) is **not** redacted, by
+design: it writes a byte-for-byte SQLite snapshot of the live control-plane store,
+not a debug artifact assembled for sharing. The manifest alongside it (`createdAt`,
+`forgeVersion`, `schemaVersion`, `sourcePath`, source device/inode identity, size,
+sha256) carries no secrets, but the artifact it describes is the whole store, and the
+store carries every field the surfaces above are busy redacting *out* of debug
+artifacts. Confidentiality here is enforced by **filesystem permission**, not
+content: backup directories are `0700` and both files inside them are `0600`,
+readable only by the account that ran `forge backup create`. Treat a backup exactly
+like the live `forge.db` — do not attach one to a bundle, ticket, or chat message.
+See [Backing up and restoring the shared store](how-to-backup.md).
+
 ## Events / exports
 
 Lifecycle event payloads are booleans + safe text by design (the Crawl

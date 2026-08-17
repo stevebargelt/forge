@@ -21,6 +21,7 @@ but they do not override current behavior or backlog state.
 
 - [Use Forge across projects](how-to-use-forge-across-projects.md)
 - [Upgrade Forge](how-to-upgrade.md)
+- [Back up and restore the shared store](how-to-backup.md)
 - [Move a project backlog to the database](how-to-backlog-db-cutover.md)
 - [Select models and providers](how-to-model-policy.md)
 - [Set up notifications](how-to-set-up-notifications.md)
