@@ -29,7 +29,7 @@
 // enforced by the compiler (`scopeIncludes` takes a RESOLVED scope, so a caller
 // cannot hand it a raw one) and asserted here over the source.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
@@ -161,21 +161,26 @@ test("FG-693/C5: a negative canonical-column answer is RE-CHECKED, so a peer's m
 // answered from memory, which is precisely what a second request does not pay for.
 
 test("FG-693 (fix batch): a recorded spelling is resolved ONCE, not once per query", () => {
-  const before = recentActivity(100, undefined, PHYSICAL).map((e) => e.runId);
-  assert.ok(before.includes("run-in-scope"), "fixture: the aliased legacy row is in scope to begin with");
+  mock.timers.enable({ apis: ["Date"] });
+  try {
+    const before = recentActivity(100, undefined, PHYSICAL).map((e) => e.runId);
+    assert.ok(before.includes("run-in-scope"), "fixture: the aliased legacy row is in scope to begin with");
 
-  // The alias is destroyed. A re-resolution now FAILS, so anything still answering
-  // with its physical path can only be answering from the cache the fix added.
-  rmSync(join(tmpHome, "link"), { force: true });
-  assert.throws(() => realpathSync(ALIAS), "fixture: the spelling no longer resolves at all");
+    // The alias is destroyed. A re-resolution now FAILS, so anything still answering
+    // with its physical path can only be answering from the cache the fix added.
+    rmSync(join(tmpHome, "link"), { force: true });
+    assert.throws(() => realpathSync(ALIAS), "fixture: the spelling no longer resolves at all");
 
-  assert.ok(
-    recentActivity(100, undefined, PHYSICAL).map((e) => e.runId).includes("run-in-scope"),
-    "the second scoped read spent no syscall on a spelling it had already resolved (if this fails after a " +
-      "multi-second stall, the TTL expired between the two reads rather than the cache being absent)",
-  );
+    assert.ok(
+      recentActivity(100, undefined, PHYSICAL).map((e) => e.runId).includes("run-in-scope"),
+      "the second scoped read spent no syscall on a spelling it had already resolved; without the cache, the " +
+        "deleted alias makes re-resolution drop the row",
+    );
 
-  symlinkSync(trees, join(tmpHome, "link"));
+    symlinkSync(trees, join(tmpHome, "link"));
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 // ── C1: the shape the cost argument rests on ───────────────────────────────
