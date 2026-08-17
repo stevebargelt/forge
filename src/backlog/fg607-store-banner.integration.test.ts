@@ -18,7 +18,6 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { DB_PATH } from "../util/paths.js";
 import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -57,7 +56,9 @@ function forge(projectDir: string, args: string[]) {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, ...authorityTestkitEnv() },
+    // Each CLI child gets a private store. The DB-mode assertions below must
+    // never read or mutate the operator's real ~/.forge/forge.db.
+    env: { ...process.env, FORGE_HOME: join(root, "home"), ...authorityTestkitEnv() },
   });
 }
 
@@ -192,6 +193,13 @@ test("integ FG-607: a full db-mode CRUD cycle leaves git status completely clean
   assert.equal(filed.status, 0, filed.stderr);
   const id = filed.stdout.match(/Created (\S+):/)![1]!;
 
+  const beforeEdit = forge(project, ["backlog", "list", "--json"]);
+  assert.equal(beforeEdit.status, 0, beforeEdit.stderr);
+  assert.ok(
+    (JSON.parse(beforeEdit.stdout) as { id: string }[]).some((ticket) => ticket.id === id),
+    "list reads the ticket filed into the DB store",
+  );
+
   for (const args of [
     ["backlog", "edit", id, "--body", "v2"],
     ["backlog", "retitle", id, "renamed in db mode"],
@@ -224,6 +232,15 @@ test("integ FG-607: a full db-mode CRUD cycle leaves git status completely clean
   assert.equal(ticket.title, "renamed in db mode");
   assert.equal(ticket.body.trim(), "v2");
   assert.equal(ticket.closedCommit, "abc1234");
+
+  const listed = forge(project, ["backlog", "list", "--status", "done", "--json"]);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.ok(
+    (JSON.parse(listed.stdout) as { id: string; status: string }[]).some(
+      (listedTicket) => listedTicket.id === id && listedTicket.status === "done",
+    ),
+    "list reflects the close written to the DB store",
+  );
 });
 
 // Slice A added the tables; Slice B only writes to them. A schema that moved
@@ -236,7 +253,7 @@ test("integ FG-607: db-mode CRUD is additive-only — no new objects, no user_ve
   importAndFlip(project);
 
   const snapshot = () => {
-    const db = new Database(DB_PATH, { readonly: true });
+    const db = new Database(join(root, "home", "forge.db"), { readonly: true });
     try {
       const objects = (
         db
