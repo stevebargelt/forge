@@ -26,7 +26,9 @@ const html = htm.bind(h);
 function CampaignCard({ summary, onSelect }) {
   const current = summary.currentItem;
   return html`
-    <div class="card campaign-card" data-testid="campaign-card" onClick=${() => onSelect(summary.campaignId)}>
+    <div class="card campaign-card" data-testid="campaign-card" role="button" tabindex="0"
+      onClick=${() => onSelect(summary.campaignId)}
+      onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(summary.campaignId); } }}>
       <div class="row campaign-card-head">
         <div>
           <span class="badge ${campaignStatusBadgeClass(summary.status)}">${summary.status}</span>
@@ -81,9 +83,11 @@ function CampaignDetail({ campaignId, onClose }) {
       try {
         const res = await fetch(`/api/campaign/${encodeURIComponent(campaignId)}`);
         if (res.status === 404) { if (!cancelled) setErr("campaign not found"); return; }
-        if (!res.ok) { if (!cancelled) setErr(`HTTP ${res.status}`); return; }
-        const d = await res.json();
+        const d = await res.json().catch(() => null);
         if (cancelled) return;
+        // A 503 degraded-store read still carries { error }; surface its message rather
+        // than a bare status so the operator sees why the report is unavailable.
+        if (!res.ok) { setErr(d && d.error ? d.error : `HTTP ${res.status}`); return; }
         if (d && d.error) { setErr(d.error); return; }
         setReport(d);
         if (d.status === "running") timer = setTimeout(load, 3000);
@@ -97,7 +101,7 @@ function CampaignDetail({ campaignId, onClose }) {
     return html`
       <div class="detail-overlay" onClick=${onClose}>
         <div class="detail" onClick=${(e) => e.stopPropagation()}>
-          <span class="close" onClick=${onClose}>×</span>
+          <button type="button" class="close" aria-label="close" onClick=${onClose}>×</button>
           <div class="muted" data-testid="campaign-detail-status">${err ?? "loading…"}</div>
         </div>
       </div>`;
@@ -106,7 +110,7 @@ function CampaignDetail({ campaignId, onClose }) {
   return html`
     <div class="detail-overlay" onClick=${onClose}>
       <div class="detail" onClick=${(e) => e.stopPropagation()}>
-        <span class="close" onClick=${onClose}>×</span>
+        <button type="button" class="close" aria-label="close" onClick=${onClose}>×</button>
         <h1>
           <span class="badge ${campaignStatusBadgeClass(report.status)}">${report.status}</span>
           <span class="badge ${verdictBadgeClass(report.verdict)}" style="margin-left: 6px;">${verdictLabel(report.verdict)}</span>

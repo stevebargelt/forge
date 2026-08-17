@@ -90,3 +90,33 @@ test("Campaigns renders a real campaign row and its blocked git/action evidence"
   await page.close();
   assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`);
 });
+
+test("Campaigns card and its detail close are keyboard-operable (RF-2, RF-3)", async () => {
+  const page: Page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${BASE}/#campaigns`);
+
+  // RF-2: the campaign card is a real, focusable control — a keyboard user opens the
+  // evidence with Enter, no pointer involved.
+  const card = page.getByTestId("campaign-card").filter({ hasText: "browser-visible campaign" });
+  await card.waitFor();
+  assert.equal(await card.getAttribute("role"), "button", "the card announces itself as a control");
+  assert.equal(await card.getAttribute("tabindex"), "0", "the card is reachable by Tab");
+
+  const detailResponse = page.waitForResponse((response) => response.url().endsWith(`/api/campaign/${campaign.id}`) && response.status() === 200);
+  await card.focus();
+  await page.keyboard.press("Enter");
+  await detailResponse;
+  await page.getByTestId("campaign-item").waitFor();
+
+  // RF-3: the overlay close is a <button> with an accessible name, operable by keyboard.
+  const close = page.getByRole("button", { name: "close" });
+  await close.waitFor();
+  await close.focus();
+  await page.keyboard.press("Enter");
+  await page.getByTestId("campaign-item").waitFor({ state: "detached" });
+
+  await page.close();
+  assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`);
+});

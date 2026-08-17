@@ -552,7 +552,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       // the page up, exactly as /api/shipping-audit does for a pre-tables store.
       const message = err instanceof Error ? err.message : String(err);
       console.error("/api/campaigns: reading campaign summaries failed:", err);
-      payload = JSON.stringify({ projectKey: null, campaigns: [], error: message });
+      // A read that THREW is an unavailable/malformed store, not a legit-empty one:
+      // report 503 so a status-only consumer never reads it as a successful list. The
+      // body shape is unchanged, so the client's degraded-state rendering still works.
+      res
+        .writeHead(503, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ projectKey: null, campaigns: [], error: message }));
+      return;
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;
@@ -570,7 +576,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`/api/campaign/${id}: assembling the campaign report failed:`, err);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ error: message }));
+      // A thrown read is an unavailable/malformed store → 503, not a 200 a status-only
+      // consumer treats as a successful report. Unknown id stays 404 (below); the
+      // {error} body shape is unchanged for the client's degraded-state rendering.
+      res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: message }));
       return;
     }
     if (!report) {

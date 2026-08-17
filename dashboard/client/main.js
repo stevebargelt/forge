@@ -416,7 +416,10 @@ function App() {
       const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/campaigns${q}`);
       if (seq !== campaignsSeq.current) return;
-      if (res.ok) setCampaigns(await res.json());
+      // 503 is the degraded-store read: its body carries the same { campaigns, error }
+      // shape, so keep it to render the "Campaigns unreadable" state rather than a blank
+      // perpetual-loading pane.
+      if (res.ok || res.status === 503) setCampaigns(await res.json());
       else setCampaigns(null);
       setNow(Date.now());
     } catch (e) {
