@@ -524,7 +524,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/campaigns") {
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
     const projectKey = url.searchParams.get("projectKey") ?? undefined;
-    const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 200);
+    // A non-numeric ?limit=abc makes Number() NaN, and clamp(NaN) stays NaN — which
+    // slice(0, NaN) coerces to 0, silently reporting an empty list as success. Fall
+    // back to the default so a garbage limit lists truthfully rather than empty.
+    const rawLimit = Number(url.searchParams.get("limit") ?? 50);
+    const limit = clamp(Number.isFinite(rawLimit) ? rawLimit : 50, 1, 200);
     // Built BEFORE any byte is written — the /api/reviews precedent: a read that
     // throws after writeHead cannot be reported and becomes a blank page.
     let payload: string;

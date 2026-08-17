@@ -147,6 +147,11 @@ test("GET /api/campaigns scopes to the requested project and lists all when unsc
 
   const limited = await (await fetch(`${BASE}/api/campaigns?limit=1`)).json() as { campaigns: unknown[] };
   assert.equal(limited.campaigns.length, 1, "limit clamps the row count");
+
+  // A non-numeric limit must not read as an empty list: NaN would slice to 0 rows and
+  // report success (RF-1). It falls back to the default, so the full list still lists.
+  const garbage = await (await fetch(`${BASE}/api/campaigns?limit=abc`)).json() as { campaigns: unknown[] };
+  assert.equal(garbage.campaigns.length, ids.length, "a garbage limit falls back to the default, not an empty list");
 });
 
 test("GET /api/campaign/:id is the full report for a blocked item with git/PR evidence", async () => {

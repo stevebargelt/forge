@@ -14,7 +14,7 @@
 // invent a snapshot history the store does not keep.
 
 import { h } from "preact";
-import { useState, useEffect } from "preact/hooks";
+import { useState, useEffect, useRef } from "preact/hooks";
 import htm from "htm";
 import {
   campaignStatusBadgeClass, verdictBadgeClass, verdictLabel, itemLifecycleBadgeClass,
@@ -75,6 +75,18 @@ export function CampaignsView({ data, selectedId, onSelect, onCloseDetail }) {
 function CampaignDetail({ campaignId, onClose }) {
   const [report, setReport] = useState(null);
   const [err, setErr] = useState(null);
+  const overlayRef = useRef(null);
+
+  // Dialog semantics: close on Escape, and move focus into the overlay on open,
+  // restoring it to the opener on close — the backlog NoteDetail modal precedent.
+  const onKeyDown = (e) => { if (e.key === "Escape") onClose(); };
+
+  useEffect(() => {
+    const opener = document.activeElement;
+    const node = overlayRef.current;
+    if (node) (node.querySelector(".close") ?? node).focus();
+    return () => { if (opener && typeof opener.focus === "function") opener.focus(); };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,7 +111,8 @@ function CampaignDetail({ campaignId, onClose }) {
 
   if (!report) {
     return html`
-      <div class="detail-overlay" onClick=${onClose}>
+      <div class="detail-overlay" ref=${overlayRef} onClick=${onClose} onKeyDown=${onKeyDown}
+        role="dialog" aria-modal="true" aria-label=${`Campaign detail for ${campaignId}`}>
         <div class="detail" onClick=${(e) => e.stopPropagation()}>
           <button type="button" class="close" aria-label="close" onClick=${onClose}>×</button>
           <div class="muted" data-testid="campaign-detail-status">${err ?? "loading…"}</div>
@@ -108,7 +121,8 @@ function CampaignDetail({ campaignId, onClose }) {
   }
 
   return html`
-    <div class="detail-overlay" onClick=${onClose}>
+    <div class="detail-overlay" ref=${overlayRef} onClick=${onClose} onKeyDown=${onKeyDown}
+      role="dialog" aria-modal="true" aria-label=${`Campaign detail for ${report.campaignId}`}>
       <div class="detail" onClick=${(e) => e.stopPropagation()}>
         <button type="button" class="close" aria-label="close" onClick=${onClose}>×</button>
         <h1>

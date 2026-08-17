@@ -110,12 +110,38 @@ test("Campaigns card and its detail close are keyboard-operable (RF-2, RF-3)", a
   await detailResponse;
   await page.getByTestId("campaign-item").waitFor();
 
+  // RF-2: the detail overlay is a real modal dialog — dialog role, aria-modal, an
+  // accessible name, and it moves focus into itself on open so a keyboard user is not
+  // stranded on the now-obscured background.
+  const overlay = page.getByRole("dialog", { name: `Campaign detail for ${campaign.id}` });
+  await overlay.waitFor();
+  assert.equal(await overlay.getAttribute("aria-modal"), "true", "the overlay announces itself as modal");
+  assert.equal(
+    await overlay.evaluate((el) => el.contains(document.activeElement)),
+    true,
+    "opening the dialog moves focus into it",
+  );
+
   // RF-3: the overlay close is a <button> with an accessible name, operable by keyboard.
   const close = page.getByRole("button", { name: "close" });
   await close.waitFor();
   await close.focus();
   await page.keyboard.press("Enter");
   await page.getByTestId("campaign-item").waitFor({ state: "detached" });
+
+  // RF-2: Escape closes the reopened dialog and returns focus to the opener card.
+  const detailReopen = page.waitForResponse((response) => response.url().endsWith(`/api/campaign/${campaign.id}`) && response.status() === 200);
+  await card.focus();
+  await page.keyboard.press("Enter");
+  await detailReopen;
+  await page.getByTestId("campaign-item").waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("campaign-item").waitFor({ state: "detached" });
+  assert.equal(
+    await card.evaluate((el) => el === document.activeElement),
+    true,
+    "closing the dialog restores focus to the opener",
+  );
 
   await page.close();
   assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`);
