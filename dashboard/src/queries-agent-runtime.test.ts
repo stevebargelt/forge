@@ -33,9 +33,14 @@ const NOW = Date.parse("2026-06-10T14:30:00Z");
     INSERT INTO tasks VALUES ('t-ok','rA','implementation','engineer','complete',NULL,'2026-06-09T09:00:00Z','2026-06-09T09:00:10Z');
     -- a FAILED engineer task, 30s — agent time was consumed, so it counts.
     INSERT INTO tasks VALUES ('t-failed','rA','implementation','engineer','failed',NULL,'2026-06-09T10:00:00Z','2026-06-09T10:00:30Z');
-    -- a different role on the same day, 100s.
+    -- a different role on the same day, 100s. It parents t-child below, so under
+    -- FG-725 it needs a container.started of its OWN to stay an observation — a
+    -- fanout parent that ran a real container, distinct from the non-container
+    -- coordinator FG-725 excludes (covered in queries-agent-runtime-coordinator).
     INSERT INTO tasks VALUES ('t-red','rA','review','red-wide','complete',NULL,'2026-06-09T11:00:00Z','2026-06-09T11:01:40Z');
-    -- a fanout CHILD: a real agent execution, not excluded.
+    INSERT INTO events (run_id,task_id,event_type,payload,created_at) VALUES ('rA','t-red','container.started','{}','2026-06-09T11:00:00Z');
+    INSERT INTO events (run_id,task_id,event_type,payload,created_at) VALUES ('rA','t-red','container.exited','{}','2026-06-09T11:01:40Z');
+    -- a fanout CHILD: a real agent execution (a leaf — no children), not excluded.
     INSERT INTO tasks VALUES ('t-child','rA','review','red-narrow','complete','t-red','2026-06-09T11:00:00Z','2026-06-09T11:00:20Z');
 
     -- still running: no completed_at.
