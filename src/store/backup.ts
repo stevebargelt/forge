@@ -47,6 +47,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -424,6 +425,22 @@ export async function restoreBackup(opts: {
 
   let stagedTemp: string | null = null;
   try {
+    // FRESH-RESTORE GUARD (FG-730). The PRIMARY disaster-recovery scenario: the store
+    // was lost (disk failure, deletion, fresh host) and we restore from backup INTO a
+    // FORGE_HOME with no live forge.db. When the target does not exist there is NO live
+    // store — nothing to refuse (no sidecars can exist without a main file) and nothing
+    // to quiesce (no live writers, and a read-only open of a non-existent file would
+    // itself throw "unable to open database file"). So we SKIP the refuse-if-dirty gate
+    // (step 1.5), the pre-restore safety backup (step 4), the quiesce proof (step 5),
+    // and sidecar hygiene (step 6) — all gated on this ONE snapshot — and go straight to
+    // stage + install. The target-exists path below is UNCHANGED.
+    //
+    // The snapshot is a moment in time, so the fresh path does NOT rename (which would
+    // atomically clobber a store that materialized in the window, unprotected). It
+    // installs only-if-absent via an atomic linkSync (step 7): a target that appeared
+    // fails EEXIST and is refused rather than overwritten (RF-1).
+    const targetExists = existsSync(targetPath);
+
     // Step 1.5 — REFUSE-IF-DIRTY. BEFORE opening any connection to the live store,
     // refuse if it still carries a WAL/SHM sidecar. An un-checkpointed WAL tail is
     // part of the live database state, and step 6 removes those sidecars before the
@@ -431,7 +448,8 @@ export async function restoreBackup(opts: {
     // remove→rename window (the AC4 hazard). A cleanly-stopped, fully-checkpointed
     // store has NO sidecars; requiring that here guarantees there is never an
     // un-checkpointed WAL tail to lose (the residual is eliminated, not accepted).
-    if (existsSync(`${targetPath}-wal`) || existsSync(`${targetPath}-shm`)) {
+    // Skipped on a fresh restore: with no live store there are no sidecars to lose.
+    if (targetExists && (existsSync(`${targetPath}-wal`) || existsSync(`${targetPath}-shm`))) {
       throw new RestoreRefusedError(
         `forge backup restore: refusing — the live store at ${targetPath} still carries a WAL/SHM ` +
           `sidecar (${targetPath}-wal / -shm), so it may hold an un-checkpointed WAL tail that a restore ` +
@@ -505,9 +523,12 @@ export async function restoreBackup(opts: {
     opts.onStagedBeforeSwap?.();
 
     // Step 4 — PRE-RESTORE SAFETY BACKUP of the CURRENT live store (the recovery
-    // path). Skipped only when there is no live store to protect (fresh restore).
+    // path). Gated on the targetExists SNAPSHOT (not a fresh existsSync), same as the
+    // quiesce proof (step 5): once we committed to the fresh path at the top, a store
+    // that MATERIALIZED in the window is not ours to back up or touch — it is refused
+    // at the install-only-if-absent swap (step 7, RF-1), not silently protected here.
     let preRestoreBackupDir: string | null = null;
-    if (existsSync(targetPath)) {
+    if (targetExists) {
       const pre = await createBackup({
         home,
         sourcePath: targetPath,
@@ -534,33 +555,41 @@ export async function restoreBackup(opts: {
     // applyMigrations, no opener registry / maintenance flag, and nothing cached
     // process-wide that would outlive the swap pointing at a soon-to-be-unlinked
     // inode). We NEVER switch journal_mode.
-    const keeper = new Database(targetPath, { readonly: true });
-    try {
-      const probe = new Database(targetPath);
+    //
+    // Skipped on a fresh restore (FG-730): there is no live store, so there are no
+    // writers to quiesce — and a read-only open of a non-existent forge.db would throw
+    // "unable to open database file", which is the very bug this guard fixes. The
+    // keeper/probe both open `targetPath`, so this whole block must not run when the
+    // target does not exist.
+    if (targetExists) {
+      const keeper = new Database(targetPath, { readonly: true });
       try {
-        probe.pragma("busy_timeout = 0");
-        // BEGIN EXCLUSIVE takes the writer lock immediately; under busy_timeout=0 it
-        // raises SQLITE_BUSY if an active writer holds the store. Success proves no
-        // active writer AT THAT INSTANT; we needed only the proof, so ROLLBACK at
-        // once (BEGIN EXCLUSIVE opened no changes to keep). Any throw ⇒ fail closed.
+        const probe = new Database(targetPath);
         try {
-          probe.exec("BEGIN EXCLUSIVE");
-          probe.exec("ROLLBACK");
-        } catch (e) {
-          throw new RestoreRefusedError(
-            `forge backup restore: refusing — could not acquire exclusive access to the live store ` +
-              `(quiesce required; another forge process holds it). Stop every forge process on this ` +
-              `FORGE_HOME and retry. Underlying: ${(e as Error).message}`,
-          );
+          probe.pragma("busy_timeout = 0");
+          // BEGIN EXCLUSIVE takes the writer lock immediately; under busy_timeout=0 it
+          // raises SQLITE_BUSY if an active writer holds the store. Success proves no
+          // active writer AT THAT INSTANT; we needed only the proof, so ROLLBACK at
+          // once (BEGIN EXCLUSIVE opened no changes to keep). Any throw ⇒ fail closed.
+          try {
+            probe.exec("BEGIN EXCLUSIVE");
+            probe.exec("ROLLBACK");
+          } catch (e) {
+            throw new RestoreRefusedError(
+              `forge backup restore: refusing — could not acquire exclusive access to the live store ` +
+                `(quiesce required; another forge process holds it). Stop every forge process on this ` +
+                `FORGE_HOME and retry. Underlying: ${(e as Error).message}`,
+            );
+          }
+        } finally {
+          // ORDERING IS LOAD-BEARING (verified): close the read-WRITE probe FIRST so the
+          // read-only keeper is what closes LAST. A read-write last close of a dirty WAL
+          // WOULD checkpoint-and-rewrite forge.db; a read-only last close never does.
+          probe.close();
         }
       } finally {
-        // ORDERING IS LOAD-BEARING (verified): close the read-WRITE probe FIRST so the
-        // read-only keeper is what closes LAST. A read-write last close of a dirty WAL
-        // WOULD checkpoint-and-rewrite forge.db; a read-only last close never does.
-        probe.close();
+        keeper.close();
       }
-    } finally {
-      keeper.close();
     }
 
     // TEST SEAM — a crash simulated HERE (exclusivity proven, before the rename) must
@@ -580,14 +609,54 @@ export async function restoreBackup(opts: {
     // vanishing behind a ghost WAL that even integrity_check reports 'ok'. It does not
     // mutate forge.db's own bytes. (Option B — remove AFTER the rename — has a
     // silent-corruption crash window: do NOT do that.)
-    rmSync(`${targetPath}-wal`, { force: true });
-    rmSync(`${targetPath}-shm`, { force: true });
+    //
+    // Gated on the targetExists SNAPSHOT: on the fresh path steps 1.5/4/5 never ran,
+    // so there are no sidecars WE created; and a store that materialized in the window
+    // is refused unprotected at step 7 (RF-1) — we must not strip its sidecars here.
+    if (targetExists) {
+      rmSync(`${targetPath}-wal`, { force: true });
+      rmSync(`${targetPath}-shm`, { force: true });
+    }
 
-    // Step 7 — SWAP. The ONE mutating step, atomic. On success the temp is consumed
-    // (moved), so it must not be removed in the finally below.
+    // Step 7 — SWAP / INSTALL. The ONE mutating step on the live path.
     const toSwap = stagedTemp;
-    stagedTemp = null;
-    renameSync(toSwap, targetPath);
+    if (targetExists) {
+      // TARGET-EXISTS PATH (UNCHANGED): atomic overwrite via rename(2). Steps 1.5 and
+      // 5 proved the store was fully checkpointed and quiesced; rename consumes the
+      // temp, so it must not be removed in the finally below.
+      stagedTemp = null;
+      renameSync(toSwap, targetPath);
+    } else {
+      // FRESH-RESTORE PATH (FG-730 / RF-1): the refuse-if-dirty gate (1.5) and the
+      // quiesce proof (5) were SKIPPED because the target was ABSENT when restore
+      // began (targetExists snapshot). But that snapshot is a moment in time — a forge
+      // process could have started and initialized forge.db (with live rows, an open
+      // writer) in the window since. A rename here would atomically CLOBBER that live
+      // store WITHOUT either protection. Install only-if-absent, ATOMICALLY: linkSync
+      // fails EEXIST if the target appeared, so a materialized store is never
+      // overwritten unprotected; the genuine DB-lost path (target still absent) links
+      // cleanly and proceeds. This closes the check→swap TOCTOU at the swap itself,
+      // not with a re-check that would race in turn.
+      try {
+        linkSync(toSwap, targetPath);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new RestoreRefusedError(
+            `forge backup restore: refusing — a target store appeared at ${targetPath} after the ` +
+              `fresh-restore check (a forge process started and initialized the store since restore began). ` +
+              `The fresh path skips the refuse-if-dirty gate and the quiesce proof, so overwriting it now ` +
+              `would bypass BOTH protections. Cleanly stop EVERY forge process on this FORGE_HOME and retry — ` +
+              `the restore will then take the protected target-exists path.`,
+          );
+        }
+        throw e;
+      }
+      // linkSync (unlike rename) did NOT consume the temp: the installed inode now has
+      // two names. Drop the temp name so only targetPath remains; the finally is then
+      // a no-op on it.
+      rmSync(toSwap, { force: true });
+      stagedTemp = null;
+    }
     chmodSync(targetPath, 0o600);
 
     return {

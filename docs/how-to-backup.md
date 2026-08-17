@@ -99,7 +99,10 @@ forge backup restore ~/.forge/backups/2026-08-17T18-02-11-483Z --confirm-quiesce
 1. **The atomic rename is the only step that touches the live path.** The candidate
    is validated and staged, and a pre-restore safety backup of the *current* store is
    taken, all before anything on the live path changes. On any failure, `forge.db`'s
-   own bytes are left byte-for-byte untouched.
+   own bytes are left byte-for-byte untouched. (This describes restoring over an
+   *existing* store; restoring into a `FORGE_HOME` with no `forge.db` at all — the
+   store is lost — takes a different, atomic-install path with no prior store to
+   protect: see [Disaster recovery](#disaster-recovery-restoring-when-the-store-itself-is-lost).)
 2. **Restore refuses a live store that still carries a `-wal`/`-shm` sidecar.** An
    un-checkpointed WAL tail is part of the live state and must never be risked in the
    swap. If you see this refusal, cleanly stop every forge process on this
@@ -131,10 +134,41 @@ Restore acquires `$FORGE_HOME/backup.lock` for its duration, blocking a concurre
 restore. This does not fence an uncooperative live writer — that's the quiesce
 proof's job (point 3 above).
 
+### Disaster recovery: restoring when the store itself is lost
+
+The contract above assumes a live `forge.db` to protect. If the store is gone —
+disk failure, an accidental `rm`, or a fresh host that has never had a `FORGE_HOME`
+— restore the same way:
+
+```bash
+forge backup restore ~/.forge/backups/2026-08-17T18-02-11-483Z --confirm-quiesced
+```
+
+Restore creates `FORGE_HOME` if it doesn't exist and, when `forge.db` itself is
+absent at the target path, takes a different path than the contract above: there is
+no live store, so there is nothing to refuse-if-dirty, nothing to take a pre-restore
+safety backup of, and no writer to quiesce — the output says
+`(no previous store existed — no pre-restore backup taken)` rather than naming a
+pre-restore directory. The candidate is still fully verified (integrity, checksum,
+schema-version gate) before anything is written.
+
+Because that "no live store" check is a snapshot in time, restore does not
+blindly overwrite the target: it installs the candidate **only if the target is
+still absent**, atomically. If a forge process starts and initializes `forge.db` in
+the window between the check and the install — recreating exactly the live store
+this path assumed didn't exist — the install is refused rather than silently
+clobbering it, with a message naming the target and telling you to stop every forge
+process on this `FORGE_HOME` and retry (which then takes the protected,
+target-exists path above). This is a race refusal, not a sign of corruption — retry
+once every forge process is confirmed stopped.
+
 ## Recovering from a bad restore or a corrupt store
 
-Because every restore takes a pre-restore safety backup of whatever was live before
-it, undoing a restore is the same operation pointed at that directory:
+Because every restore over an existing store takes a pre-restore safety backup of
+whatever was live before it, undoing a restore is the same operation pointed at that
+directory (a restore into a lost store had nothing to back up, so there is no
+pre-restore directory to undo to — restore your most recent known-good backup
+instead):
 
 ```bash
 forge backup restore ~/.forge/backups/pre-restore-<ts> --confirm-quiesced

@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { createBackup, restoreBackup, RestoreRefusedError, verifyBackup } from "./backup.js";
+import { closeDb, getDb } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
 
 let home: string;
@@ -285,6 +286,77 @@ test("manifest schemaVersion is derived from the ARTIFACT, so a migrated store r
     "manifest.schemaVersion must equal the artifact's real user_version, not a pre-backup source read",
   );
   assert.equal(verifyBackup(backupDir).outcome, "ok", "verify's manifest/artifact cross-check passes");
+});
+
+// FG-730 — the PRIMARY disaster-recovery path: the store was LOST (disk failure,
+// deletion, fresh host), so restore runs into a FORGE_HOME that has NO forge.db. The
+// refuse-if-dirty gate and the quiesce proof both open the live target; with no target
+// to open they must be SKIPPED (there is no live store to refuse or quiesce), exactly
+// as the pre-restore safety-backup step already skips. Before the fix, a read-only open
+// of the non-existent forge.db threw "unable to open database file".
+test("restore into an EMPTY FORGE_HOME (no forge.db) recovers the store, and getDb() opens it (FG-730)", async () => {
+  // Seed a store spanning several surfaces so identity — not just counts — is asserted.
+  {
+    const db = new Database(target);
+    db.pragma("journal_mode = WAL");
+    db.exec(SCHEMA_SQL);
+    for (const id of ["FG-1", "FG-2"]) {
+      db.prepare(
+        "INSERT INTO tickets (project_key, ticket_id, type, status, title, imported_at) VALUES ('forge', ?, 'story', 'active', ?, '1970-01-01T00:00:00.000Z')",
+      ).run(id, `title ${id}`);
+    }
+    db.prepare(
+      "INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('recover-run', 'feature', 'before', 'active', '1970-01-01T00:00:00.000Z')",
+    ).run();
+    db.close();
+    rmSync(`${target}-wal`, { force: true });
+    rmSync(`${target}-shm`, { force: true });
+  }
+  const tables = ["tickets", "runs"];
+  const backupCounts = (() => {
+    const db = new Database(target, { readonly: true });
+    const out: Record<string, number> = {};
+    for (const t of tables) out[t] = (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+    db.close();
+    return out;
+  })();
+  const { backupDir } = await createBackup({ home, sourcePath: target });
+
+  // A brand-new, EMPTY FORGE_HOME — the fresh-host / DB-lost target. No forge.db, and
+  // the directory itself may not carry the store yet (restore must ensure it).
+  const freshHome = mkdtempSync(join(tmpdir(), "forge-backup-fresh-"));
+  const freshTarget = join(freshHome, "forge.db");
+  assert.ok(!existsSync(freshTarget), "precondition: the fresh FORGE_HOME has no live store");
+  try {
+    const result = await restoreBackup({
+      backupPath: backupDir,
+      home: freshHome,
+      targetPath: freshTarget,
+      confirmQuiesced: true,
+    });
+    assert.equal(result.restored, true);
+    assert.equal(result.preRestoreBackupDir, null, "no live store existed, so no pre-restore safety backup is taken");
+
+    const restored = new Database(freshTarget, { readonly: true });
+    const after: Record<string, number> = {};
+    for (const t of tables) after[t] = (restored.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+    assert.deepEqual(after, backupCounts, "the recovered store matches the backup's row counts exactly");
+    assert.ok(restored.prepare("SELECT 1 FROM runs WHERE id='recover-run'").get(), "the backed-up run identity is restored");
+    assert.ok(restored.prepare("SELECT 1 FROM tickets WHERE ticket_id='FG-2'").get(), "ticket identity is restored");
+    restored.close();
+
+    // The restored single-file store must open cleanly through the ordinary path.
+    process.env.FORGE_HOME = freshHome;
+    try {
+      const db = getDb();
+      assert.equal((db.prepare("SELECT COUNT(*) AS n FROM runs").get() as { n: number }).n, backupCounts.runs);
+    } finally {
+      closeDb();
+      process.env.FORGE_HOME = home;
+    }
+  } finally {
+    rmSync(freshHome, { recursive: true, force: true });
+  }
 });
 
 test("verify rejects a manifest whose schemaVersion disagrees with the artifact", async () => {
