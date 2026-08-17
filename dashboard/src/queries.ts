@@ -1308,6 +1308,18 @@ type AgentRuntimeRow = {
    *  stop", the pre-instrumentation row layer 2 still measures. 0/1 from
    *  SQLite's EXISTS. */
   attachedExit: number;
+  /** FG-725: 1 when at least one task references this row as its `parent_id` —
+   *  i.e. this row is a workflow fanout/coordinator PARENT, which orchestrates
+   *  child tasks and runs no agent container of its own. 0/1 from SQLite's
+   *  EXISTS. A genuine agent LEAF task has no children, so this is 0 for it. */
+  hasChildren: number;
+  /** FG-725: 1 when this row ever logged a `container.started` of its own — the
+   *  evidence that an agent container actually existed for it at some point.
+   *  Deliberately UNBOUNDED by started_at, unlike the FG-690 start-evidence
+   *  lookup above: layer 1 asks "did the MEASURED attempt start a container";
+   *  this asks the coarser "did this task EVER run one", which is all the
+   *  coordinator discriminator needs. 0/1 from SQLite's EXISTS. */
+  containerStarted: number;
   failedPayload: string | null;
   reconciledPayloads: string | null;
 };
@@ -1384,6 +1396,23 @@ function reconciledIntoComplete(payloads: string | null): boolean {
  *  event is instrumentation age rather than evidence that nothing ran — layer 2
  *  keeps its existing administrative guards and is unchanged. */
 function agentObservedEndMs(row: AgentRuntimeRow): number | null {
+  // FG-725: a row that HAS children but never logged a container.started of its
+  // own is a workflow fanout/coordinator PARENT — it coordinates child tasks and
+  // runs no agent container, yet carries agent_role, started_at and completed_at
+  // like any leaf. Such a parent emits no container.started and no attached-exit
+  // event, so it reaches neither layer 1 (attachedExit === 0) nor an
+  // administrative guard, and its completed_at — set days later when a gate
+  // advance released a multi-day `awaiting_gate` wait — would otherwise be
+  // returned here and charted in full as agent execution. This gate bounds the
+  // layer-2 no-attached-exit fallback below: layer 2 exists to keep
+  // pre-instrumentation LEAF rows (no children, a missing container.started that
+  // is instrumentation age rather than proof nothing ran); a coordinator that has
+  // children and never ran a container is not defensible legacy agent evidence.
+  // Returning null drops the row outright — neither a sample nor a duration, in
+  // the overall series or any per-role series, since the sole caller pushes an
+  // observation only when this returns non-null. It takes precedence over every
+  // branch below: a coordinator has no defensible agent end at all.
+  if (row.hasChildren === 1 && row.containerStarted === 0) return null;
   if (row.attachedExit === 1) {
     if (row.agentExit === null) return null;
     const exitedMs = Date.parse(row.agentExit);
@@ -1464,6 +1493,17 @@ export function agentRuntimeTrends(
       EXISTS (SELECT 1 FROM events e
         WHERE e.task_id = t.id AND e.event_type IN (${exitEvents})
           AND julianday(e.created_at) >= julianday(t.started_at)) AS attachedExit,
+      -- FG-725: the coordinator-parent discriminator. hasChildren is the
+      -- fanout signal -- a child sets parent_id to its parent's task id
+      -- (schema.ts:138) -- and containerStarted is whether this task ever ran a
+      -- container of its own. A row with children and no container of its own is
+      -- the non-container coordinator agentObservedEndMs drops. Unbounded by
+      -- started_at on purpose: a coordinator has no container.started at any
+      -- point, so the coarse ever question is exactly the one to ask, and it
+      -- keeps the gate independent of the FG-690 per-attempt start evidence.
+      EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id) AS hasChildren,
+      EXISTS (SELECT 1 FROM events cs
+        WHERE cs.task_id = t.id AND cs.event_type = 'container.started') AS containerStarted,
       (SELECT f.payload FROM events f
         WHERE f.task_id = t.id AND f.event_type = 'task.failed'
           AND julianday(f.created_at) >= julianday(t.started_at)
