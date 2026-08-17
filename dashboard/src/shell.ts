@@ -335,7 +335,9 @@ section.feed { margin-top: 24px; }
 }
 .detail .close {
   float: right; cursor: pointer; color: var(--fg-dim); font-size: 20px; line-height: 1;
+  background: none; border: none; padding: 0; font-family: inherit;
 }
+.detail .close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .detail pre {
   background: var(--bg); padding: 12px; border-radius: 4px;
   overflow-x: auto; font-size: 12px;
@@ -1371,6 +1373,40 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 }
 .audit-gaps { margin: 4px 0 0; padding-left: 18px; }
 .audit-stale-note { color: var(--warn); font-size: 11px; margin-top: 4px; }
+
+/* FG-395: the read-only Campaigns view. The list is click-to-open cards; the detail
+ * reuses the shared .detail-overlay / .detail modal. Per-item evidence axes borrow
+ * the audit-axis-label dim treatment so absence reads as "not observed", never green. */
+.campaigns-view { margin-top: 20px; }
+.campaign-card { margin-bottom: 10px; cursor: pointer; }
+.campaign-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.campaign-card-head { justify-content: space-between; align-items: baseline; }
+.campaign-counts { font-size: 12px; margin-top: 6px; color: var(--fg-dim); }
+.campaign-next-action { margin-top: 8px; border-left: 3px solid var(--accent); }
+.campaign-groupings {
+  margin-top: 12px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.campaign-grouping-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+.campaign-item { margin-top: 10px; cursor: default; }
+.campaign-item-head { justify-content: space-between; align-items: baseline; }
+.campaign-item-axis { font-size: 12px; margin-top: 6px; }
+.campaign-item-blocker { margin-top: 8px; border-left: 3px solid var(--err); }
+.campaign-item-action { font-size: 12px; margin-top: 4px; }
+.campaign-git {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
 
 /* FG-591: the operator work queue / Kanban board.
  *

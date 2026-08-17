@@ -28,7 +28,9 @@
       "@forge/backlog-config": ["../src/backlog/config.ts"],
       "@forge/blocked-source": ["../src/store/blocked-source.ts"],
       "@forge/current-activity": ["../src/v2/current-activity.ts"],
-      "@forge/launch-observations": ["../src/store/launch-observations.ts"]
+      "@forge/launch-observations": ["../src/store/launch-observations.ts"],
+      "@forge/campaign-report": ["../src/campaign/report.ts"],
+      "@forge/store-db": ["../src/store/db.ts"]
     }
   },
   "include": ["src/**/*.ts", "browser-tests/**/*.ts"]

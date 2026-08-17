@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { getCampaign, listCampaignItems } from "../store/campaigns.js";
+import { getCampaign, listCampaigns, listCampaignItems } from "../store/campaigns.js";
 import { getRun } from "../store/runs.js";
 import { tasksForRun } from "../store/tasks.js";
 import { verdictsForRun } from "../store/verdicts.js";
@@ -783,6 +783,21 @@ export type ReportGroupings = {
   failed: string[];
 };
 
+// FG-395: the ONE derivation of a campaign's outcome groupings — the ticket-id
+// buckets assembleCampaignReport surfaces and the cheap counts the dashboard list
+// summarizes. `failed` folds needs_refinement in, matching the report contract.
+// Both surfaces project this so the counts on the list can never disagree with the
+// groupings on the detail.
+function campaignGroupings(items: CampaignItem[]): ReportGroupings {
+  return {
+    shipped: items.filter((i) => i.outcome === "shipped").map((i) => i.ticketId),
+    blocked: items.filter((i) => i.outcome === "blocked").map((i) => i.ticketId),
+    held: items.filter((i) => i.outcome === "held").map((i) => i.ticketId),
+    skipped: items.filter((i) => i.outcome === "skipped").map((i) => i.ticketId),
+    failed: items.filter((i) => i.outcome === "failed" || i.outcome === "needs_refinement").map((i) => i.ticketId),
+  };
+}
+
 export type ReportResult = {
   campaignId: string;
   sourceInput: Record<string, unknown>;
@@ -953,13 +968,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     };
   });
 
-  const groupings: ReportGroupings = {
-    shipped: items.filter((i) => i.outcome === "shipped").map((i) => i.ticketId),
-    blocked: items.filter((i) => i.outcome === "blocked").map((i) => i.ticketId),
-    held: items.filter((i) => i.outcome === "held").map((i) => i.ticketId),
-    skipped: items.filter((i) => i.outcome === "skipped").map((i) => i.ticketId),
-    failed: items.filter((i) => i.outcome === "failed" || i.outcome === "needs_refinement").map((i) => i.ticketId),
-  };
+  const groupings = campaignGroupings(items);
 
   const dirtyGitState =
     campaign.projectDir && existsSync(campaign.projectDir)
@@ -983,6 +992,90 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     followUpTickets: [],
     nextOperatorAction,
   };
+}
+
+// FG-395: the CHEAP per-campaign row the dashboard "Campaigns" list renders. It
+// deliberately does NOT assemble a full ReportResult per row — no readiness map
+// over every ticket, no per-item run/task/verdict summaries, no dirty-git-state.
+// It reuses the report contract's own derivations (computeVerdict, campaignGroupings)
+// so a summary can never disagree with the detail the same campaign opens to.
+//
+// COST: verdict for a non-complete campaign is pure (computeVerdict short-circuits
+// to "not_complete"); only a COMPLETE campaign builds the done-audit map (a bounded
+// git read per shipped item), exactly the discipline assembleCampaignShow applies.
+// The current-item title is a single best-effort ticket read, never a scan.
+//
+// FIELD NOTE: the store persists created_at and updated_at only — there is no
+// started_at / completed_at column on campaigns — so those are the two timestamps
+// surfaced. Fabricating a start/finish instant the store never recorded would be
+// worse than naming the two it did.
+export type CampaignSummary = {
+  campaignId: string;
+  goal: string | null;
+  mode: string;
+  status: string;
+  verdict: CampaignVerdict;
+  createdAt: string;
+  updatedAt: string;
+  projectDir: string | null;
+  counts: { shipped: number; blocked: number; held: number; skipped: number; failed: number; total: number };
+  currentItem: { ticketId: string; title: string | null } | null;
+};
+
+export function assembleCampaignSummary(campaign: Campaign, items: CampaignItem[]): CampaignSummary {
+  // Only a complete campaign's verdict consults the done-audit map (and pays the
+  // git cost of building it); every other status resolves to "not_complete".
+  const doneAuditMap = campaign.status === "complete" ? buildDoneAuditMap(campaign, items) : new Map<string, DoneAuditResult>();
+  const verdict = computeVerdict(campaign, items, doneAuditMap);
+  const g = campaignGroupings(items);
+
+  // The item that best answers "what is this campaign doing right now": the
+  // in-flight one if any, else the next pending item that would run on resume.
+  const current = findInFlightItem(items) ?? items.find((i) => i.lifecycleStatus === "pending") ?? null;
+  let currentTitle: string | null = null;
+  if (current && campaign.projectDir && existsSync(campaign.projectDir)) {
+    try {
+      currentTitle = readTicket(campaign.projectDir, current.ticketId).title ?? null;
+    } catch {
+      // best-effort — a title we cannot read is null, never a guess
+    }
+  }
+
+  const goal =
+    campaign.metadata?.["goal"] !== undefined ? String(campaign.metadata["goal"]) : null;
+
+  return {
+    campaignId: campaign.id,
+    goal,
+    mode: campaign.mode,
+    status: campaign.status,
+    verdict,
+    createdAt: campaign.createdAt,
+    updatedAt: campaign.updatedAt,
+    projectDir: campaign.projectDir ?? null,
+    counts: {
+      shipped: g.shipped.length,
+      blocked: g.blocked.length,
+      held: g.held.length,
+      skipped: g.skipped.length,
+      failed: g.failed.length,
+      total: items.length,
+    },
+    currentItem: current ? { ticketId: current.ticketId, title: currentTitle } : null,
+  };
+}
+
+// FG-395: the dashboard's list projection. `listCampaigns()` carries no project
+// filter and no limit by contract, so the caller passes an owner-project predicate
+// (resolved through the dashboard's own registry) and a clamped limit; ORDER BY
+// created_at DESC is preserved from the store. MUST be called inside
+// runInReadOnlyDbScope by a read-only consumer — every store read below reaches
+// getDb().
+export function assembleCampaignSummaries(accepts: (campaign: Campaign) => boolean, limit: number): CampaignSummary[] {
+  return listCampaigns()
+    .filter(accepts)
+    .slice(0, limit)
+    .map((campaign) => assembleCampaignSummary(campaign, listCampaignItems(campaign.id)));
 }
 
 export function renderCampaignReportHuman(result: ReportResult): string[] {

@@ -98,6 +98,7 @@ export const BROWSER_TIER_DIR = join(
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "fg386-shipping-audit.test.ts": 9,
+  "fg395-campaigns.test.ts": 2,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
   "completed-runs.test.ts": 8,
