@@ -118,16 +118,16 @@ Exit criteria:
 - git/branch/PR policy is visible in the report;
 - unavailable gates force `pilot` mode, pause, or explicit operator override.
 
-### Phase 4: Dashboard Visibility
+### Phase 4: Dashboard Visibility — complete
 
 The CLI can bootstrap the feature, but shipped Campaign Runner needs human-visible state.
 
-- **FG-395**: dashboard campaign view.
+- **FG-395** — delivered: read-only **campaigns** tab. `GET /api/campaigns` (cheap per-campaign summaries) and `GET /api/campaign/:id` (full report) **reuse** `src/campaign/report.ts`'s assembler rather than re-deriving done-audit/readiness/verdict/next-action/git-state in dashboard SQL, so the list's counts and the detail's groupings can never disagree with each other or with `forge campaign report --json`. Documented in [Concepts → Read surfaces](concepts.md#review-ledger) and [SCHEMA-CONTRACT](SCHEMA-CONTRACT.md#get-apicampaigns--get-apicampaignid-response-shape).
 
 Exit criteria:
 
 - dashboard lists active and recent campaigns;
-- campaign detail shows current item, blockers, outcomes, runs, tasks, tickets, branches, worktrees, PRs, and report checkpoints;
+- campaign detail shows current item, blockers, outcomes, runs, tasks, tickets, branches, worktrees, PRs, and the current report (no snapshot history — the contract persists no checkpoint history, so this is the current/final report, distinguished by its own `status`, not a stored series);
 - dashboard uses the same JSON/report contract as CLI;
 - dashboard does not require project-tracked file writes to show state.
 
