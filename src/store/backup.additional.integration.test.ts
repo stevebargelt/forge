@@ -221,6 +221,72 @@ test("an un-checkpointed WAL tail beside the target is REFUSED, preserving that 
   db.close();
 });
 
+test("restore refuses a valid-but-SUBSTITUTED artifact swapped in after verification (RF-3)", async () => {
+  seed(); // live store: one committed row 'backup-run'
+  const { backupDir, artifactPath } = await createBackup({ home, sourcePath: target });
+  rmSync(`${target}-wal`, { force: true });
+  rmSync(`${target}-shm`, { force: true });
+  const before = readFileSync(target);
+
+  // Build a DIFFERENT, structurally valid, schema-compatible SQLite file to stand in
+  // for what a local attacker with write access to the backup dir could substitute in
+  // the window between verify (step 2) and the staging copy (step 3): it passes
+  // integrity_check and the version gate, but its bytes — and thus its sha256 — differ
+  // from the manifest the candidate was authenticated against.
+  const evilPath = join(home, "evil.db");
+  const evil = new Database(evilPath);
+  evil.exec(SCHEMA_SQL);
+  evil.prepare("INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('attacker', 'feature', 'evil', 'active', '1970-01-01T00:00:00.000Z')").run();
+  evil.pragma("journal_mode = DELETE");
+  evil.close();
+  const evilBytes = readFileSync(evilPath);
+  assert.notEqual(sha(evilPath), sha(artifactPath), "the substitute must differ from the verified artifact");
+
+  await assert.rejects(
+    restoreBackup({
+      backupPath: backupDir,
+      home,
+      targetPath: target,
+      confirmQuiesced: true,
+      // Substitute the artifact AFTER verify authenticated it, BEFORE it is staged.
+      onVerifiedBeforeStage: () => writeFileSync(artifactPath, evilBytes),
+    }),
+    (error: unknown) =>
+      error instanceof RestoreRefusedError && /checksum|does not match/i.test((error as Error).message),
+  );
+
+  assert.ok(before.equals(readFileSync(target)), "the substituted candidate must not be installed — forge.db is untouched");
+  assert.equal(liveState().count, 1, "the live store still holds only its own row, not the attacker's");
+});
+
+test("manifest schemaVersion is derived from the ARTIFACT, so a migrated store round-trips ok (RF-2)", async () => {
+  // A store at a non-zero (migrated) user_version. The manifest's schemaVersion must
+  // equal the ARTIFACT's real user_version — the value verify cross-checks — not a
+  // value read from the live source before backup(), which a concurrent one-way
+  // migration could make stale. Read the artifact independently and compare.
+  const db = new Database(target);
+  db.pragma("journal_mode = WAL");
+  db.exec(SCHEMA_SQL);
+  db.pragma("user_version = 1"); // == SCHEMA_VERSION: migrated to the boundary, still supported
+  db.close();
+  rmSync(`${target}-wal`, { force: true });
+  rmSync(`${target}-shm`, { force: true });
+
+  const { backupDir, artifactPath, manifest } = await createBackup({ home, sourcePath: target });
+
+  const artifactDb = new Database(artifactPath, { readonly: true });
+  const artifactVersion = artifactDb.pragma("user_version", { simple: true }) as number;
+  artifactDb.close();
+
+  assert.equal(manifest.schemaVersion, 1, "manifest records the store's user_version");
+  assert.equal(
+    manifest.schemaVersion,
+    artifactVersion,
+    "manifest.schemaVersion must equal the artifact's real user_version, not a pre-backup source read",
+  );
+  assert.equal(verifyBackup(backupDir).outcome, "ok", "verify's manifest/artifact cross-check passes");
+});
+
 test("verify rejects a manifest whose schemaVersion disagrees with the artifact", async () => {
   seed();
   const { backupDir, artifactPath, manifestPath, manifest } = await createBackup({ home, sourcePath: target });

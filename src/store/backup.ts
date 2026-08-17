@@ -137,9 +137,7 @@ export async function createBackup(opts?: {
   // newer forge migrated past a one-way boundary (the version gate is verify's and
   // restore's job, not a reason to refuse to back the store up).
   const source = new Database(sourcePath, { readonly: true });
-  let schemaVersion: number;
   try {
-    schemaVersion = source.pragma("user_version", { simple: true }) as number;
     // The online backup: a self-consistent snapshot as of now, under concurrency.
     await source.backup(artifactPath);
   } finally {
@@ -154,10 +152,18 @@ export async function createBackup(opts?: {
   // sidecars after the restore rename). Switching the DEST — a file we exclusively
   // own — to DELETE makes it a true standalone single-file snapshot; the next
   // getDb() re-establishes WAL when the restored store is first opened.
+  let schemaVersion: number;
   {
     const dest = new Database(artifactPath);
     try {
       dest.pragma("journal_mode = DELETE");
+      // Read schemaVersion from the ARTIFACT (the backed-up copy), NOT the live
+      // source before backup(). A one-way migration committing during the online
+      // backup would leave the artifact at schema N+1 while a source-read value
+      // recorded N — and verify's manifest/artifact user_version cross-check then
+      // flags that as false-corrupt. Deriving it from the artifact makes the
+      // manifest describe exactly the file it accompanies, race or no race (RF-2).
+      schemaVersion = dest.pragma("user_version", { simple: true }) as number;
     } finally {
       dest.close();
     }
@@ -196,6 +202,11 @@ export interface VerifyBackupResult {
   backupDir: string;
   artifactPath: string;
   schemaVersion: number | null; // null when the artifact could not be opened
+  // The manifest's recorded sha256 that THIS verify authenticated the artifact
+  // against — null when the manifest was missing/unreadable. Restore carries it
+  // forward to re-check the STAGED bytes, so the value it trusts is the one verify
+  // proved, not a fresh (re-tamperable) manifest read (RF-3).
+  manifestSha256: string | null;
   // Human-readable reasons — every failed check is recorded, not just the first,
   // so a corrupt-AND-checksum-mismatched artifact reports both.
   reasons: string[];
@@ -224,6 +235,7 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
     backupDir,
     artifactPath,
     schemaVersion: null,
+    manifestSha256: null,
     reasons,
     willMigrateOnFirstOpen: false,
   };
@@ -244,6 +256,7 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
     reasons.push(`unreadable manifest: ${(e as Error).message}`);
     return base;
   }
+  base.manifestSha256 = manifest.sha256;
 
   // Checksum FIRST — over the bytes at rest, before opening a connection that would
   // read them through SQLite's own paging. A mismatch is definitive corruption.
@@ -325,6 +338,7 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
     backupDir,
     artifactPath,
     schemaVersion,
+    manifestSha256: manifest.sha256,
     reasons,
     willMigrateOnFirstOpen: willMigrate,
   };
@@ -370,17 +384,21 @@ export class RestoreRefusedError extends Error {
  *      own read-only opens re-created, BEFORE the swap. Non-destructive given step 1.5.
  *   7. SWAP: rename(2) the temp OVER forge.db — the ONLY mutating step, atomic.
  *
- * Two TEST SEAMS (both mirror runDestructiveConvergenceMigration's onQuiescedBeforeDdl;
- * never passed in production): `onStagedBeforeSwap` fires immediately AFTER staging and
- * BEFORE any live-path touch; `onQuiesceProvenBeforeSwap` fires AFTER the exclusivity
- * proof and BEFORE the rename. Either lets a test throw to simulate a crash at that
- * exact window and assert forge.db is left byte-identical (sha256).
+ * Three TEST SEAMS (all mirror runDestructiveConvergenceMigration's onQuiescedBeforeDdl;
+ * never passed in production): `onVerifiedBeforeStage` fires AFTER verify succeeds and
+ * BEFORE the candidate is copied to staging — the TOCTOU window RF-3 closes, where a
+ * test can tamper the artifact to prove the staged-checksum re-check refuses;
+ * `onStagedBeforeSwap` fires immediately AFTER staging and BEFORE any live-path touch;
+ * `onQuiesceProvenBeforeSwap` fires AFTER the exclusivity proof and BEFORE the rename.
+ * Each lets a test throw or mutate at that exact window and assert forge.db is left
+ * byte-identical (sha256).
  */
 export async function restoreBackup(opts: {
   backupPath: string;
   home?: string;
   targetPath?: string;
   confirmQuiesced: boolean;
+  onVerifiedBeforeStage?: () => void;
   onStagedBeforeSwap?: () => void;
   onQuiesceProvenBeforeSwap?: () => void;
 }): Promise<RestoreBackupResult> {
@@ -431,6 +449,12 @@ export async function restoreBackup(opts: {
       );
     }
 
+    // TEST SEAM — the TOCTOU window RF-3 closes: verify has authenticated the SOURCE
+    // artifact, but it has not yet been copied to staging. A test tampers the artifact
+    // here to simulate an attacker substituting a valid-but-different SQLite file; the
+    // staged-checksum re-check below must then refuse. Never passed in production.
+    opts.onVerifiedBeforeStage?.();
+
     // Step 3 — STAGE onto the SAME filesystem as forge.db. A cross-fs rename is
     // EXDEV (see promote.ts's atomicSymlinkSwap note), and the swap MUST be a
     // rename, so the temp lives in the target's own directory.
@@ -438,6 +462,24 @@ export async function restoreBackup(opts: {
     stagedTemp = join(targetDir, `forge.db.restore-${randomUUID()}.tmp`);
     copyFileSync(verified.artifactPath, stagedTemp);
     chmodSync(stagedTemp, 0o600);
+
+    // Re-verify the STAGED bytes' checksum against the sha256 verify authenticated
+    // (step 2), BEFORE the swap. Step 2 verified the SOURCE artifact; between that
+    // read and the copyFileSync above there is a TOCTOU window in which a local
+    // attacker with write access to the backup dir could substitute a structurally
+    // valid, schema-compatible — but different — SQLite file, which integrity_check
+    // and the version gate below would happily pass. Hashing the exact bytes that
+    // become the live store and requiring them to equal the manifest sha256 verify
+    // proved (carried in verified.manifestSha256, NOT re-read here) makes the thing
+    // authenticated identical to the thing installed, closing the window (RF-3).
+    const stagedSha = sha256File(stagedTemp);
+    if (stagedSha !== verified.manifestSha256) {
+      throw new RestoreRefusedError(
+        `forge backup restore: refusing — the staged copy's checksum ${stagedSha} does not match the ` +
+          `verified manifest sha256 ${verified.manifestSha256}; the candidate changed after verification.`,
+      );
+    }
+
     // Re-open the STAGED bytes (not the source) read-only and re-prove them — the
     // copy itself is now the thing that will become the live store.
     const staged = new Database(stagedTemp, { readonly: true });
