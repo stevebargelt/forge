@@ -247,8 +247,18 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
 
   // Checksum FIRST — over the bytes at rest, before opening a connection that would
   // read them through SQLite's own paging. A mismatch is definitive corruption.
-  const actualSha = sha256File(artifactPath);
-  if (actualSha !== manifest.sha256) {
+  //
+  // The read+hash can itself THROW: an unreadable file, a directory or other non-file
+  // object a tamperer swapped in, an I/O error. AC3 requires verify to REPORT corrupt,
+  // never leak an exception (and the CLI calls verifyBackup with no handler), so an
+  // unhashable artifact is a corrupt outcome with a reason — exactly like a mismatch.
+  let actualSha: string | null = null;
+  try {
+    actualSha = sha256File(artifactPath);
+  } catch (e) {
+    reasons.push(`could not read/hash artifact: ${(e as Error).message}`);
+  }
+  if (actualSha !== null && actualSha !== manifest.sha256) {
     reasons.push(`checksum mismatch: manifest ${manifest.sha256}, actual ${actualSha}`);
     // Still fall through to integrity/version so the report is complete.
   }
@@ -295,7 +305,7 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
     reasons.push(`could not open/verify artifact: ${(e as Error).message}`);
   }
 
-  const checksumOk = actualSha === manifest.sha256;
+  const checksumOk = actualSha !== null && actualSha === manifest.sha256;
   if (!checksumOk || !integrityOk || manifestSchemaMismatch) {
     return { ...base, outcome: "corrupt", schemaVersion };
   }
@@ -340,6 +350,11 @@ export class RestoreRefusedError extends Error {
  *
  * The sequence (exactly this order — see the module header for why each layer):
  *   1. Acquire `<home>/backup.lock`; require confirmQuiesced.
+ *   1.5. REFUSE-IF-DIRTY: before opening any connection to the live store, refuse if
+ *      forge.db-wal / forge.db-shm exist — a dirty (un-checkpointed) WAL tail is part
+ *      of the live state and must never be discarded. This guarantees the store STARTS
+ *      fully checkpointed, so the only sidecars step 6 ever removes are the EMPTY ones
+ *      our own read-only opens (steps 4–5) re-create — never committed data (RF-1).
  *   2. VALIDATE the candidate via the full verify() (integrity + checksum + version
  *      gate). Refuse here → nothing on the live path touched.
  *   3. STAGE: copy the validated candidate to `<targetDir>/forge.db.restore-<uuid>.tmp`
@@ -351,7 +366,8 @@ export class RestoreRefusedError extends Error {
  *      read-write PROBE that runs BEGIN EXCLUSIVE/ROLLBACK under busy_timeout=0; fail
  *      closed on SQLITE_BUSY. Does NOT switch journal_mode — forge.db's own bytes stay
  *      untouched (see the body for the checkpoint-on-close trap the keeper dodges).
- *   6. SIDECAR HYGIENE: unlink any residual forge.db-wal / forge.db-shm BEFORE the swap.
+ *   6. SIDECAR HYGIENE: unlink the (now provably EMPTY) forge.db-wal / forge.db-shm our
+ *      own read-only opens re-created, BEFORE the swap. Non-destructive given step 1.5.
  *   7. SWAP: rename(2) the temp OVER forge.db — the ONLY mutating step, atomic.
  *
  * Two TEST SEAMS (both mirror runDestructiveConvergenceMigration's onQuiescedBeforeDdl;
@@ -390,6 +406,22 @@ export async function restoreBackup(opts: {
 
   let stagedTemp: string | null = null;
   try {
+    // Step 1.5 — REFUSE-IF-DIRTY. BEFORE opening any connection to the live store,
+    // refuse if it still carries a WAL/SHM sidecar. An un-checkpointed WAL tail is
+    // part of the live database state, and step 6 removes those sidecars before the
+    // swap — so a store with a dirty WAL could lose committed frames in the
+    // remove→rename window (the AC4 hazard). A cleanly-stopped, fully-checkpointed
+    // store has NO sidecars; requiring that here guarantees there is never an
+    // un-checkpointed WAL tail to lose (the residual is eliminated, not accepted).
+    if (existsSync(`${targetPath}-wal`) || existsSync(`${targetPath}-shm`)) {
+      throw new RestoreRefusedError(
+        `forge backup restore: refusing — the live store at ${targetPath} still carries a WAL/SHM ` +
+          `sidecar (${targetPath}-wal / -shm), so it may hold an un-checkpointed WAL tail that a restore ` +
+          `must not risk losing. Cleanly stop EVERY forge process on this FORGE_HOME, then open and close ` +
+          `forge once to checkpoint the WAL (which removes the sidecars), and retry the restore.`,
+      );
+    }
+
     // Step 2 — VALIDATE the candidate. Refuse on ANY non-ok outcome. Live path untouched.
     const verified = verifyBackup(opts.backupPath);
     if (verified.outcome !== "ok") {
@@ -494,12 +526,18 @@ export async function restoreBackup(opts: {
     // exact window the old journal_mode=DELETE proof failed. Never passed in production.
     opts.onQuiesceProvenBeforeSwap?.();
 
-    // Step 6 — SIDECAR HYGIENE, load-bearing (Option A: BEFORE the rename). The
-    // swapped-in artifact is a single-file DELETE-mode DB; a stale forge.db-wal left
-    // beside it would be read as AUTHORITATIVE — the restored rows would vanish behind
-    // a ghost WAL that even integrity_check reports as 'ok'. Removing these separate
-    // sidecar files does not mutate forge.db's own bytes. (Option B — remove AFTER the
-    // rename — has a silent-corruption crash window: do NOT do that.)
+    // Step 6 — SIDECAR HYGIENE, now provably NON-DESTRUCTIVE (Option A: BEFORE the
+    // rename). The refuse-if-dirty gate (step 1.5) proved the live store carried NO
+    // un-checkpointed WAL tail. Our own read-ONLY opens since then — the pre-restore
+    // backup (step 4) and the keeper (step 5) — re-create EMPTY forge.db-wal/-shm
+    // beside the target (a WAL reader cannot clean them up on close), so removing them
+    // here can lose nothing: the gate guaranteed there were no committed frames to
+    // begin with (the RF-1 hazard is ELIMINATED at the gate, not accepted here). The
+    // removal is still load-bearing: a stale sidecar left beside the swapped-in
+    // single-file DELETE-mode artifact would be read as AUTHORITATIVE — restored rows
+    // vanishing behind a ghost WAL that even integrity_check reports 'ok'. It does not
+    // mutate forge.db's own bytes. (Option B — remove AFTER the rename — has a
+    // silent-corruption crash window: do NOT do that.)
     rmSync(`${targetPath}-wal`, { force: true });
     rmSync(`${targetPath}-shm`, { force: true });
 

@@ -118,6 +118,17 @@ function counts(path: string, tables: string[]): Record<string, number> {
   return out;
 }
 
+// createBackup snapshots the live store on a READ-ONLY handle, which (like any WAL
+// reader) leaves EMPTY forge.db-wal/-shm sidecars behind that it cannot clean up on
+// close. A real operator checkpoints the store before restoring; here we just remove
+// the empty fixture sidecars so the refuse-if-dirty gate sees the clean, fully
+// checkpointed store the operator would present. Removing empty sidecars touches none
+// of forge.db's own bytes (the online backup left them uncommitted).
+function clearFixtureSidecars(path = target): void {
+  rmSync(`${path}-wal`, { force: true });
+  rmSync(`${path}-shm`, { force: true });
+}
+
 test("round-trip: every control-plane surface survives create → restore with counts intact", async () => {
   const original = seedFullStore(target);
   const { backupDir } = await createBackup({ home, sourcePath: target });
@@ -150,6 +161,7 @@ test("round-trip: every control-plane surface survives create → restore with c
 test("restore takes a pre-restore safety backup of the previous store, and it is itself restorable", async () => {
   seedFullStore(target);
   const { backupDir } = await createBackup({ home, sourcePath: target });
+  clearFixtureSidecars();
 
   const result = await restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true });
   assert.ok(result.preRestoreBackupDir, "a pre-restore safety backup must be recorded");
@@ -160,6 +172,7 @@ test("restore takes a pre-restore safety backup of the previous store, and it is
 test("interrupt between stage and swap leaves forge.db byte-identical", async () => {
   seedFullStore(target);
   const { backupDir } = await createBackup({ home, sourcePath: target });
+  clearFixtureSidecars();
   const before = readFileSync(target);
 
   await assert.rejects(
@@ -183,6 +196,7 @@ test("interrupt between stage and swap leaves forge.db byte-identical", async ()
 test("interrupt AFTER the exclusivity proof, before swap, leaves forge.db byte-identical", async () => {
   seedFullStore(target);
   const { backupDir } = await createBackup({ home, sourcePath: target });
+  clearFixtureSidecars();
   const before = readFileSync(target);
 
   await assert.rejects(
@@ -207,18 +221,32 @@ test("interrupt AFTER the exclusivity proof, before swap, leaves forge.db byte-i
 
 test("active writer: a live write transaction makes the quiesce probe refuse, live store unchanged", async () => {
   const original = seedFullStore(target);
+
+  // Put the live store in rollback-journal (DELETE) mode so a held writer takes its
+  // lock via a `forge.db-journal`, NOT a `-wal`/`-shm` sidecar. That keeps the
+  // refuse-if-dirty gate (which only fires on -wal/-shm) OUT of the way, so this test
+  // still exercises the EXCLUSIVITY PROBE distinctly — the dirty-store path has its
+  // own test below. (A held WAL writer would trip the dirty gate first.)
+  {
+    const conv = new Database(target);
+    conv.pragma("journal_mode = DELETE");
+    conv.close();
+  }
   const { backupDir } = await createBackup({ home, sourcePath: target });
 
-  // A second connection holding an OPEN write transaction holds the WAL writer lock,
-  // so the restore's BEGIN EXCLUSIVE probe (busy_timeout=0) raises SQLITE_BUSY and
-  // restore fails closed. (A mere reader in WAL does NOT block a writer lock and no
-  // longer forces refusal — the non-mutating proof only fences an active WRITER.)
+  // A second connection holding an OPEN write transaction holds the writer lock, so
+  // the restore's BEGIN EXCLUSIVE probe (busy_timeout=0) raises SQLITE_BUSY and
+  // restore fails closed. (A mere reader does NOT block a writer lock and no longer
+  // forces refusal — the non-mutating proof only fences an active WRITER.)
   const writer = new Database(target);
-  writer.pragma("journal_mode = WAL");
   writer.exec("BEGIN IMMEDIATE");
   writer.prepare(
     "INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('held-writer', 'feature', 'held', 'active', ?)",
   ).run(T0);
+  assert.ok(
+    !existsSync(`${target}-wal`) && !existsSync(`${target}-shm`),
+    "precondition: a DELETE-mode writer must NOT create -wal/-shm, so the dirty gate stays out of the way",
+  );
   try {
     await assert.rejects(
       restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true }),
@@ -231,15 +259,50 @@ test("active writer: a live write transaction makes the quiesce probe refuse, li
 
   const after = counts(target, Object.keys(original));
   assert.deepEqual(after, original, "a refused restore must leave the live store's data unchanged");
-  // user_version is unchanged on refusal too — the probe never switched journal_mode.
   const db = new Database(target, { readonly: true });
   assert.equal(db.pragma("user_version", { simple: true }), 0, "refusal must not touch user_version");
   db.close();
 });
 
+test("dirty store: a live store carrying WAL/SHM sidecars is REFUSED before the live path is touched", async () => {
+  seedFullStore(target);
+  const { backupDir } = await createBackup({ home, sourcePath: target });
+  const before = readFileSync(target);
+
+  // Hold a WAL connection open with an un-checkpointed committed write: `-wal`/`-shm`
+  // persist on disk, standing in for a store shut down WITHOUT a checkpoint. That WAL
+  // tail is part of the live state, and step 6 would remove the sidecars before the
+  // swap — the exact data-loss window RF-1 refuses. The gate must fire BEFORE opening
+  // any connection to the live store, leaving forge.db byte-for-byte untouched.
+  const holder = new Database(target);
+  holder.pragma("journal_mode = WAL");
+  holder
+    .prepare("INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('dirty', 'feature', 'd', 'active', ?)")
+    .run(T0);
+  try {
+    assert.ok(
+      existsSync(`${target}-wal`) || existsSync(`${target}-shm`),
+      "precondition: the held WAL writer must leave -wal/-shm on disk",
+    );
+    await assert.rejects(
+      restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true }),
+      (e: unknown) =>
+        e instanceof RestoreRefusedError && /sidecar|checkpoint|WAL tail/i.test((e as Error).message),
+    );
+    // Read forge.db's own bytes WHILE the holder is still open, so its 'dirty' frame is
+    // still un-checkpointed in the -wal: the refusal must not have renamed or otherwise
+    // mutated the main file. (holder.close() below would checkpoint that frame in — a
+    // change made by the test's own writer, not by restore.)
+    assert.ok(before.equals(readFileSync(target)), "a refused (dirty) restore leaves forge.db byte-for-byte untouched");
+  } finally {
+    holder.close();
+  }
+});
+
 test("restore refuses a corrupt candidate before touching the live path", async () => {
   const original = seedFullStore(target);
   const { backupDir, artifactPath } = await createBackup({ home, sourcePath: target });
+  clearFixtureSidecars(); // present a clean store so the CORRUPT candidate is what refuses, not the dirty gate
   const before = readFileSync(target);
 
   // Corrupt the candidate (checksum will mismatch).

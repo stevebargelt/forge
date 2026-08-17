@@ -5,7 +5,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, statSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -140,4 +140,25 @@ test("verify: a missing manifest or artifact is CORRUPT, not a throw", () => {
   const v = verifyBackup(join(home, "does-not-exist"));
   assert.equal(v.outcome, "corrupt");
   assert.ok(v.reasons.some((r) => /missing manifest/i.test(r)));
+});
+
+test("verify: an unreadable/unhashable artifact is CORRUPT, not a throw (AC3)", async () => {
+  const src = join(home, "forge.db");
+  seedStore(src);
+  const { backupDir, artifactPath } = await createBackup({ home, sourcePath: src });
+
+  // Replace the artifact with a directory: it still "exists" (so verify gets past the
+  // existence checks) but hashing it throws EISDIR. That read is OUTSIDE the SQLite
+  // try/catch, and the CLI calls verifyBackup with no handler — pre-fix this leaked as
+  // an uncaught exception rather than a corrupt result.
+  rmSync(artifactPath, { force: true });
+  mkdirSync(artifactPath);
+
+  const v = verifyBackup(backupDir); // must NOT throw
+  assert.equal(v.outcome, "corrupt");
+  assert.equal(v.ok, false);
+  assert.ok(
+    v.reasons.some((r) => /could not read\/hash artifact/i.test(r)),
+    "verify must record the unreadable-artifact reason instead of throwing",
+  );
 });
