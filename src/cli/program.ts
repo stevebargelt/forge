@@ -52,6 +52,7 @@ import { registerReadiness } from "./commands/readiness.js";
 import { registerRecordHostVerification } from "./commands/record-host-verification.js";
 import { registerPublish } from "./commands/publish.js";
 import { registerStore } from "./commands/store.js";
+import { registerBackup } from "./commands/backup.js";
 import { registerRelease } from "./commands/release.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
@@ -128,6 +129,7 @@ export function buildProgram(): Command {
   registerRecordHostVerification(program);
   registerPublish(program);
   registerStore(program);
+  registerBackup(program);
   registerRelease(program);
 
   return program;
