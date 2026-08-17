@@ -829,6 +829,8 @@ Each `CampaignSummary`: `{ campaignId, goal, mode, status, verdict, createdAt, u
 
 **Both routes report a THROWN store read as `503`, not `200`** (RF-1) — a store predating the campaign tables, or otherwise unreadable, is a failure, distinct from a legitimately empty list (`200 { campaigns: [] }`) or an unknown id (`404`). The `503` body shape is unchanged (`{ projectKey: null, campaigns: [], error }` / `{ error }`), so the client's existing degraded-state rendering (`Campaigns unreadable: <message>`) needs no separate branch for it.
 
+**A non-numeric `?limit=` on `/api/campaigns` falls back to the default `50`** (RF-1), rather than clamping `Number()`'s `NaN` — `clamp(NaN, 1, 200)` stays `NaN`, and slicing a list to a `NaN` length coerces to `0`, which would have reported a garbage limit as a truthfully-empty list. This fallback is applied only on this route; the other `?limit=` query params in this file do not yet share it.
+
 ### `GET /api/agent-runtime` response shape (`AgentRuntimeTrends`)
 
 Read-only (FG-648). The mean duration of completed agent tasks, bucketed over time, overall and per role. Distinct from `/api/ops`'s median-by-phase table, which is a single point-in-time roll-up: this one buckets the same durations across a window so a trend is visible. **TASK based, not run based**: each observation is one completed agent task, so `sampleCount` below counts task attempts, not forge runs — a single run with several tasks (fanout children, retries) contributes several observations. The RUN-based sibling metric is [`/api/completed-runs`](#get-apicompleted-runs-response-shape-completedruntrends) below (FG-683); do not read this endpoint's `sampleCount` as a throughput or run-count figure. Top-level fields:
