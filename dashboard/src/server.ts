@@ -37,6 +37,10 @@ import {
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
+import { assembleCampaignReport, assembleCampaignSummaries } from "@forge/campaign-report";
+import type { ReportResult } from "@forge/campaign-report";
+import { runInReadOnlyDbScope } from "@forge/store-db";
+import type { Campaign } from "@forge/types";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
@@ -506,6 +510,74 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       payload = JSON.stringify({ projectKey: null, rows: [], degraded: [], error: message });
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  // FG-395: the read-only Campaigns projection — recent campaign summaries for the
+  // owner project (here), and one campaign's full report (below). Both REUSE the
+  // campaign report contract (src/campaign/report.ts) rather than re-deriving
+  // done-audit / readiness / verdict / next-action / git-state in dashboard SQL,
+  // and both run the assembly inside runInReadOnlyDbScope so the reused store reads
+  // can NEVER open the shared ~/.forge/forge.db writable or run a migration against
+  // it: the store's getDb() default is read-WRITE (db.ts:702), and the scope forces
+  // the read-only handle for the no-arg calls assembleCampaignReport makes.
+  if (path === "/api/campaigns") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 200);
+    // Built BEFORE any byte is written — the /api/reviews precedent: a read that
+    // throws after writeHead cannot be reported and becomes a blank page.
+    let payload: string;
+    try {
+      // Owner resolution uses the dashboard's OWN registry, exactly as /api/queue
+      // and /api/shipping-audit resolve it. An unregistered projectDir still filters
+      // to campaigns recorded against that exact path (the fallback set) rather than
+      // widening to every project's campaigns; an unscoped request lists all.
+      const owner = resolveOwnerProject(projectsForDashboard(), projectKey, projectDir);
+      const scoped = projectKey !== undefined || projectDir !== undefined;
+      const acceptedDirs = new Set<string>(
+        owner
+          ? [...owner.projectDirs, ...owner.checkouts.map((c) => c.projectDir)]
+          : projectDir
+            ? [projectDir]
+            : [],
+      );
+      const accepts = (c: Campaign): boolean =>
+        !scoped ? true : c.projectDir !== undefined && acceptedDirs.has(c.projectDir);
+      const campaigns = runInReadOnlyDbScope(() => assembleCampaignSummaries(accepts, limit));
+      payload = JSON.stringify({ projectKey: owner?.key ?? null, campaigns });
+    } catch (err) {
+      // A store predating the campaign tables has no rows to read, and a read-only
+      // open never migrates them into existence (db.ts's policy). Report it and keep
+      // the page up, exactly as /api/shipping-audit does for a pre-tables store.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/campaigns: reading campaign summaries failed:", err);
+      payload = JSON.stringify({ projectKey: null, campaigns: [], error: message });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  // FG-395: one campaign's full detail. There is NO separate serializer — the wire
+  // form is exactly JSON.stringify(assembleCampaignReport(id)). Unknown id → the
+  // assembler returns null → 404. Same read-only scope + degraded-store guard as the
+  // list above.
+  if (path.startsWith("/api/campaign/")) {
+    const id = path.slice("/api/campaign/".length);
+    let report: ReportResult | null;
+    try {
+      report = runInReadOnlyDbScope(() => assembleCampaignReport(id));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`/api/campaign/${id}: assembling the campaign report failed:`, err);
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ error: message }));
+      return;
+    }
+    if (!report) {
+      res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: `campaign ${id} not found` }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(report));
     return;
   }
 

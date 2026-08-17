@@ -11,6 +11,7 @@ import { BacklogView } from "./backlog.js";
 import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
 import { ShippingAuditView } from "./shipping-audit.js";
+import { CampaignsView } from "./campaigns.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
@@ -95,6 +96,11 @@ function App() {
   // FG-386: the shipping-audit projection, scoped to ONE project like the queue.
   const [shippingAudit, setShippingAudit] = useState(null);
   const shippingSeq = useRef(0);
+  // FG-395: the campaign list projection + the currently-opened campaign's detail.
+  // Works unscoped (all campaigns) as well as project-scoped, unlike shipping-audit.
+  const [campaigns, setCampaigns] = useState(null);
+  const [selectedCampaignId, setSelectedCampaignId] = useState(null);
+  const campaignsSeq = useRef(0);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
   // so a launched loop is visible before any task row exists for it.
@@ -401,6 +407,40 @@ function App() {
     return () => clearInterval(id);
   }, [pollShippingAudit, view]);
 
+  // FG-395: the campaigns list. Scope-token like pollShippingAudit so a read for the
+  // previous project can never overwrite the one just switched to. Polled at the slow
+  // cadence — the detail overlay owns its own faster re-read while a campaign runs.
+  const pollCampaigns = useCallback(async () => {
+    const seq = (campaignsSeq.current += 1);
+    try {
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const res = await fetch(`/api/campaigns${q}`);
+      if (seq !== campaignsSeq.current) return;
+      if (res.ok) setCampaigns(await res.json());
+      else setCampaigns(null);
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== campaignsSeq.current) return;
+      setCampaigns(null);
+      setError(String(e));
+    }
+  }, [projectFilter, checkoutFilter]);
+
+  // Drop the list + any open detail the instant the scope changes, so the previous
+  // project's campaigns are never shown under the new scope while the read is in flight.
+  useEffect(() => {
+    campaignsSeq.current += 1;
+    setCampaigns(null);
+    setSelectedCampaignId(null);
+  }, [projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "campaigns") return;
+    pollCampaigns();
+    const id = setInterval(pollCampaigns, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollCampaigns, view]);
+
   const pollBacklog = useCallback(async () => {
     if (!projectFilter) { setBacklog(null); return; }
     try {
@@ -518,6 +558,7 @@ function App() {
             <button class=${"tab " + (view === "queue" ? "tab-active" : "")} onClick=${() => switchView("queue")}>queue</button>
             <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
             <button class=${"tab " + (view === "shipping" ? "tab-active" : "")} onClick=${() => switchView("shipping")}>shipping</button>
+            <button class=${"tab " + (view === "campaigns" ? "tab-active" : "")} onClick=${() => switchView("campaigns")}>campaigns</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -586,6 +627,13 @@ function App() {
         ? html`<${ReviewsView} data=${reviews} />`
         : view === "shipping"
         ? html`<${ShippingAuditView} data=${shippingAudit} />`
+        : view === "campaigns"
+        ? html`<${CampaignsView}
+            data=${campaigns}
+            selectedId=${selectedCampaignId}
+            onSelect=${setSelectedCampaignId}
+            onCloseDetail=${() => setSelectedCampaignId(null)}
+          />`
         : view === "verify"
         ? html`<${VerificationsView}
             inProgress=${inProgressVerifications}

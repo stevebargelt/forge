@@ -574,6 +574,28 @@ let _dbRW: DatabaseInstance | null = null;
 let _dbRO: DatabaseInstance | null = null;
 let _generation = 0;
 
+// FG-395: a bounded region of work that must NEVER acquire a write handle or run
+// migrations, even though the store functions it calls all reach getDb() with no
+// args. The read-only dashboard reuses assembleCampaignReport (src/campaign/
+// report.ts) whose every store read goes through getDb() — a no-arg call would
+// otherwise take the writable branch below (ensureForgeDirs + SCHEMA_SQL +
+// applyMigrations) against the live shared ~/.forge/forge.db, which has
+// machine-wide blast radius. Inside this scope getDb() behaves exactly as if
+// every caller passed {readOnly:true}. A DEPTH counter, not a boolean, so nested
+// scopes compose and the read-only default is only lifted when the OUTERMOST
+// scope exits. fn MUST be synchronous — the scope is a synchronous dynamic extent
+// (assembleCampaignReport and listCampaigns are both synchronous); an await inside
+// would let unrelated work observe the flag.
+let _readOnlyScopeDepth = 0;
+export function runInReadOnlyDbScope<T>(fn: () => T): T {
+  _readOnlyScopeDepth++;
+  try {
+    return fn();
+  } finally {
+    _readOnlyScopeDepth--;
+  }
+}
+
 // A CLOSED handle is not a connection. better-sqlite3 keeps the object alive
 // after close() and throws "The database connection is not open" on first use,
 // so a cached-but-closed handle is a landmine that only detonates at the call
@@ -688,7 +710,9 @@ export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
 
   // FG-608: the read path returns BEFORE ensureForgeDirs() — creating ~/.forge as
   // a side effect of reading is the same class of mutation as creating forge.db.
-  if (opts?.readOnly === true) {
+  // FG-395: a positive _readOnlyScopeDepth forces this branch for no-arg callers
+  // too, so a reused report assembler cannot silently open the writable handle.
+  if (opts?.readOnly === true || _readOnlyScopeDepth > 0) {
     if (_dbRO) return _dbRO;
     // Deliberately NOT `if (!_dbRW) getDb()`. That bootstrap was the whole bug:
     // it ran SCHEMA_SQL + applyMigrations from a read. A cached writable handle is
