@@ -20,7 +20,7 @@ That content used to live in this file, where it had no maintenance owner and dr
 
 ## Session start: use `forge backlog`, don't read backlog files whole
 
-This repo uses the structured backlog format: tickets live under `backlog/stories/`, `backlog/done/`, etc.; session-handoff notes live at `backlog/notes.md`. **Use the `forge backlog` CLI** instead of reading these files directly — same data, ~30x less context.
+This repo is DB-authoritative: tickets live in `~/.forge/forge.db`, not in Markdown files. **Use the `forge backlog` CLI** (`list`, `show`, `file`, `edit`, `move`, `close`, …) for all ticket access. `backlog/notes.md` (session-handoff notes) and `backlog/PLAN.md` (operator sequencing) are retained on-disk files; the old `backlog/{stories,epics,ideas,done}/` ticket corpus was frozen at the DB cutover and has since been removed (FG-670).
 
 Standard session-start sequence:
 ```
@@ -29,11 +29,11 @@ forge backlog list --status active          # open tickets (titles only)
 forge backlog show <id>                     # full body when you need one
 ```
 
-`forge backlog --help` lists the rest (`file`, `close`, `move`, `notes add`, `notes replace`, `import`, `mode`, `migrate`). Only read the backlog directory whole if you genuinely need to scan across many ticket bodies at once — typically you don't.
+`forge backlog --help` lists the rest (`file`, `close`, `move`, `notes add`, `notes replace`, `import`, `mode`, `migrate`).
 
 Every `forge backlog` verb that reads tickets prints a one-line `store:` banner on **stderr** naming which store it read — `store: legacy markdown` (the pre-cutover default), or `store: db (project_key=…)` once a project cuts over to the DB store via `forge backlog migrate`. It is not an error or a warning; ignore it unless it names a store you didn't expect. It stays off stdout, so `--json` output is still safe to pipe. A `warning: … snapshot(s) are STALE` line under it *is* worth acting on: a host ticket write did not reach a running agent container, which may be reading an older ticket.
 
-This repo **cut over to the DB store on 2026-07-29** (FG-608; flip recorded by revision `f391b54`, `project_key` in `.forge/config.yml`). Expect `store: db` from every backlog verb here. The cutover is one-way: there is no Markdown export, `backlog/*.md` is a frozen snapshot that nothing writes anymore, and forge refuses to flip back after the first DB-only edit. Never read `backlog/*.md` for ticket truth — the CLI is the only interface. See `docs/how-to-backlog-db-cutover.md` before running `forge backlog migrate` on any other project.
+This repo **cut over to the DB store on 2026-07-29** (FG-608; flip recorded by revision `f391b54`, `project_key` in `.forge/config.yml`). Expect `store: db` from every backlog verb here. The cutover is one-way: there is no Markdown export, and forge refuses to flip back after the first DB-only edit. The frozen `backlog/{stories,epics,ideas,done}/` corpus left behind by the cutover was itself removed on 2026-08-17 (FG-670) — those files no longer exist on disk at all. The CLI is the only interface for ticket truth. See `docs/how-to-backlog-db-cutover.md` before running `forge backlog migrate` on any other project.
 
 Sticky numbers (e.g. `#33`, `#41`) are stable across sessions and referenced from commit messages and ADRs. New tasks land via `forge backlog file "<title>"` (auto-assigns the next sticky); never renumber.
 
