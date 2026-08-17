@@ -252,6 +252,7 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
   let schemaVersion: number | null = null;
   let integrityOk = false;
   let incompatibleNewer = false;
+  let manifestSchemaMismatch = false;
   // A severely corrupt file makes `new Database` or PRAGMA integrity_check THROW
   // (SQLITE_CORRUPT / "file is not a database") rather than return a non-'ok' row —
   // both are "corrupt", never a leaked exception out of verify.
@@ -265,6 +266,15 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
         reasons.push(`integrity_check failed: ${rows.map((r) => r.integrity_check).join("; ")}`);
       }
       schemaVersion = db.pragma("user_version", { simple: true }) as number;
+      // The manifest's recorded schemaVersion is integrity metadata; a value that
+      // disagrees with the artifact's real user_version is a tamper signal, distinct
+      // from the forward-support gate below.
+      if (schemaVersion !== manifest.schemaVersion) {
+        manifestSchemaMismatch = true;
+        reasons.push(
+          `manifest schema version ${manifest.schemaVersion} disagrees with artifact user_version ${schemaVersion}`,
+        );
+      }
       // Reuse the forward gate verbatim — do NOT re-derive the rule. It throws iff
       // stored > SCHEMA_VERSION, which is exactly the incompatible-newer refusal.
       try {
@@ -282,7 +292,7 @@ export function verifyBackup(backupPath: string): VerifyBackupResult {
   }
 
   const checksumOk = actualSha === manifest.sha256;
-  if (!checksumOk || !integrityOk) {
+  if (!checksumOk || !integrityOk || manifestSchemaMismatch) {
     return { ...base, outcome: "corrupt", schemaVersion };
   }
   if (incompatibleNewer) {
