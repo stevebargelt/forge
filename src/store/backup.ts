@@ -27,16 +27,20 @@
 //   restore — the rename(2) over forge.db is the ONLY step that mutates the live
 //             path, so any failure during validation/staging leaves forge.db
 //             byte-for-byte untouched. Three quiescence layers, all reusing
-//             existing precedent: a host file lock (run-lock.ts), the
-//             journal_mode=DELETE quiesce PROOF (the exact mechanism
-//             runDestructiveConvergenceMigration relies on — the WAL→DELETE switch
-//             succeeds only when NO other connection holds the store), and an
-//             operator `--confirm-quiesced` assertion. The HONEST LIMIT is the same
-//             one converge documents: the file lock does not hard-fence an
-//             uncooperative writer (`forge next` knows nothing about backup.lock,
-//             and no SQLite lock survives the rename) — the guarantee against an
-//             uncooperative peer is fail-closed-at-quiesce-probe + operator
-//             quiescence, NOT a machine fence.
+//             existing precedent: a host file lock (run-lock.ts), a NON-MUTATING
+//             exclusivity PROOF (a read-only keeper held across a bare read-write
+//             probe that runs BEGIN EXCLUSIVE/ROLLBACK — see step 5 for why the keeper
+//             and the close-ordering are load-bearing), and an operator
+//             `--confirm-quiesced` assertion. The proof deliberately does NOT switch
+//             journal_mode: the earlier WAL→DELETE quiesce proof checkpointed the WAL
+//             and rewrote forge.db's header BEFORE the rename, so a crash in the
+//             post-probe→pre-rename window left forge.db non-byte-identical (the AC4
+//             defect this design fixes). The HONEST LIMIT is the same one converge
+//             documents: the file lock does not hard-fence an uncooperative writer
+//             (`forge next` knows nothing about backup.lock, and no SQLite lock
+//             survives the rename) — the guarantee against an uncooperative peer is
+//             fail-closed-at-exclusivity-probe + operator quiescence, NOT a machine
+//             fence.
 
 import Database from "better-sqlite3";
 import {
@@ -343,15 +347,18 @@ export class RestoreRefusedError extends Error {
  *      re-run integrity_check + the version gate.
  *   4. PRE-RESTORE SAFETY BACKUP: a real db.backup() of the CURRENT live store — the
  *      recovery path — into `backups/pre-restore-<ts>/`.
- *   5. QUIESCE PROOF: journal_mode=DELETE on a bare writable handle to the live store
- *      under busy_timeout=0; fail closed unless it returns 'delete'.
- *   6. SIDECAR HYGIENE: unlink any residual forge.db-wal / forge.db-shm.
+ *   5. QUIESCE PROOF (NON-MUTATING): a read-only KEEPER handle held across a bare
+ *      read-write PROBE that runs BEGIN EXCLUSIVE/ROLLBACK under busy_timeout=0; fail
+ *      closed on SQLITE_BUSY. Does NOT switch journal_mode — forge.db's own bytes stay
+ *      untouched (see the body for the checkpoint-on-close trap the keeper dodges).
+ *   6. SIDECAR HYGIENE: unlink any residual forge.db-wal / forge.db-shm BEFORE the swap.
  *   7. SWAP: rename(2) the temp OVER forge.db — the ONLY mutating step, atomic.
  *
- * `onStagedBeforeSwap` is a TEST SEAM ONLY (mirrors runDestructiveConvergenceMigration's
- * onQuiescedBeforeDdl): invoked immediately AFTER staging and BEFORE any live-path
- * touch, so a test can throw to simulate a crash "between stage and swap" and prove
- * forge.db is left byte-identical. Never passed in production.
+ * Two TEST SEAMS (both mirror runDestructiveConvergenceMigration's onQuiescedBeforeDdl;
+ * never passed in production): `onStagedBeforeSwap` fires immediately AFTER staging and
+ * BEFORE any live-path touch; `onQuiesceProvenBeforeSwap` fires AFTER the exclusivity
+ * proof and BEFORE the rename. Either lets a test throw to simulate a crash at that
+ * exact window and assert forge.db is left byte-identical (sha256).
  */
 export async function restoreBackup(opts: {
   backupPath: string;
@@ -359,6 +366,7 @@ export async function restoreBackup(opts: {
   targetPath?: string;
   confirmQuiesced: boolean;
   onStagedBeforeSwap?: () => void;
+  onQuiesceProvenBeforeSwap?: () => void;
 }): Promise<RestoreBackupResult> {
   const home = opts.home ?? FORGE_HOME;
   const targetPath = opts.targetPath ?? resolveDbPath();
@@ -434,41 +442,64 @@ export async function restoreBackup(opts: {
       preRestoreBackupDir = pre.backupDir;
     }
 
-    // Step 5 — QUIESCE PROOF. A bare writable handle (NOT getDb(): no SCHEMA_SQL, no
-    // applyMigrations, and nothing cached process-wide that would outlive the swap
-    // pointing at a soon-to-be-unlinked inode). journal_mode=DELETE under
-    // busy_timeout=0 is the exact mechanism runDestructiveConvergenceMigration uses:
-    // the WAL→DELETE switch acquires an exclusive lock and fully checkpoints, which
-    // it CANNOT do while any other connection holds the store, so a return of
-    // 'delete' proves quiescence AT THAT INSTANT. A failed switch leaves the mode
-    // WAL and the file untouched — the fail-closed refusal that also keeps forge.db
-    // byte-identical when an active writer is present.
-    const live = new Database(targetPath);
-    let journalMode: unknown;
+    // Step 5 — QUIESCE PROOF, NON-MUTATING. The earlier design switched
+    // journal_mode=DELETE on the live store to prove exclusivity — but that switch
+    // CHECKPOINTS the WAL and rewrites forge.db's header, mutating its bytes BEFORE
+    // the atomic rename, so a crash in the post-probe→pre-rename window left forge.db
+    // non-byte-identical (the AC4 defect). This proves the same exclusivity WITHOUT
+    // touching forge.db's own bytes.
+    //
+    // THE TRAP IT DODGES — CHECKPOINT-ON-CLOSE: the LAST read-WRITE connection to
+    // close a WAL store that carries a dirty (un-checkpointed) WAL performs a
+    // checkpoint as it closes, rewriting forge.db. A read-ONLY last close NEVER
+    // checkpoints. So a read-only KEEPER is held OPEN across the whole probe: while
+    // it is open the read-write PROBE is never the last connection, and the keeper —
+    // closed LAST and read-only — cannot checkpoint. This is verified in-container.
+    //
+    // Both are bare `new Database` handles (NOT getDb(): no SCHEMA_SQL, no
+    // applyMigrations, no opener registry / maintenance flag, and nothing cached
+    // process-wide that would outlive the swap pointing at a soon-to-be-unlinked
+    // inode). We NEVER switch journal_mode.
+    const keeper = new Database(targetPath, { readonly: true });
     try {
-      live.pragma("busy_timeout = 0");
+      const probe = new Database(targetPath);
       try {
-        journalMode = live.pragma("journal_mode = DELETE", { simple: true });
-      } catch (e) {
-        throw new RestoreRefusedError(
-          `forge backup restore: refusing — could not acquire exclusive access to the live store ` +
-            `(quiesce required; another forge process holds it). Underlying: ${(e as Error).message}`,
-        );
-      }
-      if (journalMode !== "delete") {
-        throw new RestoreRefusedError(
-          `forge backup restore: refusing — the live store is in use by another forge process ` +
-            `(quiesce proof returned '${String(journalMode)}', not 'delete'). Stop every forge ` +
-            `process on this FORGE_HOME and retry.`,
-        );
+        probe.pragma("busy_timeout = 0");
+        // BEGIN EXCLUSIVE takes the writer lock immediately; under busy_timeout=0 it
+        // raises SQLITE_BUSY if an active writer holds the store. Success proves no
+        // active writer AT THAT INSTANT; we needed only the proof, so ROLLBACK at
+        // once (BEGIN EXCLUSIVE opened no changes to keep). Any throw ⇒ fail closed.
+        try {
+          probe.exec("BEGIN EXCLUSIVE");
+          probe.exec("ROLLBACK");
+        } catch (e) {
+          throw new RestoreRefusedError(
+            `forge backup restore: refusing — could not acquire exclusive access to the live store ` +
+              `(quiesce required; another forge process holds it). Stop every forge process on this ` +
+              `FORGE_HOME and retry. Underlying: ${(e as Error).message}`,
+          );
+        }
+      } finally {
+        // ORDERING IS LOAD-BEARING (verified): close the read-WRITE probe FIRST so the
+        // read-only keeper is what closes LAST. A read-write last close of a dirty WAL
+        // WOULD checkpoint-and-rewrite forge.db; a read-only last close never does.
+        probe.close();
       }
     } finally {
-      live.close();
+      keeper.close();
     }
 
-    // Step 6 — SIDECAR HYGIENE. Leaving WAL removes -wal/-shm, but unlink any
-    // residual explicitly before the rename so a stray sidecar can never be
-    // reinterpreted against the swapped-in single-file DB.
+    // TEST SEAM — a crash simulated HERE (exclusivity proven, before the rename) must
+    // leave forge.db byte-identical: step 5 mutated none of its own bytes. This is the
+    // exact window the old journal_mode=DELETE proof failed. Never passed in production.
+    opts.onQuiesceProvenBeforeSwap?.();
+
+    // Step 6 — SIDECAR HYGIENE, load-bearing (Option A: BEFORE the rename). The
+    // swapped-in artifact is a single-file DELETE-mode DB; a stale forge.db-wal left
+    // beside it would be read as AUTHORITATIVE — the restored rows would vanish behind
+    // a ghost WAL that even integrity_check reports as 'ok'. Removing these separate
+    // sidecar files does not mutate forge.db's own bytes. (Option B — remove AFTER the
+    // rename — has a silent-corruption crash window: do NOT do that.)
     rmSync(`${targetPath}-wal`, { force: true });
     rmSync(`${targetPath}-shm`, { force: true });
 

@@ -10,7 +10,10 @@
 //   - restore atomically REPLACES the live store (a modification made after the
 //     backup is gone; the backed-up rows are back);
 //   - an interrupt BETWEEN stage and swap leaves forge.db byte-identical;
-//   - an active second live connection makes the quiesce proof return 'wal', so
+//   - an interrupt AFTER the exclusivity proof, before the swap, ALSO leaves forge.db
+//     byte-identical (the non-mutating quiesce proof: the case the old
+//     journal_mode=DELETE proof failed);
+//   - an active WRITER makes the BEGIN EXCLUSIVE quiesce probe raise SQLITE_BUSY, so
 //     restore REFUSES and the live store is unchanged;
 //   - a pre-restore safety backup of the previous store is taken and is itself
 //     restorable.
@@ -177,29 +180,61 @@ test("interrupt between stage and swap leaves forge.db byte-identical", async ()
   assert.ok(before.equals(after), "forge.db must be byte-for-byte unchanged after a pre-swap crash");
 });
 
-test("active writer: a second live connection makes the quiesce proof refuse, live store unchanged", async () => {
+test("interrupt AFTER the exclusivity proof, before swap, leaves forge.db byte-identical", async () => {
+  seedFullStore(target);
+  const { backupDir } = await createBackup({ home, sourcePath: target });
+  const before = readFileSync(target);
+
+  await assert.rejects(
+    restoreBackup({
+      backupPath: backupDir,
+      home,
+      targetPath: target,
+      confirmQuiesced: true,
+      // The exact window the OLD journal_mode=DELETE proof failed: exclusivity is
+      // proven and the pre-restore safety backup is taken, but the rename has not run.
+      // The non-mutating proof must have touched none of forge.db's own bytes.
+      onQuiesceProvenBeforeSwap: () => {
+        throw new Error("simulated crash after quiesce proof, before swap");
+      },
+    }),
+    /simulated crash after quiesce proof, before swap/,
+  );
+
+  const after = readFileSync(target);
+  assert.ok(before.equals(after), "forge.db must be byte-for-byte unchanged after a post-proof pre-swap crash");
+});
+
+test("active writer: a live write transaction makes the quiesce probe refuse, live store unchanged", async () => {
   const original = seedFullStore(target);
   const { backupDir } = await createBackup({ home, sourcePath: target });
 
-  // A second connection holding an OPEN read transaction keeps the store locked in
-  // WAL — exactly the shape runDestructiveConvergenceMigration's quiesce proof
-  // fails closed against: journal_mode=DELETE cannot complete and returns 'wal'.
+  // A second connection holding an OPEN write transaction holds the WAL writer lock,
+  // so the restore's BEGIN EXCLUSIVE probe (busy_timeout=0) raises SQLITE_BUSY and
+  // restore fails closed. (A mere reader in WAL does NOT block a writer lock and no
+  // longer forces refusal — the non-mutating proof only fences an active WRITER.)
   const writer = new Database(target);
   writer.pragma("journal_mode = WAL");
-  writer.exec("BEGIN");
-  writer.prepare("SELECT COUNT(*) FROM runs").get();
+  writer.exec("BEGIN IMMEDIATE");
+  writer.prepare(
+    "INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('held-writer', 'feature', 'held', 'active', ?)",
+  ).run(T0);
   try {
     await assert.rejects(
       restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true }),
-      (e: unknown) => e instanceof RestoreRefusedError && /quiesce/i.test((e as Error).message),
+      (e: unknown) => e instanceof RestoreRefusedError && /exclusive access/i.test((e as Error).message),
     );
   } finally {
-    writer.exec("COMMIT");
+    writer.exec("ROLLBACK");
     writer.close();
   }
 
   const after = counts(target, Object.keys(original));
   assert.deepEqual(after, original, "a refused restore must leave the live store's data unchanged");
+  // user_version is unchanged on refusal too — the probe never switched journal_mode.
+  const db = new Database(target, { readonly: true });
+  assert.equal(db.pragma("user_version", { simple: true }), 0, "refusal must not touch user_version");
+  db.close();
 });
 
 test("restore refuses a corrupt candidate before touching the live path", async () => {

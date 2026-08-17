@@ -48,31 +48,54 @@ function sha(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+// The non-mutating quiesce proof (BEGIN EXCLUSIVE on a bare probe held under a
+// read-only keeper) fails closed ONLY against an active WRITER — a held writer lock
+// makes BEGIN EXCLUSIVE raise SQLITE_BUSY (busy_timeout=0). A mere reader or an idle
+// connection does NOT hold the writer lock in WAL and so no longer forces refusal:
+// operator quiescence (--confirm-quiesced) is what covers those, exactly as the
+// contract states. This is the deliberate consequence of NOT switching journal_mode.
+test("restore fails closed with an active writer and preserves the live store", async () => {
+  seed();
+  const { backupDir } = await createBackup({ home, sourcePath: target });
+  const before = liveState();
+  const peer = new Database(target);
+  peer.exec("BEGIN IMMEDIATE");
+  peer.prepare("INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('held-write', 'feature', 'held', 'active', '1970-01-01T00:00:00.000Z')").run();
+  try {
+    await assert.rejects(
+      restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true }),
+      (error: unknown) => error instanceof RestoreRefusedError && /exclusive access/i.test((error as Error).message),
+    );
+  } finally {
+    if (peer.inTransaction) peer.exec("ROLLBACK");
+    peer.close();
+  }
+  assert.deepEqual(liveState(), before, "refusal must not change rows or user_version");
+  const check = new Database(target, { readonly: true });
+  assert.equal((check.pragma("integrity_check") as { integrity_check: string }[])[0]?.integrity_check, "ok");
+  check.close();
+});
+
+// The mirror of the above: a NON-writing peer (reader / idle) does NOT hold the
+// writer lock, so the exclusivity proof succeeds and restore proceeds — the proof
+// still never mutated forge.db en route (the swap itself is the mutation). Documents
+// the intentional narrowing to active-writer-only refusal.
 for (const [kind, hold] of [
   ["read transaction", (db: DatabaseInstance) => { db.exec("BEGIN"); db.prepare("SELECT * FROM runs").all(); }],
-  ["write transaction", (db: DatabaseInstance) => { db.exec("BEGIN IMMEDIATE"); db.prepare("INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('held-write', 'feature', 'held', 'active', '1970-01-01T00:00:00.000Z')").run(); }],
   ["idle open connection", (db: DatabaseInstance) => { db.pragma("journal_mode = WAL"); }],
 ] as const) {
-  test(`restore fails closed with a ${kind} and preserves the live store`, async () => {
+  test(`restore is NOT blocked by a ${kind} (writer-only quiesce proof)`, async () => {
     seed();
     const { backupDir } = await createBackup({ home, sourcePath: target });
-    const before = liveState();
     const peer = new Database(target);
     hold(peer);
     try {
-      await assert.rejects(
-        restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true }),
-        (error: unknown) => error instanceof RestoreRefusedError,
-      );
+      const result = await restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true });
+      assert.equal(result.restored, true, "a non-writing peer must not force refusal");
     } finally {
       if (peer.inTransaction) peer.exec("ROLLBACK");
       peer.close();
     }
-    assert.deepEqual(liveState(), before, "refusal must not change rows or user_version");
-    // A peer in WAL may legitimately retain sidecars after close; prove they are
-    // not a corrupting state by opening the main store read-only and running
-    // SQLite's own consistency check (rather than treating mere existence as
-    // corruption).
     const check = new Database(target, { readonly: true });
     assert.equal((check.pragma("integrity_check") as { integrity_check: string }[])[0]?.integrity_check, "ok");
     check.close();
@@ -104,7 +127,7 @@ test("verify is read-only for both artifact and live store", async () => {
   );
 });
 
-test("a peer opened at the staging seam is still refused before the swap", async () => {
+test("a writer that appears at the staging seam is still refused before the swap", async () => {
   seed();
   const { backupDir } = await createBackup({ home, sourcePath: target });
   let peer: DatabaseInstance | undefined;
@@ -115,17 +138,55 @@ test("a peer opened at the staging seam is still refused before the swap", async
         home,
         targetPath: target,
         confirmQuiesced: true,
+        // A WRITER opened AFTER staging but before the (later) quiesce probe is still
+        // caught by BEGIN EXCLUSIVE — proving the probe evaluates state at ITS instant,
+        // not at stage time. (An idle/reader peer here would legitimately proceed.)
         onStagedBeforeSwap: () => {
           peer = new Database(target);
-          peer.pragma("journal_mode = WAL");
+          peer.exec("BEGIN IMMEDIATE");
+          peer.prepare("INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('seam-write', 'feature', 'seam', 'active', '1970-01-01T00:00:00.000Z')").run();
         },
       }),
-      (error: unknown) => error instanceof RestoreRefusedError,
+      (error: unknown) => error instanceof RestoreRefusedError && /exclusive access/i.test((error as Error).message),
     );
   } finally {
+    if (peer?.inTransaction) peer.exec("ROLLBACK");
     peer?.close();
   }
   assert.equal(liveState().count, 1);
+});
+
+test("a stale forge.db-wal/-shm beside the target does not survive the restore to corrupt the swapped-in db", async () => {
+  seed(); // target: one row 'backup-run', sidecars removed
+  const { backupDir } = await createBackup({ home, sourcePath: target }); // backup captures exactly that
+
+  // Fabricate a REAL residual WAL as a prior non-clean shutdown would leave one: write
+  // an extra committed row into the WAL WITHOUT checkpointing, snapshot the sidecar
+  // bytes, then restore them beside the target after the clean close checkpointed them
+  // away. The stale -wal now describes a 'ghost-run' the backup does not contain.
+  const w = new Database(target);
+  w.pragma("journal_mode = WAL");
+  w.pragma("wal_autocheckpoint = 0");
+  w.prepare("INSERT INTO runs (id, workflow, title, status, created_at) VALUES ('ghost-run', 'feature', 'ghost', 'active', '1970-01-01T00:00:00.000Z')").run();
+  const staleWal = readFileSync(`${target}-wal`);
+  const staleShm = readFileSync(`${target}-shm`);
+  w.close();
+  writeFileSync(`${target}-wal`, staleWal);
+  writeFileSync(`${target}-shm`, staleShm);
+
+  const result = await restoreBackup({ backupPath: backupDir, home, targetPath: target, confirmQuiesced: true });
+  assert.equal(result.restored, true);
+
+  // Option-A sidecar hygiene (removal BEFORE the rename) ran: no ghost WAL survives.
+  assert.equal(existsSync(`${target}-wal`), false, "restore must remove the residual -wal before the swap");
+  assert.equal(existsSync(`${target}-shm`), false, "restore must remove the residual -shm before the swap");
+
+  const db = new Database(target, { readonly: true });
+  assert.equal((db.pragma("integrity_check") as { integrity_check: string }[])[0]?.integrity_check, "ok");
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM runs").get() as { n: number }).n, 1, "only the backed-up row survives");
+  assert.equal(db.prepare("SELECT 1 FROM runs WHERE id='ghost-run'").get(), undefined, "the stale-WAL ghost row must not be served");
+  assert.ok(db.prepare("SELECT 1 FROM runs WHERE id='backup-run'").get(), "the restored row is authoritative");
+  db.close();
 });
 
 test("verify rejects a manifest whose schemaVersion disagrees with the artifact", async () => {
