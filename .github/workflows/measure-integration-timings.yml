@@ -23,8 +23,9 @@ on:
 jobs:
   measure:
     runs-on: ubuntu-latest
-    # The serial measure is ~17 min; give it generous headroom over that.
-    timeout-minutes: 30
+    # The serial measure runs each of ~287 files in its own process; on the x64
+    # CI runner that is ~40 min (well over the ~17 min a faster host takes).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
