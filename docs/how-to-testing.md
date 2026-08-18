@@ -163,12 +163,18 @@ npm run test:unit
 # CLI subprocess / real FS / real DB
 npm run test:integration
 
-# Re-measure per-file integration cost and rewrite scripts/integration-timings.json,
-# the manifest CI's eight bulk shards are balanced against (FG-624/FG-704). Serial by
-# design — run it in a linux node:24 container matching CI (see "Refreshing the
-# timing manifest" above) and commit the result. Run it when the tier's shape
+# Rough/relative re-measure of per-file integration cost. NOT authoritative for CI
+# balance, and its output must NOT be committed unless it was measured on the x64 CI
+# architecture. The CANONICAL refresh that produces the committed
+# scripts/integration-timings.json — the manifest CI's eight bulk shards are balanced
+# against (FG-624/FG-704) — is the x64 "Measure integration timings" CI job
+# (workflow_dispatch): run it, download the integration-timings artifact, and commit that
+# (see "Refreshing the timing manifest" above). An off-architecture local run — e.g. an
+# arm64 laptop, or a linux node:24 container on Apple Silicon — mis-balances the x64
+# shards even though the weights are relative-only, because the arm64->x64 slowdown is
+# non-uniform. Serial by design; useful locally as a rough aid when the tier's shape
 # changes materially, or when the coverage guard (src/integration-timings-coverage.test.ts)
-# reds; a stale manifest degrades gracefully (unmeasured files still run, at a
+# reds — a stale manifest degrades gracefully (unmeasured files still run, at a
 # default weight) until coverage drops below its 95% floor.
 npm run test:integration:timings
 
