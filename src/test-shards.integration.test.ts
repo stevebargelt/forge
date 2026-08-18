@@ -109,7 +109,7 @@ if (process.env.FG704_FAIL_SERIAL === "1" && args.includes("${SERIAL_FILE}")) pr
   chmodSync(node, 0o755);
 
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}`, FG704_NODE_LOG: log };
-  const SERIAL_ARGV = ["--import", "tsx", "--import", "./src/test-setup.ts", "--test-concurrency=1", "--test", SERIAL_FILE];
+  const SERIAL_ARGV = ["--import", "tsx", "--import", "./src/integration-build-preload.ts", "--import", "./src/test-setup.ts", "--test-concurrency=1", "--test", SERIAL_FILE];
   try {
     // The dedicated serial lane: exactly one `--test` run, only fg576, serial concurrency.
     rmSync(log, { force: true });
