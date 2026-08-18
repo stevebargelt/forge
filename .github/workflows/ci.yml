@@ -9,18 +9,22 @@ name: CI
 # job `test-extended` (FG-495) is the required merge check carrying the
 # integration + worktree tiers moved out of the fast gate — real
 # subprocess/git/DB coverage that's still trust-sensitive. It is now a
-# lightweight FINAL AGGREGATE: the slow work is sharded across nine
-# concurrent jobs — `integration_1`..`integration_5` (root integration tier,
-# FG-624: partitioned by MEASURED per-file duration rather than Node's
-# --test-shard, which split by file index and left one shard at 5m25s
+# lightweight FINAL AGGREGATE: the slow work is sharded across ELEVEN
+# concurrent jobs (FG-704) — `integration_1`..`integration_6` (root integration
+# BULK tier, FG-624: partitioned by MEASURED per-file duration rather than
+# Node's --test-shard, which split by file index and left one shard at 5m25s
 # against this 6-minute ceiling while its siblings finished in 2.5 min),
-# `worktree` (root worktree tier), `dashboard_integration` (dashboard
-# workspace's own integration tier), and `dashboard_browser` (FG-642: the
-# dashboard's real-Chrome tier, which until then ran in CI nowhere and
+# `integration_serial` (FG-681/FG-704: the fg576 AC9 correlation suite, run
+# ALONE under --test-concurrency=1 in its own dedicated lane — it is EXCLUDED
+# from the six bulk shards so its real 30s production window never shares a job
+# with anything else), `worktree` (root worktree tier), `dashboard_integration`
+# (dashboard workspace's own integration tier), and `dashboard_browser` (FG-642:
+# the dashboard's real-Chrome tier, which until then ran in CI nowhere and
 # skipped itself to green everywhere else), and `fg693_alias_identity` (FG-693:
 # the FG-693 identity suite re-run with TMPDIR pointed at a SYMLINK, so this
 # Linux runner carries the filesystem-alias class natively instead of being
-# green on it by accident of platform). `test-extended` `needs` all nine and, with
+# green on it by accident of platform). `test-extended` `needs` all eleven
+# (derived fail-closed from `toJSON(needs)`) and, with
 # `if: always()`, FAILS CLOSED unless every one reports success — so a
 # failed/cancelled/skipped shard cannot yield a green required check. Branch
 # protection still carries both contexts ("test" and "test-extended"; the
@@ -72,13 +76,15 @@ jobs:
       - name: Test (root + dashboard workspace)
         run: npm run test:all
 
-  # Root integration tier, sharded 5 ways by MEASURED per-file duration
-  # (FG-624): scripts/run-integration-tests.sh bin-packs the discovered files
-  # over scripts/integration-timings.json and hands each job an explicit file
-  # list. All five run concurrently (no `needs` between them). Five, not four:
-  # the balanced 4-way partition fits today (~3m54s projected worst shard) but
-  # leaves too little room for the failure this ticket came from — ONE new file
-  # landing on the wrong shard. Every shard runs on the .nvmrc interpreter alone
+  # Root integration BULK tier, sharded 6 ways by MEASURED per-file duration
+  # (FG-624/FG-704): scripts/run-integration-tests.sh bin-packs the discovered
+  # files — MINUS fg576, which runs alone in `integration_serial` below — over
+  # scripts/integration-timings.json and hands each job an explicit file list.
+  # All six run concurrently (no `needs` between them). Six, not five: FG-704
+  # pulled the ~62s fg576 serial suite out of shard 1 into its own lane and
+  # re-balanced the remainder six ways to restore the sub-5-minute objective
+  # with headroom against the ONE-new-file-on-the-wrong-shard failure this tier
+  # keeps regressing to. Every shard runs on the .nvmrc interpreter alone
   # (FG-647): the F31 preflight coverage in node-preflight.integration.test.ts is
   # deterministic under one Node, so no shard downloads a second one.
   #
@@ -116,8 +122,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 1/5)
-        run: bash scripts/run-integration-tests.sh 1/5
+      - name: Test integration (shard 1/6)
+        run: bash scripts/run-integration-tests.sh 1/6
 
   integration_2:
     runs-on: ubuntu-latest
@@ -136,8 +142,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 2/5)
-        run: bash scripts/run-integration-tests.sh 2/5
+      - name: Test integration (shard 2/6)
+        run: bash scripts/run-integration-tests.sh 2/6
 
   integration_3:
     runs-on: ubuntu-latest
@@ -156,8 +162,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 3/5)
-        run: bash scripts/run-integration-tests.sh 3/5
+      - name: Test integration (shard 3/6)
+        run: bash scripts/run-integration-tests.sh 3/6
 
   integration_4:
     runs-on: ubuntu-latest
@@ -176,8 +182,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 4/5)
-        run: bash scripts/run-integration-tests.sh 4/5
+      - name: Test integration (shard 4/6)
+        run: bash scripts/run-integration-tests.sh 4/6
 
   integration_5:
     runs-on: ubuntu-latest
@@ -196,8 +202,59 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 5/5)
-        run: bash scripts/run-integration-tests.sh 5/5
+      - name: Test integration (shard 5/6)
+        run: bash scripts/run-integration-tests.sh 5/6
+
+  integration_6:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test integration (shard 6/6)
+        run: bash scripts/run-integration-tests.sh 6/6
+
+  # The 7th integration job (FG-681/FG-704): the DEDICATED SERIAL LANE. It runs
+  # ONLY fg576-codex-adapter.integration.test.ts, alone, under
+  # `--test-concurrency=1` (the `serial` mode of run-integration-tests.sh takes
+  # no k/N selector). fg576's AC9 correlation tests observe a real 30-second
+  # production window and prove correlation at ordinary operating capacity; they
+  # must run with nothing else concurrent, not merely in a smaller bucket, or the
+  # same scheduling flake is only postponed. It is excluded from the six bulk
+  # shards entirely, so (bulk ∪ serial) is the whole discovered tier, disjoint.
+  # It keeps the shards' 10-minute ceiling (the ~62s suite has ample headroom;
+  # the ceiling is the hang backstop, deliberately NOT lowered to 5 — FG-704
+  # non-goal).
+  integration_serial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test integration (serial lane — fg576 alone, concurrency 1)
+        run: bash scripts/run-integration-tests.sh serial
 
   # Root worktree tier (~23s).
   worktree:
@@ -354,24 +411,36 @@ jobs:
 
   # Lightweight FINAL AGGREGATE — the required branch-protection context
   # `CI / test-extended`. It does no test work itself; it fails closed unless
-  # every one of the nine sharded/tiered jobs above reports success, so a
+  # every one of the eleven sharded/tiered jobs above reports success, so a
   # failed, cancelled, or skipped dependency cannot yield a green required
   # check.
+  #
+  # FG-704: the gate is DERIVED from `${{ toJSON(needs) }}`, not a hand-written
+  # `results=` list. A job present in `needs` is therefore automatically in the
+  # gating loop — the primary hazard here is a job added to `needs` but forgotten
+  # in the aggregate string, and deriving from the context makes that impossible.
+  # (node is the runner's ambient interpreter, used only to parse the JSON — this
+  # job provisions no second interpreter, cf. FG-647.)
   test-extended:
     runs-on: ubuntu-latest
-    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, worktree, dashboard_integration, dashboard_browser, fg693_alias_identity]
+    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_serial, worktree, dashboard_integration, dashboard_browser, fg693_alias_identity]
     if: always()
     steps:
       - name: Aggregate required extended gate
         if: always()
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          results="${{ needs.integration_1.result }} ${{ needs.integration_2.result }} ${{ needs.integration_3.result }} ${{ needs.integration_4.result }} ${{ needs.integration_5.result }} ${{ needs.worktree.result }} ${{ needs.dashboard_integration.result }} ${{ needs.dashboard_browser.result }} ${{ needs.fg693_alias_identity.result }}"
-          echo "dependency results: $results"
-          for r in $results; do
-            if [ "$r" != "success" ]; then
-              echo "::error::extended gate dependency not successful: $r"
-              exit 1
-            fi
-          done
-          echo "all nine extended-gate dependencies succeeded"
+          echo "dependency results: $NEEDS_JSON"
+          failed=$(NEEDS_JSON="$NEEDS_JSON" node -e '
+            const needs = JSON.parse(process.env.NEEDS_JSON);
+            const bad = Object.entries(needs).filter(([, v]) => v.result !== "success");
+            for (const [name, v] of bad) console.error(`::error::extended gate dependency not successful: ${name} = ${v.result}`);
+            process.stdout.write(String(bad.length));
+          ')
+          if [ "$failed" != "0" ]; then
+            echo "extended gate: $failed dependency(ies) did not report success"
+            exit 1
+          fi
+          echo "all extended-gate dependencies succeeded"
