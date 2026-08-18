@@ -17,6 +17,8 @@ name: Measure integration timings
 # see docs/how-to-testing.md, "Refreshing the timing manifest (FG-704)".
 on:
   workflow_dispatch:
+  push:
+    branches: [fix/fg704-integration-topology]
 
 jobs:
   measure:
