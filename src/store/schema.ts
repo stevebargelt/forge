@@ -1270,6 +1270,91 @@ CREATE INDEX IF NOT EXISTS idx_launch_observations_project
 CREATE INDEX IF NOT EXISTS idx_launch_observations_observed
   ON launch_observations(observed_at);
 
+-- FG-731: ci_waits — the durable record of a Forge-owned CI WAIT. The FOURTH,
+-- DISTINCT CI surface, and deliberately not any of the other three:
+--   * NOT launch_observations — a launch's terminal authority is a LOCAL tmux owner
+--     (owner_gone is terminal). A CI run is REMOTE on GitHub, so an owner/waiter dying
+--     never makes the run terminal — only RE-OBSERVATION does. The opposite rule.
+--   * NOT the review-loop's candidate-sha-bound ci_observed event stream — this wait is
+--     not bound to a tracked candidate sha (the FG-704 workflow_dispatch case is a run
+--     bound to no candidate at all).
+--   * NOT requiredCi — that stays exactly as-is; this surface rides ALONGSIDE it.
+--
+-- Brand-new table via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
+-- additive-only BD-15 contract as continuations / queue_claims / launch_observations
+-- above. SCHEMA_SQL is exec'd on EVERY writable open, so this CREATE is itself the
+-- additive migration that brings an aged ~/.forge/forge.db forward; a whole new table
+-- needs no ADDITIVE_COLUMNS entry (that list exists only for new COLUMNS on tables that
+-- CREATE TABLE IF NOT EXISTS would no-op over). No CHECK and no UNIQUE beyond the
+-- primary key (enum-as-convention, FG-585), so an old/new binary never fights a
+-- constraint the other lacks. user_version is NOT bumped.
+--
+-- TWO INDEPENDENT STATE AXES, and they must not be conflated:
+--   lifecycle_state — the STATE-MACHINE position that decides liveness:
+--       registered -> running -> completed_awaiting_advance -> {advanced|cancelled|abandoned}
+--     'terminal' is DERIVED from it (advanced/cancelled/abandoned are terminal; a
+--     'completed_awaiting_advance' is a REAL non-terminal state — a forge advance is owed,
+--     it is not a leak). TERMINAL AUTHORITY IS REMOTE: nothing here terminalizes on lease
+--     expiry — a dead waiter leaves a live wait, because the CI run is still real on GitHub.
+--   observed_state — the LAST-OBSERVED aggregate CI state, one of
+--       running (+ observed_m/observed_n), no_runs, unavailable (+ observed_reason), completed.
+--     'no_runs' ("no CI is running") and 'unavailable' ("CI state could not be determined")
+--     are DISTINCT and neither may collapse into the other or into a fake success/idle.
+--     NULL until the first observation — a register-before-poll row has looked at nothing.
+--
+-- observed_at is the last time a WRITER looked. It governs the LABEL a later step renders
+-- (fresh -> "running m/n"; stale -> "unavailable"), NEVER whether the wait exists: liveness
+-- is 'terminal = 0', independent of freshness.
+--
+-- REMOTE IDENTITY is whatever lets ANY forge process re-query gh without the original
+-- waiter: repo + actions_run_id (push/dispatch), or pr_number + head_sha + check_suite_ref
+-- (pr_checks). For workflow_dispatch the run id is unknown at trigger time, so the dispatch
+-- REQUEST is stored (workflow_file + dispatch_ref + dispatch_inputs) and actions_run_id/url
+-- are filled on first observation.
+--
+-- ASSOCIATION (run_id / ticket_id / project_dir + its PROVEN canonical form) is modeled on
+-- launch association (FG-679/FG-700) so the Step-2b derivation can place and scope the row
+-- with the SAME inProjectScope/resolveProjectScope machinery. It is a DIFFERENT axis from
+-- the remote identity: a forge run id is not the Actions run id (actions_run_id).
+-- Ownership is never inferred from a name, argv, or log text (FG-492).
+CREATE TABLE IF NOT EXISTS ci_waits (
+  id                    TEXT PRIMARY KEY,
+  kind                  TEXT NOT NULL,
+  -- remote identity
+  repo                  TEXT,
+  actions_run_id        TEXT,
+  pr_number             INTEGER,
+  head_sha              TEXT,
+  check_suite_ref       TEXT,
+  workflow_file         TEXT,
+  dispatch_ref          TEXT,
+  dispatch_inputs       TEXT,
+  url                   TEXT,
+  started_at            TEXT NOT NULL,
+  -- state machine
+  lifecycle_state       TEXT NOT NULL,
+  terminal              INTEGER NOT NULL,
+  terminal_disposition  TEXT,
+  -- last-observed aggregate CI state
+  observed_state        TEXT,
+  observed_reason       TEXT,
+  observed_m            INTEGER,
+  observed_n            INTEGER,
+  observed_at           TEXT,
+  -- owner/waiter identity + renewable epoch-ms lease (observability + adopt-on-recovery
+  -- ONLY; NEVER terminal authority)
+  owner                 TEXT,
+  lease_expires_at_ms   INTEGER,
+  -- association (FG-679/FG-700 shape)
+  run_id                TEXT,
+  ticket_id             TEXT,
+  project_dir           TEXT,
+  project_dir_canonical TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ci_waits_run ON ci_waits(run_id);
+CREATE INDEX IF NOT EXISTS idx_ci_waits_project ON ci_waits(project_dir);
+CREATE INDEX IF NOT EXISTS idx_ci_waits_live ON ci_waits(terminal);
+
 -- FG-591 (the operator work queue and its dispatcher): FOUR brand-new tables, all
 -- arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
 -- additive-only BD-15 contract as every table above. user_version is NOT bumped, so
@@ -1711,6 +1796,35 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // same reason as the runs entry above. `cwd` gets no companion column: it is the
   // launch's working directory, not a project key, and nothing decides ownership from it.
   { table: "launch_observations", column: "project_dir_canonical", ddl: "ALTER TABLE launch_observations ADD COLUMN project_dir_canonical TEXT" },
+
+  // FG-731: ci_waits is a whole new table, but the fresh-vs-migrated parity guard strips
+  // EVERY restorable column off EVERY table and relies on this list to restore it — so a
+  // new table's nullable columns are declared here exactly like launch_observations' were.
+  // The five non-restorable columns (id PK; kind/started_at/lifecycle_state/terminal, all
+  // NOT NULL with no default) are re-created only by the CREATE and are correctly absent
+  // here. run_id and project_dir are index-referenced (undroppable) and so ALSO appear in
+  // the parity guard's UNDROPPABLE set — the same dual listing launch_observations uses.
+  { table: "ci_waits", column: "repo", ddl: "ALTER TABLE ci_waits ADD COLUMN repo TEXT" },
+  { table: "ci_waits", column: "actions_run_id", ddl: "ALTER TABLE ci_waits ADD COLUMN actions_run_id TEXT" },
+  { table: "ci_waits", column: "pr_number", ddl: "ALTER TABLE ci_waits ADD COLUMN pr_number INTEGER" },
+  { table: "ci_waits", column: "head_sha", ddl: "ALTER TABLE ci_waits ADD COLUMN head_sha TEXT" },
+  { table: "ci_waits", column: "check_suite_ref", ddl: "ALTER TABLE ci_waits ADD COLUMN check_suite_ref TEXT" },
+  { table: "ci_waits", column: "workflow_file", ddl: "ALTER TABLE ci_waits ADD COLUMN workflow_file TEXT" },
+  { table: "ci_waits", column: "dispatch_ref", ddl: "ALTER TABLE ci_waits ADD COLUMN dispatch_ref TEXT" },
+  { table: "ci_waits", column: "dispatch_inputs", ddl: "ALTER TABLE ci_waits ADD COLUMN dispatch_inputs TEXT" },
+  { table: "ci_waits", column: "url", ddl: "ALTER TABLE ci_waits ADD COLUMN url TEXT" },
+  { table: "ci_waits", column: "terminal_disposition", ddl: "ALTER TABLE ci_waits ADD COLUMN terminal_disposition TEXT" },
+  { table: "ci_waits", column: "observed_state", ddl: "ALTER TABLE ci_waits ADD COLUMN observed_state TEXT" },
+  { table: "ci_waits", column: "observed_reason", ddl: "ALTER TABLE ci_waits ADD COLUMN observed_reason TEXT" },
+  { table: "ci_waits", column: "observed_m", ddl: "ALTER TABLE ci_waits ADD COLUMN observed_m INTEGER" },
+  { table: "ci_waits", column: "observed_n", ddl: "ALTER TABLE ci_waits ADD COLUMN observed_n INTEGER" },
+  { table: "ci_waits", column: "observed_at", ddl: "ALTER TABLE ci_waits ADD COLUMN observed_at TEXT" },
+  { table: "ci_waits", column: "owner", ddl: "ALTER TABLE ci_waits ADD COLUMN owner TEXT" },
+  { table: "ci_waits", column: "lease_expires_at_ms", ddl: "ALTER TABLE ci_waits ADD COLUMN lease_expires_at_ms INTEGER" },
+  { table: "ci_waits", column: "run_id", ddl: "ALTER TABLE ci_waits ADD COLUMN run_id TEXT" },
+  { table: "ci_waits", column: "ticket_id", ddl: "ALTER TABLE ci_waits ADD COLUMN ticket_id TEXT" },
+  { table: "ci_waits", column: "project_dir", ddl: "ALTER TABLE ci_waits ADD COLUMN project_dir TEXT" },
+  { table: "ci_waits", column: "project_dir_canonical", ddl: "ALTER TABLE ci_waits ADD COLUMN project_dir_canonical TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

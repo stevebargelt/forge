@@ -37,6 +37,12 @@ export function newCampaignItemId(): string {
   return `citem-${shortId()}${shortId()}`;
 }
 
+// FG-731: a Forge-owned CI wait. Generated at wait-creation, held by the waiter so
+// the same id threads register -> observe -> advance across processes.
+export function newCiWaitId(): string {
+  return `ciwait-${shortId()}${shortId()}`;
+}
+
 // FG-487: pairing discriminator for host-side verification start/finish event
 // pairs (review-loop rounds, campaign reconcile host-gate execs) — a crashed
 // process restarting the same round/ticket/sha, or a retried gate exec, can
