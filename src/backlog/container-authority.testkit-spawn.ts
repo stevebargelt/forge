@@ -24,6 +24,14 @@ import { SNAPSHOT_DIR_ENV } from "./container-authority.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// FG-728: the built `.js` testkit that a `node <builtEntry>` spawn must --import
+// lives at BUILT_AUTHORITY_TESTKIT_URL (src/integration-cli-spawn.ts). It is NOT
+// wired in here yet: the container-authority mount is a per-module-instance
+// singleton (setAuthorityMountForTest, container-authority.ts), so the testkit
+// tree MUST match the CLI-entry tree — a built `.js` testkit only shares state with
+// a built CLI entry, and this file's ~27 callers still spawn `tsx src/cli/index.ts`.
+// The flip to the built testkit therefore lands ATOMICALLY with the Step-2 entry
+// migration, not before it. See the Step-1 result notes for the coupling.
 /** The `--import` argument for a spawned forge CLI child. */
 export const AUTHORITY_TESTKIT_URL = pathToFileURL(resolve(here, "container-authority.testkit.ts")).href;
 
