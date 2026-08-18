@@ -74,7 +74,7 @@ test("FG-695: the narrowed integration runner still matches run-integration-test
   // files), so it reproduces its runner — including the test-setup preload that
   // keeps the suite off the real ~/.forge/forge.db (#199). This fails if either moves.
   const bulkLine = readFileSync(join(root, "scripts", "run-integration-tests.sh"), "utf8").match(
-    /^\s*(node --import tsx --import \.\/src\/test-setup\.ts --test) "\$\{BULK_FILES\[@\]\}"$/m,
+    /^\s*(node --import tsx --import \.\/src\/integration-build-preload\.ts --import \.\/src\/test-setup\.ts --test) "\$\{BULK_FILES\[@\]\}"$/m,
   )?.[1];
   assert.ok(bulkLine, "run-integration-tests.sh must retain its explicit bulk runner");
   const runner = bulkLine;

@@ -121,7 +121,7 @@ function tierRunner(tier: "unit" | "integration"): string {
   }
   const sh = readFileSync(join(REPO_ROOT, "scripts", "run-integration-tests.sh"), "utf8");
   const bulkRunner = sh.match(
-    /^\s*(node --import tsx --import \.\/src\/test-setup\.ts --test) "\$\{BULK_FILES\[@\]\}"$/m,
+    /^\s*(node --import tsx --import \.\/src\/integration-build-preload\.ts --import \.\/src\/test-setup\.ts --test) "\$\{BULK_FILES\[@\]\}"$/m,
   )?.[1];
   assert.ok(bulkRunner, "run-integration-tests.sh must retain its explicit bulk runner");
   return bulkRunner;

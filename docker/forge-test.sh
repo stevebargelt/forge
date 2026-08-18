@@ -122,7 +122,7 @@ _tier_runner() {
     # scripts/run-integration-tests.sh's own exec line, which this cannot invoke
     # (that script selects its files itself). Kept honest by a test in
     # src/v2/forge-test-wrapper.test.ts that fails if the two ever diverge.
-    *run-integration-tests.sh*) _TIER_CMD=(node --import tsx --import ./src/test-setup.ts --test) ;;
+    *run-integration-tests.sh*) _TIER_CMD=(node --import tsx --import ./src/integration-build-preload.ts --import ./src/test-setup.ts --test) ;;
     *) return 1 ;;
   esac
 }
