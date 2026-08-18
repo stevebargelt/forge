@@ -29,11 +29,11 @@
 // read-only, so that could not be finalized here).
 
 import { mkdirSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import esbuild from "esbuild";
 import { INTEGRATION_BUILD_DIR, SRC_DIR } from "./integration-cli-spawn.js";
+import { invocationId, invocationMarkers, parentStartToken } from "./integration-build-invocation.js";
 
 // JS reserved words cannot be re-emitted as `export const <word>` (a JSON file
 // like package.json has a top-level `private` key). They are still reachable via
@@ -103,20 +103,23 @@ async function buildOnce(): Promise<void> {
 // each wipe yanking `<buildDir>/cli/index.js` out from under a sibling subprocess
 // that is mid-spawn, so `node <builtEntry>` fails nondeterministically (FG-728
 // step 2). The subprocesses of one invocation share a parent — the test runner —
-// so process.ppid names the invocation: exactly one subprocess builds, the rest
-// wait for its completion sentinel and reuse the tree. This also removes the
+// so the parent process names the invocation: exactly one subprocess builds, the
+// rest wait for its completion sentinel and reuse the tree. This also removes the
 // redundant per-file rebuild cost (~700ms × files) the "one build per process"
 // model was already meant to avoid; it just misjudged the process boundary.
 //
 // The lock + ready sentinel live in the OS tmpdir (not under the repo root), so a
 // wipe of the build dir can never remove them and no marker is left in the work
-// tree. They are scoped to THIS invocation's ppid, so a later `node --test`
-// invocation (e.g. the runner's serial lane after the bulk lane) never reuses a
-// stale tree: with a different ppid it finds no ready sentinel and rebuilds fresh,
-// preserving the always-rebuild fail-safe per invocation.
-const INVOCATION = process.ppid;
-const LOCK_DIR = resolve(tmpdir(), `forge-integration-build.${INVOCATION}.lock`);
-const READY = resolve(tmpdir(), `forge-integration-build.${INVOCATION}.ready`);
+// tree. They are scoped to THIS invocation via the parent's PID AND start time
+// (see integration-build-invocation.ts): keying on the ppid alone was unsafe
+// because the markers are never removed, so an OS PID-reuse of the parent let a
+// later invocation reuse a prior invocation's stale READY and skip the build. With
+// the start time folded in, a recycled parent PID yields a different identity, so
+// a later `node --test` invocation (e.g. the runner's serial lane after the bulk
+// lane, or a dev host re-running the tier) finds no ready sentinel and rebuilds
+// fresh — preserving the always-rebuild fail-safe per invocation.
+const INVOCATION = invocationId(process.ppid, parentStartToken(process.ppid));
+const { lockDir: LOCK_DIR, ready: READY } = invocationMarkers(INVOCATION);
 const READY_TIMEOUT_MS = 120_000;
 
 let builder = false;
@@ -136,7 +139,7 @@ if (builder) {
     if (Date.now() > deadline) {
       throw new Error(
         `integration build preload: timed out after ${READY_TIMEOUT_MS}ms waiting for the ` +
-          `sibling builder (ppid ${INVOCATION}) to produce ${INTEGRATION_BUILD_DIR}`,
+          `sibling builder (invocation ${INVOCATION}) to produce ${INTEGRATION_BUILD_DIR}`,
       );
     }
     await delay(25);
