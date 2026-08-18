@@ -1,5 +1,5 @@
 {
-  "$comment": "FG-624 per-file wall-clock cost of the root integration tier, in ms. Regenerate with `npm run test:integration:timings`. Host timings, not CI timings — used for RELATIVE weight only. A file missing from `files` still runs: the planner gives it a pessimistic default weight (see src/test-shards.ts).",
+  "$comment": "FG-624 per-file wall-clock cost of the root integration tier, in ms. Regenerate with `npm run test:integration:timings` — locally for a rough refresh, or via the x64 CI \"Measure integration timings\" workflow_dispatch job for the canonical, arch-matched measurement (see docs/how-to-testing.md). Used for RELATIVE weight only: the planner balances shards by proportion of total, so absolute host-vs-CI speed differences don't change the partition. A file missing from `files` still runs: the planner gives it a pessimistic default weight (see src/test-shards.ts).",
   "measuredWith": {
     "node": "v24.19.0",
     "platform": "linux-x64",
