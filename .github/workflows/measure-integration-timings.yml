@@ -1,0 +1,75 @@
+name: Measure integration timings
+
+# FG-704 (AC1): the CANONICAL refresh of scripts/integration-timings.json.
+#
+# The shard planner (src/test-shards.ts) bin-packs CI's six bulk integration
+# shards against this manifest. CI runs on x64 (ubuntu-latest); the arm64->x64
+# slowdown is NON-UNIFORM (subprocess-heavy tests scale ~2x, others ~1.3x), so a
+# manifest measured on arm64 (e.g. an Apple-Silicon Docker container) mis-balances
+# the shards on CI even though the timings are "relative-weight-only". The fix is
+# to measure on the SAME architecture CI runs — this job does exactly that.
+#
+# It is a MANUAL maintenance job (~15-20 min serial), never wired to push/PR: it
+# does not gate anything and must not run on every commit. A maintainer triggers
+# it, downloads the `integration-timings` artifact, and commits the result. The
+# local `npm run test:integration:timings` remains valid for a rough/relative
+# refresh but is NOT authoritative for CI balance when run on a different arch —
+# see docs/how-to-testing.md, "Refreshing the timing manifest (FG-704)".
+on:
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    # The serial measure is ~17 min; give it generous headroom over that.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same Node setup as the CI integration jobs: pin to .nvmrc, cache npm.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      # Discovers the full *.integration.test.ts corpus and rewrites
+      # scripts/integration-timings.json, measured on THIS x64 runner.
+      - name: Measure integration timings
+        run: npm run test:integration:timings
+
+      # Make it visible in the run summary that the manifest was measured on
+      # linux-x64 (not arm64) — the whole point of running this in CI.
+      - name: Echo measuredWith to the step summary
+        run: |
+          set -euo pipefail
+          node -e '
+            const m = require("./scripts/integration-timings.json").measuredWith;
+            const out = process.env.GITHUB_STEP_SUMMARY;
+            const fs = require("node:fs");
+            const line = (s) => fs.appendFileSync(out, s + "\n");
+            line("## Integration timings — measuredWith");
+            line("");
+            line("| field | value |");
+            line("| --- | --- |");
+            line(`| platform | \`${m.platform}\` |`);
+            line(`| node | \`${m.node}\` |`);
+            line(`| cpus | ${m.cpus} |`);
+            line(`| serialTotalMs | ${m.serialTotalMs} (${(m.serialTotalMs / 60000).toFixed(1)} min) |`);
+            line("");
+            if (!String(m.platform).endsWith("-x64")) {
+              line("> ⚠️ platform is NOT linux-x64 — this manifest is not authoritative for CI shard balance.");
+            }
+          '
+
+      - name: Upload the refreshed manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-timings
+          path: scripts/integration-timings.json
+          retention-days: 7

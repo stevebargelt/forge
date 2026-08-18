@@ -32,13 +32,17 @@ That command-matching pairing is necessary but not sufficient for CI-sourced evi
 
 ### Refreshing the timing manifest (FG-704)
 
-`scripts/integration-timings.json` is the per-file duration manifest `src/test-shards.ts` bin-packs the six bulk shards against. Regenerate it with:
+`scripts/integration-timings.json` is the per-file duration manifest `src/test-shards.ts` bin-packs the six bulk shards against.
+
+**The canonical refresh is the `Measure integration timings` CI job** (`.github/workflows/measure-integration-timings.yml`, `workflow_dispatch` only). Trigger it from the Actions tab, let it run (~15-20 min serial), download the `integration-timings` artifact it uploads, and commit `scripts/integration-timings.json`. It must be the canonical refresh because the manifest has to be measured on **the same x64 architecture CI runs**: the arm64→x64 slowdown is NON-UNIFORM (subprocess-heavy tests scale ~2x, others ~1.3x), so an arm64-balanced partition — e.g. one measured in an Apple-Silicon Docker container — mis-balances on the x64 CI runner even though the timings are "relative-weight-only". The job runs `npm run test:integration:timings` on `ubuntu-latest` with the same `.nvmrc`/`npm ci` setup as the integration shards, and echoes the resulting `measuredWith` (platform/node/serialTotalMs) to its run summary so it is visibly confirmed as `linux-x64`.
+
+The local command remains valid for a **rough/relative** refresh, but is **NOT authoritative for CI balance** if run on a different architecture than CI (e.g. an arm64 laptop or container):
 
 ```bash
 npm run test:integration:timings
 ```
 
-**Run it in a linux environment matching CI** — a `node:24` container, the same interpreter CI's shards pin via `.nvmrc` — and commit the result. The manifest's own `$comment`/`measuredWith` fields record what produced it (node version, platform, core count, total serial time) so a stale or off-platform regeneration is visible in the diff. Timings are **relative-weight-only**: they size shards against each other, not against a latency budget, so a host/container measurement is a legitimate input even though it isn't the CI runner itself.
+The manifest's own `$comment`/`measuredWith` fields record what produced it (node version, platform, core count, total serial time) so a stale or off-platform regeneration is visible in the diff.
 
 **Thirteen integration tests require host tmux/docker/git-identity setup that fails fast in a plain container** (see [Tmux socket isolation](#tmux-socket-isolation-for-tests-that-touch-tmux-fg-614fg-680) below, and the FG-621/FG-664 host-only smokes further below) — a bare container measurement would under-weight those files and risk unbalancing a shard. For that set, the committed weight is `max(container measurement, prior working-linux manifest value)`, so a container run that fails fast can never push a file's weight down. This reconciliation is what `measuredWith.reconciledEnvDependent` in the manifest counts.
 
