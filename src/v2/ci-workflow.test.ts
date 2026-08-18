@@ -130,16 +130,16 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 });
 
 // FG-495 regression guard (updated: sharded extended gate; FG-624: duration-
-// aware; FG-704: 6 bulk shards + a dedicated serial lane): the slow
+// aware; FG-704: 8 bulk shards + a dedicated serial lane): the slow
 // integration/worktree coverage moved out of the fast `test` gate must still run
-// somewhere routine and visible. It now runs as ELEVEN concurrent jobs — six
-// root integration BULK shards (`integration_1`..`integration_6`, partitioned by
-// measured per-file duration via scripts/run-integration-tests.sh over
+// somewhere routine and visible. It now runs as THIRTEEN concurrent jobs — eight
+// root integration BULK shards (`integration_1`..`integration_8`, partitioned by
+// BATCHED-execution cost via scripts/run-integration-tests.sh over
 // discovered−fg576), the `integration_serial` lane (FG-681/FG-704: fg576 alone
 // under --test-concurrency=1), a `worktree` job, a `dashboard_integration` job,
 // (FG-642) a `dashboard_browser` job, and (FG-693) an `fg693_alias_identity`
 // job — with the required `test-extended` job reduced to a fail-closed aggregate
-// over all eleven. If a future edit drops a shard, mistargets a shard selector,
+// over all thirteen. If a future edit drops a shard, mistargets a shard selector,
 // or lets the aggregate go green on a failed dependency, the trust-sensitive
 // coverage (FG-419/FG-440/FG-474 gate-enforcement tests, among others) would
 // stop gating merges without anyone deciding that on purpose.
@@ -151,10 +151,12 @@ const INTEGRATION_SHARD_JOBS = [
   "integration_4",
   "integration_5",
   "integration_6",
+  "integration_7",
+  "integration_8",
 ] as const;
 // FG-681/FG-704: the dedicated serial lane. fg576's AC9 correlation suite runs
 // ALONE under --test-concurrency=1, in its own job, taking no k/N selector — it
-// is excluded from the six bulk shards so its real 30s production window never
+// is excluded from the eight bulk shards so its real 30s production window never
 // shares a job. It sits in the TEN-minute tier alongside the bulk shards (the
 // ceiling is the hang backstop, deliberately not lowered — FG-704 non-goal).
 const SERIAL_JOB = "integration_serial" as const;
@@ -163,7 +165,7 @@ const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser
 // suite with TMPDIR pointed at a symlink, so this Linux CI executes the
 // filesystem-alias class instead of being green on it by accident of platform —
 // the asymmetry that let FG-575, FG-576 and FG-253 each ship green and each
-// leave the invariant open. It sits in the TEN-minute tier rather than the six:
+// leave the invariant open. It sits in the TEN-minute tier rather than the eight:
 // the suite carries its own AC8 falsification harness, which copies the tree and
 // spawns a nested test run per migrated consumer, so its cost is a multiple of
 // the suite's own and it has the same headroom problem the shards documented.
@@ -171,7 +173,7 @@ const ALIAS_IDENTITY_JOB = "fg693_alias_identity" as const;
 const TEN_MINUTE_JOBS = [...INTEGRATION_SHARD_JOBS, SERIAL_JOB, ALIAS_IDENTITY_JOB] as const;
 const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS] as const;
 
-test("FG-495 (sharded, FG-704 6-way): ci.yml has six integration BULK shard jobs each running the shard script with its own k/6 selector", () => {
+test("FG-495 (sharded, FG-704 8-way): ci.yml has eight integration BULK shard jobs each running the shard script with its own k/8 selector", () => {
   const wf = loadWorkflow();
   const selectors: string[] = [];
   for (const name of INTEGRATION_SHARD_JOBS) {
@@ -189,8 +191,8 @@ test("FG-495 (sharded, FG-704 6-way): ci.yml has six integration BULK shard jobs
   }
   assert.deepEqual(
     [...selectors].sort(),
-    ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"],
-    "the six bulk shard jobs must cover exactly 1/6..6/6 — each appearing exactly once. The selectors are what make the partition a cover: src/test-shards.ts plans N shards and each job takes one, so a duplicated or missing k means files run twice or not at all"
+    ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"],
+    "the eight bulk shard jobs must cover exactly 1/8..8/8 — each appearing exactly once. The selectors are what make the partition a cover: src/test-shards.ts plans N shards and each job takes one, so a duplicated or missing k means files run twice or not at all"
   );
 });
 
@@ -277,7 +279,7 @@ test("FG-642: ci.yml has a dashboard_browser job that provisions a browser and r
   );
 });
 
-test("FG-495 (sharded, FG-704): the test-extended aggregate needs all eleven extended-gate jobs, derives its gate from toJSON(needs), uses if: always(), and fails closed on any non-success", () => {
+test("FG-495 (sharded, FG-704): the test-extended aggregate needs all thirteen extended-gate jobs, derives its gate from toJSON(needs), uses if: always(), and fails closed on any non-success", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
@@ -286,7 +288,7 @@ test("FG-495 (sharded, FG-704): the test-extended aggregate needs all eleven ext
   assert.deepEqual(
     [...needs].sort(),
     [...EXTENDED_GATE_JOBS].sort(),
-    "test-extended must `needs` exactly the eleven sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
+    "test-extended must `needs` exactly the thirteen sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
   );
 
   assert.equal(
@@ -300,7 +302,7 @@ test("FG-495 (sharded, FG-704): the test-extended aggregate needs all eleven ext
   // "a job in `needs` cannot be omitted from the gating loop" structurally true
   // rather than a discipline — the loop iterates the whole needs context. So the
   // per-dependency `needs.X.result` enumeration is replaced by proving the
-  // derivation shape, and the `needs` deepEqual above is what pins the set to 11.
+  // derivation shape, and the `needs` deepEqual above is what pins the set to 13.
   const steps = job!.steps ?? [];
   const envValues = steps.flatMap((s) => Object.values(s.env ?? {}));
   assert.ok(
@@ -341,19 +343,19 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
   );
 });
 
-// Extended-gate wall-clock ceiling: every one of the eleven concurrent
+// Extended-gate wall-clock ceiling: every one of the thirteen concurrent
 // extended-gate jobs carries a `timeout-minutes` ceiling, so a suite that runs
 // long is cancelled → its result is not `success` → the fail-closed aggregate
-// goes red → merge is blocked. Because the eleven run concurrently, bounding each
-// bounds the whole extended gate.
+// goes red → merge is blocked. Because the thirteen run concurrently, bounding
+// each bounds the whole extended gate.
 //
-// The six integration bulk shards, the FG-681/FG-704 serial lane, and the FG-693
-// alias job get 10 minutes; the three smaller tiers keep 6.
+// The eight integration bulk shards, the FG-681/FG-704 serial lane, and the
+// FG-693 alias job get 10 minutes; the three smaller tiers keep 6.
 // The tier grew into the old shared 6: at cfbebcc5 `integration_1` finished the
 // whole shard green in 5m57s and was killed at the ceiling anyway, turning the
 // required check red with nothing failing. See the evidence recorded above the
 // shard jobs in ci.yml.
-test("extended-gate ceiling: each of the ten-minute jobs (six bulk shards + the serial lane + the FG-693 alias job) has timeout-minutes: 10", () => {
+test("extended-gate ceiling: each of the ten-minute jobs (eight bulk shards + the serial lane + the FG-693 alias job) has timeout-minutes: 10", () => {
   const wf = loadWorkflow();
   for (const name of TEN_MINUTE_JOBS) {
     const job = wf.jobs?.[name];

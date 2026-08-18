@@ -44,10 +44,10 @@ test("FG-624: unsharded mode still selects the whole tier", () => {
   assert.deepEqual([...all].sort(), all, "the unsharded list must stay sorted");
 });
 
-test("FG-704: the six BULK shards are a disjoint cover of (discovered − fg576) and never contain fg576", () => {
+test("FG-704: the eight BULK shards are a disjoint cover of (discovered − fg576) and never contain fg576", () => {
   const all = listFiles();
   const expectedBulk = all.filter((f) => f !== SERIAL_FILE);
-  const n = 6;
+  const n = 8;
   const shards = Array.from({ length: n }, (_, i) => listFiles(`${i + 1}/${n}`));
   const flat = shards.flat();
   assert.equal(new Set(flat).size, flat.length, "a file was emitted by two bulk shards");
@@ -61,7 +61,7 @@ test("FG-704: the six BULK shards are a disjoint cover of (discovered − fg576)
   assert.deepEqual(
     [...flat].sort(),
     [...expectedBulk].sort(),
-    "the union of the six bulk shards must be exactly (discovered − fg576) — a missing file is a green shard that proves nothing",
+    "the union of the eight bulk shards must be exactly (discovered − fg576) — a missing file is a green shard that proves nothing",
   );
 });
 
@@ -74,12 +74,12 @@ test("FG-681/FG-704: (bulk ∪ serial) == the discovered tier, disjoint — the 
 
   // No bulk shard, at any N, may carry fg576 — the exclusion is a shell contract
   // independent of shard count.
-  for (const n of [4, 6]) {
+  for (const n of [4, 8]) {
     const carriers = Array.from({ length: n }, (_, i) => `${i + 1}/${n}`).filter((shard) => listFiles(shard).includes(SERIAL_FILE));
     assert.deepEqual(carriers, [], `N=${n}: no bulk shard may carry fg576 — the serial lane does`);
   }
 
-  const bulk = Array.from({ length: 6 }, (_, i) => listFiles(`${i + 1}/6`)).flat();
+  const bulk = Array.from({ length: 8 }, (_, i) => listFiles(`${i + 1}/8`)).flat();
   const union = [...bulk, ...serial];
   assert.equal(new Set(union).size, union.length, "bulk and serial must be disjoint");
   assert.deepEqual([...union].sort(), [...all].sort(), "(bulk ∪ serial) must equal the discovered integration tier");

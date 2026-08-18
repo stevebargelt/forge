@@ -8,7 +8,16 @@ import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultWeight, loadTimings, planShards, parseShardSelector, shardCost } from "./test-shards.js";
+import {
+  defaultWeight,
+  loadTimings,
+  packWeight,
+  planShards,
+  parseShardSelector,
+  shardCost,
+  STARTUP_DISCOUNT_MS,
+  FLOOR_MS,
+} from "./test-shards.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -41,7 +50,7 @@ test("FG-624: the real integration file list is a disjoint cover for every shard
 test("FG-624: a file missing from the timings manifest is still assigned to exactly one shard", () => {
   const orphan = "src/brand-new-nobody-measured-me.integration.test.ts";
   const files = [...FILES, orphan];
-  for (const n of [1, 4, 6]) {
+  for (const n of [1, 4, 6, 8]) {
     const shards = planShards(files, TIMINGS, n);
     assertDisjointCover(shards, files, `unmeasured file, N=${n}`);
     assert.equal(
@@ -104,7 +113,7 @@ test("FG-624: duplicate input paths cannot put the same file in two shards", () 
 test("FG-624: every shard's projected cost is within 1.25x of the median shard", () => {
   const measured = Object.keys(TIMINGS).length;
   assert.ok(measured > 100, `the checked-in timings manifest must cover the tier; only ${measured} entries`);
-  for (const n of [4, 5, 6]) {
+  for (const n of [4, 5, 6, 8]) {
     const costs = planShards(FILES, TIMINGS, n).map((s) => shardCost(s, TIMINGS));
     const sorted = [...costs].sort((a, b) => a - b);
     const median =
@@ -128,6 +137,35 @@ test("FG-624: an unmeasured file is weighted pessimistically (p75), not optimist
     "the default weight for an unmeasured file must be at least the median measured file — guessing low is what blows the 6-minute ceiling",
   );
   assert.equal(defaultWeight({}), 1, "an empty manifest must still produce a usable weight");
+});
+
+test("FG-704: packWeight discounts a batched startup, floors positive, and preserves ordering + the disjoint cover", () => {
+  // A heavy file keeps ~all of its weight: the discount is a small fraction of a
+  // 222s file, so the packer still treats it as the tier's anchor.
+  const heavyRaw = 222_000;
+  assert.equal(packWeight(heavyRaw), heavyRaw - STARTUP_DISCOUNT_MS);
+  assert.ok(
+    packWeight(heavyRaw) > heavyRaw * 0.98,
+    "a heavy file must keep most of its weight — the discount only removes the once-per-file startup",
+  );
+
+  // A trivially-fast file (raw at/below the discount) floors to a small POSITIVE
+  // weight, never zero or negative — otherwise LPT would treat it as free and
+  // pile such files onto one shard.
+  assert.equal(packWeight(100), FLOOR_MS, "a sub-discount file floors to FLOOR_MS");
+  assert.equal(packWeight(STARTUP_DISCOUNT_MS), FLOOR_MS, "raw == discount still floors positive");
+  assert.ok(packWeight(0) > 0 && packWeight(1_000_000) > 0, "every packed weight is strictly positive");
+
+  // Monotonic above the floor ⇒ heavy-file ordering is unchanged by the discount.
+  const a = STARTUP_DISCOUNT_MS + 10_000;
+  const b = STARTUP_DISCOUNT_MS + 20_000;
+  assert.ok(packWeight(b) > packWeight(a), "packWeight is monotonic in rawWeight above the floor");
+
+  // The cover guarantee is independent of the weight function: applying the
+  // discount must not drop or duplicate a file at any shard count.
+  for (const n of [1, 6, 8]) {
+    assertDisjointCover(planShards(FILES, TIMINGS, n), FILES, `cost-model cover N=${n}`);
+  }
 });
 
 test("FG-624: shard selectors are validated", () => {

@@ -9,22 +9,25 @@ name: CI
 # job `test-extended` (FG-495) is the required merge check carrying the
 # integration + worktree tiers moved out of the fast gate — real
 # subprocess/git/DB coverage that's still trust-sensitive. It is now a
-# lightweight FINAL AGGREGATE: the slow work is sharded across ELEVEN
-# concurrent jobs (FG-704) — `integration_1`..`integration_6` (root integration
-# BULK tier, FG-624: partitioned by MEASURED per-file duration rather than
-# Node's --test-shard, which split by file index and left one shard at 5m25s
-# against this 6-minute ceiling while its siblings finished in 2.5 min),
-# `integration_serial` (FG-681/FG-704: the fg576 AC9 correlation suite, run
-# ALONE under --test-concurrency=1 in its own dedicated lane — it is EXCLUDED
-# from the six bulk shards so its real 30s production window never shares a job
-# with anything else), `worktree` (root worktree tier), `dashboard_integration`
-# (dashboard workspace's own integration tier), and `dashboard_browser` (FG-642:
-# the dashboard's real-Chrome tier, which until then ran in CI nowhere and
-# skipped itself to green everywhere else), and `fg693_alias_identity` (FG-693:
-# the FG-693 identity suite re-run with TMPDIR pointed at a SYMLINK, so this
-# Linux runner carries the filesystem-alias class natively instead of being
-# green on it by accident of platform). `test-extended` `needs` all eleven
-# (derived fail-closed from `toJSON(needs)`) and, with
+# lightweight FINAL AGGREGATE: the slow work is sharded across THIRTEEN
+# concurrent jobs (FG-704) — `integration_1`..`integration_8` (root integration
+# BULK tier, FG-624: partitioned by the BATCHED-execution cost of each file —
+# MEASURED per-file duration discounted by an estimated per-file `node --test`
+# startup, see src/test-shards.ts's packWeight — rather than Node's --test-shard,
+# which split by file index and left one shard at 5m25s against this ceiling
+# while its siblings finished in 2.5 min; six bulk shards could not meet the
+# sub-5min + p95<4:15 target once a single 222s file anchored a shard floor, so
+# the bulk tier went to EIGHT), `integration_serial` (FG-681/FG-704: the fg576
+# AC9 correlation suite, run ALONE under --test-concurrency=1 in its own
+# dedicated lane — it is EXCLUDED from the eight bulk shards so its real 30s
+# production window never shares a job with anything else), `worktree` (root
+# worktree tier), `dashboard_integration` (dashboard workspace's own integration
+# tier), and `dashboard_browser` (FG-642: the dashboard's real-Chrome tier, which
+# until then ran in CI nowhere and skipped itself to green everywhere else), and
+# `fg693_alias_identity` (FG-693: the FG-693 identity suite re-run with TMPDIR
+# pointed at a SYMLINK, so this Linux runner carries the filesystem-alias class
+# natively instead of being green on it by accident of platform). `test-extended`
+# `needs` all thirteen (derived fail-closed from `toJSON(needs)`) and, with
 # `if: always()`, FAILS CLOSED unless every one reports success — so a
 # failed/cancelled/skipped shard cannot yield a green required check. Branch
 # protection still carries both contexts ("test" and "test-extended"; the
@@ -76,16 +79,21 @@ jobs:
       - name: Test (root + dashboard workspace)
         run: npm run test:all
 
-  # Root integration BULK tier, sharded 6 ways by MEASURED per-file duration
+  # Root integration BULK tier, sharded 8 ways by BATCHED-execution cost
   # (FG-624/FG-704): scripts/run-integration-tests.sh bin-packs the discovered
   # files — MINUS fg576, which runs alone in `integration_serial` below — over
   # scripts/integration-timings.json and hands each job an explicit file list.
-  # All six run concurrently (no `needs` between them). Six, not five: FG-704
-  # pulled the ~62s fg576 serial suite out of shard 1 into its own lane and
-  # re-balanced the remainder six ways to restore the sub-5-minute objective
-  # with headroom against the ONE-new-file-on-the-wrong-shard failure this tier
-  # keeps regressing to. Every shard runs on the .nvmrc interpreter alone
-  # (FG-647): the F31 preflight coverage in node-preflight.integration.test.ts is
+  # The packer balances the BATCHED cost of a shard, not the serial-measure cost:
+  # each manifest weight is a single-file `node --test` measure (startup + exec),
+  # but a shard runs all its files in ONE batch and pays startup ~once, so
+  # src/test-shards.ts discounts an estimated per-file startup before packing
+  # (packWeight). All eight run concurrently (no `needs` between them). Eight, not
+  # six: CI evidence showed the ~1481s x64 bulk test-time over 6 shards is
+  # ~4.1-5.5m worst — a single 222s file (campaign.integration.test.ts) anchors a
+  # shard floor — so 6 (and 7) could not meet the sub-5min + p95<4:15 target;
+  # over 8 shards the worst is ~3.8m, the headroom that target needs against
+  # runtime variance. Every shard runs on the .nvmrc interpreter alone (FG-647):
+  # the F31 preflight coverage in node-preflight.integration.test.ts is
   # deterministic under one Node, so no shard downloads a second one.
   #
   # The shards' ceiling is 10 minutes, not the 6 the other extended-gate jobs
@@ -122,8 +130,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 1/6)
-        run: bash scripts/run-integration-tests.sh 1/6
+      - name: Test integration (shard 1/8)
+        run: bash scripts/run-integration-tests.sh 1/8
 
   integration_2:
     runs-on: ubuntu-latest
@@ -142,8 +150,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 2/6)
-        run: bash scripts/run-integration-tests.sh 2/6
+      - name: Test integration (shard 2/8)
+        run: bash scripts/run-integration-tests.sh 2/8
 
   integration_3:
     runs-on: ubuntu-latest
@@ -162,8 +170,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 3/6)
-        run: bash scripts/run-integration-tests.sh 3/6
+      - name: Test integration (shard 3/8)
+        run: bash scripts/run-integration-tests.sh 3/8
 
   integration_4:
     runs-on: ubuntu-latest
@@ -182,8 +190,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 4/6)
-        run: bash scripts/run-integration-tests.sh 4/6
+      - name: Test integration (shard 4/8)
+        run: bash scripts/run-integration-tests.sh 4/8
 
   integration_5:
     runs-on: ubuntu-latest
@@ -202,8 +210,8 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 5/6)
-        run: bash scripts/run-integration-tests.sh 5/6
+      - name: Test integration (shard 5/8)
+        run: bash scripts/run-integration-tests.sh 5/8
 
   integration_6:
     runs-on: ubuntu-latest
@@ -222,16 +230,56 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Test integration (shard 6/6)
-        run: bash scripts/run-integration-tests.sh 6/6
+      - name: Test integration (shard 6/8)
+        run: bash scripts/run-integration-tests.sh 6/8
 
-  # The 7th integration job (FG-681/FG-704): the DEDICATED SERIAL LANE. It runs
+  integration_7:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test integration (shard 7/8)
+        run: bash scripts/run-integration-tests.sh 7/8
+
+  integration_8:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test integration (shard 8/8)
+        run: bash scripts/run-integration-tests.sh 8/8
+
+  # The 9th integration job (FG-681/FG-704): the DEDICATED SERIAL LANE. It runs
   # ONLY fg576-codex-adapter.integration.test.ts, alone, under
   # `--test-concurrency=1` (the `serial` mode of run-integration-tests.sh takes
   # no k/N selector). fg576's AC9 correlation tests observe a real 30-second
   # production window and prove correlation at ordinary operating capacity; they
   # must run with nothing else concurrent, not merely in a smaller bucket, or the
-  # same scheduling flake is only postponed. It is excluded from the six bulk
+  # same scheduling flake is only postponed. It is excluded from the eight bulk
   # shards entirely, so (bulk ∪ serial) is the whole discovered tier, disjoint.
   # It keeps the shards' 10-minute ceiling (the ~62s suite has ample headroom;
   # the ceiling is the hang backstop, deliberately NOT lowered to 5 — FG-704
@@ -411,7 +459,7 @@ jobs:
 
   # Lightweight FINAL AGGREGATE — the required branch-protection context
   # `CI / test-extended`. It does no test work itself; it fails closed unless
-  # every one of the eleven sharded/tiered jobs above reports success, so a
+  # every one of the thirteen sharded/tiered jobs above reports success, so a
   # failed, cancelled, or skipped dependency cannot yield a green required
   # check.
   #
@@ -423,7 +471,7 @@ jobs:
   # job provisions no second interpreter, cf. FG-647.)
   test-extended:
     runs-on: ubuntu-latest
-    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_serial, worktree, dashboard_integration, dashboard_browser, fg693_alias_identity]
+    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_7, integration_8, integration_serial, worktree, dashboard_integration, dashboard_browser, fg693_alias_identity]
     if: always()
     steps:
       - name: Aggregate required extended gate

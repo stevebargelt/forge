@@ -32,11 +32,61 @@ export const INTEGRATION_TIMINGS_PATH = join(REPO_ROOT, "scripts", "integration-
 export type Timings = Record<string, number>;
 
 /**
+ * FG-704 batched-execution cost model — the per-file `node --test` process
+ * startup we DISCOUNT from a manifest weight before packing.
+ *
+ * WHY: scripts/measure-integration-timings.ts times each file in its OWN
+ * `node --test` process, so every manifest weight is `process_startup +
+ * test_exec`. A shard, though, runs ALL its files in ONE `node --test` batch and
+ * pays startup ~once, not once per file. Packing on the raw per-file weights
+ * therefore over-weights shards that hold many small files, and the tier
+ * mis-balances (observed projected-vs-actual skew −11% to −51% on the x64 run).
+ * Subtracting an estimated per-file startup makes the packed weight track batched
+ * cost: balancing `sum(rawWeight_i − startup)` across shards balances the batched
+ * total, because the one-startup-per-shard term a shard actually pays is constant
+ * across shards and so drops out of the comparison.
+ *
+ * HOW ~2400ms was derived: on the x64 measure run the serial per-file total
+ * (manifest `measuredWith.serialTotalMs`, ~2242s over 288 measured files) against
+ * the actual BATCHED bulk total summed from a real sharded CI run (~1481s over the
+ * 286 bulk files) implies ~2.4s of overhead paid once-per-file under serial
+ * measurement but ~once-per-shard under batched execution ((2242−1481)·1000/286 ≈
+ * 2660; rounded down to a conservative 2400 so the discount never overshoots a
+ * file's real batched cost). RE-DERIVE if it drifts: take the manifest's serial
+ * per-file mean (`serialTotalMs` / measured-file count) minus a real sharded run's
+ * batched per-file mean (summed per-job `actual_duration_ms` / bulk-file count)
+ * and update this constant.
+ */
+export const STARTUP_DISCOUNT_MS = 2400;
+
+/**
+ * Floor for a file's packing weight after the startup discount. A trivially-fast
+ * file (raw weight at or below the discount) must still carry a small POSITIVE
+ * weight so LPT keeps spreading such files by count instead of treating them as
+ * free and piling them onto one shard.
+ */
+export const FLOOR_MS = 400;
+
+/**
+ * Weight used FOR PACKING: a file's batched-execution cost — its raw measured (or
+ * defaulted) weight minus the once-per-file startup the serial manifest baked in,
+ * floored positive. This is the ONLY weight planShards/shardCost balance on; the
+ * manifest (scripts/integration-timings.json) is not touched — only how it is
+ * CONSUMED. Monotonic in rawWeight, so it does not change the heavy-file ordering
+ * LPT depends on; it only compresses the small-file tail toward the floor.
+ */
+export function packWeight(rawWeight: number): number {
+  return Math.max(FLOOR_MS, rawWeight - STARTUP_DISCOUNT_MS);
+}
+
+/**
  * Weight for a file the manifest doesn't mention. Pessimistic on purpose (p75
  * of the measured files, not the median): an unmeasured file is usually a NEW
- * file, and the cost of guessing low is a shard that blows the 6-minute
- * ceiling, while the cost of guessing high is only a slightly uneven partition.
- * An empty/missing manifest makes every weight equal, which degrades LPT to
+ * file, and the cost of guessing low is a shard that blows the job ceiling,
+ * while the cost of guessing high is only a slightly uneven partition. This
+ * raw p75 is discounted by packWeight like any measured weight when it feeds
+ * packing, so an unmeasured file's pessimistic default represents BATCHED cost
+ * too. An empty/missing manifest makes every weight equal, which degrades LPT to
  * round-robin over the sorted list — still a valid disjoint cover.
  */
 export function defaultWeight(timings: Timings): number {
@@ -63,7 +113,7 @@ export function loadTimings(path: string = INTEGRATION_TIMINGS_PATH): Timings {
 }
 
 export function shardCost(files: readonly string[], timings: Timings, fallback = defaultWeight(timings)): number {
-  return files.reduce((sum, f) => sum + (timings[f] ?? fallback), 0);
+  return files.reduce((sum, f) => sum + packWeight(timings[f] ?? fallback), 0);
 }
 
 /**
@@ -80,7 +130,8 @@ export function planShards(files: readonly string[], timings: Timings, shardCoun
   }
   const fallback = defaultWeight(timings);
   const unique = [...new Set(files)].sort();
-  const ordered = [...unique].sort((a, b) => (timings[b] ?? fallback) - (timings[a] ?? fallback) || a.localeCompare(b));
+  const weightOf = (f: string): number => packWeight(timings[f] ?? fallback);
+  const ordered = [...unique].sort((a, b) => weightOf(b) - weightOf(a) || a.localeCompare(b));
 
   const shards: string[][] = Array.from({ length: shardCount }, () => []);
   const loads = new Array<number>(shardCount).fill(0);
@@ -90,7 +141,7 @@ export function planShards(files: readonly string[], timings: Timings, shardCoun
       if (loads[i]! < loads[lightest]!) lightest = i;
     }
     shards[lightest]!.push(file);
-    loads[lightest] = loads[lightest]! + (timings[file] ?? fallback);
+    loads[lightest] = loads[lightest]! + weightOf(file);
   }
   return shards.map((s) => s.sort());
 }
@@ -128,7 +179,7 @@ if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.
       process.stdout.write(`shard ${i + 1}/${count}: ${shard.length} files, projected ${(cost / 1000).toFixed(1)}s\n`);
     });
     process.stdout.write(
-      `${files.length} files, ${unknown.length} unmeasured (default ${(fallback / 1000).toFixed(1)}s each)\n`,
+      `${files.length} files, ${unknown.length} unmeasured (batched default ${(packWeight(fallback) / 1000).toFixed(1)}s each; raw p75 ${(fallback / 1000).toFixed(1)}s − ${(STARTUP_DISCOUNT_MS / 1000).toFixed(1)}s startup)\n`,
     );
     process.exit(0);
   }

@@ -5,10 +5,12 @@ set -euo pipefail
 # Usable unsharded (dev, `npm run test:integration`) and sharded (CI, one job
 # per shard). The file list is SORTED so every shard sees an identical ordering.
 #
-# FG-704 restored the sub-five-minute integration objective with a 7-JOB
+# FG-704 restored the sub-five-minute integration objective with a 9-JOB
 # topology, invoked entirely through this script:
-#   - SIX bulk shards (selector `k/6`), bin-packed by MEASURED per-file duration
-#     (scripts/integration-timings.json) over (discovered − fg576).
+#   - EIGHT bulk shards (selector `k/8`), bin-packed by the BATCHED-execution
+#     cost of each file — MEASURED per-file duration (scripts/integration-timings
+#     .json) discounted by an estimated per-file `node --test` startup, see
+#     src/test-shards.ts's packWeight — over (discovered − fg576).
 #   - ONE dedicated SERIAL lane (the literal argument `serial`, no k/N selector)
 #     that runs ONLY fg576-codex-adapter.integration.test.ts under
 #     `--test-concurrency=1`. fg576 is EXCLUDED from the bin-packer entirely, so
@@ -23,7 +25,7 @@ set -euo pipefail
 #
 # FORGE_INTEGRATION_LIST_ONLY=1 prints the selected files instead of running
 # them — how src/test-shards.integration.test.ts proves the census: the union of
-# the six bulk shards is exactly (discovered − fg576), and the serial lane lists
+# the eight bulk shards is exactly (discovered − fg576), and the serial lane lists
 # exactly fg576.
 #
 # FG-681: fg576's AC9 correlation tests observe a real 30s production window.
@@ -46,7 +48,7 @@ if [ "$ARG" = "serial" ]; then
   MODE="serial"
 elif [ -n "$ARG" ]; then
   if ! [[ "$ARG" =~ ^[0-9]+/[0-9]+$ ]]; then
-    echo "error: argument must be a k/N shard selector (e.g. 1/6) or the literal 'serial'; got: $ARG" >&2
+    echo "error: argument must be a k/N shard selector (e.g. 1/8) or the literal 'serial'; got: $ARG" >&2
     exit 2
   fi
   SHARD="$ARG"
@@ -71,7 +73,7 @@ if [[ ! " ${ALL[*]} " =~ " ${SERIAL_FILE} " ]]; then
 fi
 
 # fg576 is excluded from the set fed to the bin-packer: bulk packing is a clean
-# 6-way over (discovered − fg576). The serial lane runs fg576 by itself.
+# 8-way over (discovered − fg576). The serial lane runs fg576 by itself.
 BULK_ALL=()
 for f in "${ALL[@]}"; do
   if [ "$f" != "$SERIAL_FILE" ]; then
@@ -113,12 +115,20 @@ emit_job_summary() {
   shift 4
   local files=("$@")
 
-  # Projected weight and manifest coverage of THIS job's selected files. The p75
-  # default weight mirrors src/test-shards.ts's defaultWeight for unmeasured
-  # files (relative weight only — see the manifest's $comment).
+  # Projected weight and manifest coverage of THIS job's selected files. This
+  # mirrors src/test-shards.ts's packing cost model so projected_weight_ms is on
+  # the SAME batched-execution basis the bin-packer balances — the p75 default for
+  # unmeasured files (defaultWeight) AND the FG-704 startup discount (packWeight:
+  # max(FLOOR_MS, raw − STARTUP_DISCOUNT_MS)). Keep these two constants in sync
+  # with test-shards.ts; the manifest weights are serial per-file measures, so a
+  # projection that skipped the discount would over-count by ~startup·nfiles and
+  # the projected-vs-actual skew (how we validate the model held) would be
+  # meaningless. Relative weight only — see the manifest's $comment.
   local nfiles=0 measured=0 weight=0 cov="0.0"
   read -r nfiles measured weight cov < <(
     FORGE_JOB_FILES="$(printf '%s\n' ${files[@]+"${files[@]}"})" node -e '
+      const STARTUP_DISCOUNT_MS = 2400, FLOOR_MS = 400;
+      const pack = (raw) => Math.max(FLOOR_MS, raw - STARTUP_DISCOUNT_MS);
       const m = (require("./scripts/integration-timings.json").files) || {};
       const vals = Object.values(m).filter((v) => typeof v === "number" && v > 0).sort((a, b) => a - b);
       const p75 = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.75))] : 1;
@@ -126,7 +136,7 @@ emit_job_summary() {
       let weight = 0, measured = 0;
       for (const f of fs) {
         const v = m[f];
-        if (typeof v === "number" && v > 0) { weight += v; measured++; } else { weight += p75; }
+        if (typeof v === "number" && v > 0) { weight += pack(v); measured++; } else { weight += pack(p75); }
       }
       const cov = fs.length ? (100 * measured / fs.length) : 0;
       console.log(fs.length, measured, Math.round(weight), cov.toFixed(1));
@@ -195,7 +205,7 @@ end_capture_and_report() {
   rm -f "$CAPTURE_LOG"
 }
 
-# ---- serial lane (the 7th job) ---------------------------------------------
+# ---- serial lane (the 9th job) ---------------------------------------------
 if [ "$MODE" = "serial" ]; then
   if [ "${FORGE_INTEGRATION_LIST_ONLY:-}" = "1" ]; then
     printf '%s\n' "$SERIAL_FILE"

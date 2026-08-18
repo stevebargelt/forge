@@ -88,7 +88,7 @@ test("FG-704: bulk and serial jobs publish machine-readable and Checks summaries
   const fixture = runnerFixture();
   try {
     for (const [arg, label] of [
-      ["1/6", "bulk 1/6"],
+      ["1/8", "bulk 1/8"],
       ["serial", "serial"],
     ] as const) {
       const summary = join(fixture.dir, `${arg.replace("/", "-")}.md`);
