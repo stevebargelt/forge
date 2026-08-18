@@ -176,13 +176,17 @@ describe("FG-693 AC9 — Linux CI carries the synthetic symlink-alias regression
       "the alias job runs but nothing requires it to pass. `test-extended` is the required check and it fails " +
         `closed on its dependencies; a job outside that list is advisory. Current needs: ${needs[1]}`,
     );
-    // The aggregate reads each dependency's result explicitly, so a job added to
-    // `needs` but not to the results string is still not gating.
+    // FG-704: the aggregate is derived from `${{ toJSON(needs) }}` rather than a
+    // hand-maintained per-name results string, so a job present in `needs` is
+    // AUTOMATICALLY iterated and gated — being in `needs` (asserted above) is now
+    // sufficient, and a job cannot be silently left out of the gating loop. That
+    // is a strictly stronger guarantee than the old per-name `.result` read this
+    // used to require, so assert the new mechanism instead.
     assert.match(
       workflow,
-      /needs\.fg693_alias_identity\.result/,
-      "the extended gate's aggregate does not read the alias job's result, so a failed alias job would still " +
-        "produce a green required check",
+      /toJSON\(\s*needs\s*\)/,
+      "the extended gate's aggregate no longer derives from toJSON(needs); without it a job added to `needs` " +
+        "could be omitted from the gating loop, so a failed alias job could still produce a green required check",
     );
   });
 });

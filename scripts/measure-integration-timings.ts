@@ -10,9 +10,12 @@
 // are measured SERIALLY by default (--jobs 1) so no two runs contend for CPU;
 // contention is what makes a timing manifest unreproducible.
 //
-// Host timings are NOT CI timings. The manifest is used for RELATIVE weight
-// only — the planner balances shards by proportion of total, so a host that is
-// uniformly 2x faster than a CI runner produces the same partition.
+// The manifest is used for RELATIVE weight only — the planner balances shards
+// by proportion of total, so a host that is uniformly 2x faster than a CI
+// runner produces the same partition. The CANONICAL refresh runs ON x64 CI (the
+// "Measure integration timings" workflow_dispatch job), because the arm64->x64
+// slowdown is non-uniform; running this locally is still valid for a rough
+// refresh (see docs/how-to-testing.md).
 //
 // Usage:
 //   npm run test:integration:timings              # serial, rewrites the manifest
@@ -113,7 +116,7 @@ if (dryRun) process.exit(0);
 
 const manifest = {
   $comment:
-    "FG-624 per-file wall-clock cost of the root integration tier, in ms. Regenerate with `npm run test:integration:timings`. Host timings, not CI timings — used for RELATIVE weight only. A file missing from `files` still runs: the planner gives it a pessimistic default weight (see src/test-shards.ts).",
+    "FG-624 per-file wall-clock cost of the root integration tier, in ms. Regenerate with `npm run test:integration:timings` — locally for a rough refresh, or via the x64 CI \"Measure integration timings\" workflow_dispatch job for the canonical, arch-matched measurement (see docs/how-to-testing.md). Used for RELATIVE weight only: the planner balances shards by proportion of total, so absolute host-vs-CI speed differences don't change the partition. A file missing from `files` still runs: the planner gives it a pessimistic default weight (see src/test-shards.ts).",
   measuredWith: {
     node: process.version,
     platform: `${process.platform}-${process.arch}`,
