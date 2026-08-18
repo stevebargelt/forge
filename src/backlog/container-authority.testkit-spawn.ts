@@ -20,11 +20,16 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { BUILT_AUTHORITY_TESTKIT_URL } from "../integration-cli-spawn.js";
 import { SNAPSHOT_DIR_ENV } from "./container-authority.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** The `--import` argument for a spawned forge CLI child. */
+// The `.ts` testkit, loaded by a `tsx`-based spawn (bin/forge children and the
+// suites that deliberately stay on tsx — the driver files and the seam-behavior
+// tests). A `node <builtEntry>` spawn instead needs the BUILT `.js` testkit
+// (BUILT_AUTHORITY_TESTKIT_URL); withAuthorityTestkit() picks between them.
+/** The `.ts` `--import` argument for a spawned forge CLI child (tsx trees). */
 export const AUTHORITY_TESTKIT_URL = pathToFileURL(resolve(here, "container-authority.testkit.ts")).href;
 
 let mount: string | null = null;
@@ -48,9 +53,20 @@ export function authorityTestkitEnv(): Record<string, string> {
   return { [SNAPSHOT_DIR_ENV]: "", FORGE_TEST_AUTHORITY_MOUNT: neutralAuthorityMount() };
 }
 
-/** `tsx`/`node` argv prefix that loads the preload ahead of `entry`. */
+/** `tsx`/`node` argv prefix that loads the preload ahead of `entry`.
+ *
+ *  FG-728: the container-authority mount is a per-module-instance singleton
+ *  (setAuthorityMountForTest, container-authority.ts), so the testkit the child
+ *  --imports MUST come from the SAME tree as `entry` — otherwise the setter arms
+ *  one instance and the CLI reads another, and a spawn on a host WITH a mounted
+ *  backlog snapshot silently reads the real snapshot instead of the fixture. A
+ *  migrated caller passes the built `.js` entry (`node <builtEntry>`); a caller
+ *  that stays on tsx passes the `.ts` src entry. Select the testkit to match the
+ *  entry's tree by its extension, so the coupling holds either way with no change
+ *  at the ~29 migrated callsites or the tsx-based ones. */
 export function withAuthorityTestkit(entry: string, args: string[]): string[] {
-  return ["--import", AUTHORITY_TESTKIT_URL, entry, ...args];
+  const testkit = entry.endsWith(".js") ? BUILT_AUTHORITY_TESTKIT_URL : AUTHORITY_TESTKIT_URL;
+  return ["--import", testkit, entry, ...args];
 }
 
 /** The same seam for a child launched through `bin/forge`, which builds its OWN node

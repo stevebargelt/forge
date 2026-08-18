@@ -31,9 +31,7 @@ import { SCHEMA_SQL } from "../../store/schema.js";
 import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "index.ts");
-const localTsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
-const tsx = existsSync(localTsx) ? localTsx : "tsx";
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 
 let homeDir: string;
 

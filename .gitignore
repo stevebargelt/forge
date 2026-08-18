@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# FG-728: ephemeral per-file mirror of src/ built once per integration `node --test`
+# process (integration-build-preload.ts); never committed, rebuilt every run.
+.forge-integration-build/
 *.log
 .DS_Store
 projects/

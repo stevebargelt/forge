@@ -22,8 +22,7 @@ import { collectDoneAuditInputFor } from "./collect.js";
 import { evaluateDoneAudit } from "./done-audit.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cliEntry = resolve(here, "..", "cli", "index.ts");
-const tsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as cliEntry } from "../integration-cli-spawn.js";
 
 let projectDir: string;
 let forgeHome: string;

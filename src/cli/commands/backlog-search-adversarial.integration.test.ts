@@ -13,8 +13,7 @@ import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/contain
 
 const here = dirname(fileURLToPath(import.meta.url));
 // here = src/cli/commands; entry is src/cli/index.ts; node_modules is at repo root
-const entry = resolve(here, "..", "index.ts");
-const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 
 let projectDir: string;
 

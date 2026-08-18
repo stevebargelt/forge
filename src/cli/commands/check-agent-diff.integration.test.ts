@@ -15,8 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "..", "cli", "index.ts");
-const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 
 let projectDir: string;
 

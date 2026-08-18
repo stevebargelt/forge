@@ -51,7 +51,7 @@ function measure(file: string): Promise<Measurement> {
     const started = process.hrtime.bigint();
     const child = spawn(
       process.execPath,
-      ["--import", "tsx", "--import", "./src/test-setup.ts", "--test", file],
+      ["--import", "tsx", "--import", "./src/integration-build-preload.ts", "--import", "./src/test-setup.ts", "--test", file],
       { cwd: REPO_ROOT, stdio: ["ignore", "ignore", "ignore"] },
     );
     child.on("close", (code) => {

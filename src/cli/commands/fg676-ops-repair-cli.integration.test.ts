@@ -16,8 +16,7 @@ import { applyMigrations } from "../../store/db.js";
 import { SCHEMA_SQL } from "../../store/schema.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "index.ts");
-const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 
 let forgeHome: string;
 let projectDir: string;

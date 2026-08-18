@@ -25,9 +25,7 @@ import { fileURLToPath } from "node:url";
 import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "cli", "index.ts");
-const localTsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
-const tsx = existsSync(localTsx) ? localTsx : "tsx";
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../integration-cli-spawn.js";
 
 const READY_BODY =
   "## Problem\nSomething is broken.\n\n## Goal\nFix it.\n\n## Acceptance Criteria\n- The fix is covered by a test.\n";

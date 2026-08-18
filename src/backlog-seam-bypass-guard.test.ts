@@ -116,6 +116,15 @@ const ALLOWLIST: readonly AllowEntry[] = [
       "The dashboard keeps notes.md reads per-checkout (FG-380 operational state), orthogonal to ticket " +
       "truth — FG-608 moved only the TICKET source to the host-wide DB.",
   },
+  {
+    file: "src/integration-cli-spawn.ts",
+    pattern: /resolve\(INTEGRATION_BUILD_DIR, ["']backlog["'], ["']container-authority\.testkit\.js["']\)/,
+    reason:
+      "This is the build-dir MIRROR path of src/backlog/container-authority.testkit-spawn.ts, not a ticket " +
+      "read. The integration build mirrors src/ into .forge-integration-build/, so the compiled testkit lands " +
+      "at <buildDir>/backlog/container-authority.testkit.js — the .js a spawned `node` CLI passes to --import " +
+      "(it has no tsx to parse the .ts source). No backlog/*.md Markdown is opened.",
+  },
 ];
 
 interface Hit {

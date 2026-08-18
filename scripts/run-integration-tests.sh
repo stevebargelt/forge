@@ -213,7 +213,7 @@ if [ "$MODE" = "serial" ]; then
   fi
   start_capture
   set +e
-  node --import tsx --import ./src/test-setup.ts --test-concurrency=1 --test "$SERIAL_FILE"
+  node --import tsx --import ./src/integration-build-preload.ts --import ./src/test-setup.ts --test-concurrency=1 --test "$SERIAL_FILE"
   SERIAL_STATUS=$?
   set -e
   end_capture_and_report "serial" "$SERIAL_STATUS" "$SERIAL_FILE"
@@ -250,7 +250,7 @@ fi
 
 start_capture
 set +e
-node --import tsx --import ./src/test-setup.ts --test "${BULK_FILES[@]}"
+node --import tsx --import ./src/integration-build-preload.ts --import ./src/test-setup.ts --test "${BULK_FILES[@]}"
 BULK_STATUS=$?
 set -e
 end_capture_and_report "bulk ${SHARD:-all}" "$BULK_STATUS" "${BULK_FILES[@]}"
@@ -266,7 +266,7 @@ fi
 if [ -z "$SHARD" ]; then
   start_capture
   set +e
-  node --import tsx --import ./src/test-setup.ts --test-concurrency=1 --test "$SERIAL_FILE"
+  node --import tsx --import ./src/integration-build-preload.ts --import ./src/test-setup.ts --test-concurrency=1 --test "$SERIAL_FILE"
   SERIAL_STATUS=$?
   set -e
   end_capture_and_report "serial" "$SERIAL_STATUS" "$SERIAL_FILE"

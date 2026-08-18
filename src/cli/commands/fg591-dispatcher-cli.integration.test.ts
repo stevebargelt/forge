@@ -40,9 +40,7 @@ import type { ScanEntry } from "../../store/queue-claims.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..");
-const entry = resolve(here, "..", "index.ts");
-const localTsx = resolve(repoRoot, "node_modules", ".bin", "tsx");
-const tsx = existsSync(localTsx) ? localTsx : "tsx";
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 
 let root: string;
 let home: string;
