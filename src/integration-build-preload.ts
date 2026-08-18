@@ -28,8 +28,10 @@
 // to a direct devDependency + regenerate the lockfile (the container mount is
 // read-only, so that could not be finalized here).
 
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import esbuild from "esbuild";
 import { INTEGRATION_BUILD_DIR, SRC_DIR } from "./integration-cli-spawn.js";
 
@@ -73,21 +75,70 @@ const mirrorPlugin: esbuild.Plugin = {
   },
 };
 
-const entryPoints = readdirSync(SRC_DIR, { recursive: true })
-  .filter((f): f is string => typeof f === "string" && f.endsWith(".ts"))
-  .map((f) => resolve(SRC_DIR, f));
+async function buildOnce(): Promise<void> {
+  const entryPoints = readdirSync(SRC_DIR, { recursive: true })
+    .filter((f): f is string => typeof f === "string" && f.endsWith(".ts"))
+    .map((f) => resolve(SRC_DIR, f));
 
-rmSync(INTEGRATION_BUILD_DIR, { recursive: true, force: true });
+  rmSync(INTEGRATION_BUILD_DIR, { recursive: true, force: true });
 
-await esbuild.build({
-  entryPoints,
-  outdir: INTEGRATION_BUILD_DIR,
-  outbase: SRC_DIR,
-  bundle: true, // required for the plugin's onResolve/onLoad; nothing is actually bundled (all imports external)
-  format: "esm",
-  platform: "node",
-  target: "node24",
-  sourcemap: false,
-  logLevel: "warning",
-  plugins: [mirrorPlugin],
-});
+  await esbuild.build({
+    entryPoints,
+    outdir: INTEGRATION_BUILD_DIR,
+    outbase: SRC_DIR,
+    bundle: true, // required for the plugin's onResolve/onLoad; nothing is actually bundled (all imports external)
+    format: "esm",
+    platform: "node",
+    target: "node24",
+    sourcemap: false,
+    logLevel: "warning",
+    plugins: [mirrorPlugin],
+  });
+}
+
+// BUILD ONCE PER `node --test` INVOCATION, not once per file. node:test runs each
+// test file in its OWN subprocess (process-level isolation is the default), and
+// every subprocess re-runs this --import preload. Without coordination all of them
+// would `rmSync` + rebuild the SINGLE shared INTEGRATION_BUILD_DIR concurrently —
+// each wipe yanking `<buildDir>/cli/index.js` out from under a sibling subprocess
+// that is mid-spawn, so `node <builtEntry>` fails nondeterministically (FG-728
+// step 2). The subprocesses of one invocation share a parent — the test runner —
+// so process.ppid names the invocation: exactly one subprocess builds, the rest
+// wait for its completion sentinel and reuse the tree. This also removes the
+// redundant per-file rebuild cost (~700ms × files) the "one build per process"
+// model was already meant to avoid; it just misjudged the process boundary.
+//
+// The lock + ready sentinel live in the OS tmpdir (not under the repo root), so a
+// wipe of the build dir can never remove them and no marker is left in the work
+// tree. They are scoped to THIS invocation's ppid, so a later `node --test`
+// invocation (e.g. the runner's serial lane after the bulk lane) never reuses a
+// stale tree: with a different ppid it finds no ready sentinel and rebuilds fresh,
+// preserving the always-rebuild fail-safe per invocation.
+const INVOCATION = process.ppid;
+const LOCK_DIR = resolve(tmpdir(), `forge-integration-build.${INVOCATION}.lock`);
+const READY = resolve(tmpdir(), `forge-integration-build.${INVOCATION}.ready`);
+const READY_TIMEOUT_MS = 120_000;
+
+let builder = false;
+try {
+  mkdirSync(LOCK_DIR); // atomic: exactly one subprocess of this invocation wins
+  builder = true;
+} catch {
+  builder = false; // another subprocess is (or was) the builder
+}
+
+if (builder) {
+  await buildOnce();
+  writeFileSync(READY, "ok"); // built tree is fully populated
+} else {
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  while (!existsSync(READY)) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `integration build preload: timed out after ${READY_TIMEOUT_MS}ms waiting for the ` +
+          `sibling builder (ppid ${INVOCATION}) to produce ${INTEGRATION_BUILD_DIR}`,
+      );
+    }
+    await delay(25);
+  }
+}

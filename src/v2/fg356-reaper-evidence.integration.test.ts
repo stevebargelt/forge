@@ -45,8 +45,7 @@ const RUN_ID = "run-fg356-evidence";
 const ALIVE = () => true;
 
 const here = dirname(fileURLToPath(import.meta.url));
-const CLI_ENTRY = resolve(here, "..", "cli", "index.ts");
-const TSX = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
+import { NODE_EXEC as TSX, BUILT_CLI_ENTRY as CLI_ENTRY } from "../integration-cli-spawn.js";
 
 const tmpDirs: string[] = [];
 let openDbs: DatabaseInstance[] = [];

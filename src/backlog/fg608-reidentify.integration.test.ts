@@ -31,9 +31,7 @@ import { SNAPSHOT_DIR_ENV } from "./container-authority.js";
 import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "cli", "index.ts");
-const localTsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
-const tsx = existsSync(localTsx) ? localTsx : "tsx";
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../integration-cli-spawn.js";
 
 let projectDir: string;
 let home: string;

@@ -27,8 +27,7 @@ import { writeTicket } from "../../backlog/structured.js";
 import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "index.ts");
-const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 
 const WORKFLOW_WITH_AUTHORITATIVE_SHIPPING_REVIEWER = `
 name: fg472-feature-test

@@ -51,9 +51,8 @@ import type { EffectiveAuth } from "../../v2/model-resolution.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // From src/cli/commands/ go up two to src/, then into cli/index.ts.
-const entry = resolve(here, "..", "..", "cli", "index.ts");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
 // node_modules lives at the project root (three levels above here).
-const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
 const FAKE_CLAUDE = resolve(here, "..", "..", "orchestrator", "__fixtures__", "fake-claude.js");
 
 let tmp: string;

@@ -41,9 +41,7 @@ import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, "..", "..");
-const entry = resolve(REPO_ROOT, "src", "cli", "index.ts");
-const localTsx = resolve(REPO_ROOT, "node_modules", ".bin", "tsx");
-const tsx = existsSync(localTsx) ? localTsx : "tsx";
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../integration-cli-spawn.js";
 
 const KEY = "pk-fg645-a2";
 const NOW = "2026-07-30T00:00:00Z";

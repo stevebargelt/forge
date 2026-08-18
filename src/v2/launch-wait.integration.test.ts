@@ -16,9 +16,8 @@ import { fileURLToPath } from "node:url";
 import { LAUNCHES_DIR, realWaitHarness, shellQuote, startLaunch, waitForLaunchTerminal, type LaunchStatus, type LaunchView, type WaitOutcome } from "./launch.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "cli", "index.ts");
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../integration-cli-spawn.js";
 const loader = resolve(here, "..", "..", "bin", "forge-loader.mjs");
-const tsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
 
 const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;
 const started: string[] = [];

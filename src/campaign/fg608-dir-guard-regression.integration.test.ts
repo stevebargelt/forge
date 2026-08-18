@@ -67,9 +67,7 @@ import { getCampaign } from "../store/campaigns.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
-const entry = resolve(repoRoot, "src", "cli", "index.ts");
-const localTsx = resolve(repoRoot, "node_modules", ".bin", "tsx");
-const tsx = existsSync(localTsx) ? localTsx : "tsx";
+import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../integration-cli-spawn.js";
 
 const NOW = "2026-07-29T00:00:00Z";
 const BODY =
