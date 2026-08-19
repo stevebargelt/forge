@@ -960,6 +960,24 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       assert.match(collapsed(load), new RegExp(CURRENT_ACTIVITY_UNAVAILABLE_LABEL));
     });
 
+    test("RF-4: a present-but-malformed `ciWaits` (an object, not an array) is a FAILED read, never erased to idle", () => {
+      // A live CI wait forces never-IDLE by its MERE PRESENCE, so a malformed present
+      // `ciWaits` must fail OPEN to `unavailable`, not be silently dropped to `[]` and
+      // reported as idle. The old guard only rejected a bad ARRAY, so `ciWaits: {}` slipped
+      // through as `ready` and `homeInFlightActivity(load).ciWaits` was `[]` — idle.
+      const body = payload({ ciWaits: {} } as never);
+      assert.equal(isCurrentActivityPayload(body), false, "a present ciWaits that is not an array must be rejected");
+      const load = activityFromBody(body);
+      assert.equal(activityPhase(load), "unavailable");
+      assert.equal((load as { reason: string }).reason, "malformed");
+      // It resolves to the honest unavailable line, NOT an empty (idle) waits list.
+      const inFlight = homeInFlightActivity(load);
+      assert.equal(inFlight.phase, "unavailable");
+      assert.equal(inFlight.message, IN_FLIGHT_WAITS_UNAVAILABLE_LABEL);
+      // An ABSENT ciWaits (a server predating the field) still validates — absent-tolerant.
+      assert.equal(isCurrentActivityPayload(payload({})), true, "absent ciWaits is still tolerated");
+    });
+
     // ─────── the CLASS, generated from the contract rather than from bug reports ──────
     //
     // One test per entry kind the renderer walks into, driven by the SAME table the

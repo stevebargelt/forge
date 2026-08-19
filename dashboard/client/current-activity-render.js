@@ -344,9 +344,13 @@ export function isCurrentActivityPayload(value) {
   // read the same way and for the same reason — a server predating it sends none.
   if (Array.isArray(value.unassociated) && !value.unassociated.every(isLaunchEntry)) return false;
   if (Array.isArray(value.launches) && !value.launches.every(isLaunchEntry)) return false;
-  // FG-731: `ciWaits` is read the same absent-tolerant way — a server predating it sends
-  // none — but a present array holding a malformed entry is still a failed read.
-  if (Array.isArray(value.ciWaits) && !value.ciWaits.every(isCiWaitEntry)) return false;
+  // FG-731: `ciWaits` is ABSENT-tolerant — a server predating it sends none — but NOT
+  // malformed-tolerant. Unlike `unassociated`/`launches` (diagnostic buckets that fail
+  // safe when dropped), a live CI wait forces never-IDLE by its MERE PRESENCE, so a
+  // present-but-malformed `ciWaits` (an object, or an array with a bad entry) must be a
+  // FAILED read, never silently erased to `[]` and reported as idle (RF-4). Absent (the
+  // field simply not sent) still validates; present-and-not-a-valid-array does not.
+  if (value.ciWaits !== undefined && !isArrayOf(value.ciWaits, isCiWaitEntry)) return false;
   const ci = value.requiredCi;
   if (!isPlainObject(ci)) return false;
   if (!isNonEmptyString(ci.state)) return false;

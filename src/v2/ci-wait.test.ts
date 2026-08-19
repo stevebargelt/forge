@@ -154,6 +154,32 @@ describe("FG-731 armCiWait — register-before-poll + adopt-on-duplicate", () =>
     const live = readCiWaits({ liveOnly: true }).filter((w) => w.prNumber === 42);
     assert.equal(live.length, 1, "adopt must not register a duplicate");
   });
+
+  test("RF-1: adoption finds the live twin by lifecycle_state, not the stored `terminal` byte", () => {
+    const first = armPr();
+    // Corrupt the byte: the wait is still LIVE by lifecycle but the terminal byte lies (1).
+    // The atomic adopt-or-register must still see it as a live twin and adopt, never insert a
+    // duplicate — the same canonical-liveness rule readCiWaits was fixed for (RF-3).
+    db.prepare(`UPDATE ci_waits SET terminal = 1 WHERE id = ?`).run(first.id);
+    const second = armPr();
+    assert.equal(second.adopted, true, "a live-by-lifecycle twin is adopted despite a lying terminal byte");
+    assert.equal(second.id, first.id);
+  });
+
+  test("RF-6: a store write failure degrades to an unregistered fallback wait — armCiWait NEVER throws", () => {
+    // Simulate a store that cannot be written OR read: the register transaction throws inside
+    // registerOrAdoptCiWait, which returns { registered: false }. The OLD armCiWait ignored
+    // that and called renewCiWaitLease — a SECOND unguarded write that re-threw on the same
+    // store and aborted the waiter before it could ever poll gh. The fix honors the miss.
+    db.exec("DROP TABLE ci_waits");
+    let armed: ReturnType<typeof armCiWait> | undefined;
+    assert.doesNotThrow(() => {
+      armed = armCiWait({ kind: "pr_checks", remote: { repo: "acme/forge", prNumber: 7 }, owner: OWNER, leaseMs: 60000 });
+    });
+    assert.equal(armed!.adopted, false);
+    assert.equal(armed!.wait.lifecycleState, "registered", "the loop proceeds against an unregistered fallback wait");
+    assert.ok(armed!.id, "the wait still has an id to probe gh against");
+  });
 });
 
 describe("FG-731 the block-wait loop — single terminal outcome by re-observation", () => {

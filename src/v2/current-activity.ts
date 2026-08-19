@@ -72,6 +72,7 @@ import {
 } from "../store/launch-observations.js";
 import { isTerminalReviewState } from "../store/reviews.js";
 import {
+  CI_WAIT_LIVE_WHERE,
   isCiWaitLive,
   rowToCiWait,
   type CiWait,
@@ -592,13 +593,15 @@ function readOpenLaunches(db: DatabaseInstance): LaunchObservation[] {
 function readLiveCiWaits(db: DatabaseInstance): CiWait[] {
   const cols = db.prepare(`PRAGMA table_info(ci_waits)`).all() as Array<{ name: string }>;
   if (cols.length === 0) return [];
+  // Liveness is filtered on lifecycle_state (CI_WAIT_LIVE_WHERE), never the `terminal`
+  // byte: a row whose byte lies (e.g. lifecycle=running, terminal=1) must NOT be dropped
+  // from Current activity — that byte-lie is precisely how a live wait let the workspace
+  // read IDLE again (RF-5). Same corrected predicate as readCiWaits (RF-3).
   const rows = db.prepare(`
-    SELECT * FROM ci_waits WHERE terminal = 0 ORDER BY started_at DESC LIMIT 500
+    SELECT * FROM ci_waits WHERE ${CI_WAIT_LIVE_WHERE} ORDER BY started_at DESC LIMIT 500
   `).all() as Array<Parameters<typeof rowToCiWait>[0]>;
-  // Terminality is the CANONICAL predicate over lifecycle_state, never trusted from the
-  // column byte (ci-waits.ts invariant 2): a row whose `terminal` byte disagrees with
-  // its own state is decided by the state. isCiWaitLive is what forces the wait to keep
-  // forcing WAITING/never-IDLE below.
+  // isCiWaitLive re-derives terminality from lifecycle_state (never the byte) as a belt-and-
+  // suspenders over the SQL, and is what forces the wait to keep forcing WAITING/never-IDLE.
   return rows.map(rowToCiWait).filter(isCiWaitLive);
 }
 

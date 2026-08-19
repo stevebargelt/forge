@@ -178,6 +178,14 @@ const CI_WAIT_COLUMNS = [
   "lease_expires_at_ms", "run_id", "ticket_id", "project_dir", "project_dir_canonical",
 ].join(", ");
 
+/** The SQL liveness predicate — derived from lifecycle_state (the CANONICAL axis),
+ *  NEVER the stored `terminal` byte (invariant 2). Filtering on the byte would silently
+ *  drop a row whose byte lies (e.g. lifecycle=running, terminal=1) off the live surface,
+ *  which is exactly the recovery/activity IDLE bug. The three terminal states here mirror
+ *  isTerminalCiWaitState / CI_WAIT_TERMINAL_DISPOSITIONS — everything else (including a
+ *  state a newer binary wrote) is live, so a filter on this never ages a wait out. */
+export const CI_WAIT_LIVE_WHERE = `lifecycle_state NOT IN ('advanced', 'cancelled', 'abandoned')`;
+
 function decodeKind(raw: string): CiWaitKind {
   // An unknown kind is kept verbatim rather than fabricated into a specific one:
   // failing closed to pr_checks would be a lie, and a value a newer binary wrote is
@@ -299,6 +307,86 @@ export function registerCiWait(input: RegisterCiWaitInput): boolean {
   }
 }
 
+export type RegisterOrAdoptCiWaitInput = RegisterCiWaitInput & { owner: string; leaseMs: number };
+
+export type RegisterOrAdoptCiWaitResult =
+  | { registered: true; adopted: boolean; wait: CiWait }
+  | { registered: false };
+
+/** ATOMIC insert-or-adopt keyed on the caller's remote-identity matcher (FG-731 RF-1).
+ *  The find-a-live-twin read and the INSERT run in ONE writeTransaction (BEGIN IMMEDIATE),
+ *  so two forge processes arming the SAME remote run cannot both take the new-row path:
+ *  the loser blocks on the write lock, then sees the winner's committed row and adopts it.
+ *  Candidate liveness is derived from lifecycle_state (CI_WAIT_LIVE_WHERE), never the byte.
+ *
+ *  The lease is set in the SAME transaction — so the caller never needs a SECOND write to
+ *  arm the wait. BEST-EFFORT against a busy store, exactly like registerCiWait: a store
+ *  hiccup returns { registered: false } and NEVER throws, so the caller degrades to an
+ *  unregistered fallback wait rather than blocking or refusing it (RF-6). */
+export function registerOrAdoptCiWait(
+  input: RegisterOrAdoptCiWaitInput,
+  matches: (candidate: CiWait) => boolean,
+): RegisterOrAdoptCiWaitResult {
+  const remote = input.remote ?? {};
+  const projectDir = input.association?.projectDir ?? null;
+  // PROVEN identity resolved BEFORE the transaction opens — no filesystem syscall may be
+  // held across the machine-wide write lock (the invariant db.ts and registerCiWait state).
+  const projectDirCanonical = projectDir === null ? null : provenPhysical(projectDir);
+  try {
+    const db = getDb();
+    const priorBusyTimeout = db.pragma("busy_timeout", { simple: true }) as number;
+    db.pragma(`busy_timeout = ${CI_WAIT_REGISTER_BUSY_TIMEOUT_MS}`);
+    try {
+      return writeTransaction((): RegisterOrAdoptCiWaitResult => {
+        const tx = getDb();
+        const liveRows = tx
+          .prepare(`SELECT ${CI_WAIT_COLUMNS} FROM ci_waits WHERE ${CI_WAIT_LIVE_WHERE} ORDER BY started_at DESC`)
+          .all() as CiWaitRow[];
+        const existing = liveRows.map(rowToCiWait).find(matches);
+        const leaseExpiresAtMs = storeNowMs() + input.leaseMs;
+        if (existing) {
+          tx.prepare(`UPDATE ci_waits SET owner = ?, lease_expires_at_ms = ? WHERE id = ?`)
+            .run(input.owner, leaseExpiresAtMs, existing.id);
+          return { registered: true, adopted: true, wait: { ...existing, owner: input.owner, leaseExpiresAtMs } };
+        }
+        tx.prepare(`
+          INSERT INTO ci_waits (${CI_WAIT_COLUMNS})
+          VALUES (@id, @kind, @repo, @actions_run_id, @pr_number, @head_sha, @check_suite_ref,
+                  @workflow_file, @dispatch_ref, @dispatch_inputs, @url, @started_at,
+                  'registered', 0, NULL, NULL, NULL, NULL, NULL, NULL, @owner,
+                  @lease_expires_at_ms, @run_id, @ticket_id, @project_dir, @project_dir_canonical)
+          ON CONFLICT(id) DO NOTHING
+        `).run({
+          id: input.id,
+          kind: input.kind,
+          repo: remote.repo ?? null,
+          actions_run_id: remote.actionsRunId ?? null,
+          pr_number: remote.prNumber ?? null,
+          head_sha: remote.headSha ?? null,
+          check_suite_ref: remote.checkSuiteRef ?? null,
+          workflow_file: remote.workflowFile ?? null,
+          dispatch_ref: remote.dispatchRef ?? null,
+          dispatch_inputs: encodeDispatchInputs(remote.dispatchInputs),
+          url: input.url ?? null,
+          started_at: input.startedAt,
+          owner: input.owner,
+          lease_expires_at_ms: leaseExpiresAtMs,
+          run_id: input.association?.runId ?? null,
+          ticket_id: input.association?.ticketId ?? null,
+          project_dir: projectDir,
+          project_dir_canonical: projectDirCanonical,
+        });
+        const wait = getCiWait(input.id);
+        return wait === undefined ? { registered: false } : { registered: true, adopted: false, wait };
+      });
+    } finally {
+      db.pragma(`busy_timeout = ${priorBusyTimeout}`);
+    }
+  } catch {
+    return { registered: false }; // unregistered, not unwaited — and never delayed
+  }
+}
+
 /** What an observation may resolve about the remote on first sight — the
  *  workflow_dispatch case fills the run id/url here (register-before-poll left them null). */
 export type CiWaitResolved = { actionsRunId?: string | null; url?: string | null };
@@ -416,7 +504,10 @@ export type CiWaitScope = { liveOnly?: boolean; limit?: number };
  *  left to the derivation's resolveProjectScope machinery over the association fields
  *  every row carries — this read stays deliberately un-opinionated about placement. */
 export function readCiWaits(scope: CiWaitScope = {}): CiWait[] {
-  const where = scope.liveOnly ? `WHERE terminal = 0` : ``;
+  // liveOnly filters on lifecycle_state (CI_WAIT_LIVE_WHERE), never the `terminal` byte:
+  // a row whose byte disagrees with its own state must be decided by the state (RF-3), and
+  // this keeps the LIMIT applied to live rows rather than to a byte-filtered subset.
+  const where = scope.liveOnly ? `WHERE ${CI_WAIT_LIVE_WHERE}` : ``;
   const rows = getDb()
     .prepare(`SELECT ${CI_WAIT_COLUMNS} FROM ci_waits ${where} ORDER BY started_at DESC LIMIT ?`)
     .all(scope.limit ?? 500) as CiWaitRow[];

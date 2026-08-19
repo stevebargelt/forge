@@ -9,7 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
-  registerCiWait,
+  registerOrAdoptCiWait,
   observeCiWait,
   advanceCiWait,
   renewCiWaitLease,
@@ -259,30 +259,31 @@ function fallbackWait(id: string, input: ArmCiWaitInput, startedAt: string): CiW
   };
 }
 
-/** ADOPT a live twin, else REGISTER a fresh wait — synchronously, BEFORE any gh call.
- *  The register INSERT is best-effort (registerCiWait never blocks/refuses the wait);
- *  the lease is set via renewCiWaitLease so it lands on the store's own clock. */
+/** ADOPT a live twin, else REGISTER a fresh wait — ATOMICALLY and synchronously, BEFORE
+ *  any gh call. The find-twin read, the INSERT, and the lease all run in ONE store
+ *  transaction (registerOrAdoptCiWait), so two processes arming the same run cannot both
+ *  register a duplicate (RF-1). The write is best-effort: on a store hiccup it returns
+ *  unregistered, and we HONOR that by degrading to an unregistered fallback wait — never a
+ *  second unguarded write that would re-throw on the same busy store and abort the waiter
+ *  before it can poll gh (RF-6). The wait is unregistered, NOT unwaited. */
 export function armCiWait(input: ArmCiWaitInput): ArmedCiWait {
-  const existing = readCiWaits({ liveOnly: true }).find((w) => sameRemoteIdentity(w, input.kind, input.remote));
-  if (existing) {
-    renewCiWaitLease(existing.id, input.owner, input.leaseMs);
-    const wait = getCiWait(existing.id) ?? existing;
-    return { id: existing.id, adopted: true, wait };
-  }
   const id = newCiWaitId();
   const startedAt = nowIso();
-  registerCiWait({
-    id,
-    kind: input.kind,
-    remote: input.remote,
-    url: input.url ?? null,
-    startedAt,
-    owner: input.owner,
-    association: input.association,
-  });
-  renewCiWaitLease(id, input.owner, input.leaseMs);
-  const wait = getCiWait(id) ?? fallbackWait(id, input, startedAt);
-  return { id, adopted: false, wait };
+  const result = registerOrAdoptCiWait(
+    {
+      id,
+      kind: input.kind,
+      remote: input.remote,
+      url: input.url ?? null,
+      startedAt,
+      owner: input.owner,
+      leaseMs: input.leaseMs,
+      association: input.association,
+    },
+    (candidate) => sameRemoteIdentity(candidate, input.kind, input.remote),
+  );
+  if (!result.registered) return { id, adopted: false, wait: fallbackWait(id, input, startedAt) };
+  return { id: result.wait.id, adopted: result.adopted, wait: result.wait };
 }
 
 // ── the block-wait loop: single terminal outcome, by re-observation ──────────

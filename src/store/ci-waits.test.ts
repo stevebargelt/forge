@@ -263,6 +263,17 @@ describe("FG-731 ci_waits — reads and vocabulary", () => {
     assert.deepEqual(live.map((w) => w.id), ["ciwait-e2"]);
   });
 
+  test("RF-3: liveOnly derives liveness from lifecycle_state, NOT the stored `terminal` byte", () => {
+    registerPush("ciwait-bytelie", { startedAt: T1 });
+    // A byte-lie: the lifecycle is still LIVE (running) but the stored terminal byte says 1.
+    // The old `WHERE terminal = 0` pre-filter silently dropped this live wait; the corrected
+    // predicate keys on lifecycle_state, so it stays on the live surface.
+    db.prepare(`UPDATE ci_waits SET lifecycle_state = 'running', terminal = 1 WHERE id = ?`).run("ciwait-bytelie");
+    const live = readCiWaits({ liveOnly: true });
+    assert.ok(live.some((w) => w.id === "ciwait-bytelie"), "a lifecycle-live row must not be dropped by a lying terminal byte");
+    assert.equal(live.find((w) => w.id === "ciwait-bytelie")!.terminal, false, "terminal is re-derived from lifecycle_state");
+  });
+
   test("the kind vocabulary is exactly the three FG-731 wait kinds", () => {
     assert.deepEqual([...CI_WAIT_KIND_VALUES].sort(), ["pr_checks", "push_actions", "workflow_dispatch"]);
   });

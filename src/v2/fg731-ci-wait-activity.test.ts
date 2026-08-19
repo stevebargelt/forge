@@ -260,6 +260,16 @@ describe("FG-731 AC2 — classification over both branches", () => {
     addCiWait({ id: "wait-corrupt", lifecycleState: "advanced", terminal: 0, terminalDisposition: "advanced" });
     assert.deepEqual(derive().ciWaits, [], "isCiWaitLive decides terminality from the state, not the byte");
   });
+
+  test("RF-5: a row whose `terminal` byte lies (1) but whose state is LIVE (running) stays on the surface", () => {
+    // The mirror of the case above: the byte says terminal, the lifecycle says running. The
+    // old activity SQL (`WHERE terminal = 0`) discarded this live wait BEFORE terminality was
+    // re-derived from lifecycle_state, dropping it from Current activity and re-introducing
+    // the IDLE bug. The corrected predicate keys on lifecycle_state, so the wait survives.
+    addCiWait({ id: "wait-bytelie", lifecycleState: "running", terminal: 1, observedState: "running", observedM: 1, observedN: 2, observedAt: ago(1_000) });
+    const ids = derive().ciWaits.map((w) => w.waitId);
+    assert.deepEqual(ids, ["wait-bytelie"], "liveness is derived from lifecycle_state, never the stored terminal byte");
+  });
 });
 
 // ───────────────────────── placement / scoping (parallels launches) ────────────────
