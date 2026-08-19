@@ -18,13 +18,15 @@ import {
   gatherPolicy,
   gatherProfileAuth,
   gatherReleaseInputs,
-  newestBuildInputMtime,
+  computeCurrentBuildInputDigest,
+  readRecordedDigest,
   renderDoctor,
   renderDocsSurfaces,
   type DoctorFindings,
   type DoctorProbes,
 } from "./doctor.js";
 import { buildReleaseReport, type ImageInputs, type ReleaseReport } from "../../v2/release-doctor.js";
+import { computeBuildInputDigest } from "../../v2/build-input-digest.js";
 import { Command } from "commander";
 import { assetRoot } from "../../v2/asset-root.js";
 import {
@@ -74,7 +76,7 @@ function writeProjectPolicy(body = PROJECT_POLICY): void {
 }
 
 const fakeImage = (over: Partial<ImageInputs> = {}): DoctorProbes => ({
-  inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, buildInputMtimeMs: 1000, ...over }),
+  inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, recordedDigest: "d", currentInputDigest: "d", ...over }),
   probeClisInImage: () => ({}), // no runtimes in the temp FORGE_HOME → empty
 });
 
@@ -171,7 +173,7 @@ test("#229 project-local runtime CLI is probed: policy profile.runtime drives th
 
   const probedCommands: string[] = [];
   const inputs = gatherReleaseInputs("agent-dev-worker:latest", { projectDir }, {
-    inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, buildInputMtimeMs: 1000 }),
+    inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, recordedDigest: "d", currentInputDigest: "d" }),
     probeClisInImage: (_image, commands) => { probedCommands.push(...commands); return {}; },
   });
 
@@ -194,21 +196,23 @@ test("#229 gatherReleaseInputs: injected docker probe controls the image check (
   assert.equal(report.ok, false);
 });
 
-test("#229 gatherReleaseInputs: ctx.forgeRepoDir is forwarded to the build-input mtime check", () => {
-  // Use the buildInputMtime sub-probe to verify the repo dir is forwarded correctly
+test("#229 gatherReleaseInputs: ctx.forgeRepoDir is forwarded to the build-input digest check", () => {
+  // Use the buildInputDigest sub-probe to verify the repo dir is forwarded correctly
   // (avoids real docker + real filesystem — both can vary across environments).
   let capturedDir: string | undefined;
   gatherReleaseInputs("nonexistent-image-for-test-xyz", { projectDir, forgeRepoDir: "/custom/forge-repo" }, {
     probeClisInImage: () => ({}),
-    buildInputMtime: (dir) => { capturedDir = dir; return 9999; },
+    buildInputDigest: (dir) => { capturedDir = dir; return "digest"; },
   });
   assert.equal(capturedDir, "/custom/forge-repo");
 });
 
-// FG-520: the wrapper the image bakes in (forge-test.sh) is COPYed by the Dockerfile.
-// Staleness measured off the Dockerfile alone would call an image with the OLD
-// wrapper "current", so the rebuild acceptance couldn't be enforced.
-function writeBuildContext(repoDir: string, files: Record<string, number>): void {
+// FG-543: the image's staleness is a build-input CONTENT digest, computed by the
+// ONE shared function (src/v2/build-input-digest.ts) at build time and check time.
+// The Dockerfile COPYs forge-test.sh / agent-entrypoint.sh, so their CONTENT is
+// part of the digest — an image with the OLD wrapper content is STALE. corp-root.pem
+// is a COPY source but is EXCLUDED (staged/removed by build.sh, unreadable at check).
+function writeBuildContext(repoDir: string, files: Record<string, string>): void {
   const dockerDir = join(repoDir, "docker");
   mkdirSync(dockerDir, { recursive: true });
   writeFileSync(join(dockerDir, "agent-dev-worker.Dockerfile"), [
@@ -217,44 +221,161 @@ function writeBuildContext(repoDir: string, files: Record<string, number>): void
     "COPY forge-test.sh /usr/local/bin/forge-test",
     "COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint",
   ].join("\n"));
-  for (const [name, mtimeMs] of Object.entries(files)) {
-    const p = join(dockerDir, name);
-    writeFileSync(p, "#!/bin/sh\n");
-    utimesSync(p, mtimeMs / 1000, mtimeMs / 1000);
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(join(dockerDir, name), content);
   }
 }
 
-test("FG-520 newestBuildInputMtime: a COPYed script newer than the Dockerfile drives staleness", () => {
+test("FG-543 computeBuildInputDigest: changing a COPYed file's CONTENT flips the digest (AC3)", () => {
   const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-repo-"));
   try {
-    const dockerfileMs = Date.now() - 100_000;
-    writeBuildContext(repoDir, { "forge-test.sh": dockerfileMs + 50_000, "agent-entrypoint.sh": dockerfileMs - 10_000 });
-    utimesSync(join(repoDir, "docker", "agent-dev-worker.Dockerfile"), dockerfileMs / 1000, dockerfileMs / 1000);
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\necho v1\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
+    const dockerDir = join(repoDir, "docker");
+    const before = computeBuildInputDigest(dockerDir);
 
-    const newest = newestBuildInputMtime(repoDir);
-    assert.ok(newest !== undefined);
-    assert.ok(newest > dockerfileMs, "forge-test.sh's mtime must win over the older Dockerfile");
-
-    // an image built between the two → STALE, which the Dockerfile-only check missed
-    const inputs = gatherReleaseInputs("agent-dev-worker:latest", { projectDir }, {
-      inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: dockerfileMs + 10_000, buildInputMtimeMs: newest }),
-      probeClisInImage: () => ({}),
-    });
-    const check = buildReleaseReport(inputs).checks.find((c) => c.name.includes("image"))!;
-    assert.equal(check.status, "warn");
-    assert.match(check.detail, /STALE/);
+    writeFileSync(join(dockerDir, "forge-test.sh"), "#!/bin/sh\necho v2\n");
+    const after = computeBuildInputDigest(dockerDir);
+    assert.notEqual(before, after, "changed build-input content must change the digest");
   } finally {
     rmSync(repoDir, { recursive: true, force: true });
   }
 });
 
-test("FG-520 newestBuildInputMtime: a COPY source that doesn't exist is skipped, not fatal", () => {
+test("FG-543 computeBuildInputDigest: an mtime-only touch (same bytes) does NOT change the digest (AC2)", () => {
   const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-repo-"));
   try {
-    // corp-root.pem is generated at build time and absent from the repo
-    writeBuildContext(repoDir, { "forge-test.sh": Date.now() - 5_000, "agent-entrypoint.sh": Date.now() - 5_000 });
-    assert.ok(newestBuildInputMtime(repoDir) !== undefined);
-    assert.equal(newestBuildInputMtime(join(repoDir, "no-such-repo")), undefined);
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\necho hi\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
+    const dockerDir = join(repoDir, "docker");
+    const before = computeBuildInputDigest(dockerDir);
+
+    // Bump the mtime far into the future (as a git pull/checkout would) — and,
+    // belt-and-suspenders, rewrite one file with identical content.
+    const future = Date.now() + 10 * 60_000;
+    utimesSync(join(dockerDir, "forge-test.sh"), future / 1000, future / 1000);
+    writeFileSync(join(dockerDir, "agent-entrypoint.sh"), "#!/bin/sh\n");
+    const after = computeBuildInputDigest(dockerDir);
+    assert.equal(before, after, "a timestamp-only change must NOT change the digest — the FG-543 false positive");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-543 computeBuildInputDigest: corp-root.pem is excluded and a missing COPY source is skipped, not fatal", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-repo-"));
+  try {
+    // corp-root.pem (excluded) and forge-test.sh/agent-entrypoint.sh are the COPY
+    // sources; none of corp-root.pem exists on disk. The digest is still computable.
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
+    const dockerDir = join(repoDir, "docker");
+    const digest = computeBuildInputDigest(dockerDir);
+    assert.match(digest, /^[0-9a-f]{64}$/, "a stable hex sha256 despite the excluded/missing corp-root.pem");
+
+    // Writing corp-root.pem (the excluded source) must NOT change the digest.
+    writeFileSync(join(dockerDir, "corp-root.pem"), "-----CERT-----\n");
+    assert.equal(computeBuildInputDigest(dockerDir), digest, "corp-root.pem is excluded, so staging it cannot move the digest");
+
+    // An unreadable Dockerfile (docker/ absent) makes the wrapper return undefined.
+    assert.equal(computeCurrentBuildInputDigest(join(repoDir, "no-such-repo")), undefined);
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-543 AC1-AC4 wiring: recorded==current → ok; differ → STALE; absent → STALE", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-repo-"));
+  try {
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\necho hi\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
+    const current = computeCurrentBuildInputDigest(repoDir)!;
+    assert.match(current, /^[0-9a-f]{64}$/);
+
+    const imageCheckStatus = (over: Partial<ImageInputs>): string =>
+      buildReleaseReport(gatherReleaseInputs("agent-dev-worker:latest", { projectDir, forgeRepoDir: repoDir }, {
+        inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, currentInputDigest: current, ...over }),
+        probeClisInImage: () => ({}),
+      })).checks.find((c) => c.name.includes("image"))!.status;
+
+    // AC1/AC2: a cached rebuild / mtime-only touch records the SAME digest → ok.
+    assert.equal(imageCheckStatus({ recordedDigest: current }), "ok");
+    // AC3: changed build-input content → recorded no longer matches → STALE.
+    assert.equal(imageCheckStatus({ recordedDigest: "some-other-digest" }), "warn");
+    // AC4: no digest recorded (old pre-label image) → fail toward STALE.
+    assert.equal(imageCheckStatus({ recordedDigest: undefined }), "warn");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+// ─────────── FG-543 RF-1: a docker inspect FAILURE must not fabricate a STALE ───────────
+//
+// readRecordedDigest previously turned EVERY inspect failure into undefined, which
+// the pure check reads as an absent label → fail toward STALE (AC4). A transient
+// daemon/permission failure is INCONCLUSIVE, not an absent label: it must surface
+// as an error so inspectImage routes it to dockerError (image check skips), exactly
+// like the ls-unreachable path — never a false STALE on a present image.
+
+test("FG-543 RF-1: a docker inspect FAILURE is an inconclusive error probe, not an absent label", () => {
+  const boom = (): string => {
+    const e = new Error("Command failed: docker image inspect") as Error & { stderr?: string };
+    e.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock";
+    throw e;
+  };
+  const probe = readRecordedDigest("sha256:abc", boom);
+  assert.equal(probe.kind, "error", "an exec failure is inconclusive, NOT an absent label");
+  assert.match((probe as { message: string }).message, /Cannot connect to the Docker daemon/);
+});
+
+test("FG-543 RF-1: an inspect failure with no stderr still yields a non-empty error message", () => {
+  const probe = readRecordedDigest("id", () => { throw new Error(""); });
+  assert.equal(probe.kind, "error");
+  assert.ok((probe as { message: string }).message.length > 0, "the message is never empty");
+});
+
+test("FG-543 RF-1: a SUCCESSFUL inspect with no label value is a genuinely absent record (→ STALE, AC4)", () => {
+  assert.deepEqual(readRecordedDigest("id", () => "<no value>\n"), { kind: "absent" });
+  assert.deepEqual(readRecordedDigest("id", () => "   \n"), { kind: "absent" });
+});
+
+test("FG-543 RF-1: a SUCCESSFUL inspect returning a digest yields it verbatim (trimmed)", () => {
+  assert.deepEqual(readRecordedDigest("id", () => "  deadbeef\n"), { kind: "value", digest: "deadbeef" });
+});
+
+// ─────────── FG-543 RF-2: an unreadable-but-PRESENT COPY source must not fabricate a STALE ───────────
+//
+// A COPY source hashed into the recorded digest at build time but transiently
+// UNREADABLE at check time (permission/IO) was silently omitted, shrinking the
+// input set so the digests differ → false STALE. Only a source ABSENT on disk
+// (ENOENT — skipped at both build and check, so they agree) may be dropped; any
+// other read failure makes the current digest UNCOMPUTABLE, which fails safe to
+// NOT stale via computeCurrentBuildInputDigest's undefined.
+
+test("FG-543 RF-2: a COPY source PRESENT but unreadable is uncomputable (throws), not a partial digest", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-rf2-"));
+  try {
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
+    const dockerDir = join(repoDir, "docker");
+    assert.match(computeBuildInputDigest(dockerDir), /^[0-9a-f]{64}$/, "baseline: all sources readable → computable");
+
+    // Replace a COPY source with a DIRECTORY: present on disk, but readFileSync
+    // cannot read it (EISDIR) — the "present at build, unreadable at check" case.
+    rmSync(join(dockerDir, "agent-entrypoint.sh"));
+    mkdirSync(join(dockerDir, "agent-entrypoint.sh"));
+    assert.throws(() => computeBuildInputDigest(dockerDir), /EISDIR/, "an existing-but-unreadable source is uncomputable, not skipped");
+    // The doctor wrapper turns that throw into undefined → the pure check reads
+    // "can't compute" as "can't prove stale", NOT a false STALE.
+    assert.equal(computeCurrentBuildInputDigest(repoDir), undefined);
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-543 RF-2: a COPY source ABSENT on disk (ENOENT) is still skipped deterministically", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-rf2-enoent-"));
+  try {
+    // agent-entrypoint.sh is a COPY source but never written → ENOENT → skipped,
+    // exactly as before, so build and check agree and the digest stays computable.
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\n" });
+    const digest = computeBuildInputDigest(join(repoDir, "docker"));
+    assert.match(digest, /^[0-9a-f]{64}$/, "a genuinely-absent COPY source is skipped, not fatal");
   } finally {
     rmSync(repoDir, { recursive: true, force: true });
   }
@@ -278,7 +399,7 @@ test("FG-577: the build-input probe defaults to the executing asset root, not FO
     let probed: string | undefined;
     gatherReleaseInputs("nonexistent-image-for-fg577", { projectDir }, {
       probeClisInImage: () => ({}),
-      buildInputMtime: (dir) => { probed = dir; return 42; },
+      buildInputDigest: (dir) => { probed = dir; return "digest"; },
     });
     assert.equal(probed, assetRoot());
     assert.ok(!probed!.startsWith(hostile), "the ambient env must not choose which Dockerfile the image is judged against");
@@ -289,45 +410,46 @@ test("FG-577: the build-input probe defaults to the executing asset root, not FO
   }
 });
 
-// FG-577: pointing the probe at the release fixed WHICH Dockerfile is judged, but
-// under a release the judgement itself is a category error. release.ts materializes
-// the tree with cpSync, which does not preserve timestamps — so this drives the
-// REAL cpSync, not a hand-stamped mtime, and pins that a release host cannot be
-// told its image is stale by bytes it just copied.
-test("FG-577: a cpSync-materialized release reports no STALE — the mechanism, driven for real", () => {
+// FG-577 → FG-543: cpSync materializes the release tree with fresh timestamps but
+// IDENTICAL bytes. The old mtime heuristic read the restamped inputs as "newer than
+// the image" → permanent false STALE. The content digest reads the SAME bytes → the
+// digest recorded at build time still matches, so the release is not stale — and,
+// because the judgement is content-based, this holds in BOTH modes without a gate.
+test("FG-543 (was FG-577): a cpSync-materialized release matches the recorded digest — no false STALE, driven for real", () => {
   const source = mkdtempSync(join(tmpdir(), "fg577-src-"));
-  const release = mkdtempSync(join(tmpdir(), "fg577-rel-mtime-"));
+  const release = mkdtempSync(join(tmpdir(), "fg577-rel-digest-"));
   try {
     // A dev checkout whose build inputs were last edited long ago…
     const edited = Date.now() - 10 * 60_000;
-    writeBuildContext(source, { "forge-test.sh": edited, "agent-entrypoint.sh": edited });
+    writeBuildContext(source, { "forge-test.sh": "#!/bin/sh\necho real\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
     utimesSync(join(source, "docker", "agent-dev-worker.Dockerfile"), edited / 1000, edited / 1000);
 
-    // …materialized into a release exactly as release.ts does it.
-    cpSync(join(source, "docker"), join(release, "docker"), { recursive: true });
+    // The digest the image would have recorded at build time, from the source tree.
+    const recordedDigest = computeBuildInputDigest(join(source, "docker"))!;
 
-    // The image was built AFTER every real edit — genuinely current. It is only
-    // "stale" against the copy's own timestamps.
-    const createdMs = Date.now() - 5 * 60_000;
-    const copiedMtime = newestBuildInputMtime(release);
-    assert.ok(copiedMtime !== undefined && copiedMtime > createdMs, "the fixture must reproduce the trap: cpSync restamps the inputs newer than the image");
+    // …materialized into a release exactly as release.ts does it (fresh mtimes).
+    cpSync(join(source, "docker"), join(release, "docker"), { recursive: true });
+    const future = Date.now() + 5 * 60_000;
+    for (const f of ["agent-dev-worker.Dockerfile", "forge-test.sh", "agent-entrypoint.sh"]) {
+      utimesSync(join(release, "docker", f), future / 1000, future / 1000);
+    }
+
+    // cpSync preserved content, so the release tree's digest equals the recorded one
+    // even though every mtime is now newer than the image (the old trap).
+    const copiedDigest = computeCurrentBuildInputDigest(release)!;
+    assert.equal(copiedDigest, recordedDigest, "cpSync preserves content, so the digest is unchanged despite fresh mtimes");
 
     const probes: DoctorProbes = {
-      inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs, buildInputMtimeMs: newestBuildInputMtime(release) }),
+      inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, recordedDigest, currentInputDigest: computeCurrentBuildInputDigest(release) }),
       probeClisInImage: () => ({}),
     };
 
-    const asRelease = buildReleaseReport(gatherReleaseInputs("agent-dev-worker:latest", { projectDir, forgeRepoDir: release }, probes, "release"));
-    const relCheck = asRelease.checks.find((c) => c.name.includes("image"))!;
-    assert.equal(relCheck.status, "ok", "a permanently-STALE release host is the dead end this fixes");
-    assert.doesNotMatch(relCheck.detail, /STALE/);
-    // The dead end was STALE advising a command that refuses here — neither half survives.
-    assert.ok(!(relCheck.next ?? "").includes("forge upgrade --rebuild-image"));
-
-    // Same bytes, same probe, dev mode: still STALE. The suppression is scoped to
-    // the mode where the timestamps are meaningless, not switched off.
-    const asDev = buildReleaseReport(gatherReleaseInputs("agent-dev-worker:latest", { projectDir, forgeRepoDir: release }, probes, "dev"));
-    assert.equal(asDev.checks.find((c) => c.name.includes("image"))!.status, "warn");
+    for (const mode of ["release", "dev"] as const) {
+      const report = buildReleaseReport(gatherReleaseInputs("agent-dev-worker:latest", { projectDir, forgeRepoDir: release }, probes, mode));
+      const check = report.checks.find((c) => c.name.includes("image"))!;
+      assert.equal(check.status, "ok", `matching content is not stale in ${mode} — the permanently-STALE dead end this fixes`);
+      assert.doesNotMatch(check.detail, /STALE/);
+    }
   } finally {
     for (const d of [source, release]) rmSync(d, { recursive: true, force: true });
   }
@@ -337,7 +459,7 @@ test("FG-577: an explicit ctx.forgeRepoDir still overrides the probe root (upgra
   let probed: string | undefined;
   gatherReleaseInputs("nonexistent-image-for-fg577", { projectDir, forgeRepoDir: "/some/release" }, {
     probeClisInImage: () => ({}),
-    buildInputMtime: (dir) => { probed = dir; return 42; },
+    buildInputDigest: (dir) => { probed = dir; return "digest"; },
   });
   assert.equal(probed, "/some/release");
 });

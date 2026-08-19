@@ -9,7 +9,7 @@ import { buildReleaseReport, summarizeProblems, type ReleaseInputs } from "./rel
 function green(over: Partial<ReleaseInputs> = {}): ReleaseInputs {
   return {
     mode: "dev",
-    image: { name: "agent-dev-worker:latest", present: true, createdMs: 2000, buildInputMtimeMs: 1000 },
+    image: { name: "agent-dev-worker:latest", present: true, recordedDigest: "digest-abc", currentInputDigest: "digest-abc" },
     clis: [
       { command: "claude", present: true, neededBy: ["claude-oauth"] },
       { command: "codex", present: true, neededBy: ["codex-subscription"] },
@@ -40,11 +40,28 @@ test("#229 image missing → fail with a rebuild next-command, overall NOT ready
   assert.match(img.next ?? "", /docker\/build\.sh|rebuild/i);
 });
 
-test("#229 image stale (Dockerfile newer than image) → warn, but not blocking", () => {
-  const r = buildReleaseReport(green({ image: { name: "agent-dev-worker:latest", present: true, createdMs: 1000, buildInputMtimeMs: 5000 } }));
+test("FG-543 image stale (recorded digest differs from current build-input digest) → warn, but not blocking", () => {
+  const r = buildReleaseReport(green({ image: { name: "agent-dev-worker:latest", present: true, recordedDigest: "old", currentInputDigest: "new" } }));
+  assert.equal(status(r, "image"), "warn");
+  const detail = r.checks.find((c) => c.name.includes("image"))!.detail;
+  assert.match(detail, /STALE/);
+  assert.match(detail, /digest/, "the operator-facing detail explains the digest basis, not mtimes (AC5)");
+  assert.equal(r.ok, true, "a stale image warns, doesn't block");
+});
+
+test("FG-543 AC4 no recorded digest (old pre-label image) → warn (fail toward STALE) until rebuilt once", () => {
+  const r = buildReleaseReport(green({ image: { name: "agent-dev-worker:latest", present: true, currentInputDigest: "new" } }));
   assert.equal(status(r, "image"), "warn");
   assert.match(r.checks.find((c) => c.name.includes("image"))!.detail, /STALE/);
   assert.equal(r.ok, true, "a stale image warns, doesn't block");
+});
+
+test("FG-543 AC1/AC2 matching digest → ok, digest basis stated (a cached rebuild / mtime-only touch does not flag)", () => {
+  const r = buildReleaseReport(green({ image: { name: "agent-dev-worker:latest", present: true, recordedDigest: "same", currentInputDigest: "same" } }));
+  assert.equal(status(r, "image"), "ok");
+  const detail = r.checks.find((c) => c.name.includes("image"))!.detail;
+  assert.doesNotMatch(detail, /STALE/);
+  assert.match(detail, /matches the digest recorded at build time/);
 });
 
 test("#229 docker unreachable (not 'No such image') → image skip, never a false 'rebuild' fail", () => {
@@ -150,26 +167,34 @@ test("#229 routing-policy absent → warn; present+invalid → fail", () => {
   assert.equal(bad.ok, false);
 });
 
-// ─────────── FG-577: the mtime heuristic and the advice are mode-scoped ───────────
+// ─────────── FG-577 → FG-543: mode no longer gates the staleness judgement ───────────
 //
-// A release tree is materialized with cpSync (release.ts), which does NOT preserve
-// timestamps: every build input carries the moment the release was BUILT, not an
-// edit time. Judged by the dev heuristic, that is unconditionally "newer than the
-// image" — so every release host reported a permanently STALE image, and the only
-// remedy the advice named (`forge upgrade --rebuild-image`) refuses on a release.
-// STALE → run the named command → it refuses → still STALE, forever.
+// FG-577 gated the mtime heuristic to dev because a release tree is materialized
+// with cpSync (release.ts), which does NOT preserve timestamps: every build input
+// carried the release-BUILD time, read as "newer than the image", and every release
+// host reported a permanently STALE image whose only remedy refused on a release.
+//
+// FG-543 dissolves that concern by hashing CONTENT, not timestamps. cpSync copies
+// content byte-for-byte, so a release whose build-input content matches the image's
+// recorded digest is simply NOT stale — in BOTH modes. The digest check is therefore
+// correct without a mode gate.
 
-test("FG-577: a release does NOT report STALE from cpSync-stamped build inputs (the dev heuristic still does)", () => {
-  // The identical inputs, differing only in mode: build inputs stamped long after
-  // the image, exactly as a fresh release materialization stamps them.
-  const image = { name: "agent-dev-worker:latest", present: true, createdMs: 1000, buildInputMtimeMs: 5000 };
+test("FG-543 (was FG-577): a release whose build-input content matches the recorded digest is NOT stale", () => {
+  // cpSync preserves content, so the recorded digest still matches after materialization.
+  const image = { name: "agent-dev-worker:latest", present: true, recordedDigest: "same", currentInputDigest: "same" };
 
   const dev = buildReleaseReport(green({ mode: "dev", image }));
-  assert.equal(status(dev, "image"), "warn", "dev keeps the heuristic — this fix must not disarm it (FG-543 owns that)");
+  assert.equal(status(dev, "image"), "ok", "matching content is not stale in dev");
 
   const release = buildReleaseReport(green({ mode: "release", image }));
-  assert.equal(status(release, "image"), "ok", "a release's build-input mtimes cannot prove staleness");
+  assert.equal(status(release, "image"), "ok", "and matching content is not stale in a release either");
   assert.doesNotMatch(release.checks.find((c) => c.name.includes("image"))!.detail, /STALE/);
+});
+
+test("FG-543: changed build-input content flags STALE in BOTH modes (content, not timestamps)", () => {
+  const image = { name: "agent-dev-worker:latest", present: true, recordedDigest: "old", currentInputDigest: "new" };
+  assert.equal(status(buildReleaseReport(green({ mode: "dev", image })), "image"), "warn");
+  assert.equal(status(buildReleaseReport(green({ mode: "release", image })), "image"), "warn");
 });
 
 test("FG-577: no advice reachable in release mode names a command that refuses in release mode", () => {

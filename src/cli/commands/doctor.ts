@@ -7,7 +7,7 @@
 
 import type { Command } from "commander";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FORGE_HOME } from "../../util/paths.js";
 import { identify, type PathIdentity } from "../../util/path-identity.js";
@@ -30,6 +30,7 @@ import {
   type ProjectAdapterReport,
 } from "../../v2/seed-drift.js";
 import { inspectSeedInstall, type SeedInstallState } from "../../v2/seed-generation.js";
+import { computeBuildInputDigest } from "../../v2/build-input-digest.js";
 import { classifyDocsSurfaces, type DocsSurfacesClassification } from "../../v2/contract.js";
 import {
   buildModelPolicyStatus,
@@ -49,41 +50,65 @@ import {
 const DEFAULT_IMAGE = "agent-dev-worker:latest";
 const MODEL_POLICY_PATH = join(FORGE_HOME, "model-policy.yml");
 
-// The image bakes in more than the Dockerfile: it COPYs forge-test.sh and
-// agent-entrypoint.sh from the build context, so editing one leaves the built
-// image stale while the Dockerfile's own mtime is unchanged. Compare the image
-// against the newest of the Dockerfile AND every file it COPYs.
-export function newestBuildInputMtime(repoDir: string): number | undefined {
-  const dockerDir = join(repoDir, "docker");
-  const dockerfile = join(dockerDir, "agent-dev-worker.Dockerfile");
-  let newest: number | undefined;
-  const consider = (path: string): void => {
-    try {
-      const ms = statSync(path).mtimeMs;
-      if (newest === undefined || ms > newest) newest = ms;
-    } catch {
-      // a build input we can't stat (optional cert, glob source) can't prove staleness
-    }
-  };
-
-  consider(dockerfile);
-  let body: string;
+// FG-543: staleness is decided by a build-input CONTENT digest (see
+// src/v2/build-input-digest.ts — the ONE function build.sh and doctor share), not
+// by mtime-vs-created. computeCurrentDigest wraps computeBuildInputDigest for the
+// executing tree's docker/ dir; an unreadable tree yields undefined (the check
+// treats "can't compute" as "can't prove stale", not a false STALE).
+export function computeCurrentBuildInputDigest(repoDir: string): string | undefined {
   try {
-    body = readFileSync(dockerfile, "utf8");
+    return computeBuildInputDigest(join(repoDir, "docker"));
   } catch {
-    return newest;
+    // docker/ is a required asset dir on any tree this runs against; a throw here
+    // (Dockerfile unreadable) leaves the digest uncomputable rather than fatal.
+    return undefined;
   }
-  for (const line of body.split("\n")) {
-    const m = /^\s*COPY\s+(.+)$/i.exec(line);
-    if (!m || /--from=/i.test(m[1]!)) continue;
-    const args = m[1]!.trim().split(/\s+/).filter((a) => !a.startsWith("--"));
-    for (const src of args.slice(0, -1)) consider(join(dockerDir, src));
-  }
-  return newest;
 }
 
-function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir: string) => number | undefined): ImageInputs {
-  let createdMs: number | undefined;
+// FG-543 / RF-1: the outcome of reading the `forge.build-inputs.digest` LABEL off
+// an image. Three cases that MUST stay distinct: a value present; a genuinely
+// absent label (successful inspect, empty / `<no value>` output → fail toward
+// STALE, AC4); and an inspect FAILURE (daemon down / permission), which is
+// INCONCLUSIVE — it must skip the image check like the ls-unreachable path, NOT
+// be conflated with an absent label and fabricate a STALE.
+export type RecordedDigestProbe =
+  | { kind: "value"; digest: string }
+  | { kind: "absent" }
+  | { kind: "error"; message: string };
+
+type LabelReader = (imageId: string) => string;
+
+// inspect-by-ID is reliable even where inspect-by-name is not (containerd store).
+// stderr is piped (not ignored) so a failure's cause survives into the message.
+const readDigestLabel: LabelReader = (imageId) =>
+  execFileSync(
+    "docker",
+    ["image", "inspect", imageId, "--format", '{{index .Config.Labels "forge.build-inputs.digest"}}'],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+
+export function readRecordedDigest(imageId: string, read: LabelReader = readDigestLabel): RecordedDigestProbe {
+  let out: string;
+  try {
+    out = read(imageId).trim();
+  } catch (e) {
+    // A docker exec FAILURE is inconclusive, not an absent label — surface it as
+    // an error so inspectImage routes it to dockerError (skip), never to STALE.
+    const err = e as Error & { stderr?: Buffer | string };
+    const stderr = typeof err.stderr === "string" ? err.stderr : err.stderr?.toString() ?? "";
+    const message =
+      `${stderr}\n${err.message ?? ""}`.split("\n").find((l) => l.trim().length > 0)?.trim() ??
+      "docker image inspect failed";
+    return { kind: "error", message };
+  }
+  // Docker prints the literal `<no value>` when the label is absent → genuinely
+  // absent record (fail toward STALE, AC4).
+  if (out.length === 0 || out === "<no value>") return { kind: "absent" };
+  return { kind: "value", digest: out };
+}
+
+function inspectImage(name: string, repoDirOverride?: string, digestProbe?: (repoDir: string) => string | undefined): ImageInputs {
+  let recordedDigest: string | undefined;
   let present = false;
   let dockerError: string | undefined;
   // Presence is probed with `docker image ls <name>`, NOT `docker image inspect
@@ -114,29 +139,25 @@ function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir:
   if (!present && lastErr) {
     dockerError = (lastErr.split("\n").find((l) => l.trim().length > 0) ?? "docker unavailable").trim();
   }
-  // Created date (best-effort) by ID — inspect-by-ID is reliable even when
-  // inspect-by-name is not. A failure here just drops the staleness comparison.
+  // FG-543: read the build-input digest LABEL by ID — inspect-by-ID is reliable
+  // even when inspect-by-name is not. RF-1: an inspect FAILURE is inconclusive, so
+  // it becomes a dockerError (image check skips) rather than an absent label — only
+  // a successful inspect returning no value fails toward STALE (AC4).
   if (present && imageId) {
-    try {
-      const created = execFileSync("docker", ["image", "inspect", imageId, "--format", "{{.Created}}"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      const ms = Date.parse(created);
-      if (!Number.isNaN(ms)) createdMs = ms;
-    } catch {
-      createdMs = undefined;
-    }
+    const probe = readRecordedDigest(imageId);
+    if (probe.kind === "value") recordedDigest = probe.digest;
+    else if (probe.kind === "error") dockerError = dockerError ?? probe.message;
+    // probe.kind === "absent" → recordedDigest stays undefined → STALE (AC4).
   }
 
   // FG-577: the staleness PROBE is a read, so it judges the running image against
   // the EXECUTING release's bundled docker/ (a REQUIRED asset dir). The rebuild
-  // ACTION is dev-advancement and refuses in release mode (upgrade.ts). Whether
-  // the mtime is MEANINGFUL is the pure layer's call (release-doctor.ts): a
-  // release's inputs are cpSync-stamped, so it ignores them.
+  // ACTION is dev-advancement and refuses in release mode (upgrade.ts). FG-543:
+  // the digest is content-based, so it is correct in BOTH modes — the pure layer
+  // no longer has to ignore a release's (restamped) build inputs.
   const repoDir = repoDirOverride ?? assetRoot();
-  const buildInputMtimeMs = mtimeProbe ? mtimeProbe(repoDir) : newestBuildInputMtime(repoDir);
-  return { name, present, createdMs, buildInputMtimeMs, ...(dockerError ? { dockerError } : {}) };
+  const currentInputDigest = digestProbe ? digestProbe(repoDir) : computeCurrentBuildInputDigest(repoDir);
+  return { name, present, recordedDigest, currentInputDigest, ...(dockerError ? { dockerError } : {}) };
 }
 
 // command -> runtime names that need it. Collects from workspace seeds
@@ -287,8 +308,9 @@ function gatherRouting(): ReleaseInputs["routing"] {
 export type DoctorProbes = {
   inspectImage?: (name: string) => ImageInputs;
   probeClisInImage?: CliProbe;
-  /** Override the build-input mtime lookup — lets tests verify the repo dir is forwarded correctly without needing a real build context. */
-  buildInputMtime?: (repoDir: string) => number | undefined;
+  /** FG-543: override the current build-input digest computation — lets tests verify
+   *  the repo dir is forwarded correctly without needing a real build context. */
+  buildInputDigest?: (repoDir: string) => string | undefined;
 };
 
 export function gatherReleaseInputs(
@@ -299,7 +321,7 @@ export function gatherReleaseInputs(
 ): ReleaseInputs {
   const image = probes.inspectImage
     ? probes.inspectImage(imageName)
-    : inspectImage(imageName, ctx.forgeRepoDir, probes.buildInputMtime);
+    : inspectImage(imageName, ctx.forgeRepoDir, probes.buildInputDigest);
   return {
     image,
     clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage, ctx),

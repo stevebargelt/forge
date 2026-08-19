@@ -49,7 +49,7 @@ test("tryNpmInstall: dry-run with package.json returns 'ok' without invoking npm
 function greenInputs() {
   return {
     mode: "dev" as const,
-    image: { name: "agent-dev-worker:latest", present: true, createdMs: 2000, buildInputMtimeMs: 1000 },
+    image: { name: "agent-dev-worker:latest", present: true, recordedDigest: "d", currentInputDigest: "d" },
     clis: [{ command: "codex", present: true, neededBy: ["codex-subscription"] }],
     policy: { present: true, valid: true },
     profileAuth: [{ profile: "codex-subscription", provider: "openai", auth: "subscription", status: "available" as const, detail: "ok" }],

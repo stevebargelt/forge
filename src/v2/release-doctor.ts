@@ -34,12 +34,15 @@ export type ReleaseReport = {
 export type ImageInputs = {
   name: string;
   present: boolean;
-  /** image creation time (ms) — undefined when absent. */
-  createdMs?: number;
-  /** Newest mtime (ms) across the image's build inputs — the Dockerfile and every
-   *  file it COPYs (forge-test.sh, agent-entrypoint.sh). Undefined when the source
-   *  repo isn't locatable. */
-  buildInputMtimeMs?: number;
+  /** FG-543: the build-input CONTENT digest recorded on the image as the
+   *  `forge.build-inputs.digest` LABEL at build time. Undefined/empty when the
+   *  label is absent — an image built before the digest label (or by hand). The
+   *  check fails toward STALE on absence (AC4). */
+  recordedDigest?: string;
+  /** FG-543: the digest freshly computed from the executing tree's build inputs
+   *  (computeBuildInputDigest). Compared against recordedDigest to decide
+   *  staleness. Undefined when the tree's docker/ couldn't be read. */
+  currentInputDigest?: string;
   /** Set when docker itself couldn't be probed (daemon down / not installed) —
    *  distinct from a genuine "No such image". Makes the check skip, not fail, so
    *  a transient daemon hiccup never tells the user to rebuild a present image. */
@@ -108,27 +111,41 @@ function imageCheck(img: ImageInputs, mode: ExecutionMode): ReleaseCheck {
   if (!img.present) {
     return { name: `image ${img.name}`, status: "fail", detail: "not built on this host", next: rebuildAdvice(mode) };
   }
-  // FG-577: under a release the mtime comparison is a category error, not a
-  // conservative guess. Release trees are materialized with cpSync (release.ts),
-  // which does not preserve timestamps — so every build input is stamped at
-  // release-build time and reads as newer than any image built before it. That
-  // makes STALE permanent on a release host, and the only remedy it could name
-  // refuses there. Presence is the honest check; the heuristic's wider
-  // false-positive class is FG-543, not this ticket.
-  if (mode === "dev" && img.buildInputMtimeMs !== undefined && img.createdMs !== undefined && img.buildInputMtimeMs > img.createdMs) {
+  // FG-543: staleness is a CONTENT-digest comparison, not mtime-vs-created. The
+  // Dockerfile + its source-controlled COPYed files are hashed identically at
+  // build time (recorded as the `forge.build-inputs.digest` label) and at check
+  // time (recomputed from the executing tree). This is correct in BOTH modes:
+  // content, not timestamps, so a release's cpSync-restamped inputs (the FG-577
+  // false STALE) and a fully-cached rebuild (new ID, old `created`) both judge
+  // correctly. FG-577's mode gate dissolves — a release whose build-input content
+  // matches the recorded digest is simply not stale.
+  const recorded = img.recordedDigest?.trim();
+  if (!recorded) {
+    // AC4: fail toward STALE when the digest record is absent. Pre-label images
+    // (built before this label existed, or by hand) stay flagged until rebuilt
+    // once — the rebuild is what records the digest.
     return {
       name: `image ${img.name}`,
       status: "warn",
-      detail: "STALE — a build input (Dockerfile or a COPYed script, e.g. forge-test.sh) is newer than the built image; runtime CLIs/deps/wrappers may be out of date",
+      detail: "STALE — no build-input content digest is recorded on this image (built before the digest label, or by hand); rebuild once to record it",
+      next: rebuildAdvice(mode),
+    };
+  }
+  // currentInputDigest is undefined only when the executing tree's docker/ can't
+  // be read; with no current digest to compare, an absence of proof of staleness
+  // is not proof of staleness, so this stays ok rather than a false STALE.
+  if (img.currentInputDigest !== undefined && recorded !== img.currentInputDigest) {
+    return {
+      name: `image ${img.name}`,
+      status: "warn",
+      detail: "STALE — the build-input content digest differs from the digest recorded on the image at build time; a build input's content changed, so runtime CLIs/deps/wrappers may be out of date",
       next: rebuildAdvice(mode),
     };
   }
   return {
     name: `image ${img.name}`,
     status: "ok",
-    detail: mode === "release"
-      ? "present (a release's build-input mtimes are stamped at release time, so staleness is not judged from them — FG-543)"
-      : "present and not older than its build inputs (Dockerfile + COPYed scripts)",
+    detail: "present; build-input content matches the digest recorded at build time",
   };
 }
 
