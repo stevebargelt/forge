@@ -367,3 +367,98 @@ test("FG-566 round-entry finding detail — the rendered finding carries a STDER
     `the step's stderr tail is the whole diagnosis — today it is truncated away by summary.split("\\n")[0], which cost a manual 'ls node_modules'. Note was:\n${note}`,
   );
 });
+
+// ── FG-625 Defect B: the POST-FIXER readiness preflight (engine projection) ──
+//
+// The round-entry env-unavailable disposition above is driven by deps.verify()
+// returning a refusal. FG-625 owns the SIBLING path: the post-fixer, pre-commit
+// verification inside fix(). A refusal there travels up as a DISTINCT FixDispatch
+// shape (environmentUnavailable + the classified readiness), and the loop must map
+// it to the SAME terminal state — never verification_failed, never a consumed
+// round — so an unprepared workspace on the CI-reuse path is never reported as a
+// code failure. These pin the engine's projection of that FixDispatch shape; the
+// CLI integration half drives a real npm-ci refusal through fix() itself.
+//
+// Constructed structurally (VerificationResult["readiness"] cast) so this file
+// still imports NO symbol introduced by the readiness build step.
+const REFUSED_READINESS = (reason: string): VerificationResult["readiness"] => ({
+  outcome: "refused",
+  reason,
+  workspace: "/tmp/forge-fg625-clone",
+  command: "npm ci",
+  exitStatus: 1,
+  stderrTail: "npm error code EUSAGE FG625-POST-FIXER-TAIL",
+  message: `verification_environment_unavailable: the post-fixer verification could not be prepared (${reason}).`,
+}) as unknown as VerificationResult["readiness"];
+
+test("FG-625 Defect B — a post-fixer env-unavailable FixDispatch maps to verification_environment_unavailable with ZERO rounds pushed, never verification_failed", async () => {
+  let fixed = 0;
+  const deps: ReviewLoopDeps = {
+    verify: () => preparedVerification(),
+    review: () => ({ ok: true, verdict: "needs_fix", findings: [{ summary: "harden the retry path", file: "src.ts", line: 1 }] }),
+    fix: () => { fixed++; return { ok: false, environmentUnavailable: true, readiness: REFUSED_READINESS("setup_failed") }; },
+  };
+  const outcome = await runReviewLoop({ maxRounds: 2, ticketId: "FG-625" }, deps);
+
+  assert.equal(
+    String(outcome.stopReason), READINESS_TOKEN,
+    "an unprepared post-fixer workspace is an environment fault, not a verdict on the reviewed code",
+  );
+  assert.notEqual(
+    String(outcome.stopReason), "verification_failed",
+    "the whole point of Defect B: the post-fixer path must never launder an environment fault into a code failure",
+  );
+  assert.equal(outcome.rounds.length, 0, "a post-fixer environment fault consumes ZERO review rounds — no RoundRecord may be pushed");
+  assert.equal(fixed, 1, "the fixer WAS dispatched — its post-fixer readiness preflight is what refused");
+  assert.equal(outcome.closeable, false);
+  assert.ok(outcome.environment, "the classified refusal is carried on outcome.environment, exactly like the round-entry disposition");
+  assert.equal(String(outcome.environment?.outcome), "refused");
+  assert.equal(String(outcome.environment?.reason), "setup_failed");
+});
+
+test("FG-625 Defect B — a post-fixer env-unavailable on the verification-FAILED short-circuit path ALSO maps to the env terminal state", async () => {
+  // Round-entry verification FAILS (a real code failure, readiness prepared — NOT a
+  // refusal), so the reviewer is short-circuited and the failure goes straight to
+  // the fixer. The fixer's own post-fixer preflight then refuses. Both fix()
+  // dispatch sites must honour the distinct shape.
+  const deps: ReviewLoopDeps = {
+    verify: () => verification({ ok: false, steps: [depsMissingStep()], readiness: { outcome: "prepared", workspace: "/tmp/w" } }),
+    review: () => { throw new Error("the reviewer must be short-circuited when round-entry verification fails"); },
+    fix: () => ({ ok: false, environmentUnavailable: true, readiness: REFUSED_READINESS("runtime_abi_mismatch") }),
+  };
+  const outcome = await runReviewLoop({ maxRounds: 2, ticketId: "FG-625" }, deps);
+
+  assert.equal(String(outcome.stopReason), READINESS_TOKEN);
+  assert.notEqual(String(outcome.stopReason), "verification_failed");
+  assert.equal(outcome.rounds.length, 0, "zero rounds pushed on the short-circuit path too");
+  assert.equal(String(outcome.environment?.reason), "runtime_abi_mismatch");
+});
+
+test("FG-625 Defect B — a genuine post-fixer CODE failure still stops verification_failed WITH the full step evidence, never the env state", async () => {
+  // The inverse guard, and the more dangerous direction: a real post-fixer code
+  // failure must retain the step-1 evidence behaviour and must NOT be laundered
+  // into an environment outcome just because a readiness preflight now runs first.
+  const failedPostFixer = verification({
+    ok: false,
+    steps: [depsMissingStep()],
+    readiness: { outcome: "reused", workspace: "/tmp/w" },
+  });
+  const deps: ReviewLoopDeps = {
+    verify: () => preparedVerification(),
+    review: () => ({ ok: true, verdict: "needs_fix", findings: [{ summary: "harden the retry path", file: "src.ts", line: 1 }] }),
+    fix: () => ({ ok: false, verificationFailed: true, dirtyPaths: ["src.ts"], verification: failedPostFixer }),
+  };
+  const outcome = await runReviewLoop({ maxRounds: 2, ticketId: "FG-625" }, deps);
+
+  assert.equal(String(outcome.stopReason), "verification_failed", "a real code failure is still a code verdict");
+  assert.notEqual(String(outcome.stopReason), READINESS_TOKEN, "readiness 'reused' means the environment was fine — the FAILURE is the code");
+  assert.equal(outcome.rounds.length, 1, "a genuine code failure consumes the round — unchanged step-1 behaviour");
+  assert.ok(outcome.rounds[0]!.fixVerification, "FG-625 step 1: the post-fixer evidence still survives onto the RoundRecord");
+
+  const note = renderReviewLoopNote(NOTE_META, outcome);
+  assert.match(note, /post-fixer verification failed steps:/, "the note still enumerates the failed step (step 1)");
+  assert.ok(
+    note.includes("FG566-STDERR-TAIL-MARKER"),
+    `the failed step's output tail still survives into the note — Defect B must not regress step 1. Note was:\n${note}`,
+  );
+});

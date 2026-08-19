@@ -47,6 +47,7 @@ import { Command } from "commander";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
 import { buildReviewLoopDeps, registerReviewLoop, type ReviewLoopContext } from "./review-loop.js";
+import { runReviewLoop } from "../../v2/review-loop.js";
 import { runDir } from "../../util/paths.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertHostVerification } from "../../store/host-verifications.js";
@@ -461,4 +462,160 @@ test("FG-566 observable contract: a LEGACY review_loop.verification_finished pay
   assert.deepEqual(payload, legacy, "a legacy payload must round-trip byte-identically — the readiness field is additive");
   assert.equal("readiness" in payload, false, "consumers must tolerate the field being absent entirely, not merely null");
   assert.equal(readinessField(payload), undefined);
+});
+
+// ── FG-625 Defect B: the POST-FIXER readiness preflight, end to end ──────────
+//
+// FG-566 fixed the two ROUND-ENTRY local arms (verifyWithReuse). The post-fixer,
+// pre-commit verification inside fix() (review-loop.ts:924) was fenced to FG-625
+// and still ran runVerify with NO readiness preflight — so on the CI-REUSE path
+// (round entry satisfied by covering evidence, readiness never consulted) an
+// unprepared workspace reported an environment fault as verification_failed, the
+// exact FG-566 defect surviving on a sibling path.
+//
+// These drive a REAL npm-ci refusal through fix() itself: a covering host row so
+// the clean round entry reuses (readiness skipped there), a reviewer needs_fix, a
+// fixer diff that leaves the tree dirty, and a workspace whose lockfile is
+// desynced — so the post-fixer preflight's `npm ci` refuses. buildReviewLoopDeps
+// is driven directly (like the FG-625 evidence-repro) for full control over the
+// reviewer/fixer roles.
+
+const FIX_VERIFICATION_FINISHED = "review_loop.fix_verification_finished";
+
+/** Seed the covering CI evidence that makes the CLEAN round entry reuse — so the
+ *  round-entry readiness preflight is NEVER consulted and the post-fixer preflight
+ *  is the first (and only) readiness check, the exact CI-reuse path FG-625 owns. */
+function seedCoveringCiEvidence(): void {
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  insertHostVerification({
+    ticketId: "FG-566", projectDir, commitSha: headSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-07-27T00:00:00Z",
+  });
+}
+
+function postFixerCtx(over: Partial<ReviewLoopContext>): ReviewLoopContext {
+  return {
+    ticketId: "FG-566", acceptance: "FG-566 — reviewer-found fix", diffProvider: () => "diff --git a/src.ts b/src.ts",
+    projectDir, scripts: { typecheck: "fg566-ok", test: "fg566-ok" }, unrouted: true,
+    // A dirty tree must never reuse, and a consulted CI provider on a clean entry
+    // would mean the reuse precondition broke — fail loudly if it is ever called.
+    checkStatusProvider: () => { throw new Error("clean-tree round entry must reuse the covering host row, never consult CI"); },
+    ...over,
+  };
+}
+
+test("FG-625 Defect B: a post-fixer readiness refusal stops verification_environment_unavailable (NOT verification_failed) and leaves the fixer diff uncommitted", async () => {
+  // failSetup: true bakes a lockfile desync into the committed tree, so the
+  // post-fixer `npm ci` refuses (EUSAGE) — deterministic and offline.
+  writeReadinessProject({ failSetup: true });
+  seedCoveringCiEvidence();
+  const headSubjectBefore = gitExec(["log", "-1", "--format=%s"], projectDir).trim();
+
+  const invokeFn = async (a: InvokeArgs): Promise<InvokeResult> => {
+    if (a.agentRole === "engineer") {
+      // An in-scope diff so the scope guard's post-revert path actually runs the
+      // post-fixer verification. Plus a PROJECT-DIR `.forge/config.json` naming a
+      // bogus setup command: FG-575 says the tree now holding the fixer's
+      // uncommitted diff must NOT be a setup-command seam — this must be ignored.
+      writeFileSync(join(projectDir, "src.ts"), "// reviewer-found fix applied\n");
+      mkdirSync(join(projectDir, ".forge"), { recursive: true });
+      writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ hostVerificationSetup: "echo PROJECT_DIR_SEAM_BREACH" }));
+      return RESULT({});
+    }
+    return RESULT({ result: { verdict: "needs_fix", findings: [{ summary: "src.ts drops the error on the retry path", file: "src.ts", line: 1 }] } });
+  };
+
+  const { deps } = buildReviewLoopDeps(postFixerCtx({ runId: "run-fg625-b-refuse" }), invokeFn);
+  const lines = captureConsoleLog();
+  let outcome;
+  try {
+    outcome = await runReviewLoop({ maxRounds: 2, ticketId: "FG-566" }, deps);
+  } finally {
+    mock.restoreAll();
+  }
+
+  // ── The distinct terminal state, never a code verdict ──────────────────────
+  assert.equal(String(outcome.stopReason), READINESS_TOKEN, `stdout was:\n${lines.join("\n")}`);
+  assert.notEqual(String(outcome.stopReason), "verification_failed", "an unprepared post-fixer workspace must never be reported as a code failure");
+  assert.equal(outcome.rounds.length, 0, "an environment fault on the post-fixer path consumes ZERO rounds");
+  assert.ok(outcome.environment, "the classified refusal is carried on the outcome");
+  assert.equal(String(outcome.environment!.outcome), "refused");
+  assert.ok(
+    REFUSAL_REASONS.includes(String(outcome.environment!.reason)),
+    `the refusal must name a vocabulary reason; got ${String(outcome.environment!.reason)}`,
+  );
+
+  // ── FG-575: host-only setup-command provenance survives on this path ───────
+  // The setup command is the lockfile-derived host default, NOT the value the
+  // fixer wrote into <project>/.forge/config.json.
+  const setupCommand = String(outcome.environment!.command);
+  assert.ok(setupCommand.includes("npm ci"), `the setup command must be the host-derived default; got ${setupCommand}`);
+  assert.ok(
+    !setupCommand.includes("PROJECT_DIR_SEAM_BREACH"),
+    "FG-575: a <project>/.forge/config.json written by the fixer must NEVER become the setup command — no project-dir seam",
+  );
+
+  // ── verify-before-commit intact: the diff is left uncommitted for inspection ─
+  assert.equal(gitExec(["log", "-1", "--format=%s"], projectDir).trim(), headSubjectBefore, "no fix commit may land on an unprepared workspace");
+  assert.ok(gitExec(["status", "--porcelain"], projectDir).trim().length > 0, "the fixer's diff is left uncommitted for inspection");
+
+  // ── The durable post-fixer event does NOT claim a code verification ran ────
+  const evt = eventsForRun("run-fg625-b-refuse").find((e) => e.eventType === FIX_VERIFICATION_FINISHED);
+  assert.equal(evt, undefined, "a readiness refusal returns BEFORE runVerify — no post-fixer code-verification event fires");
+});
+
+test("FG-625 Defect B: readiness established at a DIRTY round entry is REUSED by the post-fixer preflight, and the verified fix commits without hand intervention", async () => {
+  // failSetup: false — the workspace CAN be prepared. A DIRTY round entry forces
+  // the round-entry local arm to run the readiness preflight (a clean entry might
+  // reuse CI and skip it); the post-fixer preflight must then find that same
+  // binding already established and REUSE it — proving the two calls are
+  // idempotent, not a double install, and that a genuine fix still commits.
+  writeReadinessProject({ failSetup: false });
+  // Dirty the tree at round entry with an in-scope file so the round-entry arm is
+  // the local (readiness-running) path, not a CI reuse.
+  writeFileSync(join(projectDir, "src.ts"), "// uncommitted work under review\n");
+
+  const invokeFn = async (a: InvokeArgs): Promise<InvokeResult> => {
+    if (a.agentRole === "engineer") {
+      writeFileSync(join(projectDir, "src.ts"), "// reviewer-found fix applied\n");
+      return RESULT({});
+    }
+    return RESULT({ result: { verdict: "needs_fix", findings: [{ summary: "harden the retry path", file: "src.ts", line: 1 }] } });
+  };
+
+  const { deps } = buildReviewLoopDeps(
+    // No checkStatusProvider override: this project ships no .github/workflows, so
+    // CI is unavailable and both round entries fall to the local (readiness) arm.
+    { ...postFixerCtx({ runId: "run-fg625-b-reuse" }), checkStatusProvider: undefined },
+    invokeFn,
+  );
+  const lines = captureConsoleLog();
+  let outcome;
+  try {
+    outcome = await runReviewLoop({ maxRounds: 2, ticketId: "FG-566" }, deps);
+  } finally {
+    mock.restoreAll();
+  }
+
+  // The env-fault path must NOT trigger — a prepared+reused workspace is ready.
+  assert.notEqual(String(outcome.stopReason), READINESS_TOKEN, `a reused readiness must never be misread as an environment fault. stdout:\n${lines.join("\n")}`);
+
+  // Exactly one post-fixer verification ran (round 1's fix); round 2 stops at max
+  // rounds before dispatching a second fixer.
+  const fixEvents = eventsForRun("run-fg625-b-reuse").filter((e) => e.eventType === FIX_VERIFICATION_FINISHED);
+  assert.equal(fixEvents.length, 1, "exactly one post-fixer verification ran (round 1's fix)");
+  const payload = fixEvents[0]!.payload as Record<string, unknown>;
+  assert.equal(payload["ok"], true, "the post-fixer verification passed on the reused-readiness workspace");
+  const readiness = payload["readiness"] as { outcome?: unknown } | null;
+  assert.ok(readiness, "the post-fixer event now carries the consulted readiness — no longer null (Defect B adds the preflight)");
+  assert.equal(
+    String(readiness!.outcome), "reused",
+    "the round-entry preparation is REUSED by the post-fixer preflight — not re-installed",
+  );
+
+  // A real commit landed on the verified fix — no hand intervention required.
+  assert.notEqual(
+    gitExec(["log", "-1", "--format=%s"], projectDir).trim(), "(FG-566) project under review",
+    "a correct fixer diff verifies and commits without hand intervention",
+  );
 });

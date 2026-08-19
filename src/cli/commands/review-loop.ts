@@ -17,7 +17,7 @@ import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
-  verificationCommandSet,
+  verificationCommandSet, stepOutputTail,
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
   type ReviewedTipTrust, type RevertedPathGuidance, type GitRunner,
   type ReviewDispatch, type ReviewerModelErrorRetry, type VerificationReadiness,
@@ -1001,13 +1001,61 @@ export function buildReviewLoopDeps(
         // them normally rather than aborting the whole round. Fast tier by
         // default (FG-501 AC5): the fixer's commit gets pushed and CI runs
         // test:extended as a required check; --local-extended restores the full tier.
+        //
+        // FG-625 Defect B: readiness preflight for the POST-FIXER verification —
+        // the sibling of the two round-entry local arms in verifyWithReuse. Without
+        // it, an unprepared workspace on the CI-reuse path reported an environment
+        // fault as a code failure (the FG-566 defect shape surviving on this path).
+        // prepareLocalVerification is host-only by construction (no configDir/
+        // project-dir seam, FG-575) even though the tree now holds the fixer's
+        // uncommitted diff. A refusal returns the DISTINCT env-unavailable FixDispatch
+        // shape — the loop maps it to verification_environment_unavailable, never
+        // verification_failed, leaving the diff uncommitted for inspection and
+        // consuming zero rounds. Scripts run and the runVerify → add → commit ordering
+        // are unchanged.
+        stage = "post-revert readiness preflight";
+        const fixVerifyScripts = localFallbackScripts();
+        const readiness = await prepareLocalVerification(fixVerifyScripts);
+        if (readiness.outcome === "refused") {
+          return { ok: false, environmentUnavailable: true, readiness };
+        }
         stage = "post-revert verification";
-        const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+        const verification: VerificationResult = { ...runVerify(fixVerifyScripts, { cwd: ctx.projectDir }), readiness };
+        // FG-625: the post-fixer verification's durable emission point. Path-2 had
+        // NONE — review_loop.verification_finished only ever fired for the
+        // round-entry verifier — so a `verification_failed` stop discarded every
+        // failed step's command/tier/output and the two FG-559 stops were
+        // undiagnosable. Emit on BOTH pass and fail, naming every failed step with
+        // its command/tier and a bounded (~2000-char) output tail, plus the readiness
+        // now consulted (prepared/reused/not_required — the post-fixer preflight
+        // Defect B added; refusals return above before this event). Scripts run are
+        // UNCHANGED (localFallbackScripts, fast tier by default) and this fires AFTER
+        // the run, BEFORE the commit — the runVerify → add → commit ordering is untouched.
+        logEvent("review_loop.fix_verification_finished", {
+          ...(runId ? { runId } : {}),
+          payload: {
+            ticketId: ctx.ticketId,
+            round,
+            ok: verification.ok,
+            steps: verification.steps.map((s) => ({
+              name: s.name,
+              ok: s.ok,
+              command: s.command ?? null,
+              tier: s.tier ?? null,
+              // Bounded tail for FAILED steps only — a passing step carries no
+              // interesting output and would only bloat the event row.
+              output: s.ok ? null : stepOutputTail(s.output),
+            })),
+            readiness: verification.readiness ?? null,
+          },
+        });
         if (!verification.ok) {
           const dirtyPaths = parsePorcelainChanges(gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]))
             .flatMap((c) => (c.kind === "simple" ? [c.path] : [c.oldPath, c.newPath]));
-          // Leave the diff for inspection; do NOT commit or revert further.
-          return { ok: false, verificationFailed: true, dirtyPaths };
+          // Leave the diff for inspection; do NOT commit or revert further. FG-625:
+          // carry the whole VerificationResult so the failed step's evidence
+          // survives into RoundRecord.fixVerification and the rendered note.
+          return { ok: false, verificationFailed: true, dirtyPaths, verification };
         }
 
         stage = "add/commit/rev-parse";

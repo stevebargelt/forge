@@ -420,6 +420,23 @@ export type FixDispatch =
   | { ok: true; committedSha?: string; revertedPaths?: RevertedPathGuidance[] }
   | { ok: false; error?: string; outOfScope?: boolean; offendingPaths?: string[];
       verificationFailed?: boolean; dirtyPaths?: string[];
+      // FG-625: the COMPLETE post-fixer VerificationResult when verificationFailed
+      // is set. Previously the fixer returned only `dirtyPaths` here and every
+      // failed step's command/tier/output was discarded — the FG-559 stops that
+      // reported `fix left uncommitted (verification failed): <paths>` and nothing
+      // else. Carried through to RoundRecord.fixVerification and rendered in the
+      // note so a verification_failed stop names WHICH step failed and why.
+      verification?: VerificationResult;
+      // FG-625 Defect B: the post-fixer readiness preflight REFUSED — the
+      // verification ENVIRONMENT could not be established, so no post-fixer
+      // verification ever ran. This is the DISTINCT THIRD state and is NEVER
+      // folded into verificationFailed: the loop maps it to
+      // verification_environment_unavailable (leaving the fixer diff uncommitted
+      // for inspection, dispatching nothing, consuming zero rounds), the same
+      // disposition the round-entry isEnvironmentUnavailable path already uses.
+      // Reporting an unprepared workspace on the CI-reuse path as a code failure
+      // was the FG-566 defect shape surviving on this sibling path (review-loop.ts:924).
+      environmentUnavailable?: boolean; readiness?: VerificationReadiness;
       // FG-502 finding 1/2: at least one disallowed path failed to verifiably
       // revert (still dirty/present after the attempt, or the revert command
       // itself threw). Distinct from `outOfScope` (a clean full revert that
@@ -459,6 +476,12 @@ export type RoundRecord = {
   committedSha?: string;
   outOfScopePaths?: string[];
   fixDirtyPaths?: string[];
+  /** FG-625: the full post-fixer (pre-commit) VerificationResult when the fix was
+   *  left uncommitted because verification failed — set from FixDispatch.verification
+   *  in BOTH verification-failed branches. Its failed steps (name/command/tier/
+   *  bounded output tail) are rendered under the round in renderReviewLoopNote, so
+   *  `verification_failed` with only dirty paths is impossible in the note. */
+  fixVerification?: VerificationResult;
   /** FG-502: paths the fixer touched but that were selectively reverted by the
    *  scope guard (see RevertedPathGuidance) while in-scope changes from the
    *  same round survived and were committed. */
@@ -476,7 +499,7 @@ export type RoundRecord = {
  *  END of a failed npm run (`ERR_MODULE_NOT_FOUND`, the tsc error list's tail, npm's
  *  error summary); a head slice of a long log is what left the FG-356 findings
  *  reporting a step name and a bare colon. */
-function stepOutputTail(output: string, chars = 2000): string {
+export function stepOutputTail(output: string, chars = 2000): string {
   const trimmed = output.trim();
   if (trimmed.length === 0) return "(no output captured)";
   return trimmed.length <= chars ? trimmed : `…${trimmed.slice(trimmed.length - chars)}`;
@@ -572,6 +595,14 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
         rounds.push(rec); // fixed; next round re-verifies
         continue;
       }
+      if (fix.environmentUnavailable) {
+        // FG-625 Defect B: the post-fixer readiness preflight refused. An
+        // environment fault is NOT a code failure — stop on the distinct
+        // env-unavailable state with ZERO RoundRecords pushed and the fixer diff
+        // left uncommitted for inspection, exactly as the round-entry
+        // isEnvironmentUnavailable disposition above does.
+        return { stopReason: "verification_environment_unavailable", closeable: false, rounds, environment: fix.readiness! };
+      }
       if (fix.scopeGuardRevertFailed) {
         rec.scopeGuardFailedPaths = fix.failedRevertPaths;
         if (fix.error) rec.fixError = fix.error;
@@ -585,6 +616,9 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
       }
       if (fix.verificationFailed) {
         rec.fixDirtyPaths = fix.dirtyPaths;
+        // FG-625: preserve the whole post-fixer VerificationResult so the failed
+        // step's command/tier/output survives into the RoundRecord and the note.
+        if (fix.verification) rec.fixVerification = fix.verification;
         rounds.push(rec);
         return { stopReason: "verification_failed", closeable: false, rounds };
       }
@@ -640,6 +674,11 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
       if (fix.committedSha) rec.committedSha = fix.committedSha;
       if (fix.revertedPaths && fix.revertedPaths.length > 0) rec.revertedPaths = fix.revertedPaths;
       rounds.push(rec); // fixed; next round re-verifies + re-reviews
+    } else if (fix.environmentUnavailable) {
+      // FG-625 Defect B: post-fixer readiness refused — the distinct env-unavailable
+      // state, never verification_failed. Zero RoundRecords pushed, nothing further
+      // dispatched, the fixer diff left uncommitted for inspection.
+      return { stopReason: "verification_environment_unavailable", closeable: false, rounds, environment: fix.readiness! };
     } else if (fix.scopeGuardRevertFailed) {
       rec.scopeGuardFailedPaths = fix.failedRevertPaths;
       if (fix.error) rec.fixError = fix.error;
@@ -651,6 +690,8 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
       return { stopReason: "fixer_out_of_scope", closeable: false, rounds };
     } else if (fix.verificationFailed) {
       rec.fixDirtyPaths = fix.dirtyPaths;
+      // FG-625: preserve the whole post-fixer VerificationResult (see above).
+      if (fix.verification) rec.fixVerification = fix.verification;
       rounds.push(rec);
       return { stopReason: "verification_failed", closeable: false, rounds };
     } else {
@@ -861,6 +902,17 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
         L.push(`- fixer out-of-scope paths: ${r.outOfScopePaths.join(", ")}`);
       } else if (r.fixDirtyPaths && r.fixDirtyPaths.length > 0) {
         L.push(`- fix left uncommitted (verification failed): ${r.fixDirtyPaths.join(", ")}`);
+        // FG-625: name every failed post-fixer verification step — command, tier
+        // and the bounded output tail — reusing the same verificationFindings()/
+        // stepOutputTail() shape the round-entry findings use, so the post-fixer
+        // stop is never just a list of dirty paths. Absent fixVerification (legacy
+        // rounds) renders byte-identically to before.
+        if (r.fixVerification) {
+          L.push(`- post-fixer verification failed steps:`);
+          for (const f of verificationFindings(r.fixVerification)) {
+            L.push(...renderFindingLines("[post-fix verification]", f.summary));
+          }
+        }
       } else if (r.committedSha) {
         L.push(`- fix: applied`);
         L.push(`- committed: ${r.committedSha}`);
