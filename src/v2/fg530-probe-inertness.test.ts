@@ -601,7 +601,7 @@ const ALLOWLIST: Allow[] = [
   // ── reconcile.ts: the FG-536 idle bound over a LIVE container ───────────────
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "reconcile_idle_bound",
     reason:
@@ -622,7 +622,7 @@ const ALLOWLIST: Allow[] = [
   // deferred gap:
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "setTaskStatus",
     near: "ordered_fanout_resumable",
     reason:
@@ -638,7 +638,7 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "ordered_fanout_resumable",
     reason:
@@ -649,7 +649,7 @@ const ALLOWLIST: Allow[] = [
   // ── reconcile.ts: FG-356's orphan workspace reaper ─────────────────────────
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "task.workspace_reaped",
     reason:
@@ -661,7 +661,7 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "task.workspace_retained",
     reason:
@@ -672,7 +672,7 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "task.workspace_reap_deferred",
     reason:
@@ -1183,7 +1183,7 @@ const ALLOWLIST: Allow[] = [
   // ── reconcile.ts ───────────────────────────────────────────────────────────
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "container.reap_failed",
     reason:
@@ -1192,7 +1192,7 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "finalizeRunIfSettled",
     near: "no_live_work",
     reason:
@@ -1203,7 +1203,7 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
+    fn: "reconcileRunCore",
     call: "logEvent",
     near: "no_live_work",
     reason: "the run.reconciled event passed as finalizeRunIfSettled's onCompleted — it fires INSIDE that helper's transaction, so it is not a separable write.",

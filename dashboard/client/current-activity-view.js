@@ -105,10 +105,11 @@ export function InFlightActivityWaits({ load, now, onRetry }) {
       </div>
     `;
   }
-  if (waits.hostVerification.length === 0 && waits.ci.length === 0) return null;
+  if (waits.hostVerification.length === 0 && waits.ci.length === 0 && waits.ciWaits.length === 0) return null;
   return html`
     ${waits.hostVerification.map((entry) => html`<${HostWaitRow} key=${entry.launchId} entry=${entry} now=${now} />`)}
     ${waits.ci.map((summary) => html`<${CiWaitRow} key=${ciWaitKey(summary)} summary=${summary} />`)}
+    ${waits.ciWaits.map((summary) => html`<${RegisteredCiWaitRow} key=${summary.waitId} summary=${summary} now=${now} />`)}
   `;
 }
 
@@ -156,6 +157,30 @@ function CiWaitRow({ summary }) {
   `;
 }
 
+// FG-731: ONE aggregate line per registered CI wait — kind · state · m/n · elapsed. A
+// live progress SUMMARY, not a check-by-check history dump. The badge text is the
+// server-rendered `statusLabel` (running m/n / no CI is running / CI state unavailable /
+// completed — awaiting advance) — the client never composes it, so a stale wait reads
+// `CI state unavailable`, NEVER a fabricated `running`, and a completed one reads
+// awaiting-advance rather than being dropped. The record carries only aggregate m/n, so
+// there is no per-check history to dump here; the m/n count rides in the summary detail.
+function RegisteredCiWaitRow({ summary, now }) {
+  const wait = summary.wait;
+  return html`
+    <div class="item ca-wait-row ca-registered-ci-wait-row">
+      <span class="badge ${summary.class}">${summary.label}</span>
+      <div>
+        ${summary.identity ? html`<strong>${summary.identity}</strong><span class="faint"> · </span>` : null}
+        <span class="ca-ci-wait-kind">${summary.kind}</span>
+        ${summary.detail ? html`<span class="faint"> · </span><span class="ca-ci-detail-text">${summary.detail}</span>` : null}
+      </div>
+      <div class="muted mono" style="font-size: 11px;" title="time since the wait started">
+        ${caElapsedText(wait && wait.startedAt, now)}
+      </div>
+    </div>
+  `;
+}
+
 // The version-skew state FG-694 reproduced, and the whole point of AC7. Note what is
 // NOT here: any statement about agents, launches or checks. We failed to read; that
 // is the only fact we have.
@@ -187,7 +212,9 @@ function CurrentActivityBlock({ section, now, onTaskClick }) {
           ? section.entries.map((summary, index) => html`
             <${RequiredCiRow} key=${ciRowKey(summary, index)} summary=${summary} />
           `)
-          : section.entries.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
+          : section.kind === "ciWaits"
+            ? section.entries.map((summary) => html`<${RegisteredCiWaitRow} key=${summary.waitId} summary=${summary} now=${now} />`)
+            : section.entries.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
     </section>
   `;
 }

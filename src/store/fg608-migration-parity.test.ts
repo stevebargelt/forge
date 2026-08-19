@@ -123,6 +123,10 @@ function isRestorable(c: Col): boolean {
 // FG-655 RF-4 joins review_docs_dispatches.state for the same reason: the partial UNIQUE
 // index that holds "at most one LIVE docs binding per review" names it in its WHERE
 // clause, and it carries an ADDITIVE_COLUMNS entry.
+// FG-731 ci_waits.run_id / ci_waits.project_dir join for the same reason
+// launch_observations' pair did: idx_ci_waits_run and idx_ci_waits_project reference
+// them, so SQLite refuses to DROP them. Deliberate, not a waiver: both carry
+// ADDITIVE_COLUMNS entries, so the completeness test below still covers them.
 const UNDROPPABLE = new Set([
   "events.run_id",
   "events.task_id",
@@ -130,6 +134,8 @@ const UNDROPPABLE = new Set([
   "launch_observations.run_id",
   "launch_observations.project_dir",
   "review_docs_dispatches.state",
+  "ci_waits.run_id",
+  "ci_waits.project_dir",
 ]);
 
 function freshDb(): DatabaseInstance {

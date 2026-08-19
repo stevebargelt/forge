@@ -271,8 +271,9 @@ The dashboard has one visible owner for live work: **In flight**. It renders age
 
 - **Host verification** — [durable launches](#durable-launch) with a persisted observation that **declared the purpose `host_verification`** (FG-700). A launch is *never* rendered under Agents, however long it runs and whoever submitted it.
 - **CI checks** — configured shipping checks at the exact candidate sha, from observations the review-loop's existing CI observer persists. The dashboard label describes the operator question (are PR checks in progress?) rather than exposing Forge's internal “required CI” term.
+- **CI waits** (FG-731) — every live, explicitly **registered** Forge-owned CI wait (`forge ci-wait`; see [Registered CI waits](#registered-ci-waits-fg-731) below), folded in unconditionally rather than filtered to a running-only or pending-only subset: a registered wait is something the orchestrator is BLOCKED on, so a stale or `completed_awaiting_advance` one still renders, carrying that label instead of a fabricated `running`.
 
-Those two are the waits. A third section is diagnostic only — it is on `forge status` and under Activity → Diagnostics, and never among Home's compact rows:
+Those three are the waits. A fourth section is diagnostic only — it is on `forge status` and under Activity → Diagnostics, and never among Home's compact rows:
 
 - **Launch activity** — every other launch with a persisted observation, whatever purpose it declared. Its full diagnostic row is unchanged; only the heading it sits under is narrower.
 
@@ -335,6 +336,25 @@ The **section itself** is one of three states (FG-694), and the first two are a 
 Each observation names the **exact candidate sha** the observer probed and enumerates **every** required context with its own state, URL, and observation time. A summary verdict without that per-context detail does not satisfy the contract, and neither does a short sha.
 
 Evidence bound to a superseded candidate **disappears** rather than being carried forward or relabeled. The mechanism is deliberately boring: the observer declares the sha it probed, the reader presents only the newest **current** observation, and never derives the candidate itself — so when the candidate moves, the old-sha observation simply stops being the newest, and a pair rejected as historical is not replaced by an older row promoted in its place (that would carry a superseded candidate forward under a fresher label).
+
+### Registered CI waits (FG-731)
+
+A **fourth** surface, orthogonal to `requiredCi`: a **registered** Forge-owned CI wait — a durable `ci_waits` row created by `forge ci-wait register`/`forge ci-wait wait` **before** any `gh` polling starts, covering `pr_checks` (a PR's required check-suite), `push_actions` (a push-triggered Actions run), and `workflow_dispatch` (a dispatched workflow run). It exists because an awaited CI run that is not the candidate-sha `requiredCi` check — a `workflow_dispatch`, or a push-triggered Actions run with no PR — was otherwise invisible to `forge status`/the dashboard the moment its registering process died, and the workspace read `IDLE` while Forge was still genuinely blocked on GitHub.
+
+The invariant this surface exists to enforce, and the opposite rule from `requiredCi`/host verification (both of which drop out of `Current activity` once their observation goes stale): **a non-terminal wait's mere PRESENCE forces `WORKING`/never `IDLE`, independent of observation freshness.** Freshness governs only the wait's LABEL, never whether it appears — a fresh `running` observation renders `CI running m/n`; a stale or never-observed one degrades to `CI state unavailable` rather than being dropped or fabricated as `running`. A wait whose registering process died is recovered by **re-observing `gh`** in `reconcile` (not by trusting the lease as terminal authority), so a dead-waiter wait is never silently dropped from the live surface.
+
+Four display states, each distinct and none substituting for another or faking success/idle:
+
+- **`running`** — a fresh observation says checks are still going, with `m/n` complete when known.
+- **`no_runs`** — a fresh observation looked and found no CI running for this identity. Distinct from `unavailable`.
+- **`unavailable`** — the state could not be determined (a `gh` failure short of "not found"), or the last observation is too old to be evidence about now.
+- **`completed_awaiting_advance`** — the run reached a terminal state on GitHub, but a `forge advance`/`forge continue` is still owed; never dropped and never rendered as still running.
+
+A wait's remote resolving to genuinely gone — a merged/closed PR, a deleted run — resolves the *record itself* to `abandoned`, a fifth, TERMINAL lifecycle disposition (alongside `advanced` and an operator's `cancelled`) that removes it from the live surface; this is distinct from an `unavailable` observation, which means only "could not determine right now."
+
+`forge ci-wait wait --kind <pr_checks|push_actions|workflow_dispatch> …` is the single Forge-owned surface for this kind of wait: it registers the durable record synchronously before the first `gh` probe (so a waiter that dies pre-probe still leaves a row), then blocks and polls, emitting exactly one terminal outcome — mirroring `forge launch wait`. It replaces bare `gh run watch` or ad-hoc `gh` polling as the supported way to wait on Forge-owned CI. `forge ci-wait register` registers without blocking; `forge ci-wait cancel <id>` retires the wait as an operator abandon of the *wait*, never touching the remote CI run itself; `forge ci-wait advance <id>` is the production surface that clears `completed_awaiting_advance`, transitioning it to the terminal `advanced` and taking it off the live surface once the owed `forge advance`/`forge continue` has actually happened — a no-op refusal (not a false terminal) on a wait not currently awaiting advance. See `docs/quick-start.md` §13.
+
+`forge status`'s plain-text rendering adds a fifth `Current activity` section, `CI waits`, always emitted after `Required CI`: `(no CI wait registered)` when nothing is live, or one line per wait with its label, kind, id, and url. The dashboard folds every live wait into **In flight** unconditionally — never filtered by freshness or observed state, the way a host-verification launch (running-only) or a CI candidate (pending-only) is — with the aggregate `m/n` as a single compact line, never a check-by-check history dump; the full record is also under Activity → Diagnostics. Schema: `docs/SCHEMA-CONTRACT.md` → **ci_waits**.
 
 **Home and Activity do not render a second visible current-activity panel.** An earlier compact rendering put the full Current-activity panel above the existing `In flight` list; the live reproduction measured it at 810.5px in an 862px viewport, with every agent duplicated. Both views now keep the ONE live-work surface they already had, `In flight`, and fold into it only the subset an operator is actually waiting on. Full evidence is collapsed under Activity → Diagnostics and remains in `forge status`.
 

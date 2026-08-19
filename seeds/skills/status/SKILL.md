@@ -50,8 +50,8 @@ evidence that agent work is running or stopped.
    forge status --read-only --json
    ```
 
-   `Current activity` has four sections: `Agents`, `Host verification`,
-   `Launch activity`, and `Required CI`. A launch is never an agent task. Only
+   `Current activity` has five sections: `Agents`, `Host verification`,
+   `Launch activity`, `Required CI`, and `CI waits`. A launch is never an agent task. Only
    a launch that DECLARED `--purpose host_verification` at submission (FG-700)
    ever renders under `Host verification`; every other placed launch —
    `agent_invoke`, `review`, `campaign`, `dashboard`, `generic`, and any
@@ -73,6 +73,25 @@ evidence that agent work is running or stopped.
    running` (observed, nothing pending), and a `stale` observation distinct;
    CI evidence is bound to an exact candidate sha and disappears when the
    candidate moves.
+
+   `CI waits` is a distinct, fifth surface (FG-731): a **registered** Forge-owned
+   CI wait — `pr_checks`, `push_actions`, or `workflow_dispatch` — created by
+   `forge ci-wait register`/`forge ci-wait wait` *before* polling starts. Unlike
+   host verification and required CI, a non-terminal wait's mere presence forces
+   `WORKING`, never `IDLE`, independent of how stale its last observation is: a
+   dead-waiter wait is recovered by re-observation, not dropped. Read its label
+   exactly as printed and keep the four states distinct — `CI running m/n`
+   (fresh, still going), `no CI is running` (`no_runs`: a fresh look found
+   nothing pending), `CI state unavailable` (the state could not be determined,
+   or the last observation is too old to trust — distinct from `no_runs`, never
+   reported as either idle or a fabricated `running`), and `CI completed —
+   awaiting advance` (`completed_awaiting_advance`: the run finished but a
+   `forge advance`/`forge continue` is still owed — report the pending advance,
+   never treat this as done). `(no CI wait registered)` means exactly that — no
+   registered wait, not that CI is idle. `forge ci-wait` is the supported
+   surface for registering and waiting on this kind of CI (replacing bare `gh
+   run watch` or ad-hoc `gh` polling); a status/diagnosis request only READS
+   this section and never registers, cancels, or otherwise mutates a wait.
 
    A launch can be alive while no new task has dispatched, or finished while a
    continuation still needs to advance. State both facts.
@@ -136,14 +155,21 @@ Classify from `Current activity` (step 4), not from `forge launch list --json`.
 Lead with exactly one:
 
 - `WORKING` — `Current activity` shows at least one relevant running agent task,
-  running host verification launch, or pending required check.
+  running host verification launch, pending required check, or a registered
+  non-terminal CI wait (`CI waits`). A CI wait counts by its mere presence in
+  `CI waits`, whatever its current label — including `CI state unavailable` or
+  `CI completed — awaiting advance` — since a non-terminal wait is never IDLE.
 - `WAITING FOR OPERATOR` — the next action is a human gate or other explicit
   operator decision.
 - `NEEDS ATTENTION` — failed/orphaned work, a blocked continuation, an expired
   idle bound, or contradictory authoritative/projection state needs inspection.
+  A `CI waits` entry reading `CI completed — awaiting advance` belongs here (or
+  under `WORKING` if you are about to drive the advance yourself) rather than
+  being reported as finished.
 - `IDLE` — `Current activity` shows no active non-session task, no running host
-  verification launch, and no pending required check. An `unobserved since
-  <time>` launch is not IDLE: it is unobserved, and it belongs under
+  verification launch, no pending required check, and no registered CI wait
+  (`CI waits` reads `(no CI wait registered)`). An `unobserved since <time>`
+  launch is not IDLE: it is unobserved, and it belongs under
   `NEEDS ATTENTION` if the run's progress depends on it.
 
 Then use this compact shape:

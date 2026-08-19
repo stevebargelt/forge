@@ -183,6 +183,30 @@ const ci = (sha: string, state: "running" | "not_running" | "stale", label: stri
   label,
 });
 
+// FG-731: a registered CI wait fixture, mirroring CiWaitActivity from the derivation.
+function ciWait(over: Partial<Activity["ciWaits"][number]> & { waitId: string }): Activity["ciWaits"][number] {
+  return {
+    waitId: over.waitId,
+    kind: over.kind ?? "workflow_dispatch",
+    url: over.url ?? "https://github.com/o/r/actions/runs/999",
+    startedAt: over.startedAt ?? "2026-08-05T11:50:00.000Z",
+    observedAt: over.observedAt ?? "2026-08-05T11:59:40.000Z",
+    placement: over.placement ?? "host",
+    runId: over.runId ?? null,
+    ticketId: over.ticketId ?? "FG-704",
+    projectDir: over.projectDir ?? null,
+    projectLabel: over.projectLabel ?? "forge",
+    lifecycleState: over.lifecycleState ?? "running",
+    observedState: over.observedState ?? "running",
+    observedReason: over.observedReason ?? null,
+    m: over.m ?? 1,
+    n: over.n ?? 4,
+    observation: over.observation ?? "fresh",
+    displayState: over.displayState ?? "running",
+    statusLabel: over.statusLabel ?? "CI running 1/4",
+  };
+}
+
 const base = (over: Partial<Activity>): Activity => ({
   generatedAt: NOW,
   scope: { runId: "run-fg679", projectDirs: null },
@@ -193,6 +217,7 @@ const base = (over: Partial<Activity>): Activity => ({
   // in scope could be waiting on required checks" — not "we observed no CI", which
   // is a claim about an observer that was never asked.
   requiredCi: over.requiredCi ?? { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
+  ciWaits: over.ciWaits ?? [],
   unassociated: over.unassociated ?? [],
 });
 
@@ -687,8 +712,74 @@ test("FG-694 correction: agent rows have one dashboard owner — In flight, neve
   await page.close();
 });
 
+test("FG-731: a registered CI wait renders in the Current activity panel with kind/state, and no_runs/unavailable/completed stay DISTINCT", async () => {
+  // The FG-704 blind spot at the browser boundary: a workflow_dispatch run bound to no
+  // tracked candidate sha, plus three more waits proving the states never collapse.
+  served = base({
+    ciWaits: [
+      ciWait({ waitId: "wait-running", kind: "workflow_dispatch", displayState: "running", statusLabel: "CI running 1/4", m: 1, n: 4 }),
+      ciWait({ waitId: "wait-norun", kind: "push_actions", ticketId: "FG-731", displayState: "no_runs", statusLabel: "no CI is running", observedState: "no_runs", m: null, n: null }),
+      ciWait({ waitId: "wait-unavail", kind: "pr_checks", ticketId: "FG-590", displayState: "unavailable", statusLabel: "CI state unavailable — gh rate limited", observedState: "unavailable", m: null, n: null }),
+      ciWait({ waitId: "wait-done", kind: "workflow_dispatch", ticketId: "FG-728", displayState: "completed_awaiting_advance", statusLabel: "CI completed — awaiting advance", lifecycleState: "completed_awaiting_advance", observedState: "completed", m: null, n: null }),
+    ],
+  });
+  const page = await open();
+
+  assert.ok((await sectionHeadings(page)).includes("CI waits"), "the CI waits section renders");
+  const section = page.locator("section.current-activity section.ca-section", { has: page.locator(".ca-registered-ci-wait-row") });
+  await section.locator(".ca-registered-ci-wait-row").first().waitFor();
+  assert.equal(await section.locator(".ca-registered-ci-wait-row").count(), 4, "one aggregate line per wait — a summary, not a check-by-check history");
+
+  const text = await section.innerText();
+  // The FG-704 run's kind and a live m/n count.
+  assert.match(text, /workflow_dispatch/);
+  assert.match(text, /CI running 1\/4/);
+  // no_runs and unavailable are DISTINCT strings and neither is a fake success or idle.
+  assert.match(text, /no CI is running/);
+  assert.match(text, /CI state unavailable/);
+  assert.notEqual("no CI is running", "CI state unavailable");
+  // completed-awaiting-advance renders as itself — not dropped, not "running".
+  assert.match(text, /CI completed — awaiting advance/);
+  // A history dump would show the 40-char sha / per-check URLs; the summary must not.
+  assert.doesNotMatch(text, /https:\/\//, "the run URL is not dumped into the compact summary line");
+
+  assert.doesNotMatch(text, /Nothing currently running/, "a live wait means the workspace is NOT idle");
+
+  await page.screenshot({ path: join(SHOTS, "fg731-ci-waits.png"), fullPage: true });
+  await page.close();
+});
+
+test("FG-731: a wait STALE past its freshness cutoff STILL renders — its label degrades to unavailable, it is NEVER dropped or shown running", async () => {
+  // The #1 risk at the browser boundary: a dead-waiter wait whose last observation aged
+  // out must keep the surface non-idle, not vanish from it the way a stale launch does.
+  served = base({
+    ciWaits: [
+      ciWait({
+        waitId: "wait-dead",
+        kind: "workflow_dispatch",
+        observation: "unobserved",
+        displayState: "unavailable",
+        statusLabel: "CI state unavailable — last observed 2026-08-05T11:30:00.000Z",
+        observedState: "running",
+        m: 3,
+        n: 7,
+      }),
+    ],
+  });
+  const page = await open();
+
+  const section = page.locator("section.current-activity section.ca-section", { has: page.locator(".ca-registered-ci-wait-row") });
+  await section.locator(".ca-registered-ci-wait-row").first().waitFor();
+  assert.equal(await section.locator(".ca-registered-ci-wait-row").count(), 1, "the wait is STILL present — freshness never removes it");
+  const text = await section.innerText();
+  assert.match(text, /CI state unavailable/);
+  assert.doesNotMatch(text, /CI running|3\/7/, "NEVER a fabricated running, never the stale m/n");
+  assert.doesNotMatch(await page.locator("section.current-activity").innerText(), /Nothing currently running/);
+  await page.close();
+});
+
 test("FG-679: the screenshots for the populated, empty and stale states exist", () => {
-  for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png", "fg694-unavailable.png", "fg694-historical-noise-current.png"]) {
+  for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png", "fg694-unavailable.png", "fg694-historical-noise-current.png", "fg731-ci-waits.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);
   }
   console.log(`FG-679 screenshots: ${SHOTS}`);

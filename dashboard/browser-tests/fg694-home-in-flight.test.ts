@@ -384,8 +384,51 @@ test("FG-694: a failed read says the WAITS are unavailable and claims no absence
   }
 });
 
+test("FG-731: a registered CI wait keeps Home WAITING, never IDLE — folded into In flight with nothing else running", async () => {
+  // The FG-704 gap on Home: nothing forge-native is in flight, but the orchestrator is
+  // blocked on a workflow_dispatch Actions run. Home must read WAITING, not IDLE — the
+  // wait's MERE PRESENCE forces it, so `No live tasks.` may not print over it.
+  const wait = {
+    waitId: "wait-fg704",
+    kind: "workflow_dispatch" as const,
+    url: "https://github.com/o/r/actions/runs/999",
+    startedAt: ago(120_000),
+    observedAt: ago(4_000),
+    placement: "host" as const,
+    runId: null,
+    ticketId: "FG-704",
+    projectDir: null,
+    projectLabel: "forge",
+    lifecycleState: "running" as const,
+    observedState: "running" as const,
+    observedReason: null,
+    m: 1,
+    n: 4,
+    observation: "fresh" as const,
+    displayState: "running" as const,
+    statusLabel: "CI running 1/4",
+  };
+  served = {
+    ...reportedShape(),
+    agents: [],
+    hostVerification: [],
+    requiredCi: { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
+    ciWaits: [wait],
+  };
+  inFlight = [];
+  const page = await openHome();
+  await page.locator(".ca-registered-ci-wait-row").waitFor();
+  const text = await homeInFlight(page).innerText();
+  assert.doesNotMatch(text, /No live tasks/, "a registered CI wait is live work — Home is NOT idle");
+  assert.match(text, /CI running 1\/4/);
+  assert.match(text, /workflow_dispatch/);
+  assert.doesNotMatch(text, /github\.com/, "compact: the run URL is drill-down detail, not on Home");
+  await page.screenshot({ path: join(SHOTS, "fg731-home-ci-wait.png"), fullPage: true });
+  await page.close();
+});
+
 test("FG-694: the Home screenshots exist", () => {
-  for (const name of ["fg694-home-one-surface.png", "fg694-home-compact.png", "fg694-home-waits-unavailable.png", "fg694-home-associated-waits-only.png"]) {
+  for (const name of ["fg694-home-one-surface.png", "fg694-home-compact.png", "fg694-home-waits-unavailable.png", "fg694-home-associated-waits-only.png", "fg731-home-ci-wait.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);
   }
   console.log(`FG-694 Home screenshots: ${SHOTS}`);
