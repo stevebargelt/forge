@@ -395,6 +395,17 @@ export type EventType =
   // and the largest composed size, because "600,000 utf8_bytes" means nothing without the
   // runtime it was proven on and how close to the line the proof actually ran.
   | "review.shard_budget_validated"
+  // FG-682: a documentation-only correction was amended into the review's candidate
+  // AFTER the docs stage, by the coordinator (not the orchestrator). Payload carries
+  // fromSha/toSha — the exact candidate lineage — plus the declared documentation paths
+  // committed, the rationale, and who discovered the correction. This is the durable,
+  // append-only proof that the move happened AS an amendment: the shipping stage record
+  // is last-write-wins per stage and is overwritten when shipping re-runs at the amended
+  // sha, so only a dedicated record (and this event) lets a later reader see the
+  // amendment rather than a candidate that always contained the prose. event_type is TEXT
+  // NOT NULL with no CHECK constraint, so this is additive to the TS union alone: NO
+  // SCHEMA_SQL / ADDITIVE_COLUMNS change and NO migration against the shared host DB.
+  | "review.docs_amended"
   // FG-703: the durable audit record of an operator-authorized adjudication —
   // an exact orphaned_work_may_persist incident (outcome no_unique_work) retired
   // from the active high-severity report. Append-only: it writes NO task/run

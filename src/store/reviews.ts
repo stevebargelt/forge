@@ -1094,7 +1094,112 @@ export function lensOutcomeRecordsOf(review: Review): unknown[] {
  *  cannot drift into disagreeing about which records those are — which is exactly how a
  *  new record kind gets silently erased by the next whole-column write. */
 function isNonOutcomeRecord(r: unknown): boolean {
-  return isLensAcceptance(r) || isAgentProtocolRecord(r) || isLensSkipped(r);
+  return isLensAcceptance(r) || isAgentProtocolRecord(r) || isLensSkipped(r) || isAmendmentRecord(r);
+}
+
+// ─── FG-682: the late-docs amendment ledger (the FIFTH record kind) ─────────
+
+/** A documentation-only correction amended into the candidate AFTER the docs stage, by
+ *  the coordinator. This is AC6's durable home, and it is a DEDICATED record — not a
+ *  finding, not a fix batch, not a stage record — for a specific reason:
+ *  `recordStageEvidence` is last-write-wins per stage, so when shipping re-runs at the
+ *  amended sha the superseded-candidate shipping record is OVERWRITTEN in the row. A
+ *  reader who only had the stage evidence would then see a candidate that had always
+ *  contained the prose. Only a record that captures both endpoints — the candidate the
+ *  amendment SUPERSEDED and the one it PRODUCED — lets the amendment read after the fact
+ *  as an amendment.
+ *
+ *  It rides `lens_outcomes_json` beside the acceptances, the protocol receipts and the
+ *  skip records — the same additive move FG-654 and FG-689 made — precisely so it needs
+ *  NO schema change and NO migration against the shared host DB. It is filtered out of
+ *  every outcome read by `isNonOutcomeRecord`, so nothing that asks "did discovery happen"
+ *  can mistake an amendment for a review that happened.
+ *
+ *  Deliberately CARRIES BOTH SHAS rather than only the new one: `supersededSha` is what
+ *  makes the lineage a chain a reader can walk, and it is what step 4's bounded recheck
+ *  bases its `supersededSha..amendedSha` delta on so the recheck covers only the amended
+ *  prose. `discoveredBy` names who found the correction — the orchestrator, a reviewer, or
+ *  a later stage — because an amendment discovered behind a stage is a different fact from
+ *  one an operator typed, and the ledger should say which. */
+export type AmendmentRecord = {
+  kind: "docs_amendment";
+  /** The candidate this amendment superseded — the sha every prior stage's evidence was
+   *  bound to. Non-empty; it is one half of the lineage a reader walks. */
+  supersededSha: string;
+  /** The candidate the amendment commit produced. Non-empty; the sha CI must now re-run at
+   *  because sha-bound verification of `supersededSha` does not satisfy it. */
+  amendedSha: string;
+  /** The declared documentation paths the coordinator committed, repo-relative. Recorded
+   *  whole so a reader sees exactly what the amendment moved — never inferred from a diff. */
+  paths: string[];
+  /** Why the amendment happened, in the discoverer's words. */
+  rationale: string;
+  /** Who discovered the correction — e.g. `orchestrator`, `reviewer`, a later stage. Kept
+   *  because an amendment found behind a completed stage is a different fact from one an
+   *  operator typed, and the ledger should be able to say which. */
+  discoveredBy: string;
+  at: string;
+};
+
+export function isAmendmentRecord(v: unknown): v is AmendmentRecord {
+  return typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "docs_amendment";
+}
+
+/** The amendments recorded against this review, oldest first — the exact candidate
+ *  lineage. A reader walks `supersededSha -> amendedSha` across the list to see which
+ *  candidate each stage's evidence was bound to (AC6). Invisible to every outcome
+ *  consumer via `isNonOutcomeRecord`. */
+export function amendmentRecordsOf(review: Review): AmendmentRecord[] {
+  return lensRecordsOf(review).filter(isAmendmentRecord);
+}
+
+export type DocsAmendmentInput = Omit<AmendmentRecord, "kind" | "at"> & { at?: string };
+
+/** Record ONE late-docs amendment, appended beside the outcomes, and emit the event
+ *  carrying the fromSha/toSha lineage.
+ *
+ *  IDEMPOTENT on the `(supersededSha, amendedSha)` lineage pair: an amendment commit is
+ *  irreversible, but the ledger write is a separate transaction, so a crash-replay between
+ *  the two (step 3's RF-2 recovery) re-states the SAME amendment. A second identical record
+ *  would double-count the lineage and grow the column without bound, so the pair is the
+ *  dedup key and a re-state is a silent no-op that emits no second event.
+ *
+ *  The read is inside the write lock, as it is for every other writer of this column
+ *  (`recordAgentProtocol`, `recordLensSkipped`): `lens_outcomes_json` is a whole-column
+ *  read-modify-write shared by several writers, and reading the array outside the lock
+ *  would let a concurrent write land in the window and be blindly overwritten. An
+ *  unreadable (non-array) outcomes column is LEFT ALONE rather than clobbered — the same
+ *  refusal its siblings make, for the same reason: losing reviewer-authored outcomes to
+ *  record an amendment beside them is a strictly worse trade. */
+export function recordDocsAmendment(reviewId: string, rec: DocsAmendmentInput): Review {
+  const at = rec.at ?? nowIso();
+  const record: AmendmentRecord = { kind: "docs_amendment", ...rec, at };
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) throw new Error(`forge: no review ${reviewId}`);
+    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) return;
+    const already = amendmentRecordsOf(fresh).some(
+      (a) => a.supersededSha === record.supersededSha && a.amendedSha === record.amendedSha,
+    );
+    if (already) return;
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify([...lensRecordsOf(fresh), record]), at, reviewId);
+    logEvent("review.docs_amended", {
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
+      payload: {
+        reviewId,
+        fromSha: record.supersededSha,
+        toSha: record.amendedSha,
+        paths: record.paths,
+        rationale: record.rationale,
+        discoveredBy: record.discoveredBy,
+        at,
+      },
+    });
+  });
+  return getReview(reviewId) as Review;
 }
 
 /** Replace the reviewer-authored OUTCOMES of `lens_outcomes_json`, preserving everything
