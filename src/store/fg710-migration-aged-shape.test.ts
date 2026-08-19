@@ -99,8 +99,9 @@ describe("FG-710 — an aged store gains the refused-delivery table and the exec
         .map((c) => c.name)
         .sort();
       assert.deepEqual(cols, [
-        "batch_id", "captured_at_candidate_sha", "created_at", "diff_patch", "porcelain_status",
-        "raw_result_bytes", "refusal_reasons_json", "repair_attempts", "revision", "state", "updated_at",
+        "batch_id", "captured_at_candidate_sha", "created_at", "diff_patch", "lease_expires_at_ms",
+        "porcelain_status", "raw_result_bytes", "refusal_reasons_json", "repair_attempts", "revision",
+        "state", "updated_at",
       ]);
       const resultCols = (db.prepare(`PRAGMA table_info(fix_batch_results)`).all() as Array<{ name: string }>).map((c) => c.name);
       assert.ok(resultCols.includes("executed_assertion"), "the ALTER added executed_assertion");

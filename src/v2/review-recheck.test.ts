@@ -213,6 +213,62 @@ test("FG-639 / PRD #29: a resolved claim citing a SKIPPED test becomes inconclus
   assert.equal(r.returnsToDisposition, true);
 });
 
+// ─── RF-5: the recheck must execute the assertion the FIXER named ────────────
+
+test("RF-5: a resolved verdict on a DIFFERENT test than the fixer named is recorded inconclusive, never resolved", () => {
+  // The recheck cites a real, executed regression test — but NOT the one the fixer's remediation
+  // identified. Stage 8 must execute THIS named assertion; a passing unrelated test cannot close
+  // the finding, or executed_assertion is decorative and resolution rests on a test nobody tied
+  // to the fix.
+  const r = ingestRecheck(
+    output({
+      rechecked: [
+        resolvedEntry("RF-1", {
+          evidence: { kind: "regression_test", test_name: "some other passing test", runner_output: "ok 1 - some other passing test" },
+        }),
+      ],
+    }),
+    {
+      reviewId: REVIEW,
+      candidateSha: SHA,
+      expected: [finding({ ordinal: 1 })],
+      fixerAssertions: { [`${REVIEW}/RF-1`]: "the reconcile path guards a partial write" },
+    },
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive", "never resolved on a different test");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+  assert.match(r.applications[0]?.detail ?? "", /does not include the executed assertion the fixer named/);
+  assert.match(r.applications[0]?.detail ?? "", /the reconcile path guards a partial write/);
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("RF-5: a resolved verdict that EXECUTED the fixer's named assertion resolves", () => {
+  const r = ingestRecheck(output({ rechecked: [resolvedEntry("RF-1")] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1 })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: "the reconcile path guards a partial write" },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "resolved");
+  assert.equal(r.applications[0]?.coverage, "executed");
+});
+
+test("RF-5: with NO fixer assertion recorded for a finding, the binding does not fire — a valid resolved stands", () => {
+  const r = ingestRecheck(output({ rechecked: [resolvedEntry("RF-1")] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1 })],
+    fixerAssertions: {},
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "resolved");
+});
+
 test("FG-639 / PRD #26: a DEMONSTRATED finding claimed resolved by re-inspection becomes inconclusive", () => {
   const r = ingestRecheck(
     output({

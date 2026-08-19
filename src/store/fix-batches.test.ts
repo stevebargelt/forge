@@ -36,9 +36,12 @@ import {
   verifyMaterializedPayload,
   captureRefusedFixDelivery,
   claimRefusedFixDeliveryRepair,
+  reclaimStrandedFixDeliveryRepair,
   refusedFixDelivery,
   supersedeRefusedFixDelivery,
+  FIX_REPAIR_LEASE_MS,
 } from "./fix-batches.js";
+import { setPublicationClockOffsetForTest } from "./publications.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -79,6 +82,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPublicationClockOffsetForTest(0);
   setDbForTest(prev as DatabaseInstance);
   db.close();
 });
@@ -616,4 +620,75 @@ test("FG-710 AC4: the refused-delivery record captures the work, and repair clai
 
   supersedeRefusedFixDelivery(batch.id, batch.revision);
   assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "superseded");
+});
+
+// ─── RF-1: the repair lease distinguishes a LIVE repair from a crash-stranded one ──
+
+test("RF-1: a claim stamps a live lease; a stranded repairing is reclaimed ONLY after the lease expires", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["fixer result.json invalid"],
+    diffPatch: "diff\n",
+  });
+
+  const claimed = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok(claimed);
+  assert.equal(claimed?.state, "repairing");
+  assert.ok((claimed?.leaseExpiresAtMs ?? 0) > 0, "the claim stamps a repair lease");
+
+  // While the lease is LIVE, a concurrent recoverer must NOT reclaim it — that is what stops a
+  // second concurrent repair from being dispatched over the same batch.
+  assert.equal(
+    reclaimStrandedFixDeliveryRepair(batch.id, batch.revision),
+    undefined,
+    "a live repairing lease is never reclaimed",
+  );
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.repairAttempts, 1, "no extra attempt is counted");
+
+  // Age the store clock past the lease: now the record is crash-stranded and one recoverer wins.
+  setPublicationClockOffsetForTest(FIX_REPAIR_LEASE_MS + 1);
+  const reclaimed = reclaimStrandedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok(reclaimed, "a strictly-expired lease is reclaimed and re-driven");
+  assert.equal(reclaimed?.state, "repairing");
+  assert.equal(reclaimed?.repairAttempts, 1, "reclaim recovers the crashed attempt — it does not count a new one");
+
+  // The reclaim renewed the lease, so a SECOND concurrent recoverer now sees it live and backs off.
+  assert.equal(
+    reclaimStrandedFixDeliveryRepair(batch.id, batch.revision),
+    undefined,
+    "the reclaim renews the lease, so only one recoverer wins",
+  );
+});
+
+test("RF-1: a re-capture returns the record to open and CLEARS the lease, so the open->repairing CAS is the only claim path", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["first refusal"],
+  });
+  const claimed = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok((claimed?.leaseExpiresAtMs ?? 0) > 0);
+
+  // The repair refused again: capture puts it back to open and drops the lease.
+  const reopened = captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["repair refused too"],
+  });
+  assert.equal(reopened.state, "open");
+  assert.equal(reopened.leaseExpiresAtMs, undefined, "the lease is cleared when the record re-opens");
+
+  // A reclaim cannot fire on an open record; the ordinary open->repairing CAS is the path.
+  assert.equal(reclaimStrandedFixDeliveryRepair(batch.id, batch.revision), undefined);
+  const reclaimedOpen = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.equal(reclaimedOpen?.state, "repairing");
+  assert.equal(reclaimedOpen?.repairAttempts, 2, "the second claim counts the second attempt");
 });

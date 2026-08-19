@@ -22,6 +22,8 @@ import { REACHABILITY, toleratedRootKeys, type DiscoveryFinding } from "./review
 import { RISK_LENSES } from "./review-contract.js";
 import {
   classifyRecheckCoverage,
+  executedIdentityOf,
+  ranTestNames,
   validateResolutionEvidence,
   type CoverageOutcome,
   type ResolutionEvidenceKind,
@@ -113,6 +115,12 @@ export type RecheckContext = {
   candidateSha: string;
   /** Every finding whose id the rechecker was asked about — the current `fix_now` set. */
   expected: readonly ReviewFinding[];
+  /** RF-5: the executed-assertion identity the FIXER named per finding id, from the ingested fix
+   *  results. When present for a finding, a `resolved` verdict must have EXECUTED that same named
+   *  assertion — the rechecker's own evidence identity must cover it, or the finding is recorded
+   *  `inconclusive`/`not_executed`, never resolved on a DIFFERENT test than the one remediation
+   *  identified. Absent for a finding the fixer named no assertion for (a non-demonstrated one). */
+  fixerAssertions?: Record<string, string>;
 };
 
 /** Ingest a rechecker's output, host-side.
@@ -233,6 +241,32 @@ export function ingestRecheck(raw: unknown, ctx: RecheckContext): RecheckIngesti
             `('${check.kind}') — recorded inconclusive rather than guessing which was meant.`,
         });
         continue;
+      }
+      // RF-5: the recheck must have executed the SAME assertion the FIXER named for this finding.
+      // Stage 8 is the sole candidate-bound executor (FG-639); binding it to the fixer's
+      // `executed_assertion` is what stops a demonstrated finding from being recorded resolved on a
+      // DIFFERENT passing test than the remediation identified — which would make executed_assertion
+      // decorative and rest resolution on an assertion nobody tied to the fix. A mismatch is
+      // inconclusive/not_executed, never resolved. Only bound when the fixer named an assertion.
+      const named = ctx.fixerAssertions?.[finding.id];
+      if (named !== undefined && named.trim() !== "") {
+        const required = ranTestNames(named);
+        const executed = new Set(executedIdentityOf(check.evidence));
+        const uncovered = required.filter((n) => n === "" || !executed.has(n));
+        if (uncovered.length > 0) {
+          applications.push({
+            findingId: finding.id,
+            findingRef: finding.findingRef,
+            resolution: "inconclusive",
+            coverage: "not_executed",
+            detail:
+              `${finding.findingRef}: the recheck resolved on '${check.kind}' evidence that executed ` +
+              `[${[...executed].join(", ") || "no named test"}], which does not include the executed assertion the ` +
+              `fixer named ('${named}'). Stage 8 must execute THIS named assertion — recorded inconclusive, not ` +
+              `resolved on a different test than the remediation identified.`,
+          });
+          continue;
+        }
       }
       applications.push({
         findingId: finding.id,

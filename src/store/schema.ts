@@ -1030,6 +1030,12 @@ CREATE TABLE IF NOT EXISTS fix_batch_refused_deliveries (
   repair_attempts           INTEGER NOT NULL DEFAULT 0,
   state                     TEXT NOT NULL DEFAULT 'open'
                               CHECK (state IN ('open', 'repairing', 'superseded')),
+  -- RF-1: the repair LEASE. Stamped (store clock) when a pass claims open -> repairing, so a
+  -- concurrent review-continue pass can tell a LIVE repair from a crash-stranded one. A repairing
+  -- record with a live lease is in flight and re-driving it would dispatch a second repair over the
+  -- same batch/worktree; only a strictly-expired lease is re-driven. NULL on an aged row and on a
+  -- record that has never been claimed -- read as "no live lease".
+  lease_expires_at_ms       INTEGER,
   created_at                TEXT NOT NULL,
   updated_at                TEXT NOT NULL,
   PRIMARY KEY (batch_id, revision)
@@ -2076,6 +2082,13 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
     ddl:
       "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN state TEXT NOT NULL DEFAULT 'open' " +
       "CHECK (state IN ('open', 'repairing', 'superseded'))",
+  },
+  // RF-1: the repair lease. Nullable INTEGER with no default, so ADD COLUMN restores it on an
+  // aged DB and the FG-608 parity guard is satisfied.
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "lease_expires_at_ms",
+    ddl: "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN lease_expires_at_ms INTEGER",
   },
 
   // FG-655: the docs dispatch binding. Brand-new, so a real old DB gets it whole from the

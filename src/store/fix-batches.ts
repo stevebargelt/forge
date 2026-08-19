@@ -30,6 +30,7 @@ import {
   type ReviewFinding,
 } from "./reviews.js";
 import { newFixBatchId, nowIso } from "../util/ids.js";
+import { storeNowMs } from "./publications.js";
 import { executedAssertionIdentityValid } from "../v2/review-evidence.js";
 
 export const FIX_BATCH_STATES = ["open", "dispatched", "ingested", "superseded"] as const;
@@ -656,6 +657,13 @@ export function ingestFixBatchResults(
  *  one-batch bound forbids. */
 export const MAX_FIX_REPAIR_ATTEMPTS = 2;
 
+/** RF-1: how long a repair claim holds the `repairing` lease before a concurrent pass may treat
+ *  the record as crash-stranded and re-drive it. Generously longer than a repair fixer's dispatch
+ *  so a slow-but-LIVE repair is never mistaken for stranded — the repair only re-emits a corrected
+ *  result.json for edits that already exist, so it is a short container, and the cost of erring long
+ *  is only that a genuinely crashed repair waits this out before recovery. */
+export const FIX_REPAIR_LEASE_MS = 30 * 60 * 1000;
+
 export const REFUSED_DELIVERY_STATES = ["open", "repairing", "superseded"] as const;
 export type RefusedDeliveryState = (typeof REFUSED_DELIVERY_STATES)[number];
 
@@ -674,6 +682,10 @@ export type RefusedFixDelivery = {
   capturedAtCandidateSha: string;
   repairAttempts: number;
   state: RefusedDeliveryState;
+  /** RF-1: the repair lease expiry (store-clock ms). Set when a pass claims open -> repairing;
+   *  undefined on an aged row, a never-claimed record, or one reset back to `open`. A `repairing`
+   *  record whose lease is in the future is a LIVE repair; one strictly past is crash-stranded. */
+  leaseExpiresAtMs?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -688,6 +700,7 @@ type RefusedDeliveryRow = {
   captured_at_candidate_sha: string;
   repair_attempts: number;
   state: string;
+  lease_expires_at_ms: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -703,6 +716,7 @@ function rowToRefusedDelivery(row: RefusedDeliveryRow): RefusedFixDelivery {
     capturedAtCandidateSha: row.captured_at_candidate_sha,
     repairAttempts: row.repair_attempts,
     state: row.state as RefusedDeliveryState,
+    leaseExpiresAtMs: row.lease_expires_at_ms ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -741,10 +755,13 @@ export function captureRefusedFixDelivery(input: CaptureRefusedDeliveryInput): R
     const existing = refusedFixDelivery(input.batchId, input.revision);
     const reasons = [...(existing?.refusalReasons ?? []), ...input.refusalReasons];
     if (existing) {
+      // RF-1: a fresh refusal returns the record to `open` and CLEARS the repair lease — the pass
+      // that held `repairing` is done (it refused), so its lease must not outlive it and be read as
+      // a live repair by the next continue. repair_attempts is owned by the claim CAS, untouched here.
       db.prepare(
         `UPDATE fix_batch_refused_deliveries
          SET raw_result_bytes = ?, diff_patch = ?, porcelain_status = ?, refusal_reasons_json = ?,
-             captured_at_candidate_sha = ?, state = 'open', updated_at = ?
+             captured_at_candidate_sha = ?, state = 'open', lease_expires_at_ms = NULL, updated_at = ?
          WHERE batch_id = ? AND revision = ?`,
       ).run(
         input.rawResultBytes ?? null,
@@ -789,23 +806,24 @@ export function captureRefusedFixDelivery(input: CaptureRefusedDeliveryInput): R
   return refusedFixDelivery(input.batchId, input.revision) as RefusedFixDelivery;
 }
 
-/** Compare-and-set `open` -> `repairing`, incrementing repair_attempts, so exactly ONE of two
- *  concurrent `forge review continue` processes dispatches a repair. Returns the claimed record
- *  when this caller won the transition, else undefined (already claimed, or not open). Mirrors
- *  markFixBatchDispatched's guarded write. */
+/** Compare-and-set `open` -> `repairing`, incrementing repair_attempts and STAMPING the repair
+ *  lease (RF-1), so exactly ONE of two concurrent `forge review continue` processes dispatches a
+ *  repair. Returns the claimed record when this caller won the transition, else undefined (already
+ *  claimed, or not open). Mirrors markFixBatchDispatched's guarded write. */
 export function claimRefusedFixDeliveryRepair(batchId: string, revision: number): RefusedFixDelivery | undefined {
   const batch = getFixBatch(batchId);
   if (!batch) throw new Error(`forge: no fix batch ${batchId}`);
   const review = getReview(batch.reviewId);
   let claimed = false;
   writeTransaction(() => {
+    const leaseUntil = storeNowMs() + FIX_REPAIR_LEASE_MS;
     const res = getDb()
       .prepare(
         `UPDATE fix_batch_refused_deliveries
-         SET state = 'repairing', repair_attempts = repair_attempts + 1, updated_at = ?
+         SET state = 'repairing', repair_attempts = repair_attempts + 1, lease_expires_at_ms = ?, updated_at = ?
          WHERE batch_id = ? AND revision = ? AND state = 'open'`,
       )
-      .run(nowIso(), batchId, revision);
+      .run(leaseUntil, nowIso(), batchId, revision);
     claimed = res.changes === 1;
     if (claimed) {
       logEvent("review.fix_delivery_repair_claimed", {
@@ -816,6 +834,40 @@ export function claimRefusedFixDeliveryRepair(batchId: string, revision: number)
     }
   });
   return claimed ? refusedFixDelivery(batchId, revision) : undefined;
+}
+
+/** RF-1: reclaim a CRASH-STRANDED `repairing` record — one whose lease has strictly EXPIRED, or
+ *  which carries no lease at all (an aged row). One guarded write renews the lease and keeps the
+ *  record `repairing`, so exactly one of several concurrent continues wins the re-drive and the
+ *  rest see a live lease and back off. A `repairing` record with a lease still in the FUTURE is a
+ *  LIVE repair and is never reclaimed — returning undefined there is what stops a second concurrent
+ *  repair from being dispatched over the same batch/worktree. repair_attempts is NOT incremented:
+ *  the crashed attempt was already counted when it claimed; this recovers it, it is not a new one. */
+export function reclaimStrandedFixDeliveryRepair(batchId: string, revision: number): RefusedFixDelivery | undefined {
+  const batch = getFixBatch(batchId);
+  if (!batch) throw new Error(`forge: no fix batch ${batchId}`);
+  const review = getReview(batch.reviewId);
+  let reclaimed = false;
+  writeTransaction(() => {
+    const now = storeNowMs();
+    const res = getDb()
+      .prepare(
+        `UPDATE fix_batch_refused_deliveries
+         SET lease_expires_at_ms = ?, updated_at = ?
+         WHERE batch_id = ? AND revision = ? AND state = 'repairing'
+           AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms <= ?)`,
+      )
+      .run(now + FIX_REPAIR_LEASE_MS, nowIso(), batchId, revision, now);
+    reclaimed = res.changes === 1;
+    if (reclaimed) {
+      logEvent("review.fix_delivery_repair_reclaimed", {
+        runId: review?.runId,
+        taskId: batch.dispatchTaskId,
+        payload: { reviewId: batch.reviewId, fixBatchId: batchId, revision },
+      });
+    }
+  });
+  return reclaimed ? refusedFixDelivery(batchId, revision) : undefined;
 }
 
 /** Retire the refused-delivery record once a corrected result ingested and the cycle committed. */

@@ -69,6 +69,7 @@ import {
   fixBatchResults,
   captureRefusedFixDelivery,
   claimRefusedFixDeliveryRepair,
+  reclaimStrandedFixDeliveryRepair,
   refusedFixDelivery,
   supersedeRefusedFixDelivery,
   MAX_FIX_REPAIR_ATTEMPTS,
@@ -330,8 +331,15 @@ export type CoordinatorDeps = {
   /** FG-710 AC4: capture the completed fixer workspace as a RE-APPLIABLE record, so a
    *  schema-invalid or evidence-incomplete result does not discard finished work. Git-backed
    *  (implemented in review-wiring, which has git; the coordinator stays git-agnostic), a peer
-   *  of materialize/dispatch/commit. Returns a git-format patch INCLUDING untracked files and
-   *  the porcelain status at refusal time. Invoked INSIDE the PRE-INGEST refusal arms only. */
+   *  of materialize/dispatch/commit. Returns a git-format patch and the porcelain status at
+   *  refusal time. Invoked INSIDE the PRE-INGEST refusal arms only.
+   *
+   *  RF-3: the git-backed implementation bounds the patch to THE FIXER'S OWN CHANGED SET — the
+   *  paths that became dirty or appeared since a pre-dispatch baseline it snapshots when the fixer
+   *  container starts — never the whole dirty checkout. An unrelated pre-existing dirty edit, or an
+   *  attacker-planted file that was present before the fixer ran, must not ride into the durable
+   *  refused-delivery patch a repair fixer later reapplies. The fixer's new untracked regression
+   *  test, which appeared during the run, is inside that set. */
   captureFixWorkspace: (ctx: { review: Review; batch: FixBatch }) => Awaitable<{
     diffPatch: string;
     porcelainStatus: string;
@@ -1338,11 +1346,18 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
           `${refused.refusalReasons.join(" | ")}`,
       );
     }
-    // Serialization (high-risk): a compare-and-set of open -> repairing gates the dispatch so
-    // two concurrent `forge review continue` cannot both dispatch a repair. A crash-stranded
-    // `repairing` record is re-driven from the durable patch without re-claiming (the attempt
-    // was already counted at its claim); the repair fixer re-applies the patch if the tree reset.
-    let claim: RefusedFixDelivery = refused;
+    // Serialization (RF-1, high-risk): a repair is dispatched ONLY after this pass wins a
+    // compare-and-set on the refused-delivery record, so two concurrent `forge review continue`
+    // cannot both dispatch a repair over the same batch/worktree.
+    //   - `open`     -> claim open->repairing (stamps the lease); the loser sees no `open` and backs off.
+    //   - `repairing` with a LIVE lease -> a repair is already in flight; refuse, do not re-drive.
+    //   - `repairing` with an EXPIRED (or absent) lease -> crash-stranded; reclaim it (renew the
+    //     lease, no new attempt counted) and re-drive from the durable patch, which the repair
+    //     fixer re-applies if the tree was reset. The reclaim is itself a guarded write, so only
+    //     one of several concurrent recoverers wins.
+    // The prior code treated ANY `repairing` record as re-drivable, so a second continue that read
+    // the row after the first claimed it dispatched a second concurrent repair — the hole this closes.
+    let claim: RefusedFixDelivery;
     if (refused.state === "open") {
       const won = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
       if (won === undefined) {
@@ -1352,6 +1367,16 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
         );
       }
       claim = won;
+    } else {
+      const reclaimed = reclaimStrandedFixDeliveryRepair(batch.id, batch.revision);
+      if (reclaimed === undefined) {
+        return refuse(
+          `fix_delivery_repair_in_flight: fix batch ${batch.id} revision ${batch.revision} is already being repaired ` +
+            `by a concurrent pass whose lease is still live. Nothing was dispatched and no second repair was started; ` +
+            `re-run \`forge review continue ${reviewId}\` once it settles.`,
+        );
+      }
+      claim = reclaimed;
     }
     const dispatch = await deps.dispatchFixRepair({ review, batch, refused: claim });
     const delivered = await deliver(dispatch);
@@ -1756,6 +1781,10 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   // original evidence. The rechecker's job is to VERIFY this claim, so it has to receive
   // the claim rather than a restatement of the finding.
   const fixerEvidence: Record<string, string> = {};
+  // RF-5: the executed-assertion identity the fixer NAMED per finding, threaded into ingestion so
+  // a `resolved` verdict is bound to THIS assertion having executed — not merely rendered into the
+  // rechecker's free-text claim, where nothing checked that the recheck ran the named test.
+  const fixerAssertions: Record<string, string> = {};
   for (const b of snap.batches) {
     for (const r of fixBatchResults(b.id)) {
       if (r.evidence === undefined && r.executedAssertion === undefined) continue;
@@ -1766,6 +1795,7 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
         r.executedAssertion !== undefined
           ? `${r.evidence ?? ""}\n\nexecuted assertion: ${r.executedAssertion}`.trim()
           : (r.evidence as string);
+      if (r.executedAssertion !== undefined) fixerAssertions[r.findingId] = r.executedAssertion;
     }
   }
 
@@ -1838,7 +1868,7 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
     };
   }
 
-  const ingestion = ingestRecheck(dispatch.result, { reviewId, candidateSha: candidate, expected });
+  const ingestion = ingestRecheck(dispatch.result, { reviewId, candidateSha: candidate, expected, fixerAssertions });
   if (!ingestion.ok) {
     return { transition, status: "refused", message: ingestion.refusal };
   }

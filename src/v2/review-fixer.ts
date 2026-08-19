@@ -18,16 +18,17 @@ import { FIX_RESULTS, type IncomingFixResult } from "../store/fix-batches.js";
  *  optional is a refusal, which discarded completed remediation work with no adoption path.
  *
  *  These are NORMALIZED to absence (an empty string means "I did not use this field"), scoped
- *  to exactly these keys. A required field — `evidence`, `remediation_summary` — is never in
- *  this set: an empty one still refuses loudly. `executed_assertion` is here so an empty one
- *  routes to the SEMANTIC Shape-B diagnostic (a demonstrated `fixed` finding names no executed
- *  assertion) rather than a bare `min(1)` parse error. */
+ *  to EXACTLY these four optional conditional fields — the review contract's normalization
+ *  boundary, and nothing wider. A required field — `evidence`, `remediation_summary` — is never
+ *  in this set: an empty one still refuses loudly. `executed_assertion` is deliberately NOT here
+ *  (RF-6): it is not one of the four the contract scopes normalization to, and an empty one on a
+ *  demonstrated `fixed` finding is caught by the Shape-B identity check (missing/invalid identity
+ *  -> park), which is the spec-compliant path rather than a silent empty-to-absent conversion. */
 const NORMALIZE_EMPTY_TO_ABSENT = [
   "interaction",
   "scope_change_reason",
   "evidence_path",
   "evidence_sha256",
-  "executed_assertion",
 ] as const;
 
 const PerFindingShape = z
@@ -48,7 +49,10 @@ const PerFindingShape = z
      *  binds — the test NAME (or "; "-joined names) the fixer's proof executed. OPTIONAL at
      *  the schema level: the schema has no reachability, so it cannot know when this is
      *  required. The batch-aware requirement (a demonstrated `fixed` finding must name it)
-     *  is enforced in ingestFixBatchResults, which has the payload's reachability. */
+     *  is enforced in ingestFixBatchResults, which has the payload's reachability. It is NOT
+     *  empty-normalized (RF-6): an empty string is a `min(1)` refusal like any other non-scoped
+     *  field, and an OMITTED one on a demonstrated `fixed` finding is what routes to the
+     *  Shape-B identity check. */
     executed_assertion: z.string().trim().min(1).optional(),
   })
   .strict()

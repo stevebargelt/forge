@@ -361,6 +361,7 @@ export type EventType =
   // captures the completed work; a repair-retry claims and later supersedes that record.
   | "review.fix_delivery_refused"
   | "review.fix_delivery_repair_claimed"
+  | "review.fix_delivery_repair_reclaimed"
   | "review.fix_delivery_repair_superseded"
   // FG-640: the third route by which an absent lens clears. The payload NAMES the missing
   // evidence, the lens it attaches to, and the candidate it was accepted against — an

@@ -34,16 +34,23 @@ test("FG-710 AC2: an empty scope_change_reason on a `fixed` result normalizes to
   assert.equal(r.scopeChanges.length, 0);
 });
 
-test("FG-710 AC2: empty interaction / evidence_path / evidence_sha256 / executed_assertion all normalize to absence", () => {
-  const r = parseFixerResult(
-    base([{ ...FIXED, interaction: "", evidence_path: "", evidence_sha256: "", executed_assertion: "" }]),
-  );
+test("FG-710 AC2: empty interaction / evidence_path / evidence_sha256 all normalize to absence", () => {
+  const r = parseFixerResult(base([{ ...FIXED, interaction: "", evidence_path: "", evidence_sha256: "" }]));
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.results[0]?.interaction, undefined);
   assert.equal(r.results[0]?.evidencePath, undefined);
   assert.equal(r.results[0]?.evidenceSha256, undefined);
-  assert.equal(r.results[0]?.executedAssertion, undefined);
+});
+
+test("RF-6: executed_assertion is NOT one of the four normalized fields — an empty one refuses loudly, never absence", () => {
+  // The review contract scopes empty-string normalization to EXACTLY four optional conditional
+  // fields (interaction, scope_change_reason, evidence_path, evidence_sha256). executed_assertion
+  // is not among them: an empty one is a min(1) refusal, not silently converted to absence.
+  const r = parseFixerResult(base([{ ...FIXED, executed_assertion: "" }]));
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.refusal, /findings\.0\.executed_assertion/);
 });
 
 test("FG-710: a REQUIRED empty field is never normalized — an empty evidence still refuses loudly", () => {
