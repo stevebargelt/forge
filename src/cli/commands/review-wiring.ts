@@ -1791,14 +1791,24 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         };
       }
 
+      // RF-2: COMPARE-AND-SET the branch tip so ONLY a commit that still sits on the candidate
+      // lands, matching the FG-428 campaign_id CAS precedent. The `at !== candidate` guard above
+      // is a check, not a lock: another amendment invocation can advance HEAD in the window
+      // between it and the write, and a plain `git commit` moves HEAD unconditionally — so a
+      // loser would author an unadopted child on the racer's tip and LEAVE it there. Instead,
+      // build the commit as an EXPLICIT child of the candidate (never touching HEAD) and move the
+      // branch tip with an old-value guard: `update-ref HEAD <new> <candidate>` fails atomically
+      // if HEAD is no longer the candidate. A lost race leaves the tip untouched and the built
+      // commit unreferenced (git gc reclaims it), so nothing is recorded and the candidate is
+      // unmoved. THE INDEX IS SHARED; THE TREE MUST NOT BE (FG-649 RF-6): the `outside` refusal
+      // above proved the index differs from the candidate only in the declared paths, so
+      // `write-tree` after staging them yields the same partial tree the old `git commit -- <paths>`
+      // did. `stageDeclaredPaths` tolerates a path the index already fully represents.
+      let newSha: string;
       try {
-        // THE INDEX IS SHARED; THE COMMIT MUST NOT BE (FG-649 RF-6). Passing the same pathspecs
-        // to `commit` makes it a partial commit — git builds the tree from HEAD plus exactly
-        // these paths — closing the stage-then-commit window structurally. `:/` makes the
-        // pathspecs repo-root relative, matching porcelain. `stageDeclaredPaths` tolerates a
-        // path the index already fully represents (the far side of a `git mv`).
         stageDeclaredPaths(git, moved);
-        git(["commit", "-m", subject, "--", ...moved.map((p) => `:/${p}`)]);
+        const tree = git(["write-tree"]).trim();
+        newSha = git(["commit-tree", tree, "-p", candidate ?? "", "-m", subject]).trim();
       } catch (err) {
         return {
           kind: "refused",
@@ -1808,6 +1818,16 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
             `correction is still in the worktree, so nothing is lost: resolve what git reported (staging the paths ` +
             `yourself is enough — the commit is taken from the index) and re-run`,
         };
+      }
+      try {
+        git(["update-ref", "HEAD", newSha, candidate ?? ""]);
+      } catch {
+        return notAdopted(
+          newSha,
+          `HEAD is no longer the candidate ${candidate ?? "(unset)"}, so the compare-and-set that moves the branch ` +
+            `tip refused — another writer advanced the candidate while this amendment was staging. The built commit ` +
+            `is left unreferenced and the branch tip is unmoved`,
+        );
       }
 
       // AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it can be.

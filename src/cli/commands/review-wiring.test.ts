@@ -603,6 +603,9 @@ function scriptedGit(script: {
   /** Paths `git diff --cached` reports as already fully staged, which is the ONLY excuse the
    *  committer accepts for an add that matched nothing. */
   staged?: string[];
+  /** FG-682 RF-2: make the amendment's `update-ref` compare-and-set REFUSE — a racer advanced
+   *  the branch tip in the window, so the tip is unmoved and the commit is not adopted. */
+  casFail?: boolean;
 }) {
   const calls: string[][] = [];
   let committed = false;
@@ -640,6 +643,22 @@ function scriptedGit(script: {
     if (args[0] === "commit") {
       authoredSubject = args[2];
       committed = true;
+    }
+    // FG-682 RF-2: the amendment committer builds the commit as an explicit child of the candidate
+    // (`commit-tree`) and moves the branch tip with a compare-and-set (`update-ref HEAD <new>
+    // <old>`) instead of `git commit`. The fake models it: `commit-tree` returns the new sha and
+    // records its subject; `update-ref` is what actually advances HEAD. `casFail` scripts a lost
+    // race — the CAS refuses and HEAD stays put.
+    if (args[0] === "write-tree") return "tree0000\n";
+    if (args[0] === "commit-tree") {
+      const mi = args.indexOf("-m");
+      authoredSubject = mi >= 0 ? args[mi + 1] : "";
+      return `${head}\n`;
+    }
+    if (args[0] === "update-ref") {
+      if (script.casFail) throw new Error(`fatal: update_ref failed for ref 'HEAD': cannot lock ref`);
+      committed = true;
+      return "";
     }
     if (args[0] === "status") return script.status ?? "";
     if (args[0] === "rev-parse") return `${committed ? head : preHead}\n`;
@@ -1255,13 +1274,37 @@ test("FG-682: the amendment commit carries ONLY the declared documentation and n
   const commit = await docsDeps(git).commitDocsAmendment!(ctx);
 
   assert.equal(commit.kind, "committed");
-  assert.equal(commit.kind === "committed" ? commit.sha : "", "amended222", "the sha the commit CREATED");
-  const commitCall = calls.find((c) => c[0] === "commit") as string[];
-  assert.equal(commitCall[2], amendSubjectFor("cand111"));
-  assert.doesNotMatch(commitCall[2] as string, /FG-/, "resolveReviewBase infers a LATER review's base from a ticket subject");
-  // THE PATHS REACH `commit` ITSELF, not merely `add` — the index is shared.
-  assert.deepEqual(commitCall.slice(3), ["--", ":/docs/SCHEMA-CONTRACT.md", ":/docs/new.md"]);
-  assert.ok(!commitCall.includes("-A") && !commitCall.includes("--all"), "never `git commit -a`");
+  assert.equal(commit.kind === "committed" ? commit.sha : "", "amended222", "the sha the CAS adopted");
+  // RF-2: the commit is built as an EXPLICIT child of the candidate (`commit-tree -p cand111`) and
+  // the branch tip is moved by a compare-and-set (`update-ref HEAD <new> cand111`), never by
+  // `git commit` — so a racer that advanced HEAD in the window loses the CAS instead of leaving an
+  // unadopted commit on the tip.
+  assert.equal(calls.find((c) => c[0] === "commit"), undefined, "no `git commit` — the tip moves by CAS");
+  const treeCall = calls.find((c) => c[0] === "commit-tree") as string[];
+  assert.equal(treeCall[3], "cand111", "the commit is parented on the candidate");
+  const subject = treeCall[treeCall.indexOf("-m") + 1] as string;
+  assert.equal(subject, amendSubjectFor("cand111"));
+  assert.doesNotMatch(subject, /FG-/, "resolveReviewBase infers a LATER review's base from a ticket subject");
+  const casCall = calls.find((c) => c[0] === "update-ref") as string[];
+  assert.deepEqual(casCall, ["update-ref", "HEAD", "amended222", "cand111"], "old-value guard is the candidate");
+  // RF-6: only the declared paths reach the tree — they are the ONLY thing `add` staged, and the
+  // tree is `write-tree` of that index, never `git commit -a`.
+  const addCall = calls.find((c) => c[0] === "add") as string[];
+  assert.deepEqual(addCall.slice(2), [":/docs/SCHEMA-CONTRACT.md", ":/docs/new.md"]);
+  assert.ok(!calls.some((c) => c.includes("-A") || c.includes("--all")), "never `git commit -a`");
+});
+
+test("FG-682 RF-2: a racer that wins the branch tip loses the amendment its compare-and-set — nothing adopted", async () => {
+  // The window the finding names: HEAD == the candidate at the check, then another writer advances
+  // it before the ref move. `update-ref HEAD <new> <candidate>` refuses, so the built commit is
+  // never adopted and the tip is unmoved — records nothing, candidate unmoved.
+  const { git, calls } = scriptedGit({ status: "M  docs/SCHEMA-CONTRACT.md\0", head: "amended222", casFail: true });
+  const commit = await docsDeps(git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_amendment_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /compare-and-set/);
+  assert.ok(calls.some((c) => c[0] === "update-ref"), "the CAS was attempted");
 });
 
 test("FG-682: a declared NON-documentation path refuses by name before any git write (AC2)", async () => {

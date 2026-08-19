@@ -196,6 +196,46 @@ test("FG-682: idempotent on the (superseded -> amended) pair — a replay re-sta
   );
 });
 
+test("FG-682 RF-1: recordDocsAmendment signals recorded, then duplicate, on a replay of the same pair", () => {
+  newReview();
+  const args = {
+    supersededSha: "1fa62358",
+    amendedSha: "c6a3b8c2",
+    paths: ["docs/SCHEMA-CONTRACT.md"],
+    rationale: "prose delta",
+    discoveredBy: "orchestrator",
+  };
+  const first = recordDocsAmendment("review-1", { ...args });
+  assert.equal(first.persisted, "recorded", "the first write persisted the record");
+  const replay = recordDocsAmendment("review-1", { ...args });
+  assert.equal(replay.persisted, "duplicate", "the idempotent replay is a benign duplicate, lineage already present");
+  assert.equal(amendmentRecordsOf(getReview("review-1")!).length, 1, "still exactly one record");
+});
+
+test("FG-682 RF-1: a NON-ARRAY outcomes column is LEFT ALONE and signalled skipped_nonarray — never clobbered", () => {
+  newReview();
+  // The no-clobber refusal: a non-array outcomes column holds something this writer must not
+  // overwrite. It writes NOTHING and says so, so the caller can refuse to advance (RF-3).
+  db.prepare(`UPDATE reviews SET lens_outcomes_json = ? WHERE id = ?`).run(JSON.stringify({ corrupt: true }), "review-1");
+  const before = getReview("review-1")!.lensOutcomes;
+
+  const write = recordDocsAmendment("review-1", {
+    supersededSha: "1fa62358",
+    amendedSha: "c6a3b8c2",
+    paths: ["docs/SCHEMA-CONTRACT.md"],
+    rationale: "would lose lineage if it clobbered the column",
+    discoveredBy: "orchestrator",
+  });
+
+  assert.equal(write.persisted, "skipped_nonarray", "the write reports that it persisted nothing");
+  assert.deepEqual(getReview("review-1")!.lensOutcomes, before, "the non-array column is untouched");
+  assert.equal(
+    eventsForRun(RUN.id).filter((e) => e.eventType === "review.docs_amended").length,
+    0,
+    "no amendment event was emitted for a write that did not persist",
+  );
+});
+
 test("FG-682: a DIFFERENT amended sha is a distinct amendment — lineage is a chain", () => {
   newReview();
   recordDocsAmendment("review-1", {

@@ -1155,6 +1155,16 @@ export function amendmentRecordsOf(review: Review): AmendmentRecord[] {
 
 export type DocsAmendmentInput = Omit<AmendmentRecord, "kind" | "at"> & { at?: string };
 
+/** RF-1: what `recordDocsAmendment` did with the write, so the caller can tell a persisted
+ *  lineage from a suppressed one and refuse to advance the candidate without it (RF-3).
+ *   - `recorded`   — the amendment record was written; lineage is present.
+ *   - `duplicate`  — the `(supersededSha, amendedSha)` pair was already recorded; a benign
+ *                    idempotent replay, lineage already present, safe to advance.
+ *   - `skipped_nonarray` — the outcomes column was non-array and LEFT ALONE (the no-clobber
+ *                    refusal); NOTHING was written, so the caller must NOT advance. */
+export type DocsAmendmentPersist = "recorded" | "duplicate" | "skipped_nonarray";
+export type DocsAmendmentWrite = { review: Review; persisted: DocsAmendmentPersist };
+
 /** Record ONE late-docs amendment, appended beside the outcomes, and emit the event
  *  carrying the fromSha/toSha lineage.
  *
@@ -1171,17 +1181,24 @@ export type DocsAmendmentInput = Omit<AmendmentRecord, "kind" | "at"> & { at?: s
  *  unreadable (non-array) outcomes column is LEFT ALONE rather than clobbered — the same
  *  refusal its siblings make, for the same reason: losing reviewer-authored outcomes to
  *  record an amendment beside them is a strictly worse trade. */
-export function recordDocsAmendment(reviewId: string, rec: DocsAmendmentInput): Review {
+export function recordDocsAmendment(reviewId: string, rec: DocsAmendmentInput): DocsAmendmentWrite {
   const at = rec.at ?? nowIso();
   const record: AmendmentRecord = { kind: "docs_amendment", ...rec, at };
+  let persisted: DocsAmendmentPersist = "recorded";
   writeTransaction(() => {
     const fresh = getReview(reviewId);
     if (!fresh) throw new Error(`forge: no review ${reviewId}`);
-    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) return;
+    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) {
+      persisted = "skipped_nonarray";
+      return;
+    }
     const already = amendmentRecordsOf(fresh).some(
       (a) => a.supersededSha === record.supersededSha && a.amendedSha === record.amendedSha,
     );
-    if (already) return;
+    if (already) {
+      persisted = "duplicate";
+      return;
+    }
     getDb()
       .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify([...lensRecordsOf(fresh), record]), at, reviewId);
@@ -1199,7 +1216,7 @@ export function recordDocsAmendment(reviewId: string, rec: DocsAmendmentInput): 
       },
     });
   });
-  return getReview(reviewId) as Review;
+  return { review: getReview(reviewId) as Review, persisted };
 }
 
 /** Replace the reviewer-authored OUTCOMES of `lens_outcomes_json`, preserving everything

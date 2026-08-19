@@ -2966,6 +2966,31 @@ test("FG-682 RF-2: a crash after the advance leaves only the docs record to fini
   assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 1, "the amendment record was not duplicated");
 });
 
+test("FG-682 RF-1/RF-3: a suppressed ledger write REFUSES the advance — no candidate move without lineage", async () => {
+  const seen: { declared?: readonly string[] } = {};
+  const h = harness(amendCommitting("amended222", seen));
+  await parkAt(h.deps, "shipping_review");
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+
+  // The no-clobber case: the outcomes column is non-array, so recordDocsAmendment leaves it
+  // alone and persists nothing. Advancing the candidate here would move it with no amendment
+  // record — losing the AC6 lineage. The advance must be gated on a confirmed ledger write.
+  db.prepare(`UPDATE reviews SET lens_outcomes_json = ? WHERE id = ?`).run(JSON.stringify({ corrupt: true }), REVIEW);
+
+  const outcome = await runDocsAmendment(REVIEW, ["docs/x.md"], "the receipt claim is now false", h.deps);
+
+  assert.equal(outcome.status, "refused");
+  if (outcome.status !== "refused") return;
+  assert.equal(outcome.reason, "docs_amendment_ledger_unwritable");
+  assert.match(outcome.message, /NOT advanced/);
+  assert.equal(seen.declared?.length, 1, "the committer WAS reached — the commit is irreversible, the refusal is after it");
+
+  // The candidate is unmoved and no amendment record exists — nothing downstream reads a moved
+  // candidate without its lineage.
+  assert.equal(getReview(REVIEW)?.candidateSha, superseded, "candidate unmoved");
+  assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 0, "no amendment recorded");
+});
+
 // ─── FG-682 step 4: the post-amendment recheck delta is bounded to the amendment ──────────────
 //
 // After a late-docs amendment the current candidate is an amended sha. runRecheck's default

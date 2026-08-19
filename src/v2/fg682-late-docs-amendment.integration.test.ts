@@ -445,6 +445,57 @@ test("integ FG-682: the coordinator amends the correction into the candidate, ad
   assert.deepEqual(payload.paths, [DOC_AMEND_PATH]);
 });
 
+test("integ FG-682 RF-2: a candidate advance racing the amendment loses the compare-and-set — no unadopted commit on the tip", async () => {
+  const h = harness();
+  const superseded = await driveToShippingBoundary(h);
+
+  // The correction is in the worktree, ready to commit.
+  writeFileSync(
+    join(repo, DOC_AMEND_PATH),
+    "# Schema contract\n\nThe dependencyEnvironment receipt no longer distinguishes the lanes:\n" +
+      `all three now cross one shared resolver. ${AMEND_MARKER}.\n`,
+  );
+
+  // A `git` seam that reproduces the race window the finding names: the committer has already
+  // checked HEAD == the candidate; between that check and the ref move — during "the worktree
+  // scan and staging" — ANOTHER writer advances the branch tip. We land that racer on the
+  // committer's first porcelain scan (after the candidate check, before staging, so the racer's
+  // `--allow-empty` commit stays genuinely empty and never sweeps the un-staged correction in),
+  // then let the real commit proceed. The CAS `update-ref HEAD <new> <candidate>` must refuse,
+  // because HEAD is no longer the candidate.
+  let raced = false;
+  const raceGit = (args: string[]): string => {
+    if (!raced && args[0] === "status") {
+      raced = true;
+      git(["commit", "--allow-empty", "-qm", "a concurrent writer advanced the candidate first"]);
+    }
+    return git(args);
+  };
+  const racedWiring = buildCoordinatorDeps({ projectDir: repo, ticketId: TICKET, runId: RUN_ID, git: raceGit });
+  const racedDeps: CoordinatorDeps = { ...h.deps, commitDocsAmendment: racedWiring.commitDocsAmendment };
+  const racerTip = () => head();
+
+  const outcome = await runDocsAmendment(REVIEW, [DOC_AMEND_PATH], "the receipt prose is now false", racedDeps);
+
+  assert.equal(outcome.status, "refused", JSON.stringify(outcome));
+  if (outcome.status !== "refused") return;
+  assert.equal(outcome.reason, "docs_amendment_commit_raced", "the CAS refusal names the race");
+
+  // THE POINT OF RF-2: the branch tip is the racer's commit, NOT an unadopted amendment commit
+  // left dangling on it. The amendment moved nothing an amendment must not.
+  assert.equal(raced, true, "the race actually fired");
+  assert.equal(head(), git(["rev-parse", "HEAD"]).trim());
+  assert.deepEqual(pathsAt("HEAD"), [], "the branch tip is the racer's empty commit — no amendment commit on it");
+  assert.equal(git(["rev-parse", "HEAD^"]).trim(), superseded, "and the racer sits directly on the superseded candidate");
+  assert.notEqual(racerTip(), superseded, "HEAD advanced (to the racer), never to the amendment");
+
+  // Records nothing, candidate unmoved.
+  assert.equal(getReview(REVIEW)?.candidateSha, superseded, "the review candidate is unmoved");
+  assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 0, "no amendment record");
+  // The correction is still in the worktree — nothing lost.
+  assert.match(porcelain(), /SCHEMA-CONTRACT\.md/, "the correction stays in the worktree for a clean re-run");
+});
+
 // ─── AC4 / AC5: what the move re-opens, and what it does NOT ─────────────────
 
 test("integ FG-682: the amendment re-opens verification and a BOUNDED recheck at the amended sha, and full discovery does NOT re-run", async () => {

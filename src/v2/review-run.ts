@@ -2001,13 +2001,33 @@ export async function runDocsAmendment(
   // (f) THE AMENDMENT LEDGER RECORD, written BEFORE the advance so a crash after the advance can
   // still recover the superseded sha. Idempotent on (supersededSha, amendedSha), so an RF-2
   // replay re-states the same amendment rather than double-counting the lineage (AC6).
-  recordDocsAmendment(reviewId, {
+  const write = recordDocsAmendment(reviewId, {
     supersededSha: candidateBefore,
     amendedSha,
     paths: committedPaths,
     rationale: rationale.trim(),
     discoveredBy,
   });
+
+  // RF-1/RF-3: the ledger write is the GATE on the advance. recordDocsAmendment leaves a
+  // non-array outcomes column ALONE rather than clobber reviewer-authored outcomes (its
+  // no-clobber refusal) — but that suppresses the amendment record, so advancing the candidate
+  // here would move it with no lineage, exactly the AC6 invariant this ticket protects. Treat a
+  // suppressed write as a REFUSAL: record nothing more, leave the candidate at candidateBefore.
+  // The commit already exists at the amended sha, but the review does not adopt it, so a re-run
+  // recognises that commit (RF-2) and refuses again until the column is repaired — never a moved
+  // candidate without its record. `recorded` and the benign `duplicate` replay both mean lineage
+  // is present, so both advance.
+  if (write.persisted === "skipped_nonarray") {
+    return refused(
+      "docs_amendment_ledger_unwritable",
+      `the amendment ledger column for review ${reviewId} is not an array, so the amendment record could not be ` +
+        `written without clobbering the reviewer-authored outcomes beside it. The candidate is NOT advanced — it ` +
+        `stays at ${candidateBefore} — because advancing it would lose the superseded→amended lineage the ledger ` +
+        `exists to preserve (AC6). The amendment commit ${amendedSha} was authored but is not adopted; repair the ` +
+        `outcomes column and re-run, and the coordinator re-adopts that commit rather than authoring a second.`,
+    );
+  }
 
   // (d) ADVANCE THE CANDIDATE through the one place it moves — fires resolution/verification
   // invalidation (AC4). contractConfirmedSha is untouched, so discovery never re-opens.
