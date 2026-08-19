@@ -2092,20 +2092,33 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
     if (f.riskLens !== undefined) lensInstructions[f.findingRef] = `source lens: ${f.riskLens} (${lensRole(f.riskLens as RiskLens)})`;
   }
 
-  // FG-689: the remediation delta comes from the SAME pinned seam, over the confirmed sha and
+  // FG-682: when the current candidate is an AMENDED sha, narrow the recheck's bounded delta to
+  // the amendment ALONE. The default base is `contractConfirmedSha`; after a late-docs amendment
+  // discovered post-shipping that span covers the fix commit, the docs commit AND the amendment —
+  // re-reviewing already-settled remediation, the ceremony this ticket removes. The amendment
+  // record carries the exact superseded→amended lineage, so base the delta on
+  // `supersededSha..amendedSha`: it covers ONLY the amended documentation paths (AC5). Full
+  // discovery still never re-runs — it is anchored to `contractConfirmedSha`, which the amendment
+  // never wrote. A non-amendment recheck keeps the `confirmedSha..candidate` base unchanged. The
+  // most recent amendment (the one whose `amendedSha` is the current candidate) is the only one
+  // whose prose is unreviewed; earlier amendments were already rechecked at their own candidate.
+  const amendment = amendmentRecordsOf(review).find((a) => a.amendedSha === candidate);
+  const deltaBase = amendment ? amendment.supersededSha : confirmedSha;
+
+  // FG-689: the remediation delta comes from the SAME pinned seam, over the delta base and
   // the current candidate. Not because the rechecker needs the coverage guarantee — it does
   // not — but because a second unpinned `git diff` in this module is the seam that grows back.
   //
   // A refusal REFUSES THE STAGE. The old `deps.diff` threw on a git failure and the throw
   // escaped the coordinator; the one thing that must not happen instead is a rechecker handed a
   // placeholder for the delta it is supposed to be verifying against.
-  const renderedDelta = await deps.reviewDiff(confirmedSha, candidate);
+  const renderedDelta = await deps.reviewDiff(deltaBase, candidate);
   if (!renderedDelta.ok) {
     return {
       transition,
       status: "refused",
       message:
-        `the remediation delta ${confirmedSha}..${candidate} could not be rendered (${renderedDelta.reason}): ` +
+        `the remediation delta ${deltaBase}..${candidate} could not be rendered (${renderedDelta.reason}): ` +
         `${renderedDelta.refusal} No rechecker was dispatched, no resolution was inferred and every finding stays ` +
         `exactly as it was.`,
     };

@@ -54,7 +54,7 @@ import {
 import { setPublicationClockOffsetForTest } from "../store/publications.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
 import { runDocsAmendment, runNextStage, type CoordinatorDeps, type DocsAmendmentCommit } from "./review-run.js";
-import { fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
+import { fakeRendering, fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -2964,4 +2964,69 @@ test("FG-682 RF-2: a crash after the advance leaves only the docs record to fini
   assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.sha, "amended222", "the docs record was finished at the amended sha");
   assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.meta?.amendment, true);
   assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 1, "the amendment record was not duplicated");
+});
+
+// ─── FG-682 step 4: the post-amendment recheck delta is bounded to the amendment ──────────────
+//
+// After a late-docs amendment the current candidate is an amended sha. runRecheck's default
+// bounded delta is `contractConfirmedSha..candidate`, which spans the fix commit, the docs commit
+// AND the amendment — re-reviewing already-settled remediation, the ceremony FG-682 removes. The
+// step narrows the base to the amendment's own `supersededSha` when the candidate is an amended
+// sha, so the recheck covers ONLY the amended documentation paths (AC5). A non-amendment recheck
+// keeps the `confirmedSha..candidate` base. `contractConfirmedSha` is never read as a delta base
+// here, so full discovery still never re-runs.
+
+/** A `reviewDiff` seam that records every (base, candidate) range it was asked to render and
+ *  returns a structurally-real rendering over `paths`, so a test can assert which base the
+ *  recheck chose. */
+function recordingReviewDiff(paths: readonly string[], sink: Array<{ base: string; candidate: string }>) {
+  return (base: string, candidate: string) => {
+    sink.push({ base, candidate });
+    return fakeRendering(base, candidate, paths);
+  };
+}
+
+test("FG-682 step 4: after an amendment the recheck's bounded delta is supersededSha..amendedSha, and a non-amendment recheck stays confirmedSha..candidate (AC5)", async () => {
+  const seen: { declared?: readonly string[] } = {};
+  const ranges: Array<{ base: string; candidate: string }> = [];
+  const h = harness({
+    ...amendCommitting("amended222", seen),
+    // The rendered path set only feeds contract confirmation's lens-scope check; this test's
+    // subject is the delta BASE the recheck picks, so keep the default harness's covered path.
+    reviewDiff: recordingReviewDiff(["src/store/reviews.ts"], ranges),
+  });
+
+  await parkAt(h.deps, "shipping_review");
+  const confirmed = getReview(REVIEW)?.contractConfirmedSha as string;
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+  assert.notEqual(superseded, confirmed, "the fix cycle already moved the candidate off the confirmed sha");
+
+  // The ORDINARY recheck that ran during the first cycle based its delta on confirmedSha..candidate.
+  const ordinary = ranges.find((r) => r.base === confirmed && r.candidate === superseded);
+  assert.ok(ordinary, "a non-amendment recheck bases its bounded delta on confirmedSha..candidate");
+
+  // Amend a three-line prose correction in, past the docs stage — candidate → amended222.
+  const amended = await runDocsAmendment(
+    REVIEW,
+    ["docs/SCHEMA-CONTRACT.md"],
+    "the batch collapsed the dispatch lanes; the receipt claim is now false",
+    h.deps,
+    { discoveredBy: "orchestrator" },
+  );
+  assert.equal(amended.status, "amended");
+
+  // Final verification re-runs at the amended sha first; then the recheck.
+  assert.equal(pending().kind, "verify_final");
+  await runNextStage(REVIEW, h.deps); // verify_final at amended222
+  ranges.length = 0; // isolate the recheck's own reviewDiff call
+  const recheck = await runNextStage(REVIEW, h.deps); // recheck at amended222
+  assert.equal(recheck.transition.kind, "recheck");
+  assert.equal(recheck.status, "advanced", recheck.message);
+  assert.equal(h.calls.rechecker, 2, "the amended candidate is rechecked — its resolutions were invalidated");
+
+  const deltaCall = ranges.find((r) => r.candidate === "amended222");
+  assert.ok(deltaCall, "the recheck rendered a bounded delta ending at the amended candidate");
+  // The base is the SUPERSEDED sha — only the amended prose, not the fix/docs commits.
+  assert.equal(deltaCall?.base, superseded, "the post-amendment recheck delta is based on supersededSha..amendedSha");
+  assert.notEqual(deltaCall?.base, confirmed, "NOT confirmedSha..candidate — the earlier fix/docs commits are excluded");
 });
