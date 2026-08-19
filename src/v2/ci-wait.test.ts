@@ -303,6 +303,43 @@ describe("FG-731 the block-wait loop — single terminal outcome by re-observati
     assert.equal(outcome.kind, "cancelled");
     assert.equal(getCiWait(armed.id)?.terminal, false);
   });
+
+  // RF-2 (residual of RF-6): armCiWait now degrades to an unregistered fallback on a
+  // store failure, but the loop's FIRST operation was an UNGUARDED renewCiWaitLease — a
+  // writeTransaction with no catch. A PERSISTENT store failure (broken/absent DB) through
+  // BOTH register AND that first lease write threw there, aborting the waiter before any
+  // gh observation. The register-before-poll contract is best-effort: the durable write
+  // may miss, but the wait must still poll gh and reach terminal from re-observation alone.
+  test("RF-2: a persistent store failure through register AND the first lease write still lets the loop poll gh — never aborts", async () => {
+    // Break the store BEFORE arming: arm degrades to an unregistered fallback (registered=false),
+    // then the loop's lease write and every step store touch hit the same broken store.
+    db.exec("DROP TABLE ci_waits");
+    const armed = armCiWait({ kind: "pr_checks", remote: { repo: "acme/forge", prNumber: 7 }, owner: OWNER, leaseMs: 60000 });
+    assert.equal(armed.wait.lifecycleState, "registered", "arm degraded to a fallback wait, not a registered row");
+
+    let polls = 0;
+    // gh is reachable even though the store is not: running twice, then completed.
+    const probe: CiWaitProbe = () => (polls++ < 2 ? { observation: { state: "running", m: 1, n: 3 } } : { observation: { state: "completed" } });
+
+    let outcome: Awaited<ReturnType<typeof runCiWaitLoop>> | undefined;
+    await assert.doesNotReject(async () => {
+      outcome = await runCiWaitLoop(armed, loopDeps(probe));
+    }, "a broken store must never abort the waiter — the durable write is best-effort");
+    assert.ok(polls >= 3, "the loop kept polling gh across the broken-store steps");
+    assert.equal(outcome?.kind, "completed_awaiting_advance", "terminal is reached from the gh probe alone, store-less");
+  });
+
+  test("RF-2: a broken store with a still-running gh keeps polling to the WAITER timeout, never throws", async () => {
+    db.exec("DROP TABLE ci_waits");
+    const armed = armCiWait({ kind: "pr_checks", remote: { repo: "acme/forge", prNumber: 9 }, owner: OWNER, leaseMs: 60000 });
+    const probe: CiWaitProbe = () => ({ observation: { state: "running", m: 0, n: 2 } });
+    let outcome: Awaited<ReturnType<typeof runCiWaitLoop>> | undefined;
+    await assert.doesNotReject(async () => {
+      // deadline already passed → one best-effort probe, then a WAITER timeout (not an abort).
+      outcome = await runCiWaitLoop(armed, loopDeps(probe, { timeoutMs: 0, now: () => 1000 }));
+    });
+    assert.equal(outcome?.kind, "timeout", "a broken store degrades to gh-only polling; the waiter's own timeout still fires");
+  });
 });
 
 describe("FG-731 reconcileCiWaits — re-observation recovery (Step 3)", () => {

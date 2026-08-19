@@ -242,4 +242,24 @@ export function registerCiWaitCommand(program: Command): void {
       if (opts.json) process.stdout.write(`${JSON.stringify({ id, cancelled: ok, alreadyTerminal: !ok && before.terminal })}\n`);
       else process.stdout.write(`forge ci-wait: ${ok ? `cancelled ${id}` : `${id} was already terminal (${before.lifecycleState}) — left as-is`}\n`);
     });
+
+  // FG-731 (RF-1): the PRODUCTION advance surface. A successful wait resolves to the
+  // NON-terminal `completed_awaiting_advance` — a forge advance/continue is owed — and
+  // NO other production path clears it, so a completed wait would otherwise stay on the
+  // live surface forever (the forever-live row the FG-590 boundary and this ticket's
+  // contract forbid). The orchestrator runs this after acting on a completed wait, which
+  // drives `completed_awaiting_advance -> advanced` and takes it off the live surface.
+  ciWait
+    .command("advance")
+    .description("Record that a completed wait has been acted on — transitions `completed_awaiting_advance` -> `advanced`, taking it off the live surface. Run after forge advances/continues on a completed CI wait.")
+    .argument("<id>", "the ci-wait id")
+    .option("--json", "machine-readable output")
+    .action((id: string, opts: { json?: boolean }) => {
+      ensureForgeDirs();
+      const before: CiWait | undefined = getCiWait(id);
+      if (before === undefined) return process.exit(fail(`no such ci-wait '${id}'`, !!opts.json));
+      const ok = advanceCiWait(id, "advanced");
+      if (opts.json) process.stdout.write(`${JSON.stringify({ id, advanced: ok, state: (getCiWait(id) ?? before).lifecycleState })}\n`);
+      else process.stdout.write(`forge ci-wait: ${ok ? `advanced ${id}` : `${id} was not awaiting advance (${before.lifecycleState}) — left as-is`}\n`);
+    });
 }

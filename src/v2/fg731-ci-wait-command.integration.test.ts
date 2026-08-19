@@ -8,7 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { NODE_EXEC as node, BUILT_CLI_ENTRY as entry } from "../integration-cli-spawn.js";
-import { getCiWait, readCiWaits } from "../store/ci-waits.js";
+import { getCiWait, observeCiWait, readCiWaits } from "../store/ci-waits.js";
+import { nowIso } from "../util/ids.js";
 
 function forge(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync(node, [entry, ...args], { encoding: "utf8" });
@@ -46,6 +47,48 @@ test("forge ci-wait cancel takes a registered wait off the live surface determin
   assert.equal(row?.terminal, true);
   assert.equal(row?.terminalDisposition, "cancelled");
   assert.ok(!readCiWaits({ liveOnly: true }).some((w) => w.id === id), "a cancelled wait must leave the live surface");
+});
+
+// RF-1: `completed_awaiting_advance` is a NON-terminal state — a forge advance is owed —
+// and NO other production path clears it, so without an advance surface a completed wait
+// stays on the live surface forever (the forever-live row this ticket's contract forbids).
+// `forge ci-wait advance <id>` is that production surface: it drives
+// completed_awaiting_advance -> advanced and takes the wait off the live surface.
+test("forge ci-wait advance takes a completed_awaiting_advance wait off the live surface", () => {
+  const id = (JSON.parse(forge(["ci-wait", "register", "--kind", "pr_checks", "--repo", "acme/forge", "--pr", "11", "--json"]).stdout) as { id: string }).id;
+  // Drive it to completed_awaiting_advance the way a terminal gh observation would (the
+  // gh-poll loop is proven in ci-wait.test.ts). This is the state an advance clears.
+  observeCiWait(id, { state: "completed" }, nowIso());
+  assert.equal(getCiWait(id)?.lifecycleState, "completed_awaiting_advance");
+  assert.ok(readCiWaits({ liveOnly: true }).some((w) => w.id === id), "a completed_awaiting_advance wait is still LIVE — an advance is owed");
+
+  const res = forge(["ci-wait", "advance", id, "--json"]);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout) as { advanced: boolean; state: string };
+  assert.equal(out.advanced, true);
+  assert.equal(out.state, "advanced");
+  const row = getCiWait(id);
+  assert.equal(row?.terminal, true);
+  assert.equal(row?.terminalDisposition, "advanced");
+  assert.ok(!readCiWaits({ liveOnly: true }).some((w) => w.id === id), "an advanced wait must leave the live surface");
+});
+
+test("forge ci-wait advance on a wait NOT awaiting advance is a no-op refusal, not a false terminal", () => {
+  const id = (JSON.parse(forge(["ci-wait", "register", "--kind", "pr_checks", "--repo", "acme/forge", "--pr", "12", "--json"]).stdout) as { id: string }).id;
+  // Still `registered` (never observed completed): advance requires completed_awaiting_advance.
+  const res = forge(["ci-wait", "advance", id, "--json"]);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout) as { advanced: boolean; state: string };
+  assert.equal(out.advanced, false, "advance must not terminalize a wait that never completed");
+  assert.equal(out.state, "registered");
+  assert.equal(getCiWait(id)?.terminal, false);
+  assert.ok(readCiWaits({ liveOnly: true }).some((w) => w.id === id), "the still-running wait stays live");
+});
+
+test("forge ci-wait advance on an unknown id is a clean refusal", () => {
+  const res = forge(["ci-wait", "advance", "ci-wait-does-not-exist", "--json"]);
+  assert.equal(res.status, 2);
+  assert.match(JSON.parse(res.stdout).error, /no such ci-wait/);
 });
 
 test("a missing --pr for pr_checks is a clean refusal, not a registered half-wait", () => {

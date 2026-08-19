@@ -387,11 +387,29 @@ function realSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Best-effort store access on the WAIT path (RF-2, residual of RF-6). The durable
+ *  ci_waits row is an OBSERVABILITY layer, never a gate on the wait: register-before-poll
+ *  is best-effort, and terminal authority for the waiter comes from the gh probe, not the
+ *  store. A PERSISTENT store failure (a busy/broken/absent DB) must degrade to gh-only
+ *  polling — never throw and abort the waiter before it can observe CI. Every store read/
+ *  write in the loop and this step is funneled through here so one broken store cannot
+ *  kill the wait. */
+function bestEffortStore<T>(op: () => T, fallback: T): T {
+  try {
+    return op();
+  } catch {
+    return fallback;
+  }
+}
+
 /** ONE observation step: probe gh, write it through the store, and decide whether the
  *  record reached a terminal. Returns the outcome on terminal, else null (keep
- *  waiting). All gh probing for the wait happens HERE (writer path). */
+ *  waiting). All gh probing for the wait happens HERE (writer path). Every store touch is
+ *  best-effort (RF-2): a broken store falls through to gh-only resolution, never throws. */
 export function stepCiWait(idOrWait: string | CiWait, probe: CiWaitProbe): CiWaitOutcome | null {
-  const current = typeof idOrWait === "string" ? getCiWait(idOrWait) : (getCiWait(idOrWait.id) ?? idOrWait);
+  const fallback = typeof idOrWait === "string" ? undefined : idOrWait;
+  const id = typeof idOrWait === "string" ? idOrWait : idOrWait.id;
+  const current = bestEffortStore(() => getCiWait(id), undefined) ?? fallback;
   if (current === undefined) return null; // unregistered + no fallback: caller retries with a fallback wait
   const already = recordTerminalOutcome(current);
   if (already) return already;
@@ -399,12 +417,12 @@ export function stepCiWait(idOrWait: string | CiWait, probe: CiWaitProbe): CiWai
   const result = probe(current);
   const observedAt = nowIso();
   if (result.gone) {
-    advanceCiWait(current.id, "abandoned");
-    const wait = getCiWait(current.id) ?? { ...current, lifecycleState: "abandoned", terminal: true, terminalDisposition: "abandoned" as CiWaitTerminalDisposition };
+    bestEffortStore(() => advanceCiWait(current.id, "abandoned"), false);
+    const wait = bestEffortStore(() => getCiWait(current.id), undefined) ?? { ...current, lifecycleState: "abandoned", terminal: true, terminalDisposition: "abandoned" as CiWaitTerminalDisposition };
     return { kind: "abandoned", id: current.id, wait };
   }
-  observeCiWait(current.id, result.observation, observedAt, result.resolved);
-  const after = getCiWait(current.id);
+  bestEffortStore(() => observeCiWait(current.id, result.observation, observedAt, result.resolved), false);
+  const after = bestEffortStore(() => getCiWait(current.id), undefined);
   if (after && after.lifecycleState === "completed_awaiting_advance") return { kind: "completed_awaiting_advance", id: current.id, wait: after };
   if (after) {
     const t = recordTerminalOutcome(after);
@@ -428,10 +446,13 @@ export async function runCiWaitLoop(armed: ArmedCiWait, deps: CiWaitLoopDeps): P
 
   for (;;) {
     if (deps.signal?.aborted) return { kind: "cancelled", id: armed.id, lastObserved };
-    renewCiWaitLease(armed.id, deps.owner, deps.leaseMs);
-    const outcome = stepCiWait(getCiWait(armed.id) ?? armed.wait, deps.probe);
+    // RF-2: the lease renewal is the loop's FIRST store write — best-effort, exactly like
+    // register-before-poll. A persistent store failure here must NOT throw and abort the
+    // waiter before its first gh probe; degrade to fallback (unregistered) polling instead.
+    bestEffortStore(() => renewCiWaitLease(armed.id, deps.owner, deps.leaseMs), false);
+    const outcome = stepCiWait(bestEffortStore(() => getCiWait(armed.id), undefined) ?? armed.wait, deps.probe);
     if (outcome) return outcome;
-    lastObserved = getCiWait(armed.id)?.observedState ?? lastObserved;
+    lastObserved = bestEffortStore(() => getCiWait(armed.id), undefined)?.observedState ?? lastObserved;
     if (now() >= deadline) return { kind: "timeout", id: armed.id, lastObserved };
     await sleep(deps.intervalMs, deps.signal);
     if (deps.signal?.aborted) return { kind: "cancelled", id: armed.id, lastObserved };
