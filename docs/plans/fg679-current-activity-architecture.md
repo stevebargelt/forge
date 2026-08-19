@@ -22,7 +22,13 @@ launch IS" for the current model; the three-section shape above is FG-679's as s
 CI wait (`pr_checks` / `push_actions` / `workflow_dispatch`, via `forge ci-wait`) — orthogonal to
 `Required CI`'s candidate-sha checks, and the one section whose mere presence forces `WORKING`/never
 `IDLE` independent of observation freshness. See `docs/concepts.md` → Current activity → "Registered CI
-waits" and `docs/SCHEMA-CONTRACT.md` → `ci_waits`; the four-section shape above predates it.)*
+waits" and `docs/SCHEMA-CONTRACT.md` → `ci_waits`; the four-section shape above predates it.)* *(Note
+2026-08-18: FG-734 added a sixth, disjoint `Waiting on operator` section for derived `operatorWaits` —
+a task parked at a `human`-gated workflow step, or a campaign item that recorded a
+`requested_human_action` hard stop — orthogonal to `CI waits`: an operator wait reports Forge blocked on
+a person deciding something, not on GitHub continuing to run something. See `docs/concepts.md` →
+Current activity → "Operator waits" and `docs/SCHEMA-CONTRACT.md` → `/api/current-activity`
+(`operatorWaits`); the five-section shape above predates it.)*
 
 The ticket was filed as a pure projection gap. **It is not one, and the correction matters** to anyone
 reading this later. The CI half *is* a projection gap: `probeCiGateStatus` (FG-501) already probes
