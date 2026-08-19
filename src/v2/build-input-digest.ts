@@ -37,12 +37,16 @@ function sha256Hex(data: Buffer | string): string {
  *  Hashes in a STABLE order (sorted relpath) over a canonical
  *  `<relpath>\0<sha256(content)>\n` list, so the byte order the files happen to
  *  appear in the Dockerfile never changes the digest. A COPY source that does not
- *  exist on disk is skipped deterministically (same choice at build and check, so
- *  the two agree) — corp-root.pem is excluded outright for the same reason.
+ *  exist on disk (ENOENT) is skipped deterministically (same choice at build and
+ *  check, so the two agree) — corp-root.pem is excluded outright for the same
+ *  reason.
  *
- *  Throws only if the Dockerfile itself cannot be read (docker/ is a required
- *  asset dir on any tree this runs against, so callers treat a throw as
- *  "uncomputable" rather than a normal outcome). */
+ *  Throws if the Dockerfile itself cannot be read, OR if a COPY source that IS on
+ *  disk cannot be read (RF-2: a present-at-build but transiently-unreadable source
+ *  was hashed into the recorded digest; silently omitting it would shrink the input
+ *  set and fabricate a false STALE). docker/ is a required asset dir on any tree
+ *  this runs against, so callers treat a throw as "uncomputable" — i.e. NOT stale —
+ *  rather than a normal outcome. */
 export function computeBuildInputDigest(dockerDir: string): string {
   const dockerfilePath = join(dockerDir, DOCKERFILE);
   const dockerfileBody = readFileSync(dockerfilePath, "utf8");
@@ -60,10 +64,17 @@ export function computeBuildInputDigest(dockerDir: string): string {
       let content: Buffer;
       try {
         content = readFileSync(join(dockerDir, src));
-      } catch {
-        // A COPY source not present on disk cannot contribute to the digest.
-        // Skipping it deterministically is what keeps build and check in agreement.
-        continue;
+      } catch (e) {
+        // A COPY source NOT PRESENT on disk cannot contribute to the digest at
+        // build OR check time. Skipping it deterministically is what keeps the two
+        // in agreement.
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+        // But a source that EXISTS and is merely unreadable here (permission, IO)
+        // was present — and hashed — at build time. Omitting it would shrink the
+        // input set so the digests differ and report a false STALE (RF-2). The
+        // current digest is uncomputable; throw so the caller fails safe to NOT
+        // stale rather than computing a partial one.
+        throw e;
       }
       entries.push({ rel: src, contentHash: sha256Hex(content) });
     }

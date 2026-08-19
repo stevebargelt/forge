@@ -65,22 +65,46 @@ export function computeCurrentBuildInputDigest(repoDir: string): string | undefi
   }
 }
 
-// Read the `forge.build-inputs.digest` label off the image config. inspect-by-ID
-// is reliable even where inspect-by-name is not (containerd store). Docker prints
-// the literal `<no value>` when the label is absent — normalized to undefined so
-// the pure check treats it as an absent record (fail toward STALE, AC4).
-function readRecordedDigest(imageId: string): string | undefined {
+// FG-543 / RF-1: the outcome of reading the `forge.build-inputs.digest` LABEL off
+// an image. Three cases that MUST stay distinct: a value present; a genuinely
+// absent label (successful inspect, empty / `<no value>` output → fail toward
+// STALE, AC4); and an inspect FAILURE (daemon down / permission), which is
+// INCONCLUSIVE — it must skip the image check like the ls-unreachable path, NOT
+// be conflated with an absent label and fabricate a STALE.
+export type RecordedDigestProbe =
+  | { kind: "value"; digest: string }
+  | { kind: "absent" }
+  | { kind: "error"; message: string };
+
+type LabelReader = (imageId: string) => string;
+
+// inspect-by-ID is reliable even where inspect-by-name is not (containerd store).
+// stderr is piped (not ignored) so a failure's cause survives into the message.
+const readDigestLabel: LabelReader = (imageId) =>
+  execFileSync(
+    "docker",
+    ["image", "inspect", imageId, "--format", '{{index .Config.Labels "forge.build-inputs.digest"}}'],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+
+export function readRecordedDigest(imageId: string, read: LabelReader = readDigestLabel): RecordedDigestProbe {
+  let out: string;
   try {
-    const out = execFileSync(
-      "docker",
-      ["image", "inspect", imageId, "--format", '{{index .Config.Labels "forge.build-inputs.digest"}}'],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    if (out.length === 0 || out === "<no value>") return undefined;
-    return out;
-  } catch {
-    return undefined;
+    out = read(imageId).trim();
+  } catch (e) {
+    // A docker exec FAILURE is inconclusive, not an absent label — surface it as
+    // an error so inspectImage routes it to dockerError (skip), never to STALE.
+    const err = e as Error & { stderr?: Buffer | string };
+    const stderr = typeof err.stderr === "string" ? err.stderr : err.stderr?.toString() ?? "";
+    const message =
+      `${stderr}\n${err.message ?? ""}`.split("\n").find((l) => l.trim().length > 0)?.trim() ??
+      "docker image inspect failed";
+    return { kind: "error", message };
   }
+  // Docker prints the literal `<no value>` when the label is absent → genuinely
+  // absent record (fail toward STALE, AC4).
+  if (out.length === 0 || out === "<no value>") return { kind: "absent" };
+  return { kind: "value", digest: out };
 }
 
 function inspectImage(name: string, repoDirOverride?: string, digestProbe?: (repoDir: string) => string | undefined): ImageInputs {
@@ -116,9 +140,14 @@ function inspectImage(name: string, repoDirOverride?: string, digestProbe?: (rep
     dockerError = (lastErr.split("\n").find((l) => l.trim().length > 0) ?? "docker unavailable").trim();
   }
   // FG-543: read the build-input digest LABEL by ID — inspect-by-ID is reliable
-  // even when inspect-by-name is not. Absent label → undefined → fail toward STALE.
+  // even when inspect-by-name is not. RF-1: an inspect FAILURE is inconclusive, so
+  // it becomes a dockerError (image check skips) rather than an absent label — only
+  // a successful inspect returning no value fails toward STALE (AC4).
   if (present && imageId) {
-    recordedDigest = readRecordedDigest(imageId);
+    const probe = readRecordedDigest(imageId);
+    if (probe.kind === "value") recordedDigest = probe.digest;
+    else if (probe.kind === "error") dockerError = dockerError ?? probe.message;
+    // probe.kind === "absent" → recordedDigest stays undefined → STALE (AC4).
   }
 
   // FG-577: the staleness PROBE is a read, so it judges the running image against

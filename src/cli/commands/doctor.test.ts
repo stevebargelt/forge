@@ -19,6 +19,7 @@ import {
   gatherProfileAuth,
   gatherReleaseInputs,
   computeCurrentBuildInputDigest,
+  readRecordedDigest,
   renderDoctor,
   renderDocsSurfaces,
   type DoctorFindings,
@@ -299,6 +300,82 @@ test("FG-543 AC1-AC4 wiring: recorded==current → ok; differ → STALE; absent 
     assert.equal(imageCheckStatus({ recordedDigest: "some-other-digest" }), "warn");
     // AC4: no digest recorded (old pre-label image) → fail toward STALE.
     assert.equal(imageCheckStatus({ recordedDigest: undefined }), "warn");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+// ─────────── FG-543 RF-1: a docker inspect FAILURE must not fabricate a STALE ───────────
+//
+// readRecordedDigest previously turned EVERY inspect failure into undefined, which
+// the pure check reads as an absent label → fail toward STALE (AC4). A transient
+// daemon/permission failure is INCONCLUSIVE, not an absent label: it must surface
+// as an error so inspectImage routes it to dockerError (image check skips), exactly
+// like the ls-unreachable path — never a false STALE on a present image.
+
+test("FG-543 RF-1: a docker inspect FAILURE is an inconclusive error probe, not an absent label", () => {
+  const boom = (): string => {
+    const e = new Error("Command failed: docker image inspect") as Error & { stderr?: string };
+    e.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock";
+    throw e;
+  };
+  const probe = readRecordedDigest("sha256:abc", boom);
+  assert.equal(probe.kind, "error", "an exec failure is inconclusive, NOT an absent label");
+  assert.match((probe as { message: string }).message, /Cannot connect to the Docker daemon/);
+});
+
+test("FG-543 RF-1: an inspect failure with no stderr still yields a non-empty error message", () => {
+  const probe = readRecordedDigest("id", () => { throw new Error(""); });
+  assert.equal(probe.kind, "error");
+  assert.ok((probe as { message: string }).message.length > 0, "the message is never empty");
+});
+
+test("FG-543 RF-1: a SUCCESSFUL inspect with no label value is a genuinely absent record (→ STALE, AC4)", () => {
+  assert.deepEqual(readRecordedDigest("id", () => "<no value>\n"), { kind: "absent" });
+  assert.deepEqual(readRecordedDigest("id", () => "   \n"), { kind: "absent" });
+});
+
+test("FG-543 RF-1: a SUCCESSFUL inspect returning a digest yields it verbatim (trimmed)", () => {
+  assert.deepEqual(readRecordedDigest("id", () => "  deadbeef\n"), { kind: "value", digest: "deadbeef" });
+});
+
+// ─────────── FG-543 RF-2: an unreadable-but-PRESENT COPY source must not fabricate a STALE ───────────
+//
+// A COPY source hashed into the recorded digest at build time but transiently
+// UNREADABLE at check time (permission/IO) was silently omitted, shrinking the
+// input set so the digests differ → false STALE. Only a source ABSENT on disk
+// (ENOENT — skipped at both build and check, so they agree) may be dropped; any
+// other read failure makes the current digest UNCOMPUTABLE, which fails safe to
+// NOT stale via computeCurrentBuildInputDigest's undefined.
+
+test("FG-543 RF-2: a COPY source PRESENT but unreadable is uncomputable (throws), not a partial digest", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-rf2-"));
+  try {
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\n", "agent-entrypoint.sh": "#!/bin/sh\n" });
+    const dockerDir = join(repoDir, "docker");
+    assert.match(computeBuildInputDigest(dockerDir), /^[0-9a-f]{64}$/, "baseline: all sources readable → computable");
+
+    // Replace a COPY source with a DIRECTORY: present on disk, but readFileSync
+    // cannot read it (EISDIR) — the "present at build, unreadable at check" case.
+    rmSync(join(dockerDir, "agent-entrypoint.sh"));
+    mkdirSync(join(dockerDir, "agent-entrypoint.sh"));
+    assert.throws(() => computeBuildInputDigest(dockerDir), /EISDIR/, "an existing-but-unreadable source is uncomputable, not skipped");
+    // The doctor wrapper turns that throw into undefined → the pure check reads
+    // "can't compute" as "can't prove stale", NOT a false STALE.
+    assert.equal(computeCurrentBuildInputDigest(repoDir), undefined);
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-543 RF-2: a COPY source ABSENT on disk (ENOENT) is still skipped deterministically", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-rf2-enoent-"));
+  try {
+    // agent-entrypoint.sh is a COPY source but never written → ENOENT → skipped,
+    // exactly as before, so build and check agree and the digest stays computable.
+    writeBuildContext(repoDir, { "forge-test.sh": "#!/bin/sh\n" });
+    const digest = computeBuildInputDigest(join(repoDir, "docker"));
+    assert.match(digest, /^[0-9a-f]{64}$/, "a genuinely-absent COPY source is skipped, not fatal");
   } finally {
     rmSync(repoDir, { recursive: true, force: true });
   }
