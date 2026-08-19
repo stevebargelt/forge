@@ -1227,6 +1227,127 @@ test("FG-655: recognition decides adoption on the SAME terms — an anchored com
   assert.match(commit.kind === "refused" ? commit.detail : "", /git reset --soft cand111/);
 });
 
+// ─── FG-682: the late-docs amendment committer ───────────────────────────────
+//
+// The FOURTH commit sibling, and the ONLY one that classifies documentation before it will
+// author anything: a bounded late-docs amendment commits ONLY declared prose. These pin the
+// documentation-only classification refusal, the undeclared-dirty and no-op refusals, the
+// commit-only-declared-paths pathspecs, and the RF-2 recognition arm against the scripted git
+// seam. The end-to-end evidence against a real repository is
+// src/v2/fg682-late-docs-amendment.integration.test.ts.
+
+function amendCtx(declaredPaths: string[], candidateSha?: string) {
+  const fixCtx = parkAtFix();
+  const review = candidateSha === undefined ? fixCtx.review : { ...fixCtx.review, candidateSha };
+  return { review, declaredPaths };
+}
+
+/** The subject the coordinator writes for a late-docs amendment — the per-superseded-candidate
+ *  idempotency key the recovery arm matches on. Spelled out here rather than imported, for the
+ *  same reason the fix/docs cycle's is: a change to the shipped key has to be made twice. */
+function amendSubjectFor(supersededSha: string): string {
+  return `docs(review): late-docs amendment on ${supersededSha}`;
+}
+
+test("FG-682: the amendment commit carries ONLY the declared documentation and names the amendment, never the ticket", async () => {
+  const { git, calls } = scriptedGit({ status: "M  docs/SCHEMA-CONTRACT.md\0?? docs/new.md\0", head: "amended222" });
+  const ctx = amendCtx(["docs/SCHEMA-CONTRACT.md", "docs/new.md"]);
+  const commit = await docsDeps(git).commitDocsAmendment!(ctx);
+
+  assert.equal(commit.kind, "committed");
+  assert.equal(commit.kind === "committed" ? commit.sha : "", "amended222", "the sha the commit CREATED");
+  const commitCall = calls.find((c) => c[0] === "commit") as string[];
+  assert.equal(commitCall[2], amendSubjectFor("cand111"));
+  assert.doesNotMatch(commitCall[2] as string, /FG-/, "resolveReviewBase infers a LATER review's base from a ticket subject");
+  // THE PATHS REACH `commit` ITSELF, not merely `add` — the index is shared.
+  assert.deepEqual(commitCall.slice(3), ["--", ":/docs/SCHEMA-CONTRACT.md", ":/docs/new.md"]);
+  assert.ok(!commitCall.includes("-A") && !commitCall.includes("--all"), "never `git commit -a`");
+});
+
+test("FG-682: a declared NON-documentation path refuses by name before any git write (AC2)", async () => {
+  const { review } = amendCtx([]); // one review; the loop reuses it so the primary key is inserted once
+  for (const bad of ["src/resolver.ts", "docs/wiring.test.ts", "package-lock.json", "config.yml"]) {
+    const { git, calls } = scriptedGit({ status: "M  docs/ok.md\0" });
+    const commit = await docsDeps(git).commitDocsAmendment!({ review, declaredPaths: ["docs/ok.md", bad] });
+    assert.equal(commit.kind, "refused", bad);
+    assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_amendment_path_not_documentation", bad);
+    assert.match(commit.kind === "refused" ? commit.detail : "", new RegExp(bad.replace(/[.\/]/g, "\\$&")), bad);
+    assert.equal(calls.length, 0, `${bad}: the classification refusal touches no git at all`);
+  }
+});
+
+test("FG-682: the orchestrator-policy surface is refused as non-documentation, never committed (FG-732)", async () => {
+  const { review } = amendCtx([]);
+  for (const surface of ["CLAUDE.md", "seeds/orchestrator-template.md"]) {
+    const { git } = scriptedGit({ status: `M  ${surface}\0` });
+    const commit = await docsDeps(git).commitDocsAmendment!({ review, declaredPaths: [surface] });
+    assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_amendment_path_not_documentation", surface);
+  }
+});
+
+test("FG-682: a tree that moved OUTSIDE the declared documentation refuses by name and stages nothing (AC2)", async () => {
+  const { git, calls } = scriptedGit({ status: "M  docs/SCHEMA-CONTRACT.md\0?? src/sneaky.ts\0" });
+  const commit = await docsDeps(git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md"]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_amendment_tree_dirty_outside_declared_scope");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /src\/sneaky\.ts/);
+  assert.equal(calls.find((c) => c[0] === "add"), undefined, "nothing is staged");
+  assert.equal(calls.find((c) => c[0] === "commit"), undefined);
+});
+
+test("FG-682: a declaration against a CLEAN tree is NOT a no-op — nothing to amend refuses by name", async () => {
+  // UNLIKE the docs cycle, an amendment has no legitimate no-op: it exists to bring a correction
+  // IN, so a clean tree is nothing to amend rather than a candidate-unchanged success.
+  const commit = await docsDeps(scriptedGit({ status: "" }).git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md"]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_amendment_declared_changes_absent");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /brings a correction IN/);
+});
+
+test("FG-682: a declaration that reaches beyond the tree commits what moved and NAMES what did not", async () => {
+  const { git } = scriptedGit({ status: "M  docs/SCHEMA-CONTRACT.md\0", head: "amended222", paths: ["docs/SCHEMA-CONTRACT.md"] });
+  const commit = await docsDeps(git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md", "docs/never-written.md"]));
+  assert.equal(commit.kind, "committed");
+  assert.deepEqual(commit.kind === "committed" ? commit.committedPaths : [], ["docs/SCHEMA-CONTRACT.md"]);
+  assert.deepEqual(commit.kind === "committed" ? commit.declaredNotMoved : [], ["docs/never-written.md"]);
+});
+
+test("FG-682: a head that is not the candidate refuses candidate_not_checked_out with the soft-reset remedy", async () => {
+  const { git, calls } = scriptedGit({ status: "", preHead: "someoneelse9" });
+  const commit = await docsDeps(git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md"]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "candidate_not_checked_out");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /git reset --soft cand111/);
+  assert.equal(calls.find((c) => c[0] === "commit"), undefined, "it authors nothing on a foreign tree");
+});
+
+test("FG-682 RF-2: a commit an earlier crashed pass authored is RECOGNIZED, not re-authored", async () => {
+  // The pre-advance crash window: the commit's PARENT is the candidate, its subject is this
+  // amendment's key. (The post-advance window is handled by runDocsAmendment's own recovery, so
+  // the committer only ever sees the pre-advance anchor.)
+  const { git, calls } = scriptedGit({
+    status: "",
+    preHead: "amended222",
+    subject: () => amendSubjectFor("cand111"),
+    parent: () => "cand111",
+    paths: ["docs/SCHEMA-CONTRACT.md"],
+  });
+  const commit = await docsDeps(git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md"]));
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.equal(commit.kind === "committed" ? commit.recognized : false, true);
+  assert.equal(calls.find((c) => c[0] === "commit"), undefined, "no SECOND commit was authored");
+});
+
+test("FG-682 RF-2: recognition decides adoption on the SAME terms — an anchored commit carrying an undeclared path is refused", async () => {
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "amended222",
+    subject: () => amendSubjectFor("cand111"),
+    parent: () => "cand111",
+    paths: ["docs/SCHEMA-CONTRACT.md", "src/smuggled.ts"],
+  });
+  const commit = await docsDeps(git).commitDocsAmendment!(amendCtx(["docs/SCHEMA-CONTRACT.md"]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_amendment_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /src\/smuggled\.ts/);
+});
+
 test("FG-655 / AC4: the verify seam refuses a DIRTY tree at the right candidate, naming the paths and the action", async () => {
   // The seam checked head-vs-candidate ONLY, so a dirty tree at the right head passed it and
   // review-loop degraded to a local run — a green verification line computed against a tree

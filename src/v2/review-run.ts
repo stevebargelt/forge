@@ -33,6 +33,7 @@
 //     dispositions are written after the commit returns.
 
 import {
+  amendmentRecordsOf,
   findingsForReview,
   getReview,
   ingestFindings,
@@ -40,6 +41,7 @@ import {
   lensOutcomeRecordsOf,
   lensSkipRecordsOf,
   mergeLensOutcomesByShard,
+  recordDocsAmendment,
   recordLensSkipped,
   recordShardPlan,
   recordShardBudgetValidation,
@@ -51,6 +53,7 @@ import {
   recordStageEvidence,
   retireDocsDispatch,
   setReviewState,
+  stageCompleteAt,
   updateReview,
   type DocsDispatch,
   type PlannedShard,
@@ -241,6 +244,31 @@ export type DocsCycleCommitContext = {
   declaredFiles: readonly string[];
 };
 
+/** FG-682: what the coordinator's own LATE-DOCS AMENDMENT commit did.
+ *
+ *  Two outcomes, not three — deliberately UNLIKE FixCycleCommit/DocsCycleCommit, which carry a
+ *  `no_change` arm for a cycle that legitimately resolved a finding without touching a file. A
+ *  late-docs amendment exists to bring a documentation CORRECTION into the candidate; a
+ *  declaration whose paths never moved is `docs_amendment_declared_changes_absent`, never a
+ *  silent no-op. `committed` names the sha the coordinator CREATED (or, with `recognized`, the
+ *  one it authored on a pass that crashed before the ledger writes and is now recovering rather
+ *  than re-authoring); `refused` is NAMED and records nothing — the classification refusal
+ *  (a code/test/config/policy-surface path) and the undeclared-dirty refusal both land here, so
+ *  by construction a refusal leaves the candidate unmoved (AC2). `declaredNotMoved` carries a
+ *  declared path the worktree never moved, the same honest-ledger note the fix/docs cycles make. */
+export type DocsAmendmentCommit =
+  | { kind: "committed"; sha: string; committedPaths: string[]; recognized?: boolean; declaredNotMoved?: string[] }
+  | { kind: "refused"; reason: string; detail: string };
+
+export type DocsAmendmentCommitContext = {
+  review: Review;
+  /** The declared documentation paths, repo-relative, normalized and non-empty. The ONLY scope
+   *  the amendment commits — every one is classified documentation by the committer before any
+   *  git write, and the commit carries these and nothing else (FG-649 RF-6 pathspecs). The
+   *  superseded sha the subject key is derived from is `review.candidateSha` at call time. */
+  declaredPaths: readonly string[];
+};
+
 /** FG-655: the docs agent's declaration, read off the DURABLE task record its binding names.
  *
  *  One read for both paths — the pass that just dispatched and the pass recovering after a
@@ -392,6 +420,20 @@ export type CoordinatorDeps = {
    *  gives: an optional seam is a seam some caller silently does without, and this one is the
    *  candidate-movement write path. */
   commitDocsCycle: (ctx: DocsCycleCommitContext) => Awaitable<DocsCycleCommit>;
+  /** FG-682: THE COORDINATOR COMMITS THE LATE-DOCS AMENDMENT too — the FG-649 rule
+   *  (the coordinator owns candidate movement) generalized to any commit during a review,
+   *  not only a fixer's or docs agent's output.
+   *
+   *  OPTIONAL, unlike its three siblings, and for a specific reason that does NOT weaken the
+   *  "an optional seam is a seam some caller silently does without" argument they are required
+   *  under: `runNextStage` — the staged main path every discovery/fix/docs test drives — never
+   *  touches this seam. It is consumed ONLY by `runDocsAmendment`, a SEPARATE coordinator entry
+   *  point reached by the `forge review amend-docs` verb, which hard-refuses
+   *  (`docs_amendment_no_commit_authority`) when it is absent. So the seam is required at the
+   *  boundary that uses it rather than bolted onto the shared type that a dozen unrelated
+   *  discovery/fix tests would then have to satisfy — there is no main-path stage that could
+   *  silently skip it. The real wiring always provides it. */
+  commitDocsAmendment?: (ctx: DocsAmendmentCommitContext) => Awaitable<DocsAmendmentCommit>;
   dispatchRechecker: (ctx: RecheckContextIn) => Awaitable<{
     ok: boolean;
     taskId?: string;
@@ -1755,6 +1797,251 @@ async function runDocs(reviewId: string, transition: Transition, deps: Coordinat
             : "")
         : `docs reconciliation complete; the docs agent changed nothing, the tree is clean, and the candidate is ` +
           `unchanged at ${candidateBefore}`,
+  };
+}
+
+// ─── the bounded late-docs amendment (FG-682) ────────────────────────────────
+
+/** FG-682: what a late-docs amendment did, for the `forge review amend-docs` verb to report.
+ *  `amended` names the exact lineage (superseded → amended) the ledger preserved; `refused`
+ *  is a NAMED refusal that recorded nothing and left the candidate unmoved. `recovered` marks
+ *  an `amended` outcome the coordinator did not author on this pass — a crash after the commit
+ *  and advance left only the docs stage record to finish, and this pass finished it. */
+export type DocsAmendmentOutcome =
+  | {
+      status: "amended";
+      supersededSha: string;
+      amendedSha: string;
+      committedPaths: string[];
+      declaredNotMoved: string[];
+      recognized: boolean;
+      recovered: boolean;
+      message: string;
+    }
+  | { status: "refused"; reason: string; message: string };
+
+/** The docs stage record a completed amendment writes, at the POST-advance sha and marked as
+ *  an amendment. Shared by the authored path and the RF-2 W3 recovery so a recovered amendment
+ *  records the SAME shape as the pass that would have written it. */
+function amendmentDocsStageRecord(rec: {
+  supersededSha: string;
+  amendedSha: string;
+  paths: readonly string[];
+  declaredNotMoved: readonly string[];
+  recognized: boolean;
+  discoveredBy: string;
+}): { sha: string; detail: string; meta: Record<string, unknown> } {
+  const base = rec.recognized
+    ? `late-docs amendment: the commit ${rec.amendedSha} was authored by an earlier pass that crashed before ` +
+      `recording it, and was RECOVERED rather than re-authored (superseded ${rec.supersededSha})`
+    : `late-docs amendment moved the candidate ${rec.supersededSha} → ${rec.amendedSha}; the coordinator committed ` +
+      `${rec.paths.length} declared documentation path(s)`;
+  return {
+    sha: rec.amendedSha,
+    detail: base + (rec.declaredNotMoved.length > 0 ? `; declared ${rec.declaredNotMoved.join(", ")} did not move` : ""),
+    // `amendment: true` is the marker that lets a reader (and the shipping review) tell this
+    // docs record apart from an ordinary Stage-6 completion. The sha is the amended candidate,
+    // so Stage 6 stays complete AT that candidate and is NOT re-opened (AC5); only
+    // verified_final / recheck / shipping re-open, because they were recorded at the superseded
+    // sha. The lineage lives durably in the dedicated amendment record; this meta mirrors it.
+    meta: {
+      amendment: true,
+      supersededSha: rec.supersededSha,
+      amendedSha: rec.amendedSha,
+      committedPaths: [...rec.paths],
+      declaredNotMoved: [...rec.declaredNotMoved],
+      recognized: rec.recognized,
+      discoveredBy: rec.discoveredBy,
+    },
+  };
+}
+
+/** FG-682: amend a documentation-only correction discovered AFTER the docs stage into the
+ *  review's candidate — the bounded coordinator verb this ticket exists to add.
+ *
+ *  A SEPARATE coordinator entry point, not a stage: it is driven by `forge review amend-docs`,
+ *  never by `runNextStage`, because there is no finding to trigger a fix cycle and `continue`
+ *  never repeats a completed stage. It is BOUNDED by construction and is NOT a re-anchor:
+ *
+ *   - (a) ELIGIBILITY. It refuses unless the review is PAST DISCOVERY (a confirmed sha with a
+ *         completed discovery record at it). `contractConfirmedSha` is READ here and WRITTEN
+ *         nowhere in this path — discovery is anchored to it and never re-opens, so no full
+ *         second discovery pass runs (AC5). A non-empty declaration and a rationale are
+ *         required (AC6).
+ *   - (b/c) DOCUMENTATION-ONLY, COMMITTED BY THE COORDINATOR. Every declared path is classified
+ *         documentation by the committer (`commitDocsAmendment`); a code / test / config /
+ *         orchestrator-policy-surface path, or an undeclared dirty one, is refused BY NAME with
+ *         nothing recorded and the candidate unmoved (AC2). The COORDINATOR commits, never the
+ *         orchestrator (AC3).
+ *   - (d) CANDIDATE ADVANCE through `advanceCandidate`, the one place the candidate moves, so
+ *         `invalidateResolutionsForCandidate` fires and sha-bound verification of the superseded
+ *         candidate cannot satisfy the amended one — CI is required at the amended sha (AC4). No
+ *         raw candidateSha write.
+ *   - (e) THE DOCS STAGE RECORD at the POST-advance sha with an amendment marker, so Stage 6
+ *         stays complete at the amended candidate and is NOT re-opened (AC5).
+ *   - (f) THE DEDICATED AMENDMENT LEDGER RECORD — the durable home of the superseded→amended
+ *         lineage and the rationale (AC6), so the amendment reads after the fact AS an amendment.
+ *
+ *  ORDER IS THE CRASH-RECOVERY ARGUMENT. The git commit is an irreversible external write and
+ *  the three ledger writes after it are separate transactions. They run: amendment record →
+ *  advance → docs stage record. The amendment record carries BOTH shas and is written BEFORE
+ *  the advance, so a crash after the advance (the candidate already moved) can still recover the
+ *  superseded sha from it. Each ledger write is idempotent, and `commitDocsAmendment` recognizes
+ *  a commit an earlier crashed pass already authored (RF-2), so a replay re-adopts rather than
+ *  re-authoring or wedging. */
+export async function runDocsAmendment(
+  reviewId: string,
+  declaredPaths: readonly string[],
+  rationale: string,
+  deps: CoordinatorDeps,
+  opts: { discoveredBy?: string } = {},
+): Promise<DocsAmendmentOutcome> {
+  const review = getReview(reviewId);
+  if (!review) throw new Error(`forge: no review ${reviewId}`);
+  const discoveredBy = (opts.discoveredBy ?? "").trim() || "orchestrator";
+  const refused = (reason: string, message: string): DocsAmendmentOutcome => ({ status: "refused", reason, message });
+
+  // (a) ELIGIBILITY — a candidate to amend on top of, and past discovery.
+  const candidateBefore = review.candidateSha;
+  if (candidateBefore === undefined) {
+    return refused(
+      "docs_amendment_no_candidate",
+      `review ${reviewId} has no candidate sha, so there is nothing to amend on top of. A late-docs amendment ` +
+        `runs only after a review has opened on a candidate and completed discovery.`,
+    );
+  }
+  const confirmedSha = review.contractConfirmedSha;
+  if (confirmedSha === undefined || !stageCompleteAt(review, "discovery", confirmedSha)) {
+    return refused(
+      "docs_amendment_before_discovery",
+      `review ${reviewId} has not completed discovery at a confirmed sha, so a late-docs amendment is not yet ` +
+        `available — the amendment is bounded to reviews PAST discovery precisely so it can never re-open it. ` +
+        `Nothing was recorded and the candidate stays at ${candidateBefore}.`,
+    );
+  }
+
+  // RF-2 CRASH RECOVERY — the W3 window: the commit, the candidate advance and the amendment
+  // record all landed, but the docs stage record did not, so the candidate already sits on an
+  // amended sha whose amendment record exists while Stage 6 is incomplete at it. Finish the
+  // docs record and return; do NOT author a second commit. Distinguished from an already
+  // completed amendment by Stage 6 being incomplete at the candidate — a completed one recorded
+  // docs and falls through to be treated as a fresh request on top of the current candidate.
+  const recovered = amendmentRecordsOf(review).find((a) => a.amendedSha === candidateBefore);
+  if (recovered !== undefined && !stageCompleteAt(review, "docs", candidateBefore)) {
+    const stage = amendmentDocsStageRecord({
+      supersededSha: recovered.supersededSha,
+      amendedSha: recovered.amendedSha,
+      paths: recovered.paths,
+      declaredNotMoved: [],
+      recognized: true,
+      discoveredBy: recovered.discoveredBy,
+    });
+    recordStageEvidence(reviewId, "docs", stage);
+    return {
+      status: "amended",
+      supersededSha: recovered.supersededSha,
+      amendedSha: recovered.amendedSha,
+      committedPaths: [...recovered.paths],
+      declaredNotMoved: [],
+      recognized: true,
+      recovered: true,
+      message:
+        `recovered a late-docs amendment authored by an earlier pass that crashed before recording it: the docs ` +
+        `stage record was completed at the amended candidate ${recovered.amendedSha} (superseded ` +
+        `${recovered.supersededSha}). No second commit was authored.`,
+    };
+  }
+
+  // DECLARATION — non-empty, with a rationale. Path classification (documentation-only, the
+  // FG-732 surface) and the undeclared-dirty refusal are the committer's, which is where the
+  // path authority and git both live; each surfaces below as a NAMED `refused`.
+  const declared = [...new Set(declaredPaths.map((p) => p.replace(/^\.\//, "").trim()).filter((p) => p !== ""))].sort();
+  if (declared.length === 0) {
+    return refused(
+      "docs_amendment_no_paths_declared",
+      `a late-docs amendment must DECLARE the documentation paths it commits — the caller declares them and the ` +
+        `coordinator verifies each is documentation. None were declared, so nothing was recorded and the candidate ` +
+        `stays at ${candidateBefore}.`,
+    );
+  }
+  if (rationale.trim() === "") {
+    return refused(
+      "docs_amendment_no_rationale",
+      `a late-docs amendment must carry a rationale — the ledger preserves WHY the amendment happened so it reads ` +
+        `after the fact as an amendment (AC6). None was given; nothing was recorded and the candidate stays at ` +
+        `${candidateBefore}.`,
+    );
+  }
+
+  // (b/c) COMMIT AUTHORITY, then the commit. The COORDINATOR commits (AC3). The seam is optional
+  // on CoordinatorDeps only because `runNextStage` never touches it; this entry point requires it.
+  if (deps.commitDocsAmendment === undefined) {
+    return refused(
+      "docs_amendment_no_commit_authority",
+      `this coordinator was built without commitDocsAmendment, so it cannot author the amendment commit. This is a ` +
+        `wiring error, not an operator condition — the amend-docs verb builds deps via buildCoordinatorDeps, which ` +
+        `always provides it. Nothing was recorded and the candidate stays at ${candidateBefore}.`,
+    );
+  }
+  const commit = await deps.commitDocsAmendment({ review, declaredPaths: declared });
+  if (commit.kind === "refused") {
+    // NAMED refusal — a non-documentation path, an undeclared dirty one, the FG-732 surface, or
+    // a nothing-to-commit clean tree. Nothing recorded, candidate unmoved (AC2).
+    return refused(
+      commit.reason,
+      `${commit.reason}: ${commit.detail} — the late-docs amendment recorded NOTHING and the candidate stays at ` +
+        `${candidateBefore}.`,
+    );
+  }
+
+  const amendedSha = commit.sha;
+  const committedPaths = [...commit.committedPaths];
+  const declaredNotMoved = [...(commit.declaredNotMoved ?? [])];
+
+  // (f) THE AMENDMENT LEDGER RECORD, written BEFORE the advance so a crash after the advance can
+  // still recover the superseded sha. Idempotent on (supersededSha, amendedSha), so an RF-2
+  // replay re-states the same amendment rather than double-counting the lineage (AC6).
+  recordDocsAmendment(reviewId, {
+    supersededSha: candidateBefore,
+    amendedSha,
+    paths: committedPaths,
+    rationale: rationale.trim(),
+    discoveredBy,
+  });
+
+  // (d) ADVANCE THE CANDIDATE through the one place it moves — fires resolution/verification
+  // invalidation (AC4). contractConfirmedSha is untouched, so discovery never re-opens.
+  advanceCandidate(reviewId, amendedSha);
+
+  // (e) THE DOCS STAGE RECORD at the amended sha with the amendment marker (AC5).
+  const stage = amendmentDocsStageRecord({
+    supersededSha: candidateBefore,
+    amendedSha,
+    paths: committedPaths,
+    declaredNotMoved,
+    recognized: commit.recognized === true,
+    discoveredBy,
+  });
+  recordStageEvidence(reviewId, "docs", stage);
+
+  return {
+    status: "amended",
+    supersededSha: candidateBefore,
+    amendedSha,
+    committedPaths,
+    declaredNotMoved,
+    recognized: commit.recognized === true,
+    recovered: false,
+    message:
+      (commit.recognized === true
+        ? `late-docs amendment recovered the commit ${amendedSha} an earlier pass authored, and completed the ledger; `
+        : `late-docs amendment moved the candidate ${candidateBefore} → ${amendedSha}; the coordinator committed ` +
+          `${committedPaths.length} declared documentation path(s); `) +
+      `final verification, recheck and shipping re-open at the amended sha (CI is required there), while discovery ` +
+      `stays anchored to the confirmed sha and does not re-run` +
+      (declaredNotMoved.length > 0
+        ? `. NOTE: declared ${declaredNotMoved.join(", ")} did not move — the commit carries only what did`
+        : ""),
   };
 }
 
