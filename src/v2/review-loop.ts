@@ -427,6 +427,16 @@ export type FixDispatch =
       // else. Carried through to RoundRecord.fixVerification and rendered in the
       // note so a verification_failed stop names WHICH step failed and why.
       verification?: VerificationResult;
+      // FG-625 Defect B: the post-fixer readiness preflight REFUSED — the
+      // verification ENVIRONMENT could not be established, so no post-fixer
+      // verification ever ran. This is the DISTINCT THIRD state and is NEVER
+      // folded into verificationFailed: the loop maps it to
+      // verification_environment_unavailable (leaving the fixer diff uncommitted
+      // for inspection, dispatching nothing, consuming zero rounds), the same
+      // disposition the round-entry isEnvironmentUnavailable path already uses.
+      // Reporting an unprepared workspace on the CI-reuse path as a code failure
+      // was the FG-566 defect shape surviving on this sibling path (review-loop.ts:924).
+      environmentUnavailable?: boolean; readiness?: VerificationReadiness;
       // FG-502 finding 1/2: at least one disallowed path failed to verifiably
       // revert (still dirty/present after the attempt, or the revert command
       // itself threw). Distinct from `outOfScope` (a clean full revert that
@@ -585,6 +595,14 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
         rounds.push(rec); // fixed; next round re-verifies
         continue;
       }
+      if (fix.environmentUnavailable) {
+        // FG-625 Defect B: the post-fixer readiness preflight refused. An
+        // environment fault is NOT a code failure — stop on the distinct
+        // env-unavailable state with ZERO RoundRecords pushed and the fixer diff
+        // left uncommitted for inspection, exactly as the round-entry
+        // isEnvironmentUnavailable disposition above does.
+        return { stopReason: "verification_environment_unavailable", closeable: false, rounds, environment: fix.readiness! };
+      }
       if (fix.scopeGuardRevertFailed) {
         rec.scopeGuardFailedPaths = fix.failedRevertPaths;
         if (fix.error) rec.fixError = fix.error;
@@ -656,6 +674,11 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
       if (fix.committedSha) rec.committedSha = fix.committedSha;
       if (fix.revertedPaths && fix.revertedPaths.length > 0) rec.revertedPaths = fix.revertedPaths;
       rounds.push(rec); // fixed; next round re-verifies + re-reviews
+    } else if (fix.environmentUnavailable) {
+      // FG-625 Defect B: post-fixer readiness refused — the distinct env-unavailable
+      // state, never verification_failed. Zero RoundRecords pushed, nothing further
+      // dispatched, the fixer diff left uncommitted for inspection.
+      return { stopReason: "verification_environment_unavailable", closeable: false, rounds, environment: fix.readiness! };
     } else if (fix.scopeGuardRevertFailed) {
       rec.scopeGuardFailedPaths = fix.failedRevertPaths;
       if (fix.error) rec.fixError = fix.error;

@@ -14,11 +14,17 @@
 // entry the round-entry verifier already runs a local pass (and, post-FG-566, a
 // readiness preflight), which would MASK the second FG-625 defect — the missing
 // readiness preflight on the post-fixer path at review-loop.ts:924. Entering
-// clean via covering CI evidence means readiness is never consulted at round
-// entry, so the post-fixer event's `readiness: null` is the honest, load-bearing
-// record that the post-fixer path consulted no readiness at all. That absence is
-// the evidence the orchestrator uses to update the ticket's recorded root cause
-// and direction before the behavioral fix (step 3) lands.
+// clean via covering CI evidence means round-entry readiness is never consulted
+// (the round-entry `readiness` field is absent — asserted below), so the loop
+// reaches the post-fixer path having established no readiness at all. That is the
+// evidence the orchestrator used to update the ticket's recorded root cause and
+// direction before the behavioral fix (step 3) landed.
+//
+// Step 3 (Defect B) has since landed the post-fixer readiness preflight, so the
+// post-fixer event now records its CONSULTED readiness outcome (`not_required`
+// here — this repro project has no lockfile/dependency graph to establish),
+// rather than the pre-fix `null`. The evidence this file exists to pin — the
+// failed step's name/command/tier/output surviving every hop — is unchanged.
 //
 // This file is the reproduction ARTIFACT only. It edits no backlog/ticket/PLAN.md
 // file — updating the ticket from this evidence is a backlog operation the
@@ -190,7 +196,11 @@ test("FG-625 repro: the FG-559 shape (CI-reuse clean entry -> failing fixer diff
   assert.equal(payload.ticketId, "FG-559");
   assert.equal(payload.round, 1);
   assert.equal(payload.ok, false);
-  assert.equal(payload.readiness, null, "FG-625 Defect B evidence: the post-fixer path consulted NO readiness — recorded as null, not silently omitted");
+  // Step 3 (Defect B) landed the post-fixer readiness preflight: the event now
+  // records the CONSULTED outcome (`not_required` — no lockfile/dependency graph to
+  // establish in this repro), never the pre-fix `null`. Round-entry readiness stays
+  // absent (CI reuse, asserted above) — the property that makes this the CI-reuse path.
+  assert.deepEqual(payload.readiness, { outcome: "not_required" }, "FG-625 Defect B: the post-fixer path now records its consulted readiness outcome");
   const evtFail = payload.steps.find((s) => s.name === "test")!;
   const evtPass = payload.steps.find((s) => s.name === "typecheck")!;
   assert.equal(evtFail.ok, false);
