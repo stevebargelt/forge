@@ -319,19 +319,41 @@ function App() {
     return () => clearInterval(id);
   }, [pollRuntime, pollCompletedRuns, runtimeMetric, view]);
 
-  // Drop the stale series on a window change so the chart shows its loading
-  // state rather than a grid that silently belongs to the previous window. The
-  // seq bump retires whatever is still in flight for the window being left.
-  // Both metrics are dropped: the one not on screen is stale too, and switching
-  // metric afterwards would otherwise show the previous window's counts.
-  const changeRuntimeWindow = (next) => {
+  // Drop the stale series so the chart shows its loading state rather than a
+  // grid that silently belongs to the previous scope/window. The seq bumps
+  // retire whatever is still in flight for the view being left — a late
+  // response fails its own guard and never writes. Both metrics are dropped:
+  // the one not on screen is stale too, and switching metric afterwards would
+  // otherwise show the previous view's counts. Errors clear alongside the data
+  // so a previous view's failure is not attributed to the new one.
+  const invalidateRuntimePanels = () => {
     runtimeSeq.current += 1;
     completedRunsSeq.current += 1;
     setRuntime(null);
     setRuntimeError(null);
     setCompletedRuns(null);
     setCompletedRunsError(null);
+  };
+
+  const changeRuntimeWindow = (next) => {
+    invalidateRuntimePanels();
     setRuntimeWindow(next);
+  };
+
+  // FG-699: scope changes must invalidate the runtime panels too. Invalidate
+  // BEFORE changing the filter, mirroring changeRuntimeWindow (which sets the
+  // window last): this retires the leaving scope's in-flight read and shows the
+  // loading state immediately, instead of rendering the previous scope's
+  // numbers (or error) under the new scope's label for one round trip.
+  const changeCheckoutFilter = (next) => {
+    invalidateRuntimePanels();
+    setCheckoutFilter(next);
+  };
+
+  const changeProjectScope = (project, checkoutDir = null) => {
+    invalidateRuntimePanels();
+    setProjectFilter(project);
+    setCheckoutFilter(checkoutDir);
   };
 
   const pollGovernance = useCallback(async () => {
@@ -534,14 +556,12 @@ function App() {
   };
 
   const filterByProject = (project, checkoutDir = null) => {
-    setProjectFilter(project);
-    setCheckoutFilter(checkoutDir);
+    changeProjectScope(project, checkoutDir);
     switchView("activity");
   };
 
   const clearProjectFilter = () => {
-    setProjectFilter(null);
-    setCheckoutFilter(null);
+    changeProjectScope(null, null);
   };
 
   return html`
@@ -575,14 +595,14 @@ function App() {
           <div class="project-scope-options" aria-label="Project checkout scope">
             <button
               class=${"checkout-scope-btn" + (!checkoutFilter ? " checkout-scope-btn-active" : "")}
-              onClick=${() => setCheckoutFilter(null)}
+              onClick=${() => changeCheckoutFilter(null)}
               aria-pressed=${!checkoutFilter}
             >all checkouts</button>
             ${(projectFilter.checkouts || []).map((checkout) => html`
               <button
                 key=${checkout.projectDir}
                 class=${"checkout-scope-btn" + (checkoutFilter === checkout.projectDir ? " checkout-scope-btn-active" : "")}
-                onClick=${() => setCheckoutFilter(checkout.projectDir)}
+                onClick=${() => changeCheckoutFilter(checkout.projectDir)}
                 aria-pressed=${checkoutFilter === checkout.projectDir}
                 title=${checkout.projectDir}
               >${checkoutScopeLabel(checkout)}</button>
