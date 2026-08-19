@@ -1198,25 +1198,52 @@ actual boundary that cannot ship together.
 > the *same* edits cannot correct) now capture, into a durable
 > `fix_batch_refused_deliveries` row keyed on the SAME batch and revision, the
 > raw result bytes and a re-appliable `git diff --binary HEAD` patch —
-> untracked files folded in via a scoped, always-undone intent-to-add — before
-> the stage refuses. The next `forge review continue` dispatches a REPAIR
+> untracked files folded in via a scoped, always-undone intent-to-add, and
+> bounded to the paths that became dirty or newly appeared since a baseline
+> snapshotted immediately before the fixer container started, so an unrelated
+> pre-existing dirty edit or a file already sitting in the checkout is never
+> captured into a patch a repair later re-applies — before the stage refuses.
+> The next `forge review continue` dispatches a REPAIR
 > fixer against that same batch/revision — never a new revision, never a
 > second code cycle, preserving acceptance scenario 19's retry guarantee —
-> informed by every prior refusal reason and the captured patch, and
+> informed by every prior refusal reason and the captured patch (rendered into
+> the repair prompt as labeled, untrusted reference data rather than
+> instructions, since it is another agent's raw, unvalidated output), and
 > instructed to emit a CORRECTED `result.json` for the SAME edits, re-applying
 > the patch first only if the worktree was reset in between. A compare-and-set
-> claim (`open` → `repairing`) serializes two concurrent `continue`s so only
-> one dispatches a repair. Repair attempts are capped at
+> claim (`open` → `repairing`, stamping a `FIX_REPAIR_LEASE_MS` = 30-minute
+> repair lease) serializes two concurrent `continue`s so only one dispatches a
+> repair; a `continue` that finds the record already `repairing` with a lease
+> still live refuses `fix_delivery_repair_in_flight` instead of dispatching a
+> second repair over the same batch/worktree, and only once that lease has
+> strictly expired may a later `continue` reclaim the crash-stranded record —
+> renewing the lease without counting a new attempt — and re-drive it from the
+> durable patch. Repair attempts are capped at
 > `MAX_FIX_REPAIR_ATTEMPTS` (2); once a batch/revision has exhausted them with
-> the record still `open`, the review PARKS for the operator rather than
+> the record still `open`, the review PARKS for the operator
+> (`fix_delivery_repair_exhausted`) rather than
 > looping, with the completed edits and every refusal reason preserved in the
 > row rather than lost. Post-ingest refusals — a fix-cycle commit that could
 > not land — are untouched: those already re-enter through the
 > already-ingested-results short-circuit refinement (a) above describes, and
 > leave nothing pre-ingest to preserve.
 >
-> New schema: `fix_batch_results.executed_assertion` (nullable column) and the
-> brand-new `fix_batch_refused_deliveries` table, both additive —
+> **(d) Stage 8 binds a `resolved` verdict to the assertion the fixer actually
+> named.** Naming an `executed_assertion` (b) is decorative unless the
+> recheck that records `resolved` is bound to it: `ingestRecheck` reads the
+> fixer's named identity per finding and compares it against the executed
+> identity the rechecker's OWN evidence establishes (a `regression_test`'s
+> `test_name`, or an `anchored_verification`'s test step's `ran`; a command
+> step, a `replayed_reproduction`, or a `bounded_inspection` establishes none).
+> A recheck that resolved on evidence that did not execute every name the
+> fixer cited is recorded `inconclusive`/`not_executed`, never `resolved` on a
+> different test than the one remediation identified — Stage 8 remains the
+> sole candidate-bound executor (FG-639) and the only thing that can record
+> `resolved`; this only narrows what evidence is ACCEPTED as satisfying that.
+>
+> New schema: `fix_batch_results.executed_assertion` (nullable column), the
+> brand-new `fix_batch_refused_deliveries` table, and that table's
+> `lease_expires_at_ms` (nullable column), all additive —
 > [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#fix_batch_refused_deliveries-table-fg-710-refused-delivery-recovery).
 > The threat model, the acceptance scenarios, and every scope bullet above are
 > otherwise unaltered by this note. Operator-facing detail is
