@@ -267,6 +267,18 @@ export type EventType =
   // round/ticket/sha identity can never be mispaired with the wrong finish.
   | "review_loop.verification_started"
   | "review_loop.verification_finished"
+  // FG-625: the durable, queryable record of the POST-FIXER (pre-commit)
+  // verification inside review-loop's fix() — the emission point path-2 never had.
+  // review_loop.verification_finished only ever covered the ROUND-ENTRY verifier;
+  // the post-fixer run that decides whether a fixer diff is committed had NO
+  // durable trace, so a `verification_failed` stop that discarded its steps was
+  // undiagnosable (the two FG-559 stops). Emitted on BOTH pass and fail so the
+  // post-fixer outcome is always observable. Payload:
+  //   {ticketId, round, ok, steps: [{name, ok, command, tier, output}], readiness}
+  // where `output` carries the bounded (~2000-char) tail for FAILED steps only
+  // (null for passing steps, so rows stay bounded), and `readiness` is null until
+  // FG-625 Defect B adds the post-fixer readiness preflight.
+  | "review_loop.fix_verification_finished"
   // FG-513: the loop's reviewer hit a provider/model infrastructure failure
   // (failure_kind=model_error) and was retried once, same round, on the
   // fallback profile — payload carries {ticketId, round, failedProfile?,
