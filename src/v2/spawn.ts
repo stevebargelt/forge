@@ -1508,8 +1508,15 @@ const DEPENDENCY_PROBE_SCRIPT = [
   // `.node` would dlopen the DARWIN artifact inside this linux container and
   // report the package unloadable — a permanent fail-closed refusal of every
   // read-only dispatch, with no repair path, because the cache is correct.
+  //
+  // A tuple's arch is a `+`-separated LIST, not a scalar: prebuildify emits
+  // `darwin-x64+arm64` for a universal build, so this arch can be its SECOND
+  // entry. Parse the dir name as `<platform>-<arch>[+<arch>...]` and keep it when
+  // this platform matches and the arch list CONTAINS process.arch — mirroring
+  // node-gyp-build's own tuple match. Comparing only the first tuple prunes a
+  // multi-arch directory that serves us, which refuses a correct cache (RF-9).
   'const platformDir = process.platform + "-" + process.arch;',
-  'const otherPlatform = (name) => /^(darwin|linux|win32|freebsd|openbsd|sunos|android|aix)-/.test(name) && name.split("+")[0] !== platformDir;',
+  'const otherPlatform = (name) => { const m = /^(darwin|linux|win32|freebsd|openbsd|sunos|android|aix)-(.+)$/.exec(name); return m ? !(m[1] === process.platform && m[2].split("+").includes(process.arch)) : false; };',
   "const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);",
   "const findArtifact = (dir, depth) => {",
   "  if (depth > 4) return undefined;",

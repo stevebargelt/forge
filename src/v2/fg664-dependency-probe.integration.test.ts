@@ -196,6 +196,24 @@ function makeFixtureRoot(): string {
   mkdirSync(native, { recursive: true });
   copyFileSync(artifact, join(native, "node.napi.node"));
 
+  // (6b) THE MULTI-ARCH PREBUILD FIXTURE (RF-9). `prebuildify` emits a single
+  //     `<platform>-<archA>+<archB>` directory for a universal build (that is why
+  //     it publishes `darwin-x64+arm64`), and node-gyp-build matches when this arch
+  //     appears ANYWHERE in the `+`-list. Here this machine's arch is the SECOND
+  //     entry of the tuple, and it is the ONLY loadable artifact — the foreign tuple
+  //     ships an object this machine cannot load. A filter that compares only the
+  //     first tuple (`name.split("+")[0]`) prunes this directory and refuses a cache
+  //     that is entirely correct. Names are derived from process.platform/arch so
+  //     the case holds on whatever host runs this tier.
+  const foreignPlatform = process.platform === "linux" ? "darwin" : "linux";
+  const multiArch = join(nm, "prebuilt-multi-arch");
+  writePkg(multiArch, { name: "prebuilt-multi-arch", version: "4.0.0" });
+  mkdirSync(join(multiArch, "prebuilds", `${foreignPlatform}-x64+arm64`), { recursive: true });
+  writeFileSync(join(multiArch, "prebuilds", `${foreignPlatform}-x64+arm64`, "node.napi.node"), `a ${foreignPlatform} object this machine cannot load\n`);
+  const multiNative = join(multiArch, "prebuilds", `${process.platform}-notmine+${process.arch}`);
+  mkdirSync(multiNative, { recursive: true });
+  copyFileSync(artifact, join(multiNative, "node.napi.node"));
+
   // (7) A package that BUILDS a native addon and shipped none — `npm ci` that
   //     never compiled, a pruned volume. Indistinguishable from a healthy
   //     environment to a gate that only inspects packages it found artifacts for.
@@ -419,6 +437,32 @@ test("FG-664: the SHIPPED probe selects THIS platform's prebuild — a multi-pla
   assert.equal(runShippedLoad(artifact).exitCode, 0, "and the selected artifact must actually load");
 });
 
+test("FG-667 RF-9: the SHIPPED probe selects an artifact whose arch is the SECOND entry of a multi-arch prebuilds tuple", () => {
+  const root = makeFixtureRoot();
+  const nonce = "6667666766676667666766676667666a";
+  const report = parseDependencyProbeOutput(runShippedProbe(root, nonce, ["prebuilt-multi-arch"]).stdout, nonce);
+  assert.ok(report);
+
+  const artifact = pkg(report, "prebuilt-multi-arch")?.artifact;
+  assert.ok(
+    artifact,
+    "a prebuildify universal-build package (this arch is the 2nd `+`-entry of the tuple) must still report an artifact — " +
+      "matching only the first tuple prunes the directory and permanently refuses a correct cache",
+  );
+  assert.match(
+    artifact,
+    new RegExp(`prebuilds/${process.platform}-notmine\\+${process.arch}/`),
+    `the artifact must be from the tuple whose arch list CONTAINS this arch; got ${artifact}`,
+  );
+  assert.equal(
+    runShippedLoad(artifact).exitCode,
+    0,
+    "and the selected artifact must actually load — the foreign tuple in this fixture cannot",
+  );
+  // The declared driver resolves through the whole gate as loadable, not refused.
+  assert.equal(pkg(report, "prebuilt-multi-arch")?.unavailable, undefined, "a served multi-arch tuple is not unavailable");
+});
+
 test("FG-664: a DECLARED package that is absent from every mounted root, and one present with no compiled artifact, are both reported", () => {
   const root = makeFixtureRoot();
   const nonce = "3333333333333333333333333333333a";
@@ -483,6 +527,29 @@ test("FG-664: resolveDependencyEnvironment over the SHIPPED probe is READY when 
     outcome.receipt.packages.some((p) => p.name === "broken-native" && !p.loaded),
     "an undeclared package that failed to load is still recorded in the receipt — non-fatal, not unseen",
   );
+});
+
+test("FG-667 RF-9: resolveDependencyEnvironment accepts a declared driver served by the SECOND arch in a prebuild tuple", async () => {
+  const { dir, root } = makeProbedProject({ "prebuilt-multi-arch": "^4.0.0" });
+
+  const outcome = await resolveDependencyEnvironment({
+    repoRoot: dir,
+    image: "agent-dev-worker:fg667-multi-arch",
+    platform: "darwin",
+    lockOpts: { pollMs: 1 },
+    runProvisioner: async () => ({ exitCode: 0, stderrTail: "" }),
+    ...shippedGate(root),
+  });
+
+  assert.equal(
+    outcome.outcome,
+    "ready",
+    `a declared native served by ${process.platform}-notmine+${process.arch} must not be refused; got ${JSON.stringify(outcome)}`,
+  );
+  assert.ok(outcome.outcome === "ready");
+  const attested = outcome.receipt.packages.find((entry) => entry.name === "prebuilt-multi-arch");
+  assert.ok(attested?.loaded, "the receipt must attest that the declared multi-arch driver loaded");
+  assert.match(String(attested.artifact), new RegExp(`prebuilds/${process.platform}-notmine\\+${process.arch}/`));
 });
 
 test("FG-664: resolveDependencyEnvironment over the SHIPPED probe REFUSES driver_unloadable when a DECLARED native cannot load", async () => {

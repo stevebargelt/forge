@@ -636,8 +636,11 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
   // FG-654: read the dispatched task's RECORDED protocol stamp back off its manifest.
   // Two independent artifacts by design — the manifest is authoritative (invariant 6),
   // the ledger row below is an index of it (invariant 20). If they ever disagree, that
-  // drift is stated, never reconciled here. Undefined for a refused/never-dispatched
-  // task (no manifest is written) and for pre-FG-654 manifests.
+  // drift is stated, never reconciled here. Undefined for a refused task — a manifest
+  // IS written on the FG-664 refusal arm (invoke.ts, so `forge retry` can recover the
+  // mount mode) but writeDispatchManifest OMITS agentProtocol when refused, since no
+  // container ran and no protocol was executed. Also undefined for a never-dispatched
+  // task (no manifest at all) and for pre-FG-654 manifests.
   // The taskId is REQUIRED in this return, unlike LensProtocolRecord's: it is read off the
   // manifest of a task that demonstrably dispatched, and the ledger record it feeds keys
   // on it. A record naming no task names no dispatch.
