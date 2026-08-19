@@ -884,6 +884,73 @@ test("#415 note: fixer_out_of_scope stop reason in header", () => {
   assert.match(note, /stop reason:\*\* fixer_out_of_scope/);
 });
 
+// ── FG-625: post-fixer verification evidence survives FixDispatch → RoundRecord → note ──
+
+const NOTE_META = {
+  ticketId: "FG-625", maxRounds: 2,
+  range: { mode: "since" as const, diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+  reviewedTipSha: "deadbeef",
+  remoteTrust: { kind: "trusted" as const, remoteRef: "origin/main" },
+};
+
+// A post-fixer VerificationResult with one passing and one failing step, each
+// carrying the FG-566 step-level command/tier provenance and a distinctive tail.
+const FG625_FIX_VERIFICATION: VerificationResult = {
+  ok: false,
+  steps: [
+    { name: "typecheck", ok: true, output: "", command: "npm run --silent typecheck", tier: "fast" },
+    {
+      name: "test", ok: false,
+      output: "> project@ test\n\n  1) widget behaves\n     AssertionError: expected 1 to equal 2\nFG625_STDERR_TAIL_MARKER",
+      command: "npm run --silent test", tier: "fast",
+    },
+  ],
+};
+
+test("FG-625 loop: post-fixer verificationFailed carries the full VerificationResult onto RoundRecord.fixVerification", async () => {
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => ({ ok: true, verdict: "needs_fix", findings: ANCHORED }),
+    fix: () => ({ ok: false, verificationFailed: true, dirtyPaths: ["src/foo.ts"], verification: FG625_FIX_VERIFICATION }),
+  }));
+  assert.equal(r.stopReason, "verification_failed");
+  assert.deepEqual(r.rounds.at(-1)!.fixDirtyPaths, ["src/foo.ts"]);
+  // The WHOLE post-fixer VerificationResult survives — not just the dirty paths.
+  assert.deepEqual(r.rounds.at(-1)!.fixVerification, FG625_FIX_VERIFICATION);
+});
+
+test("FG-625 note: verification-failed round names every failed step's command/tier/output tail", () => {
+  const note = renderReviewLoopNote(NOTE_META, {
+    stopReason: "verification_failed", closeable: false,
+    rounds: [{
+      round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED,
+      fixAttempted: true, fixDirtyPaths: ["src/foo.ts"], fixVerification: FG625_FIX_VERIFICATION,
+    }],
+  });
+  // The old bare-paths line still renders (never removed)...
+  assert.match(note, /fix left uncommitted \(verification failed\): src\/foo\.ts/);
+  // ...but it is NO LONGER the only evidence: the failed step names its command, tier and output tail.
+  assert.match(note, /post-fixer verification failed steps:/);
+  assert.match(note, /step 'test' failed/);
+  assert.match(note, /command: npm run --silent test/);
+  assert.match(note, /tier: fast/);
+  assert.match(note, /FG625_STDERR_TAIL_MARKER/);
+  // A PASSING step is never reported as a failure.
+  assert.doesNotMatch(note, /step 'typecheck' failed/);
+});
+
+test("FG-625 note: a verification-failed round WITHOUT fixVerification renders byte-identically to before (legacy rounds)", () => {
+  const legacyRound = {
+    round: 1, verification: VERIFY_OK, verdict: "needs_fix" as const, findings: ANCHORED,
+    fixAttempted: true, fixDirtyPaths: ["src/foo.ts"],
+  };
+  const note = renderReviewLoopNote(NOTE_META, {
+    stopReason: "verification_failed", closeable: false, rounds: [legacyRound],
+  });
+  assert.match(note, /fix left uncommitted \(verification failed\): src\/foo\.ts/);
+  // No new section is emitted when the round predates the evidence-carrying field.
+  assert.doesNotMatch(note, /post-fixer verification failed steps:/);
+});
+
 // ── FG-457: red-vocabulary fail drives a real loop round, never reviewer_failed ──
 
 test("#457 loop e2e: reviewer returning RED-style fail (+ findings) never yields reviewer_failed, and findings surface in the rounds", async () => {

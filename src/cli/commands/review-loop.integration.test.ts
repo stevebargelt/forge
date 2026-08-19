@@ -334,6 +334,175 @@ test("#415 fix dep: fixer writes in-scope file, verification FAILS → verificat
   assert.ok(status.length > 0, "dirty diff must remain for inspection");
 });
 
+// ── FG-625: post-fixer verification evidence preservation + durable event ─────
+
+type FixVerificationPayload = {
+  ticketId: string;
+  round: number;
+  ok: boolean;
+  readiness: unknown;
+  steps: { name: string; ok: boolean; command: string | null; tier: string | null; output: string | null }[];
+};
+
+test("FG-625 fix dep: a failing post-fixer verification carries the WHOLE VerificationResult on the FixDispatch (not just dirty paths)", async () => {
+  // typecheck passes, test fails — proves BOTH the failing step's evidence and
+  // the passing step survive, and that the two are not conflated.
+  writeFileSync(join(projectDir, "package.json"),
+    JSON.stringify({ scripts: { typecheck: "true", test: "echo FG625_TAIL_MARKER && exit 1" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// unfixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(
+    gitCtx({ scripts: { typecheck: "true", test: "echo FG625_TAIL_MARKER && exit 1" } }), invokeFn);
+  const r = await deps.fix([{ summary: "x", unanchored: true }]);
+
+  assert.equal(r.ok, false);
+  assert.equal((r as { verificationFailed?: boolean }).verificationFailed, true);
+  const verification = (r as { verification?: VerificationResult }).verification;
+  assert.ok(verification, "the FixDispatch must carry the full post-fixer VerificationResult");
+  const failed = verification!.steps.find((s) => !s.ok)!;
+  assert.equal(failed.name, "test");
+  assert.equal(failed.command, "npm run --silent test");
+  assert.equal(failed.tier, "fast");
+  assert.match(failed.output, /FG625_TAIL_MARKER/);
+  // The passing step is present and marked ok — the two paths are distinguishable.
+  assert.ok(verification!.steps.some((s) => s.name === "typecheck" && s.ok));
+});
+
+test("FG-625 event: a failing post-fixer verification emits review_loop.fix_verification_finished naming the failed step's command/tier/output + readiness", async () => {
+  writeFileSync(join(projectDir, "package.json"),
+    JSON.stringify({ scripts: { typecheck: "true", test: "echo FG625_EVENT_TAIL && exit 1" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// unfixed\n");
+    return COMPLETE({ runId: "run-fg625-evt" });
+  };
+  const { deps } = buildReviewLoopDeps(
+    gitCtx({ scripts: { typecheck: "true", test: "echo FG625_EVENT_TAIL && exit 1" } }), invokeFn);
+  await deps.fix([{ summary: "x", unanchored: true }]);
+
+  const events = eventsForRun("run-fg625-evt");
+  const evt = events.find((e) => e.eventType === "review_loop.fix_verification_finished");
+  assert.ok(evt, "the post-fixer path must emit its own durable, queryable verification event");
+  const payload = evt!.payload as FixVerificationPayload;
+  assert.equal(payload.ok, false);
+  assert.equal(payload.ticketId, "FG-415");
+  // readiness is carried and is null on the post-fixer path today (no preflight
+  // consulted yet — FG-625 Defect B adds it), never simply absent from the shape.
+  assert.equal(payload.readiness, null);
+  const failStep = payload.steps.find((s) => s.name === "test")!;
+  assert.equal(failStep.ok, false);
+  assert.equal(failStep.command, "npm run --silent test");
+  assert.equal(failStep.tier, "fast");
+  assert.match(failStep.output ?? "", /FG625_EVENT_TAIL/);
+  // The passing step rides along but carries no output tail — event rows stay bounded.
+  const passStep = payload.steps.find((s) => s.name === "typecheck")!;
+  assert.equal(passStep.ok, true);
+  assert.equal(passStep.output, null);
+});
+
+test("FG-625 e2e: a correct fixer diff verifies and commits with NO hand intervention; the post-fixer event records ok:true", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { typecheck: "true", test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE({ runId: "run-fg625-ok" });
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { typecheck: "true", test: "true" } }), invokeFn);
+  const r = await deps.fix([{ summary: "x", unanchored: true }]);
+
+  assert.equal(r.ok, true);
+  assert.ok((r as { committedSha?: string }).committedSha, "a correct diff commits without hand intervention");
+  assert.equal(gitExec(["status", "--porcelain"], projectDir).trim(), "", "tree clean after commit");
+  const evt = eventsForRun("run-fg625-ok").find((e) => e.eventType === "review_loop.fix_verification_finished");
+  assert.ok(evt, "the post-fixer verification event fires on the happy path too");
+  assert.equal((evt!.payload as FixVerificationPayload).ok, true);
+});
+
+test("FG-625 e2e: a deliberately BAD fixer diff fails verification, stays uncommitted, and reports the exact failing evidence", async () => {
+  writeFileSync(join(projectDir, "package.json"),
+    JSON.stringify({ scripts: { typecheck: "true", test: "echo FG625_BAD_DIFF_TAIL && exit 1" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+  const headBefore = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// deliberately broken\n");
+    return COMPLETE({ runId: "run-fg625-bad" });
+  };
+  const { deps } = buildReviewLoopDeps(
+    gitCtx({ scripts: { typecheck: "true", test: "echo FG625_BAD_DIFF_TAIL && exit 1" } }), invokeFn);
+  const r = await deps.fix([{ summary: "x", unanchored: true }]);
+
+  assert.equal(r.ok, false);
+  assert.equal((r as { verificationFailed?: boolean }).verificationFailed, true);
+  // Uncommitted: HEAD did not move, the diff is left for inspection.
+  assert.equal(gitExec(["rev-parse", "HEAD"], projectDir).trim(), headBefore, "HEAD must not move on a failed verification");
+  assert.ok(gitExec(["status", "--porcelain"], projectDir).trim().length > 0, "the bad diff is left dirty for inspection");
+  // The EXACT failing evidence is recorded — never just dirty paths.
+  const failStep = (eventsForRun("run-fg625-bad")
+    .find((e) => e.eventType === "review_loop.fix_verification_finished")!.payload as FixVerificationPayload)
+    .steps.find((s) => s.name === "test")!;
+  assert.equal(failStep.ok, false);
+  assert.match(failStep.output ?? "", /FG625_BAD_DIFF_TAIL/);
+});
+
+test("FG-625 tier (round-entry): a dirty tree runs the EXTENDED tier — scriptsForVerification retains test:extended", async () => {
+  // Default requiredHostGate + a test:extended script → deriveRequiredGateList
+  // has >1 entry → extendedIsRequired, so scriptsForVerification KEEPS it.
+  writeFileSync(join(projectDir, "package.json"),
+    JSON.stringify({ scripts: { typecheck: "true", test: "true", "test:extended": "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+  writeFileSync(join(projectDir, "dirty.txt"), "wip"); // dirty tree → round-entry local verification
+
+  let seen: string[] = [];
+  const spy = (scripts: Record<string, unknown>): VerificationResult => {
+    seen = Object.keys(scripts);
+    return { ok: true, steps: Object.keys(scripts).map((name) => ({ name, ok: true, output: "" })) };
+  };
+  const scripts = { typecheck: "true", test: "true", "test:extended": "true" };
+  const { deps } = buildReviewLoopDeps(ctx({
+    scripts, runVerification: spy,
+    checkStatusProvider: () => { throw new Error("a dirty tree must not consult CI"); },
+  }));
+  await deps.verify();
+  assert.ok(seen.includes("test:extended"),
+    `round-entry dirty-tree tier must retain test:extended, got: ${JSON.stringify(seen)}`);
+});
+
+test("FG-625 tier (post-fixer): the post-fixer verification runs the FAST tier only — localFallbackScripts drops test:extended", async () => {
+  writeFileSync(join(projectDir, "package.json"),
+    JSON.stringify({ scripts: { typecheck: "true", test: "true", "test:extended": "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  let seen: string[] = [];
+  const spy = (scripts: Record<string, unknown>): VerificationResult => {
+    seen = Object.keys(scripts);
+    return { ok: true, steps: Object.keys(scripts).map((name) => ({ name, ok: true, output: "" })) };
+  };
+  const scripts = { typecheck: "true", test: "true", "test:extended": "true" };
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts, runVerification: spy }), invokeFn);
+  await deps.fix([{ summary: "x", unanchored: true }]);
+  assert.ok(!seen.includes("test:extended"),
+    `post-fixer tier must DROP test:extended (delegated to CI), got: ${JSON.stringify(seen)}`);
+  assert.ok(seen.includes("typecheck") && seen.includes("test"),
+    `post-fixer path must still run the fast tier, got: ${JSON.stringify(seen)}`);
+});
+
 test("#415 CLI precondition: dirty tree → assertCleanWorkingTree refuses (exit 1, clean-tree message), dispatch never called", async () => {
   writeFileSync(join(projectDir, "dirty.ts"), "// dirty\n");
 

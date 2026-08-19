@@ -17,7 +17,7 @@ import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
-  verificationCommandSet,
+  verificationCommandSet, stepOutputTail,
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
   type ReviewedTipTrust, type RevertedPathGuidance, type GitRunner,
   type ReviewDispatch, type ReviewerModelErrorRetry, type VerificationReadiness,
@@ -1003,11 +1003,41 @@ export function buildReviewLoopDeps(
         // test:extended as a required check; --local-extended restores the full tier.
         stage = "post-revert verification";
         const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+        // FG-625: the post-fixer verification's durable emission point. Path-2 had
+        // NONE — review_loop.verification_finished only ever fired for the
+        // round-entry verifier — so a `verification_failed` stop discarded every
+        // failed step's command/tier/output and the two FG-559 stops were
+        // undiagnosable. Emit on BOTH pass and fail, naming every failed step with
+        // its command/tier and a bounded (~2000-char) output tail, plus readiness
+        // (null here — the post-fixer path consults no readiness preflight yet;
+        // FG-625 Defect B adds it). Scripts run are UNCHANGED (localFallbackScripts,
+        // fast tier by default) and this fires AFTER the run, BEFORE the commit —
+        // the runVerify → add → commit ordering is untouched.
+        logEvent("review_loop.fix_verification_finished", {
+          ...(runId ? { runId } : {}),
+          payload: {
+            ticketId: ctx.ticketId,
+            round,
+            ok: verification.ok,
+            steps: verification.steps.map((s) => ({
+              name: s.name,
+              ok: s.ok,
+              command: s.command ?? null,
+              tier: s.tier ?? null,
+              // Bounded tail for FAILED steps only — a passing step carries no
+              // interesting output and would only bloat the event row.
+              output: s.ok ? null : stepOutputTail(s.output),
+            })),
+            readiness: verification.readiness ?? null,
+          },
+        });
         if (!verification.ok) {
           const dirtyPaths = parsePorcelainChanges(gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]))
             .flatMap((c) => (c.kind === "simple" ? [c.path] : [c.oldPath, c.newPath]));
-          // Leave the diff for inspection; do NOT commit or revert further.
-          return { ok: false, verificationFailed: true, dirtyPaths };
+          // Leave the diff for inspection; do NOT commit or revert further. FG-625:
+          // carry the whole VerificationResult so the failed step's evidence
+          // survives into RoundRecord.fixVerification and the rendered note.
+          return { ok: false, verificationFailed: true, dirtyPaths, verification };
         }
 
         stage = "add/commit/rev-parse";
