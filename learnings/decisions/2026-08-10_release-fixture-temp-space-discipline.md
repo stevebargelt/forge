@@ -281,10 +281,14 @@ structural invariant has no such drift — it is exact, and it names what actual
   the dashboard tests have already torn down their process groups — and by disposal never deciding a
   verdict. Signalling is not exit observation: a `finally` that only calls
   `process.kill(-pid, "SIGKILL")` hands control back before the group is actually reaped, so the
-  dashboard tests use `killGroupAndAwaitExit()`, which SIGKILLs the group and then waits for node's
-  own `exit` plus no remaining runnable member (polled via `ps`, 5 s deadline) before returning —
-  closing the window where a still-running server races the sweep that disposes of the release tree
-  it booted from.
+  dashboard tests use `killGroupAndAwaitExit()`, which SIGKILLs the group and then waits, via a
+  single 5 s-deadline-bounded poll (node's own exit plus no remaining runnable member, checked via
+  `ps`) before returning — closing the window where a still-running server races the sweep that
+  disposes of the release tree it booted from. **FG-702:** the wait is bounded on that single
+  deadline whether or not the group signal itself succeeds — a `process.kill` that throws against a
+  still-live child no longer produces an unbounded await — and a captured signal failure is named
+  in the same stderr diagnostic the deadline path emits, including when the group exits on its own
+  before the deadline (RF-1), instead of being swallowed.
 - *Someone "simplifies" by making `thawReleaseTree` itself tolerant.* That would break its fail-loud
   contract at `src/v2/promote.ts:935` (thaw the STAGING unit before `validateCandidate` and before
   the exec descriptor is authored into it) and at `src/v2/release.ts:1533` (a refused build must
