@@ -267,7 +267,7 @@ It exists because the dashboard used to project Forge **tasks** and nothing else
 
 ### One visible dashboard owner
 
-The dashboard has one visible owner for live work: **In flight**. It renders agent tasks from `/api/in-flight`, collapses orchestrators there, and adds compact rows for the two non-task waits below. The detailed durable projection remains available under Activity → **Diagnostics** and in `forge status`, but it does not render a second Agents section.
+The dashboard has one visible owner for live work: **In flight**. It renders agent tasks from `/api/in-flight`, collapses orchestrators there, and adds compact rows for the four non-task waits below. The detailed durable projection remains available under Activity → **Diagnostics** and in `forge status`, but it does not render a second Agents section.
 
 - **Host verification** — [durable launches](#durable-launch) with a persisted observation that **declared the purpose `host_verification`** (FG-700). A launch is *never* rendered under Agents, however long it runs and whoever submitted it.
 - **CI checks** — configured shipping checks at the exact candidate sha, from observations the review-loop's existing CI observer persists. The dashboard label describes the operator question (are PR checks in progress?) rather than exposing Forge's internal “required CI” term.
