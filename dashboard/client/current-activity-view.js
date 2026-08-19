@@ -105,8 +105,14 @@ export function InFlightActivityWaits({ load, now, onRetry }) {
       </div>
     `;
   }
-  if (waits.hostVerification.length === 0 && waits.ci.length === 0 && waits.ciWaits.length === 0) return null;
+  if (
+    waits.hostVerification.length === 0 &&
+    waits.ci.length === 0 &&
+    waits.ciWaits.length === 0 &&
+    waits.operatorWaits.length === 0
+  ) return null;
   return html`
+    ${waits.operatorWaits.map((summary) => html`<${OperatorWaitRow} key=${summary.waitKey} summary=${summary} now=${now} />`)}
     ${waits.hostVerification.map((entry) => html`<${HostWaitRow} key=${entry.launchId} entry=${entry} now=${now} />`)}
     ${waits.ci.map((summary) => html`<${CiWaitRow} key=${ciWaitKey(summary)} summary=${summary} />`)}
     ${waits.ciWaits.map((summary) => html`<${RegisteredCiWaitRow} key=${summary.waitId} summary=${summary} now=${now} />`)}
@@ -181,6 +187,28 @@ function RegisteredCiWaitRow({ summary, now }) {
   `;
 }
 
+// FG-734: ONE line per operator wait — the badge is the server-rendered `statusLabel`
+// (Waiting on operator), the `source` drives the badge class so a human gate and a
+// campaign hard-stop read distinctly, and the row names the reason Forge stopped and the
+// action the operator must take. A pending decision is live work: this is what keeps the
+// workspace off IDLE while Forge waits on a human.
+function OperatorWaitRow({ summary, now }) {
+  const wait = summary.wait;
+  return html`
+    <div class="item ca-wait-row ca-operator-wait-row">
+      <span class="badge ${summary.class}">${summary.label}</span>
+      <div>
+        ${summary.identity ? html`<strong>${summary.identity}</strong><span class="faint"> · </span>` : null}
+        <span class="ca-operator-wait-reason">${summary.reason}</span>
+        ${summary.requestedAction ? html`<span class="faint"> · </span><span class="ca-operator-wait-action">${summary.requestedAction}</span>` : null}
+      </div>
+      <div class="muted mono" style="font-size: 11px;" title="time since Forge stopped for this decision">
+        ${caElapsedText(wait && wait.startedAt, now)}
+      </div>
+    </div>
+  `;
+}
+
 // The version-skew state FG-694 reproduced, and the whole point of AC7. Note what is
 // NOT here: any statement about agents, launches or checks. We failed to read; that
 // is the only fact we have.
@@ -214,7 +242,9 @@ function CurrentActivityBlock({ section, now, onTaskClick }) {
           `)
           : section.kind === "ciWaits"
             ? section.entries.map((summary) => html`<${RegisteredCiWaitRow} key=${summary.waitId} summary=${summary} now=${now} />`)
-            : section.entries.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
+            : section.kind === "operatorWaits"
+              ? section.entries.map((summary) => html`<${OperatorWaitRow} key=${summary.waitKey} summary=${summary} now=${now} />`)
+              : section.entries.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
     </section>
   `;
 }

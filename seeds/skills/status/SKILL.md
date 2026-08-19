@@ -50,8 +50,8 @@ evidence that agent work is running or stopped.
    forge status --read-only --json
    ```
 
-   `Current activity` has five sections: `Agents`, `Host verification`,
-   `Launch activity`, `Required CI`, and `CI waits`. A launch is never an agent task. Only
+   `Current activity` has six sections: `Agents`, `Host verification`,
+   `Launch activity`, `Required CI`, `CI waits`, and `Waiting on operator`. A launch is never an agent task. Only
    a launch that DECLARED `--purpose host_verification` at submission (FG-700)
    ever renders under `Host verification`; every other placed launch —
    `agent_invoke`, `review`, `campaign`, `dashboard`, `generic`, and any
@@ -92,6 +92,26 @@ evidence that agent work is running or stopped.
    surface for registering and waiting on this kind of CI (replacing bare `gh
    run watch` or ad-hoc `gh` polling); a status/diagnosis request only READS
    this section and never registers, cancels, or otherwise mutates a wait.
+
+   `Waiting on operator` is a distinct, sixth surface (FG-734), reported
+   separately from `CI waits`: a **derived** entry for each live thing Forge
+   has intentionally stopped and is waiting on a HUMAN to decide — never
+   inferred from log text, an agent's own message, or elapsed time. Only two
+   durable sources produce a row: `human_gate` (a task parked at
+   `awaiting_gate` whose *workflow step* gate resolves to `human` — a
+   `verdict`/`auto`/`none`-gated step is the orchestrator's own call and never
+   appears here), and `campaign_hard_stop` (a campaign item that recorded a
+   `requested_human_action` — an autonomous run that stopped itself and named
+   the authority and action it needs). A human gate and a campaign hard stop
+   naming the same run report as ONE entry, never two. Multiple, unrelated
+   waits are never collapsed into a single line — report the count and, for
+   each, its ticket or run id, reason, and requested action. Like `CI waits`,
+   an entry's mere presence is the WAITING signal on its own, independent of
+   every other section; `(nothing waiting on operator)` means exactly that. A
+   task sitting in `awaiting_red`, `blocked_by_red`, or `awaiting_recovery` is
+   not this — those are automated recovery states and belong under `NEEDS
+   ATTENTION`, not here, unless the task has specifically landed at a
+   human-gated step.
 
    A launch can be alive while no new task has dispatched, or finished while a
    continuation still needs to advance. State both facts.
@@ -159,17 +179,27 @@ Lead with exactly one:
   non-terminal CI wait (`CI waits`). A CI wait counts by its mere presence in
   `CI waits`, whatever its current label — including `CI state unavailable` or
   `CI completed — awaiting advance` — since a non-terminal wait is never IDLE.
-- `WAITING FOR OPERATOR` — the next action is a human gate or other explicit
-  operator decision.
+- `WAITING FOR OPERATOR` — `Current activity`'s `Waiting on operator` section
+  lists at least one entry: a task parked at a workflow step whose gate
+  resolves `human` (`human_gate`), or a campaign item that recorded a
+  `requested_human_action` hard stop (`campaign_hard_stop`). Report each
+  entry's reason and requested action; when there is more than one, report the
+  count and each entry's ticket or run id rather than naming only one. A step
+  gated `verdict`/`auto`/`none` is not this — classify a task parked there from
+  its ordinary task/phase state instead.
 - `NEEDS ATTENTION` — failed/orphaned work, a blocked continuation, an expired
   idle bound, or contradictory authoritative/projection state needs inspection.
   A `CI waits` entry reading `CI completed — awaiting advance` belongs here (or
   under `WORKING` if you are about to drive the advance yourself) rather than
-  being reported as finished.
+  being reported as finished. A task sitting in `awaiting_red`, `blocked_by_red`,
+  or `awaiting_recovery` belongs here too, not under `WAITING FOR OPERATOR` —
+  those are automated recovery states, not a parked human-gated step, unless it
+  has specifically landed in `Waiting on operator`.
 - `IDLE` — `Current activity` shows no active non-session task, no running host
-  verification launch, no pending required check, and no registered CI wait
-  (`CI waits` reads `(no CI wait registered)`). An `unobserved since <time>`
-  launch is not IDLE: it is unobserved, and it belongs under
+  verification launch, no pending required check, no registered CI wait
+  (`CI waits` reads `(no CI wait registered)`), and nothing in
+  `Waiting on operator` (reads `(nothing waiting on operator)`). An `unobserved
+  since <time>` launch is not IDLE: it is unobserved, and it belongs under
   `NEEDS ATTENTION` if the run's progress depends on it.
 
 Then use this compact shape:

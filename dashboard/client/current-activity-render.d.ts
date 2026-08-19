@@ -107,6 +107,29 @@ export type CiWaitEntry = {
   statusLabel: string;
 };
 
+/** FG-734: one live thing Forge has intentionally STOPPED on, waiting for a human
+ *  decision. Mirrors OperatorWaitActivity in src/v2/current-activity.ts. A row here forces
+ *  WAITING/never-IDLE by its mere presence — a pending decision is not idleness. */
+export type OperatorWaitEntry = {
+  kind: "waiting_on_operator";
+  source: "human_gate" | "campaign_hard_stop";
+  waitKey: string;
+  placement: "run" | "project" | "host";
+  runId: string | null;
+  taskId: string | null;
+  ticketId: string | null;
+  campaignId: string | null;
+  itemId: string | null;
+  projectDir: string | null;
+  projectLabel: string | null;
+  startedAt: string | null;
+  reason: string;
+  requestedAction: string;
+  blockerKind: string | null;
+  /** Server-rendered; never composed on the client. */
+  statusLabel: string;
+};
+
 export type CurrentActivityPayload = {
   generatedAt: string;
   scope: { runId: string | null; projectDirs: string[] | null };
@@ -132,6 +155,9 @@ export type CurrentActivityPayload = {
   /** FG-731: the live registered CI waits. Absent from a server that predates FG-731, so
    *  readers substitute []. */
   ciWaits?: CiWaitEntry[];
+  /** FG-734: the live operator waits. Absent from a server that predates FG-734, so
+   *  readers substitute []. */
+  operatorWaits?: OperatorWaitEntry[];
   unassociated: HostLaunchEntry[];
 };
 
@@ -167,6 +193,8 @@ export const CI_RUNNING_LABEL: string;
 export const CI_FAILED_LABEL: string;
 export const CI_PASSED_LABEL: string;
 export const CI_WAIT_STATE_UNAVAILABLE_LABEL: string;
+/** FG-734: the client-side fallback for an operator wait with no server-rendered label. */
+export const OPERATOR_WAIT_LABEL: string;
 /** The four strings a failed or absent read may never render (AC7). */
 export const OBSERVATION_CLAIMS: readonly string[];
 
@@ -258,6 +286,23 @@ export type CiWaitCompactSummary = {
 export function ciWaitCompactSummary(
   wait: Partial<CiWaitEntry> | null | undefined,
 ): CiWaitCompactSummary;
+
+/** FG-734: one compact Home line for one operator wait. */
+export type OperatorWaitCompactSummary = {
+  waitKey: string;
+  source: "human_gate" | "campaign_hard_stop";
+  identity: string | null;
+  label: string;
+  reason: string;
+  requestedAction: string;
+  class: string;
+  /** The full entry, for the elapsed clock. Null for a synthesized row. */
+  wait: OperatorWaitEntry | null;
+};
+
+export function operatorWaitCompactSummary(
+  wait: Partial<OperatorWaitEntry> | null | undefined,
+): OperatorWaitCompactSummary;
 /** Null means "render no CI row at all" — no current candidate, or nothing readable. */
 export function homeCiSummaries(
   section: Partial<RequiredCiSectionEntry> | null | undefined,
@@ -298,6 +343,8 @@ export type HomeInFlightActivity = {
   /** FG-731: EVERY live registered CI wait — not filtered by freshness or state, so a
    *  stale or completed-awaiting-advance wait still keeps Home non-idle. */
   ciWaits: CiWaitCompactSummary[];
+  /** FG-734: EVERY live operator wait — a pending decision keeps Home non-idle. */
+  operatorWaits: OperatorWaitCompactSummary[];
   /** Non-null ONLY when the read failed — In flight may not imply it looked. */
   message: string | null;
   detail: string | null;
