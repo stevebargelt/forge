@@ -147,7 +147,7 @@ const POLICY: Record<string, PolicyEntry> = {
       "Completes a RED task. Reds are outside IMPLEMENTER_ROLES, so evaluateValidationContract " +
       "returns held:false for them — validating here would be a no-op.",
   },
-  "src/v2/reconcile.ts::reconcileRun": {
+  "src/v2/reconcile.ts::reconcileRunCore": {
     class: "recovery-sweep",
     rationale:
       "Crash-recovery sweep. Both sites are gated by isInvokeLikeRun — a workflow/pipeline task " +
@@ -382,7 +382,7 @@ test("the resolver attributes every known seam to the expected enclosing functio
     "src/v2/runNext.ts::republishForcedPrimary",
     "src/v2/invoke.ts::dispatchInvokeTask",
     "src/v2/gate.ts::gate",
-    "src/v2/reconcile.ts::reconcileRun",
+    "src/v2/reconcile.ts::reconcileRunCore",
   ]) {
     assert.ok(byKey.has(expected), `expected a completion seam at ${expected}; resolver found none`);
   }
