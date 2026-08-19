@@ -275,6 +275,41 @@ export function ranTestNames(ran: string | readonly string[]): string[] {
   return parts.map((p) => p.trim());
 }
 
+/** FG-710 Shape B: is a claimed executed-assertion identity SHAPE-valid — does it name at
+ *  least one test with NO blank member? Reuses the SAME `ranTestNames` split the FG-639
+ *  validator binds per-test identity through, so the identity the fixer claims and the one the
+ *  rechecker later executes are read the same way and cannot drift.
+ *
+ *  This is a SHAPE check only. Whether that named assertion actually EXECUTED against the
+ *  candidate is Stage 8's job — the recheck stays the sole candidate-bound executor (FG-639).
+ *  Enforcing the shape here is what stops a demonstrated `fixed` finding from landing with no
+ *  assertion for the recheck to bind, which is the FG-709 defect. */
+export function executedAssertionIdentityValid(ran: string | undefined): boolean {
+  if (ran === undefined) return false;
+  const names = ranTestNames(ran);
+  return names.length > 0 && names.every((n) => n !== "");
+}
+
+/** RF-5: the test-name identity a validated resolution evidence establishes as EXECUTED — the
+ *  same list vocabulary `ran`/`test_name` are read in, so it can be compared to the fixer's named
+ *  `executed_assertion` whole-name for whole-name. A regression_test's identity is its `test_name`
+ *  (when the environment blocked it, an alternate lane has already been proven to cover every one
+ *  of those names, so `test_name` is still the executed identity). An anchored_verification's test
+ *  step contributes its `ran`. A command step, a replayed_reproduction, or a bounded_inspection
+ *  names no test, so it establishes NO test identity — an empty list, which corresponds to no
+ *  named assertion and so cannot stand in for the fixer's. */
+export function executedIdentityOf(ev: ResolutionEvidence): string[] {
+  switch (ev.kind) {
+    case "regression_test":
+      return ranTestNames(ev.test_name);
+    case "anchored_verification":
+      return isCommandStep(ev.verification_step) ? [] : ranTestNames(ev.verification_step.ran);
+    case "replayed_reproduction":
+    case "bounded_inspection":
+      return [];
+  }
+}
+
 /** How one member of a cited list is named in a refusal. A blank member has no name to
  *  print, and printing the empty string reads as a test called nothing. */
 function memberLabel(names: readonly string[], index: number): string {

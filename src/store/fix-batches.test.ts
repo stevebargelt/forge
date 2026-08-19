@@ -34,7 +34,14 @@ import {
   markFixBatchDispatched,
   serializeFixBatchPayload,
   verifyMaterializedPayload,
+  captureRefusedFixDelivery,
+  claimRefusedFixDeliveryRepair,
+  reclaimStrandedFixDeliveryRepair,
+  refusedFixDelivery,
+  supersedeRefusedFixDelivery,
+  FIX_REPAIR_LEASE_MS,
 } from "./fix-batches.js";
+import { setPublicationClockOffsetForTest } from "./publications.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -75,6 +82,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPublicationClockOffsetForTest(0);
   setDbForTest(prev as DatabaseInstance);
   db.close();
 });
@@ -279,7 +287,17 @@ test("FG-639: batch creation and dispatch each emit one event naming the revisio
 // ─── PRD #20 — host ingestion integrity ─────────────────────────────────────
 
 function incoming(findings: readonly ReviewFinding[], over: Record<string, unknown> = {}) {
-  return findings.map((f) => ({ findingId: f.id, result: "fixed" as const, summary: "done", filesChanged: ["src/x.ts"], evidence: "test added", ...over }));
+  return findings.map((f) => ({
+    findingId: f.id,
+    result: "fixed" as const,
+    summary: "done",
+    filesChanged: ["src/x.ts"],
+    evidence: "test added",
+    // FG-710 Shape B: these fixture findings are `demonstrated`, so a `fixed` result must name
+    // the candidate-bound executed assertion the recheck will run.
+    executedAssertion: "the guard test executed",
+    ...over,
+  }));
 }
 
 test("FG-639 / PRD #20: a result OMITTING an expected finding id is refused and NOTHING is applied", () => {
@@ -498,7 +516,7 @@ test("FG-639: a scope_change result is stored as such — it is an outcome, not 
   const findings = fixNowFindings(2);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
   const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), [
-    { findingId: (findings[0] as ReviewFinding).id, result: "fixed", summary: "done", filesChanged: ["src/x.ts"], evidence: "test added" },
+    { findingId: (findings[0] as ReviewFinding).id, result: "fixed", summary: "done", filesChanged: ["src/x.ts"], evidence: "test added", executedAssertion: "the guard test executed" },
     { findingId: (findings[1] as ReviewFinding).id, result: "scope_change", summary: "needs a new table", filesChanged: [], evidence: "cannot fix without a schema change" },
   ]);
   assert.equal(r.ok, true);
@@ -523,4 +541,154 @@ test("FG-639: agents never write the batch tables — ingestion is the only writ
 
 test("FG-639: a batch cannot be created with no fix_now findings", () => {
   assert.throws(() => ensureFixBatch(REVIEW, "cand111", []), /at least one fix_now finding/);
+});
+
+// ─── FG-710: Shape-B batch-aware evidence + refused-delivery record ───────────
+
+test("FG-710 Shape B: a demonstrated `fixed` with NO executed-assertion identity is refused, and nothing is written", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings, { executedAssertion: undefined }));
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.refusalKind, "demonstrated_evidence_missing");
+  assert.match(r.refusal, /names no candidate-bound executed assertion/);
+  assert.equal(fixBatchResults(batch.id).length, 0, "the whole result is refused — nothing is applied");
+});
+
+test("FG-710 Shape B: a blank executed-assertion identity is refused the same as an absent one", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings, { executedAssertion: "  ; " }));
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.refusalKind, "demonstrated_evidence_missing");
+});
+
+test("FG-710 Shape B: a demonstrated `fixed` WITH the executed assertion ingests, and the identity is persisted", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings, { executedAssertion: "the guard test" }));
+  assert.equal(r.ok, true);
+  assert.equal(fixBatchResults(batch.id)[0]?.executedAssertion, "the guard test");
+});
+
+test("FG-710 Shape B: a scope_change / not_fixed result never needs an executed assertion", () => {
+  const findings = fixNowFindings(2);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), [
+    { findingId: (findings[0] as ReviewFinding).id, result: "scope_change", summary: "s", filesChanged: [], evidence: "cannot", },
+    { findingId: (findings[1] as ReviewFinding).id, result: "not_fixed", summary: "s", filesChanged: [], evidence: "left open" },
+  ]);
+  assert.equal(r.ok, true);
+});
+
+test("FG-710 AC4: the refused-delivery record captures the work, and repair claim is a compare-and-set", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+
+  const rec = captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["fixer result.json invalid: findings.0: unrecognized key(s)"],
+    rawResultBytes: '{"raw":true}',
+    diffPatch: "diff --git a/src/x.ts b/src/x.ts\n+guard\n",
+    porcelainStatus: "M  src/x.ts\0",
+  });
+  assert.equal(rec.state, "open");
+  assert.equal(rec.repairAttempts, 0);
+  assert.equal(rec.rawResultBytes, '{"raw":true}');
+  assert.match(rec.diffPatch ?? "", /guard/);
+
+  // A re-capture (the repair refused again) appends its reason and stays open, never resetting attempts.
+  const rec2 = captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["second refusal"],
+  });
+  assert.deepEqual(rec2.refusalReasons.length, 2);
+
+  // Compare-and-set: the first claim wins and increments; a second concurrent claim finds it not open.
+  const won = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok(won);
+  assert.equal(won?.state, "repairing");
+  assert.equal(won?.repairAttempts, 1);
+  const lost = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.equal(lost, undefined, "a second concurrent continue cannot also claim the repair");
+
+  supersedeRefusedFixDelivery(batch.id, batch.revision);
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "superseded");
+});
+
+// ─── RF-1: the repair lease distinguishes a LIVE repair from a crash-stranded one ──
+
+test("RF-1: a claim stamps a live lease; a stranded repairing is reclaimed ONLY after the lease expires", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["fixer result.json invalid"],
+    diffPatch: "diff\n",
+  });
+
+  const claimed = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok(claimed);
+  assert.equal(claimed?.state, "repairing");
+  assert.ok((claimed?.leaseExpiresAtMs ?? 0) > 0, "the claim stamps a repair lease");
+
+  // While the lease is LIVE, a concurrent recoverer must NOT reclaim it — that is what stops a
+  // second concurrent repair from being dispatched over the same batch.
+  assert.equal(
+    reclaimStrandedFixDeliveryRepair(batch.id, batch.revision),
+    undefined,
+    "a live repairing lease is never reclaimed",
+  );
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.repairAttempts, 1, "no extra attempt is counted");
+
+  // Age the store clock past the lease: now the record is crash-stranded and one recoverer wins.
+  setPublicationClockOffsetForTest(FIX_REPAIR_LEASE_MS + 1);
+  const reclaimed = reclaimStrandedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok(reclaimed, "a strictly-expired lease is reclaimed and re-driven");
+  assert.equal(reclaimed?.state, "repairing");
+  assert.equal(reclaimed?.repairAttempts, 1, "reclaim recovers the crashed attempt — it does not count a new one");
+
+  // The reclaim renewed the lease, so a SECOND concurrent recoverer now sees it live and backs off.
+  assert.equal(
+    reclaimStrandedFixDeliveryRepair(batch.id, batch.revision),
+    undefined,
+    "the reclaim renews the lease, so only one recoverer wins",
+  );
+});
+
+test("RF-1: a re-capture returns the record to open and CLEARS the lease, so the open->repairing CAS is the only claim path", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["first refusal"],
+  });
+  const claimed = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.ok((claimed?.leaseExpiresAtMs ?? 0) > 0);
+
+  // The repair refused again: capture puts it back to open and drops the lease.
+  const reopened = captureRefusedFixDelivery({
+    batchId: batch.id,
+    revision: batch.revision,
+    capturedAtCandidateSha: "cand111",
+    refusalReasons: ["repair refused too"],
+  });
+  assert.equal(reopened.state, "open");
+  assert.equal(reopened.leaseExpiresAtMs, undefined, "the lease is cleared when the record re-opens");
+
+  // A reclaim cannot fire on an open record; the ordinary open->repairing CAS is the path.
+  assert.equal(reclaimStrandedFixDeliveryRepair(batch.id, batch.revision), undefined);
+  const reclaimedOpen = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.equal(reclaimedOpen?.state, "repairing");
+  assert.equal(reclaimedOpen?.repairAttempts, 2, "the second claim counts the second attempt");
 });

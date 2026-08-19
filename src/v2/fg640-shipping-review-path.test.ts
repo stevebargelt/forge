@@ -132,6 +132,8 @@ function deps(over: ShippingOverrides = {}): CoordinatorDeps {
     dispatchFixer: () => ({ ok: true, taskId: "task-fixer", result: {} }),
     // FG-649: Stage 5 owns the fix-cycle commit. This path has no findings, so it is never
     // reached — a no-change commit at the one sha this fixture has is the only honest stub.
+    captureFixWorkspace: () => ({ diffPatch: "", porcelainStatus: "" }),
+    dispatchFixRepair: () => ({ ok: false, taskId: "", error: "no repair in this test" }),
     commitFixCycle: () => ({ kind: "no_change", sha: SHA }),
     // FG-655: the docs stage binds its dispatch durably and commits what the agent DECLARED.
     // This fixture's docs agent declares nothing and leaves a clean tree — the legitimate

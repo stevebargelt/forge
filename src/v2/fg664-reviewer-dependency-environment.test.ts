@@ -1637,10 +1637,13 @@ function harness(over: Partial<CoordinatorDeps> = {}): { deps: CoordinatorDeps; 
             remediation_summary: "guarded",
             files_changed: ["src/v2/reconcile.ts"],
             evidence: "added the named regression test",
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
     },
+    captureFixWorkspace: () => ({ diffPatch: "", porcelainStatus: "" }),
+    dispatchFixRepair: () => ({ ok: false, taskId: "", error: "no repair in this test" }),
     commitFixCycle: ({ declaredFiles }) =>
       declaredFiles.length > 0
         ? { kind: "committed", sha: head, committedPaths: [...declaredFiles] }

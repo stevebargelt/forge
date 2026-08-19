@@ -172,6 +172,8 @@ function harness(budget?: number): { deps: CoordinatorDeps; calls: Dispatched[] 
     },
     materializeFixBatch: (ctx) => ctx.payload,
     dispatchFixer: () => ({ ok: false, taskId: "", error: "unreachable" }),
+    captureFixWorkspace: () => ({ diffPatch: "", porcelainStatus: "" }),
+    dispatchFixRepair: () => ({ ok: false, taskId: "", error: "no repair in this test" }),
     commitFixCycle: () => ({ kind: "no_change", sha: CONF }),
     dispatchDocs: () => {
       throw new Error("unreachable");

@@ -276,6 +276,7 @@ function harness(over: { lens?: LensBehaviour; recheck?: RecheckBehaviour } = {}
             remediation_summary: "guarded the partial write",
             files_changed: ["src/reconcile.ts", "src/reconcile.test.ts"],
             evidence: EXECUTED,
+            executed_assertion: AC_TEST,
           })),
         });
       }

@@ -42,9 +42,13 @@ import {
   fixBatchesForReview,
   getFixBatch,
   ingestFixBatchResults,
+  claimRefusedFixDeliveryRepair,
+  refusedFixDelivery,
   serializeFixBatchPayload,
+  FIX_REPAIR_LEASE_MS,
   type FixBatch,
 } from "../store/fix-batches.js";
+import { setPublicationClockOffsetForTest } from "../store/publications.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
 import { fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
@@ -90,6 +94,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPublicationClockOffsetForTest(0);
   setDbForTest(prev as DatabaseInstance);
   db.close();
 });
@@ -188,6 +193,7 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
             remediation_summary: "guarded",
             files_changed: ["src/x.ts"],
             evidence: "added the named regression test",
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
@@ -270,6 +276,8 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
       // requirements and found none outstanding.
       docsCloseout: { assessed: true, gaps: [], detail: "the ticket requires no doc update" },
     }),
+    captureFixWorkspace: () => ({ diffPatch: "", porcelainStatus: "" }),
+    dispatchFixRepair: () => ({ ok: false, taskId: "", error: "no repair configured in this harness" }),
     ...over,
   };
 
@@ -635,6 +643,7 @@ test("FG-639 / PRD #5: the fixer resolves four and reports one scope-changing �
                   remediation_summary: "guarded",
                   files_changed: ["src/x.ts"],
                   evidence: "added the named regression test",
+                  executed_assertion: "the reconcile path guards a partial write",
                 },
           ),
         },
@@ -729,6 +738,7 @@ test("FG-649 / RF-1: a REFUSED fix-cycle commit records NOTHING — not the stat
                   remediation_summary: "guarded",
                   files_changed: ["src/x.ts"],
                   evidence: "added the named regression test",
+                  executed_assertion: "the reconcile path guards a partial write",
                 },
           ),
         },
@@ -782,6 +792,7 @@ test("FG-639: a fixer result that omits an expected id refuses the stage and lea
           remediation_summary: "guarded",
           files_changed: ["src/x.ts"],
           evidence: "test added",
+          executed_assertion: "the reconcile path guards a partial write",
         })),
       },
     }),
@@ -889,6 +900,7 @@ test("FG-649 / RF-8: a completed review cycle never re-dispatches either resolve
             remediation_summary: `cycle ${cycle}`,
             files_changed: [],
             evidence: `cycle ${cycle}: the existing guard already covers it`,
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
@@ -1000,7 +1012,7 @@ test("FG-639 / RF-8: the store-level guard still holds — a scope_change cannot
       filesChanged: [],
       evidence: "touching it again would change scope",
     },
-    { findingId: open.id, result: "fixed", summary: "guarded", filesChanged: ["src/x.ts"], evidence: EXECUTED },
+    { findingId: open.id, result: "fixed", summary: "guarded", filesChanged: ["src/x.ts"], evidence: EXECUTED, executedAssertion: "the reconcile path guards a partial write" },
   ]);
 
   assert.equal(ingested.ok, true);
@@ -1239,6 +1251,7 @@ function inconclusiveOnSecondFinding(): Harness {
             remediation_summary: `cycle ${cycle}`,
             files_changed: ["src/x.ts"],
             evidence: `cycle ${cycle}: committed a guard`,
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
@@ -1338,6 +1351,7 @@ test("FG-639: an unmoved candidate still cannot earn a second fix or recheck cyc
             remediation_summary: `cycle ${cycle}`,
             files_changed: ["src/x.ts"],
             evidence: `cycle ${cycle}: fixed without a commit`,
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
@@ -1404,6 +1418,7 @@ test("FG-639 / RF-6: a post-recheck decision cannot mint a withdrawn cycle or re
             remediation_summary: "cycle 1",
             files_changed: ["src/x.ts"],
             evidence: "cycle 1: committed a guard",
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
@@ -1839,6 +1854,7 @@ test("FG-639 / PRD #20: a fixer result claiming a stale REVISION refuses the sta
           remediation_summary: "guarded",
           files_changed: ["src/x.ts"],
           evidence: "added the named regression test",
+          executed_assertion: "the reconcile path guards a partial write",
         })),
       },
     }),
@@ -1963,6 +1979,7 @@ test("FG-639 / PRD #20: a fixer result naming a FOREIGN finding id is refused at
             remediation_summary: "guarded",
             files_changed: ["src/x.ts"],
             evidence: "added the named regression test",
+            executed_assertion: "the reconcile path guards a partial write",
           },
         ],
       },
@@ -2018,6 +2035,7 @@ test("FG-639 / PRD #19: a disposition re-decided WHILE the fixer runs cannot aut
             remediation_summary: "guarded",
             files_changed: ["src/x.ts"],
             evidence: "added the named regression test",
+            executed_assertion: "the reconcile path guards a partial write",
           })),
         },
       };
@@ -2375,6 +2393,7 @@ test("FG-654: the docs and recheck dispatches record their protocol generation t
           remediation_summary: "fixed",
           files_changed: ["src/x.ts"],
           evidence: "the regression test now passes",
+          executed_assertion: "the reconcile path guards a partial write",
         })),
       },
     }),
@@ -2394,7 +2413,7 @@ test("FG-654: the docs and recheck dispatches record their protocol generation t
           finding_id: f.id,
           result: "resolved",
           evidence_kind: "regression_test",
-          evidence: { kind: "regression_test", test_name: "the guard holds", runner_output: EXECUTED },
+          evidence: { kind: "regression_test", test_name: "the reconcile path guards a partial write", runner_output: EXECUTED },
         })),
         new_findings: [],
       },
@@ -2542,4 +2561,244 @@ test("FG-654 RF-12: a record committed DURING the lens fan-out survives the disc
   assert.equal(agentProtocolRecordsOf(review)[0]?.taskId, "task-mid-flight");
   assert.equal(lensAcceptancesOf(review).length, 1, "the operator's acceptance was erased by the discovery write");
   assert.ok(lensOutcomeRecordsOf(review).length > 0, "and discovery still recorded its own outcomes");
+});
+
+// ─── FG-710: the fixer-result boundary — capture + repair-retry ──────────────
+
+/** A fixer stub that returns a fixed batch result missing a field or carrying an extra key, so
+ *  the result is refused at the boundary without a second code cycle. `mutate` edits each
+ *  finding entry after the schema-valid shape is built. */
+function fixedFindings(ctx: { batch: FixBatch }, mutate: (f: Record<string, unknown>) => Record<string, unknown>) {
+  return ctx.batch.payload.findings.map((f) =>
+    mutate({
+      finding_id: f.finding_id,
+      result: "fixed",
+      remediation_summary: "guarded",
+      files_changed: ["src/x.ts"],
+      evidence: "added the named regression test",
+      executed_assertion: "the reconcile path guards a partial write",
+    }),
+  );
+}
+
+test("FG-710 Shape A: an unknown nested key refuses, captures the completed work, and a repair-retry adopts it — SAME batch/revision", async () => {
+  let realFixers = 0;
+  let repairs = 0;
+  const h: Harness = harness({
+    // The first delivery is schema-invalid: it carries implementer keys a fix result never has
+    // (the FG-730 shape). Nothing is redone — the code is already in the worktree.
+    dispatchFixer: (ctx) => {
+      realFixers += 1;
+      return {
+        ok: true,
+        taskId: "task-fixer-1",
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: fixedFindings(ctx, (f) => ({ ...f, no_validation_reason: "n/a", docs_impact: "none" })),
+        },
+      };
+    },
+    captureFixWorkspace: () => ({
+      diffPatch: "diff --git a/src/x.ts b/src/x.ts\n@@ guard @@\n+the completed edit\n",
+      porcelainStatus: "M  src/x.ts\0",
+    }),
+    dispatchFixRepair: (ctx) => {
+      repairs += 1;
+      h.setHead("afterfix2");
+      return {
+        ok: true,
+        taskId: "task-fixer-repair-1",
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: fixedFindings(ctx, (f) => f),
+        },
+      };
+    },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "batch_fix");
+
+  // First pass: the invalid result is refused, names BOTH offending keys, and preserves the work.
+  const refusedPass = await runNextStage(REVIEW, h.deps);
+  assert.equal(refusedPass.status, "refused");
+  assert.match(refusedPass.message, /no_validation_reason/);
+  assert.match(refusedPass.message, /docs_impact/);
+
+  const batch = fixBatchesForReview(REVIEW)[0] as FixBatch;
+  const captured = refusedFixDelivery(batch.id, batch.revision);
+  assert.ok(captured, "a refused-delivery record captured the completed work");
+  assert.equal(captured?.state, "open");
+  assert.match(captured?.rawResultBytes ?? "", /no_validation_reason/);
+  assert.match(captured?.diffPatch ?? "", /the completed edit/);
+  assert.equal(captured?.repairAttempts, 0);
+
+  // Second pass: the repair adopts the SAME edits and the cycle completes. No second real fixer.
+  const repairPass = await runNextStage(REVIEW, h.deps);
+  assert.equal(repairPass.status, "advanced", repairPass.message);
+  assert.equal(realFixers, 1, "the code was never re-remediated — only the result.json was repaired");
+  assert.equal(repairs, 1);
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "no revision 2 was minted");
+  assert.equal((fixBatchesForReview(REVIEW)[0] as FixBatch).revision, 1);
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "superseded", "the record retires on adoption");
+});
+
+test("FG-710 Shape B / FG-709: a demonstrated fixed with NO executed assertion refuses before stage completion; a repair supplies it and the finding resolves — never rejected_premise (AC10)", async () => {
+  let realFixers = 0;
+  let repairs = 0;
+  const h: Harness = harness({
+    // Schema-valid, but a demonstrated finding marked fixed with no candidate-bound executed
+    // assertion — the FG-709 shape. It cannot complete the remediation stage.
+    dispatchFixer: (ctx) => {
+      realFixers += 1;
+      return {
+        ok: true,
+        taskId: "task-fixer-1",
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: fixedFindings(ctx, ({ executed_assertion, ...rest }) => rest),
+        },
+      };
+    },
+    captureFixWorkspace: () => ({ diffPatch: "diff --git a/src/x.ts b/src/x.ts\n+guard\n", porcelainStatus: "M  src/x.ts\0" }),
+    dispatchFixRepair: (ctx) => {
+      repairs += 1;
+      h.setHead("afterfix2");
+      return {
+        ok: true,
+        taskId: "task-fixer-repair-1",
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: fixedFindings(ctx, (f) => f),
+        },
+      };
+    },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "batch_fix");
+
+  const refusedPass = await runNextStage(REVIEW, h.deps);
+  assert.equal(refusedPass.status, "refused");
+  assert.match(refusedPass.message, /names no candidate-bound executed assertion/);
+  const batch = fixBatchesForReview(REVIEW)[0] as FixBatch;
+  assert.notEqual(getFixBatch(batch.id)?.state, "ingested", "nothing was ingested — the stage did not complete");
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "open");
+
+  // The repair supplies the executed assertion for the SAME edits; the cycle then advances and
+  // the recheck (harness default) executes the named assertion and records resolved.
+  const repairPass = await runNextStage(REVIEW, h.deps);
+  assert.equal(repairPass.status, "advanced", repairPass.message);
+  assert.equal(realFixers, 1);
+  assert.equal(repairs, 1);
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "no second batch");
+
+  await parkAt(h.deps, "recheck");
+  const recheck = await runNextStage(REVIEW, h.deps);
+  assert.equal(recheck.status, "advanced", recheck.message);
+  const f = findingsForReview(REVIEW).find((x) => x.findingRef === "RF-1") as ReviewFinding;
+  assert.equal(f.resolution, "resolved");
+  assert.notEqual(f.disposition, "rejected_premise", "a remediated demonstrated finding is never recast rejected_premise");
+});
+
+test("FG-710: repair attempts are capped — after MAX the review PARKS rather than looping", async () => {
+  const h: Harness = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: fixedFindings(ctx, (f) => ({ ...f, bogus_key: "x" })),
+      },
+    }),
+    captureFixWorkspace: () => ({ diffPatch: "diff\n", porcelainStatus: "M  src/x.ts\0" }),
+    // Every repair also emits an invalid result.
+    dispatchFixRepair: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-repair",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: fixedFindings(ctx, (f) => ({ ...f, bogus_key: "x" })),
+      },
+    }),
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "batch_fix");
+
+  // Pass 1: initial dispatch refused. Passes 2-3: two repair attempts, both refused. Pass 4: park.
+  for (let i = 0; i < 3; i++) {
+    const p = await runNextStage(REVIEW, h.deps);
+    assert.equal(p.status, "refused", `pass ${i + 1} should refuse`);
+  }
+  const parked = await runNextStage(REVIEW, h.deps);
+  assert.equal(parked.status, "refused");
+  assert.match(parked.message, /fix_delivery_repair_exhausted/);
+  const batch = fixBatchesForReview(REVIEW)[0] as FixBatch;
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.repairAttempts, 2, "exactly two repairs were attempted");
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "no revision was ever minted");
+});
+
+test("RF-1: a LIVE `repairing` record is NEVER re-driven — a concurrent continue refuses in_flight, dispatching no second repair", async () => {
+  let repairs = 0;
+  const h: Harness = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        // Shape A: an unknown key refuses and captures the completed work as `open`.
+        findings: fixedFindings(ctx, (f) => ({ ...f, bogus_key: "x" })),
+      },
+    }),
+    captureFixWorkspace: () => ({ diffPatch: "diff\n", porcelainStatus: "M  src/x.ts\0" }),
+    dispatchFixRepair: (ctx) => {
+      repairs += 1;
+      h.setHead("afterfix2");
+      return {
+        ok: true,
+        taskId: "task-fixer-repair-1",
+        result: { fix_batch_id: ctx.batch.id, revision: ctx.batch.revision, findings: fixedFindings(ctx, (f) => f) },
+      };
+    },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "batch_fix");
+
+  // Pass 1: the fresh delivery refuses and the record is captured `open`.
+  const refused = await runNextStage(REVIEW, h.deps);
+  assert.equal(refused.status, "refused");
+  const batch = fixBatchesForReview(REVIEW)[0] as FixBatch;
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "open");
+
+  // A CONCURRENT continue claims the repair first, moving the record to `repairing` with a LIVE
+  // lease — the exact window RF-1 is about: this pass is still running its repair.
+  const claimed = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+  assert.equal(claimed?.state, "repairing");
+
+  // This pass now re-enters the stage. It must NOT re-drive the live repairing record.
+  const inFlight = await runNextStage(REVIEW, h.deps);
+  assert.equal(inFlight.status, "refused");
+  assert.match(inFlight.message, /fix_delivery_repair_in_flight/);
+  assert.equal(repairs, 0, "no second concurrent repair was dispatched over the same batch/worktree");
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.repairAttempts, 1, "the one live claim is the only attempt");
+
+  // Once the live lease EXPIRES, the record is crash-stranded and re-entry recovers it exactly once.
+  setPublicationClockOffsetForTest(FIX_REPAIR_LEASE_MS + 1);
+  const recovered = await runNextStage(REVIEW, h.deps);
+  assert.equal(recovered.status, "advanced", recovered.message);
+  assert.equal(repairs, 1, "the stranded record is re-driven once");
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "superseded");
 });
