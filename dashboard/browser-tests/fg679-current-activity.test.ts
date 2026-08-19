@@ -218,11 +218,15 @@ const base = (over: Partial<Activity>): Activity => ({
   // is a claim about an observer that was never asked.
   requiredCi: over.requiredCi ?? { state: "no_current_candidate", label: "no current CI candidate", observations: [] },
   ciWaits: over.ciWaits ?? [],
+  operatorWaits: over.operatorWaits ?? [],
   unassociated: over.unassociated ?? [],
 });
 
 /** The payload the fixture server serves for /api/current-activity. */
 let served: Activity = base({});
+/** The task feed is separate from Current activity on purpose: Home owns agent rows,
+ * while Activity owns the diagnostic operator-wait evidence. */
+let inFlight: unknown[] = [];
 /** FG-694 AC7: the STATUS the fixture answers with. 404 is the reproduced version
  *  skew — a dashboard server that predates the route. */
 let currentActivityStatus = 200;
@@ -778,6 +782,45 @@ test("FG-731: a wait STALE past its freshness cutoff STILL renders — its label
   await page.close();
 });
 
+test("FG-734: Waiting on operator renders alongside a running agent and never lets the workspace read IDLE", async () => {
+  inFlight = [{
+    taskId: "task-building", runId: "run-building", runTitle: "live implementation", workflow: "feature",
+    phase: "build", agentRole: "engineer", agentModel: null, status: "running", startedAt: "2026-08-19T11:45:00.000Z",
+    projectDir: null, projectLabel: "forge", orchestrator: null, reconcile: null,
+  }];
+  served = base({
+    agents: [{
+      runId: "run-building", runTitle: "live implementation", workflow: "feature", projectDir: null, projectLabel: "forge",
+      taskId: "task-building", agentRole: "engineer", agentModel: null, phase: "build", status: "running", startedAt: "2026-08-19T11:45:00.000Z",
+    }],
+    operatorWaits: [{
+      kind: "waiting_on_operator", source: "human_gate", waitKey: "task-human", placement: "run", runId: "run-human", taskId: "task-human",
+      ticketId: "FG-734", campaignId: null, itemId: null, projectDir: null, projectLabel: "forge", startedAt: "2026-08-19T11:40:00.000Z",
+      reason: "human gate at step approve (tech-lead) in workflow feature", requestedAction: "advance or reject the gate", blockerKind: "human_gate", statusLabel: "Waiting on operator",
+    }],
+  });
+  const page = await open();
+
+  assert.ok((await sectionHeadings(page)).includes("Waiting on operator"));
+  const section = page.locator("section.current-activity section.ca-section", { has: page.locator(".ca-operator-wait-row") });
+  await section.locator(".ca-operator-wait-row").waitFor();
+  const text = await section.innerText();
+  assert.match(text, /Waiting on operator/);
+  assert.match(text, /FG-734/);
+  assert.match(text, /advance or reject the gate/);
+  assert.doesNotMatch(await page.locator("section.current-activity").innerText(), /Nothing currently running|IDLE/);
+
+  // Home owns the real running-agent row. The same operator wait reaches that surface
+  // as a compact row, so a decision pause cannot erase concurrent implementation work.
+  await page.goto(`${baseUrl}/`);
+  const home = page.locator("section.home-view section.in-flight");
+  await home.locator(".item").first().waitFor();
+  assert.match(await home.innerText(), /task-building/);
+  assert.match(await home.innerText(), /Waiting on operator/);
+  assert.doesNotMatch(await home.innerText(), /No live tasks|IDLE/);
+  await page.close();
+});
+
 test("FG-679: the screenshots for the populated, empty and stale states exist", () => {
   for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png", "fg694-unavailable.png", "fg694-historical-noise-current.png", "fg731-ci-waits.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);
@@ -812,6 +855,10 @@ function createFixtureServer(): Server {
       }
       res.writeHead(200, { "Content-Type": "application/json" })
         .end(servedRawBody ?? JSON.stringify(served));
+      return;
+    }
+    if (url.pathname === "/api/in-flight") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inFlight));
       return;
     }
     if (url.pathname === "/api/usage/limits") {

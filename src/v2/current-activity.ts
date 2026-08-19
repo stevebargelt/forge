@@ -60,6 +60,8 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { compareIdentity, identify } from "../util/path-identity.js";
 import { retargetProofIdentity } from "../store/legacy-path-attribution.js";
 import { isLaunchId, statusLine, type LaunchStatus } from "./launch.js";
+import { loadWorkflow } from "./loader.js";
+import type { Gate } from "./schema.js";
 import {
   HOST_VERIFICATION_PURPOSE,
   hasPlacementAuthority,
@@ -115,6 +117,18 @@ export const CI_WAIT_RUNNING_LABEL = "CI running";
 export const CI_WAIT_NO_RUNS_LABEL = "no CI is running";
 export const CI_WAIT_UNAVAILABLE_LABEL = "CI state unavailable";
 export const CI_WAIT_AWAITING_ADVANCE_LABEL = "CI completed — awaiting advance";
+
+/** FG-734: the ONE label for an operator wait — Forge has intentionally stopped and is
+ *  waiting on a human decision. Distinct from every CI/launch/agent string: this is not
+ *  a thing that is RUNNING, it is a thing that has DELIBERATELY STOPPED and is owed an
+ *  operator's authority. Its mere presence forces WAITING/never-IDLE, exactly like a
+ *  live CI wait (FG-731) — a decision Forge is blocked on is not idleness. */
+export const OPERATOR_WAIT_LABEL = "Waiting on operator";
+
+/** The requested action shown for a human-gate operator wait — the durable gate has no
+ *  free-text action of its own (a campaign hard-stop carries one), so this is the fixed,
+ *  honest instruction: the operator advances or rejects it. */
+export const OPERATOR_WAIT_GATE_ACTION = "advance or reject the gate";
 
 /** FG-694: the THIRD absence, and the one the pre-fix surface could not say. Nothing
  *  in scope is still open — no anchored run, no open review — so there is nothing that
@@ -298,6 +312,52 @@ export type CiWaitActivity = {
   statusLabel: string;
 };
 
+/** FG-734: which DURABLE record a `waiting_on_operator` entry was derived from — never
+ *  inferred from prose, logs or elapsed time. `human_gate` is a task parked at a
+ *  workflow step whose gate is `human` (a verdict/auto/none gate is the orchestrator's
+ *  call, not the operator's, and is NOT this). `campaign_hard_stop` is a campaign_items
+ *  row that recorded a `requested_human_action` — an autonomous run that stopped itself
+ *  and named the authority it needs. */
+export type OperatorWaitSource = "human_gate" | "campaign_hard_stop";
+
+/** One live thing Forge has INTENTIONALLY STOPPED on and is waiting for a human to
+ *  decide — surfaced identically to a CI wait (FG-731): a durable-record derivation whose
+ *  MERE PRESENCE forces the workspace non-idle, re-derived from live state every call so
+ *  advancing/rejecting/cancelling clears it with no stale row. It is NOT a new table:
+ *  `human_gate` rows come from `tasks` (awaiting_gate + human step), `campaign_hard_stop`
+ *  rows from `campaign_items.requested_human_action`. Placement/scope is decided by the
+ *  association ids it carries, exactly as a launch or CI wait is. */
+export type OperatorWaitActivity = {
+  kind: "waiting_on_operator";
+  source: OperatorWaitSource;
+  /** Stable identity for rendering AND de-duplication (AC6) — the task id for a human
+   *  gate, the campaign item id for a hard stop. Never fabricated. */
+  waitKey: string;
+  placement: "run" | "project" | "host";
+  runId: string | null;
+  taskId: string | null;
+  ticketId: string | null;
+  campaignId: string | null;
+  itemId: string | null;
+  projectDir: string | null;
+  projectLabel: string | null;
+  /** When the wait began — the task's `started_at` for a gate, the item's `updated_at`
+   *  for a hard stop (when it was parked). Null when the record never recorded one. */
+  startedAt: string | null;
+  /** WHY Forge stopped, in the operator's terms. For a human gate: which step is owed a
+   *  decision. For a hard stop: the item's recorded `reason`. */
+  reason: string;
+  /** The named next action the operator must take. For a human gate this is the fixed
+   *  `advance or reject the gate`; for a hard stop it is the item's own
+   *  `requested_human_action`. */
+  requestedAction: string;
+  /** The named stop CATEGORY when there is one — the campaign item's `blocker_kind`, or
+   *  `human_gate` for a gate. Carried so a reader sees the classification. */
+  blockerKind: string | null;
+  /** What RENDERS, derived once so `forge status` and the dashboard agree (BD-9). */
+  statusLabel: string;
+};
+
 export type CurrentActivity = {
   generatedAt: string;
   scope: { runId: string | null; projectDirs: string[] | null };
@@ -317,6 +377,11 @@ export type CurrentActivity = {
    *  freshness — the fix for a dead-waiter wait aging out and the workspace reading idle
    *  again. Freshness governs only `statusLabel`/`displayState`, never membership. */
   ciWaits: CiWaitActivity[];
+  /** FG-734: the live things Forge has INTENTIONALLY STOPPED on, waiting for a human
+   *  decision — derived from durable `tasks` (human gates) and `campaign_items` (hard
+   *  stops), NOT a new table. Like `ciWaits`, a row here forces WAITING/never-IDLE by its
+   *  mere presence and clears the instant its source record leaves the live state. */
+  operatorWaits: OperatorWaitActivity[];
   /** BD-14: launches whose cwd maps to NO registered project home. Populated only
    *  for the host-wide scope — it is a HOST-level bucket, and surfacing it inside a
    *  project or run view would be inventing the very ownership BD-2 forbids. */
@@ -480,9 +545,17 @@ function scopeCouldInclude(row: RowProjectIdentity, scope: ResolvedProjectScope 
  *  Asked per read rather than cached: a PRAGMA is a schema lookup, and a peer forge
  *  that migrates the store in place must not leave a long-running dashboard reading
  *  the pre-migration shape forever. */
-function hasCanonicalColumn(db: DatabaseInstance, table: "runs"): boolean {
+function hasCanonicalColumn(db: DatabaseInstance, table: "runs" | "campaigns"): boolean {
+  return hasColumn(db, table, "project_dir_canonical");
+}
+
+/** Does THIS store carry a given column? PRAGMA table_info on a missing table returns
+ *  zero rows rather than throwing (db.ts's shape-probe rule), so this doubles as a
+ *  table-existence probe — a read-only handle can predate a table or a column, and naming
+ *  one it lacks would throw and take the whole surface down (the FG-700 aged-store case). */
+function hasColumn(db: DatabaseInstance, table: string, column: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  return columns.some((c) => c.name === "project_dir_canonical");
+  return columns.some((c) => c.name === column);
 }
 
 function readAgents(
@@ -674,6 +747,192 @@ function toCiWaitActivity(wait: CiWait, placement: "run" | "project" | "host", n
     displayState,
     statusLabel,
   };
+}
+
+// ─────────────────────── FG-734: operator waits (derived, no new table) ──────────────
+//
+// Two DURABLE sources, one derived kind. Nothing here reads prose, a log, or elapsed
+// time: an operator wait exists only where a task is parked at a `human` gate or a
+// campaign item recorded a `requested_human_action`. Re-derived live every call, so it
+// clears the instant the gate is advanced/rejected or the item leaves its park (AC5).
+
+/** The gate a step declares, resolved through the SAME `loadWorkflow` the CLI uses
+ *  (status.ts), memoized per (workflow, projectDir) and FAIL-CLOSED: a workflow that
+ *  cannot be loaded (missing seed generation, YAML error, unknown name) yields `null`,
+ *  and a step whose gate cannot be proven `human` is NOT surfaced as an operator wait —
+ *  the weaker claim, never a guess. Kept behind an injectable seam so the derivation
+ *  stays hermetically testable without a seed install on disk. */
+export type StepGateResolver = (workflow: string, projectDir: string | null, stepId: string) => Gate | null;
+
+export function makeWorkflowGateResolver(): StepGateResolver {
+  const cache = new Map<string, ReturnType<typeof loadWorkflow> | null>();
+  return (workflow, projectDir, stepId) => {
+    const key = `${workflow} ${projectDir ?? ""}`;
+    let wf = cache.get(key);
+    if (wf === undefined) {
+      try {
+        wf = loadWorkflow(workflow, projectDir ? { projectDir } : {});
+      } catch {
+        wf = null;
+      }
+      cache.set(key, wf);
+    }
+    if (wf === null) return null;
+    const step = wf.steps.find((s) => s.id === stepId);
+    return step ? step.gate : null;
+  };
+}
+
+type HumanGateRow = {
+  id: string;
+  run_id: string;
+  phase: string;
+  agent_role: string;
+  started_at: string | null;
+  workflow: string;
+  ticket_id: string | null;
+  project_dir: string | null;
+  project_dir_canonical?: string | null;
+};
+
+/** Tasks parked at a durable gate, on an ACTIVE run — the only writer of `awaiting_gate`
+ *  is the CAS at markTaskHeldForGate, reached for BOTH `human` and `verdict` gates, so
+ *  the gate kind is resolved per row and only `human` survives. The ticket association is
+ *  read off the run metadata (never argv/log), matching how launches are placed. */
+function readAwaitingGateTasks(db: DatabaseInstance): HumanGateRow[] {
+  const canonical = hasCanonicalColumn(db, "runs") ? ", r.project_dir_canonical" : "";
+  // The run metadata carries the ticket id under a `ticketId` key when the run declared
+  // one; json_extract returns NULL when absent, which is the honest reading. An aged
+  // `runs` table can predate the metadata column entirely (FG-700's aged-store shape), so
+  // it is probed and read as no-ticket rather than naming a column that would throw.
+  const ticket = hasColumn(db, "runs", "metadata") ? "json_extract(r.metadata, '$.ticketId')" : "NULL";
+  return db.prepare(`
+    SELECT t.id, t.run_id, t.phase, t.agent_role, t.started_at,
+           r.workflow, r.project_dir, ${ticket} AS ticket_id${canonical}
+      FROM tasks t
+      JOIN runs r ON r.id = t.run_id
+     WHERE t.status = 'awaiting_gate'
+       AND r.status = 'active'
+     ORDER BY t.started_at DESC, t.created_at DESC
+  `).all() as HumanGateRow[];
+}
+
+function humanGateToOperatorWait(row: HumanGateRow, placement: "run" | "project" | "host"): OperatorWaitActivity {
+  const reason = `human gate at step ${row.phase} (${row.agent_role}) in workflow ${row.workflow}`;
+  return {
+    kind: "waiting_on_operator",
+    source: "human_gate",
+    waitKey: row.id,
+    placement,
+    runId: row.run_id,
+    taskId: row.id,
+    ticketId: typeof row.ticket_id === "string" && row.ticket_id !== "" ? row.ticket_id : null,
+    campaignId: null,
+    itemId: null,
+    projectDir: row.project_dir,
+    projectLabel: projectLabelOf(row.project_dir),
+    startedAt: row.started_at,
+    reason,
+    requestedAction: OPERATOR_WAIT_GATE_ACTION,
+    blockerKind: "human_gate",
+    statusLabel: OPERATOR_WAIT_LABEL,
+  };
+}
+
+type CampaignStopRow = {
+  id: string;
+  campaign_id: string;
+  ticket_id: string;
+  run_id: string | null;
+  lifecycle_status: string;
+  blocker_kind: string | null;
+  reason: string | null;
+  requested_human_action: string;
+  updated_at: string | null;
+  project_dir: string | null;
+  project_dir_canonical?: string | null;
+};
+
+/** Campaign items that STOPPED THEMSELVES and named the operator authority they need —
+ *  a non-null `requested_human_action` is the durable hard-stop signal. Only LIVE parks
+ *  survive: a `complete`/`failed`/`pending`/`running` item is not a wait (it advanced or
+ *  never parked), so the parked set (awaiting_gate / blocked_by_red / awaiting_recovery)
+ *  is what remains. The item carries no project dir of its own; the campaign does. */
+function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
+  // A read-only handle can predate the campaign tables; PRAGMA doubles as the existence
+  // check (zero rows for a missing table), so a store without them reads as no hard stops
+  // rather than throwing on the JOIN and taking the whole surface down.
+  if (!hasColumn(db, "campaign_items", "requested_human_action") || !hasColumn(db, "campaigns", "project_dir")) return [];
+  const canonical = hasCanonicalColumn(db, "campaigns") ? ", c.project_dir_canonical" : "";
+  return db.prepare(`
+    SELECT ci.id, ci.campaign_id, ci.ticket_id, ci.run_id, ci.lifecycle_status,
+           ci.blocker_kind, ci.reason, ci.requested_human_action, ci.updated_at,
+           c.project_dir${canonical}
+      FROM campaign_items ci
+      JOIN campaigns c ON c.id = ci.campaign_id
+     WHERE ci.requested_human_action IS NOT NULL
+       AND ci.lifecycle_status NOT IN ('complete', 'failed', 'pending', 'running')
+     ORDER BY ci.updated_at DESC
+  `).all() as CampaignStopRow[];
+}
+
+function campaignStopToOperatorWait(row: CampaignStopRow, placement: "run" | "project" | "host"): OperatorWaitActivity {
+  const reason = row.reason && row.reason !== "" ? row.reason : `campaign item ${row.ticket_id} parked (${row.lifecycle_status})`;
+  return {
+    kind: "waiting_on_operator",
+    source: "campaign_hard_stop",
+    waitKey: row.id,
+    placement,
+    runId: row.run_id,
+    taskId: null,
+    ticketId: row.ticket_id,
+    campaignId: row.campaign_id,
+    itemId: row.id,
+    projectDir: row.project_dir,
+    projectLabel: projectLabelOf(row.project_dir),
+    startedAt: row.updated_at,
+    reason,
+    requestedAction: row.requested_human_action,
+    blockerKind: row.blocker_kind,
+    statusLabel: OPERATOR_WAIT_LABEL,
+  };
+}
+
+/** The operator waits IN SCOPE, de-duplicated (AC6). A human-gate task and a campaign
+ *  hard-stop that name the SAME run are ONE wait — Forge stopped once — so the human
+ *  gate (which carries task identity) wins and the campaign row for that run is dropped.
+ *  Scoping/placement mirror `ciWaits`: an unassociated wait is still shown host-wide,
+ *  because a decision Forge is blocked on must never let the workspace read idle. */
+function deriveOperatorWaits(
+  db: DatabaseInstance,
+  scope: CurrentActivityScope,
+  project: ResolvedProjectScope | undefined,
+  resolveGate: StepGateResolver,
+): OperatorWaitActivity[] {
+  const gates = readAwaitingGateTasks(db).filter((r) => resolveGate(r.workflow, r.project_dir, r.phase) === "human");
+  const stops = readCampaignHardStops(db);
+
+  const placementOf = (runId: string | null, projectDir: string | null): "run" | "project" | "host" =>
+    runId !== null ? "run" : projectDir !== null ? "project" : "host";
+  const inScope = (runId: string | null, id: RowProjectIdentity): boolean => {
+    if (scope.runId !== undefined) return runId === scope.runId;
+    if (scope.projectDirs !== undefined) return inProjectScope(id, project);
+    return true;
+  };
+
+  const waits: OperatorWaitActivity[] = [];
+  const coveredRuns = new Set<string>();
+  for (const g of gates) {
+    if (!inScope(g.run_id, { projectDir: g.project_dir, canonical: g.project_dir_canonical ?? null })) continue;
+    coveredRuns.add(g.run_id);
+    waits.push(humanGateToOperatorWait(g, scope.runId !== undefined ? "run" : scope.projectDirs !== undefined ? "project" : placementOf(g.run_id, g.project_dir)));
+  }
+  for (const s of stops) {
+    if (s.run_id !== null && coveredRuns.has(s.run_id)) continue; // AC6: same run → one entry
+    if (!inScope(s.run_id, { projectDir: s.project_dir, canonical: s.project_dir_canonical ?? null })) continue;
+    waits.push(campaignStopToOperatorWait(s, scope.runId !== undefined ? "run" : scope.projectDirs !== undefined ? "project" : placementOf(s.run_id, s.project_dir)));
+  }
+  return waits;
 }
 
 type CiPayload = {
@@ -1210,10 +1469,16 @@ function hasCurrentCandidate(
 }
 
 /** The ONE derivation `forge status` and the dashboard both call (BD-9). */
-export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; scope?: CurrentActivityScope } = {}): CurrentActivity {
+export function deriveCurrentActivity(
+  db: DatabaseInstance,
+  opts: { now?: Date; scope?: CurrentActivityScope; resolveStepGate?: StepGateResolver } = {},
+): CurrentActivity {
   const now = opts.now ?? new Date();
   const nowMs = now.getTime();
   const scope = opts.scope ?? {};
+  // FG-734: resolved ONCE per derivation (memoized inside) so both surfaces prove the
+  // same gate the same way. Injectable so the derivation tests stay hermetic.
+  const resolveStepGate = opts.resolveStepGate ?? makeWorkflowGateResolver();
   const hostWide = scope.runId === undefined && scope.projectDirs === undefined;
   // FG-693: ONE resolution of the operator's scope for the whole derivation. Resolving
   // it inside the row predicates would realpath the same spellings once per row, on a
@@ -1290,6 +1555,11 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
     );
   }
 
+  // FG-734: the operator waits — Forge's intentional stops, derived from durable task and
+  // campaign records over the SAME injected handle. Scoped/placed exactly like ciWaits;
+  // an unassociated wait is still shown host-wide so a pending decision never reads idle.
+  const operatorWaits = deriveOperatorWaits(db, scope, project, resolveStepGate);
+
   // FG-694: what is OPEN is read once, and it decides two different things through ONE
   // predicate over the SAME work references — which observations are current, and which
   // of the three CI absences is the true one.
@@ -1321,6 +1591,7 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
       observations,
     },
     ciWaits,
+    operatorWaits,
     unassociated,
   };
 }
@@ -1387,6 +1658,20 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   } else {
     for (const w of activity.ciWaits) {
       lines.push(`    ${w.statusLabel}  ${w.kind}  ${w.waitId}${w.ticketId ? `  ${w.ticketId}` : ""}  — ${w.url ?? "(no url)"}`);
+    }
+  }
+
+  // FG-734: the operator waits — Forge's intentional stops. Always emitted, like the
+  // sections above, so a `waiting_on_operator` entry IS the WAITING/never-IDLE signal on
+  // `forge status`, and an empty set renders the parenthesised absence. Each row names
+  // the reason Forge stopped and the action the operator must take.
+  lines.push("  Waiting on operator");
+  if (activity.operatorWaits.length === 0) {
+    lines.push("    (nothing waiting on operator)");
+  } else {
+    for (const w of activity.operatorWaits) {
+      const ident = w.ticketId ?? w.runId ?? w.itemId ?? w.taskId ?? "(no id)";
+      lines.push(`    ${w.statusLabel}  ${w.source}  ${ident}  — ${w.reason} · ${w.requestedAction}`);
     }
   }
 

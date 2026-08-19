@@ -112,7 +112,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg591-queue-board.test.ts": 6,
   "fg643-sanitize-markdown.test.ts": 1,
   "fg663-deleted-checkout.test.ts": 1,
-  "fg679-current-activity.test.ts": 15,
+  "fg679-current-activity.test.ts": 16,
   "fg694-home-in-flight.test.ts": 10,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,

@@ -1926,8 +1926,12 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   const waits = activityLoad ? homeInFlightActivity(activityLoad) : null;
   // FG-731: a registered CI wait is live work too — its mere presence makes the workspace
   // WAITING, never IDLE, so `No live tasks.` may not print over it.
+  // FG-734: a live operator wait is a pending human decision — Forge has intentionally
+  // stopped, which is WAITING, never IDLE. It counts toward non-idle exactly as a CI wait
+  // does, so `No live tasks.` may not print over it (AC7).
   const anyWaits = waits !== null
-    && (waits.hostVerification.length > 0 || waits.ci.length > 0 || waits.ciWaits.length > 0 || waits.message !== null);
+    && (waits.hostVerification.length > 0 || waits.ci.length > 0 || waits.ciWaits.length > 0
+      || waits.operatorWaits.length > 0 || waits.message !== null);
 
   const nothingLive = work.length === 0 && activeOrchestrators.length === 0 && standalone.length === 0 && !anyWaits;
 

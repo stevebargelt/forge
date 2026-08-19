@@ -189,6 +189,11 @@ export const CI_PASSED_LABEL = "CI passed";
  *  one, so an entry with no label reads as the explicit "unavailable", never as running. */
 export const CI_WAIT_STATE_UNAVAILABLE_LABEL = "CI state unavailable";
 
+/** FG-734: the client-side fallback for an operator wait whose server-rendered
+ *  `statusLabel` is absent. The server derives the honest label; the client never
+ *  fabricates one, so an entry with no label still reads as the explicit stop state. */
+export const OPERATOR_WAIT_LABEL = "Waiting on operator";
+
 /** The four strings a failed/absent read may never produce. Exported so the test
  *  asserts against the SAME list the renderer is written against, rather than a
  *  second copy that can drift out of agreement with it. */
@@ -278,6 +283,11 @@ export const RENDER_DEREFERENCE_CONTRACT = Object.freeze({
   // guards in ciWaitCompactSummary (they render as text or drive a class, never crash),
   // so they are deliberately not required — an older field-shape may omit them.
   ciWait: Object.freeze({ waitId: "text" }),
+  // FG-734: an operator wait. `waitKey` is the ONLY crash surface — it is the row key.
+  // `statusLabel`, `source`, `reason`, `requestedAction`, `ticketId` are all read THROUGH
+  // guards in operatorWaitCompactSummary (they render as text or drive a class, never
+  // crash), so they are deliberately not required — an older field-shape may omit them.
+  operatorWait: Object.freeze({ waitKey: "text" }),
 });
 
 function checkField(spec, value) {
@@ -309,6 +319,7 @@ const isAgentEntry = (value) => isRenderableEntry("agent", value);
 const isLaunchEntry = (value) => isRenderableEntry("launch", value);
 const isCiObservationEntry = (value) => isRenderableEntry("ciObservation", value);
 const isCiWaitEntry = (value) => isRenderableEntry("ciWait", value);
+const isOperatorWaitEntry = (value) => isRenderableEntry("operatorWait", value);
 
 /** Is this actually a current-activity payload? A 200 carrying an HTML error page,
  *  an empty object, or a truncated body is NOT missing data we can render around —
@@ -351,6 +362,10 @@ export function isCurrentActivityPayload(value) {
   // FAILED read, never silently erased to `[]` and reported as idle (RF-4). Absent (the
   // field simply not sent) still validates; present-and-not-a-valid-array does not.
   if (value.ciWaits !== undefined && !isArrayOf(value.ciWaits, isCiWaitEntry)) return false;
+  // FG-734: `operatorWaits` is ABSENT-tolerant but NOT malformed-tolerant, for the same
+  // reason as `ciWaits` — a live operator wait forces never-IDLE by its mere presence, so
+  // a present-but-malformed value must be a FAILED read, never silently erased to `[]`.
+  if (value.operatorWaits !== undefined && !isArrayOf(value.operatorWaits, isOperatorWaitEntry)) return false;
   const ci = value.requiredCi;
   if (!isPlainObject(ci)) return false;
   if (!isNonEmptyString(ci.state)) return false;
@@ -598,6 +613,34 @@ export function ciWaitCompactSummary(wait) {
   return { waitId: w.waitId, kind, identity, state, label, detail, class: `ci-wait-${state}`, wait: wait ?? null };
 }
 
+/** FG-734: ONE compact line for ONE operator wait — the reason Forge stopped and the
+ *  action the operator must take. It reads the server-rendered `statusLabel` through a
+ *  guard (defaulting to the explicit `Waiting on operator`, never fabricated), and the
+ *  `source` drives the badge class so a human gate and a campaign hard-stop are visually
+ *  distinct. The raw entry rides along under `wait` for the elapsed clock. */
+export function operatorWaitCompactSummary(wait) {
+  const w = wait && typeof wait === "object" ? wait : {};
+  const source = w.source === "campaign_hard_stop" ? "campaign_hard_stop" : "human_gate";
+  const label = typeof w.statusLabel === "string" && w.statusLabel !== "" ? w.statusLabel : OPERATOR_WAIT_LABEL;
+  const identity = typeof w.ticketId === "string" && w.ticketId !== ""
+    ? w.ticketId
+    : typeof w.runId === "string" && w.runId !== ""
+      ? w.runId
+      : null;
+  const reason = typeof w.reason === "string" ? w.reason : "";
+  const requestedAction = typeof w.requestedAction === "string" ? w.requestedAction : "";
+  return {
+    waitKey: w.waitKey,
+    source,
+    identity,
+    label,
+    reason,
+    requestedAction,
+    class: `operator-wait-${source.replace(/_/g, "-")}`,
+    wait: wait ?? null,
+  };
+}
+
 /** The CI block for Home, or `null` for "render no CI row at all".
  *
  *  `no_current_candidate` returns null — nothing in scope could be waiting on
@@ -719,6 +762,7 @@ export function homeInFlightActivity(load) {
       hostVerification: [],
       ci: [],
       ciWaits: [],
+      operatorWaits: [],
       message: phase === "unavailable" ? IN_FLIGHT_WAITS_UNAVAILABLE_LABEL : null,
       detail: phase === "unavailable" ? activityUnavailableDetail(load) : null,
     };
@@ -731,11 +775,16 @@ export function homeInFlightActivity(load) {
   // non-idle regardless of how old the last observation is. `ciWaits` is read the same
   // absent-tolerant way as `launches` — a server predating it sends none.
   const ciWaits = (Array.isArray(activity.ciWaits) ? activity.ciWaits : []).map(ciWaitCompactSummary);
+  // FG-734: EVERY live operator wait folds in — a pending human decision is something
+  // Forge is BLOCKED on, so it keeps Home non-idle exactly as a CI wait does. Read the
+  // same absent-tolerant way — a server predating it sends none.
+  const operatorWaits = (Array.isArray(activity.operatorWaits) ? activity.operatorWaits : []).map(operatorWaitCompactSummary);
   return {
     phase,
     hostVerification: activity.hostVerification.filter(launchIsCurrentWait),
     ci: (homeCiSummaries(activity.requiredCi) ?? []).filter((s) => s.state === "running"),
     ciWaits,
+    operatorWaits,
     message: null,
     detail: null,
   };
@@ -771,8 +820,13 @@ export function homeActivityView(load) {
   // the Activity view's Current activity panel stops reading "Nothing currently running"
   // while a wait lives, even one whose last observation has aged out.
   const ciWaits = (Array.isArray(activity.ciWaits) ? activity.ciWaits : []).map(ciWaitCompactSummary);
+  // FG-734: the operator waits, on the diagnostic surface. Read absent-tolerant like
+  // `ciWaits`. A non-empty operatorWaits section makes this projection non-empty — so the
+  // Activity view stops reading "Nothing currently running" while a decision is pending.
+  const operatorWaits = (Array.isArray(activity.operatorWaits) ? activity.operatorWaits : []).map(operatorWaitCompactSummary);
   if (hostVerification.length > 0) sections.push({ kind: "hostVerification", heading: "Host verification", entries: hostVerification });
   if (ci !== null) sections.push({ kind: "requiredCi", heading: "CI checks", entries: ci });
+  if (operatorWaits.length > 0) sections.push({ kind: "operatorWaits", heading: "Waiting on operator", entries: operatorWaits });
   if (ciWaits.length > 0) sections.push({ kind: "ciWaits", heading: "CI waits", entries: ciWaits });
   if (launches.length > 0) sections.push({ kind: "launches", heading: "Launch activity", entries: launches });
   if (unassociated.length > 0) sections.push({ kind: "unassociated", heading: "Unassociated activity", entries: unassociated });

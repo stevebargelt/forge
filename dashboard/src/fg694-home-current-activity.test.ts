@@ -234,6 +234,26 @@ const ciWait = {
   statusLabel: "CI running 1/4",
 };
 
+// FG-734: a well-formed operator-wait entry, for the dereference-contract coverage.
+const operatorWait = {
+  kind: "waiting_on_operator" as const,
+  source: "human_gate" as const,
+  waitKey: "task-gate-abc",
+  placement: "run" as const,
+  runId: "run-fg734",
+  taskId: "task-gate-abc",
+  ticketId: "FG-734",
+  campaignId: null,
+  itemId: null,
+  projectDir: null,
+  projectLabel: "forge",
+  startedAt: "2026-08-08T11:50:00.000Z",
+  reason: "human gate at step plan (architect) in workflow feature",
+  requestedAction: "advance or reject the gate",
+  blockerKind: "human_gate",
+  statusLabel: "Waiting on operator",
+};
+
 const ready = (over: Partial<CurrentActivityPayload> = {}) => ({ phase: "ready" as const, activity: payload(over) });
 
 // ─────────────────────────── AC4 — one compact line ──────────────────────────────
@@ -992,6 +1012,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       ciObservation: (e) => payload({ requiredCi: ciSection([e]) } as never),
       ciContext: (e) => payload({ requiredCi: ciSection([observation({ contexts: [e] as never })]) } as never),
       ciWait: (e) => payload({ ciWaits: [e] } as never),
+      operatorWait: (e) => payload({ operatorWaits: [e] } as never),
     };
 
     /** A well-formed entry of each kind, so every rejection below is shown to be caused
@@ -1002,6 +1023,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       ciObservation: () => ({ ...observation() }),
       ciContext: () => ({ ...context("test", "pending") }),
       ciWait: () => ({ ...ciWait }),
+      operatorWait: () => ({ ...operatorWait }),
     };
 
     /** Values that break a field of each declared kind. */
@@ -1118,8 +1140,8 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       // `unassociated`, and is legitimately ABSENT from a server that predates FG-700 —
       // so it is declared guarded rather than required. The payload validator still
       // rejects a `launches` that is present and holds a malformed entry.
-      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches", "ciWaits"] },
-      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: ["ciWaits"] },
+      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches", "ciWaits", "operatorWaits"] },
+      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: ["ciWaits", "operatorWaits"] },
       { file: "current-activity-render.js", fn: "launchIsAssociatedWait", receiver: "entry", kind: "launch",
         guarded: ["runId", "taskId", "ticketId"] },
       { file: "current-activity-render.js", fn: "launchIsCurrentWait", receiver: "entry", kind: "launch",
