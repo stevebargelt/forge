@@ -37,7 +37,7 @@ test("FG-577: all three former re-derivation sites read the one authoritative ro
     let probedDir: string | undefined;
     gatherReleaseInputs("nonexistent-image-for-fg577", { projectDir: hostile }, {
       probeClisInImage: () => ({}),
-      buildInputMtime: (dir) => { probedDir = dir; return 1; },
+      buildInputDigest: (dir) => { probedDir = dir; return "digest"; },
     });
     assert.equal(probedDir, root);
 

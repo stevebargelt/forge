@@ -23,6 +23,15 @@ fi
 # Trap cleans up the staged cert even on failure.
 trap 'rm -f "$HERE/corp-root.pem"' EXIT
 
+# FG-543: record the build-input CONTENT digest as an image LABEL. Computed by the
+# SAME function doctor recomputes at check time (src/v2/build-input-digest.ts, via
+# the printer), so the two can't drift. A `--label` on the build command is applied
+# to the final image config even when every layer is CACHED — so a fully-cached
+# rebuild still stamps the current-inputs digest onto the new image ID, which is
+# exactly what lets a cached rebuild clear a STALE flag (FG-543 AC1).
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+BUILD_INPUT_DIGEST="$(cd "$REPO_ROOT" && node --import tsx src/v2/print-build-input-digest.ts "$HERE")"
+
 # Native build (#187): no --platform pin, so the image is built for the host's
 # architecture (arm64 on Apple Silicon, amd64 on Linux/CI) and runs natively —
 # no Rosetta tax. The amd64 pin only ever existed to satisfy the amd64-only
@@ -30,5 +39,6 @@ trap 'rm -f "$HERE/corp-root.pem"' EXIT
 # arm64-capable chromium, so the pin's sole justification is gone. If you ever
 # need a cross-arch image (e.g. amd64 from this Mac for a Linux server), use
 # `docker buildx build --platform linux/amd64` explicitly for that one-off.
-docker build -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
-echo "Built agent-dev-worker."
+docker build --label "forge.build-inputs.digest=${BUILD_INPUT_DIGEST}" \
+  -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
+echo "Built agent-dev-worker (build-input digest ${BUILD_INPUT_DIGEST})."

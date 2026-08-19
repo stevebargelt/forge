@@ -42,7 +42,7 @@ test("#252 routingPolicyStep: compiled-when-absent → created; compile fail →
 function inputs(over: Partial<ReleaseInputs> = {}): ReleaseInputs {
   return {
     mode: "dev",
-    image: { name: "agent-dev-worker:latest", present: true, createdMs: 2, buildInputMtimeMs: 1 },
+    image: { name: "agent-dev-worker:latest", present: true, recordedDigest: "d", currentInputDigest: "d" },
     clis: [{ command: "codex", present: true, neededBy: ["codex-subscription"] }],
     policy: { present: true, valid: true },
     profileAuth: [{ profile: "codex-subscription", provider: "openai", auth: "subscription", status: "available", detail: "cred present" }],
