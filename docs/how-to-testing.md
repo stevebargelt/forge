@@ -83,7 +83,7 @@ What neither arm sees is an arm that consults the environment and returns green 
 
 ## The dashboard browser tier (FG-642)
 
-`dashboard/browser-tests/*.test.ts` is sixteen suites / 99 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
+`dashboard/browser-tests/*.test.ts` is seventeen suites / 109 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
 
 ```bash
 npm run test:browser -w dashboard      # the whole tier, ~6.5s with a browser present
@@ -103,7 +103,7 @@ A candidate must be a **file**. Symlinks are followed deliberately — the agent
 
 ### It fails, it never skips
 
-A Chrome-less environment takes every one of the 99 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
+A Chrome-less environment takes every one of the 109 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
 
 ```
 chrome precondition: the dashboard browser tier requires a real Chrome/Chromium binary and none was
@@ -188,8 +188,8 @@ npm run test:worktree
 # any root aggregate script; run it explicitly (next).
 npm run test:extended
 
-# Dashboard browser tier: 16 suites / 99 tests against a real Chrome (FG-642).
-# Needs a browser — a Chrome-less environment FAILS all 99, it never skips.
+# Dashboard browser tier: 17 suites / 109 tests against a real Chrome (FG-642).
+# Needs a browser — a Chrome-less environment FAILS all 109, it never skips.
 npm run test:browser -w dashboard
 
 # Canonical deterministic gate: unit tier + dashboard workspace
