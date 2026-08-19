@@ -81,6 +81,32 @@ export type RequiredCiSectionEntry = {
   observations: RequiredCiObservationEntry[];
 };
 
+/** FG-731: one live (non-terminal) registered Forge-owned CI wait. Mirrors
+ *  CiWaitActivity in src/v2/current-activity.ts. A row here forces WAITING/never-IDLE by
+ *  its mere presence, INDEPENDENT of `observation` freshness — freshness governs only
+ *  `displayState`/`statusLabel`. */
+export type CiWaitEntry = {
+  waitId: string;
+  kind: string;
+  url: string | null;
+  startedAt: string;
+  observedAt: string | null;
+  placement: "run" | "project" | "host";
+  runId: string | null;
+  ticketId: string | null;
+  projectDir: string | null;
+  projectLabel: string | null;
+  lifecycleState: string;
+  observedState: string | null;
+  observedReason: string | null;
+  m: number | null;
+  n: number | null;
+  observation: "fresh" | "unobserved";
+  displayState: "running" | "no_runs" | "unavailable" | "completed_awaiting_advance";
+  /** Server-rendered; never composed on the client. */
+  statusLabel: string;
+};
+
 export type CurrentActivityPayload = {
   generatedAt: string;
   scope: { runId: string | null; projectDirs: string[] | null };
@@ -103,6 +129,9 @@ export type CurrentActivityPayload = {
    *  Absent from a server that predates FG-700, so readers substitute []. */
   launches?: HostLaunchEntry[];
   requiredCi: RequiredCiSectionEntry;
+  /** FG-731: the live registered CI waits. Absent from a server that predates FG-731, so
+   *  readers substitute []. */
+  ciWaits?: CiWaitEntry[];
   unassociated: HostLaunchEntry[];
 };
 
@@ -137,6 +166,7 @@ export const CI_STATUS_UNAVAILABLE_LABEL: string;
 export const CI_RUNNING_LABEL: string;
 export const CI_FAILED_LABEL: string;
 export const CI_PASSED_LABEL: string;
+export const CI_WAIT_STATE_UNAVAILABLE_LABEL: string;
 /** The four strings a failed or absent read may never render (AC7). */
 export const OBSERVATION_CLAIMS: readonly string[];
 
@@ -169,6 +199,7 @@ export const RENDER_DEREFERENCE_CONTRACT: Readonly<{
   launch: Readonly<Record<string, string>>;
   ciObservation: Readonly<Record<string, string>>;
   ciContext: Readonly<Record<string, string>>;
+  ciWait: Readonly<Record<string, string>>;
 }>;
 /** Does `value` carry everything the renderer will dereference on an entry of `kind`?
  *  Unknown kind → false. */
@@ -209,6 +240,24 @@ export type CiCompactSummary = {
 export function ciCompactSummary(
   observation: Partial<RequiredCiObservationEntry> | null | undefined,
 ): CiCompactSummary;
+
+/** FG-731: one compact Home line for one registered CI wait. */
+export type CiWaitCompactSummary = {
+  waitId: string;
+  kind: string;
+  identity: string | null;
+  state: "running" | "no_runs" | "unavailable" | "completed_awaiting_advance";
+  label: string;
+  /** `m/n complete` for a running wait, else null. */
+  detail: string | null;
+  class: string;
+  /** The full wait entry, for the elapsed clock. Null for a synthesized row. */
+  wait: CiWaitEntry | null;
+};
+
+export function ciWaitCompactSummary(
+  wait: Partial<CiWaitEntry> | null | undefined,
+): CiWaitCompactSummary;
 /** Null means "render no CI row at all" — no current candidate, or nothing readable. */
 export function homeCiSummaries(
   section: Partial<RequiredCiSectionEntry> | null | undefined,
@@ -246,6 +295,9 @@ export type HomeInFlightActivity = {
   hostVerification: HostLaunchEntry[];
   /** Only candidates whose required checks are still pending. */
   ci: CiCompactSummary[];
+  /** FG-731: EVERY live registered CI wait — not filtered by freshness or state, so a
+   *  stale or completed-awaiting-advance wait still keeps Home non-idle. */
+  ciWaits: CiWaitCompactSummary[];
   /** Non-null ONLY when the read failed — In flight may not imply it looked. */
   message: string | null;
   detail: string | null;

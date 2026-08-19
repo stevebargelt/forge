@@ -71,6 +71,14 @@ import {
   type LaunchPurpose,
 } from "../store/launch-observations.js";
 import { isTerminalReviewState } from "../store/reviews.js";
+import {
+  isCiWaitLive,
+  rowToCiWait,
+  type CiWait,
+  type CiWaitKind,
+  type CiWaitLifecycleState,
+  type CiWaitObservedState,
+} from "../store/ci-waits.js";
 
 /** Re-exported so a second consumer (the dashboard) validates a launch id against
  *  the SAME definition `launchDir` uses, and renders the status through the SAME
@@ -93,6 +101,19 @@ export const CI_OBSERVATION_FRESH_MS = 15 * 60_000;
 export const CI_NOT_OBSERVED_LABEL = "CI not observed";
 export const CI_NOT_RUNNING_LABEL = "CI not running";
 export const CI_RUNNING_LABEL = "CI running";
+
+/** FG-731: how old a CI-WAIT observation may be before the reader stops treating it as
+ *  evidence about the run's live state. The wait's re-observation cadence matches the
+ *  review-loop observer (seconds), so the same generosity as CI_OBSERVATION_FRESH_MS is
+ *  right. This gates ONLY the LABEL a wait renders — NEVER whether it is present. A
+ *  non-terminal wait past this cutoff is STILL shown and STILL forces non-idle; it just
+ *  reads `CI state unavailable` instead of a fabricated `CI running`. */
+export const CI_WAIT_OBSERVATION_FRESH_MS = 15 * 60_000;
+
+export const CI_WAIT_RUNNING_LABEL = "CI running";
+export const CI_WAIT_NO_RUNS_LABEL = "no CI is running";
+export const CI_WAIT_UNAVAILABLE_LABEL = "CI state unavailable";
+export const CI_WAIT_AWAITING_ADVANCE_LABEL = "CI completed — awaiting advance";
 
 /** FG-694: the THIRD absence, and the one the pre-fix surface could not say. Nothing
  *  in scope is still open — no anchored run, no open review — so there is nothing that
@@ -230,6 +251,52 @@ export type RequiredCiSection = {
   observations: RequiredCiObservation[];
 };
 
+/** FG-731: how a registered CI wait RENDERS. The four states are DISTINCT and never
+ *  collapse into each other, into a fabricated success, or into idle:
+ *    `running`                     — a fresh observation says checks are still going (+ m/n).
+ *    `no_runs`                     — a fresh observation found no CI running (NOT unavailable).
+ *    `unavailable`                 — the state could not be determined, OR the last
+ *                                    observation is too old to be evidence about now.
+ *    `completed_awaiting_advance`  — the run finished but the orchestrator still owes an
+ *                                    advance; shown as exactly that, never dropped, never
+ *                                    "running". */
+export type CiWaitDisplayState = "running" | "no_runs" | "unavailable" | "completed_awaiting_advance";
+
+/** One live (non-terminal) registered CI wait, shaped to PARALLEL HostLaunchActivity —
+ *  a durable, register-before-poll wait the orchestrator is blocked on, surfaced so the
+ *  workspace never reads IDLE while it lives. Placement/scope is decided by the
+ *  association ids the record carries, through the same machinery a launch uses. */
+export type CiWaitActivity = {
+  waitId: string;
+  kind: CiWaitKind;
+  url: string | null;
+  startedAt: string;
+  /** When the wait was last re-observed, or null if never — kept distinct from the
+   *  EFFECTIVE freshness so a reader can tell "observed running, a while ago" from
+   *  "never looked". */
+  observedAt: string | null;
+  placement: "run" | "project" | "host";
+  runId: string | null;
+  ticketId: string | null;
+  projectDir: string | null;
+  projectLabel: string | null;
+  /** The state-machine position, carried through so a reader sees the classification. */
+  lifecycleState: CiWaitLifecycleState;
+  /** The last-observed aggregate CI state, as persisted — a DIFFERENT axis from
+   *  lifecycleState (a wait can be `running` with an `unavailable` last observation). */
+  observedState: CiWaitObservedState | null;
+  observedReason: string | null;
+  m: number | null;
+  n: number | null;
+  /** `fresh` when the last observation is recent enough to be evidence about now;
+   *  `unobserved` when it is stale or absent. Governs ONLY the label, NEVER presence. */
+  observation: "fresh" | "unobserved";
+  /** What RENDERS, derived once so both surfaces agree (BD-9). Never a fabricated
+   *  "running", never a drop. */
+  displayState: CiWaitDisplayState;
+  statusLabel: string;
+};
+
 export type CurrentActivity = {
   generatedAt: string;
   scope: { runId: string | null; projectDirs: string[] | null };
@@ -244,6 +311,11 @@ export type CurrentActivity = {
    *  not host verification still renders, under a heading that does not claim it is. */
   launches: HostLaunchActivity[];
   requiredCi: RequiredCiSection;
+  /** FG-731: the registered Forge-owned CI waits still LIVE (non-terminal). A row here
+   *  forces WAITING/never-IDLE by its MERE PRESENCE, INDEPENDENT of observation
+   *  freshness — the fix for a dead-waiter wait aging out and the workspace reading idle
+   *  again. Freshness governs only `statusLabel`/`displayState`, never membership. */
+  ciWaits: CiWaitActivity[];
   /** BD-14: launches whose cwd maps to NO registered project home. Populated only
    *  for the host-wide scope — it is a HOST-level bucket, and surfacing it inside a
    *  project or run view would be inventing the very ownership BD-2 forbids. */
@@ -508,6 +580,97 @@ function readOpenLaunches(db: DatabaseInstance): LaunchObservation[] {
      LIMIT 500
   `).all() as LaunchObservationRow[];
   return rows.map(rowToLaunchObservation).filter((o) => !o.terminal);
+}
+
+/** The live (non-terminal) CI waits, read from the INJECTED handle — never `getDb()`,
+ *  so the dashboard's own read-only connection is honoured (BD-9) and no store is minted
+ *  here. READ-ONLY over the persisted record: no gh/git/tmux/shell/CLI, exactly like the
+ *  requiredCi read (BD-7/BD-12). The PRAGMA probe doubles as the table-existence check —
+ *  a read-only handle can predate the ci_waits table, and `SELECT *` on a missing table
+ *  would throw and take the whole surface down (db.ts's shape-probe rule: PRAGMA
+ *  table_info on a missing table returns zero rows rather than throwing). */
+function readLiveCiWaits(db: DatabaseInstance): CiWait[] {
+  const cols = db.prepare(`PRAGMA table_info(ci_waits)`).all() as Array<{ name: string }>;
+  if (cols.length === 0) return [];
+  const rows = db.prepare(`
+    SELECT * FROM ci_waits WHERE terminal = 0 ORDER BY started_at DESC LIMIT 500
+  `).all() as Array<Parameters<typeof rowToCiWait>[0]>;
+  // Terminality is the CANONICAL predicate over lifecycle_state, never trusted from the
+  // column byte (ci-waits.ts invariant 2): a row whose `terminal` byte disagrees with
+  // its own state is decided by the state. isCiWaitLive is what forces the wait to keep
+  // forcing WAITING/never-IDLE below.
+  return rows.map(rowToCiWait).filter(isCiWaitLive);
+}
+
+/** THE #1 RISK (FG-731). A non-terminal wait is ALWAYS shown and ALWAYS forces non-idle
+ *  by its MERE PRESENCE — freshness NEVER removes it, unlike the launch / requiredCi
+ *  freshness-DROP rule (a dead-waiter wait must not age out and let the workspace read
+ *  idle again). EXISTENCE is decoupled from LIVENESS: freshness governs only the LABEL.
+ *  A fresh `running` observation renders `CI running m/n`; a stale or never-observed one
+ *  degrades to `CI state unavailable` — NEVER a fabricated `running`, and NEVER a drop.
+ *  The observed states stay DISTINCT and never collapse into each other, into a fake
+ *  success, or into idle. */
+function ciWaitDisplay(wait: CiWait, fresh: boolean): { displayState: CiWaitDisplayState; statusLabel: string } {
+  // `completed_awaiting_advance` is a persisted LIFECYCLE fact — a forge advance is owed.
+  // It is not an observation about NOW, so freshness does not gate it into `unavailable`,
+  // and it is neither dropped nor shown as still running.
+  if (wait.lifecycleState === "completed_awaiting_advance" || wait.observedState === "completed") {
+    return { displayState: "completed_awaiting_advance", statusLabel: CI_WAIT_AWAITING_ADVANCE_LABEL };
+  }
+  if (!fresh) {
+    // Stale or never observed — we do NOT know the live state, so say exactly that. This
+    // is the decoupling the ticket's #1 risk turns on: the wait stays present (above),
+    // only its label degrades, and it degrades to unavailable, never to a fake `running`.
+    const reason = wait.observedAt === null ? "not yet observed" : `last observed ${wait.observedAt}`;
+    return { displayState: "unavailable", statusLabel: `${CI_WAIT_UNAVAILABLE_LABEL} — ${reason}` };
+  }
+  switch (wait.observedState) {
+    case "running": {
+      const counts = wait.observedM !== null && wait.observedN !== null ? ` ${wait.observedM}/${wait.observedN}` : "";
+      return { displayState: "running", statusLabel: `${CI_WAIT_RUNNING_LABEL}${counts}` };
+    }
+    case "no_runs":
+      // Distinct from `unavailable`: the observer LOOKED and found no CI running. Never
+      // collapsed into unavailable, into a fake success, or into idle.
+      return { displayState: "no_runs", statusLabel: CI_WAIT_NO_RUNS_LABEL };
+    case "unavailable":
+      return {
+        displayState: "unavailable",
+        statusLabel: wait.observedReason
+          ? `${CI_WAIT_UNAVAILABLE_LABEL} — ${wait.observedReason}`
+          : CI_WAIT_UNAVAILABLE_LABEL,
+      };
+    default:
+      // A fresh observedAt with no observedState cannot arise (only an observation writes
+      // observed_at) — read as unknown rather than fabricated.
+      return { displayState: "unavailable", statusLabel: CI_WAIT_UNAVAILABLE_LABEL };
+  }
+}
+
+function toCiWaitActivity(wait: CiWait, placement: "run" | "project" | "host", nowMs: number): CiWaitActivity {
+  const observedMs = parseMs(wait.observedAt);
+  const fresh = observationIsFresh(observedMs, nowMs, CI_WAIT_OBSERVATION_FRESH_MS);
+  const { displayState, statusLabel } = ciWaitDisplay(wait, fresh);
+  return {
+    waitId: wait.id,
+    kind: wait.kind,
+    url: wait.url,
+    startedAt: wait.startedAt,
+    observedAt: wait.observedAt,
+    placement,
+    runId: wait.runId,
+    ticketId: wait.ticketId,
+    projectDir: wait.projectDir,
+    projectLabel: projectLabelOf(wait.projectDir),
+    lifecycleState: wait.lifecycleState,
+    observedState: wait.observedState,
+    observedReason: wait.observedReason,
+    m: wait.observedM,
+    n: wait.observedN,
+    observation: fresh ? "fresh" : "unobserved",
+    displayState,
+    statusLabel,
+  };
 }
 
 type CiPayload = {
@@ -1104,6 +1267,26 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
       .map((o) => toHostLaunch(o, "host", nowMs))
     : [];
 
+  // FG-731: the registered CI waits, read from the SAME injected handle over the SAME
+  // persisted record — no outbound call. Placed/scoped by the association ids exactly as
+  // launches are. Every live wait is something the orchestrator is BLOCKED on, so unlike
+  // a launch (which needs a project home or an explicit association to appear host-wide)
+  // an unassociated wait is still shown host-wide at `host` placement — an awaited run
+  // with no run/project id is precisely the FG-704 case the workspace read idle through.
+  const liveWaits = readLiveCiWaits(db);
+  let ciWaits: CiWaitActivity[];
+  if (scope.runId !== undefined) {
+    ciWaits = liveWaits.filter((w) => w.runId === scope.runId).map((w) => toCiWaitActivity(w, "run", nowMs));
+  } else if (scope.projectDirs !== undefined) {
+    ciWaits = liveWaits
+      .filter((w) => inProjectScope({ projectDir: w.projectDir, canonical: w.projectDirCanonical }, project))
+      .map((w) => toCiWaitActivity(w, "project", nowMs));
+  } else {
+    ciWaits = liveWaits.map((w) =>
+      toCiWaitActivity(w, w.runId !== null ? "run" : w.projectDir !== null ? "project" : "host", nowMs),
+    );
+  }
+
   // FG-694: what is OPEN is read once, and it decides two different things through ONE
   // predicate over the SAME work references — which observations are current, and which
   // of the three CI absences is the true one.
@@ -1134,6 +1317,7 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
           : CI_NO_CANDIDATE_LABEL,
       observations,
     },
+    ciWaits,
     unassociated,
   };
 }
@@ -1186,6 +1370,20 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
         lines.push(`      ${c.context}: ${c.state}  ${c.url ?? "(no url)"}  observed ${c.observedAt}`);
       }
       if (ci.unavailableReason) lines.push(`      unavailable: ${ci.unavailableReason}`);
+    }
+  }
+
+  // FG-731: the registered CI waits. Always emitted, like Agents / Host verification /
+  // Required CI — the section IS the WAITING/never-IDLE signal on `forge status`, so a
+  // non-terminal wait renders a row and an empty set renders the parenthesised absence.
+  // A dead-waiter wait past its freshness cutoff still renders (its label degrades to
+  // `CI state unavailable`); it is never dropped, which is the whole point of the fix.
+  lines.push("  CI waits");
+  if (activity.ciWaits.length === 0) {
+    lines.push("    (no CI wait registered)");
+  } else {
+    for (const w of activity.ciWaits) {
+      lines.push(`    ${w.statusLabel}  ${w.kind}  ${w.waitId}${w.ticketId ? `  ${w.ticketId}` : ""}  — ${w.url ?? "(no url)"}`);
     }
   }
 

@@ -1924,8 +1924,10 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
 
   // The waits are live rows too, so `No live tasks.` may not be printed over them.
   const waits = activityLoad ? homeInFlightActivity(activityLoad) : null;
+  // FG-731: a registered CI wait is live work too — its mere presence makes the workspace
+  // WAITING, never IDLE, so `No live tasks.` may not print over it.
   const anyWaits = waits !== null
-    && (waits.hostVerification.length > 0 || waits.ci.length > 0 || waits.message !== null);
+    && (waits.hostVerification.length > 0 || waits.ci.length > 0 || waits.ciWaits.length > 0 || waits.message !== null);
 
   const nothingLive = work.length === 0 && activeOrchestrators.length === 0 && standalone.length === 0 && !anyWaits;
 

@@ -183,6 +183,12 @@ export const CI_RUNNING_LABEL = "CI running";
 export const CI_FAILED_LABEL = "CI failed";
 export const CI_PASSED_LABEL = "CI passed";
 
+/** FG-731: the client-side fallback for a registered CI wait whose server-rendered
+ *  `statusLabel` is absent. The server derives the honest label (running m/n / no CI is
+ *  running / unavailable / completed — awaiting advance); the client never fabricates
+ *  one, so an entry with no label reads as the explicit "unavailable", never as running. */
+export const CI_WAIT_STATE_UNAVAILABLE_LABEL = "CI state unavailable";
+
 /** The four strings a failed/absent read may never produce. Exported so the test
  *  asserts against the SAME list the renderer is written against, rather than a
  *  second copy that can drift out of agreement with it. */
@@ -267,6 +273,11 @@ export const RENDER_DEREFERENCE_CONTRACT = Object.freeze({
   launch: Object.freeze({ launchId: "text" }),
   ciObservation: Object.freeze({ candidateSha: "text", contexts: "ciContext[]" }),
   ciContext: Object.freeze({ context: "string", state: "string" }),
+  // FG-731: a registered CI wait. `waitId` is the ONLY crash surface — it is the row
+  // key. `displayState`, `statusLabel`, `kind`, `ticketId`, `m`, `n` are all read THROUGH
+  // guards in ciWaitCompactSummary (they render as text or drive a class, never crash),
+  // so they are deliberately not required — an older field-shape may omit them.
+  ciWait: Object.freeze({ waitId: "text" }),
 });
 
 function checkField(spec, value) {
@@ -297,6 +308,7 @@ for (const [kind, fields] of Object.entries(RENDER_DEREFERENCE_CONTRACT)) {
 const isAgentEntry = (value) => isRenderableEntry("agent", value);
 const isLaunchEntry = (value) => isRenderableEntry("launch", value);
 const isCiObservationEntry = (value) => isRenderableEntry("ciObservation", value);
+const isCiWaitEntry = (value) => isRenderableEntry("ciWait", value);
 
 /** Is this actually a current-activity payload? A 200 carrying an HTML error page,
  *  an empty object, or a truncated body is NOT missing data we can render around —
@@ -332,6 +344,9 @@ export function isCurrentActivityPayload(value) {
   // read the same way and for the same reason — a server predating it sends none.
   if (Array.isArray(value.unassociated) && !value.unassociated.every(isLaunchEntry)) return false;
   if (Array.isArray(value.launches) && !value.launches.every(isLaunchEntry)) return false;
+  // FG-731: `ciWaits` is read the same absent-tolerant way — a server predating it sends
+  // none — but a present array holding a malformed entry is still a failed read.
+  if (Array.isArray(value.ciWaits) && !value.ciWaits.every(isCiWaitEntry)) return false;
   const ci = value.requiredCi;
   if (!isPlainObject(ci)) return false;
   if (!isNonEmptyString(ci.state)) return false;
@@ -558,6 +573,27 @@ export function ciCompactSummary(observation) {
   return { identity, state, label, detail, class: `ci-compact-${state}`, observation: observation ?? null };
 }
 
+/** FG-731: ONE compact line for ONE registered CI wait (deliverable 4) — kind · state ·
+ *  m/n · elapsed, a LIVE progress SUMMARY, not a check-by-check history dump. It reuses
+ *  the compact-summary SHAPE `ciCompactSummary` produces (identity / state / label /
+ *  detail / class) so the row renders through the same surface, but it never RECOMPUTES
+ *  the state: the server already derived the honest `statusLabel`/`displayState` (running
+ *  m/n, no CI is running, unavailable, completed — awaiting advance), and this reads them
+ *  through guards, defaulting to the explicit "unavailable" rather than fabricating a
+ *  "running". `detail` carries the m/n only for a running wait; the raw wait rides along
+ *  under `wait` for the elapsed clock, exactly as `observation` does for a CI summary. */
+export function ciWaitCompactSummary(wait) {
+  const w = wait && typeof wait === "object" ? wait : {};
+  const state = typeof w.displayState === "string" && w.displayState !== "" ? w.displayState : "unavailable";
+  const label = typeof w.statusLabel === "string" && w.statusLabel !== "" ? w.statusLabel : CI_WAIT_STATE_UNAVAILABLE_LABEL;
+  const kind = typeof w.kind === "string" && w.kind !== "" ? w.kind : "CI";
+  const identity = typeof w.ticketId === "string" && w.ticketId !== "" ? w.ticketId : null;
+  const m = typeof w.m === "number" ? w.m : null;
+  const n = typeof w.n === "number" ? w.n : null;
+  const detail = state === "running" && m !== null && n !== null ? `${m}/${n} complete` : null;
+  return { waitId: w.waitId, kind, identity, state, label, detail, class: `ci-wait-${state}`, wait: wait ?? null };
+}
+
 /** The CI block for Home, or `null` for "render no CI row at all".
  *
  *  `no_current_candidate` returns null — nothing in scope could be waiting on
@@ -678,15 +714,24 @@ export function homeInFlightActivity(load) {
       phase,
       hostVerification: [],
       ci: [],
+      ciWaits: [],
       message: phase === "unavailable" ? IN_FLIGHT_WAITS_UNAVAILABLE_LABEL : null,
       detail: phase === "unavailable" ? activityUnavailableDetail(load) : null,
     };
   }
   const activity = load.activity;
+  // FG-731: EVERY live registered wait folds in — NOT filtered by freshness or state, the
+  // way a host launch (running-only) or a CI candidate (pending-only) is. A registered
+  // wait is something the orchestrator is BLOCKED on, so a stale (`unavailable`) or
+  // `completed_awaiting_advance` one is still a wait, and folding it in is what keeps Home
+  // non-idle regardless of how old the last observation is. `ciWaits` is read the same
+  // absent-tolerant way as `launches` — a server predating it sends none.
+  const ciWaits = (Array.isArray(activity.ciWaits) ? activity.ciWaits : []).map(ciWaitCompactSummary);
   return {
     phase,
     hostVerification: activity.hostVerification.filter(launchIsCurrentWait),
     ci: (homeCiSummaries(activity.requiredCi) ?? []).filter((s) => s.state === "running"),
+    ciWaits,
     message: null,
     detail: null,
   };
@@ -717,8 +762,14 @@ export function homeActivityView(load) {
   // narrowed, the evidence did not.
   const launches = Array.isArray(activity.launches) ? activity.launches : [];
   const unassociated = Array.isArray(activity.unassociated) ? activity.unassociated : [];
+  // FG-731: the registered CI waits, on the diagnostic surface. Read absent-tolerant like
+  // `launches`. A non-empty ciWaits section is what makes this projection non-empty — so
+  // the Activity view's Current activity panel stops reading "Nothing currently running"
+  // while a wait lives, even one whose last observation has aged out.
+  const ciWaits = (Array.isArray(activity.ciWaits) ? activity.ciWaits : []).map(ciWaitCompactSummary);
   if (hostVerification.length > 0) sections.push({ kind: "hostVerification", heading: "Host verification", entries: hostVerification });
   if (ci !== null) sections.push({ kind: "requiredCi", heading: "CI checks", entries: ci });
+  if (ciWaits.length > 0) sections.push({ kind: "ciWaits", heading: "CI waits", entries: ciWaits });
   if (launches.length > 0) sections.push({ kind: "launches", heading: "Launch activity", entries: launches });
   if (unassociated.length > 0) sections.push({ kind: "unassociated", heading: "Unassociated activity", entries: unassociated });
   return {

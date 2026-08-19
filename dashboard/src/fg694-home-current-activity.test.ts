@@ -212,6 +212,28 @@ const launch = {
   observation: "fresh" as const,
 };
 
+// FG-731: a well-formed registered CI wait entry, for the dereference-contract coverage.
+const ciWait = {
+  waitId: "wait-fg704-abc",
+  kind: "workflow_dispatch",
+  url: "https://github.com/o/r/actions/runs/999",
+  startedAt: "2026-08-08T11:50:00.000Z",
+  observedAt: "2026-08-08T11:59:40.000Z",
+  placement: "host" as const,
+  runId: null,
+  ticketId: "FG-704",
+  projectDir: null,
+  projectLabel: "forge",
+  lifecycleState: "running",
+  observedState: "running",
+  observedReason: null,
+  m: 1,
+  n: 4,
+  observation: "fresh" as const,
+  displayState: "running" as const,
+  statusLabel: "CI running 1/4",
+};
+
 const ready = (over: Partial<CurrentActivityPayload> = {}) => ({ phase: "ready" as const, activity: payload(over) });
 
 // ─────────────────────────── AC4 — one compact line ──────────────────────────────
@@ -951,6 +973,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       launch: (e) => payload({ hostVerification: [e] } as never),
       ciObservation: (e) => payload({ requiredCi: ciSection([e]) } as never),
       ciContext: (e) => payload({ requiredCi: ciSection([observation({ contexts: [e] as never })]) } as never),
+      ciWait: (e) => payload({ ciWaits: [e] } as never),
     };
 
     /** A well-formed entry of each kind, so every rejection below is shown to be caused
@@ -960,6 +983,7 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       launch: () => ({ ...launch }),
       ciObservation: () => ({ ...observation() }),
       ciContext: () => ({ ...context("test", "pending") }),
+      ciWait: () => ({ ...ciWait }),
     };
 
     /** Values that break a field of each declared kind. */
@@ -1060,6 +1084,10 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
         guarded: ["url", "observedAt"] },
       { file: "current-activity-render.js", fn: "ciCompactSummary", receiver: "o", kind: "ciObservation",
         guarded: ["state", "outcome", "unavailableReason", "label"] },
+      // FG-731: the registered-CI-wait summary. `waitId` is validated (the contract's one
+      // required field, the row key); everything else is read through a typeof guard.
+      { file: "current-activity-render.js", fn: "ciWaitCompactSummary", receiver: "w", kind: "ciWait",
+        guarded: ["displayState", "statusLabel", "kind", "ticketId", "m", "n"] },
       { file: "current-activity-render.js", fn: "ciCandidateLabel", receiver: "observation", kind: "ciObservation",
         guarded: ["ticketId"] },
       { file: "current-activity-render.js", fn: "launchBadgeClass", receiver: "entry", kind: "launch",
@@ -1072,8 +1100,8 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       // `unassociated`, and is legitimately ABSENT from a server that predates FG-700 —
       // so it is declared guarded rather than required. The payload validator still
       // rejects a `launches` that is present and holds a malformed entry.
-      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches"] },
-      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: [] },
+      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches", "ciWaits"] },
+      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: ["ciWaits"] },
       { file: "current-activity-render.js", fn: "launchIsAssociatedWait", receiver: "entry", kind: "launch",
         guarded: ["runId", "taskId", "ticketId"] },
       { file: "current-activity-render.js", fn: "launchIsCurrentWait", receiver: "entry", kind: "launch",

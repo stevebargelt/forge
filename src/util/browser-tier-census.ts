@@ -95,6 +95,12 @@ export const BROWSER_TIER_DIR = join(
 // accepted-deferral follow-up ticket rendered as a link (RF-7), and a scope switch
 // clearing the panel so a failed new-scope response never retains the prior project's
 // rows (RF-3).
+// FG-731 grows `fg679-current-activity` to 15 (the registered CI-wait rows in the
+// Activity view's Current activity panel: kind/state with no_runs/unavailable/
+// completed-awaiting-advance as distinct rendered facts, and the #1-risk case — a wait
+// stale past its freshness cutoff STILL renders, its label degraded to unavailable
+// rather than dropped or shown running) and `fg694-home-in-flight` to 10 (a registered
+// CI wait keeps Home WAITING, never IDLE, folded into In flight with nothing else live).
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "fg386-shipping-audit.test.ts": 9,
@@ -106,8 +112,8 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg591-queue-board.test.ts": 6,
   "fg643-sanitize-markdown.test.ts": 1,
   "fg663-deleted-checkout.test.ts": 1,
-  "fg679-current-activity.test.ts": 13,
-  "fg694-home-in-flight.test.ts": 9,
+  "fg679-current-activity.test.ts": 15,
+  "fg694-home-in-flight.test.ts": 10,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,
