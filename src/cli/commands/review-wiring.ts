@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
+import { applyOrchestratorBlock } from "./init.js";
 import { resolveCommitRange } from "../../v2/review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
@@ -55,6 +56,25 @@ const FIX_BATCH_TASK_SUBDIR = "fix-batch";
 const FIX_BATCH_CONTAINER_DIR = `/task/${FIX_BATCH_TASK_SUBDIR}`;
 export const FIX_BATCH_PAYLOAD_PATH = `${FIX_BATCH_CONTAINER_DIR}/payload.json`;
 export const FIX_BATCH_ENVELOPE_PATH = `${FIX_BATCH_CONTAINER_DIR}/envelope.json`;
+
+// FG-732: the marker-managed GENERATED surface a docs cycle must never commit an edit of.
+// `CLAUDE.md`'s `<!-- forge:orchestrator-start -->…-end -->` block is rendered from the seed
+// and NOT hand-owned; a raw edit of it drifts from the seed and wedges the review at
+// verify_final's parity gate. The documentation-maintainer declines CLAUDE.md by allowlist
+// omission, but the review docs-stage's inline prompt does not carry that decline, so the
+// coordinator fails closed here regardless of what the prompt says.
+const GENERATED_SURFACE_FILE = "CLAUDE.md";
+const ORCHESTRATOR_SEED_REL = "seeds/orchestrator-template.md";
+
+// True when CLAUDE.md's rendered orchestrator block in the worktree is no longer byte-for-byte
+// what the seed renders — i.e. the block was ALTERED. Reuses the real installer's parity logic
+// (`applyOrchestratorBlock`), the same predicate the verify_final gate checks: any action other
+// than "unchanged" means the committed block would diverge from the seed.
+function orchestratorBlockAltered(projectDir: string): boolean {
+  const claudeMd = readFileSync(join(projectDir, GENERATED_SURFACE_FILE), "utf8");
+  const seed = readFileSync(join(projectDir, ORCHESTRATOR_SEED_REL), "utf8");
+  return applyOrchestratorBlock(claudeMd, seed).action !== "unchanged";
+}
 
 export type WiringContext = {
   projectDir: string;
@@ -1138,6 +1158,31 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         };
       }
 
+      // FG-732: A MARKER-MANAGED GENERATED SURFACE IS NEVER COMMITTED BY A DOCS CYCLE.
+      // `CLAUDE.md`'s `forge:orchestrator` block is RENDERED from `seeds/orchestrator-template.md`;
+      // a raw edit of it drifts from the seed and wedges the review at verify_final's parity gate
+      // every cycle. The prompt declines this surface, but this guard is the load-bearing
+      // structural guarantee that fails closed regardless: if CLAUDE.md moved AND its orchestrator
+      // block was altered, REFUSE deterministically — the surface is never committed, and the
+      // remedy names the SEED as the edit target and `forge-dev upgrade` as the render path. A
+      // CLAUDE.md edit that leaves the block in parity (prose above/below the markers) is NOT this
+      // surface and passes through the ordinary declared-path reconciliation below.
+      if (moved.includes(GENERATED_SURFACE_FILE) && orchestratorBlockAltered(ctx.projectDir)) {
+        return {
+          kind: "refused",
+          reason: "docs_cycle_touched_generated_surface",
+          detail:
+            `the docs agent altered the marker-managed \`forge:orchestrator\` block in ${GENERATED_SURFACE_FILE} ` +
+            `(bounded by \`<!-- forge:orchestrator-start -->\`/\`-end -->\`), which is GENERATED from ` +
+            `\`${ORCHESTRATOR_SEED_REL}\` — not hand-owned. Committing it would drift the rendered block from its ` +
+            `seed and wedge the review at verify_final's orchestrator-block parity gate, so the docs cycle refuses ` +
+            `it deterministically and nothing was committed. If the block's prose is stale, correct the SEED ` +
+            `(\`${ORCHESTRATOR_SEED_REL}\`) and re-render with \`forge-dev upgrade\` — never a raw edit of the ` +
+            `rendered block. Discard the ${GENERATED_SURFACE_FILE} block edit from the worktree (an out-of-block ` +
+            `CLAUDE.md prose edit is fine and commits normally), then re-run`,
+        };
+      }
+
       // THE RECONCILIATION IS TWO-DIRECTIONAL, exactly as the fix cycle's is: `outside`
       // catches a tree beyond the declaration, `declaredNotMoved` a declaration beyond the
       // tree. Nothing moved at all is a stop — the claim is wholly unsupported. Something
@@ -1318,9 +1363,15 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
           `(${review.ticketId ?? "(no ticket)"}) at candidate ${candidateSha}. This phase runs BEFORE final ` +
           `verification and recheck, so it may change the candidate.\n\n` +
           `DO NOT COMMIT. The review coordinator authors this cycle's commit from your declaration: list EVERY ` +
-          `path you touched in \`docs_updated\`, including adjacent ones (an index, a cross-reference, a rendered ` +
-          `block) a narrative summary would omit. A path you touched but did not declare STOPS the review; a path ` +
-          `you declare but did not change is named too. Committing your own work refuses candidate_not_checked_out.`,
+          `path you touched in \`docs_updated\`, including adjacent ones (an index, a cross-reference) a narrative ` +
+          `summary would omit. A path you touched but did not declare STOPS the review; a path you declare but did ` +
+          `not change is named too. Committing your own work refuses candidate_not_checked_out.\n\n` +
+          `Do NOT edit marker-managed GENERATED surfaces. Specifically: the ` +
+          `\`<!-- forge:orchestrator-start -->\`…\`-end -->\` block in \`CLAUDE.md\` is rendered from ` +
+          `\`seeds/orchestrator-template.md\` — a raw edit of that block drifts it from its seed and wedges the ` +
+          `review at the orchestrator-block parity gate. If that block's prose is stale, the correction goes to the ` +
+          `SEED (\`seeds/orchestrator-template.md\`) and is re-rendered via \`forge-dev upgrade\`, never a raw edit ` +
+          `of the rendered block. (An out-of-block edit to CLAUDE.md prose is fine.)`,
         projectDir: ctx.projectDir,
         ...(runIdFor() !== undefined ? { runId: runIdFor() as string } : {}),
         runTitle: `review docs reconciliation — ${ctx.ticketId}`,
