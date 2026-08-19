@@ -332,3 +332,55 @@ test("integ FG-732: a CLAUDE.md edit OUTSIDE the orchestrator block commits — 
   assert.notEqual(head(), before, "the out-of-block CLAUDE.md edit advanced the candidate");
   assert.deepEqual(commitPaths(), ["M CLAUDE.md"], "the out-of-block CLAUDE.md edit is committed normally");
 });
+
+// FG-732 RF-1: the guard compared the worktree CLAUDE.md block to the worktree SEED, so a docs
+// cycle that edits the SAME block content in BOTH — keeping them in seed-parity — made the old
+// predicate false and slipped through. The reference is now the block COMMITTED at the candidate,
+// which the parity edit still diverges from, so this bypass is refused.
+test("integ FG-732: editing the orchestrator block in BOTH CLAUDE.md AND the seed in parity is REFUSED (RF-1 bypass)", async () => {
+  installOrchestratorSurfaceAtCandidate();
+  const from = "Generated orchestrator policy — rendered from the seed, never hand-edited.";
+  const to = "Orchestrator policy the docs cycle rewrote in both files to keep them in seed-parity.";
+  const coordinator = orchestratorDeps(() => {
+    const seedPath = join(repo, "seeds", "orchestrator-template.md");
+    const claudePath = join(repo, "CLAUDE.md");
+    writeFileSync(seedPath, readFileSync(seedPath, "utf8").replace(from, to));
+    writeFileSync(claudePath, readFileSync(claudePath, "utf8").replace(from, to));
+    return ["CLAUDE.md", "seeds/orchestrator-template.md"];
+  });
+  await parkAtDocs(coordinator);
+  const before = head();
+
+  const outcome = await runNextStage(reviewId, coordinator);
+
+  assert.equal(outcome.status, "refused", outcome.message);
+  assert.match(outcome.message, /docs_cycle_touched_generated_surface/);
+  assert.match(outcome.message, /seeds\/orchestrator-template\.md/, "the seed is named as an orchestrator surface");
+  assert.match(outcome.message, /forge-dev upgrade/, "the remedy names the render path");
+  assert.equal(head(), before, "the candidate never advances onto the parity-kept surface edit");
+  assert.equal(getReview(reviewId)?.candidateSha, before, "the candidate row did not move");
+  assert.equal(getReview(reviewId)?.stageEvidence?.docs, undefined, "no docs stage is recorded");
+  const status = git(["status", "--porcelain"]);
+  assert.match(status, /^ ?M CLAUDE\.md$/m, "the CLAUDE.md block edit is left uncommitted");
+  assert.match(status, /^ ?M seeds\/orchestrator-template\.md$/m, "the seed edit is left uncommitted too");
+});
+
+// FG-732: the guard is precisely scoped — a NON-orchestrator seed is maintainer-owned and commits
+// normally, so the decline does not spill onto seeds/agents/** or seeds/skills/**.
+test("integ FG-732: a docs cycle editing a non-orchestrator seed (seeds/skills/**) commits normally", async () => {
+  installOrchestratorSurfaceAtCandidate();
+  const coordinator = orchestratorDeps(() => {
+    mkdirSync(join(repo, "seeds", "skills"), { recursive: true });
+    writeFileSync(join(repo, "seeds", "skills", "example.md"), "# skill\n\nMaintainer-owned skill doc.\n");
+    return ["seeds/skills/example.md"];
+  });
+  await parkAtDocs(coordinator);
+  const before = head();
+
+  const outcome = await runNextStage(reviewId, coordinator);
+
+  assert.notEqual(outcome.status, "refused", outcome.message);
+  assert.notEqual(head(), before, "the non-orchestrator seed edit advanced the candidate");
+  assert.equal(getReview(reviewId)?.candidateSha, head(), "the candidate row moved to the commit");
+  assert.deepEqual(commitPaths(), ["A seeds/skills/example.md"], "only the declared non-orchestrator seed is committed");
+});
