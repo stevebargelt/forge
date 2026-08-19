@@ -55,3 +55,32 @@ test("a missing --pr for pr_checks is a clean refusal, not a registered half-wai
   assert.match(JSON.parse(res.stdout).error, /pr_checks requires --pr/);
   assert.equal(readCiWaits().length, before, "a refused request registers nothing");
 });
+
+// RF-2: a non-numeric/negative --timeout or --interval must be rejected at parse time,
+// BEFORE arming or entering the poll loop — otherwise a NaN/negative delay coerces to a
+// ~1ms timer with a never-satisfied deadline, an unbounded near-tight gh hammer. These
+// exit fast (validation precedes the blocking loop) and register nothing.
+for (const [flag, value, pattern] of [
+  ["--timeout", "abc", /--timeout must be a number/],
+  ["--timeout", "-1", /--timeout must be a non-negative number/],
+  ["--interval", "0", /--interval must be a positive number/],
+  ["--interval", "-5", /--interval must be a positive number/],
+  ["--interval", "nope", /--interval must be a number/],
+] as const) {
+  test(`forge ci-wait wait rejects ${flag} ${value} at parse time`, () => {
+    const before = readCiWaits().length;
+    const res = forge(["ci-wait", "wait", "--kind", "pr_checks", "--repo", "acme/forge", "--pr", "7", flag, value, "--json"]);
+    assert.equal(res.status, 2, res.stderr || res.stdout);
+    assert.match(JSON.parse(res.stdout).error, pattern);
+    assert.equal(readCiWaits().length, before, "a refused wait registers nothing");
+  });
+}
+
+test("forge ci-wait wait ACCEPTS --timeout 0 as the no-timeout sentinel", () => {
+  // 0 is valid for --timeout only; we can't let the loop block, so pair it with a bad
+  // --interval so validation still fails fast — but on the INTERVAL, proving 0 timeout
+  // itself passed validation.
+  const res = forge(["ci-wait", "wait", "--kind", "pr_checks", "--repo", "acme/forge", "--pr", "7", "--timeout", "0", "--interval", "bad", "--json"]);
+  assert.equal(res.status, 2);
+  assert.match(JSON.parse(res.stdout).error, /--interval must be a number/);
+});

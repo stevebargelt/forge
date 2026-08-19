@@ -46,7 +46,8 @@ import { isPhasePrimaryRow, isFanoutChildRow } from "./lifecycle-evaluator.js";
 import { shouldRetainContainer } from "./docker-exec.js";
 import { liveRunLockHolder } from "../util/run-lock.js";
 import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
-import { reconcileCiWaits } from "./ci-wait.js";
+import { reconcileCiWaits, type CiWaitReconcileScope } from "./ci-wait.js";
+import { provenPhysical } from "../util/path-identity.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -468,8 +469,10 @@ export function isOrderedFanoutWave(parentTaskId: string): boolean {
 }
 
 /** Reconcile a single run's task + run state against reality. Returns what (if
- *  anything) changed. */
-export function reconcileRun(
+ *  anything) changed. Core body WITHOUT CI-wait recovery — reconcileRun (single) adds a
+ *  scoped recovery around this, and reconcileRuns loops this core and recovers ONCE for
+ *  the whole set, so a batch reconcile does not re-fire recovery per run. */
+function reconcileRunCore(
   runId: string,
   containerAlive: ContainerAlive = defaultContainerAlive,
   reapContainer: ContainerReap = defaultContainerReap,
@@ -1698,6 +1701,51 @@ export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] 
   return changes;
 }
 
+/** The CI-wait recovery scope for a set of runs: the runs themselves plus their
+ *  projects (both canonical and verbatim, so a wait matches on either). RF-1/RF-4:
+ *  recovery re-observes only waits tied to these runs or sitting in their projects,
+ *  never host-wide. */
+function ciWaitScopeForRuns(runIds: readonly string[]): CiWaitReconcileScope {
+  const projectDirs = new Set<string>();
+  for (const id of runIds) {
+    const pd = getRun(id)?.projectDir;
+    if (!pd) continue;
+    projectDirs.add(pd);
+    const canonical = provenPhysical(pd);
+    if (canonical) projectDirs.add(canonical);
+  }
+  return { runIds, projectDirs: [...projectDirs] };
+}
+
+/** RF-1/RF-4: re-observe any CI wait whose waiter is presumed dead (expired lease),
+ *  SCOPED to exactly the runs (and their projects) being reconciled — never host-wide,
+ *  which would probe/mutate other workspaces' waits. Best-effort: a gh hiccup (or, on
+ *  the read-only path, no live waits) must never fail run reconciliation. */
+function recoverCiWaitsForRuns(runIds: readonly string[]): void {
+  try {
+    reconcileCiWaits(ciWaitScopeForRuns(runIds));
+  } catch {
+    /* recovery is advisory here; the run reconcile is the primary result */
+  }
+}
+
+/** Reconcile a single run's task + run state against reality, then re-observe that
+ *  run's CI waits. RF-1: the single-run path (`forge status <run-id>`, and show/next/
+ *  recover) must run CI-wait recovery too — scoped to THIS run (RF-4), the same scope
+ *  reconcileRuns uses. Returns what (if anything) changed. */
+export function reconcileRun(
+  runId: string,
+  containerAlive: ContainerAlive = defaultContainerAlive,
+  reapContainer: ContainerReap = defaultContainerReap,
+  containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
+  writers: ReconcileWriters = defaultReconcileWriters,
+  idleBound: ContainerIdleBound = defaultIdleBound,
+): ReconcileResult {
+  const result = reconcileRunCore(runId, containerAlive, reapContainer, containerExitInfo, writers, idleBound);
+  recoverCiWaitsForRuns([runId]);
+  return result;
+}
+
 /** Reconcile a specific set of runs. Callers pass exactly the run ids they will
  *  act on / display, so reconciliation stays scoped — e.g. `forge status` must
  *  reconcile only the workspace-filtered runs it shows, not every active run on
@@ -1710,17 +1758,11 @@ export function reconcileRuns(
   containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
 ): ReconcileResult[] {
   const results = runIds
-    .map((id) => reconcileRun(id, containerAlive, reapContainer, containerExitInfo))
+    .map((id) => reconcileRunCore(id, containerAlive, reapContainer, containerExitInfo))
     .filter((r) => r.taskChanges.length > 0 || r.runChange);
-  // FG-731 (Step 3): re-observe any CI wait whose waiter is presumed dead (expired
-  // lease). This runs wherever reconcileRuns does (top of `forge status`, dispatcher
-  // wake) and is what makes a Forge-owned CI wait REACH terminal with no live waiter.
-  // Best-effort: a gh hiccup (or, on the read-only path, no live waits) must never
-  // fail run reconciliation.
-  try {
-    reconcileCiWaits();
-  } catch {
-    /* recovery is advisory here; the run reconcile above is the primary result */
-  }
+  // FG-731 (Step 3) + RF-1/RF-4: re-observe dead-waiter CI waits ONCE for the whole
+  // reconciled set, scoped to those runs + their projects. Loops reconcileRunCore (not
+  // reconcileRun) above so this aggregate recovery is not re-fired per run.
+  recoverCiWaitsForRuns(runIds);
   return results;
 }

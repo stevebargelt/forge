@@ -37,6 +37,10 @@ afterEach(() => {
 
 const OWNER = "host:123";
 
+// The scope armPr()'s wait sits in — reconcileCiWaits is scoped (RF-1/RF-4), so the
+// recovery tests pass the project the fixture wait was registered under.
+const SCOPE = { projectDirs: ["/repos/forge"] } as const;
+
 function armPr(): ReturnType<typeof armCiWait> {
   return armCiWait({
     kind: "pr_checks",
@@ -44,6 +48,16 @@ function armPr(): ReturnType<typeof armCiWait> {
     owner: OWNER,
     leaseMs: 60000,
     association: { projectDir: "/repos/forge", ticketId: "FG-731" },
+  });
+}
+
+function armPrIn(projectDir: string, prNumber: number): ReturnType<typeof armCiWait> {
+  return armCiWait({
+    kind: "pr_checks",
+    remote: { repo: "acme/forge", prNumber },
+    owner: OWNER,
+    leaseMs: 60000,
+    association: { projectDir },
   });
 }
 
@@ -303,7 +317,7 @@ describe("FG-731 reconcileCiWaits — re-observation recovery (Step 3)", () => {
     const armed = armPr();
     expireLease(armed.id);
     const probe: CiWaitProbe = () => ({ observation: { state: "completed" } });
-    const changes = reconcileCiWaits(probe, storeNowMs);
+    const changes = reconcileCiWaits(SCOPE, probe, storeNowMs);
     assert.equal(getCiWait(armed.id)?.lifecycleState, "completed_awaiting_advance");
     assert.ok(changes.some((c) => c.id === armed.id && c.to === "completed_awaiting_advance"));
   });
@@ -312,7 +326,7 @@ describe("FG-731 reconcileCiWaits — re-observation recovery (Step 3)", () => {
     const armed = armPr();
     expireLease(armed.id);
     const probe: CiWaitProbe = () => ({ observation: { state: "running", m: 1, n: 4 } });
-    reconcileCiWaits(probe, storeNowMs);
+    reconcileCiWaits(SCOPE, probe, storeNowMs);
     const row = getCiWait(armed.id);
     assert.equal(row?.terminal, false, "lease expiry is not terminal authority — the run is still real on GitHub");
     assert.equal(row?.lifecycleState, "running");
@@ -323,7 +337,7 @@ describe("FG-731 reconcileCiWaits — re-observation recovery (Step 3)", () => {
     const armed = armPr();
     expireLease(armed.id);
     const probe: CiWaitProbe = () => ({ observation: { state: "no_runs" }, gone: true });
-    reconcileCiWaits(probe, storeNowMs);
+    reconcileCiWaits(SCOPE, probe, storeNowMs);
     assert.equal(getCiWait(armed.id)?.terminalDisposition, "abandoned");
   });
 
@@ -335,7 +349,7 @@ describe("FG-731 reconcileCiWaits — re-observation recovery (Step 3)", () => {
       probed = true;
       return { observation: { state: "completed" } };
     };
-    reconcileCiWaits(probe, storeNowMs);
+    reconcileCiWaits(SCOPE, probe, storeNowMs);
     assert.equal(probed, false, "a live-lease wait must not be double-probed by recovery");
     assert.equal(getCiWait(armed.id)?.lifecycleState, "registered");
   });
@@ -343,8 +357,51 @@ describe("FG-731 reconcileCiWaits — re-observation recovery (Step 3)", () => {
   test("recovery reaps NOTHING — a completed_awaiting_advance row stays on the live surface (FG-590 boundary)", () => {
     const armed = armPr();
     expireLease(armed.id);
-    reconcileCiWaits(() => ({ observation: { state: "completed" } }) as CiWaitProbeOutcome, storeNowMs);
+    reconcileCiWaits(SCOPE, () => ({ observation: { state: "completed" } }) as CiWaitProbeOutcome, storeNowMs);
     const live = readCiWaits({ liveOnly: true });
     assert.ok(live.some((w) => w.id === armed.id), "completed_awaiting_advance is a legitimate non-terminal state, not a leak");
+  });
+
+  test("RF-4: an out-of-scope wait (another workspace) is NEVER probed or mutated", () => {
+    const mine = armPrIn("/repos/forge", 42);
+    const other = armPrIn("/repos/elsewhere", 7);
+    expireLease(mine.id);
+    expireLease(other.id);
+    const probed: string[] = [];
+    const probe: CiWaitProbe = (w) => {
+      probed.push(w.id);
+      return { observation: { state: "completed" } };
+    };
+    const changes = reconcileCiWaits({ projectDirs: ["/repos/forge"] }, probe, storeNowMs);
+    assert.deepEqual(probed, [mine.id], "recovery must probe only in-scope waits");
+    assert.ok(changes.some((c) => c.id === mine.id));
+    assert.equal(getCiWait(other.id)?.lifecycleState, "registered", "an out-of-scope wait stays untouched");
+  });
+
+  test("RF-1: a wait is in scope by its runId even without a project match", () => {
+    const armed = armCiWait({
+      kind: "pr_checks",
+      remote: { repo: "acme/forge", prNumber: 99 },
+      owner: OWNER,
+      leaseMs: 60000,
+      association: { runId: "run-abc", projectDir: "/repos/forge" },
+    });
+    expireLease(armed.id);
+    const probe: CiWaitProbe = () => ({ observation: { state: "completed" } });
+    reconcileCiWaits({ runIds: ["run-abc"] }, probe, storeNowMs);
+    assert.equal(getCiWait(armed.id)?.lifecycleState, "completed_awaiting_advance");
+  });
+
+  test("an empty scope matches nothing — recovery is never implicitly host-wide", () => {
+    const armed = armPr();
+    expireLease(armed.id);
+    let probed = false;
+    const probe: CiWaitProbe = () => {
+      probed = true;
+      return { observation: { state: "completed" } };
+    };
+    reconcileCiWaits({}, probe, storeNowMs);
+    assert.equal(probed, false);
+    assert.equal(getCiWait(armed.id)?.lifecycleState, "registered");
   });
 });

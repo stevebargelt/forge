@@ -144,9 +144,21 @@ type RunListRow = {
  *  Predicate: event ∈ {workflow_dispatch, ⊥} ∧ (ref matches when recorded) ∧
  *  createdAt ≥ started_at (strict, no skew slack), then min(createdAt).
  *
- *  `gh run list` exposes no per-run dispatch inputs, so dispatch-input matching is not
- *  available here — the created-at bound is the guard. A row without a createdAt cannot
- *  be proven post-registration and is therefore never selected. */
+ *  RF-3 (dispatch inputs / accepted residual): GitHub exposes NO per-run
+ *  workflow_dispatch inputs on either read we have — `gh run list` and `gh run view
+ *  --json` both omit an `inputs` field — so the dispatch inputs CANNOT be a correlation
+ *  key here, even though we store them. The stored `dispatch_inputs` are therefore not
+ *  dead state: they are the durable REQUEST evidence of what this wait dispatched (the
+ *  ci_waits row is the recoverable identity record), retained for audit/recovery, not
+ *  for run selection. With inputs unavailable, workflow/ref/event + the created-at bound
+ *  are the only discriminators. The accepted residual: two CONCURRENT dispatches of the
+ *  IDENTICAL workflow on the IDENTICAL ref, BOTH created after this registration, are
+ *  indistinguishable — min(createdAt) picks the earlier, which may not be ours. This is
+ *  accepted because this single-user orchestrator does not fire two identical dispatches
+ *  of the same workflow/ref concurrently; a naive first-match (the original RF-2 bug)
+ *  could attach to a PRIOR unrelated run, which the created-at bound rules out.
+ *
+ *  A row without a createdAt cannot be proven post-registration and is never selected. */
 function matchDispatchRun(wait: CiWait, rows: RunListRow[]): RunListRow | undefined {
   const registeredMs = new Date(wait.startedAt).getTime();
   const candidates = rows.filter((row) => {
@@ -436,6 +448,30 @@ export type CiWaitRecoveryChange = {
   observedState: CiWaitObservedState | null;
 };
 
+/** The run/project scope a reconcile pass is permitted to re-observe (RF-1/RF-4).
+ *  Recovery is hooked in reconcile, and a reconcile stays scoped to the run set it is
+ *  reconciling — so a workspace- or single-run reconcile must NEVER `gh`-probe or mutate
+ *  waits outside that scope (that would reach into other workspaces' waits). A wait is in
+ *  scope when it is tied to one of these runs (`runId`) OR sits in one of these projects
+ *  (`projectDirs`, matched against the wait's canonical project) — the latter so a
+ *  runless, project/ticket-only wait in the reconciled workspace still recovers.
+ *  `projectDirs` are expected already-canonical (provenPhysical), to match
+ *  `projectDirCanonical`; the verbatim `projectDir` is a fallback for rows with no
+ *  canonical. An empty scope matches NOTHING — recovery is never implicitly host-wide. */
+export type CiWaitReconcileScope = {
+  runIds?: readonly string[];
+  projectDirs?: readonly string[];
+};
+
+function waitInReconcileScope(wait: CiWait, scope: CiWaitReconcileScope): boolean {
+  if (wait.runId != null && scope.runIds?.includes(wait.runId)) return true;
+  if (scope.projectDirs && scope.projectDirs.length > 0) {
+    if (wait.projectDirCanonical != null && scope.projectDirs.includes(wait.projectDirCanonical)) return true;
+    if (wait.projectDir != null && scope.projectDirs.includes(wait.projectDir)) return true;
+  }
+  return false;
+}
+
 /** Re-observe every NON-TERMINAL wait whose lease has expired (waiter presumed dead),
  *  advancing it to whatever `gh` now reports. An expired lease NEVER by itself
  *  terminalizes the wait (invariant 1) — terminal comes ONLY from re-observation
@@ -444,14 +480,20 @@ export type CiWaitRecoveryChange = {
  *  terminal-reachability — recovery IS re-observation.
  *
  *  FG-590 boundary: this reaps NOTHING. `completed_awaiting_advance` is a legitimate
- *  non-terminal state (an advance is owed), not a leak. */
+ *  non-terminal state (an advance is owed), not a leak.
+ *
+ *  RF-1/RF-4: `scope` bounds which waits this pass may touch to the run/project set the
+ *  calling reconcile is reconciling — an unscoped, host-wide sweep would probe and mutate
+ *  every other workspace's waits. */
 export function reconcileCiWaits(
+  scope: CiWaitReconcileScope,
   probe: CiWaitProbe = defaultCiWaitProbe,
   nowMs: () => number = defaultNowMs,
 ): CiWaitRecoveryChange[] {
   const changes: CiWaitRecoveryChange[] = [];
   const now = nowMs();
   for (const wait of readCiWaits({ liveOnly: true })) {
+    if (!waitInReconcileScope(wait, scope)) continue; // RF-4: never touch out-of-scope waits
     const lease = wait.leaseExpiresAtMs;
     const expired = lease === null || lease <= now;
     if (!expired) continue; // a live waiter owns the poll; do not double-probe

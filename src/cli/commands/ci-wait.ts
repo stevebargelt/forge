@@ -45,6 +45,25 @@ function fail(msg: string, json: boolean): number {
   return 2;
 }
 
+/** RF-2: a non-numeric or negative --timeout/--interval must be REJECTED at parse
+ *  time, never coerced through. A NaN deadline never satisfies now()>=deadline and
+ *  Node coerces a NaN/negative delay to a ~1ms timer, so a bad flag would turn the
+ *  poll loop into an effectively unbounded, near-tight `gh` hammer against the GitHub
+ *  API. `allowZero` is true only for --timeout, where 0 is the documented
+ *  "no timeout" sentinel; --interval must be strictly positive. */
+function parseWaitSeconds(
+  raw: string | undefined,
+  { allowZero }: { allowZero: boolean },
+): { value: number; error?: string } {
+  if (raw == null) return { value: 0 };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { value: 0, error: `must be a number (got '${raw}')` };
+  if (n < 0 || (n === 0 && !allowZero)) {
+    return { value: 0, error: `must be a ${allowZero ? "non-negative" : "positive"} number (got '${raw}')` };
+  }
+  return { value: n };
+}
+
 /** Assemble the arm input from flags. Repo defaults to the cwd project's preferred
  *  remote identity (owner/repo) so a plain `forge ci-wait wait --kind pr_checks --pr N`
  *  works from inside a checkout. */
@@ -181,8 +200,12 @@ export function registerCiWaitCommand(program: Command): void {
       ensureForgeDirs();
       const { input, error } = buildArmInput(opts);
       if (error) return process.exit(fail(error, !!opts.json));
-      const timeoutMs = opts.timeout != null ? (Number(opts.timeout) === 0 ? Infinity : Number(opts.timeout) * 1000) : DEFAULT_TIMEOUT_MS;
-      const intervalMs = opts.interval != null ? Number(opts.interval) * 1000 : DEFAULT_INTERVAL_MS;
+      const timeout = parseWaitSeconds(opts.timeout, { allowZero: true });
+      if (timeout.error) return process.exit(fail(`--timeout ${timeout.error}`, !!opts.json));
+      const interval = parseWaitSeconds(opts.interval, { allowZero: false });
+      if (interval.error) return process.exit(fail(`--interval ${interval.error}`, !!opts.json));
+      const timeoutMs = opts.timeout == null ? DEFAULT_TIMEOUT_MS : timeout.value === 0 ? Infinity : timeout.value * 1000;
+      const intervalMs = opts.interval == null ? DEFAULT_INTERVAL_MS : interval.value * 1000;
 
       const controller = new AbortController();
       const onSigint = () => controller.abort();
