@@ -94,6 +94,98 @@ function orchestratorBlockAltered(worktreeClaudeMd: string, committedClaudeMd: s
   return applyOrchestratorBlock(worktreeClaudeMd, committedClaudeMd).action !== "unchanged";
 }
 
+// FG-682: the documentation-path AUTHORITY for the bounded late-docs amendment. The amendment
+// verb (`forge review amend-docs`) may commit ONLY declared documentation; this pure function is
+// what lets the coordinator refuse code, tests, and config BY NAME (AC2), in the spirit of the
+// fix/docs-cycle scope refusals. It is a single classification consistent with how the review
+// already tells prose from code — a prose EXTENSION is documentation, everything else is not —
+// rather than a fourth notion of "doc". It touches no git and moves no candidate: given a
+// repo-relative path it answers `documentation | not-documentation` and nothing more.
+//
+// DEFAULT-DENY is the whole point: an authority that refuses is only sound if the ONLY accepts
+// are ones it can positively vouch for. So the accept path is the narrow one (a known prose
+// extension whose basename is not a config file), and every ambiguous or hostile shape —
+// absolute paths, `..` traversal, dotfiles, extensionless files, unknown extensions — falls
+// through to `not-documentation`.
+export type AmendmentPathClass = "documentation" | "not-documentation";
+
+// Prose file extensions that carry documentation rather than code or configuration. `.txt` is
+// included for NOTICE/README-style prose, but a handful of `.txt` DEPENDENCY manifests
+// (requirements.txt, CMakeLists.txt) are config wearing a prose extension — those are named in
+// CONFIG_PROSE_BASENAMES below so the extension gate never sweeps them in.
+const DOCUMENTATION_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".md",
+  ".mdx",
+  ".markdown",
+  ".rst",
+  ".txt",
+]);
+
+// Config / dependency manifests that carry a prose extension and would otherwise pass the
+// extension gate. Compared case-folded against the basename. Non-prose-extension config
+// (`.json`, `.yml`, `.toml`, `.lock`, …) needs no listing — it never matches
+// DOCUMENTATION_EXTENSIONS, so it is refused by default.
+const CONFIG_PROSE_BASENAMES: ReadonlySet<string> = new Set([
+  "requirements.txt",
+  "requirements-dev.txt",
+  "constraints.txt",
+  "cmakelists.txt",
+]);
+
+// FG-732: the orchestrator-policy surface is NEVER amendable documentation, even though both
+// files ARE markdown. `CLAUDE.md` carries the rendered `forge:orchestrator` block and
+// `seeds/orchestrator-template.md` authors it; a late-docs amendment may commit NEITHER —
+// mirroring the docs-cycle refusal at this file's `docs_cycle_touched_generated_surface`. A pure
+// PATH classifier cannot see the block boundary the docs-cycle guard inspects, so it fails closed
+// on the WHOLE of `CLAUDE.md` (an out-of-block CLAUDE.md prose correction is not amendable through
+// this verb — the safe under-approximation); the byte-level block distinction stays with the
+// committer's `orchestratorBlockAltered` guard as defense in depth.
+const AMENDMENT_POLICY_SURFACE: ReadonlySet<string> = new Set([
+  GENERATED_SURFACE_FILE, // "CLAUDE.md"
+  ORCHESTRATOR_SEED_REL, // "seeds/orchestrator-template.md"
+]);
+
+// A test file is CODE, even when it sits beside prose or (contrived) carries a prose extension.
+// The prose-extension gate already refuses `foo.test.ts` (`.ts` is not prose); this predicate
+// makes the intent explicit and also catches a `foo.test.md`-shaped path. Matches the common
+// `.test.`/`.spec.` infixes, including `.integration.test.` and `.worktree.test.`.
+function isTestBasename(base: string): boolean {
+  return /\.(test|spec)\.[^.]+$/i.test(base);
+}
+
+/** Classify a repo-relative path as amendable documentation or not — the AC2 authority the
+ *  coordinator consults to refuse a non-documentation path by name. PURE: no git, no store, no
+ *  candidate movement. Refusals are checked BEFORE the accept so a named carve-out (FG-732
+ *  surface, a config `.txt`, a test file) always wins over the extension gate. Fails closed on
+ *  every ambiguous or hostile shape. */
+export function classifyAmendmentPath(repoRelPath: string): AmendmentPathClass {
+  const path = repoRelPath.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+  if (path === "") return "not-documentation";
+
+  // Fail closed on anything that is not a plain repo-relative path: an absolute path or a `..`
+  // traversal segment could name a file outside the reviewed tree, which the amendment must never
+  // reach into. (git status emits repo-relative, `..`-free paths, so a well-formed input is
+  // unaffected; a hostile or malformed declaration is refused here.)
+  if (path.startsWith("/") || path.split("/").includes("..")) return "not-documentation";
+
+  // FG-732: orchestrator-policy surface is never amendable documentation.
+  if (AMENDMENT_POLICY_SURFACE.has(path)) return "not-documentation";
+
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const baseLower = base.toLowerCase();
+
+  // A test file is code; a listed config `.txt` is config. Both refused ahead of the gate.
+  if (isTestBasename(base)) return "not-documentation";
+  if (CONFIG_PROSE_BASENAMES.has(baseLower)) return "not-documentation";
+
+  // The single doc-vs-code distinction: a known prose extension is documentation. A leading-dot
+  // basename (`.gitignore`) has its dot at index 0 → no extension → not documentation. An
+  // extensionless file (`Makefile`, `README` with no suffix) → not documentation.
+  const dot = base.lastIndexOf(".");
+  const ext = dot <= 0 ? "" : baseLower.slice(dot);
+  return DOCUMENTATION_EXTENSIONS.has(ext) ? "documentation" : "not-documentation";
+}
+
 export type WiringContext = {
   projectDir: string;
   ticketId: string;
