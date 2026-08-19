@@ -254,6 +254,8 @@ function stageDeps(over: Partial<CoordinatorDeps> = {}): CoordinatorDeps {
     dispatchFixer: () => {
       throw new Error("unreachable");
     },
+    captureFixWorkspace: () => ({ diffPatch: "", porcelainStatus: "" }),
+    dispatchFixRepair: () => ({ ok: false, taskId: "", error: "no repair in this test" }),
     commitFixCycle: () => {
       throw new Error("unreachable");
     },

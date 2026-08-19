@@ -67,8 +67,14 @@ import {
   verifyMaterializedPayload,
   fixBatchesForReview,
   fixBatchResults,
+  captureRefusedFixDelivery,
+  claimRefusedFixDeliveryRepair,
+  refusedFixDelivery,
+  supersedeRefusedFixDelivery,
+  MAX_FIX_REPAIR_ATTEMPTS,
   type FixBatch,
   type FixBatchResultRecord,
+  type RefusedFixDelivery,
 } from "../store/fix-batches.js";
 import {
   classifyVerification,
@@ -319,6 +325,32 @@ export type CoordinatorDeps = {
     error?: string;
     /** FG-654: the protocol generation the fixer ran under, read back off its task
      *  manifest. Absent when the dispatch was refused before a manifest was written. */
+    protocol?: { role: string; sha256: string };
+  }>;
+  /** FG-710 AC4: capture the completed fixer workspace as a RE-APPLIABLE record, so a
+   *  schema-invalid or evidence-incomplete result does not discard finished work. Git-backed
+   *  (implemented in review-wiring, which has git; the coordinator stays git-agnostic), a peer
+   *  of materialize/dispatch/commit. Returns a git-format patch INCLUDING untracked files and
+   *  the porcelain status at refusal time. Invoked INSIDE the PRE-INGEST refusal arms only. */
+  captureFixWorkspace: (ctx: { review: Review; batch: FixBatch }) => Awaitable<{
+    diffPatch: string;
+    porcelainStatus: string;
+  }>;
+  /** FG-710 AC4: dispatch a REPAIR fixer against the SAME batch/revision as a prior refused
+   *  delivery. It is informed by the captured prior diff + every prior refusal reason and
+   *  instructed to emit a CORRECTED result.json for the SAME edits WITHOUT redoing the code.
+   *  The crash-recovery contract mirrors dispatchFixer's: the repair fixer re-applies from the
+   *  durable patch if the worktree was reset (the coordinator never writes worktree edits). The
+   *  empty-taskId sentinel has the same meaning — refused before any container started. */
+  dispatchFixRepair: (ctx: {
+    review: Review;
+    batch: FixBatch;
+    refused: RefusedFixDelivery;
+  }) => Awaitable<{
+    ok: boolean;
+    taskId: string;
+    result?: unknown;
+    error?: string;
     protocol?: { role: string; sha256: string };
   }>;
   /** FG-649 change 1: THE COORDINATOR COMMITS THE FIX CYCLE, so the post-fix sha is known
@@ -1158,13 +1190,24 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   const pending = fixCycleAwaitingRecord(snap);
   const fixNow = unresolvedFixNow(snap.findings, candidate);
 
+  // FG-710 AC4: THE THIRD RECOVERY ARM. When the latest batch carries an OPEN (or crash-stranded
+  // `repairing`) refused-delivery record, a prior fixer left COMPLETED edits that a schema-invalid
+  // or evidence-incomplete result could not adopt. We dispatch a REPAIR fixer against the SAME
+  // batch/revision — never a new revision, never a second code cycle — to emit a corrected
+  // result.json for those same edits. It sits ahead of the fresh-dispatch decision like `pending`
+  // does, and like `pending` it may run even when nothing else would select the stage.
+  const latestBatch = snap.batches[snap.batches.length - 1];
+  const refusedRecord =
+    latestBatch !== undefined ? refusedFixDelivery(latestBatch.id, latestBatch.revision) : undefined;
+  const refused = refusedRecord?.state === "open" || refusedRecord?.state === "repairing" ? refusedRecord : undefined;
+
   // THE EMPTY SET IS A NAMED REFUSAL, NOT A STACK TRACE. `ensureFixBatch` throws on an empty
   // finding list, and this refusal must land BEFORE setReviewState — a row moved to `fixing`
   // for a stage that can never be selected again is parked mid-stage with nothing an operator
   // could act on. With the selecting predicate and this guard sharing one definition of the
   // set (unresolvedFixNow) the transition is not selected here anyway; the guard is what makes
   // that true by construction rather than by agreement between two call sites.
-  if (pending === undefined && fixNow.length === 0) {
+  if (pending === undefined && refused === undefined && fixNow.length === 0) {
     return {
       transition,
       status: "refused",
@@ -1193,14 +1236,128 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
 
   setReviewState(reviewId, "fixing", { reason: transition.reason });
 
-  const batch = pending ?? ensureFixBatch(reviewId, candidate, fixNow).batch;
+  const batch =
+    refused !== undefined
+      ? (latestBatch as FixBatch)
+      : (pending ?? ensureFixBatch(reviewId, candidate, fixNow).batch);
 
   let taskId: string;
   let results: readonly FixBatchResultRecord[];
   let scopeChangeIds: string[];
   let repeatIngest: boolean;
 
-  if (pending !== undefined) {
+  // FG-710 AC4: capture the completed workspace + the raw refused bytes into the durable
+  // refused-delivery record. Invoked ONLY at the PRE-INGEST refusals — a schema-invalid result
+  // (Shape A) or a demonstrated `fixed` naming no executed assertion (Shape B) — because those
+  // are the refusals whose completed edits have no adoption path. Post-ingest refusals
+  // (commitFixCycle) already re-enter via `fixCycleAwaitingRecord` and leave nothing to capture.
+  const rawResultBytes = (r: unknown): string => (typeof r === "string" ? r : JSON.stringify(r ?? null));
+  const captureRefusal = async (dispatchResult: unknown, reasons: string[]): Promise<void> => {
+    const artifacts = await deps.captureFixWorkspace({ review, batch });
+    captureRefusedFixDelivery({
+      batchId: batch.id,
+      revision: batch.revision,
+      capturedAtCandidateSha: candidate,
+      refusalReasons: reasons,
+      rawResultBytes: rawResultBytes(dispatchResult),
+      diffPatch: artifacts.diffPatch,
+      porcelainStatus: artifacts.porcelainStatus,
+    });
+  };
+
+  // The SHARED post-dispatch pipeline for the fresh and the repair arms alike: record the
+  // protocol, gate on ok, parse (capture on Shape A), ingest (capture on Shape B). A `done`
+  // result is a completed StageOutcome to return; otherwise it carries the ingested scope.
+  type Delivered =
+    | { done: true; outcome: StageOutcome }
+    | { done: false; taskId: string; results: readonly FixBatchResultRecord[]; scopeChangeIds: string[]; repeatIngest: boolean };
+  const deliver = async (dispatch: {
+    ok: boolean;
+    taskId: string;
+    result?: unknown;
+    error?: string;
+    protocol?: { role: string; sha256: string };
+  }): Promise<Delivered> => {
+    if (dispatch.taskId !== "") markFixBatchDispatched(batch.id, dispatch.taskId);
+    if (dispatch.protocol && dispatch.taskId !== "") {
+      recordAgentProtocol(review.id, {
+        role: dispatch.protocol.role,
+        sha256: dispatch.protocol.sha256,
+        taskId: dispatch.taskId,
+        stage: "fix_batch",
+      });
+    }
+    if (!dispatch.ok) {
+      return {
+        done: true,
+        outcome: refuse(
+          `the fixer failed (${dispatch.error ?? "no error recorded"}) — fix batch ${batch.id} revision ` +
+            `${batch.revision} stays open and its findings stay fix_now, unresolved.`,
+        ),
+      };
+    }
+    const parsed = parseFixerResult(dispatch.result);
+    if (!parsed.ok) {
+      // FG-710 Shape A: the completed edits are preserved before we refuse.
+      await captureRefusal(dispatch.result, [parsed.refusal]);
+      return { done: true, outcome: refuse(parsed.refusal) };
+    }
+    const ingestion = ingestFixBatchResults(
+      batch.id,
+      dispatch.taskId,
+      { batchId: parsed.claimedBatchId, revision: parsed.claimedRevision },
+      parsed.results,
+    );
+    if (!ingestion.ok) {
+      // FG-710 Shape B: only the demonstrated-evidence-missing refusal preserves work — the
+      // membership refusals (foreign/omitted/duplicate id) name a result about the wrong scope,
+      // which a repair of the SAME edits cannot correct.
+      if (ingestion.refusalKind === "demonstrated_evidence_missing") {
+        await captureRefusal(dispatch.result, [ingestion.refusal]);
+      }
+      return { done: true, outcome: refuse(ingestion.refusal) };
+    }
+    return {
+      done: false,
+      taskId: dispatch.taskId,
+      results: ingestion.records,
+      scopeChangeIds: parsed.scopeChanges,
+      repeatIngest: ingestion.alreadyIngested,
+    };
+  };
+
+  if (refused !== undefined) {
+    // FG-710 AC4: THE REPAIR ARM. Same batch/revision, informed by the captured diff + every
+    // prior refusal reason. FG-660 holds — no new revision, no second code cycle.
+    if (refused.state === "open" && refused.repairAttempts >= MAX_FIX_REPAIR_ATTEMPTS) {
+      return refuse(
+        `fix_delivery_repair_exhausted: fix batch ${batch.id} revision ${batch.revision} has had ` +
+          `${refused.repairAttempts} repair attempt(s) against a refused delivery and still cannot produce a valid, ` +
+          `evidence-complete result. The completed worktree edits and every refusal reason are preserved in the ` +
+          `refused-delivery record; this review is PARKED for an operator rather than looping. Prior refusals: ` +
+          `${refused.refusalReasons.join(" | ")}`,
+      );
+    }
+    // Serialization (high-risk): a compare-and-set of open -> repairing gates the dispatch so
+    // two concurrent `forge review continue` cannot both dispatch a repair. A crash-stranded
+    // `repairing` record is re-driven from the durable patch without re-claiming (the attempt
+    // was already counted at its claim); the repair fixer re-applies the patch if the tree reset.
+    let claim: RefusedFixDelivery = refused;
+    if (refused.state === "open") {
+      const won = claimRefusedFixDeliveryRepair(batch.id, batch.revision);
+      if (won === undefined) {
+        return refuse(
+          `fix_delivery_repair_in_flight: a repair for fix batch ${batch.id} revision ${batch.revision} was already ` +
+            `claimed by a concurrent pass. Nothing was dispatched; re-run \`forge review continue ${reviewId}\` once it settles.`,
+        );
+      }
+      claim = won;
+    }
+    const dispatch = await deps.dispatchFixRepair({ review, batch, refused: claim });
+    const delivered = await deliver(dispatch);
+    if (delivered.done) return delivered.outcome;
+    ({ taskId, results, scopeChangeIds, repeatIngest } = delivered);
+  } else if (pending !== undefined) {
     // Re-derived from the store, never re-dispatched. `fixBatchResults` is the same read the
     // ingest returns, so the commit sees exactly the scope the ledger recorded.
     results = fixBatchResults(batch.id);
@@ -1221,44 +1378,9 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
     if (!verified.ok) return refuse(verified.refusal);
 
     const dispatch = await deps.dispatchFixer(ctx);
-    // The empty-taskId sentinel (CoordinatorDeps.dispatchFixer): a refusal from BEFORE the
-    // container started names no task. Marking the batch dispatched against an empty id would
-    // record a delivery that never happened; leaving it open re-enters this revision as-is.
-    if (dispatch.taskId !== "") markFixBatchDispatched(batch.id, dispatch.taskId);
-    // FG-654: recorded against the REVISION that was actually delivered, and recorded
-    // BEFORE the ok/parse gates below — a fixer that ran under a protocol and then crashed
-    // still ran under that protocol, and that is exactly the fact a later reader needs.
-    if (dispatch.protocol && dispatch.taskId !== "") {
-      recordAgentProtocol(review.id, {
-        role: dispatch.protocol.role,
-        sha256: dispatch.protocol.sha256,
-        taskId: dispatch.taskId,
-        stage: "fix_batch",
-      });
-    }
-    if (!dispatch.ok) {
-      // Fixer crash: findings stay fix_now and unresolved. Nothing is recorded.
-      return refuse(
-        `the fixer failed (${dispatch.error ?? "no error recorded"}) — fix batch ${batch.id} revision ` +
-          `${batch.revision} stays open and its findings stay fix_now, unresolved.`,
-      );
-    }
-
-    const parsed = parseFixerResult(dispatch.result);
-    if (!parsed.ok) return refuse(parsed.refusal);
-
-    const ingestion = ingestFixBatchResults(
-      batch.id,
-      dispatch.taskId,
-      { batchId: parsed.claimedBatchId, revision: parsed.claimedRevision },
-      parsed.results,
-    );
-    if (!ingestion.ok) return refuse(ingestion.refusal);
-
-    taskId = dispatch.taskId;
-    results = ingestion.records;
-    scopeChangeIds = parsed.scopeChanges;
-    repeatIngest = ingestion.alreadyIngested;
+    const delivered = await deliver(dispatch);
+    if (delivered.done) return delivered.outcome;
+    ({ taskId, results, scopeChangeIds, repeatIngest } = delivered);
   }
 
   // THE FIXER'S OWN CLAIM about what it touched, read back from the ledger — an expected-changes
@@ -1274,6 +1396,13 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
         `re-run \`forge review continue ${reviewId}\`; no second fixer will be dispatched for this revision.`,
     );
   }
+
+  // FG-710 AC4: the commit landed, so a corrected result adopted the completed edits. Retire any
+  // refused-delivery record for this batch/revision — idempotent, and a no-op on the ordinary
+  // path where none exists. It covers the repair arm AND the resume arm (a repair that ingested
+  // but whose commit refused re-enters through `pending`, so the retire must not be bound to the
+  // repair branch alone).
+  supersedeRefusedFixDelivery(batch.id, batch.revision);
 
   // A scope-changing conflict returns THAT finding to disposition as an architecture
   // question and lets the rest of the batch proceed. Guessing through it is what the
@@ -1629,7 +1758,14 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   const fixerEvidence: Record<string, string> = {};
   for (const b of snap.batches) {
     for (const r of fixBatchResults(b.id)) {
-      if (r.evidence !== undefined) fixerEvidence[r.findingId] = r.evidence;
+      if (r.evidence === undefined && r.executedAssertion === undefined) continue;
+      // FG-710 Shape B: the executed-assertion identity rides WITH the claim so the recheck
+      // executes the SAME named assertion against the candidate (AC6). Stage 8 stays the sole
+      // candidate-bound executor — this only tells it which assertion to run.
+      fixerEvidence[r.findingId] =
+        r.executedAssertion !== undefined
+          ? `${r.evidence ?? ""}\n\nexecuted assertion: ${r.executedAssertion}`.trim()
+          : (r.evidence as string);
     }
   }
 

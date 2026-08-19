@@ -993,8 +993,46 @@ CREATE TABLE IF NOT EXISTS fix_batch_results (
   interaction        TEXT,
   evidence_path      TEXT,
   evidence_sha256    TEXT,
+  -- FG-710 Shape B: the candidate-bound executed-assertion identity the fixer named for a
+  -- demonstrated 'fixed' finding, surfaced to the recheck so Stage 8 executes THIS assertion.
+  -- Nullable; a scope_change / not_fixed result and a non-demonstrated finding carry NULL.
+  executed_assertion TEXT,
   ingested_at        TEXT NOT NULL,
   PRIMARY KEY (batch_id, task_id, finding_id)
+);
+
+-- FG-710 Shape A/AC4: the DURABLE refused-delivery record. When a fixer's result.json is
+-- refused BEFORE ingestion (a schema-invalid Shape-A result, or a Shape-B demonstrated 'fixed'
+-- naming no executed assertion), the code remediation in the task workspace is COMPLETE but has
+-- no adoption path — the coordinator owns the commit, so the orchestrator cannot land it by
+-- hand. This row preserves the completed work: the raw result bytes, a re-appliable diff patch
+-- (including untracked files), the porcelain status, and every refusal reason. A supported
+-- repair-retry re-enters the SAME batch/revision (never a new revision) informed by this record
+-- and emits a CORRECTED result.json for the same edits.
+--
+-- Keyed (batch_id, revision) — NOT a new FIX_BATCH_STATES value: the batch lifecycle is
+-- unchanged, and this is a separate recovery ledger beside it. Brand-new table, so the
+-- CREATE TABLE IF NOT EXISTS here IS the additive migration (no ADDITIVE_COLUMNS entry needed);
+-- user_version is untouched (FG-568 forward-gate contract), so an older binary is never broken.
+--
+-- state: 'open' (a repair is owed) -> 'repairing' (a repair dispatch has claimed it, via a
+-- compare-and-set so two concurrent 'forge review continue' cannot both dispatch) -> 'superseded'
+-- (a corrected result ingested and the cycle committed). A repair that refuses again returns it
+-- to 'open'. repair_attempts is the cap counter: at most 2 repairs, then the review PARKS.
+CREATE TABLE IF NOT EXISTS fix_batch_refused_deliveries (
+  batch_id                  TEXT NOT NULL REFERENCES fix_batches(id) ON DELETE CASCADE,
+  revision                  INTEGER NOT NULL,
+  raw_result_bytes          TEXT,
+  diff_patch                TEXT,
+  porcelain_status          TEXT,
+  refusal_reasons_json      TEXT NOT NULL DEFAULT '[]',
+  captured_at_candidate_sha TEXT NOT NULL,
+  repair_attempts           INTEGER NOT NULL DEFAULT 0,
+  state                     TEXT NOT NULL DEFAULT 'open'
+                              CHECK (state IN ('open', 'repairing', 'superseded')),
+  created_at                TEXT NOT NULL,
+  updated_at                TEXT NOT NULL,
+  PRIMARY KEY (batch_id, revision)
 );
 
 -- FG-655: the docs stage's DURABLE DISPATCH BINDING. One more brand-new table on the
@@ -1998,6 +2036,47 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "fix_batch_results", column: "interaction", ddl: "ALTER TABLE fix_batch_results ADD COLUMN interaction TEXT" },
   { table: "fix_batch_results", column: "evidence_path", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_path TEXT" },
   { table: "fix_batch_results", column: "evidence_sha256", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_sha256 TEXT" },
+  // FG-710 Shape B: the executed-assertion identity a demonstrated `fixed` finding must name.
+  { table: "fix_batch_results", column: "executed_assertion", ddl: "ALTER TABLE fix_batch_results ADD COLUMN executed_assertion TEXT" },
+
+  // FG-710: fix_batch_refused_deliveries. Brand-new, so a real old DB gets it whole from the
+  // CREATE TABLE IF NOT EXISTS above and none of these ALTERs ever fires there. They are declared
+  // for the FG-608 parity guard, which strips a fresh DB to the oldest shape SQLite permits and
+  // demands the migration path restore it. Only the RESTORABLE columns appear: batch_id/revision
+  // are the primary key and captured_at_candidate_sha, created_at and updated_at are NOT NULL with
+  // NO DEFAULT, so ADD COLUMN could never put them back and listing them would be a lie.
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "raw_result_bytes",
+    ddl: "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN raw_result_bytes TEXT",
+  },
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "diff_patch",
+    ddl: "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN diff_patch TEXT",
+  },
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "porcelain_status",
+    ddl: "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN porcelain_status TEXT",
+  },
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "refusal_reasons_json",
+    ddl: "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN refusal_reasons_json TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "repair_attempts",
+    ddl: "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN repair_attempts INTEGER NOT NULL DEFAULT 0",
+  },
+  {
+    table: "fix_batch_refused_deliveries",
+    column: "state",
+    ddl:
+      "ALTER TABLE fix_batch_refused_deliveries ADD COLUMN state TEXT NOT NULL DEFAULT 'open' " +
+      "CHECK (state IN ('open', 'repairing', 'superseded'))",
+  },
 
   // FG-655: the docs dispatch binding. Brand-new, so a real old DB gets it whole from the
   // CREATE above and none of these ever fires there — they exist for the FG-608 parity

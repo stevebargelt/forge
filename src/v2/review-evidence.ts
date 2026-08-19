@@ -275,6 +275,21 @@ export function ranTestNames(ran: string | readonly string[]): string[] {
   return parts.map((p) => p.trim());
 }
 
+/** FG-710 Shape B: is a claimed executed-assertion identity SHAPE-valid — does it name at
+ *  least one test with NO blank member? Reuses the SAME `ranTestNames` split the FG-639
+ *  validator binds per-test identity through, so the identity the fixer claims and the one the
+ *  rechecker later executes are read the same way and cannot drift.
+ *
+ *  This is a SHAPE check only. Whether that named assertion actually EXECUTED against the
+ *  candidate is Stage 8's job — the recheck stays the sole candidate-bound executor (FG-639).
+ *  Enforcing the shape here is what stops a demonstrated `fixed` finding from landing with no
+ *  assertion for the recheck to bind, which is the FG-709 defect. */
+export function executedAssertionIdentityValid(ran: string | undefined): boolean {
+  if (ran === undefined) return false;
+  const names = ranTestNames(ran);
+  return names.length > 0 && names.every((n) => n !== "");
+}
+
 /** How one member of a cited list is named in a refusal. A blank member has no name to
  *  print, and printing the empty string reads as a test called nothing. */
 function memberLabel(names: readonly string[], index: number): string {

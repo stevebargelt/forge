@@ -358,6 +358,8 @@ function harness(opts: { findingOver?: Record<string, unknown> } = {}): { deps: 
     },
     materializeFixBatch: (ctx) => ctx.payload,
     dispatchFixer: () => ({ ok: false, taskId: "", error: "not reached" }),
+    captureFixWorkspace: () => ({ diffPatch: "", porcelainStatus: "" }),
+    dispatchFixRepair: () => ({ ok: false, taskId: "", error: "no repair in this test" }),
     commitFixCycle: () => ({ kind: "no_change", sha: CANDIDATE }),
     // FG-655: a durably-bound docs dispatch whose agent declares nothing against a clean
     // tree — the legitimate no-op. This suite never reaches Stage 6, but the seams are

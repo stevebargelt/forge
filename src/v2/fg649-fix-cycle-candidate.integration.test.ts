@@ -47,7 +47,7 @@ import {
   type Review,
   type ReviewFinding,
 } from "../store/reviews.js";
-import { fixBatchesForReview } from "../store/fix-batches.js";
+import { fixBatchesForReview, refusedFixDelivery } from "../store/fix-batches.js";
 import { buildCoordinatorDeps } from "../cli/commands/review-wiring.js";
 import { runNextStage, type CoordinatorDeps, type StageOutcome } from "./review-run.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
@@ -166,6 +166,7 @@ function editingFixer(payload: FixPayload): unknown {
       remediation_summary: "guarded the partial write",
       files_changed: ["src/reconcile.ts", "src/reconcile.test.ts"],
       evidence: EXECUTED,
+      executed_assertion: AC_TEST,
     })),
   };
 }
@@ -457,6 +458,88 @@ test("integ FG-649: the fix cycle records the POST-FIX candidate automatically, 
   assert.equal(h.dispatches("engineer").length, 1, "one fix cycle was enough — the loop is gone");
 });
 
+// ─── FG-710: refused fixer delivery, through the real git/coordinator seam ──
+
+test("integ FG-710: a Shape-A refusal preserves real work, then a same-revision REPAIR commits and rechecks it", async () => {
+  // This is deliberately not a review-run harness test: buildCoordinatorDeps captures a real
+  // binary git patch (including the new untracked regression test), constructs the repair task,
+  // and commits its declared paths in a real repository. The first delivery has an empty
+  // optional conditional field AND an unknown key: the empty field normalizes, while strict
+  // parsing still refuses the unknown key. The repair changes only result.json, not the edits.
+  let fixerCalls = 0;
+  const h = harness({
+    fixer: (payload) => {
+      fixerCalls += 1;
+      if (fixerCalls === 1) {
+        appendFileSync(join(repo, "src", "reconcile.ts"), `\n${GUARD}\n`);
+        writeFileSync(join(repo, "src", "reconcile.test.ts"), `// ${EXECUTED}\n`);
+        return {
+          fix_batch_id: payload.fix_batch_id,
+          revision: payload.revision,
+          findings: payload.findings.map((f) => ({
+            finding_id: f.finding_id,
+            result: "fixed",
+            remediation_summary: "guarded the partial write",
+            files_changed: ["src/reconcile.ts", "src/reconcile.test.ts"],
+            evidence: EXECUTED,
+            executed_assertion: AC_TEST,
+            scope_change_reason: "",
+            unexpected_fixer_key: "must remain strict",
+          })),
+        };
+      }
+      return {
+        fix_batch_id: payload.fix_batch_id,
+        revision: payload.revision,
+        findings: payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded the partial write",
+          files_changed: ["src/reconcile.ts", "src/reconcile.test.ts"],
+          evidence: EXECUTED,
+          executed_assertion: AC_TEST,
+        })),
+      };
+    },
+  });
+  await parkAt(h.deps, "batch_fix");
+  const before = getReview(REVIEW)?.candidateSha as string;
+
+  const refused = await runNextStage(REVIEW, h.deps);
+  assert.equal(refused.status, "refused");
+  assert.match(refused.message, /unexpected_fixer_key/);
+  assert.equal(getReview(REVIEW)?.candidateSha, before, "a refused delivery cannot advance the candidate");
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "the completed edits do not mint a second batch");
+  assert.match(porcelain(), /reconcile\.test\.ts/, "the completed regression test remains in the worktree");
+
+  const batch = fixBatchesForReview(REVIEW)[0]!;
+  const captured = refusedFixDelivery(batch.id, batch.revision);
+  assert.ok(captured, "the refused result has a durable delivery record");
+  assert.match(captured?.rawResultBytes ?? "", /unexpected_fixer_key/);
+  assert.match(captured?.diffPatch ?? "", /reconcile\.test\.ts/, "untracked test is present in the re-applicable patch");
+  assert.match(captured?.diffPatch ?? "", /partial write/, "the source edit is present in the re-applicable patch");
+
+  const repaired = await runNextStage(REVIEW, h.deps);
+  assert.equal(repaired.status, "advanced", repaired.message);
+  assert.equal(fixerCalls, 2, "one initial fixer plus one result-only repair");
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "repair keeps the original batch/revision");
+  assert.equal(fixBatchesForReview(REVIEW)[0]?.revision, 1);
+  assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "superseded");
+  assert.notEqual(head(), before, "the repair adopts the original completed edits in a real commit");
+  assert.equal(porcelain(), "", "the adopted edits are not lost or left dirty");
+  const repairTask = h.dispatches("engineer")[1]?.task ?? "";
+  assert.match(repairTask, /REPAIR/i, "the second dispatch is explicitly a repair, not a fresh fixer");
+  assert.match(repairTask, /unexpected_fixer_key/, "the repair receives the prior refusal reason");
+
+  await parkAt(h.deps, "recheck");
+  const recheck = await runNextStage(REVIEW, h.deps);
+  assert.equal(recheck.status, "advanced", recheck.message);
+  for (const finding of findingsForReview(REVIEW)) {
+    assert.equal(finding.resolution, "resolved", "the named assertion resolves the finding at the committed candidate");
+    assert.notEqual(finding.disposition, "rejected_premise");
+  }
+});
+
 // ─── resumability: a crash between the ingest and the commit ─────────────────
 
 test("integ FG-649: a crash between ingestion and the commit starts NO second fixer and still records the post-fix candidate", async () => {
@@ -561,6 +644,7 @@ test("integ FG-649: a fixer that DECLARES files against a clean tree refuses by 
         remediation_summary: "claims a guard it never wrote",
         files_changed: ["src/reconcile.ts"],
         evidence: EXECUTED,
+        executed_assertion: AC_TEST,
       })),
     }),
   });
@@ -594,6 +678,7 @@ test("integ FG-649: a tree that moved OUTSIDE the declared set refuses by name a
           remediation_summary: "guarded, plus something it did not declare",
           files_changed: ["src/reconcile.ts"],
           evidence: EXECUTED,
+          executed_assertion: AC_TEST,
         })),
       };
     },
@@ -626,6 +711,7 @@ test("integ FG-655: the fix-cycle staging helper refuses a path git genuinely ca
           remediation_summary: "guarded the partial write",
           files_changed: ["src/reconcile.ts", unknown],
           evidence: EXECUTED,
+          executed_assertion: AC_TEST,
         })),
       };
     },
@@ -672,6 +758,7 @@ test("integ FG-649 / RF-7: a refused raced commit is STILL refused on the next c
           remediation_summary: "guarded the partial write",
           files_changed: ["src/reconcile.ts"],
           evidence: EXECUTED,
+          executed_assertion: AC_TEST,
         })),
       };
     },
@@ -721,6 +808,7 @@ test("integ FG-649: a fixer that COMMITS its own work refuses by name rather tha
           remediation_summary: "guarded and committed",
           files_changed: ["src/reconcile.ts"],
           evidence: EXECUTED,
+          executed_assertion: AC_TEST,
         })),
       };
     },

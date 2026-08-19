@@ -356,6 +356,12 @@ export type EventType =
   | "review.fix_batch_created"
   | "review.fix_batch_dispatched"
   | "review.fix_batch_ingested"
+  // FG-710: the refused-delivery recovery ledger. A fixer result refused BEFORE ingestion
+  // (schema-invalid Shape A, or a demonstrated `fixed` naming no executed assertion Shape B)
+  // captures the completed work; a repair-retry claims and later supersedes that record.
+  | "review.fix_delivery_refused"
+  | "review.fix_delivery_repair_claimed"
+  | "review.fix_delivery_repair_superseded"
   // FG-640: the third route by which an absent lens clears. The payload NAMES the missing
   // evidence, the lens it attaches to, and the candidate it was accepted against — an
   // acceptance is a decision about one candidate's missing review, never a standing waiver.

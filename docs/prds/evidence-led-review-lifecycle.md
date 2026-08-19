@@ -1148,6 +1148,80 @@ actual boundary that cannot ship together.
 > unaltered by this note. Operator-facing detail is
 > [Review coordinator](../concepts.md#review-coordinator).
 
+### FG-710 refinement — the fixer-result boundary
+
+> **[SHIPPED 2026-08-19 (FG-710).]** Two defects sat on either side of one
+> boundary: the point where a fixer's `result.json` is judged. Stage 5's fixer
+> template prints four OPTIONAL conditional fields (`interaction`,
+> `scope_change_reason`, `evidence_path`, `evidence_sha256`) unconditionally as
+> a worked example, and an agent copying that shape naturally emitted `""` for
+> the ones its own result did not use — an empty string on a `min(1)` optional
+> is a refusal, not an omission, so completed remediation work was discarded
+> over four bytes nobody meant as data. And every pre-ingest refusal, of any
+> shape, discarded the fixer's actual code changes along with the rejected
+> result: the coordinator owns the fix-cycle commit (FG-649), so nothing else
+> could land work sitting in a refused task's workspace, and the only recovery
+> was a second real fixer re-doing code that already existed. Two shapes, one
+> fix each, recorded here so they are not re-derived later.
+>
+> **(a) Shape A — four named optional keys normalize `""` to absence,
+> everything else still refuses exactly as before.** The normalization is
+> scoped to precisely `interaction`, `scope_change_reason`, `evidence_path`,
+> `evidence_sha256` — never `evidence` or `remediation_summary`, the two
+> REQUIRED fields, which still refuse loudly on an empty string. `.strict()`
+> unknown-key rejection is unchanged; what changed is that the refusal message
+> now enumerates every offending key a strict-object issue carries, rather than
+> the first, so a fixer that emitted three implementer-result keys by mistake
+> learns about all three in one pass instead of rediscovering them one refusal
+> at a time.
+>
+> **(b) Shape B — a `fixed` result on a `demonstrated` finding must name the
+> executed assertion it proved with.** `executed_assertion` — the
+> candidate-bound test name, or several joined with `"; "`, the fixer's proof
+> actually executed — is schema-optional, because the per-finding schema has
+> no reachability to reason from. The requirement is enforced in
+> `ingestFixBatchResults`, which reads the batch's own immutable payload and
+> does: a `fixed` result against a finding whose original `reachability` was
+> `demonstrated` that omits `executed_assertion`, or names one with no
+> resolvable test identity, refuses BEFORE anything is written
+> (`demonstrated_evidence_missing`). The same batch stays open, every finding
+> in it stays `fix_now` and unresolved, and no new batch revision is minted.
+> Stage 8's recheck executes THAT named assertion rather than re-deriving one
+> — this is prevention before stage completion, never a "trust me it was
+> fixed" escape hatch, since the recheck still runs the assertion itself and
+> remains the only thing that can record `resolved`.
+>
+> **(c) AC4 — a pre-ingest refusal captures the completed workspace instead of
+> discarding it.** Both Shape A and Shape B (the demonstrated-evidence-missing
+> arm specifically, not the membership refusals — a foreign, duplicate, or
+> omitted finding id names a result about the wrong scope, which a repair of
+> the *same* edits cannot correct) now capture, into a durable
+> `fix_batch_refused_deliveries` row keyed on the SAME batch and revision, the
+> raw result bytes and a re-appliable `git diff --binary HEAD` patch —
+> untracked files folded in via a scoped, always-undone intent-to-add — before
+> the stage refuses. The next `forge review continue` dispatches a REPAIR
+> fixer against that same batch/revision — never a new revision, never a
+> second code cycle, preserving acceptance scenario 19's retry guarantee —
+> informed by every prior refusal reason and the captured patch, and
+> instructed to emit a CORRECTED `result.json` for the SAME edits, re-applying
+> the patch first only if the worktree was reset in between. A compare-and-set
+> claim (`open` → `repairing`) serializes two concurrent `continue`s so only
+> one dispatches a repair. Repair attempts are capped at
+> `MAX_FIX_REPAIR_ATTEMPTS` (2); once a batch/revision has exhausted them with
+> the record still `open`, the review PARKS for the operator rather than
+> looping, with the completed edits and every refusal reason preserved in the
+> row rather than lost. Post-ingest refusals — a fix-cycle commit that could
+> not land — are untouched: those already re-enter through the
+> already-ingested-results short-circuit refinement (a) above describes, and
+> leave nothing pre-ingest to preserve.
+>
+> New schema: `fix_batch_results.executed_assertion` (nullable column) and the
+> brand-new `fix_batch_refused_deliveries` table, both additive —
+> [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#fix_batch_refused_deliveries-table-fg-710-refused-delivery-recovery).
+> The threat model, the acceptance scenarios, and every scope bullet above are
+> otherwise unaltered by this note. Operator-facing detail is
+> [Review coordinator](../concepts.md#review-coordinator).
+
 ### Migration safety
 
 - Persist exactly one `review_mode` per run:
