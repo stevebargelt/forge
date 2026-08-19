@@ -208,15 +208,64 @@ test("Switching checkout scope drops the COMPLETED-RUNS panel to loading, not th
   await page.close();
 });
 
-test("A slow leaving-scope response cannot repaint the scope moved to, and the leaving scope's error is cleared", async () => {
+test("A slow leaving-scope failure that lands after the scope switch cannot repaint the abandoned scope (seq guard)", async () => {
   delayByScope.clear();
   statusByScope.clear();
   const page = await newPage({ width: 1440, height: 1200 });
 
-  // The all-checkouts scope is BOTH failing and slow: its error is on screen,
-  // and a late response for it is still in flight when the operator moves on.
+  // The all-checkouts read is slow AND will fail: it is still IN FLIGHT when the
+  // operator narrows scope, and only lands (HTTP 500) afterwards. This is the
+  // state AC2 is about — a pending leaving-scope response the seq bump must
+  // retire — so the read must NOT have resolved before the switch. A generous
+  // delay keeps it pending across the switch; we then await its late landing
+  // deterministically rather than guessing a timeout.
   statusByScope.set(`key:${PROJECT_KEY}`, 500);
-  delayByScope.set(`key:${PROJECT_KEY}`, 900);
+  delayByScope.set(`key:${PROJECT_KEY}`, 3_000);
+  await page.goto(`${baseUrl}/#projects`);
+  await page.getByRole("button", { name: "Open all Atlas checkouts" }).click();
+  await page.getByRole("button", { name: "ops" }).click();
+  await page.getByRole("heading", { name: "Average agent runtime over time" }).waitFor();
+
+  // Loading, not error: the leaving read has NOT resolved, so it is genuinely
+  // pending at the moment of the switch (the flaw the previous test missed — it
+  // waited for the error to render, retiring nothing).
+  await page.locator(".runtime-loading").waitFor();
+  assert.equal(await page.locator(".runtime-error").count(), 0, "the leaving read is still pending, not yet resolved");
+
+  // Arm the wait for the leaving scope's own late response BEFORE switching, so
+  // we can assert on the panel exactly after that retired 500 has been received.
+  const leavingLate = page.waitForResponse(
+    (res) => res.url().includes("/api/agent-runtime") && res.url().includes(`projectKey=${PROJECT_KEY}`),
+  );
+
+  // Narrow to a fast, clean checkout scope while the leaving 500 is in flight.
+  await checkoutScopeButton(page, "main").click();
+  await page.getByRole("img", { name: /Average agent runtime for/ }).waitFor();
+  assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's own data is shown");
+
+  // The retired 500 lands. Its seq is stale, so the guard drops it and never
+  // writes: no error is attributed to the checkout the operator moved to. The
+  // decisive check is `.runtime-stale`, NOT `.runtime-error` — with the new
+  // scope's data on screen a broken guard would attach the leaving 500 to it as
+  // the stale-data notice (render 1144), never the bare error card (render 1159).
+  await leavingLate;
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator(".runtime-stale").count(), 0, "a late leaving-scope failure cannot be pinned to the new scope's data as stale");
+  assert.equal(await page.locator(".runtime-error").count(), 0, "a late leaving-scope failure cannot repaint the abandoned scope");
+  assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's data still stands");
+  assert.equal(await checkoutScopeButton(page, "main").getAttribute("aria-pressed"), "true");
+  await page.close();
+});
+
+test("Switching checkout scope clears the leaving scope's on-screen error (checkout-scope-btn)", async () => {
+  delayByScope.clear();
+  statusByScope.clear();
+  const page = await newPage({ width: 1440, height: 1200 });
+
+  // The all-checkouts scope has already FAILED — its error is fully rendered
+  // (nothing in flight). This is the AC3 leg: the switch must clear that error
+  // rather than carry it under the new scope's label.
+  statusByScope.set(`key:${PROJECT_KEY}`, 500);
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Atlas checkouts" }).click();
   await page.getByRole("button", { name: "ops" }).click();
@@ -226,20 +275,11 @@ test("A slow leaving-scope response cannot repaint the scope moved to, and the l
   await error.waitFor();
   assert.match(await error.innerText(), /HTTP 500/);
 
-  // The new (checkout) scope answers cleanly and quickly. On the switch: the
-  // leaving scope's error must clear (AC3), and the leaving scope's slow late
-  // response must NOT repaint the panel it was abandoned for (AC2 — seq bump).
+  // The new (checkout) scope answers cleanly: the leaving error must clear.
   await checkoutScopeButton(page, "main").click();
   await page.getByRole("img", { name: /Average agent runtime for/ }).waitFor();
   assert.equal(await page.locator(".runtime-error").count(), 0, "the leaving scope's error is not attributed to the new scope");
   assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's own data is shown");
-
-  // Let the retired 500 for the all-checkouts scope land late — it must not
-  // resurrect the error on the checkout the operator moved to.
-  await page.waitForTimeout(1200);
-  assert.equal(await page.locator(".runtime-error").count(), 0, "a late leaving-scope failure cannot repaint the abandoned scope");
-  assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's data still stands");
-  await checkoutScopeButton(page, "main");
   assert.equal(await checkoutScopeButton(page, "main").getAttribute("aria-pressed"), "true");
   await page.close();
 });
