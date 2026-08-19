@@ -12,6 +12,7 @@ import { registerRetry } from "./commands/retry.js";
 import { registerInit } from "./commands/init.js";
 import { registerWatch } from "./commands/watch.js";
 import { registerLaunch } from "./commands/launch.js";
+import { registerCiWaitCommand } from "./commands/ci-wait.js";
 import { registerUpgrade } from "./commands/upgrade.js";
 import { registerInvoke } from "./commands/invoke.js";
 import { registerContinue } from "./commands/continue.js";
@@ -89,6 +90,7 @@ export function buildProgram(): Command {
   registerInit(program);
   registerWatch(program);
   registerLaunch(program);
+  registerCiWaitCommand(program);
   registerUpgrade(program);
   registerInvoke(program);
   registerContinue(program);

@@ -46,6 +46,7 @@ import { isPhasePrimaryRow, isFanoutChildRow } from "./lifecycle-evaluator.js";
 import { shouldRetainContainer } from "./docker-exec.js";
 import { liveRunLockHolder } from "../util/run-lock.js";
 import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
+import { reconcileCiWaits } from "./ci-wait.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -1708,7 +1709,18 @@ export function reconcileRuns(
   reapContainer: ContainerReap = defaultContainerReap,
   containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
 ): ReconcileResult[] {
-  return runIds
+  const results = runIds
     .map((id) => reconcileRun(id, containerAlive, reapContainer, containerExitInfo))
     .filter((r) => r.taskChanges.length > 0 || r.runChange);
+  // FG-731 (Step 3): re-observe any CI wait whose waiter is presumed dead (expired
+  // lease). This runs wherever reconcileRuns does (top of `forge status`, dispatcher
+  // wake) and is what makes a Forge-owned CI wait REACH terminal with no live waiter.
+  // Best-effort: a gh hiccup (or, on the read-only path, no live waits) must never
+  // fail run reconciliation.
+  try {
+    reconcileCiWaits();
+  } catch {
+    /* recovery is advisory here; the run reconcile above is the primary result */
+  }
+  return results;
 }
