@@ -393,9 +393,12 @@ test("FG-625 event: a failing post-fixer verification emits review_loop.fix_veri
   const payload = evt!.payload as FixVerificationPayload;
   assert.equal(payload.ok, false);
   assert.equal(payload.ticketId, "FG-415");
-  // readiness is carried and is null on the post-fixer path today (no preflight
-  // consulted yet — FG-625 Defect B adds it), never simply absent from the shape.
-  assert.equal(payload.readiness, null);
+  // readiness is the CONSULTED post-fixer preflight result (FG-625 Defect B landed
+  // it). This project has no lockfile / dependency graph, so preparation is
+  // `not_required` — a real readiness outcome, never simply null/absent from the
+  // shape. (A refusal would return BEFORE runVerify, so no event fires at all;
+  // that path is covered in fg566-review-loop-readiness.integration.test.ts.)
+  assert.deepEqual(payload.readiness, { outcome: "not_required" });
   const failStep = payload.steps.find((s) => s.name === "test")!;
   assert.equal(failStep.ok, false);
   assert.equal(failStep.command, "npm run --silent test");

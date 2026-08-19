@@ -1001,18 +1001,36 @@ export function buildReviewLoopDeps(
         // them normally rather than aborting the whole round. Fast tier by
         // default (FG-501 AC5): the fixer's commit gets pushed and CI runs
         // test:extended as a required check; --local-extended restores the full tier.
+        //
+        // FG-625 Defect B: readiness preflight for the POST-FIXER verification —
+        // the sibling of the two round-entry local arms in verifyWithReuse. Without
+        // it, an unprepared workspace on the CI-reuse path reported an environment
+        // fault as a code failure (the FG-566 defect shape surviving on this path).
+        // prepareLocalVerification is host-only by construction (no configDir/
+        // project-dir seam, FG-575) even though the tree now holds the fixer's
+        // uncommitted diff. A refusal returns the DISTINCT env-unavailable FixDispatch
+        // shape — the loop maps it to verification_environment_unavailable, never
+        // verification_failed, leaving the diff uncommitted for inspection and
+        // consuming zero rounds. Scripts run and the runVerify → add → commit ordering
+        // are unchanged.
+        stage = "post-revert readiness preflight";
+        const fixVerifyScripts = localFallbackScripts();
+        const readiness = await prepareLocalVerification(fixVerifyScripts);
+        if (readiness.outcome === "refused") {
+          return { ok: false, environmentUnavailable: true, readiness };
+        }
         stage = "post-revert verification";
-        const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+        const verification: VerificationResult = { ...runVerify(fixVerifyScripts, { cwd: ctx.projectDir }), readiness };
         // FG-625: the post-fixer verification's durable emission point. Path-2 had
         // NONE — review_loop.verification_finished only ever fired for the
         // round-entry verifier — so a `verification_failed` stop discarded every
         // failed step's command/tier/output and the two FG-559 stops were
         // undiagnosable. Emit on BOTH pass and fail, naming every failed step with
-        // its command/tier and a bounded (~2000-char) output tail, plus readiness
-        // (null here — the post-fixer path consults no readiness preflight yet;
-        // FG-625 Defect B adds it). Scripts run are UNCHANGED (localFallbackScripts,
-        // fast tier by default) and this fires AFTER the run, BEFORE the commit —
-        // the runVerify → add → commit ordering is untouched.
+        // its command/tier and a bounded (~2000-char) output tail, plus the readiness
+        // now consulted (prepared/reused/not_required — the post-fixer preflight
+        // Defect B added; refusals return above before this event). Scripts run are
+        // UNCHANGED (localFallbackScripts, fast tier by default) and this fires AFTER
+        // the run, BEFORE the commit — the runVerify → add → commit ordering is untouched.
         logEvent("review_loop.fix_verification_finished", {
           ...(runId ? { runId } : {}),
           payload: {
