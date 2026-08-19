@@ -856,19 +856,30 @@ function liveGroupMembers(pgid: number): number {
 async function killGroupAndAwaitExit(child: ChildProcess, label: string): Promise<void> {
   const pid = child.pid;
   if (pid === undefined) return; // spawn never produced a process; nothing to wait for
-  const exited = new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) resolve();
-    else child.once("exit", () => resolve());
-  });
-  try { process.kill(-pid, "SIGKILL"); } catch { /* group already gone */ }
-  await exited;
   const deadline = Date.now() + 5000;
-  while (liveGroupMembers(pid) > 0) {
+  let signalFailure: unknown;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    signalFailure = error;
+  }
+  const signalFailureReason = (): string =>
+    signalFailure instanceof Error ? `group SIGKILL failed: ${signalFailure.message}` : `group SIGKILL failed: ${String(signalFailure)}`;
+
+  while (child.exitCode === null && child.signalCode === null || liveGroupMembers(pid) > 0) {
     if (Date.now() >= deadline) {
-      process.stderr.write(`forge test: process group ${pid} (${label}) still had a RUNNABLE member 5s after SIGKILL — disposal may race it\n`);
+      const reason = signalFailure === undefined ? "still had a RUNNABLE member" : signalFailureReason();
+      process.stderr.write(`forge test: process group ${pid} (${label}) ${reason} 5s after SIGKILL — disposal may race it\n`);
       return;
     }
     await new Promise((r) => setTimeout(r, 25));
+  }
+
+  // The group stopped before the deadline. A group signal that FAILED still has to surface: the
+  // group exiting on its own is not evidence our kill worked, so swallowing the failed
+  // process.kill on this early-exit path is the signal-inverting outcome FG-702 guards (RF-1).
+  if (signalFailure !== undefined) {
+    process.stderr.write(`forge test: process group ${pid} (${label}) ${signalFailureReason()} but the group exited before the 5s deadline — signal did not stop it\n`);
   }
 }
 
@@ -900,6 +911,91 @@ test("FG-698 (AC4): the dashboard teardown WAITS for the signalled process group
     "teardown returned only after the child was actually reaped — a queued signal is not an exit",
   );
   assert.equal(liveGroupMembers(pid), 0, "and no member of the signalled group can still run when it returns");
+});
+
+test("FG-702: a failed group signal against a live child reaches the bounded teardown diagnostic", async () => {
+  // Induce the formerly-unbounded path directly: the fixture process is live, but the group
+  // signal throws. The real kill is restored for cleanup only after the helper has returned.
+  const child = spawn("/bin/sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
+  const pid = child.pid;
+  assert.ok(pid !== undefined, "the fixture process must spawn");
+  const upBy = Date.now() + 2000;
+  while (liveGroupMembers(pid) < 1 && Date.now() < upBy) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(liveGroupMembers(pid) >= 1, "the child must still be live before signalling fails");
+
+  const originalKill = process.kill;
+  const originalStderrWrite = process.stderr.write;
+  const diagnostics: string[] = [];
+  process.kill = ((...args: Parameters<typeof process.kill>) => {
+    const [target, signal] = args;
+    if (target === -pid && signal === "SIGKILL") throw new Error("FG-702 induced group signal failure");
+    return originalKill(...args);
+  }) as typeof process.kill;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    diagnostics.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    const started = Date.now();
+    await killGroupAndAwaitExit(child, "FG-702 bounded signal failure");
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 4500 && elapsed < 6500, `the failed-signal wait returned at its 5s deadline, not the enclosing test timeout (${elapsed}ms)`);
+    assert.match(diagnostics.join(""), /FG-702 induced group signal failure/, "the bounded-deadline diagnostic names the signal failure");
+    assert.ok(liveGroupMembers(pid) >= 1, "the helper returned because its deadline passed while the unsignalled child was still live");
+  } finally {
+    process.kill = originalKill;
+    process.stderr.write = originalStderrWrite;
+    originalKill(-pid, "SIGKILL");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  }
+});
+
+test("FG-702 (RF-1): a failed group signal is reported even when the group exits before the deadline", async () => {
+  // Same induced failure as above — the group SIGKILL throws — but the fixture exits on its
+  // own well before the 5s deadline. The wait loop then ends by OBSERVING the exit, not by the
+  // deadline, which is the path the deadline-only diagnostic left silent: a failed process.kill
+  // swallowed on early exit inverts the signal FG-702 guards. The failure must still reach
+  // stderr, and the helper must return early (not stall to the deadline).
+  const child = spawn("/bin/sh", ["-c", "sleep 1"], { detached: true, stdio: "ignore" });
+  const pid = child.pid;
+  assert.ok(pid !== undefined, "the fixture process must spawn");
+  const upBy = Date.now() + 2000;
+  while (liveGroupMembers(pid) < 1 && Date.now() < upBy) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(liveGroupMembers(pid) >= 1, "the child must be live before signalling fails");
+
+  const originalKill = process.kill;
+  const originalStderrWrite = process.stderr.write;
+  const diagnostics: string[] = [];
+  process.kill = ((...args: Parameters<typeof process.kill>) => {
+    const [target, signal] = args;
+    if (target === -pid && signal === "SIGKILL") throw new Error("FG-702 RF-1 induced group signal failure");
+    return originalKill(...args);
+  }) as typeof process.kill;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    diagnostics.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    const started = Date.now();
+    await killGroupAndAwaitExit(child, "FG-702 RF-1 early exit with failed signal");
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 4500, `the helper returned when the group exited on its own, not at the 5s deadline (${elapsed}ms)`);
+    assert.equal(liveGroupMembers(pid), 0, "the group had exited on its own before the helper returned");
+    assert.match(diagnostics.join(""), /FG-702 RF-1 induced group signal failure/, "the failed group signal is reported even though the group exited before the deadline");
+  } finally {
+    process.kill = originalKill;
+    process.stderr.write = originalStderrWrite;
+    try {
+      originalKill(-pid, "SIGKILL");
+    } catch {
+      // the fixture group already exited on its own — nothing left to signal
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+  }
 });
 
 test("FG-580 (dashboard bundled, EXECUTED, NO node on PATH): the release ships the complete dashboard closure and `forge dashboard start` boots under the release's pinned runtime, offline", async () => {
