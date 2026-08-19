@@ -2220,4 +2220,17 @@ export const CANONICAL_IDENTITY_INDEXES: CanonicalIdentityIndex[] = [
       "CREATE INDEX IF NOT EXISTS idx_launch_observations_project_canonical " +
       "ON launch_observations(project_dir_canonical)",
   },
+  {
+    // FG-731: mirrors idx_ci_waits_project (project_dir) with the canonical dir. ci_waits
+    // is a whole-new table, so on a real store the column arrives with the CREATE rather
+    // than an ALTER — but the guarded apply path is identical (table present, column
+    // present), and pairing the canonical column with its index keeps the FG-693
+    // one-ALTER-one-index invariant whole for it too.
+    table: "ci_waits",
+    column: "project_dir_canonical",
+    index: "idx_ci_waits_project_canonical",
+    ddl:
+      "CREATE INDEX IF NOT EXISTS idx_ci_waits_project_canonical " +
+      "ON ci_waits(project_dir_canonical)",
+  },
 ];

@@ -454,7 +454,19 @@ describe("FG-693 — ADDITIVE ONLY, held mechanically rather than by review memo
       ...ADDITIVE_COLUMNS.filter((c) => c.column === CANONICAL_COLUMN).map((c) => c.ddl),
       ...CANONICAL_IDENTITY_INDEXES.filter((i) => i.column === CANONICAL_COLUMN).map((i) => i.ddl),
     ];
-    assert.equal(ddl.length, CANONICAL_TABLES.length * 2, "every canonical table contributes one ALTER and one index");
+    // Every table that carries a canonical column owes exactly one ALTER and one index.
+    // Counted from the tables that actually carry the column, NOT from CANONICAL_TABLES:
+    // that registry is the AGED-MIGRATABLE set (the five tables a pre-FG-693 binary created
+    // and whose canonical column arrives by ALTER — it drives the aged-store fixtures
+    // above). FG-731's ci_waits is a SIXTH canonical-bearing table, but a brand-new one:
+    // an aged store never created it, so it cannot join CANONICAL_TABLES, yet it still owes
+    // its one ALTER (a no-op ADDITIVE_COLUMNS entry, present for the fresh-vs-migrated strip
+    // guard) and its one canonical index. Deriving the expected count from the canonical
+    // ADDITIVE entries holds ci_waits to the same invariant without pretending it is aged.
+    const canonicalTables = new Set(
+      ADDITIVE_COLUMNS.filter((c) => c.column === CANONICAL_COLUMN).map((c) => c.table),
+    );
+    assert.equal(ddl.length, canonicalTables.size * 2, "every canonical table contributes one ALTER and one index");
     for (const statement of ddl) {
       assert.match(
         statement,
