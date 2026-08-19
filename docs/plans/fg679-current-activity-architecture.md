@@ -17,7 +17,12 @@ sha — so a run with either in flight reads as though nothing is happening. FG-
 projected from durable state only. *(Note 2026-08-10: FG-700 split `Host verification` by a declared
 `purpose` field and added a fourth, disjoint `Launch activity` section for every other placed launch —
 the projection is four sections now, not three. See `docs/concepts.md` → Current activity → "What a
-launch IS" for the current model; the three-section shape above is FG-679's as shipped.)*
+launch IS" for the current model; the three-section shape above is FG-679's as shipped.)* *(Note
+2026-08-18: FG-731 added a fifth, disjoint `CI waits` section for an explicitly REGISTERED Forge-owned
+CI wait (`pr_checks` / `push_actions` / `workflow_dispatch`, via `forge ci-wait`) — orthogonal to
+`Required CI`'s candidate-sha checks, and the one section whose mere presence forces `WORKING`/never
+`IDLE` independent of observation freshness. See `docs/concepts.md` → Current activity → "Registered CI
+waits" and `docs/SCHEMA-CONTRACT.md` → `ci_waits`; the four-section shape above predates it.)*
 
 The ticket was filed as a pure projection gap. **It is not one, and the correction matters** to anyone
 reading this later. The CI half *is* a projection gap: `probeCiGateStatus` (FG-501) already probes
