@@ -46,6 +46,11 @@ export const BROWSER_TIER_DIR = join(
 // the CLI, the same move by keyboard, a stale-version refusal surfaced rather than
 // swallowed, a not-ready enqueue's concrete refinement proposal on screen, blocked vs.
 // waiting-to-overlap kept visibly distinct, and the CLI-only dispatcher panel.
+// FG-699 adds `fg699-scope-invalidation` (5 tests): scope changes on the ops runtime
+// panel invalidate the displayed payload for BOTH metrics. Checkout-banner, Projects
+// card (`filterByProject`), and clear-filter (`clearProjectFilter`) paths drop their
+// prior scope's chart/numbers to loading while the new read is pending, and a prior
+// scope's error cannot be carried into the newly selected scope.
 // FG-679 added `fg679-current-activity` (9 tests): the rendered Current activity
 // surface — three distinct sections, the four BD-4 launch statuses as four distinct
 // strings, `unobserved since <t>`, per-context required CI, old-sha evidence
@@ -114,6 +119,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg663-deleted-checkout.test.ts": 1,
   "fg679-current-activity.test.ts": 16,
   "fg694-home-in-flight.test.ts": 10,
+  "fg699-scope-invalidation.test.ts": 5,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,
