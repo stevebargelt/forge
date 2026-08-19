@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Command } from "commander";
+import type { z } from "zod";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { assertStoreForLookup } from "../no-store.js";
 import {
@@ -54,7 +55,7 @@ import {
   parseShardBudget,
   resolveReviewBase,
 } from "./review-wiring.js";
-import type { AcClaim } from "../../v2/review-evidence.js";
+import { AcClaimsSchema, type AcClaim } from "../../v2/review-evidence.js";
 import { DocsCloseoutSchema, type DocsCloseout } from "../../v2/review-shipping.js";
 
 const DASH = "—";
@@ -497,6 +498,43 @@ function readJsonFile(path: string, what: string): unknown {
   }
 }
 
+/** Name what the parsed JSON actually was, so a shape refusal can say "received an object with
+ *  keys […]" rather than leaving the operator to diff their file against the expected shape. */
+function describeReceived(raw: unknown): string {
+  if (Array.isArray(raw)) return `an array of ${raw.length} element(s)`;
+  if (raw === null) return "null";
+  if (typeof raw === "object") {
+    const keys = Object.keys(raw as Record<string, unknown>);
+    return keys.length > 0 ? `an object with keys [${keys.join(", ")}]` : "an empty object";
+  }
+  return typeof raw === "string" ? `a string` : `a ${typeof raw}`;
+}
+
+function zodIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.map(String).join(".") || "(root)"}: ${i.message}`).join("; ");
+}
+
+const ACCEPTANCE_EXAMPLE =
+  '[{"ref":"AC-1","verdict":"met","evidence":{"kind":"bounded_inspection","inspection":"…","limitation":"…"}},' +
+  '{"ref":"AC-2","verdict":"unmet"}]';
+
+/** FG-733: validate `--acceptance` at the read site so a wrong shape refuses at input time with a
+ *  named remedy, instead of reaching the shipping stage as an unvalidated cast and throwing
+ *  `claims.map is not a function`. */
+function parseAcceptanceInput(raw: unknown): { ok: true; claims: AcClaim[] } | { ok: false; refusal: string } {
+  const parsed = AcClaimsSchema.safeParse(raw);
+  if (parsed.success) return { ok: true, claims: parsed.data };
+  return {
+    ok: false,
+    refusal:
+      `--acceptance must be a top-level ARRAY of {ref, verdict, evidence?} ` +
+      `(verdict one of "met"|"unmet"|"unproven"; when verdict is "met", evidence is required and ` +
+      `must be a ResolutionEvidence, e.g. {"kind":"bounded_inspection", inspection, limitation}). ` +
+      `Received ${describeReceived(raw)}. Problems: ${zodIssues(parsed.error)}. ` +
+      `Minimal valid example: ${ACCEPTANCE_EXAMPLE}`,
+  };
+}
+
 /** Build the deps once per invocation. `--add-lens` / `--evaluated-no-drift` / `--drift`
  *  are the three recorded evaluations of the final diff: a lens is ADDED with recorded
  *  evidence, an examined diff that needs no lens change is recorded as `no_drift`, and
@@ -532,14 +570,15 @@ function depsFor(
   const retry = parseRetryShards(opts.retryShard ?? []);
   if (!retry.ok) return { ok: false, refusal: retry.refusal };
 
-  // FG-649: the dispatch workspace comes from the REVIEW, never from cwd. A --dry-run
-  // preview resolves and refuses identically but records nothing (RF-3) — rebinding which
-  // checkout later stages COMMIT into is not something a preview may do.
-  const workspace = resolveReviewWorkspace(review, opts.project, { record: opts.dryRun !== true });
-  if (!workspace.ok) return { ok: false, refusal: workspace.refusal };
-
-  const acceptance =
-    opts.acceptance !== undefined ? (readJsonFile(opts.acceptance, "acceptance claims") as AcClaim[]) : undefined;
+  // FG-733: validate operator-supplied JSON at input time — BEFORE resolving/recording the
+  // workspace — so a wrong shape refuses with a named remedy and no side effect, rather than
+  // reaching the shipping stage as an unvalidated cast (`claims.map is not a function`).
+  let acceptance: AcClaim[] | undefined;
+  if (opts.acceptance !== undefined) {
+    const parsed = parseAcceptanceInput(readJsonFile(opts.acceptance, "acceptance claims"));
+    if (!parsed.ok) return { ok: false, refusal: parsed.refusal };
+    acceptance = parsed.claims;
+  }
 
   // FG-640 duty 6. Read the same way the acceptance claims are, and — like them — supplying
   // NOTHING is not the clean answer: the shipping check reads an absent assessment as an
@@ -547,17 +586,25 @@ function depsFor(
   // gaps" without a file, because that flag would be the rubber stamp the check replaces.
   let docsCloseout: DocsCloseout | undefined;
   if (opts.docsCloseout !== undefined) {
-    const parsed = DocsCloseoutSchema.safeParse(readJsonFile(opts.docsCloseout, "docs/closeout assessment"));
+    const raw = readJsonFile(opts.docsCloseout, "docs/closeout assessment");
+    const parsed = DocsCloseoutSchema.safeParse(raw);
     if (!parsed.success) {
       return {
         ok: false,
         refusal:
-          `--docs-closeout must be {"assessed": <bool>, "gaps": [<string>, …], "detail"?: <string>}: ` +
-          parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+          `--docs-closeout must be an OBJECT {"assessed": <bool>, "gaps": [<string>, …], "detail"?: <string>}. ` +
+          `Received ${describeReceived(raw)}. Problems: ${zodIssues(parsed.error)}. ` +
+          `Minimal valid example: {"assessed": true, "gaps": []}`,
       };
     }
     docsCloseout = parsed.data;
   }
+
+  // FG-649: the dispatch workspace comes from the REVIEW, never from cwd. A --dry-run
+  // preview resolves and refuses identically but records nothing (RF-3) — rebinding which
+  // checkout later stages COMMIT into is not something a preview may do.
+  const workspace = resolveReviewWorkspace(review, opts.project, { record: opts.dryRun !== true });
+  if (!workspace.ok) return { ok: false, refusal: workspace.refusal };
 
   return {
     ok: true,
@@ -767,8 +814,11 @@ export function registerReview(program: Command): void {
       "--evaluated-no-drift <statement>",
       "record that you EXAMINED the final diff and no lens change is needed — the confirmation then advances",
     )
-    .option("--acceptance <file>", "acceptance-criterion claims for the shipping review, as JSON")
-    .option("--docs-closeout <file>", "FG-640 shipping duty 6: the ticket-required docs/closeout assessment, as JSON {assessed, gaps[], detail?}. Omitting it reads as NOT assessed, which blocks")
+    .option(
+      "--acceptance <file>",
+      'acceptance-criterion claims for the shipping review, as JSON — a TOP-LEVEL ARRAY of {ref, verdict: "met"|"unmet"|"unproven", evidence?} (evidence required, a ResolutionEvidence, when verdict is "met")',
+    )
+    .option("--docs-closeout <file>", "FG-640 shipping duty 6: the ticket-required docs/closeout assessment, as JSON — an OBJECT {assessed: bool, gaps: string[], detail?}. Omitting it reads as NOT assessed, which blocks")
     .option(
       "--retry-shard <lens:index>",
       "re-dispatch ONLY the named shard(s) of the discovery stage (repeatable, e.g. wide:2). Every " +

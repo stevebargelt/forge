@@ -716,6 +716,27 @@ export type AcClaim = {
   evidence?: unknown;
 };
 
+/** FG-733: read-time shape validation for `--acceptance`. The command used to cast the parsed
+ *  JSON straight to `AcClaim[]`, so an object like `{acceptance_criteria:[…]}` reached the
+ *  shipping stage and threw `claims.map is not a function` — a raw stack where every other
+ *  malformed input on this command names its shape. A `met` claim must CITE evidence here (a
+ *  well-formed `ResolutionEvidence`); `assessAcceptanceClaims` still downgrades met→unproven when
+ *  that evidence does not establish execution — this rejects only a met claim that cites nothing,
+ *  and evidence that is structurally not a `ResolutionEvidence` at all. */
+export const AcClaimSchema = z
+  .object({
+    ref: z.string().trim().min(1),
+    verdict: z.enum(AC_VERDICTS),
+    evidence: ResolutionEvidenceSchema.optional(),
+  })
+  .strict()
+  .refine((c) => c.verdict !== "met" || c.evidence !== undefined, {
+    message: 'a claim with verdict "met" must cite `evidence` (a ResolutionEvidence object)',
+    path: ["evidence"],
+  });
+
+export const AcClaimsSchema = z.array(AcClaimSchema);
+
 export type AcAssessment = {
   ref: string;
   verdict: AcVerdict;
