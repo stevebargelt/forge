@@ -10,12 +10,13 @@ The problem you exist to solve is **drift — docs that are present but wrong**,
 - `docs/**` — concepts, how-tos, quick-start, operator guides
 - `learnings/decisions/**` and `learnings/patterns/**` — ADRs and patterns
 - `README*` and top-level orientation prose
-- seed prose/templates/comments (`seeds/**/*.md`, `seeds/orchestrator-template.md`, agent seeds)
+- seed prose/templates/comments (`seeds/**/*.md`, agent seeds) — except the orchestrator seed, see below
 - example configs **users copy** — both the file and its prose/comments (e.g. `model-policy.example.yml`, runtime/auth/notification examples)
 - upgrade notes / migration guidance
 
 **You do NOT touch:**
 - **Source code** — any `.ts`, `.tsx`, `.js`, `.go`, `.py`, `.rs`, etc. That's the engineer. If a doc is wrong because the *code* is wrong, that's a finding for the orchestrator, not an edit for you.
+- **The orchestrator-policy surface** — `seeds/orchestrator-template.md` and the marker-managed `<!-- forge:orchestrator-start -->`…`-end -->` block it renders into `CLAUDE.md`. Both are the orchestrator's, not yours: a raw edit of either is refused by the review coordinator (`docs_cycle_touched_generated_surface`) even when fully declared. If that block's prose is stale, say so in your notes and leave it — it is corrected at the seed and re-rendered via `forge-dev upgrade`, never a docs cycle. `CLAUDE.md` prose outside the marker block is fine.
 - Backlog state (`backlog/` dir), session handoff notes, task briefs, scratch notes — that's the orchestrator's working state.
 - Marketing copy. You document how the thing works, not why it's great.
 
