@@ -121,11 +121,50 @@ function probeRunById(wait: CiWait, gh: GhExec): CiWaitProbeOutcome {
   return { observation: { state: "running", m, n }, resolved };
 }
 
+type RunListRow = {
+  databaseId?: number | string;
+  status?: string;
+  url?: string;
+  headSha?: string;
+  headBranch?: string;
+  event?: string;
+  createdAt?: string;
+};
+
+/** RF-2: a `workflow_dispatch` wait must never claim a run the orchestrator did not
+ *  trigger. Before its own run id resolves, all we can match on is workflow/ref/event —
+ *  which a PRIOR or concurrent dispatch of the SAME workflow on the SAME ref also
+ *  satisfies, so a naive first-match could attach to an unrelated run and report its
+ *  completion as ours. Bound the candidate set by the registration time: `ci_waits`
+ *  records `started_at` register-before-poll, so only a run CREATED at/after this wait
+ *  was registered can plausibly be the one it triggered — never one that predates
+ *  registration. Among the survivors, the EARLIEST post-registration run wins (the one
+ *  this registration most plausibly kicked off).
+ *
+ *  Predicate: event ∈ {workflow_dispatch, ⊥} ∧ (ref matches when recorded) ∧
+ *  createdAt ≥ started_at (strict, no skew slack), then min(createdAt).
+ *
+ *  `gh run list` exposes no per-run dispatch inputs, so dispatch-input matching is not
+ *  available here — the created-at bound is the guard. A row without a createdAt cannot
+ *  be proven post-registration and is therefore never selected. */
+function matchDispatchRun(wait: CiWait, rows: RunListRow[]): RunListRow | undefined {
+  const registeredMs = new Date(wait.startedAt).getTime();
+  const candidates = rows.filter((row) => {
+    if (row.event !== undefined && row.event !== "workflow_dispatch") return false;
+    if (wait.dispatchRef && row.headBranch !== wait.dispatchRef) return false;
+    if (row.createdAt === undefined) return false;
+    return new Date(row.createdAt).getTime() >= registeredMs;
+  });
+  candidates.sort((a, b) => new Date(a.createdAt!).getTime() - new Date(b.createdAt!).getTime());
+  return candidates[0];
+}
+
 /** Resolve the run id for a not-yet-bound Actions wait from `gh run list`. `push`
- *  matches on head sha; `workflow_dispatch` matches on the workflow file (+ ref). No
- *  matching run yet → `no_runs` ("nothing has started"), NOT unavailable. */
+ *  matches on head sha; `workflow_dispatch` matches on the workflow file (+ ref) AND
+ *  the registration-time bound (see matchDispatchRun / RF-2). No matching run yet →
+ *  `no_runs` ("nothing has started"), NOT unavailable. */
 function probeRunList(wait: CiWait, gh: GhExec): CiWaitProbeOutcome {
-  const args = ["run", "list", ...repoArgs(wait), "--json", "databaseId,status,url,headSha,headBranch,event,workflowName", "--limit", "30"];
+  const args = ["run", "list", ...repoArgs(wait), "--json", "databaseId,status,url,headSha,headBranch,event,workflowName,createdAt", "--limit", "30"];
   if (wait.kind === "workflow_dispatch" && wait.workflowFile) args.push("--workflow", wait.workflowFile);
   const res = gh(args, wait.projectDir ?? undefined);
   if (!res.ok) {
@@ -134,14 +173,10 @@ function probeRunList(wait: CiWait, gh: GhExec): CiWaitProbeOutcome {
   }
   const rows = parseJson(res.stdout);
   if (!Array.isArray(rows)) return { observation: { state: "unavailable", reason: "gh run list returned unparseable JSON" } };
-  const match = rows.find((r) => {
-    const row = r as { headSha?: string; headBranch?: string; event?: string };
-    if (wait.kind === "push_actions") {
-      return (wait.headSha ? row.headSha === wait.headSha : true) && (row.event === undefined || row.event === "push");
-    }
-    // workflow_dispatch: constrained to the file via --workflow; refine by ref+event.
-    return (row.event === undefined || row.event === "workflow_dispatch") && (wait.dispatchRef ? row.headBranch === wait.dispatchRef : true);
-  }) as { databaseId?: number | string; status?: string; url?: string } | undefined;
+  const match =
+    wait.kind === "push_actions"
+      ? (rows as RunListRow[]).find((row) => (wait.headSha ? row.headSha === wait.headSha : true) && (row.event === undefined || row.event === "push"))
+      : matchDispatchRun(wait, rows as RunListRow[]);
   if (match === undefined) return { observation: { state: "no_runs" } };
   const resolved: CiWaitResolved = { actionsRunId: match.databaseId != null ? String(match.databaseId) : null, url: match.url ?? null };
   if (match.status === "completed") return { observation: { state: "completed" }, resolved };

@@ -115,10 +115,10 @@ describe("FG-731 probeCiWait — gh parsing per kind + observed-state distinctio
   });
 
   test("workflow_dispatch resolves its run id on the FIRST observation (run id unknown at trigger)", () => {
-    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", projectDir: null } as CiWait;
+    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", startedAt: "2026-08-19T12:00:00.000Z", projectDir: null } as CiWait;
     const out = probeCiWait(
       wait,
-      stubGh({ "run list": () => ({ ok: true, stdout: JSON.stringify([{ databaseId: 555, status: "in_progress", url: "wu", headBranch: "main", event: "workflow_dispatch" }]) }) }),
+      stubGh({ "run list": () => ({ ok: true, stdout: JSON.stringify([{ databaseId: 555, status: "in_progress", url: "wu", headBranch: "main", event: "workflow_dispatch", createdAt: "2026-08-19T12:00:05.000Z" }]) }) }),
     );
     assert.equal(out.resolved?.actionsRunId, "555");
     assert.equal(out.resolved?.url, "wu");
@@ -126,9 +126,66 @@ describe("FG-731 probeCiWait — gh parsing per kind + observed-state distinctio
   });
 
   test("workflow_dispatch: no matching run yet is no_runs (nothing started), not unavailable", () => {
-    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", projectDir: null } as CiWait;
+    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", startedAt: "2026-08-19T12:00:00.000Z", projectDir: null } as CiWait;
     const out = probeCiWait(wait, stubGh({ "run list": () => ({ ok: true, stdout: JSON.stringify([]) }) }));
     assert.equal(out.observation.state, "no_runs");
+  });
+
+  // RF-2: a workflow_dispatch wait, before its run id resolves, must never attach to a
+  // run that predates its own registration (a prior/concurrent dispatch of the same
+  // workflow on the same ref). Only a run created at/after started_at is eligible; the
+  // earliest such run wins; if none exists yet the wait stays unresolved (no attach).
+  test("RF-2: a same-workflow/ref run created BEFORE registration is NEVER selected — the post-registration run is", () => {
+    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", startedAt: "2026-08-19T12:00:00.000Z", projectDir: null } as CiWait;
+    // gh returns BOTH an unrelated prior dispatch (created before this wait registered)
+    // and the run this registration actually triggered (created after).
+    const out = probeCiWait(
+      wait,
+      stubGh({
+        "run list": () => ({
+          ok: true,
+          stdout: JSON.stringify([
+            { databaseId: 111, status: "in_progress", url: "old", headBranch: "main", event: "workflow_dispatch", createdAt: "2026-08-19T11:59:30.000Z" },
+            { databaseId: 222, status: "in_progress", url: "new", headBranch: "main", event: "workflow_dispatch", createdAt: "2026-08-19T12:00:03.000Z" },
+          ]),
+        }),
+      }),
+    );
+    assert.equal(out.resolved?.actionsRunId, "222", "must pick the run created at/after registration, never the pre-existing one");
+    assert.equal(out.resolved?.url, "new");
+  });
+
+  test("RF-2: among MULTIPLE post-registration runs, the EARLIEST created is selected", () => {
+    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", startedAt: "2026-08-19T12:00:00.000Z", projectDir: null } as CiWait;
+    const out = probeCiWait(
+      wait,
+      stubGh({
+        "run list": () => ({
+          ok: true,
+          // gh lists newest-first; the earliest post-registration run is the last row here.
+          stdout: JSON.stringify([
+            { databaseId: 333, status: "in_progress", headBranch: "main", event: "workflow_dispatch", createdAt: "2026-08-19T12:00:09.000Z" },
+            { databaseId: 222, status: "in_progress", headBranch: "main", event: "workflow_dispatch", createdAt: "2026-08-19T12:00:02.000Z" },
+          ]),
+        }),
+      }),
+    );
+    assert.equal(out.resolved?.actionsRunId, "222", "the earliest run created at/after registration is the one this registration triggered");
+  });
+
+  test("RF-2: only a stale pre-registration run exists → wait stays UNRESOLVED (no_runs), never attaches to the stale one", () => {
+    const wait = { kind: "workflow_dispatch", repo: "acme/forge", actionsRunId: null, workflowFile: "timings.yml", dispatchRef: "main", startedAt: "2026-08-19T12:00:00.000Z", projectDir: null } as CiWait;
+    const out = probeCiWait(
+      wait,
+      stubGh({
+        "run list": () => ({
+          ok: true,
+          stdout: JSON.stringify([{ databaseId: 111, status: "completed", url: "old", headBranch: "main", event: "workflow_dispatch", createdAt: "2026-08-19T11:59:30.000Z" }]),
+        }),
+      }),
+    );
+    assert.equal(out.observation.state, "no_runs", "a pre-registration run must not be attached — the wait stays unresolved");
+    assert.equal(out.resolved, undefined);
   });
 });
 
