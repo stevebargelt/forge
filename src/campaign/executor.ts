@@ -31,6 +31,7 @@ import {
 import { getDb, writeTransaction } from "../store/db.js";
 import {
   recordItemLaunch,
+  refreshItemLaunchBornUnder,
   updateItemLaunch,
   getItemLaunch,
   getCampaignLease,
@@ -2922,15 +2923,31 @@ export function recordDriveItemLaunchLinkage(
   // The SAME formula reserveCampaignDriveDispatch uses: reuse a persisted attempt, else 1.
   const attemptGeneration = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
   const lease = token ?? getCampaignLease(campaignId);
+  const controllerOwner = lease?.owner ?? `campaign@${campaignId}@launcher`;
+  const controllerGeneration = lease?.generation ?? 0;
   recordItemLaunch({
     campaignId,
     itemId,
     attemptGeneration,
     sourceLaunchId,
-    controllerOwner: lease?.owner ?? `campaign@${campaignId}@launcher`,
-    controllerGeneration: lease?.generation ?? 0,
+    controllerOwner,
+    controllerGeneration,
     ...(item.runId ? { runId: item.runId } : {}),
     state: "launched",
+  });
+  // FG-737: recordItemLaunch's upsert keeps a pre-existing row's born-under token IMMUTABLE (only
+  // ever moving run_id from NULL). That immutability strands a held item across a NEW controller:
+  // its linkage stays pinned to the FIRST controller's owner (e.g. a stale `cli-<pid>` from before
+  // the stable-identity fix, or a different generation after a legitimate takeover), so the
+  // drive-item born-under fence never authorizes and the item fences forever without reaching its
+  // held-readiness re-eval. When the attempt has SETTLED — run_id IS NULL, no in-flight authority
+  // to protect — REFRESH the born-under token to THIS drive's controller so a legitimate new
+  // controller re-drives. The refresh is guarded (run_id IS NULL) inside the store primitive: a
+  // genuinely in-flight linkage (run_id present) is left untouched, preserving FG-564's
+  // double-driver fence against a foreign live controller.
+  refreshItemLaunchBornUnder(campaignId, itemId, attemptGeneration, {
+    owner: controllerOwner,
+    generation: controllerGeneration,
   });
 }
 
