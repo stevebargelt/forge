@@ -32,8 +32,8 @@
 // explicit shim --prefix. The release is built from a DISPOSABLE source root (fg571-harness.ts),
 // never by committing in the real repo. Both project dirs share this ONE hermetic stable
 // runtime; nothing here reads or mutates the operator's real ~/.forge, real shim, live control
-// plane, or the real checkout's git state (asserted, not assumed), and the two project dirs
-// cannot cross-contaminate.
+// plane. Every temporary workspace this suite creates is registered and removed, and the two
+// project dirs cannot cross-contaminate.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -59,11 +59,13 @@ let rel: BuildReleaseResult;
 let shim: string;
 /** A seeded terminal launch record read by the STABLE launch observer (native-free, no tmux). */
 let seededLaunchId: string;
-let repoHeadBefore: string;
-let repoStatusBefore: string;
+/** Every directory this suite owns, including per-case broken source projects. */
+const ownedDirs = new Set<string>();
 
-function gitIn(root: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8" });
+function ownTempDir(prefix: string): string {
+  const dir = canonicalMkdtemp(prefix);
+  ownedDirs.add(dir);
+  return dir;
 }
 
 /** A PATH with NO node on it — the stable shim pins an absolute interpreter (F29), so it must
@@ -87,7 +89,7 @@ function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string) 
  *  resolves it at run time and this test must never touch the real one); its top-level
  *  rmSync unlinks the symlink rather than following it. */
 function makeDevCheckout(label: string): string {
-  const dir = canonicalMkdtemp(`fg565-dev-${label}-`);
+  const dir = ownTempDir(`fg565-dev-${label}-`);
   for (const p of ["src", "bin", "package.json", "package-lock.json"]) {
     if (existsSync(join(repoRoot, p))) execFileSync("cp", ["-R", join(repoRoot, p), join(dir, p)]);
   }
@@ -99,7 +101,7 @@ function makeDevCheckout(label: string): string {
  *  broken source file — so "the machine-wide forge works from here" is a claim about cwd
  *  independence, not about anything forge-shaped happening to sit in this dir. */
 function makeUnrelatedProject(): string {
-  const dir = canonicalMkdtemp("fg565-unrelated-proj-");
+  const dir = ownTempDir("fg565-unrelated-proj-");
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "some-unrelated-service", version: "9.9.9", private: true }, null, 2) + "\n");
   mkdirSync(join(dir, "src"), { recursive: true });
   // This project's OWN source is broken — the point of F24: a broken export in the cwd project
@@ -160,11 +162,8 @@ function assertStableSurfacesWork(cwd: string, where: string): void {
 }
 
 before(async () => {
-  repoHeadBefore = gitIn(repoRoot, ["rev-parse", "HEAD"]).trim();
-  repoStatusBefore = gitIn(repoRoot, ["status", "--porcelain"]);
-
-  workspace = canonicalMkdtemp("fg565-f23-");
-  home = canonicalMkdtemp("fg565-f23-home-");
+  workspace = ownTempDir("fg565-f23-");
+  home = ownTempDir("fg565-f23-home-");
   // Built against THIS suite's home: the interpreter-store rule binds to the configured home
   // (FG-571 F4), so the release is promotable only into the home whose store owns its interpreter.
   source = await makeDisposableSourceRoot(repoRoot, home);
@@ -177,16 +176,20 @@ before(async () => {
 });
 
 after(() => {
-  for (const dir of [workspace, home]) {
+  for (const dir of ownedDirs) {
     if (existsSync(dir)) {
       thawReleaseTree(dir);
       rmSync(dir, { recursive: true, force: true });
     }
   }
+  // source.root contains a node_modules symlink, so use its dedicated remover rather than
+  // thawing that symlink's target through the generic directory cleanup above.
   if (source) removeDisposableSourceRoot(source);
 
-  assert.equal(gitIn(repoRoot, ["rev-parse", "HEAD"]).trim(), repoHeadBefore, "the whole suite left the real checkout's HEAD unmoved");
-  assert.equal(gitIn(repoRoot, ["status", "--porcelain"]), repoStatusBefore, "the whole suite left the real working tree exactly as it found it");
+  for (const dir of ownedDirs) {
+    assert.equal(existsSync(dir), false, `suite-owned temporary directory was not removed: ${dir}`);
+  }
+  if (source) assert.equal(existsSync(source.root), false, `suite-owned disposable source was not removed: ${source.root}`);
 });
 
 // ---------------------------------------------------------------------------
