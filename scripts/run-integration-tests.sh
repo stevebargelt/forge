@@ -90,9 +90,22 @@ done
 CAPTURE_LOG=""
 CAPTURE_START=0
 CAPTURE_TEE_PID=0
+
+# epoch_ms: portable epoch-milliseconds. GNU date supports `date +%s%3N`, but BSD
+# date (macOS) does NOT support `%N` — it emits a literal `N`, so `$((end-start))`
+# dies with `value too great for base`. Both GNU and BSD date DO support `%s`, so
+# take epoch SECONDS and append a literal `000`: second-granular ms, which is
+# plenty for a multi-minute integration run's duration. Command substitution
+# strips the trailing newline, leaving a bare integer for the arithmetic.
+# (Stays on `date` so the fg704 runner test can inject a fake duration by
+# shadowing `date` on PATH.)
+epoch_ms() {
+  date +%s000
+}
+
 start_capture() {
   CAPTURE_LOG="$(mktemp)"
-  CAPTURE_START=$(date +%s%3N)
+  CAPTURE_START=$(epoch_ms)
   exec 3>&1 4>&2
   exec > >(tee "$CAPTURE_LOG") 2>&1
   CAPTURE_TEE_PID=$!
@@ -199,7 +212,7 @@ end_capture_and_report() {
   exec 1>&3 2>&4 3>&- 4>&-
   wait "$CAPTURE_TEE_PID" 2>/dev/null || true
   local end duration_ms
-  end=$(date +%s%3N)
+  end=$(epoch_ms)
   duration_ms=$((end - CAPTURE_START))
   emit_job_summary "$label" "$CAPTURE_LOG" "$duration_ms" "$exit_code" "${files[@]}"
   rm -f "$CAPTURE_LOG"
