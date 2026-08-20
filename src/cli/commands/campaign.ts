@@ -255,13 +255,29 @@ function forgeSelfArgv(): string[] {
   return [process.execPath, ...process.execArgv, process.argv[1] ?? ""];
 }
 
-// FG-564 (P0-A): the instance-stable campaign-controller owner for a normal `forge campaign
-// start/resume`. Prefers the provider-neutral FORGE_CONTROLLER_ID the orchestrator establishes
-// from its durable session; absent one, falls back to a process-unique id so a lease is ALWAYS
-// acquired (the machinery is exercised on every normal start) and two concurrent controllers
-// still get DIFFERENT owners — the second FAILS CLOSED against the first's live lease (AC8 is
-// non-vacuous against a live NORMAL-start controller). Unlike `recover` (P1-D), start does not
-// fail closed on a missing id: it is establishing, not taking over, a lease.
+// FG-564 (P0-A) / FG-737 (Option X): the instance-stable campaign-controller owner for a normal
+// `forge campaign start/resume`. Prefers the provider-neutral FORGE_CONTROLLER_ID the orchestrator
+// establishes from its durable session; absent one, falls back to a process-unique id
+// (`cli-<pid>`) so a lease is ALWAYS acquired (the machinery is exercised on every normal start)
+// and two concurrent controllers still get DIFFERENT owners.
+//
+// FG-737 Option X: the detached-resume wedge is fixed by the SETTLED-linkage REFRESH
+// (recordDriveItemLaunchLinkage → refreshItemLaunchBornUnder, guarded on run_id IS NULL), NOT by
+// collapsing owner-uniqueness with a stable `@auto`. A stable owner would let two concurrent
+// same-campaign controllers that both lack FORGE_CONTROLLER_ID resolve to the SAME owner; because
+// acquireCampaignLease renews a same-owner lease at the SAME generation, both would renew and both
+// would pass the born-under fence — reopening the FG-564 double-driver hazard. Keeping the
+// fallback instance-unique fences the second controller (held_by_live_owner while the first lease
+// is live; takeover only after STRICT expiry, which bumps the generation).
+//
+// The recovery path: a detached resume comes up as a NEW instance-unique owner. Once the dead
+// first controller's lease has EXPIRED it takes over (new generation), then the settled-linkage
+// refresh re-pins the held item's born-under token (run_id NULL) to the new (owner, generation)
+// and the born-under fence AUTHORIZES — the held item is re-driven. A resume issued while the
+// first lease is still LIVE is correctly denied and recovers on the next post-expiry resume;
+// bounded TTL latency is the accepted cost (ticket AC2). An explicit FORGE_CONTROLLER_ID still
+// WINS. Unlike `recover` (P1-D), start does not fail closed on a missing id: it is establishing,
+// not taking over, a lease.
 function resolveStartControllerOwner(campaignId: string): string {
   const instanceId = process.env["FORGE_CONTROLLER_ID"]?.trim() || `cli-${process.pid}`;
   return `campaign@${campaignId}@${instanceId}`;

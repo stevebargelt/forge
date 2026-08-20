@@ -358,6 +358,40 @@ export function inFlightItemLaunches(opts: { campaignId?: string } = {}): ItemLa
   return rows.map(toItemLaunch);
 }
 
+/**
+ * FG-737: REFRESH a SETTLED linkage's born-under fencing token so a legitimate new controller
+ * re-drives instead of fencing forever against a stale owner/generation.
+ *
+ * The born-under token (controller_owner + controller_generation) is normally IMMUTABLE
+ * (recordItemLaunch never rewrites it), because it fences a genuinely IN-FLIGHT attempt against a
+ * foreign live controller (FG-564 double-driver prevention). But once an attempt has SETTLED —
+ * run_id IS NULL, no in-flight authority to protect — a linkage still pinned to a prior
+ * controller's `cli-<pid>` owner strands a held item: no later controller ever holds the lease
+ * under that born-under owner, so the drive-item fence denies forever.
+ *
+ * This REFRESH is GUARDED on `run_id IS NULL`: a linkage that carries a run id is genuinely
+ * in-flight and its born-under authority is NOT touched — FG-564 stays intact. Returns true when a
+ * settled row was actually refreshed (no row / an in-flight row → false, no-op).
+ */
+export function refreshItemLaunchBornUnder(
+  campaignId: string,
+  itemId: string,
+  attemptGeneration: number,
+  token: { owner: string; generation: number },
+): boolean {
+  return writeTransaction((): boolean => {
+    const res = getDb()
+      .prepare(
+        `UPDATE campaign_item_launches
+            SET controller_owner = ?, controller_generation = ?, updated_at = ?
+          WHERE campaign_id = ? AND item_id = ? AND attempt_generation = ?
+            AND run_id IS NULL`,
+      )
+      .run(token.owner, token.generation, nowIso(), campaignId, itemId, attemptGeneration);
+    return (res.changes ?? 0) > 0;
+  });
+}
+
 /** Advance a linkage's lifecycle state and/or fill in the resolved run id. run_id is
  *  IMMUTABLE once set (COALESCE keeps the first non-null), matching the immutable
  *  dispatch identity the FG-562 primitive enforces on continuations. */
