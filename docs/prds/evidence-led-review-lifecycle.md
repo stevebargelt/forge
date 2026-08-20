@@ -1280,6 +1280,13 @@ actual boundary that cannot ship together.
 >   completed discovery at a confirmed sha (`docs_amendment_no_candidate`,
 >   `docs_amendment_before_discovery`). `contractConfirmedSha` is read and
 >   never written here, so discovery can never re-open through this door.
+>   Also refuses (`docs_amendment_before_docs_stage`) unless Stage 6 has
+>   already completed at the candidate — an amendment corrects docs AFTER
+>   reconciliation, and running it before Stage 6 would write a docs-stage
+>   record at the amended sha and make Stage 6 look complete without the
+>   mandatory reconciliation ever having run. The guard sits after the
+>   crash-recovery arm, so a replay of an amendment already recorded but not
+>   yet reflected in the docs-stage record still recovers instead of refusing.
 > - **AC2 — documentation-only, enforced by name.** Every declared path is
 >   classified by a pure, default-deny authority: a known prose extension is
 >   documentation (with a named carve-out for `.txt` dependency manifests, and
@@ -1289,9 +1296,11 @@ actual boundary that cannot ship together.
 >   write, with nothing committed and the candidate unmoved.
 > - **AC3 — the coordinator commits, never the orchestrator.** Same discipline
 >   as the FG-649 fix cycle and FG-655 docs cycle: the declared paths are
->   staged and passed to the commit itself, not merely `git add`ed, because the
->   index is shared with whatever else is running in the operator's checkout.
->   Unlike those two cycles, there is no `no_change` arm — an amendment that
+>   staged and passed to the commit itself, not merely `git add`ed. Because the
+>   real index is shared with whatever else is running in the operator's
+>   checkout, the commit's tree is cut in a scratch index instead (RF-4, below)
+>   rather than snapshotting the shared one. Unlike those two cycles, there is
+>   no `no_change` arm — an amendment that
 >   moved nothing is always the named refusal
 >   (`docs_amendment_declared_changes_absent`), because an amendment exists to
 >   bring a correction IN.
@@ -1336,12 +1345,19 @@ actual boundary that cannot ship together.
 > unadopted child sitting on the racer's tip and leave it there — refused
 > correctly as not-adopted, but with the workspace HEAD now parked on a stray
 > commit nobody's ledger recorded, needing a manual reset to recover. The
-> commit is now built as an explicit child of the candidate (`write-tree` over
-> the staged declared paths, then `commit-tree` naming the candidate as sole
-> parent) without ever touching HEAD, and only then does
+> commit is now built as an explicit child of the candidate (`read-tree` the
+> candidate into a temporary scratch index, stage only the declared paths into
+> it, `write-tree` that scratch index, then `commit-tree` naming the candidate
+> as sole parent) without ever touching HEAD, and only then does
 > `update-ref HEAD <new-sha> <candidate-sha>` move the branch tip, with the
-> candidate as the ref's required old value. A lost race now leaves that
-> compare-and-set failing atomically — the built commit stays unreferenced
+> candidate as the ref's required old value. A follow-up pass (RF-4) moved the
+> tree build off the real index entirely: snapshotting the real index with
+> `write-tree` would ride an unrelated path staged there before or during the
+> pre-commit scan straight into a documentation-labelled commit, so the tree is
+> cut from a scratch index seeded from the candidate instead, and the real
+> index is reconciled for the declared paths only after the commit lands. A
+> lost race now leaves that compare-and-set failing atomically — the built
+> commit stays unreferenced
 > (`git gc` reclaims it) and the branch tip untouched — and the amendment
 > refuses
 > `docs_amendment_commit_raced` rather than adopting a commit nobody's ledger
