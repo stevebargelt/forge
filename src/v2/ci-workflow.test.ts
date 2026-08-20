@@ -160,7 +160,17 @@ const INTEGRATION_SHARD_JOBS = [
 // shares a job. It sits in the TEN-minute tier alongside the bulk shards (the
 // ceiling is the hang backstop, deliberately not lowered — FG-704 non-goal).
 const SERIAL_JOB = "integration_serial" as const;
-const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser"] as const;
+const SMALL_TIER_JOBS = ["worktree", "dashboard_integration"] as const;
+// FG-739: the dashboard browser tier carries its OWN ceiling, not the small-tier
+// 6. Its wall-clock is dominated by provisioning chromium off Playwright's
+// Chrome-for-Testing CDN, which intermittently hangs (~6-7m observed) — the old 6
+// cancelled the job, turning the fail-closed aggregate red with the browser tests
+// themselves passing 109/109. The install is now cached across runs, and bounded +
+// retried rather than left to the job ceiling; the raised ceiling costs no
+// wall-clock on a healthy run (cache hit ⇒ near-instant) and only bounds a job that
+// is genuinely hung across every retry.
+const BROWSER_JOB = "dashboard_browser" as const;
+const BROWSER_JOB_TIMEOUT = 20;
 // FG-693: the synthetic symlink-alias job. It re-runs the whole FG-693 identity
 // suite with TMPDIR pointed at a symlink, so this Linux CI executes the
 // filesystem-alias class instead of being green on it by accident of platform —
@@ -171,7 +181,7 @@ const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser
 // the suite's own and it has the same headroom problem the shards documented.
 const ALIAS_IDENTITY_JOB = "fg693_alias_identity" as const;
 const TEN_MINUTE_JOBS = [...INTEGRATION_SHARD_JOBS, SERIAL_JOB, ALIAS_IDENTITY_JOB] as const;
-const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS] as const;
+const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS, BROWSER_JOB] as const;
 
 test("FG-495 (sharded, FG-704 8-way): ci.yml has eight integration BULK shard jobs each running the shard script with its own k/8 selector", () => {
   const wf = loadWorkflow();
@@ -368,16 +378,16 @@ test("extended-gate ceiling: each of the ten-minute jobs (eight bulk shards + th
   }
 });
 
-test("extended-gate ceiling: the two timeout tiers cover exactly every test-extended dependency", () => {
+test("extended-gate ceiling: the timeout tiers cover exactly every test-extended dependency", () => {
   const needs = loadWorkflow().jobs?.["test-extended"]?.needs ?? [];
   assert.deepEqual(
     [...EXTENDED_GATE_JOBS].sort(),
     [...needs].sort(),
-    "every test-extended dependency must appear in exactly one timeout tier — a tenth extended job without a ceiling must fail this guard"
+    "every test-extended dependency must appear in exactly one timeout tier — an extended job without a ceiling must fail this guard"
   );
 });
 
-test("extended-gate ceiling: the three smaller extended-gate tiers keep timeout-minutes: 6", () => {
+test("extended-gate ceiling: the two smaller extended-gate tiers keep timeout-minutes: 6", () => {
   const wf = loadWorkflow();
   for (const name of SMALL_TIER_JOBS) {
     const job = wf.jobs?.[name];
@@ -388,6 +398,21 @@ test("extended-gate ceiling: the three smaller extended-gate tiers keep timeout-
       `${name} must carry timeout-minutes: 6 — these tiers run in seconds to ~2min; the shards' 10 is not a licence to relax theirs`
     );
   }
+});
+
+// FG-739: the browser tier is exempt from the small-tier 6 — its wall-clock is
+// dominated by the (cached, bounded, retried) chromium provisioning off a CDN that
+// intermittently hangs, and the old 6 cancelled the job with the browser tests
+// themselves green. Its raised ceiling only bounds a job hung across every retry.
+test("extended-gate ceiling: the dashboard_browser tier carries its own raised ceiling", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.[BROWSER_JOB];
+  assert.ok(job, `ci.yml must define the ${BROWSER_JOB} extended-gate job`);
+  assert.equal(
+    job!["timeout-minutes"],
+    BROWSER_JOB_TIMEOUT,
+    `${BROWSER_JOB} must carry timeout-minutes: ${BROWSER_JOB_TIMEOUT} — the old small-tier 6 cancelled the job while chromium's Chrome-for-Testing CDN download hung (~6-7m), turning the fail-closed aggregate red with the browser tests passing 109/109 (FG-739)`
+  );
 });
 
 test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry a job timeout", () => {

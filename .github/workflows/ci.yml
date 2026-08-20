@@ -354,7 +354,13 @@ jobs:
   # instead of skipping, so an unprovisioned runner is loud, not silently empty.
   dashboard_browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    # Was 6, raised to 20 (FG-739): the 6-minute ceiling was cancelling this tier
+    # whenever Playwright's Chrome-for-Testing CDN download hung (~6-7m observed),
+    # turning the fail-closed `test-extended` aggregate red with nothing actually
+    # failing (the browser tests pass 109/109 whenever chromium installs). Raising
+    # it costs no wall-clock on a healthy run — the install is bounded/retried and
+    # near-instant on a cache hit; the ceiling only bounds a genuinely hung job.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -369,11 +375,49 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
+      # Resolve the installed playwright-core version so the browser cache key
+      # below changes EXACTLY when Playwright upgrades — a newer Playwright pins a
+      # newer chromium revision under a new ~/.cache/ms-playwright subdir, so a
+      # version-keyed cache never serves a stale browser.
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Cache Playwright's browser download across runs (FG-739). On a hit chromium
+      # is already on disk, so the install step below detects it and does NOT
+      # re-download — sidestepping the slow Chrome-for-Testing CDN entirely.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}
+
       # Same provisioning the agent image uses (docker/agent-dev-worker.Dockerfile),
       # driven through the pinned playwright-core the tier itself imports — so the
-      # browser always matches the client, with no version bump of either.
+      # browser always matches the client, with no version bump of either. Only
+      # chromium (with its OS deps) is installed — not all browsers — to minimize
+      # download surface. Each attempt is bounded by `timeout` (a normal download
+      # is ~1-2m; a hung one is killed at 5m rather than eating the whole job
+      # ceiling) and retried, so a slow-CDN blip retries INSTEAD of the job-level
+      # timeout silently cancelling the tier (FG-739). On a cache hit the binary is
+      # present and only the (fast) OS deps are ensured. If chromium genuinely
+      # cannot be installed after the retries the step FAILS LOUDLY, named as an
+      # install/infra failure so it does not read as a test failure and is
+      # obviously retriable.
       - name: Install chromium
-        run: npx playwright-core install --with-deps chromium
+        timeout-minutes: 18
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            echo "chromium install attempt $attempt/3"
+            if timeout 5m npx playwright-core install --with-deps chromium; then
+              exit 0
+            fi
+            echo "attempt $attempt failed (exit/timeout); backing off before retry"
+            sleep $((attempt * 20))
+          done
+          echo "::error::FG-739: chromium could not be installed after 3 bounded attempts. This is a Playwright browser INSTALL/INFRA failure (typically a slow Chrome-for-Testing CDN download), NOT a browser-test failure — the tier is retriable; re-run this job." >&2
+          exit 1
 
       # Playwright installs under ~/.cache/ms-playwright, which is not one of the
       # resolver's system locations; FORGE_CHROME_BIN is the override that names it.
