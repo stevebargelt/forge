@@ -15,7 +15,15 @@ import { REQUIRED_CI_CHECK_CONTEXT, REQUIRED_CI_GATE_COMMAND, projectCiRunsComma
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(root, ".github", "workflows", "ci.yml");
 
-type Step = { name?: string; uses?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, unknown> };
+type Step = {
+  name?: string;
+  id?: string;
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  "timeout-minutes"?: number;
+};
 type Job = {
   "runs-on"?: string;
   "continue-on-error"?: boolean;
@@ -160,7 +168,17 @@ const INTEGRATION_SHARD_JOBS = [
 // shares a job. It sits in the TEN-minute tier alongside the bulk shards (the
 // ceiling is the hang backstop, deliberately not lowered — FG-704 non-goal).
 const SERIAL_JOB = "integration_serial" as const;
-const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser"] as const;
+const SMALL_TIER_JOBS = ["worktree", "dashboard_integration"] as const;
+// FG-739: the dashboard browser tier carries its OWN ceiling, not the small-tier
+// 6. Its wall-clock is dominated by provisioning chromium off Playwright's
+// Chrome-for-Testing CDN, which intermittently hangs (~6-7m observed) — the old 6
+// cancelled the job, turning the fail-closed aggregate red with the browser tests
+// themselves passing 109/109. The install is now cached across runs, and bounded +
+// retried rather than left to the job ceiling; the raised ceiling costs no
+// wall-clock on a healthy run (cache hit ⇒ near-instant) and only bounds a job that
+// is genuinely hung across every retry.
+const BROWSER_JOB = "dashboard_browser" as const;
+const BROWSER_JOB_TIMEOUT = 20;
 // FG-693: the synthetic symlink-alias job. It re-runs the whole FG-693 identity
 // suite with TMPDIR pointed at a symlink, so this Linux CI executes the
 // filesystem-alias class instead of being green on it by accident of platform —
@@ -171,7 +189,7 @@ const SMALL_TIER_JOBS = ["worktree", "dashboard_integration", "dashboard_browser
 // the suite's own and it has the same headroom problem the shards documented.
 const ALIAS_IDENTITY_JOB = "fg693_alias_identity" as const;
 const TEN_MINUTE_JOBS = [...INTEGRATION_SHARD_JOBS, SERIAL_JOB, ALIAS_IDENTITY_JOB] as const;
-const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS] as const;
+const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS, BROWSER_JOB] as const;
 
 test("FG-495 (sharded, FG-704 8-way): ci.yml has eight integration BULK shard jobs each running the shard script with its own k/8 selector", () => {
   const wf = loadWorkflow();
@@ -368,16 +386,16 @@ test("extended-gate ceiling: each of the ten-minute jobs (eight bulk shards + th
   }
 });
 
-test("extended-gate ceiling: the two timeout tiers cover exactly every test-extended dependency", () => {
+test("extended-gate ceiling: the timeout tiers cover exactly every test-extended dependency", () => {
   const needs = loadWorkflow().jobs?.["test-extended"]?.needs ?? [];
   assert.deepEqual(
     [...EXTENDED_GATE_JOBS].sort(),
     [...needs].sort(),
-    "every test-extended dependency must appear in exactly one timeout tier — a tenth extended job without a ceiling must fail this guard"
+    "every test-extended dependency must appear in exactly one timeout tier — an extended job without a ceiling must fail this guard"
   );
 });
 
-test("extended-gate ceiling: the three smaller extended-gate tiers keep timeout-minutes: 6", () => {
+test("extended-gate ceiling: the two smaller extended-gate tiers keep timeout-minutes: 6", () => {
   const wf = loadWorkflow();
   for (const name of SMALL_TIER_JOBS) {
     const job = wf.jobs?.[name];
@@ -388,6 +406,124 @@ test("extended-gate ceiling: the three smaller extended-gate tiers keep timeout-
       `${name} must carry timeout-minutes: 6 — these tiers run in seconds to ~2min; the shards' 10 is not a licence to relax theirs`
     );
   }
+});
+
+// FG-739: the browser tier is exempt from the small-tier 6 — its wall-clock is
+// dominated by the (cached, bounded, retried) chromium provisioning off a CDN that
+// intermittently hangs, and the old 6 cancelled the job with the browser tests
+// themselves green. Its raised ceiling only bounds a job hung across every retry.
+test("extended-gate ceiling: the dashboard_browser tier carries its own raised ceiling", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.[BROWSER_JOB];
+  assert.ok(job, `ci.yml must define the ${BROWSER_JOB} extended-gate job`);
+  assert.equal(
+    job!["timeout-minutes"],
+    BROWSER_JOB_TIMEOUT,
+    `${BROWSER_JOB} must carry timeout-minutes: ${BROWSER_JOB_TIMEOUT} — the old small-tier 6 cancelled the job while chromium's Chrome-for-Testing CDN download hung (~6-7m), turning the fail-closed aggregate red with the browser tests passing 109/109 (FG-739)`
+  );
+});
+
+test("FG-739: dashboard_browser caches Playwright browsers using the resolved playwright-core version", () => {
+  const wf = loadWorkflow();
+  const steps = wf.jobs?.[BROWSER_JOB]?.steps ?? [];
+  const resolveVersion = steps.find((step) => step.name === "Resolve Playwright version");
+  assert.ok(resolveVersion, "dashboard_browser must resolve the installed Playwright version before caching browsers");
+  assert.equal(resolveVersion.id, "pw", "the Playwright version step must expose its output as steps.pw");
+  assert.match(
+    resolveVersion.run ?? "",
+    /echo\s+["']version=.*>>\s*["']?\$GITHUB_OUTPUT/,
+    "the Playwright version step must write a version output to $GITHUB_OUTPUT"
+  );
+
+  const browserCache = steps.find((step) => step.name === "Cache Playwright browsers");
+  assert.ok(browserCache, "dashboard_browser must cache Playwright's downloaded browser binaries");
+  assert.match(browserCache.uses ?? "", /^actions\/cache@/, "the browser cache step must use actions/cache");
+  assert.equal(browserCache.with?.path, "~/.cache/ms-playwright", "the cache must cover Playwright's browser directory");
+  assert.equal(
+    browserCache.with?.key,
+    "${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}",
+    "the cache key must vary by runner OS and the version resolved by steps.pw"
+  );
+});
+
+test("FG-739: dashboard_browser installs chromium through a bounded retry loop", () => {
+  const wf = loadWorkflow();
+  const install = wf.jobs?.[BROWSER_JOB]?.steps?.find((step) => step.name === "Install chromium");
+  assert.ok(install, "dashboard_browser must retain its Install chromium step");
+  const script = install.run ?? "";
+  assert.match(
+    script,
+    /for\s+attempt\s+in\s+(?:\d+\s+)+\d+\s*;\s*do/,
+    "chromium installation must loop over at least two attempts rather than make a one-shot install"
+  );
+  assert.match(
+    script,
+    /timeout\s+-k\s+\S+\s+\S+\s+npx\s+playwright-core\s+install\b/,
+    "each chromium install attempt must be capped by `timeout` with a kill-after (-k) bound — a bare `timeout <cap>` only SIGTERMs, so a SIGTERM-ignoring installer overruns unboundedly (FG-739 RF-1)"
+  );
+  assert.match(script, /sleep\s+/, "failed chromium install attempts must back off before retrying");
+});
+
+test("FG-739: exhausted chromium installs fail loudly as infrastructure failures within a step timeout", () => {
+  const wf = loadWorkflow();
+  const install = wf.jobs?.[BROWSER_JOB]?.steps?.find((step) => step.name === "Install chromium");
+  assert.ok(install, "dashboard_browser must retain its Install chromium step");
+  assert.ok(
+    typeof install["timeout-minutes"] === "number" && install["timeout-minutes"] > 0,
+    "Install chromium must have its own positive timeout-minutes, independent of the job ceiling"
+  );
+  assert.match(
+    install.run ?? "",
+    /::error::[\s\S]*(?:install|infra)|(?:install|infra)[\s\S]*::error::/i,
+    "retry exhaustion must emit a ::error:: identifying chromium installation or infrastructure failure"
+  );
+  assert.match(install.run ?? "", /exit\s+1\b/, "retry exhaustion must exit non-zero rather than let browser tests mask it");
+});
+
+// FG-739 RF-1: the loud exit 1 must ALWAYS win before the step (and job) timeout.
+// A bare `timeout 5m` only SIGTERMs; an installer that ignores SIGTERM overruns
+// unboundedly, so the enclosing step/job timeout can cancel the step as a bare
+// cancellation — reading as a test failure — before the ::error:: + exit 1 fires.
+// Each attempt must carry a `-k` kill-after bound, and the deterministic worst-case
+// wall-clock of the whole retry loop must sit strictly (with margin) under the step
+// timeout. This assertion computes that budget from the script itself.
+test("FG-739 RF-1: chromium retry loop is hard-bounded below its step timeout so the loud failure always wins", () => {
+  const wf = loadWorkflow();
+  const install = wf.jobs?.[BROWSER_JOB]?.steps?.find((step) => step.name === "Install chromium");
+  assert.ok(install, "dashboard_browser must retain its Install chromium step");
+  const script = install.run ?? "";
+  const stepTimeoutS = (install["timeout-minutes"] ?? 0) * 60;
+  assert.ok(stepTimeoutS > 0, "Install chromium must carry a positive step timeout-minutes");
+
+  const dur = (tok: string): number => {
+    const m = tok.match(/^(\d+)(s|m)?$/);
+    assert.ok(m && m[1], `unparseable duration token: ${tok}`);
+    return Number(m[1]) * (m[2] === "m" ? 60 : 1);
+  };
+
+  // -k <grace> <cap>: hard-kill grace + per-attempt cap.
+  const cap = script.match(/timeout\s+-k\s+(\S+)\s+(\S+)\s+npx\s+playwright-core\s+install\b/);
+  assert.ok(cap && cap[1] && cap[2], "each attempt must run under `timeout -k <grace> <cap>` so SIGTERM-ignoring installs are hard-killed");
+  const perAttemptS = dur(cap[1]) + dur(cap[2]);
+
+  const attemptTokens = script.match(/for\s+attempt\s+in\s+((?:\d+\s+)*\d+)\s*;/);
+  assert.ok(attemptTokens && attemptTokens[1], "the loop must iterate a literal list of attempt numbers");
+  const attempts = attemptTokens[1].trim().split(/\s+/).length;
+  assert.ok(attempts >= 2, "must retry at least twice");
+
+  // Worst-case backoff: `sleep $((attempt * <base>))`. Conservatively assume the
+  // backoff runs after every attempt (it is guarded to skip the last, so this is an
+  // upper bound); sum attempt*base for attempt in 1..attempts.
+  const base = Number((script.match(/sleep\s+\$\(\(\s*attempt\s*\*\s*(\d+)/) ?? [])[1] ?? 0);
+  assert.ok(base > 0, "backoff must scale with the attempt number");
+  let backoffS = 0;
+  for (let a = 1; a <= attempts; a++) backoffS += a * base;
+
+  const worstCaseS = attempts * perAttemptS + backoffS;
+  assert.ok(
+    worstCaseS < stepTimeoutS,
+    `worst-case retry-loop wall-clock (${worstCaseS}s) must stay under the step timeout (${stepTimeoutS}s) so the loud exit 1 always fires before a bare step cancellation (FG-739 RF-1)`
+  );
 });
 
 test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry a job timeout", () => {
