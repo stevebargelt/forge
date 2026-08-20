@@ -374,7 +374,14 @@ test("integ FG-576 AC7/D17: a launcher killed mid-session leaves a record that c
     cli.kill("SIGKILL");
     await new Promise<void>((r) => cli.on("exit", () => r()));
 
-    const after = loadHeartbeats({ heartbeatsDir: roots.orchestrators })[0]!;
+    let after: ReturnType<typeof loadHeartbeats>[number] | undefined;
+    await waitFor(() => {
+      const record = loadHeartbeats({ heartbeatsDir: roots.orchestrators })[0];
+      if (!record) return false;
+      after = record;
+      return record.state === "orphaned" && record.processLiveness === "dead";
+    }, 60_000);
+    assert.ok(after, "the launcher heartbeat record must remain available for orphan classification");
     // Classified by PROCESS IDENTITY, not by elapsed heartbeat time: the record is
     // seconds old, and it is still correctly dead.
     assert.equal(after.state, "orphaned");
