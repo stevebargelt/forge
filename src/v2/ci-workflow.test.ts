@@ -458,8 +458,8 @@ test("FG-739: dashboard_browser installs chromium through a bounded retry loop",
   );
   assert.match(
     script,
-    /timeout\s+\S+\s+npx\s+playwright-core\s+install\b/,
-    "each chromium install attempt must be capped by the timeout command"
+    /timeout\s+-k\s+\S+\s+\S+\s+npx\s+playwright-core\s+install\b/,
+    "each chromium install attempt must be capped by `timeout` with a kill-after (-k) bound — a bare `timeout <cap>` only SIGTERMs, so a SIGTERM-ignoring installer overruns unboundedly (FG-739 RF-1)"
   );
   assert.match(script, /sleep\s+/, "failed chromium install attempts must back off before retrying");
 });
@@ -478,6 +478,52 @@ test("FG-739: exhausted chromium installs fail loudly as infrastructure failures
     "retry exhaustion must emit a ::error:: identifying chromium installation or infrastructure failure"
   );
   assert.match(install.run ?? "", /exit\s+1\b/, "retry exhaustion must exit non-zero rather than let browser tests mask it");
+});
+
+// FG-739 RF-1: the loud exit 1 must ALWAYS win before the step (and job) timeout.
+// A bare `timeout 5m` only SIGTERMs; an installer that ignores SIGTERM overruns
+// unboundedly, so the enclosing step/job timeout can cancel the step as a bare
+// cancellation — reading as a test failure — before the ::error:: + exit 1 fires.
+// Each attempt must carry a `-k` kill-after bound, and the deterministic worst-case
+// wall-clock of the whole retry loop must sit strictly (with margin) under the step
+// timeout. This assertion computes that budget from the script itself.
+test("FG-739 RF-1: chromium retry loop is hard-bounded below its step timeout so the loud failure always wins", () => {
+  const wf = loadWorkflow();
+  const install = wf.jobs?.[BROWSER_JOB]?.steps?.find((step) => step.name === "Install chromium");
+  assert.ok(install, "dashboard_browser must retain its Install chromium step");
+  const script = install.run ?? "";
+  const stepTimeoutS = (install["timeout-minutes"] ?? 0) * 60;
+  assert.ok(stepTimeoutS > 0, "Install chromium must carry a positive step timeout-minutes");
+
+  const dur = (tok: string): number => {
+    const m = tok.match(/^(\d+)(s|m)?$/);
+    assert.ok(m && m[1], `unparseable duration token: ${tok}`);
+    return Number(m[1]) * (m[2] === "m" ? 60 : 1);
+  };
+
+  // -k <grace> <cap>: hard-kill grace + per-attempt cap.
+  const cap = script.match(/timeout\s+-k\s+(\S+)\s+(\S+)\s+npx\s+playwright-core\s+install\b/);
+  assert.ok(cap && cap[1] && cap[2], "each attempt must run under `timeout -k <grace> <cap>` so SIGTERM-ignoring installs are hard-killed");
+  const perAttemptS = dur(cap[1]) + dur(cap[2]);
+
+  const attemptTokens = script.match(/for\s+attempt\s+in\s+((?:\d+\s+)*\d+)\s*;/);
+  assert.ok(attemptTokens && attemptTokens[1], "the loop must iterate a literal list of attempt numbers");
+  const attempts = attemptTokens[1].trim().split(/\s+/).length;
+  assert.ok(attempts >= 2, "must retry at least twice");
+
+  // Worst-case backoff: `sleep $((attempt * <base>))`. Conservatively assume the
+  // backoff runs after every attempt (it is guarded to skip the last, so this is an
+  // upper bound); sum attempt*base for attempt in 1..attempts.
+  const base = Number((script.match(/sleep\s+\$\(\(\s*attempt\s*\*\s*(\d+)/) ?? [])[1] ?? 0);
+  assert.ok(base > 0, "backoff must scale with the attempt number");
+  let backoffS = 0;
+  for (let a = 1; a <= attempts; a++) backoffS += a * base;
+
+  const worstCaseS = attempts * perAttemptS + backoffS;
+  assert.ok(
+    worstCaseS < stepTimeoutS,
+    `worst-case retry-loop wall-clock (${worstCaseS}s) must stay under the step timeout (${stepTimeoutS}s) so the loud exit 1 always fires before a bare step cancellation (FG-739 RF-1)`
+  );
 });
 
 test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry a job timeout", () => {

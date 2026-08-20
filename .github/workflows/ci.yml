@@ -410,11 +410,20 @@ jobs:
           set -uo pipefail
           for attempt in 1 2 3; do
             echo "chromium install attempt $attempt/3"
-            if timeout 5m npx playwright-core install --with-deps chromium; then
+            # `-k 10s` hard-bounds each attempt: a bare `timeout 5m` only SIGTERMs,
+            # so an installer that ignores SIGTERM overruns unboundedly and the
+            # enclosing step/job timeout can then cancel the step as a bare
+            # cancellation BEFORE the loud exit 1 below (FG-739 RF-1). The kill-after
+            # grace SIGKILLs the child, so worst-case wall-clock is deterministic:
+            # 3x(5m+10s) + 20s + 40s backoff ~= 16m30s, always under the 18m step
+            # (and 20m job) ceiling, so the loud exit 1 always wins.
+            if timeout -k 10s 5m npx playwright-core install --with-deps chromium; then
               exit 0
             fi
-            echo "attempt $attempt failed (exit/timeout); backing off before retry"
-            sleep $((attempt * 20))
+            if [ "$attempt" -lt 3 ]; then
+              echo "attempt $attempt failed (exit/timeout); backing off before retry"
+              sleep $((attempt * 20))
+            fi
           done
           echo "::error::FG-739: chromium could not be installed after 3 bounded attempts. This is a Playwright browser INSTALL/INFRA failure (typically a slow Chrome-for-Testing CDN download), NOT a browser-test failure — the tier is retriable; re-run this job." >&2
           exit 1
