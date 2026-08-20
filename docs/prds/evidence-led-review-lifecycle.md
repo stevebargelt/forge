@@ -445,6 +445,10 @@ declared and advances the candidate to the commit it authored, so the post-docs
 SHA is known rather than read; see the FG-655 correction to refinement (d)
 below.
 
+A documentation-only correction discovered AFTER this stage has already
+completed and recorded does not re-run it: see the FG-682 refinement below for
+the bounded `forge review amend-docs` verb that lands it.
+
 ### Stage 7 — deterministic verification
 
 Run the full required verification against the final candidate, including
@@ -474,7 +478,10 @@ discovery over the post-discovery delta plus directly adjacent production paths
 needed to understand that delta. It does not resample the whole repository.
 When discovery produced no `fix_now` findings and the candidate has not changed,
 this stage is a no-op. Any post-discovery candidate change still receives the
-bounded delta review.
+bounded delta review — narrowed to the amendment's own superseded→amended span
+rather than the full confirmed-sha→candidate range when that change was a
+FG-682 late-docs amendment (below), so an amendment recheck reviews only the
+amended prose.
 
 For each ID it must return:
 
@@ -1247,6 +1254,105 @@ actual boundary that cannot ship together.
 > [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#fix_batch_refused_deliveries-table-fg-710-refused-delivery-recovery).
 > The threat model, the acceptance scenarios, and every scope bullet above are
 > otherwise unaltered by this note. Operator-facing detail is
+> [Review coordinator](../concepts.md#review-coordinator).
+
+### FG-682 refinement — the bounded late-docs amendment
+
+> **[SHIPPED 2026-08-19 (FG-682).]** FG-678 (2026-08-05) surfaced the gap this
+> ticket closes. A review batch-fixed its findings by collapsing three
+> dispatch lanes into one shared resolver, which falsified a documentation
+> statement Stage 6 had already reconciled for the pre-fix topology. The
+> orchestrator caught the falsehood only after Stage 6 had committed and
+> recorded, and there was no supported way to land the three-line prose
+> correction into the pinned candidate: committing it out of band left the
+> candidate stale while the branch tip drifted ahead, so shipping's
+> `tip_equality` and `docs_closeout` checks both failed honestly, and the only
+> way through was an operator override of both — ceremony a three-line fix did
+> not warrant, and a precedent this ticket exists to remove.
+>
+> **`forge review amend-docs <review-id> --path <doc> [--path <doc> ...]
+> --rationale <text>`** is a bounded coordinator verb, not a stage: it is
+> driven directly rather than through `forge review continue`, since there is
+> no finding to trigger it and `continue` never repeats a completed stage. It
+> is bounded by construction, never a re-anchor:
+>
+> - **AC1 — eligibility.** Refuses unless the review has a candidate and has
+>   completed discovery at a confirmed sha (`docs_amendment_no_candidate`,
+>   `docs_amendment_before_discovery`). `contractConfirmedSha` is read and
+>   never written here, so discovery can never re-open through this door.
+> - **AC2 — documentation-only, enforced by name.** Every declared path is
+>   classified by a pure, default-deny authority: a known prose extension is
+>   documentation (with a named carve-out for `.txt` dependency manifests, and
+>   test-named files always code); anything else — source, tests,
+>   configuration, lockfiles, the FG-732 orchestrator-policy surface, or an
+>   undeclared dirty path — refuses the WHOLE amendment by name before any git
+>   write, with nothing committed and the candidate unmoved.
+> - **AC3 — the coordinator commits, never the orchestrator.** Same discipline
+>   as the FG-649 fix cycle and FG-655 docs cycle: the declared paths are
+>   staged and passed to the commit itself, not merely `git add`ed, because the
+>   index is shared with whatever else is running in the operator's checkout.
+>   Unlike those two cycles, there is no `no_change` arm — an amendment that
+>   moved nothing is always the named refusal
+>   (`docs_amendment_declared_changes_absent`), because an amendment exists to
+>   bring a correction IN.
+> - **AC4 — the candidate advance re-opens exactly what it should.** The
+>   commit lands through the SAME `advanceCandidate` choke point the fix and
+>   docs cycles use, so CI is required at the amended sha and
+>   `verified_final`/`recheck`/`shipping` re-open there, while
+>   `contractConfirmedSha` stays untouched.
+> - **AC5 — Stage 6 stays complete, at the new candidate.** The docs stage
+>   record is rewritten at the amended sha carrying an `amendment: true`
+>   marker, so the amended candidate reads as a completed Stage 6 rather than
+>   reopening it, and Stage 8's bounded delta narrows to
+>   `supersededSha..amendedSha` instead of the full
+>   `contractConfirmedSha..candidate` span — an amendment recheck reviews only
+>   the amended prose, not remediation an earlier recheck already settled.
+> - **AC6 — the durable lineage.** A dedicated ledger record (`kind:
+>   "docs_amendment"`, a fifth shape in `lens_outcomes_json` — see
+>   [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#reviews--review_findings-tables-fg-638-dashboard-read-path)) carries `supersededSha`,
+>   `amendedSha`, the committed `paths`, and the `rationale`, because the
+>   stage-6 record it sits beside is last-write-wins and is overwritten when
+>   shipping re-runs at the amended sha — only a record naming both endpoints
+>   lets a later reader see the move happened AS an amendment rather than a
+>   candidate that always contained the prose. Written BEFORE the candidate
+>   advance so a crash after it can still recover the superseded sha, and it
+>   GATES the advance: a ledger write suppressed by the same no-clobber rule
+>   its sibling writers apply (a non-array outcomes column, left alone rather
+>   than overwritten) refuses `docs_amendment_ledger_unwritable` and leaves the
+>   candidate at the superseded sha even though the commit already exists —
+>   advancing without a recorded lineage is exactly what AC6 exists to
+>   prevent. The mirroring `review.docs_amended` event is emitted in the same
+>   transaction.
+> - **AC7 — end to end against a real repository.** Proved against a real git
+>   worktree and the real ledger rather than closure-variable seams, because
+>   the whole contract is about a real commit landing on top of the pinned
+>   candidate and the candidate advancing to the sha the coordinator authored.
+>
+> **The commit is built compare-and-set, not a plain `git commit`,** closing a
+> race a first pass at this ticket left open: the pre-commit "is HEAD the
+> candidate" check is just that, a check, not a lock, so a second `amend-docs`
+> invocation could advance HEAD in the window before a plain `git commit` ran.
+> That commit moves HEAD unconditionally, so the loser would author an
+> unadopted child sitting on the racer's tip and leave it there — refused
+> correctly as not-adopted, but with the workspace HEAD now parked on a stray
+> commit nobody's ledger recorded, needing a manual reset to recover. The
+> commit is now built as an explicit child of the candidate (`write-tree` over
+> the staged declared paths, then `commit-tree` naming the candidate as sole
+> parent) without ever touching HEAD, and only then does
+> `update-ref HEAD <new-sha> <candidate-sha>` move the branch tip, with the
+> candidate as the ref's required old value. A lost race now leaves that
+> compare-and-set failing atomically — the built commit stays unreferenced
+> (`git gc` reclaims it) and the branch tip untouched — and the amendment
+> refuses
+> `docs_amendment_commit_raced` rather than adopting a commit nobody's ledger
+> write recorded — the same FG-428 `campaign_id` compare-and-set precedent
+> applied to a branch tip instead of a row.
+>
+> New schema: `lens_outcomes_json`'s fifth record shape and the
+> `review.docs_amended` event, both additive —
+> [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#reviews--review_findings-tables-fg-638-dashboard-read-path). No new table, no
+> migration. The threat model, the acceptance scenarios, and every scope
+> bullet above are otherwise unaltered by this note. Operator-facing detail is
 > [Review coordinator](../concepts.md#review-coordinator).
 
 ### Migration safety
