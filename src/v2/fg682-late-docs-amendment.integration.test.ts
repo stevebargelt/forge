@@ -632,6 +632,40 @@ test("integ FG-682: the amendment re-opens verification and a BOUNDED recheck at
   assert.equal(h.dispatches("red-backend").length, redDispatchesBefore, "no red-backend was re-dispatched — full discovery did not re-run");
 });
 
+// ─── RF-1: the amendment refuses BEFORE Stage 6 — it can never FORGE docs-stage completion ───
+
+test("integ FG-682 RF-1: a late-docs amendment invoked BEFORE the docs stage refuses docs_amendment_before_docs_stage — it does not fabricate Stage 6", async () => {
+  const h = harness();
+
+  // Park PAST discovery and the batch fix but BEFORE the docs stage runs: the candidate has moved
+  // onto the fix commit, discovery is complete at the confirmed sha, and Stage 6 has NOT recorded.
+  await parkAt(h.deps, "docs");
+  const candidate = getReview(REVIEW)?.candidateSha as string;
+  assert.equal(
+    getReview(REVIEW)?.stageEvidence?.discovery?.sha,
+    getReview(REVIEW)?.contractConfirmedSha,
+    "discovery IS complete at the confirmed sha — the discovery guard would pass",
+  );
+  assert.equal(docsRecord(), undefined, "but the docs stage has NOT recorded — Stage 6 is incomplete at the candidate");
+
+  // A WELL-FORMED amendment — a real doc edit in the worktree, a declared path, a rationale — so
+  // the only thing that can stop it is the docs-stage eligibility guard, not the later checks.
+  writeFileSync(join(repo, DOC_AMEND_PATH), `# Schema contract\n\n${AMEND_MARKER}.\n`);
+  const outcome = await runDocsAmendment(REVIEW, [DOC_AMEND_PATH], "sneak a doc in before Stage 6", h.deps, {
+    discoveredBy: "orchestrator",
+  });
+
+  if (outcome.status !== "refused") assert.fail(`expected a refusal, got ${JSON.stringify(outcome)}`);
+  assert.equal(outcome.reason, "docs_amendment_before_docs_stage", "the NAMED docs-stage guard fired");
+
+  // Nothing was recorded and the candidate is unmoved: no forged Stage 6 record, no advance, no
+  // commit. The bypass — writing a docs-stage record at an amended sha without reconciliation — is
+  // closed. (The doc edit is left dirty in the worktree; the guard runs before the committer.)
+  assert.equal(getReview(REVIEW)?.candidateSha, candidate, "the candidate stays put");
+  assert.equal(docsRecord(), undefined, "and no docs-stage record was written — Stage 6 was not fabricated");
+  assert.equal(head(), candidate, "HEAD is unmoved; no amendment commit was authored");
+});
+
 // ─── AC7: tip_equality and docs_closeout pass on their own terms, no override ───
 
 test("integ FG-682: the amended review settles with tip_equality and docs_closeout GREEN on their own terms — no override", async () => {

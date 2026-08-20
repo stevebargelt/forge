@@ -1952,6 +1952,23 @@ export async function runDocsAmendment(
     };
   }
 
+  // (a cont.) DOCS-STAGE ELIGIBILITY — Stage 6 must already be COMPLETE at the candidate. The
+  // amendment is for a documentation correction discovered AFTER docs reconciliation; running it
+  // BEFORE Stage 6 would let this path write the docs stage record at the amended sha and make
+  // Stage 6 look complete without the mandatory docs reconciliation ever having run (RF-1). Placed
+  // AFTER the crash-recovery arm above so a W3 replay — the amendment recorded, its docs record not
+  // yet written, so Stage 6 is legitimately incomplete at the candidate — still recovers there
+  // rather than being refused here.
+  if (!stageCompleteAt(review, "docs", candidateBefore)) {
+    return refused(
+      "docs_amendment_before_docs_stage",
+      `review ${reviewId} has not completed its docs stage at the candidate ${candidateBefore}, so a late-docs ` +
+        `amendment is not yet available — the amendment brings in a documentation correction discovered AFTER ` +
+        `Stage 6 reconciled the docs, and running it before then would bypass that mandatory reconciliation. ` +
+        `Nothing was recorded and the candidate stays at ${candidateBefore}.`,
+    );
+  }
+
   // DECLARATION — non-empty, with a rationale. Path classification (documentation-only, the
   // FG-732 surface) and the undeclared-dirty refusal are the committer's, which is where the
   // path authority and git both live; each surfaces below as a NAMED `refused`.
