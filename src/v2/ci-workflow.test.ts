@@ -15,7 +15,15 @@ import { REQUIRED_CI_CHECK_CONTEXT, REQUIRED_CI_GATE_COMMAND, projectCiRunsComma
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(root, ".github", "workflows", "ci.yml");
 
-type Step = { name?: string; uses?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, unknown> };
+type Step = {
+  name?: string;
+  id?: string;
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  "timeout-minutes"?: number;
+};
 type Job = {
   "runs-on"?: string;
   "continue-on-error"?: boolean;
@@ -413,6 +421,63 @@ test("extended-gate ceiling: the dashboard_browser tier carries its own raised c
     BROWSER_JOB_TIMEOUT,
     `${BROWSER_JOB} must carry timeout-minutes: ${BROWSER_JOB_TIMEOUT} — the old small-tier 6 cancelled the job while chromium's Chrome-for-Testing CDN download hung (~6-7m), turning the fail-closed aggregate red with the browser tests passing 109/109 (FG-739)`
   );
+});
+
+test("FG-739: dashboard_browser caches Playwright browsers using the resolved playwright-core version", () => {
+  const wf = loadWorkflow();
+  const steps = wf.jobs?.[BROWSER_JOB]?.steps ?? [];
+  const resolveVersion = steps.find((step) => step.name === "Resolve Playwright version");
+  assert.ok(resolveVersion, "dashboard_browser must resolve the installed Playwright version before caching browsers");
+  assert.equal(resolveVersion.id, "pw", "the Playwright version step must expose its output as steps.pw");
+  assert.match(
+    resolveVersion.run ?? "",
+    /echo\s+["']version=.*>>\s*["']?\$GITHUB_OUTPUT/,
+    "the Playwright version step must write a version output to $GITHUB_OUTPUT"
+  );
+
+  const browserCache = steps.find((step) => step.name === "Cache Playwright browsers");
+  assert.ok(browserCache, "dashboard_browser must cache Playwright's downloaded browser binaries");
+  assert.match(browserCache.uses ?? "", /^actions\/cache@/, "the browser cache step must use actions/cache");
+  assert.equal(browserCache.with?.path, "~/.cache/ms-playwright", "the cache must cover Playwright's browser directory");
+  assert.equal(
+    browserCache.with?.key,
+    "${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}",
+    "the cache key must vary by runner OS and the version resolved by steps.pw"
+  );
+});
+
+test("FG-739: dashboard_browser installs chromium through a bounded retry loop", () => {
+  const wf = loadWorkflow();
+  const install = wf.jobs?.[BROWSER_JOB]?.steps?.find((step) => step.name === "Install chromium");
+  assert.ok(install, "dashboard_browser must retain its Install chromium step");
+  const script = install.run ?? "";
+  assert.match(
+    script,
+    /for\s+attempt\s+in\s+(?:\d+\s+)+\d+\s*;\s*do/,
+    "chromium installation must loop over at least two attempts rather than make a one-shot install"
+  );
+  assert.match(
+    script,
+    /timeout\s+\S+\s+npx\s+playwright-core\s+install\b/,
+    "each chromium install attempt must be capped by the timeout command"
+  );
+  assert.match(script, /sleep\s+/, "failed chromium install attempts must back off before retrying");
+});
+
+test("FG-739: exhausted chromium installs fail loudly as infrastructure failures within a step timeout", () => {
+  const wf = loadWorkflow();
+  const install = wf.jobs?.[BROWSER_JOB]?.steps?.find((step) => step.name === "Install chromium");
+  assert.ok(install, "dashboard_browser must retain its Install chromium step");
+  assert.ok(
+    typeof install["timeout-minutes"] === "number" && install["timeout-minutes"] > 0,
+    "Install chromium must have its own positive timeout-minutes, independent of the job ceiling"
+  );
+  assert.match(
+    install.run ?? "",
+    /::error::[\s\S]*(?:install|infra)|(?:install|infra)[\s\S]*::error::/i,
+    "retry exhaustion must emit a ::error:: identifying chromium installation or infrastructure failure"
+  );
+  assert.match(install.run ?? "", /exit\s+1\b/, "retry exhaustion must exit non-zero rather than let browser tests mask it");
 });
 
 test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry a job timeout", () => {
