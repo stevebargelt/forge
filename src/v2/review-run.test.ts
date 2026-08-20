@@ -21,6 +21,7 @@ import { insertRun } from "../store/runs.js";
 import { eventsForRun } from "../store/events.js";
 import {
   agentProtocolRecordsOf,
+  amendmentRecordsOf,
   findingsForReview,
   getReview,
   ingestFindings,
@@ -30,9 +31,11 @@ import {
   markDocsDispatchDelivered,
   openDocsDispatch,
   recordAgentProtocol,
+  recordDocsAmendment,
   recordLensAcceptance,
   recordDisposition,
   recordResolution,
+  updateReview,
   type Review,
   type ReviewFinding,
   type ReviewStage,
@@ -50,8 +53,8 @@ import {
 } from "../store/fix-batches.js";
 import { setPublicationClockOffsetForTest } from "../store/publications.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
-import { runNextStage, type CoordinatorDeps } from "./review-run.js";
-import { fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
+import { runDocsAmendment, runNextStage, type CoordinatorDeps, type DocsAmendmentCommit } from "./review-run.js";
+import { fakeRendering, fakeReviewDiff, refusingReviewDiff } from "./review-diff.testkit.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -2801,4 +2804,254 @@ test("RF-1: a LIVE `repairing` record is NEVER re-driven — a concurrent contin
   assert.equal(recovered.status, "advanced", recovered.message);
   assert.equal(repairs, 1, "the stranded record is re-driven once");
   assert.equal(refusedFixDelivery(batch.id, batch.revision)?.state, "superseded");
+});
+
+// ─── FG-682: the bounded late-docs amendment ─────────────────────────────────
+//
+// Sequencing-tier proof, over an injected commitDocsAmendment seam: runDocsAmendment advances
+// the candidate, writes the dedicated amendment ledger record, records the docs stage at the
+// POST-advance sha with the amendment marker, and re-opens only final verification / recheck /
+// shipping (NOT docs, NOT discovery). The real git commit + the documentation-only classification
+// are proven against a real repository in review-wiring.test.ts and end to end in
+// fg682-late-docs-amendment.integration.test.ts.
+
+/** A stubbed commitDocsAmendment that records the declaration it was handed and returns a
+ *  `committed` outcome moving the candidate to `amendedSha`. */
+function amendCommitting(amendedSha: string, seen: { declared?: readonly string[] }): Partial<CoordinatorDeps> {
+  return {
+    commitDocsAmendment: ({ declaredPaths }) => {
+      seen.declared = [...declaredPaths];
+      return { kind: "committed", sha: amendedSha, committedPaths: [...declaredPaths] };
+    },
+  };
+}
+
+test("FG-682: a late-docs amendment past the docs stage advances the candidate, records the ledger lineage, and re-opens final verification", async () => {
+  const seen: { declared?: readonly string[] } = {};
+  const h = harness(amendCommitting("amended222", seen));
+  await parkAt(h.deps, "shipping_review");
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+  assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.sha, superseded, "docs stage complete at the superseded candidate");
+
+  const outcome = await runDocsAmendment(
+    REVIEW,
+    ["./docs/SCHEMA-CONTRACT.md"],
+    "the batch collapsed the dispatch lanes; the dependencyEnvironment receipt claim is now false",
+    h.deps,
+    { discoveredBy: "orchestrator" },
+  );
+
+  assert.equal(outcome.status, "amended");
+  if (outcome.status !== "amended") return;
+  assert.equal(outcome.supersededSha, superseded);
+  assert.equal(outcome.amendedSha, "amended222");
+  assert.deepEqual(outcome.committedPaths, ["docs/SCHEMA-CONTRACT.md"]);
+  // The declaration is normalized before it reaches the committer — the leading `./` is stripped.
+  assert.deepEqual(seen.declared, ["docs/SCHEMA-CONTRACT.md"]);
+
+  // AC3 + AC5: the COORDINATOR moved the candidate and recorded the docs stage at the amended sha.
+  assert.equal(getReview(REVIEW)?.candidateSha, "amended222");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.sha, "amended222");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.meta?.amendment, true);
+
+  // AC6: the dedicated amendment record preserves the exact lineage and the rationale.
+  const recs = amendmentRecordsOf(getReview(REVIEW) as Review);
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0]?.supersededSha, superseded);
+  assert.equal(recs[0]?.amendedSha, "amended222");
+  assert.deepEqual(recs[0]?.paths, ["docs/SCHEMA-CONTRACT.md"]);
+  assert.match(recs[0]?.rationale ?? "", /receipt claim is now false/);
+  assert.equal(recs[0]?.discoveredBy, "orchestrator");
+
+  // AC4/AC5: Stage 6 stays complete at the amended sha, so the next thing owed is final
+  // verification (CI at the new sha) — NOT a repeat of docs, and NOT discovery.
+  assert.equal(pending().kind, "verify_final");
+});
+
+test("FG-682: a commit refusal records nothing and leaves the candidate unmoved (AC2)", async () => {
+  const h = harness({
+    commitDocsAmendment: () =>
+      ({
+        kind: "refused",
+        reason: "docs_amendment_path_not_documentation",
+        detail: "src/x.ts is not amendable documentation",
+      }) as DocsAmendmentCommit,
+  });
+  await parkAt(h.deps, "shipping_review");
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+
+  const outcome = await runDocsAmendment(REVIEW, ["src/x.ts"], "not really docs", h.deps);
+  assert.equal(outcome.status, "refused");
+  if (outcome.status !== "refused") return;
+  assert.equal(outcome.reason, "docs_amendment_path_not_documentation");
+  assert.match(outcome.message, /is not amendable documentation/);
+
+  assert.equal(getReview(REVIEW)?.candidateSha, superseded, "candidate unmoved");
+  assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 0, "no amendment recorded");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.sha, superseded, "docs stage still at the superseded sha");
+  assert.equal(pending().kind, "shipping_review", "still owed only shipping — nothing re-opened");
+});
+
+test("FG-682: an empty declaration and an empty rationale are refused before any commit (AC6)", async () => {
+  let commits = 0;
+  const h = harness({
+    commitDocsAmendment: () => {
+      commits += 1;
+      return { kind: "committed", sha: "x", committedPaths: [] };
+    },
+  });
+  await parkAt(h.deps, "shipping_review");
+
+  const noPaths = await runDocsAmendment(REVIEW, [" ", "./"], "a rationale", h.deps);
+  assert.equal(noPaths.status, "refused");
+  assert.equal((noPaths as { reason: string }).reason, "docs_amendment_no_paths_declared");
+
+  const noRationale = await runDocsAmendment(REVIEW, ["docs/x.md"], "   ", h.deps);
+  assert.equal(noRationale.status, "refused");
+  assert.equal((noRationale as { reason: string }).reason, "docs_amendment_no_rationale");
+
+  assert.equal(commits, 0, "the committer was never reached");
+});
+
+test("FG-682: an amendment before discovery is refused — bounded to reviews past discovery", async () => {
+  const seen: { declared?: readonly string[] } = {};
+  const h = harness(amendCommitting("amended222", seen));
+  // The review is fresh: still at confirming_contract, discovery not complete at a confirmed sha.
+  const outcome = await runDocsAmendment(REVIEW, ["docs/x.md"], "a rationale", h.deps);
+  assert.equal(outcome.status, "refused");
+  assert.equal((outcome as { reason: string }).reason, "docs_amendment_before_discovery");
+  assert.equal(seen.declared, undefined, "the committer was never reached");
+});
+
+test("FG-682: a coordinator built without commitDocsAmendment refuses (the seam is required at this boundary)", async () => {
+  const h = harness();
+  await parkAt(h.deps, "shipping_review");
+  const depsNoAuthority: CoordinatorDeps = { ...h.deps, commitDocsAmendment: undefined };
+  const outcome = await runDocsAmendment(REVIEW, ["docs/x.md"], "a rationale", depsNoAuthority);
+  assert.equal(outcome.status, "refused");
+  assert.equal((outcome as { reason: string }).reason, "docs_amendment_no_commit_authority");
+});
+
+test("FG-682 RF-2: a crash after the advance leaves only the docs record to finish — recovered, never re-authored", async () => {
+  let commits = 0;
+  const h = harness({
+    commitDocsAmendment: () => {
+      commits += 1;
+      return { kind: "committed", sha: "amended222", committedPaths: ["docs/x.md"] };
+    },
+  });
+  await parkAt(h.deps, "shipping_review");
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+
+  // Simulate the W3 crash window: the amendment record was written and the candidate advanced,
+  // but the docs stage record at the amended sha never landed.
+  recordDocsAmendment(REVIEW, {
+    supersededSha: superseded,
+    amendedSha: "amended222",
+    paths: ["docs/x.md"],
+    rationale: "the receipt claim is now false",
+    discoveredBy: "orchestrator",
+  });
+  updateReview(REVIEW, { candidateSha: "amended222" });
+  assert.notEqual(getReview(REVIEW)?.stageEvidence?.docs?.sha, "amended222", "docs not yet recorded at the amended sha");
+
+  const outcome = await runDocsAmendment(REVIEW, ["docs/x.md"], "the receipt claim is now false", h.deps);
+  assert.equal(outcome.status, "amended");
+  if (outcome.status !== "amended") return;
+  assert.equal(outcome.recovered, true);
+  assert.equal(outcome.recognized, true);
+  assert.equal(commits, 0, "no second commit was authored");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.sha, "amended222", "the docs record was finished at the amended sha");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.docs?.meta?.amendment, true);
+  assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 1, "the amendment record was not duplicated");
+});
+
+test("FG-682 RF-1/RF-3: a suppressed ledger write REFUSES the advance — no candidate move without lineage", async () => {
+  const seen: { declared?: readonly string[] } = {};
+  const h = harness(amendCommitting("amended222", seen));
+  await parkAt(h.deps, "shipping_review");
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+
+  // The no-clobber case: the outcomes column is non-array, so recordDocsAmendment leaves it
+  // alone and persists nothing. Advancing the candidate here would move it with no amendment
+  // record — losing the AC6 lineage. The advance must be gated on a confirmed ledger write.
+  db.prepare(`UPDATE reviews SET lens_outcomes_json = ? WHERE id = ?`).run(JSON.stringify({ corrupt: true }), REVIEW);
+
+  const outcome = await runDocsAmendment(REVIEW, ["docs/x.md"], "the receipt claim is now false", h.deps);
+
+  assert.equal(outcome.status, "refused");
+  if (outcome.status !== "refused") return;
+  assert.equal(outcome.reason, "docs_amendment_ledger_unwritable");
+  assert.match(outcome.message, /NOT advanced/);
+  assert.equal(seen.declared?.length, 1, "the committer WAS reached — the commit is irreversible, the refusal is after it");
+
+  // The candidate is unmoved and no amendment record exists — nothing downstream reads a moved
+  // candidate without its lineage.
+  assert.equal(getReview(REVIEW)?.candidateSha, superseded, "candidate unmoved");
+  assert.equal(amendmentRecordsOf(getReview(REVIEW) as Review).length, 0, "no amendment recorded");
+});
+
+// ─── FG-682 step 4: the post-amendment recheck delta is bounded to the amendment ──────────────
+//
+// After a late-docs amendment the current candidate is an amended sha. runRecheck's default
+// bounded delta is `contractConfirmedSha..candidate`, which spans the fix commit, the docs commit
+// AND the amendment — re-reviewing already-settled remediation, the ceremony FG-682 removes. The
+// step narrows the base to the amendment's own `supersededSha` when the candidate is an amended
+// sha, so the recheck covers ONLY the amended documentation paths (AC5). A non-amendment recheck
+// keeps the `confirmedSha..candidate` base. `contractConfirmedSha` is never read as a delta base
+// here, so full discovery still never re-runs.
+
+/** A `reviewDiff` seam that records every (base, candidate) range it was asked to render and
+ *  returns a structurally-real rendering over `paths`, so a test can assert which base the
+ *  recheck chose. */
+function recordingReviewDiff(paths: readonly string[], sink: Array<{ base: string; candidate: string }>) {
+  return (base: string, candidate: string) => {
+    sink.push({ base, candidate });
+    return fakeRendering(base, candidate, paths);
+  };
+}
+
+test("FG-682 step 4: after an amendment the recheck's bounded delta is supersededSha..amendedSha, and a non-amendment recheck stays confirmedSha..candidate (AC5)", async () => {
+  const seen: { declared?: readonly string[] } = {};
+  const ranges: Array<{ base: string; candidate: string }> = [];
+  const h = harness({
+    ...amendCommitting("amended222", seen),
+    // The rendered path set only feeds contract confirmation's lens-scope check; this test's
+    // subject is the delta BASE the recheck picks, so keep the default harness's covered path.
+    reviewDiff: recordingReviewDiff(["src/store/reviews.ts"], ranges),
+  });
+
+  await parkAt(h.deps, "shipping_review");
+  const confirmed = getReview(REVIEW)?.contractConfirmedSha as string;
+  const superseded = getReview(REVIEW)?.candidateSha as string;
+  assert.notEqual(superseded, confirmed, "the fix cycle already moved the candidate off the confirmed sha");
+
+  // The ORDINARY recheck that ran during the first cycle based its delta on confirmedSha..candidate.
+  const ordinary = ranges.find((r) => r.base === confirmed && r.candidate === superseded);
+  assert.ok(ordinary, "a non-amendment recheck bases its bounded delta on confirmedSha..candidate");
+
+  // Amend a three-line prose correction in, past the docs stage — candidate → amended222.
+  const amended = await runDocsAmendment(
+    REVIEW,
+    ["docs/SCHEMA-CONTRACT.md"],
+    "the batch collapsed the dispatch lanes; the receipt claim is now false",
+    h.deps,
+    { discoveredBy: "orchestrator" },
+  );
+  assert.equal(amended.status, "amended");
+
+  // Final verification re-runs at the amended sha first; then the recheck.
+  assert.equal(pending().kind, "verify_final");
+  await runNextStage(REVIEW, h.deps); // verify_final at amended222
+  ranges.length = 0; // isolate the recheck's own reviewDiff call
+  const recheck = await runNextStage(REVIEW, h.deps); // recheck at amended222
+  assert.equal(recheck.transition.kind, "recheck");
+  assert.equal(recheck.status, "advanced", recheck.message);
+  assert.equal(h.calls.rechecker, 2, "the amended candidate is rechecked — its resolutions were invalidated");
+
+  const deltaCall = ranges.find((r) => r.candidate === "amended222");
+  assert.ok(deltaCall, "the recheck rendered a bounded delta ending at the amended candidate");
+  // The base is the SUPERSEDED sha — only the amended prose, not the fix/docs commits.
+  assert.equal(deltaCall?.base, superseded, "the post-amendment recheck delta is based on supersededSha..amendedSha");
+  assert.notEqual(deltaCall?.base, confirmed, "NOT confirmedSha..candidate — the earlier fix/docs commits are excluded");
 });

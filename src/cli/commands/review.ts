@@ -44,7 +44,13 @@ import { computeRepositoryEvidence, registryByEvidence } from "../../store/proje
 import { newReviewId } from "../../util/ids.js";
 import { compareIdentity, describeIdentity, identify } from "../../util/path-identity.js";
 import { nextTransition } from "../../v2/review-coordinator.js";
-import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/review-run.js";
+import {
+  runDocsAmendment,
+  runNextStage,
+  type CoordinatorDeps,
+  type DocsAmendmentOutcome,
+  type StageOutcome,
+} from "../../v2/review-run.js";
 import { validateReviewContract } from "../../v2/review-contract.js";
 import { assessShardCompleteness, type LensOutcome } from "../../v2/review-discovery.js";
 import { DEFAULT_SHARD_BUDGET, SHARD_BUDGET_UNIT } from "../../v2/review-shards.js";
@@ -304,6 +310,18 @@ type ContinueOpts = {
   retryShard?: string[];
   all?: boolean;
   dryRun?: boolean;
+  json?: boolean;
+};
+
+// FG-682: the late-docs amendment verb. `--project` binds the workspace exactly as `continue`
+// does (the review row is the authority; the override is recorded); `--path` declares the
+// documentation paths and `--rationale` records WHY — both are validated INSIDE runDocsAmendment
+// as named refusals, so the CLI keeps no second copy of that authority.
+type AmendDocsOpts = {
+  project?: string;
+  path?: string[];
+  rationale?: string;
+  discoveredBy?: string;
   json?: boolean;
 };
 
@@ -638,6 +656,24 @@ function reportStage(outcome: StageOutcome, json: boolean): void {
   if (outcome.status === "refused") process.exitCode = 1;
 }
 
+// FG-682: report the late-docs amendment outcome. An `amended` outcome names the exact
+// superseded→amended lineage and the committed paths (AC6 read back at the surface); a `refused`
+// outcome surfaces the NAMED refusal verbatim on a non-zero exit, so a code / config / undeclared
+// path refusal reads the same at the CLI as it does in the ledger (AC2) and the caller can tell
+// nothing was written.
+function reportAmendment(outcome: DocsAmendmentOutcome, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(outcome, null, 2));
+  } else if (outcome.status === "amended") {
+    console.log(`✓ amended ${outcome.supersededSha} → ${outcome.amendedSha}`);
+    console.log(`    committed: ${outcome.committedPaths.join(", ") || "(none)"}`);
+    console.log(`    ${outcome.message}`);
+  } else {
+    console.error(`✗ ${outcome.reason}: ${outcome.message}`);
+  }
+  if (outcome.status === "refused") process.exitCode = 1;
+}
+
 function snapshotFor(reviewId: string) {
   const review = getReview(reviewId);
   if (!review) throw new Error(`Not found: ${reviewId}`);
@@ -887,6 +923,62 @@ export function registerReview(program: Command): void {
         const pending = nextTransition(snapshotFor(reviewId));
         console.log(`  next: ${pending.kind} — ${pending.reason}`);
       }
+    });
+
+  review
+    .command("amend-docs")
+    .argument("<review-id>", "review id")
+    .option(
+      "--project <dir>",
+      "override the workspace recorded on the review — the override is RECORDED. Without it the workspace " +
+        "comes from the review row, never from cwd",
+    )
+    .option(
+      "--path <doc>",
+      "a declared documentation path to amend into the candidate (repeatable). Every path must be " +
+        "documentation; source, tests, config, lockfiles, the orchestrator-policy surface, and any undeclared " +
+        "dirty path are refused BY NAME with nothing written and the candidate unmoved",
+      (v: string, acc: string[] = []) => [...acc, v],
+    )
+    .option(
+      "--rationale <text>",
+      "why the amendment happened — required. The ledger preserves it so the amendment reads after the fact " +
+        "AS an amendment, never as if the original candidate had always contained it",
+    )
+    .option(
+      "--discovered-by <who>",
+      "who found the correction after the docs stage (default: orchestrator) — recorded on the amendment lineage",
+    )
+    .option("--json", "emit the amendment outcome as JSON")
+    .description(
+      "Amend a documentation-only correction discovered AFTER the docs stage into the review's candidate — " +
+        "a BOUNDED late-docs amendment, never a re-anchor. The COORDINATOR commits the declared documentation " +
+        "and advances the candidate; discovery does not re-run and contractConfirmedSha is never touched",
+    )
+    .action(async (reviewId: string, opts: AmendDocsOpts) => {
+      ensureForgeDirs();
+      assertStoreForLookup(`review ${reviewId}`);
+
+      // Deps come from the REVIEW row's workspace (FG-649), so the coordinator commits into the
+      // reviewed checkout, never cwd. buildCoordinatorDeps always provides commitDocsAmendment,
+      // so this path always has the commit authority AC3 requires.
+      const built = depsFor(reviewId, opts);
+      if (!built.ok) {
+        console.error(`forge review amend-docs: ${built.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      // The COORDINATOR performs the commit and the candidate advance (AC3): runDocsAmendment
+      // classifies each declared path, refuses code / tests / config / undeclared-dirty by name,
+      // commits ONLY the declared documentation, advances the candidate (firing verification
+      // invalidation, AC4), records the docs stage at the amended sha, and writes the amendment
+      // ledger record (AC6). An absent --rationale or empty --path set is a named refusal in
+      // there, so the CLI keeps no second copy of that authority.
+      const outcome = await runDocsAmendment(reviewId, opts.path ?? [], opts.rationale ?? "", built.deps, {
+        ...(opts.discoveredBy !== undefined ? { discoveredBy: opts.discoveredBy } : {}),
+      });
+      reportAmendment(outcome, opts.json === true);
     });
 
   review

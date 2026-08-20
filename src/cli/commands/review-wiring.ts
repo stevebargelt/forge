@@ -11,7 +11,7 @@
 // verification model would be a second set of evidence semantics to keep honest.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { applyOrchestratorBlock } from "./init.js";
@@ -94,6 +94,98 @@ function orchestratorBlockAltered(worktreeClaudeMd: string, committedClaudeMd: s
   return applyOrchestratorBlock(worktreeClaudeMd, committedClaudeMd).action !== "unchanged";
 }
 
+// FG-682: the documentation-path AUTHORITY for the bounded late-docs amendment. The amendment
+// verb (`forge review amend-docs`) may commit ONLY declared documentation; this pure function is
+// what lets the coordinator refuse code, tests, and config BY NAME (AC2), in the spirit of the
+// fix/docs-cycle scope refusals. It is a single classification consistent with how the review
+// already tells prose from code — a prose EXTENSION is documentation, everything else is not —
+// rather than a fourth notion of "doc". It touches no git and moves no candidate: given a
+// repo-relative path it answers `documentation | not-documentation` and nothing more.
+//
+// DEFAULT-DENY is the whole point: an authority that refuses is only sound if the ONLY accepts
+// are ones it can positively vouch for. So the accept path is the narrow one (a known prose
+// extension whose basename is not a config file), and every ambiguous or hostile shape —
+// absolute paths, `..` traversal, dotfiles, extensionless files, unknown extensions — falls
+// through to `not-documentation`.
+export type AmendmentPathClass = "documentation" | "not-documentation";
+
+// Prose file extensions that carry documentation rather than code or configuration. `.txt` is
+// included for NOTICE/README-style prose, but a handful of `.txt` DEPENDENCY manifests
+// (requirements.txt, CMakeLists.txt) are config wearing a prose extension — those are named in
+// CONFIG_PROSE_BASENAMES below so the extension gate never sweeps them in.
+const DOCUMENTATION_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".md",
+  ".mdx",
+  ".markdown",
+  ".rst",
+  ".txt",
+]);
+
+// Config / dependency manifests that carry a prose extension and would otherwise pass the
+// extension gate. Compared case-folded against the basename. Non-prose-extension config
+// (`.json`, `.yml`, `.toml`, `.lock`, …) needs no listing — it never matches
+// DOCUMENTATION_EXTENSIONS, so it is refused by default.
+const CONFIG_PROSE_BASENAMES: ReadonlySet<string> = new Set([
+  "requirements.txt",
+  "requirements-dev.txt",
+  "constraints.txt",
+  "cmakelists.txt",
+]);
+
+// FG-732: the orchestrator-policy surface is NEVER amendable documentation, even though both
+// files ARE markdown. `CLAUDE.md` carries the rendered `forge:orchestrator` block and
+// `seeds/orchestrator-template.md` authors it; a late-docs amendment may commit NEITHER —
+// mirroring the docs-cycle refusal at this file's `docs_cycle_touched_generated_surface`. A pure
+// PATH classifier cannot see the block boundary the docs-cycle guard inspects, so it fails closed
+// on the WHOLE of `CLAUDE.md` (an out-of-block CLAUDE.md prose correction is not amendable through
+// this verb — the safe under-approximation); the byte-level block distinction stays with the
+// committer's `orchestratorBlockAltered` guard as defense in depth.
+const AMENDMENT_POLICY_SURFACE: ReadonlySet<string> = new Set([
+  GENERATED_SURFACE_FILE, // "CLAUDE.md"
+  ORCHESTRATOR_SEED_REL, // "seeds/orchestrator-template.md"
+]);
+
+// A test file is CODE, even when it sits beside prose or (contrived) carries a prose extension.
+// The prose-extension gate already refuses `foo.test.ts` (`.ts` is not prose); this predicate
+// makes the intent explicit and also catches a `foo.test.md`-shaped path. Matches the common
+// `.test.`/`.spec.` infixes, including `.integration.test.` and `.worktree.test.`.
+function isTestBasename(base: string): boolean {
+  return /\.(test|spec)\.[^.]+$/i.test(base);
+}
+
+/** Classify a repo-relative path as amendable documentation or not — the AC2 authority the
+ *  coordinator consults to refuse a non-documentation path by name. PURE: no git, no store, no
+ *  candidate movement. Refusals are checked BEFORE the accept so a named carve-out (FG-732
+ *  surface, a config `.txt`, a test file) always wins over the extension gate. Fails closed on
+ *  every ambiguous or hostile shape. */
+export function classifyAmendmentPath(repoRelPath: string): AmendmentPathClass {
+  const path = repoRelPath.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+  if (path === "") return "not-documentation";
+
+  // Fail closed on anything that is not a plain repo-relative path: an absolute path or a `..`
+  // traversal segment could name a file outside the reviewed tree, which the amendment must never
+  // reach into. (git status emits repo-relative, `..`-free paths, so a well-formed input is
+  // unaffected; a hostile or malformed declaration is refused here.)
+  if (path.startsWith("/") || path.split("/").includes("..")) return "not-documentation";
+
+  // FG-732: orchestrator-policy surface is never amendable documentation.
+  if (AMENDMENT_POLICY_SURFACE.has(path)) return "not-documentation";
+
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const baseLower = base.toLowerCase();
+
+  // A test file is code; a listed config `.txt` is config. Both refused ahead of the gate.
+  if (isTestBasename(base)) return "not-documentation";
+  if (CONFIG_PROSE_BASENAMES.has(baseLower)) return "not-documentation";
+
+  // The single doc-vs-code distinction: a known prose extension is documentation. A leading-dot
+  // basename (`.gitignore`) has its dot at index 0 → no extension → not documentation. An
+  // extensionless file (`Makefile`, `README` with no suffix) → not documentation.
+  const dot = base.lastIndexOf(".");
+  const ext = dot <= 0 ? "" : baseLower.slice(dot);
+  return DOCUMENTATION_EXTENSIONS.has(ext) ? "documentation" : "not-documentation";
+}
+
 export type WiringContext = {
   projectDir: string;
   ticketId: string;
@@ -121,13 +213,18 @@ export type WiringContext = {
    *  assessed — which the eighth check blocks on, deliberately: the reviewer's duty is to
    *  look, and an unasked question is not a clean answer. */
   docsCloseout?: DocsCloseout;
-  git?: (args: string[]) => string;
+  git?: (args: string[], env?: Record<string, string>) => string;
   invokeFn?: InvokeFn;
 };
 
 function realGit(projectDir: string) {
-  return (args: string[]): string =>
-    execFileSync("git", args, { cwd: projectDir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return (args: string[], env?: Record<string, string>): string =>
+    execFileSync("git", args, {
+      cwd: projectDir,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      ...(env ? { env: { ...process.env, ...env } } : {}),
+    });
 }
 
 function projectScripts(projectDir: string): Record<string, unknown> {
@@ -538,6 +635,21 @@ function fixCycleSubject(batch: { id: string; revision: number }): string {
  *  Written and matched in ONE place. */
 function docsCycleSubject(binding: { id: string }): string {
   return `docs(review): docs cycle ${binding.id}`;
+}
+
+/** FG-682: the late-docs amendment's subject, and — like the fix/docs cycle's — its RF-2
+ *  IDEMPOTENCY KEY. Keyed by the SUPERSEDED candidate (the sha the amendment sits on top of),
+ *  which is unique per amendment: an amendment ADVANCES the candidate, so a second amendment
+ *  necessarily supersedes a different sha, and a retry after a crash recomputes the same key
+ *  from the same superseded candidate and recognises the commit this coordinator already
+ *  authored instead of authoring a second one.
+ *
+ *  Does NOT reference the ticket, for the same reason `fixCycleSubject`/`docsCycleSubject` do
+ *  not: `resolveReviewBase` infers a later review's comparison base from the OLDEST commit whose
+ *  subject references the ticket, so a ticket-referencing amendment commit would anchor a later
+ *  review on its own documentation. Written and matched in ONE place. */
+function docsAmendmentSubject(supersededSha: string): string {
+  return `docs(review): late-docs amendment on ${supersededSha}`;
 }
 
 /** The changed paths, named as far as is useful and counted beyond that. Used both by the
@@ -1476,6 +1588,279 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       // AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it can be.
       const sha = headSha();
       if (sha === review.candidateSha) {
+        return notAdopted(sha, `HEAD is still the candidate, so the commit that was just authored is not there`);
+      }
+      const adopted = adoption(sha);
+      if (!adopted.ok) return notAdopted(sha, adopted.why);
+      return {
+        kind: "committed",
+        sha,
+        committedPaths: adopted.committedPaths,
+        ...(declaredNotMoved.length > 0 ? { declaredNotMoved } : {}),
+      };
+    },
+
+    // FG-682: THE COORDINATOR COMMITS THE LATE-DOCS AMENDMENT — the FOURTH sibling, and
+    // deliberately NOT generalized with commitFixCycle/commitDocsCycle into a base class: the
+    // fix and docs cycles must not change behaviour because the amendment acquired the same
+    // authority (three similar functions beat a premature abstraction, as their own comments
+    // say). Every git property below is one those two already justify — one predicate decides
+    // adoption for a commit this pass authors and one an earlier pass already made (RF-2);
+    // identity is the stage-scoped subject key AND an anchored head TOGETHER, never a substitute
+    // for adoption; the declared paths go to `git commit` ITSELF because the index is shared
+    // (RF-6); and the reconciliation runs in both directions.
+    //
+    // WHAT IS NEW HERE AND NOWHERE ELSE: the declaration is classified DOCUMENTATION-FIRST. Every
+    // declared path must be amendable documentation (`classifyAmendmentPath`), so a source, test,
+    // config, lockfile or orchestrator-policy-surface path is refused BY NAME before any git
+    // write — the amendment may move ONLY prose (AC2). And there is NO `no_change` arm: a
+    // non-empty declaration whose paths never moved is a NAMED refusal, because an amendment
+    // exists to bring a correction IN, so "nothing to amend" is never a silent success.
+    commitDocsAmendment: async ({ review, declaredPaths }) => {
+      const candidate = review.candidateSha;
+      const declared = [...new Set(declaredPaths.map((p) => p.replace(/^\.\//, "").trim()).filter((p) => p !== ""))];
+
+      // A declaration must exist. (runDocsAmendment already guards this; the committer refuses
+      // too so the authority is complete on its own.)
+      if (declared.length === 0) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_no_paths_declared",
+          detail: `the late-docs amendment declared no paths, so there is nothing it is authorised to commit`,
+        };
+      }
+
+      // (b) DOCUMENTATION-ONLY, ENFORCED BY THE PATH AUTHORITY. Every declared path must classify
+      // as documentation; the first that does not refuses the WHOLE amendment by name and nothing
+      // is committed (AC2). This is the code/tests/config refusal, in the spirit of
+      // `fix_cycle_tree_dirty_outside_declared_scope` — and `classifyAmendmentPath` also fails
+      // closed on the FG-732 orchestrator-policy surface, absolute paths and `..` traversal.
+      const notDocumentation = declared.filter((p) => classifyAmendmentPath(p) !== "documentation");
+      if (notDocumentation.length > 0) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_path_not_documentation",
+          detail:
+            `the late-docs amendment declared ${notDocumentation.slice(0, 10).join(", ")}` +
+            `${notDocumentation.length > 10 ? `, +${notDocumentation.length - 10} more` : ""}, which ` +
+            `${notDocumentation.length === 1 ? "is" : "are"} not amendable documentation. A bounded late-docs ` +
+            `amendment commits ONLY declared documentation (a known prose file), and refuses source, tests, ` +
+            `configuration, lockfiles and the orchestrator-policy surface (${GENERATED_SURFACE_FILE}, ` +
+            `${ORCHESTRATOR_SEED_REL}) by name — nothing was committed and the candidate is unmoved`,
+        };
+      }
+
+      const subject = docsAmendmentSubject(candidate ?? "");
+      const at = headSha();
+      const declaredSet = new Set(declared);
+
+      const adoption = (sha: string): { ok: true; committedPaths: string[] } | { ok: false; why: string } => {
+        const parents = parentsOf(sha);
+        if (parents.length !== 1 || !(parents[0] === candidate || sha === candidate)) {
+          return {
+            ok: false,
+            why: `its parent is ${parents.join(" ") || "(none)"}, not the candidate ${candidate ?? "(unset)"}`,
+          };
+        }
+        const committedPaths = pathsOf(sha);
+        const smuggled = committedPaths.filter((p) => !declaredSet.has(p));
+        if (smuggled.length > 0) {
+          return { ok: false, why: `it carries ${smuggled.join(", ")}, which the amendment never declared` };
+        }
+        return { ok: true, committedPaths };
+      };
+      const notAdopted = (sha: string, why: string) =>
+        ({
+          kind: "refused",
+          reason: "docs_amendment_commit_raced",
+          detail:
+            `the late-docs amendment commit ${sha} in ${ctx.projectDir} did not land as authored — ${why}. ` +
+            `Something else wrote this checkout, so the commit is NOT adopted as the candidate and nothing was ` +
+            `recorded. Inspect ${sha}, return the checkout to ${candidate ?? "the candidate"} ` +
+            `(\`git reset --soft ${candidate ?? "<candidate>"}\` puts the correction back in the worktree so the ` +
+            `coordinator can author the commit itself), and re-run`,
+        }) as const;
+
+      // RF-2: RECOGNISE A COMMIT THIS COORDINATOR ALREADY AUTHORED, first. The git commit is
+      // irreversible and the ledger writes that record it (amendment record, candidate advance,
+      // docs stage record) are separate transactions after it, so the only way a crash in
+      // between is recoverable is for the retry to recognise the commit. The subject key
+      // (per-superseded-candidate) says WHICH commit; adoption still decides WHETHER — a
+      // recognition weaker than adoption is a refusal one re-run away from being reversed. Both
+      // crash windows reachable HERE land on an anchored HEAD: before the advance HEAD's PARENT
+      // is the candidate; the post-advance window is handled by runDocsAmendment's own recovery,
+      // so this committer only ever sees the pre-advance anchor.
+      if (subjectOf(at) === subject && (at === candidate || parentsOf(at).includes(candidate ?? ""))) {
+        const adopted = adoption(at);
+        if (!adopted.ok) return notAdopted(at, adopted.why);
+        return { kind: "committed", sha: at, committedPaths: adopted.committedPaths, recognized: true };
+      }
+
+      // THE COMMIT GOES ON TOP OF THE CANDIDATE OR NOWHERE — and this is also where a correction
+      // someone COMMITTED BY HAND (the very drift this ticket removes) lands. Its commit is left
+      // alone; the remedy names the soft reset that returns the correction to the worktree so the
+      // coordinator authors the amendment itself.
+      if (at !== candidate) {
+        return {
+          kind: "refused",
+          reason: "candidate_not_checked_out",
+          detail:
+            `the workspace at ${ctx.projectDir} is on ${at}, not the candidate ${candidate ?? "(unset)"} this ` +
+            `amendment is for — refusing to author a commit on a tree the review is not about. If the correction ` +
+            `was committed by hand, leave that commit alone and run \`git reset --soft ${candidate ?? "<candidate>"}\` ` +
+            `to return its edits to the worktree, so the coordinator authors the amendment commit itself. Otherwise ` +
+            `check the candidate out (or point --project at the workspace that has it) and re-run`,
+        };
+      }
+
+      let moved: string[];
+      try {
+        moved = porcelainPaths(git(["status", "--porcelain", "-z", "--untracked-files=all"]));
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_commit_failed",
+          detail:
+            `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message} — with no ` +
+            `porcelain scan there is no declared-path scope, so nothing was staged or committed. Make ` +
+            `\`git status\` answer there again (a stale \`.git/index.lock\` is the usual cause), then re-run`,
+        };
+      }
+
+      // THE TREE MOVED BEYOND THE DECLARATION — NAMED, never swept in (AC2). This is the
+      // undeclared-dirty refusal, the same shape as the fix/docs cycles': a dirty path the
+      // amendment did not declare is a stop, so a stray code edit sitting in the worktree can
+      // never ride into a documentation-labelled commit.
+      const outside = moved.filter((p) => !declaredSet.has(p));
+      if (outside.length > 0) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_tree_dirty_outside_declared_scope",
+          detail:
+            `the worktree at ${ctx.projectDir} has changes the amendment never declared: ` +
+            `${outside.slice(0, 10).join(", ")}${outside.length > 10 ? `, +${outside.length - 10} more` : ""} ` +
+            `(declared: ${declared.join(", ")}). The amendment's commit carries only the declared documentation, ` +
+            `so an undeclared change is never swept into it — commit, stash or discard the undeclared paths ` +
+            `yourself, then re-run`,
+        };
+      }
+
+      // FG-732: DEFENSE IN DEPTH. classifyAmendmentPath already refuses the orchestrator-policy
+      // surface as a DECLARED path, and `outside` refuses it as an undeclared dirty one — so a
+      // policy-surface edit can reach neither the declared set nor the commit. This guard makes
+      // that a structural guarantee rather than an incidental one, mirroring the docs cycle's
+      // `docs_cycle_touched_generated_surface` and the carve-out the classifier's own comment
+      // hands to "the committer's orchestratorBlockAltered guard".
+      const claudeBlockAltered =
+        moved.includes(GENERATED_SURFACE_FILE) &&
+        orchestratorBlockAltered(
+          readFileOrEmpty(join(ctx.projectDir, GENERATED_SURFACE_FILE)),
+          (() => {
+            try {
+              return git(["show", `${candidate ?? "HEAD"}:${GENERATED_SURFACE_FILE}`]);
+            } catch {
+              return "";
+            }
+          })(),
+        );
+      const seedAltered = moved.includes(ORCHESTRATOR_SEED_REL);
+      if (claudeBlockAltered || seedAltered) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_touched_generated_surface",
+          detail:
+            `the amendment would commit the orchestrator-policy surface (` +
+            `${claudeBlockAltered ? `the \`forge:orchestrator\` block in ${GENERATED_SURFACE_FILE}` : ""}` +
+            `${claudeBlockAltered && seedAltered ? " and " : ""}` +
+            `${seedAltered ? `the seed \`${ORCHESTRATOR_SEED_REL}\`` : ""}), which is the orchestrator's to author, ` +
+            `never a late-docs amendment's. Nothing was committed`,
+        };
+      }
+
+      // TWO-DIRECTIONAL RECONCILIATION, exactly as the fix/docs cycles': `outside` caught a tree
+      // beyond the declaration; `declaredNotMoved` catches a declaration beyond the tree. UNLIKE
+      // those cycles there is NO legitimate no-op — an amendment that moved nothing has nothing
+      // to bring in, so an empty move is always the NAMED refusal, whether or not every declared
+      // path is accounted for.
+      const movedSet = new Set(moved);
+      const declaredNotMoved = [...declaredSet].filter((p) => !movedSet.has(p)).sort();
+      if (moved.length === 0) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_declared_changes_absent",
+          detail:
+            `the amendment declares ${declared.join(", ")} but the worktree at ${ctx.projectDir} is clean at the ` +
+            `candidate ${candidate ?? "(unset)"} — there is no documentation correction present to commit. A ` +
+            `late-docs amendment brings a correction IN, so a clean tree is nothing to amend, not a no-op. Make the ` +
+            `correction in the worktree (or check out the tree that holds it) and re-run`,
+        };
+      }
+
+      // RF-2: COMPARE-AND-SET the branch tip so ONLY a commit that still sits on the candidate
+      // lands, matching the FG-428 campaign_id CAS precedent. The `at !== candidate` guard above
+      // is a check, not a lock: another amendment invocation can advance HEAD in the window
+      // between it and the write, and a plain `git commit` moves HEAD unconditionally — so a
+      // loser would author an unadopted child on the racer's tip and LEAVE it there. Instead,
+      // build the commit as an EXPLICIT child of the candidate (never touching HEAD) and move the
+      // branch tip with an old-value guard: `update-ref HEAD <new> <candidate>` fails atomically
+      // if HEAD is no longer the candidate. A lost race leaves the tip untouched and the built
+      // commit unreferenced (git gc reclaims it), so nothing is recorded and the candidate is
+      // unmoved. RF-4: THE TREE IS BUILT FROM THE CANDIDATE PLUS ONLY THE DECLARED BLOBS, in a
+      // TEMPORARY INDEX — never from the real one. The `outside` scan above proves the WORKTREE
+      // differs from the candidate only in the declared paths; it does NOT prove the real INDEX
+      // is clean (an unrelated path staged before or during the scan sits there unseen, and
+      // `write-tree` snapshots the WHOLE index). Snapshotting the real index would ride that
+      // undeclared staged blob straight into a documentation-labelled commit — the AC2 violation.
+      // So seed a scratch index with the candidate tree (`read-tree <candidate>`), stage ONLY the
+      // declared paths from the worktree into it (a doc DELETION removes its blob too, so a
+      // removal still amends), and `write-tree` THAT: a tree that is exactly the candidate with
+      // only the declared documentation changed. The real index is never READ for the commit, so
+      // an unrelated staged path is never committed; it is reconciled for the DECLARED paths only
+      // AFTER the commit lands (below), so the worktree is left clean exactly as the prior partial
+      // `git commit -- <paths>` left it, and the undeclared staged path — never in `moved` — is
+      // untouched. `stageDeclaredPaths` tolerates a path the scratch index already fully represents.
+      let newSha: string;
+      const tmpIndex = join(
+        git(["rev-parse", "--absolute-git-dir"]).trim(),
+        `forge-amend-index-${process.pid}-${headSha()}`,
+      );
+      const gitTmp = (args: string[]): string => git(args, { GIT_INDEX_FILE: tmpIndex });
+      try {
+        rmSync(tmpIndex, { force: true });
+        gitTmp(["read-tree", candidate ?? ""]);
+        stageDeclaredPaths(gitTmp, moved);
+        const tree = gitTmp(["write-tree"]).trim();
+        newSha = git(["commit-tree", tree, "-p", candidate ?? "", "-m", subject]).trim();
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "docs_amendment_commit_failed",
+          detail:
+            `git refused the late-docs amendment commit in ${ctx.projectDir}: ${(err as Error).message}. The ` +
+            `correction is still in the worktree, so nothing is lost: resolve what git reported, then re-run`,
+        };
+      } finally {
+        rmSync(tmpIndex, { force: true });
+      }
+      try {
+        git(["update-ref", "HEAD", newSha, candidate ?? ""]);
+      } catch {
+        return notAdopted(
+          newSha,
+          `HEAD is no longer the candidate ${candidate ?? "(unset)"}, so the compare-and-set that moves the branch ` +
+            `tip refused — another writer advanced the candidate while this amendment was staging. The built commit ` +
+            `is left unreferenced and the branch tip is unmoved`,
+        );
+      }
+
+      // Bring the REAL index in line with the amended HEAD for the DECLARED paths only, so the
+      // worktree is left clean — the same post-condition the old partial commit left. The
+      // undeclared staged path is never in `moved`, so this never touches it: it stays staged.
+      stageDeclaredPaths(git, moved);
+
+      // AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it can be.
+      const sha = headSha();
+      if (sha === candidate) {
         return notAdopted(sha, `HEAD is still the candidate, so the commit that was just authored is not there`);
       }
       const adopted = adoption(sha);
