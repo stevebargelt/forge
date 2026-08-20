@@ -370,8 +370,17 @@ export function inFlightItemLaunches(opts: { campaignId?: string } = {}): ItemLa
  * under that born-under owner, so the drive-item fence denies forever.
  *
  * This REFRESH is GUARDED on `run_id IS NULL`: a linkage that carries a run id is genuinely
- * in-flight and its born-under authority is NOT touched — FG-564 stays intact. Returns true when a
- * settled row was actually refreshed (no row / an in-flight row → false, no-op).
+ * in-flight and its born-under authority is NOT touched — FG-564 stays intact.
+ *
+ * It is ALSO guarded on `token` still being the LIVE lease holder, coupled ATOMICALLY into the
+ * UPDATE via an EXISTS against campaign_controller_leases. Without this, a stale launcher whose
+ * lease was already taken over — or a TOCTOU between the caller's lease read and this write —
+ * could rebind a settled linkage's born-under token to a NON-current owner/generation, re-wedging
+ * the held item (the legit successor then fences because born-under != the live lease). Because the
+ * lease-holder check lives in the same statement as the write, no window exists between verifying
+ * the holder and rewriting the token. Only the caller actually holding the current lease rebinds;
+ * a stale caller no-ops. Returns true when a settled row was actually refreshed (no row / an
+ * in-flight row / a non-holder token → false, no-op).
  */
 export function refreshItemLaunchBornUnder(
   campaignId: string,
@@ -385,9 +394,15 @@ export function refreshItemLaunchBornUnder(
         `UPDATE campaign_item_launches
             SET controller_owner = ?, controller_generation = ?, updated_at = ?
           WHERE campaign_id = ? AND item_id = ? AND attempt_generation = ?
-            AND run_id IS NULL`,
+            AND run_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM campaign_controller_leases l
+               WHERE l.campaign_id = campaign_item_launches.campaign_id
+                 AND l.owner = ?
+                 AND l.generation = ?
+            )`,
       )
-      .run(token.owner, token.generation, nowIso(), campaignId, itemId, attemptGeneration);
+      .run(token.owner, token.generation, nowIso(), campaignId, itemId, attemptGeneration, token.owner, token.generation);
     return (res.changes ?? 0) > 0;
   });
 }

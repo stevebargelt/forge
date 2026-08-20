@@ -287,23 +287,85 @@ describe("FG-737 (AC1/AC2): the real resume controller loop recovers only after 
 });
 
 describe("FG-737: refreshItemLaunchBornUnder store primitive — guard semantics", () => {
-  test("refreshes a SETTLED row (run_id NULL); refuses an IN-FLIGHT row (run_id present); no-op on a missing row", () => {
+  test("refreshes a SETTLED row ONLY for the live lease holder; refuses an in-flight row, a missing row, and a non-holder token", () => {
     const { cid, itemId } = runningCampaignWithItem();
     const ownerA = `campaign@${cid}@A`;
     const ownerNew = `campaign@${cid}@auto`;
 
-    // Missing row → false, no-op.
-    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 1, { owner: ownerNew, generation: 9 }), false, "no row → no refresh");
+    // The current lease holder is ownerNew (generation 1). Only a token matching THIS live holder
+    // may refresh a settled linkage (RF-1).
+    const hold = acquireCampaignLease({ campaignId: cid, owner: ownerNew, ttlMs: TTL });
+    assert.ok(hold.granted && hold.lease.generation === 1);
 
-    // Settled row (run_id NULL) → refreshed.
+    // Missing row → false, no-op (even for the live holder).
+    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 1, { owner: ownerNew, generation: 1 }), false, "no row → no refresh");
+
+    // Settled row (run_id NULL) but a token that is NOT the live lease holder (wrong generation) →
+    // refused. This is the RF-1 stale-launcher guard: a taken-over token cannot rebind.
     recordItemLaunch({ campaignId: cid, itemId, attemptGeneration: 1, sourceLaunchId: "launch-settled", controllerOwner: ownerA, controllerGeneration: 1, state: "launched" });
-    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 1, { owner: ownerNew, generation: 2 }), true, "settled row → refreshed");
+    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 1, { owner: ownerNew, generation: 9 }), false, "settled row but token != live lease → refused");
+    assert.equal(getItemLaunch(cid, itemId, 1)?.controllerOwner, ownerA, "non-holder token leaves born-under untouched");
+
+    // Settled row + a token that IS the live lease holder → refreshed.
+    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 1, { owner: ownerNew, generation: 1 }), true, "settled row + live holder token → refreshed");
     assert.equal(getItemLaunch(cid, itemId, 1)?.controllerOwner, ownerNew);
+    assert.equal(getItemLaunch(cid, itemId, 1)?.controllerGeneration, 1);
+
+    // Once a run id is present the row is in-flight → refuse even for the live holder.
+    recordItemLaunch({ campaignId: cid, itemId, attemptGeneration: 2, sourceLaunchId: "launch-inflight", controllerOwner: ownerA, controllerGeneration: 1, runId: "run-x", state: "observed" });
+    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 2, { owner: ownerNew, generation: 1 }), false, "in-flight row → refused");
+    assert.equal(getItemLaunch(cid, itemId, 2)?.controllerOwner, ownerA, "in-flight born-under owner unchanged");
+  });
+});
+
+describe("FG-737 (RF-1): a STALE launcher whose lease was taken over cannot rebind a settled linkage's born-under token", () => {
+  test("after a successor legitimately re-adopts the settled linkage, a stale-snapshot re-record NO-OPs — it cannot re-wedge the held item", async () => {
+    const { cid, itemId } = runningCampaignWithItem();
+
+    // Controller A creates the lease (gen 1) and records the SETTLED born-under linkage (held item).
+    const staleOwner = `campaign@${cid}@cli-11111`;
+    const a = acquireCampaignLease({ campaignId: cid, owner: staleOwner, ttlMs: TTL });
+    assert.ok(a.granted && a.lease.generation === 1);
+    recordItemLaunch({ campaignId: cid, itemId, attemptGeneration: 1, sourceLaunchId: "launch-A", controllerOwner: staleOwner, controllerGeneration: 1, state: "launched" });
+
+    // Controller B takes over after expiry (gen 2) and legitimately re-adopts the settled linkage:
+    // getCampaignLease resolves B as the live holder, so the refresh rebinds to successorOwner#2.
+    setPublicationClockOffsetForTest(TTL + 1000);
+    const successorOwner = `campaign@${cid}@cli-22222`;
+    const b = acquireCampaignLease({ campaignId: cid, owner: successorOwner, ttlMs: TTL });
+    assert.ok(b.granted && b.mode === "took_over" && b.lease.generation === 2);
+    recordDriveItemLaunchLinkage(cid, itemId, "launch-B");
+    assert.equal(getItemLaunch(cid, itemId, 1)?.controllerOwner, successorOwner, "the live holder rebinds the settled linkage");
     assert.equal(getItemLaunch(cid, itemId, 1)?.controllerGeneration, 2);
 
-    // Once a run id is present the row is in-flight → refuse.
-    recordItemLaunch({ campaignId: cid, itemId, attemptGeneration: 2, sourceLaunchId: "launch-inflight", controllerOwner: ownerA, controllerGeneration: 1, runId: "run-x", state: "observed" });
-    assert.equal(refreshItemLaunchBornUnder(cid, itemId, 2, { owner: ownerNew, generation: 5 }), false, "in-flight row → refused");
-    assert.equal(getItemLaunch(cid, itemId, 2)?.controllerOwner, ownerA, "in-flight born-under owner unchanged");
+    // THE ATTACK RF-1 closes: controller A's launch, still carrying its PRE-TAKEOVER snapshot
+    // (staleOwner#1), completes a late launch/re-record. Its token is no longer the live lease holder
+    // (B#2 is), so the settled-linkage refresh MUST no-op — the direct primitive refuses it, and the
+    // caller path (recordDriveItemLaunchLinkage with the stale snapshot) leaves the born-under token
+    // pinned to the successor. Without the fix, A#1 would overwrite B#2 and re-wedge the item forever.
+    assert.equal(
+      refreshItemLaunchBornUnder(cid, itemId, 1, { owner: staleOwner, generation: 1 }),
+      false,
+      "the primitive refuses a token that is not the live lease holder",
+    );
+    recordDriveItemLaunchLinkage(cid, itemId, "launch-A-late", { owner: staleOwner, generation: 1 });
+    assert.equal(getItemLaunch(cid, itemId, 1)?.controllerOwner, successorOwner, "stale launcher CANNOT rebind the settled linkage to its taken-over token");
+    assert.equal(getItemLaunch(cid, itemId, 1)?.controllerGeneration, 2, "born-under stays with the successor generation");
+
+    // Proof the held item remains recoverable by B: a drive under B passes the born-under fence (a
+    // fenced child would short-circuit with recovery_needed). The fail-closed lane rejects — exactly
+    // the signal the fence let it through, so the item is NOT re-wedged by the stale-launcher attempt.
+    await assert.rejects(
+      () =>
+        driveOneCampaignItem(cid, itemId, {
+          dispatch: async () => ({ status: "complete", taskId: "t" }) as never,
+          projectDir: "/tmp/proj",
+          mode: "sequential",
+          enforceFence: true,
+          loadWorkflowFn: () => { throw new Error("stop after the fence"); },
+        }),
+      /ticket .* not found|workflow|fail closed|stop after the fence/,
+      "the held item is STILL recoverable by the successor after the stale-launcher rebind attempt",
+    );
   });
 });
