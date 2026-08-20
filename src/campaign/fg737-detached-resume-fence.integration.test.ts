@@ -49,7 +49,7 @@ import {
   recordItemLaunch,
   refreshItemLaunchBornUnder,
 } from "../store/campaign-controller.js";
-import { driveOneCampaignItem, recordDriveItemLaunchLinkage } from "./executor.js";
+import { driveOneCampaignItem, driveRemainingItems, recordDriveItemLaunchLinkage } from "./executor.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -223,6 +223,66 @@ describe("FG-737 (AC3): two concurrent same-campaign controllers WITHOUT an oper
     const renew = acquireCampaignLease({ campaignId: cid, owner: owner1, ttlMs: TTL });
     assert.ok(renew.granted && renew.mode === "renewed", "same-owner reacquire renews (the @auto collapse mechanism)");
     assert.equal(renew.lease.generation, 1, "same-owner renew stays at the SAME generation — why a shared owner defeats the fence");
+  });
+});
+
+describe("FG-737 (AC1/AC2): the real resume controller loop recovers only after the prior lease expires", () => {
+  test("a live foreign lease denies the new instance-unique controller without launching; its post-expiry takeover re-records and reaches the child drive lane", async () => {
+    const { cid, itemId } = runningCampaignWithItem();
+    const staleOwner = `campaign@${cid}@cli-90154`;
+    const resumeOwner = `campaign@${cid}@cli-90233`;
+    const stale = acquireCampaignLease({ campaignId: cid, owner: staleOwner, ttlMs: TTL });
+    assert.ok(stale.granted && stale.mode === "created");
+    recordItemLaunch({ campaignId: cid, itemId, attemptGeneration: 1, sourceLaunchId: "launch-stale", controllerOwner: staleOwner, controllerGeneration: stale.lease.generation, state: "launched" });
+
+    let launches = 0;
+    const launchUnderResumeController = async (campaignId: string, launchedItemId: string) => {
+      launches++;
+      // This is the production launcher ordering: persist/re-record the linkage before the
+      // launchable child resolves its durable born-under fence.
+      recordDriveItemLaunchLinkage(campaignId, launchedItemId, `launch-resume-${launches}`);
+      return driveOneCampaignItem(campaignId, launchedItemId, {
+        dispatch: async () => ({ status: "complete", taskId: "t" }) as never,
+        projectDir: "/tmp/proj",
+        mode: "sequential",
+        enforceFence: true,
+      });
+    };
+
+    // AC2: a detached resume has no supplied stable id, hence a distinct cli-<pid> owner.
+    // While the original controller is still live, the controller loop itself fails closed
+    // before it can launch/re-record/drive the held item.
+    const liveAttempt = await driveRemainingItems(cid, {
+      dispatch: async () => ({ status: "complete", taskId: "t" }) as never,
+      projectDir: "/tmp/proj",
+      mode: "sequential",
+      controllerOwner: resumeOwner,
+      controllerLeaseTtlMs: TTL,
+      launchDriveItem: launchUnderResumeController,
+    });
+    assert.equal(liveAttempt.stopReason, "recovery_needed", "live prior owner denies the resume controller");
+    assert.equal(launches, 0, "denied controller does not launch or re-record the held item");
+    assert.equal(getItemLaunch(cid, itemId, 1)?.controllerOwner, staleOwner, "live-lease denial leaves the stale linkage untouched");
+
+    // AC1: after strict TTL expiry, the same new instance-unique controller takes over. Its
+    // real loop invokes the launch recorder, refreshes the SETTLED linkage, and the child gets
+    // beyond the born-under fence into its drive lane.
+    setPublicationClockOffsetForTest(TTL + 1000);
+    await assert.rejects(
+      () => driveRemainingItems(cid, {
+        dispatch: async () => ({ status: "complete", taskId: "t" }) as never,
+        projectDir: "/tmp/proj",
+        mode: "sequential",
+        controllerOwner: resumeOwner,
+        controllerLeaseTtlMs: TTL,
+        launchDriveItem: launchUnderResumeController,
+      }),
+      /ticket A not found.*refusing to materialize a run/,
+    );
+    assert.equal(launches, 1, "post-expiry takeover launches exactly one re-drive");
+    const refreshed = getItemLaunch(cid, itemId, 1)!;
+    assert.equal(refreshed.controllerOwner, resumeOwner, "the takeover re-record refreshes the settled linkage owner");
+    assert.equal(refreshed.controllerGeneration, 2, "the takeover re-record refreshes the settled linkage generation");
   });
 });
 
