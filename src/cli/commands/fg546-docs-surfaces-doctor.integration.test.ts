@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,10 @@ import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cl
 let projectDir: string;
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), "fg546-doctor-cli-"));
+  // Canonicalize once: on macOS os.tmpdir() is /var/folders/... where /var is a
+  // symlink to /private/var, and doctor reports the realpath'd project root. Any
+  // assertion comparing against projectDir must use the same canonical form.
+  projectDir = realpathSync(mkdtempSync(join(tmpdir(), "fg546-doctor-cli-")));
 });
 
 afterEach(() => {
