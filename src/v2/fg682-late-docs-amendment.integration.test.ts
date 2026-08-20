@@ -496,6 +496,75 @@ test("integ FG-682 RF-2: a candidate advance racing the amendment loses the comp
   assert.match(porcelain(), /SCHEMA-CONTRACT\.md/, "the correction stays in the worktree for a clean re-run");
 });
 
+// ─── RF-4: the amendment tree is cut from the candidate + declared blobs ONLY ───
+
+test("integ FG-682 RF-4: the amendment commit carries ONLY the declared documentation — an undeclared path staged into the index after the scan is neither committed nor lost", async () => {
+  const h = harness();
+  const superseded = await driveToShippingBoundary(h);
+
+  const UNDECLARED = "src/unrelated.ts";
+  const STAGED = "STAGED_UNDECLARED\n";
+
+  // The declared documentation correction, in the worktree.
+  writeFileSync(
+    join(repo, DOC_AMEND_PATH),
+    `# Schema contract\n\nCorrected: one shared resolver for all three lanes. ${AMEND_MARKER}.\n`,
+  );
+
+  // A `git` seam that reproduces the index-dirtying window the defect names: an UNDECLARED path is
+  // staged into the SHARED index AFTER the committer's porcelain scan (so `outside` never sees it,
+  // exactly as a path staged between the scan and the write would not) but BEFORE the tree is
+  // built. `write-tree` over the WHOLE index would ride it into the documentation-labelled commit;
+  // a tree cut from the candidate + the declared blobs alone cannot. env is forwarded, so the fix's
+  // GIT_INDEX_FILE scratch index still lands where the fix points it.
+  let injected = false;
+  const gitEnv = (args: string[], env?: Record<string, string>): string => {
+    const res = spawnSync("git", args, {
+      cwd: repo,
+      encoding: "utf8",
+      env: env ? { ...process.env, ...env } : process.env,
+    });
+    assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
+    return res.stdout;
+  };
+  const seam = (args: string[], env?: Record<string, string>): string => {
+    if (!injected && args[0] === "status") {
+      const out = gitEnv(args, env); // the porcelain scan — WITHOUT the undeclared path
+      injected = true;
+      writeFileSync(join(repo, UNDECLARED), STAGED);
+      gitEnv(["add", "--", UNDECLARED]); // stage it into the SHARED index, after the scan
+      return out;
+    }
+    return gitEnv(args, env);
+  };
+
+  const seamWiring = buildCoordinatorDeps({ projectDir: repo, ticketId: TICKET, runId: RUN_ID, git: seam });
+  const deps: CoordinatorDeps = { ...h.deps, commitDocsAmendment: seamWiring.commitDocsAmendment };
+
+  const outcome = await runDocsAmendment(REVIEW, [DOC_AMEND_PATH], "correct the falsified receipt prose", deps, {
+    discoveredBy: "orchestrator",
+  });
+
+  assert.equal(injected, true, "the undeclared path was actually staged in the scan→write window");
+  assert.equal(outcome.status, "amended", JSON.stringify(outcome));
+
+  // AC2 / RF-4: the amendment commit's tree contains the declared doc change and does NOT contain
+  // the undeclared path — read off the COMMIT the coordinator authored (HEAD).
+  const amended = head();
+  assert.deepEqual(pathsAt(amended), [DOC_AMEND_PATH], "the amendment commit carries ONLY the declared documentation");
+  assert.ok(git(["show", `${amended}:${DOC_AMEND_PATH}`]).includes(AMEND_MARKER), "and it does carry the declared correction");
+  const shown = spawnSync("git", ["show", `${amended}:${UNDECLARED}`], { cwd: repo, encoding: "utf8" });
+  assert.notEqual(shown.status, 0, "the undeclared path is ABSENT from the amendment commit tree");
+
+  // RF-4, the other half: the undeclared path's STAGED index content is unchanged after the
+  // amendment — still staged, same blob, neither modified, committed, nor lost. The commit was
+  // built from a temporary index, so the real one was never read for it and never mutated.
+  assert.match(git(["diff", "--cached", "--name-only"]), /src\/unrelated\.ts/, "the undeclared path is still staged in the shared index");
+  assert.equal(git(["cat-file", "blob", `:${UNDECLARED}`]), STAGED, "with its original staged blob intact — the real index was never touched");
+  assert.equal(getReview(REVIEW)?.candidateSha, amended, "the candidate advanced to the amendment commit");
+  assert.notEqual(amended, superseded, "off the superseded candidate");
+});
+
 // ─── AC4 / AC5: what the move re-opens, and what it does NOT ─────────────────
 
 test("integ FG-682: the amendment re-opens verification and a BOUNDED recheck at the amended sha, and full discovery does NOT re-run", async () => {

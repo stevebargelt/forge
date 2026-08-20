@@ -11,7 +11,7 @@
 // verification model would be a second set of evidence semantics to keep honest.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { applyOrchestratorBlock } from "./init.js";
@@ -213,13 +213,18 @@ export type WiringContext = {
    *  assessed — which the eighth check blocks on, deliberately: the reviewer's duty is to
    *  look, and an unasked question is not a clean answer. */
   docsCloseout?: DocsCloseout;
-  git?: (args: string[]) => string;
+  git?: (args: string[], env?: Record<string, string>) => string;
   invokeFn?: InvokeFn;
 };
 
 function realGit(projectDir: string) {
-  return (args: string[]): string =>
-    execFileSync("git", args, { cwd: projectDir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return (args: string[], env?: Record<string, string>): string =>
+    execFileSync("git", args, {
+      cwd: projectDir,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      ...(env ? { env: { ...process.env, ...env } } : {}),
+    });
 }
 
 function projectScripts(projectDir: string): Record<string, unknown> {
@@ -1800,14 +1805,31 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       // branch tip with an old-value guard: `update-ref HEAD <new> <candidate>` fails atomically
       // if HEAD is no longer the candidate. A lost race leaves the tip untouched and the built
       // commit unreferenced (git gc reclaims it), so nothing is recorded and the candidate is
-      // unmoved. THE INDEX IS SHARED; THE TREE MUST NOT BE (FG-649 RF-6): the `outside` refusal
-      // above proved the index differs from the candidate only in the declared paths, so
-      // `write-tree` after staging them yields the same partial tree the old `git commit -- <paths>`
-      // did. `stageDeclaredPaths` tolerates a path the index already fully represents.
+      // unmoved. RF-4: THE TREE IS BUILT FROM THE CANDIDATE PLUS ONLY THE DECLARED BLOBS, in a
+      // TEMPORARY INDEX — never from the real one. The `outside` scan above proves the WORKTREE
+      // differs from the candidate only in the declared paths; it does NOT prove the real INDEX
+      // is clean (an unrelated path staged before or during the scan sits there unseen, and
+      // `write-tree` snapshots the WHOLE index). Snapshotting the real index would ride that
+      // undeclared staged blob straight into a documentation-labelled commit — the AC2 violation.
+      // So seed a scratch index with the candidate tree (`read-tree <candidate>`), stage ONLY the
+      // declared paths from the worktree into it (a doc DELETION removes its blob too, so a
+      // removal still amends), and `write-tree` THAT: a tree that is exactly the candidate with
+      // only the declared documentation changed. The real index is never READ for the commit, so
+      // an unrelated staged path is never committed; it is reconciled for the DECLARED paths only
+      // AFTER the commit lands (below), so the worktree is left clean exactly as the prior partial
+      // `git commit -- <paths>` left it, and the undeclared staged path — never in `moved` — is
+      // untouched. `stageDeclaredPaths` tolerates a path the scratch index already fully represents.
       let newSha: string;
+      const tmpIndex = join(
+        git(["rev-parse", "--absolute-git-dir"]).trim(),
+        `forge-amend-index-${process.pid}-${headSha()}`,
+      );
+      const gitTmp = (args: string[]): string => git(args, { GIT_INDEX_FILE: tmpIndex });
       try {
-        stageDeclaredPaths(git, moved);
-        const tree = git(["write-tree"]).trim();
+        rmSync(tmpIndex, { force: true });
+        gitTmp(["read-tree", candidate ?? ""]);
+        stageDeclaredPaths(gitTmp, moved);
+        const tree = gitTmp(["write-tree"]).trim();
         newSha = git(["commit-tree", tree, "-p", candidate ?? "", "-m", subject]).trim();
       } catch (err) {
         return {
@@ -1815,9 +1837,10 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
           reason: "docs_amendment_commit_failed",
           detail:
             `git refused the late-docs amendment commit in ${ctx.projectDir}: ${(err as Error).message}. The ` +
-            `correction is still in the worktree, so nothing is lost: resolve what git reported (staging the paths ` +
-            `yourself is enough — the commit is taken from the index) and re-run`,
+            `correction is still in the worktree, so nothing is lost: resolve what git reported, then re-run`,
         };
+      } finally {
+        rmSync(tmpIndex, { force: true });
       }
       try {
         git(["update-ref", "HEAD", newSha, candidate ?? ""]);
@@ -1829,6 +1852,11 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
             `is left unreferenced and the branch tip is unmoved`,
         );
       }
+
+      // Bring the REAL index in line with the amended HEAD for the DECLARED paths only, so the
+      // worktree is left clean — the same post-condition the old partial commit left. The
+      // undeclared staged path is never in `moved`, so this never touches it: it stays staged.
+      stageDeclaredPaths(git, moved);
 
       // AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it can be.
       const sha = headSha();
