@@ -45,6 +45,9 @@ export type HostLaunchEntry = {
    *  `unobserved since <t>`). Never composed on the client. */
   statusLabel: string;
   observation: "fresh" | "unobserved";
+  /** FG-590: the retention disposition the server computed via the shared rule — null for
+   *  a running launch (live work, not a cleanup candidate) or an entry that predates it. */
+  retentionDisposition?: "within_retention_for_investigation" | "expired_eligible" | "leaked" | null;
 };
 
 export type RequiredCiContextEntry = {
@@ -164,6 +167,8 @@ export type CurrentActivityPayload = {
 export function launchBadgeClass(entry: Partial<HostLaunchEntry> | null | undefined): string;
 export function launchBadgeText(entry: Partial<HostLaunchEntry> | null | undefined): string;
 export function launchBadge(entry: Partial<HostLaunchEntry> | null | undefined): { class: string; text: string };
+export function launchRetentionLabel(entry: Partial<HostLaunchEntry> | null | undefined): string | null;
+export function launchRetentionClass(entry: Partial<HostLaunchEntry> | null | undefined): string | null;
 export function launchAssociationLabel(entry: Partial<HostLaunchEntry> | null | undefined): string | null;
 export function launchIdentityLine(entry: Partial<HostLaunchEntry> | null | undefined): string;
 export function ciSectionLabel(section: Partial<RequiredCiSectionEntry> | null | undefined): string | null;

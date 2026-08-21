@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { describeIdentity, identify } from "../util/path-identity.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
+import type { RetentionOverrides } from "../v2/retention-policy.js";
 
 const BacklogConfigSchema = z.object({
   prefix: z.string().nullable().default(null),
@@ -194,6 +195,47 @@ export function writeProjectKey(projectDir: string, projectKey: string): void {
   }
   existing["project_key"] = projectKey;
   atomicWriteConfig(projectDir, stringifyYaml(existing));
+}
+
+// FG-590: read the OPTIONAL `retention` override block from .forge/config.yml.
+//
+// Returns undefined when the file, or the `retention` block, is ABSENT — that is the
+// upgrade AC in one line: retention defaults live in code (retention-policy.ts), so a
+// project that never edits config gets the safe defaults and this returns nothing to
+// override them with. A present block contributes only the fields it names; a field that
+// is not a finite, non-negative number is dropped (so resolveRetention falls through to
+// env/default for it) rather than throwing. A malformed file, a foreign/non-object
+// `retention` value, or a read error all read as "no override", never as an exception —
+// this is a diagnostics-lifecycle read, and it must never be the thing that breaks a
+// command. NOTHING is ever written here: reading the config never materializes defaults
+// into it. Durations are MILLISECONDS, matching RetentionOverrides.
+export function readRetentionConfig(projectDir: string): RetentionOverrides | undefined {
+  const configPath = join(projectDir, ".forge", "config.yml");
+  if (!existsSync(configPath)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(configPath, "utf8"));
+  } catch {
+    return undefined; // malformed YAML or read error — defaults ship in code
+  }
+  const top = (parsed as Record<string, unknown> | null) ?? {};
+  const block = top["retention"];
+  if (block === null || typeof block !== "object" || Array.isArray(block)) return undefined;
+  const b = block as Record<string, unknown>;
+  const overrides: RetentionOverrides = {};
+  const successMs = numericField(b["successMs"]);
+  const failureMs = numericField(b["failureAmbiguousMs"]);
+  if (successMs !== undefined) overrides.successMs = successMs;
+  if (failureMs !== undefined) overrides.failureAmbiguousMs = failureMs;
+  // An empty/foreign block (no recognized numeric field) contributes no override.
+  return overrides.successMs === undefined && overrides.failureAmbiguousMs === undefined ? undefined : overrides;
+}
+
+/** A config value accepted as a retention duration IFF it is a finite, non-negative
+ *  number; anything else (string, negative, NaN, object) is dropped so the layer below
+ *  (env, then the code default) supplies it. */
+function numericField(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
 }
 
 export function readBacklogConfig(projectDir: string): BacklogConfig {

@@ -51,25 +51,36 @@ import { provenPhysical } from "../util/path-identity.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
-/** Outcome of a best-effort `docker rm -f` reap attempt on a container we've
+/** Outcome of a best-effort `docker rm` reap attempt on a container we've
  *  already confirmed is not alive (see containerAlive above) — mirrors
  *  dependency-provisioning.ts's dockerKillContainer discriminated result so a
- *  daemon hiccup ('error') is never mistaken for confirmed cleanup. */
-export type ContainerReapResult = "killed" | "not_found" | "error";
+ *  daemon hiccup ('error') is never mistaken for confirmed cleanup.
+ *  RF-1: `skipped_running` is the daemon's OWN refusal to remove a container
+ *  that is running — the atomic backstop that closes the check-then-destroy
+ *  TOCTOU. It is NOT a failure: the container is alive and was correctly left. */
+export type ContainerReapResult = "killed" | "not_found" | "error" | "skipped_running";
 export type ContainerReap = (containerName: string) => ContainerReapResult;
 
-/** Real `docker rm -f` — reconcile's default reaper for an orphaned
+/** Real `docker rm` — reconcile's default reaper for an orphaned
  *  dependency-provisioner container. Tests inject a fake so no real docker is
  *  required to exercise the FG-437 recovery branch. */
 export function defaultContainerReap(containerName: string): ContainerReapResult {
   try {
+    // RF-1: NON-FORCED removal (no -f). The daemon itself refuses to remove a
+    // running container, so a container that restarts after our liveness scan is
+    // refused here rather than force-removed — the check-then-destroy TOCTOU is
+    // closed atomically at docker, not in a code-level re-probe->reap window.
     // -v: task containers no longer run --rm (FG-492), so remove the anonymous
     // node_modules shadow volume (DEC-019) with the container or it leaks.
-    execFileSync("docker", ["rm", "-f", "-v", containerName], { stdio: ["ignore", "ignore", "pipe"] });
+    execFileSync("docker", ["rm", "-v", containerName], { stdio: ["ignore", "ignore", "pipe"] });
     return "killed";
   } catch (e) {
     const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? "";
     if (/no such container/i.test(stderr)) return "not_found";
+    // RF-1: docker's refusal of a non-forced rm on a live container ("cannot
+    // remove a running container ... stop the container before removing or force
+    // remove"). Alive-and-skip, never a reap failure.
+    if (/running|in use/i.test(stderr)) return "skipped_running";
     return "error"; // NOT confirmed gone — leave it, a later reconcile can retry
   }
 }
@@ -1084,9 +1095,11 @@ function reconcileRunCore(
     if (!shouldRetainContainer(taskCompletedSuccessfully)) {
       let reapOutcome: ContainerReapResult;
       try {
-        // Addressed by the recorded daemon ID when there is one: `docker rm -f`
+        // Addressed by the recorded daemon ID when there is one: `docker rm`
         // by NAME would destroy whatever container holds the name now, which
-        // after a retry is not the one this task ran.
+        // after a retry is not the one this task ran. RF-1: the reap is
+        // non-forced, so a container that came back to running in this pass's
+        // liveness->reap window is refused (skipped_running), never removed.
         reapOutcome = reapContainer(containerRef);
       } catch {
         // best-effort — a later reconcile pass or `forge ops reap-containers` can retry
@@ -1097,7 +1110,7 @@ function reconcileRunCore(
           logEvent("container.reap_failed", {
             runId,
             taskId: t.id,
-            payload: { containerName, why: "docker rm -f -v failed after task completion; container may still be running/present with its anonymous shadow volume" },
+            payload: { containerName, why: "docker rm -v failed after task completion; container may still be running/present with its anonymous shadow volume" },
           });
         } catch {
           // best-effort — a logging failure must never block the reconcile pass

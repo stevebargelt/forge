@@ -314,6 +314,135 @@ test("performOpsReapContainers: a 'not_found' reap result on a completed-task le
   assert.deepEqual(outcome.completedTaskLeaks, [], "but must NOT be counted as a leak — it was already gone");
 });
 
+// ── RF-1: TOCTOU liveness re-probe at the destroy chokepoint ──
+
+test("performOpsReapContainers RF-1: a candidate that came back to running by the destroy chokepoint is NOT reaped", () => {
+  insertRun(mkRun("run-toctou", "active"));
+  insertTask({ ...mkTask("t-toctou", "run-toctou", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+
+  let calls = 0;
+  // The initial scan reports the container stopped; every LATER listing (the fresh
+  // chokepoint re-probe) reports it running again — the exact TOCTOU race the reap must lose.
+  const lister: ContainerLister = () => {
+    calls++;
+    return [{ name: "forge-t-toctou", running: calls !== 1 }];
+  };
+  const reapCalls: string[] = [];
+  const reap: ContainerReap = (name) => { reapCalls.push(name); return "killed"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, lister);
+  assert.deepEqual(reapCalls, [], "a container running again at the destroy chokepoint is never removed");
+  assert.deepEqual(outcome.reaped, []);
+  assert.deepEqual(outcome.skippedRunning, ["forge-t-toctou"]);
+});
+
+test("performOpsReapContainers RF-1: when liveness cannot be determined at the chokepoint (fresh list unreachable), the container is treated as alive and left", () => {
+  insertRun(mkRun("run-toctou2", "active"));
+  insertTask({ ...mkTask("t-toctou2", "run-toctou2", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+
+  let calls = 0;
+  const lister: ContainerLister = () => {
+    calls++;
+    return calls === 1 ? [{ name: "forge-t-toctou2", running: false }] : undefined; // docker gone by the chokepoint
+  };
+  const reapCalls: string[] = [];
+  const reap: ContainerReap = (name) => { reapCalls.push(name); return "killed"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, lister);
+  assert.deepEqual(reapCalls, [], "cannot-determine-liveness is treated as alive — never destroyed on absence of evidence");
+  assert.deepEqual(outcome.skippedRunning, ["forge-t-toctou2"]);
+});
+
+test("performOpsReapContainers RF-1: a container that becomes running AFTER an earlier candidate's chokepoint listing (not just before the sweep) is still NOT reaped", () => {
+  // Two stopped candidates at the initial scan. forge-b transitions to running only AFTER
+  // forge-a's destroy chokepoint has already taken a listing — the exact race a single
+  // memoized fresh listing loses: forge-a's snapshot still shows forge-b stopped, so a
+  // memoized re-list would greenlight destroying forge-b's now-live work.
+  insertRun(mkRun("run-mc", "active"));
+  insertTask({ ...mkTask("t-mc-a", "run-mc", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+  insertTask({ ...mkTask("t-mc-b", "run-mc", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+
+  let calls = 0;
+  const lister: ContainerLister = () => {
+    calls++;
+    // call 1: initial scan — both stopped. call 2: forge-a's chokepoint — both still
+    // stopped (so forge-a IS reaped). call 3+: forge-b has since restarted.
+    const bRunning = calls >= 3;
+    return [
+      { name: "forge-t-mc-a", running: false },
+      { name: "forge-t-mc-b", running: bRunning },
+    ];
+  };
+  const reapCalls: string[] = [];
+  const reap: ContainerReap = (name) => { reapCalls.push(name); return "killed"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, lister);
+  assert.deepEqual(reapCalls, ["forge-t-mc-a"], "only the still-stopped container is reaped");
+  assert.deepEqual(outcome.reaped, ["forge-t-mc-a"]);
+  assert.deepEqual(outcome.skippedRunning, ["forge-t-mc-b"], "the container that became running after an earlier chokepoint is left alone");
+});
+
+test("performOpsReapContainers RF-1: a container that becomes running in the residual re-probe->rm window is refused by the non-forced rm and NOT removed", () => {
+  // The chokepoint re-probe sees the container STILL stopped (so it passes the code-level
+  // liveness check), but it restarts before the actual `docker rm` — the residual window
+  // (pre-rm evidence capture runs there) the code re-probe alone can't close. The reap is
+  // non-forced, so the docker daemon itself refuses to remove the now-running container
+  // (skipped_running), and it must be routed to skippedRunning — never reaped, never an error.
+  insertRun(mkRun("run-atomic", "active"));
+  insertTask({ ...mkTask("t-atomic", "run-atomic", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+
+  // Every listing (initial scan AND chokepoint re-probe) reports it stopped — the code
+  // re-probe is satisfied and we reach the reap.
+  const lister: ContainerLister = () => [{ name: "forge-t-atomic", running: false }];
+  const reapCalls: string[] = [];
+  // The daemon refuses the non-forced rm because the container came back to running
+  // between the re-probe and the rm — exactly what defaultContainerReap returns as
+  // skipped_running on a "cannot remove a running container" stderr.
+  const reap: ContainerReap = (name) => { reapCalls.push(name); return "skipped_running"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, lister);
+  assert.deepEqual(reapCalls, ["forge-t-atomic"], "the reap is attempted (re-probe passed) and the daemon refuses it");
+  assert.deepEqual(outcome.reaped, [], "a container running at the atomic rm is never removed");
+  assert.deepEqual(outcome.errors, [], "a daemon refusal of a live container is NOT a reap error");
+  assert.deepEqual(outcome.skippedRunning, ["forge-t-atomic"]);
+  // The reap resolution marker must NOT be written for a container that was left alive.
+  const reaped = eventsForTask("t-atomic").filter((e) => e.eventType === "container.reaped");
+  assert.deepEqual(reaped, [], "no container.reaped resolution for a container the daemon refused to remove");
+});
+
+// ── RF-2: the pre-rm evidence capture must NOT masquerade as a reap resolution ──
+
+test("performOpsReapContainers RF-2: the pre-rm evidence capture is container.evidence_captured, not container.reaped — a reap 'error' leaves the reap_failed incident standing", () => {
+  insertRun(mkRun("run-rf2", "active"));
+  insertTask({ ...mkTask("t-rf2", "run-rf2", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+  // A prior, unresolved reap failure for this failed task's container.
+  logEvent("container.reap_failed", { runId: "run-rf2", taskId: "t-rf2", payload: { containerName: "forge-t-rf2", why: "docker rm failed earlier" } });
+
+  const reap: ContainerReap = () => "error"; // rm still fails — the container remains present
+  const exitInfo = () => ({ exitCode: 1 });
+  const outcome = performOpsReapContainers(
+    { policy: { success: 0, failureAmbiguous: 0 } },
+    reap,
+    containerList([{ name: "forge-t-rf2", finishedAt: "2020-01-01T00:00:00Z" }]),
+    exitInfo,
+  );
+  assert.deepEqual(outcome.errors, ["forge-t-rf2"]);
+
+  const events = eventsForTask("t-rf2");
+  // The pre-rm evidence is captured under a DISTINCT event type (still readable by the
+  // diagnostic reader, which keys on the payload) ...
+  assert.equal(events.filter((e) => e.eventType === "container.evidence_captured").length, 1);
+  // ... and NEVER under container.reaped, the resolution marker: a reap that errored
+  // resolved nothing, so no fabricated resolution exists.
+  assert.equal(events.filter((e) => e.eventType === "container.reaped").length, 0);
+  // The still-unresolved reap_failed incident therefore keeps firing.
+  const incidents = runOpsCheck({});
+  assert.ok(
+    incidents.some((i) => i.kind === "container_reap_failed" && i.taskId === "t-rf2"),
+    "a still-unresolved reap failure must not be suppressed by the pre-rm evidence event",
+  );
+});
+
 // ── FG-504: durable container.reaped resolution + completed-leak wording split ──
 
 test("performOpsReapContainers (FG-504): a 'killed' outcome records a container.reaped event and clears a prior container.reap_failed incident", () => {

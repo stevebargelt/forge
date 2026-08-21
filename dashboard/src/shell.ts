@@ -633,6 +633,19 @@ section.current-activity { margin-top: 28px; }
   background: rgba(154, 154, 163, 0.18);
   color: var(--fg-dim);
 }
+/* FG-590 (RF-9): a terminal launch's retention disposition — retained-for-investigation
+   vs expired/eligible vs leaked — as three visually distinct badges beside the launch id. */
+.launch-retention-retained, .launch-retention-expired, .launch-retention-leaked {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.launch-retention-retained { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.launch-retention-expired { background: rgba(154, 154, 163, 0.18); color: var(--fg-dim); }
+.launch-retention-leaked { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
 .ca-sha { word-break: break-all; }
 
 /* FG-694 AC4/AC5 — the compact CI line and the drill-down that keeps the evidence.

@@ -74,6 +74,78 @@ Forge can store a host-local pointer to that repo under `~/.forge`, but project 
 - An addon must not compress the launch status vocabulary. `terminated by SIGTERM (signal sender not recorded — origin unknown)`, `exited 143 (signal-range code, no signal evidence — origin unknown)`, `owner gone`, and `unknown` are four different facts, and **exit 143 alone is never attribution evidence**. A red button that means "failed" for all four is a worse surface than no button — see `docs/concepts.md` → Current activity.
 - A stale observation is not a green light and not a red one. Render `unobserved since <time>` as itself; it is a fact about the observer, not about the work. The same discipline applies to required CI, where `not observed` (nobody looked), `not running` (looked, nothing pending), and `stale` (an old observation) are three different answers an addon must not merge into one lamp.
 
+## Automatic terminal-resource cleanup (FG-590)
+
+Forge automatically retires terminal runtime resources — the tmux remains of a finished
+`forge launch` and the stopped task container retained for failure investigation — so a
+long autonomous run no longer leaves hundreds of dead tmux sessions or stopped containers
+behind. Cleanup is **daemon-free**: it runs at the `forge next` wave boundary and can be
+triggered on demand. It never removes a running launch, a running container, or a container
+owned by a non-terminal task.
+
+**Default retention periods** (shipped as code constants — see `src/v2/retention-policy.ts`):
+
+- **Successful** outcomes are retired **promptly**: `15 minutes`. A clean `exited_ok`
+  launch and a `complete`-task container have no diagnostic value, so they are removed
+  soon after they settle.
+- **Failed / signaled / owner-gone / unknown** outcomes are kept for a **multi-day
+  diagnostic window**: `7 days`. They stay inspectable (`forge show --diagnostic`,
+  `forge launch show`) for the whole window, then are retired automatically.
+
+**Configuration controls.** The defaults live in code, so **an upgrade needs no per-project
+config edit** — every existing project gets the safe defaults automatically. Override only
+when you need to, in either of two override-only channels (durations in **milliseconds**):
+
+- `.forge/config.yml`:
+  ```yaml
+  retention:
+    successMs: 900000          # 15 minutes
+    failureAmbiguousMs: 604800000   # 7 days
+  ```
+- Environment: `FORGE_RETENTION_SUCCESS_MS` and `FORGE_RETENTION_FAILURE_MS`.
+
+Precedence is **config override → `FORGE_*` env → code default**. A malformed or negative
+value is ignored and falls through to the next layer — an override can only re-time
+cleanup, never disable a window or widen the "never remove a running resource" safety
+posture.
+
+**Evidence guarantee (fail closed).** Before Forge reaps a failed or ambiguous task
+container, it persists the available exit code, signal, OOM flag, timing, and
+missing-evidence facts that `forge show --diagnostic` needs. **If that evidence cannot be
+persisted, cleanup fails closed**: the container is retained and reported, never destroyed
+with its failure evidence unrecorded. Cleanup is idempotent and crash-safe — a crash
+between removing a resource and recording its resolution converges truthfully on a later
+pass from disk truth, with no fabricated success, no duplicate resolution, and no sticky
+incident.
+
+**Cross-project ownership guarantee (fail closed).** A project-scoped launch sweep excludes
+any launch the observation store records as owned by a *different* project, so cleanup in
+one workspace never retires another's terminal launches. If that ownership cannot be
+established — the store exists but the ownership query itself fails — the sweep **fails
+closed**: it retires nothing at all (not even this project's own launches) and reports the
+failure (`forge ops cleanup` prints `launch sweep failed: <reason>`), rather than falling
+back to treating an unread store as "no foreign launches" and sweeping anyway.
+
+**Immediate manual sweep and inspection.** The automatic policy does not replace the manual
+commands — they remain available for inspection, early cleanup, and repair:
+
+- `forge ops cleanup` — run the same sweep now, under the configured retention policy
+  (`--dry-run` reports container candidates without removing anything).
+- `forge ops reap-containers` — the existing container reap; `--dry-run` and
+  `--older-than-minutes <n>` still behave exactly as before. It now re-checks each
+  candidate's liveness immediately before removal and never destroys one that has come
+  back to running (or whose liveness can't be reconfirmed) since the initial scan —
+  reported as `skipped (running again / liveness unconfirmed at reap time)`.
+- `forge launch rm <id>` — remove one launch record and its tmux remains (refuses a running
+  launch without `--force`).
+
+**Retained vs leaked, on the surfaces.** `forge status` — its plain-text rendering and
+`--json` alike — and the dashboard label a terminal launch's disposition with one shared
+rule: `within_retention_for_investigation` (deliberately kept), `expired_eligible`
+(routine, nothing to preserve), or `leaked` (a successful resource still present past its
+prompt window). A retained-for-investigation resource is never shown as a leak, and a leak
+is never shown as still-useful evidence.
+
 ## Stream Deck First Page Ideas
 
 - Needs Me: open dashboard filtered to human action required.

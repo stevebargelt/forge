@@ -189,7 +189,11 @@ test("FG-503 (review): reconcile's own reap of an already-gone container failing
     // FG-503 cross-path consistency: same {containerName, why} payload shape as
     // invoke.ts/runNext.ts/gate.ts's own reap-failure logging.
     assert.deepEqual(Object.keys(payload).sort(), ["containerName", "why"], "payload shape must match the other reap paths");
-    assert.match(payload.why, /^docker rm -f -v failed/, "why must follow the shared wording convention across all reap paths");
+    // RF-1: reconcile's reaper (defaultContainerReap) is now NON-FORCED (docker rm
+    // -v, no -f) so the daemon itself refuses to remove a container that restarted
+    // in the liveness->reap window. The reap-failure wording accurately names the
+    // real command it runs; the {containerName, why} payload shape stays shared.
+    assert.match(payload.why, /^docker rm -v failed/, "why must name the actual (non-forced) reap command");
   } finally {
     rmSync(gitDir, { recursive: true, force: true });
   }

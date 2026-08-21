@@ -48,6 +48,33 @@ export function launchBadge(entry) {
   return { class: launchBadgeClass(entry), text: launchBadgeText(entry) };
 }
 
+/** FG-590: the human LABEL for a launch's retention disposition — the server put a
+ *  `retentionDisposition` on the entry via the shared retention rule; this renders it so a
+ *  retained-for-investigation launch reads distinctly from an expired-eligible or leaked
+ *  one, never flattening the three into one. Returns null for a running launch (no
+ *  disposition — it is live work) or an entry that predates the field. */
+export function launchRetentionLabel(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  switch (entry.retentionDisposition) {
+    case "within_retention_for_investigation": return "retained for investigation";
+    case "expired_eligible": return "expired — eligible for cleanup";
+    case "leaked": return "leaked — past retention";
+    default: return null;
+  }
+}
+
+/** The badge class for the same disposition, keyed on the STRUCTURED value (never the
+ *  label text), so a CSS/theme change never has to re-derive the meaning. */
+export function launchRetentionClass(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  switch (entry.retentionDisposition) {
+    case "within_retention_for_investigation": return "launch-retention-retained";
+    case "expired_eligible": return "launch-retention-expired";
+    case "leaked": return "launch-retention-leaked";
+    default: return null;
+  }
+}
+
 /** BD-3: a launch placed by anything weaker than explicit submission metadata is
  *  LABELED, not silently attributed. Returns null when the placement was authorized. */
 export function launchAssociationLabel(entry) {

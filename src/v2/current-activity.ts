@@ -73,6 +73,7 @@ import {
   type LaunchPurpose,
 } from "../store/launch-observations.js";
 import { isTerminalReviewState } from "../store/reviews.js";
+import type { RetentionDisposition } from "./retention-policy.js";
 import {
   CI_WAIT_LIVE_WHERE,
   isCiWaitLive,
@@ -223,6 +224,13 @@ export type HostLaunchActivity = {
    *  `unobserved since <t>` once stale. Never a generic `failed` (BD-4). */
   statusLabel: string;
   observation: "fresh" | "unobserved";
+  /** FG-590: the SHARED retention disposition for a terminal launch, annotated by the
+   *  surface (withRetentionDisposition / the dashboard) from the resolved policy — not
+   *  computed by the derivation itself, which is clock/policy-free. Null for a running
+   *  launch (live work, never a cleanup candidate) and absent on a row no surface
+   *  annotated. `renderCurrentActivityLines` surfaces it so the human `forge status`
+   *  carries the same disposition the JSON does (RF-8). */
+  retentionDisposition?: RetentionDisposition | null;
 };
 
 export type RequiredCiContext = {
@@ -1599,6 +1607,19 @@ export function deriveCurrentActivity(
 /** The human rendering `forge status` prints, and the exact text the dashboard's
  *  three sections carry. Exported so the agreement test can assert one string
  *  against the other rather than two independently-written renderers. */
+/** FG-590 (RF-8): the human suffix for a terminal launch's retention disposition, so the
+ *  human `forge status` carries the SAME disposition the JSON surface already annotates.
+ *  Empty for a running launch (null disposition) or a row no surface annotated — the human
+ *  line then reads exactly as before. */
+function retentionSuffix(l: HostLaunchActivity): string {
+  switch (l.retentionDisposition) {
+    case "within_retention_for_investigation": return "  · retention: retained for investigation";
+    case "expired_eligible": return "  · retention: expired — eligible for cleanup";
+    case "leaked": return "  · retention: leaked — past retention";
+    default: return "";
+  }
+}
+
 export function renderCurrentActivityLines(activity: CurrentActivity): string[] {
   const lines: string[] = ["Current activity"];
 
@@ -1611,7 +1632,7 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   lines.push("  Host verification");
   if (activity.hostVerification.length === 0) lines.push("    (no host launch observed in flight)");
   for (const l of activity.hostVerification) {
-    lines.push(`    ${l.statusLabel}  ${l.launchId}${l.unassociated ? "  [unassociated]" : ""}  — ${l.commandLine}`);
+    lines.push(`    ${l.statusLabel}  ${l.launchId}${l.unassociated ? "  [unassociated]" : ""}  — ${l.commandLine}${retentionSuffix(l)}`);
   }
 
   // FG-700: the generic launch diagnostics. Rendered only when there is something to
@@ -1622,7 +1643,7 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   if (activity.launches.length > 0) {
     lines.push("  Launch activity");
     for (const l of activity.launches) {
-      lines.push(`    ${l.statusLabel}  ${l.launchId}  [${l.purpose}]${l.unassociated ? "  [unassociated]" : ""}  — ${l.commandLine}`);
+      lines.push(`    ${l.statusLabel}  ${l.launchId}  [${l.purpose}]${l.unassociated ? "  [unassociated]" : ""}  — ${l.commandLine}${retentionSuffix(l)}`);
     }
   }
 
@@ -1678,7 +1699,7 @@ export function renderCurrentActivityLines(activity: CurrentActivity): string[] 
   if (activity.unassociated.length > 0) {
     lines.push("  Unassociated activity");
     for (const l of activity.unassociated) {
-      lines.push(`    ${l.statusLabel}  ${l.launchId}  — ${l.commandLine}`);
+      lines.push(`    ${l.statusLabel}  ${l.launchId}  — ${l.commandLine}${retentionSuffix(l)}`);
     }
   }
   return lines;

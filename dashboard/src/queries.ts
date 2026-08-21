@@ -76,6 +76,16 @@ import {
   type CurrentActivity,
   type CurrentActivityScope,
 } from "@forge/current-activity";
+// FG-590: the ONE shared retention rule, imported rather than duplicated — the dashboard
+// labels a terminal host launch's disposition (retained-for-investigation vs expired vs
+// leaked) with the SAME function `forge status` and the automatic cleanup use.
+import {
+  classifyRetention,
+  resolveRetention,
+  retentionDisposition,
+  type RetentionDisposition,
+  type RetentionPolicy,
+} from "@forge/retention-policy";
 
 export { type ProjectRecord };
 
@@ -3513,9 +3523,38 @@ function activityScope(scope: ProjectScope, runId?: string): CurrentActivityScop
 }
 
 /** The ONE shared derivation `forge status` also calls (BD-9). The dashboard adds
- *  no interpretation of its own — agreement is structural, not asserted. */
+ *  no interpretation of its own — agreement is structural, not asserted.
+ *
+ *  FG-590: each host-launch row is annotated with `retentionDisposition` via the SHARED
+ *  retention rule, so the dashboard labels a retained-for-investigation launch distinctly
+ *  from an expired/leaked one with the SAME function `forge status` uses (agreement by
+ *  construction, not two renderers). A running launch is live work, never a cleanup
+ *  candidate → null. The policy is resolved from FORGE_* env over the code defaults (the
+ *  dashboard is host-wide; the per-project config override is a `forge status` nicety). */
 export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: number = Date.now()): CurrentActivity {
-  return deriveCurrentActivity(db(), { now: new Date(nowMs), scope: activityScope(scope, runId) });
+  const activity = deriveCurrentActivity(db(), { now: new Date(nowMs), scope: activityScope(scope, runId) });
+  const policy = resolveRetention(undefined, process.env);
+  const annotate = <T extends { recordedStatus: { state: string }; startedAt: string }>(l: T): T & { retentionDisposition: RetentionDisposition | null } => {
+    let disposition: RetentionDisposition | null = null;
+    if (l.recordedStatus.state !== "running") {
+      const startedMs = Date.parse(l.startedAt);
+      const ageMs = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
+      disposition = retentionDisposition(classifyRetention({ kind: "launch", state: l.recordedStatus.state }), ageMs, policy);
+    }
+    return { ...l, retentionDisposition: disposition };
+  };
+  return {
+    ...activity,
+    hostVerification: activity.hostVerification.map(annotate),
+    launches: activity.launches.map(annotate),
+    unassociated: activity.unassociated.map(annotate),
+  };
+}
+
+/** FG-590: exported so a consumer/test can resolve the active retention policy the same
+ *  way this surface does. */
+export function retentionPolicyForDashboard(): RetentionPolicy {
+  return resolveRetention(undefined, process.env);
 }
 
 /** BD-10: launch detail addressed by IDENTITY. The id is validated against the same

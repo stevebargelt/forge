@@ -37,6 +37,7 @@ import { h } from "preact";
 import htm from "htm";
 import {
   launchBadge, launchAssociationLabel, launchIdentityLine,
+  launchRetentionLabel, launchRetentionClass,
   ciContextRows, caElapsedText, homeActivityView,
   homeInFlightActivity, launchWaitIdentity,
 } from "./current-activity-render.js";
@@ -283,6 +284,11 @@ function AgentRow({ entry, now, onTaskClick }) {
 function LaunchRow({ entry, now }) {
   const badge = launchBadge(entry);
   const assoc = launchAssociationLabel(entry);
+  // FG-590 (RF-9): render the server-computed retention disposition through the SHARED
+  // decision functions, so a retained-for-investigation launch reads distinctly from an
+  // expired/leaked one — and a running launch (null disposition) carries no badge.
+  const retentionLabel = launchRetentionLabel(entry);
+  const retentionClass = launchRetentionClass(entry);
   return html`
     <div class="item ca-row ca-launch-row">
       <span class="badge ${badge.class}" title=${`observed ${entry.observedAt}`}>${badge.text}</span>
@@ -290,6 +296,7 @@ function LaunchRow({ entry, now }) {
         <div>
           <strong class="mono">${entry.name || entry.launchId}</strong>
           ${assoc ? html`<span class="ca-assoc-badge">${assoc}</span>` : null}
+          ${retentionLabel && retentionClass ? html`<span class=${retentionClass}>${retentionLabel}</span>` : null}
         </div>
         <div class="faint mono" style="font-size: 11px;">${entry.commandLine}</div>
         <div class="faint mono" style="font-size: 11px;">${launchIdentityLine(entry)}</div>
