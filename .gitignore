@@ -2,7 +2,10 @@ node_modules/
 dist/
 # FG-728: ephemeral per-file mirror of src/ built once per integration `node --test`
 # process (integration-build-preload.ts); never committed, rebuilt every run.
+# The `.<id>` variants are per-invocation sibling builds a nested integration-tier
+# run isolates to (FG-744), kept at REPO_ROOT depth so fixed-depth walks resolve.
 .forge-integration-build/
+.forge-integration-build.*/
 *.log
 .DS_Store
 projects/

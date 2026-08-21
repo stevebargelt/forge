@@ -52,9 +52,12 @@ function runIntegrationTier(probe: string): string {
   // `.forge-integration-build`. Without this the nested preload rmSync-wipes +
   // rebuilds the single REPO_ROOT build dir concurrently with the sibling
   // subprocesses of this shard, yanking `<dir>/cli/index.js` out from under them
-  // mid-spawn (FG-744 CI integration_7 hazard). A per-invocation temp dir gives
-  // the nested run its own tree and its own coordination markers.
-  const buildDir = mkdtempSync(join(tmpdir(), "fg744-nested-build-"));
+  // mid-spawn (FG-744 CI integration_7 hazard). The per-invocation build MUST stay
+  // a SIBLING of src/ at REPO_ROOT depth so the mirror's fixed-depth runtime walks
+  // (asset-root, git-root, seeds, docker) still land on the repo root by
+  // construction — a tmpdir would break them. `.forge-integration-build.*` is
+  // gitignored; the finally block removes this per-invocation dir.
+  const buildDir = mkdtempSync(resolve(REPO_ROOT, ".forge-integration-build."));
   env["FORGE_INTEGRATION_BUILD_DIR"] = buildDir;
   try {
     return execFileSync(cmd, args, {

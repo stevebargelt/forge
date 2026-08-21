@@ -38,9 +38,11 @@ export const SRC_DIR = here;
  *
  *  FORGE_INTEGRATION_BUILD_DIR overrides the location (default byte-identical to
  *  the sibling path above). A test that spawns a NESTED integration-tier `node
- *  --test` sets it to a per-invocation temp dir so the nested preload's wipe +
- *  rebuild never contends on the shard's shared `.forge-integration-build`. Only
- *  callers that don't depend on the fixed-depth mirror placement may override it. */
+ *  --test` sets it to a per-invocation dir so the nested preload's wipe + rebuild
+ *  never contends on the shard's shared `.forge-integration-build`. That override
+ *  MUST itself be a sibling of src/ at REPO_ROOT depth (e.g.
+ *  `<REPO_ROOT>/.forge-integration-build.<invocation-id>`) so the same fixed-depth
+ *  walks keep landing on the repo root; an arbitrary tmpdir would break them. */
 export const INTEGRATION_BUILD_DIR = process.env.FORGE_INTEGRATION_BUILD_DIR
   ? resolve(process.env.FORGE_INTEGRATION_BUILD_DIR)
   : resolve(REPO_ROOT, ".forge-integration-build");
