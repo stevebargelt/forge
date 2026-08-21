@@ -122,9 +122,22 @@ export type RecheckIngestion =
 export type TrustedTierRun = {
   /** The tier(s) forge executed for this finding (integration/worktree). */
   tiers: string[];
-  /** The higher-tier test file(s) the run was scoped to. */
+  /** The higher-tier test file(s) the run considered — the fixer's listed higher-tier set. */
   testFiles: string[];
-  /** The combined runner output forge captured. Undefined only when `blocked` is set. */
+  /** RF-3: the candidate SHA forge executed this tier AT. Resolution is refused unless it equals
+   *  the recheck's current candidate — a run bound to a different sha is not evidence about this
+   *  one, and nothing carries across a candidate move. */
+  candidateSha: string;
+  /** RF-2/RF-4: the ONE fixer-listed higher-tier file proven (by its own isolated run) to contain
+   *  the cited assertion. `runnerOutput` is THAT file's isolated output, so resolution binds to the
+   *  assertion's OWN test file — a same-named assertion in another listed file cannot resolve it.
+   *  Undefined when NO listed file contained the assertion (nothing to bind to). */
+  assertionFile?: string;
+  /** RF-4: set when the cited assertion appeared in MORE THAN ONE listed file — an ambiguous
+   *  binding that must refuse rather than pick one. Carries the colliding files for the detail. */
+  ambiguousFiles?: string[];
+  /** The isolated runner output of `assertionFile`. Undefined when `blocked` is set, when the
+   *  binding was ambiguous, or when no listed file contained the assertion. */
   runnerOutput?: string;
   /** Set when forge could not execute the tier at all — an environment fault. Routes the
    *  finding to `blocked_environment` coverage, exactly as a rechecker-declared block does,
@@ -228,7 +241,7 @@ export function ingestRecheck(raw: unknown, ctx: RecheckContext): RecheckIngesti
     // forge's execution, exactly because the only trusted proof is forge running the tier.
     const trusted = ctx.trustedTierRuns?.[finding.id];
     if (trusted !== undefined) {
-      applications.push(applyTrustedTierRun(finding, trusted, ctx.fixerAssertions?.[finding.id]));
+      applications.push(applyTrustedTierRun(finding, trusted, ctx.fixerAssertions?.[finding.id], ctx.candidateSha));
       continue;
     }
 
@@ -351,8 +364,9 @@ function applyTrustedTierRun(
   finding: ReviewFinding,
   trusted: TrustedTierRun,
   named: string | undefined,
+  currentCandidateSha: string,
 ): RecheckApplication {
-  const where = `${trusted.tiers.join("+")} tier (${trusted.testFiles.join(", ")})`;
+  const where = `${trusted.tiers.join("+")} tier (${trusted.assertionFile ?? trusted.testFiles.join(", ")})`;
 
   if (trusted.blocked !== undefined) {
     // The environment could not run the tier. `blocked_environment` coverage is never green
@@ -369,6 +383,21 @@ function applyTrustedTierRun(
     };
   }
 
+  // RF-3: a trusted run is evidence about the candidate it EXECUTED AT and no other. A run stamped
+  // with a different sha (a stale run carried across a candidate move) resolves nothing — the
+  // invariant is that a candidate move invalidates a resolution and nothing carries across it.
+  if (trusted.candidateSha !== currentCandidateSha) {
+    return {
+      findingId: finding.id,
+      findingRef: finding.findingRef,
+      resolution: "inconclusive",
+      coverage: "not_executed",
+      detail:
+        `${finding.findingRef}: the trusted ${where} run is bound to candidate ${trusted.candidateSha}, not the ` +
+        `current ${currentCandidateSha} — a run at another candidate is not evidence about this one, never resolved.`,
+    };
+  }
+
   // The fast gate cannot contain this assertion, so a tier run with no fixer-named assertion to
   // bind proves nothing about THIS finding — there is no identity to check executed.
   if (named === undefined || named.trim() === "") {
@@ -380,6 +409,37 @@ function applyTrustedTierRun(
       detail:
         `${finding.findingRef}: forge executed the ${where} but the fixer named no executed assertion to bind the ` +
         `resolution to — recorded inconclusive, not resolved on an unnamed test.`,
+    };
+  }
+
+  // RF-4: the cited assertion label appeared in MORE THAN ONE fixer-listed higher-tier file. A
+  // same-named assertion in an unrelated file must not stand in for the one the finding names, and
+  // forge cannot know which was meant — so it refuses the binding rather than pick one.
+  if (trusted.ambiguousFiles !== undefined && trusted.ambiguousFiles.length > 1) {
+    return {
+      findingId: finding.id,
+      findingRef: finding.findingRef,
+      resolution: "inconclusive",
+      coverage: "not_executed",
+      detail:
+        `${finding.findingRef}: the cited assertion '${named}' appears in more than one fixer-listed higher-tier ` +
+        `file (${trusted.ambiguousFiles.join(", ")}) — an ambiguous binding is refused, never resolved on a ` +
+        `same-named assertion in a file that may not be its own.`,
+    };
+  }
+
+  // RF-2/RF-4: no fixer-listed higher-tier file was proven to CONTAIN the cited assertion. Without
+  // an assertion-to-file binding there is nothing this run's output proves about THIS finding — the
+  // resolution is not bound to the assertion's own test file, so it does not resolve.
+  if (trusted.assertionFile === undefined) {
+    return {
+      findingId: finding.id,
+      findingRef: finding.findingRef,
+      resolution: "inconclusive",
+      coverage: "not_executed",
+      detail:
+        `${finding.findingRef}: no fixer-listed higher-tier file (${trusted.testFiles.join(", ")}) contained the ` +
+        `cited assertion '${named}' — with no file that contains it, resolution has nothing to bind to.`,
     };
   }
 

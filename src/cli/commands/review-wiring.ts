@@ -2057,14 +2057,14 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       const refusal = workspaceRefusal(candidateSha);
       if (refusal !== undefined) return { blocked: `${refusal.reason}: ${refusal.message}` };
       const { cmd, args } = tierTestCommand(tier, testFiles);
+      let output: string;
       try {
-        const output = execFileSync(cmd, args, {
+        output = execFileSync(cmd, args, {
           cwd: ctx.projectDir,
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
           env: pinnedVerificationEnv("review-recheck"),
         });
-        return { runnerOutput: output };
       } catch (e) {
         // A NON-ZERO EXIT IS NOT A BLOCK. node:test exits non-zero when a test FAILS, and a
         // red cited assertion is the finding still being present — real TAP output the recheck
@@ -2072,8 +2072,18 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         // at all (the binary missing, the workspace unreadable) is an environment fault.
         const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
         const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-        return out.trim() === "" ? { blocked: (e as Error).message } : { runnerOutput: out };
+        if (out.trim() === "") return { blocked: (e as Error).message };
+        output = out;
       }
+      // RF-1: the pre-run refusal proves the tree was the clean candidate BEFORE the tier ran, but
+      // the tier runs arbitrary test code that can move HEAD or dirty the tree. Re-confirm the
+      // candidate is still checked out clean AFTER the run — output captured from a tree the tier
+      // itself changed is not evidence about the candidate, so it is a `blocked` environment fault,
+      // never an accepted result. (Evaluated on the captured `output`, pass or fail: a failing
+      // assertion — the finding still present — is a legitimate result only if the tree held still.)
+      const postRefusal = workspaceRefusal(candidateSha);
+      if (postRefusal !== undefined) return { blocked: `${postRefusal.reason}: ${postRefusal.message}` };
+      return { runnerOutput: output };
     },
 
     shippingInput: async ({ review, candidateSha }) => {

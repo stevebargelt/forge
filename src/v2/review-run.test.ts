@@ -1057,6 +1057,125 @@ test("FG-744 / AC1+AC4: the recheck EXECUTES the integration tier of a fixer's c
   assert.equal(resolved.resolutionEvidenceKind, "regression_test");
 });
 
+test("FG-744 / RF-2+RF-4: binds to the ONE fixer-listed file that contains the cited assertion; an unrelated file's absence does not block it", async () => {
+  // The fixer lists a real integration test (which contains the cited assertion) AND an unrelated
+  // higher-tier file that does not. Each is run in ISOLATION, and the resolution binds to the file
+  // whose own run contains the assertion — not the fixer's broad list.
+  const ASSERTION = "the reconcile path guards a partial write";
+  const REAL = "src/v2/reconcile.integration.test.ts";
+  const UNRELATED = "src/v2/unrelated.integration.test.ts";
+  const perFile: Array<string[]> = [];
+
+  const h = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded, proven at the integration tier",
+          files_changed: ["src/v2/reconcile.ts", REAL, UNRELATED],
+          evidence: "added the named integration regression test",
+          executed_assertion: ASSERTION,
+        })),
+      },
+    }),
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-1",
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: { kind: "regression_test", test_name: ASSERTION, runner_output: "TAP version 13\n1..0" },
+        })),
+        new_findings: [],
+      },
+    }),
+    // Each file runs in isolation: only REAL's own output contains the cited assertion. UNRELATED
+    // prints a DIFFERENT test — it must not merge into the binding, and its absence must not block.
+    runTrustedTier: (ctx) => {
+      perFile.push(ctx.testFiles);
+      const file = ctx.testFiles[0];
+      return file === REAL
+        ? { runnerOutput: `TAP version 13\nok 1 - ${ASSERTION}\n1..1\n# pass 1` }
+        : { runnerOutput: "TAP version 13\nok 1 - an entirely different assertion\n1..1\n# pass 1" };
+    },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.status, "advanced");
+
+  // Each higher-tier file was run in ISOLATION (never a combined set) — the binding is per-file.
+  assert.deepEqual(perFile.sort(), [[REAL], [UNRELATED]].sort());
+
+  const resolved = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1") as ReviewFinding;
+  assert.equal(resolved.resolution, "resolved", "the assertion's OWN file is the trusted proof");
+  assert.equal(resolved.resolvedSha, h.head());
+});
+
+test("FG-744 / RF-4: a same-named assertion in MORE THAN ONE fixer-listed file is ambiguous — the finding does NOT resolve", async () => {
+  // The security case: an erroneous or compromised fixer lists an unrelated higher-tier file that
+  // ALSO declares a same-named passing assertion. forge cannot know which file is the assertion's
+  // own, so it refuses the binding rather than resolving on a same-named test in a foreign file.
+  const ASSERTION = "the reconcile path guards a partial write";
+  const A = "src/v2/reconcile.integration.test.ts";
+  const B = "src/v2/foreign.integration.test.ts";
+
+  const h = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded",
+          files_changed: [A, B],
+          evidence: "added the named integration regression test",
+          executed_assertion: ASSERTION,
+        })),
+      },
+    }),
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-1",
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: { kind: "regression_test", test_name: ASSERTION, runner_output: "TAP version 13\n1..0" },
+        })),
+        new_findings: [],
+      },
+    }),
+    // BOTH files' isolated runs contain a passing assertion of the same name — the ambiguity.
+    runTrustedTier: () => ({ runnerOutput: `TAP version 13\nok 1 - ${ASSERTION}\n1..1\n# pass 1` }),
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  await runNextStage(REVIEW, h.deps);
+
+  const finding = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1") as ReviewFinding;
+  assert.notEqual(finding.resolution, "resolved", "an ambiguous same-named binding never resolves");
+});
+
 test("FG-639 / RF-8: the store-level guard still holds — a scope_change cannot clear a carried finding's proof", () => {
   // The FG-649 narrowing above means a resolved finding is not normally re-carried at all, so
   // this store-level exclusion is now defence in depth rather than the first line. It is still

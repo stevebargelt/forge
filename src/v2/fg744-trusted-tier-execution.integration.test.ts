@@ -53,6 +53,9 @@ function runIntegrationTier(probe: string): string {
 }
 
 function recheckFrom(output: string, probe: string) {
+  // The coordinator binds `assertionFile` only when the file's isolated run actually contains the
+  // cited assertion — mirror that here so the recheck sees a run bound to the assertion's own file.
+  const contains = testExecution(output, ASSERTION) !== "absent";
   return ingestRecheck(
     {
       review_id: REVIEW,
@@ -66,7 +69,12 @@ function recheckFrom(output: string, probe: string) {
       expected: [FINDING],
       fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION },
       trustedTierRuns: {
-        [`${REVIEW}/RF-1`]: { tiers: ["integration"], testFiles: [probe], runnerOutput: output },
+        [`${REVIEW}/RF-1`]: {
+          tiers: ["integration"],
+          testFiles: [probe],
+          candidateSha: CANDIDATE,
+          ...(contains ? { assertionFile: probe, runnerOutput: output } : {}),
+        },
       },
     },
   );

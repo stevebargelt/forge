@@ -117,7 +117,7 @@ import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult, ReviewDiffS
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck, type TrustedTierRun } from "./review-recheck.js";
-import { isHigherTierTestFile, testTierForFile } from "./review-evidence.js";
+import { isHigherTierTestFile, resolveTestExecution, testTierForFile } from "./review-evidence.js";
 import { assessShippingReview, type ShippingAssessment, type ShippingInput } from "./review-shipping.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -2157,33 +2157,59 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   const trustedTierRuns: Record<string, TrustedTierRun> = {};
   if (deps.runTrustedTier !== undefined && Object.keys(fixerTierFiles).length > 0) {
     const runTrustedTier = deps.runTrustedTier;
-    // One run per distinct (tier, file-set) — several findings can share a test file, and the
-    // tier is deterministic in the candidate, so re-running it per finding would only burn time.
+    // RF-2/RF-4: each fixer-listed higher-tier file is run IN ISOLATION, not as a combined set, so
+    // the binding is to the assertion's OWN test file. A same-named assertion in another listed
+    // file cannot then contribute to the resolution, and its presence in more than one file is a
+    // detectable ambiguity we refuse rather than a merge we accept. One run per distinct (tier,
+    // file) — several findings can share a file, and the tier is deterministic in the candidate.
     const cache = new Map<string, { runnerOutput?: string; blocked?: string }>();
+    const runFile = async (file: string): Promise<{ tier: "integration" | "worktree"; runnerOutput?: string; blocked?: string }> => {
+      const tier = testTierForFile(file) as "integration" | "worktree";
+      const key = `${tier}::${file}`;
+      let res = cache.get(key);
+      if (res === undefined) {
+        res = await runTrustedTier({ tier, testFiles: [file], candidateSha: candidate });
+        cache.set(key, res);
+      }
+      return { tier, ...res };
+    };
+
     for (const [findingId, files] of Object.entries(fixerTierFiles)) {
-      const byTier = new Map<"integration" | "worktree", string[]>();
-      for (const file of files) {
-        const tier = testTierForFile(file) as "integration" | "worktree";
-        byTier.set(tier, [...(byTier.get(tier) ?? []), file]);
+      // Keyed together at 2142–2145: a finding only lands in fixerTierFiles when the fixer also
+      // named an executed assertion. The `?? ""` is a type guard, not a real branch — an empty
+      // identity would simply bind no file (resolveTestExecution reports it absent everywhere).
+      const named = fixerAssertions[findingId] ?? "";
+      const runs = [];
+      for (const file of files) runs.push({ file, ...(await runFile(file)) });
+      const tiers = [...new Set(runs.map((r) => r.tier))];
+
+      // A tier that could not run at all is an environment fault for the whole finding — nothing
+      // is recorded present or absent from a lane that could not execute.
+      const blocked = runs.find((r) => r.blocked !== undefined);
+      if (blocked !== undefined) {
+        trustedTierRuns[findingId] = { tiers, testFiles: files, candidateSha: candidate, blocked: blocked.blocked };
+        continue;
       }
-      const tiers: string[] = [];
-      const outputs: string[] = [];
-      let blocked: string | undefined;
-      for (const [tier, tierFiles] of byTier) {
-        const key = `${tier}::${[...tierFiles].sort().join(",")}`;
-        let res = cache.get(key);
-        if (res === undefined) {
-          res = await runTrustedTier({ tier, testFiles: tierFiles, candidateSha: candidate });
-          cache.set(key, res);
-        }
-        tiers.push(tier);
-        if (res.blocked !== undefined) blocked = res.blocked;
-        if (res.runnerOutput !== undefined) outputs.push(res.runnerOutput);
+
+      // The file(s) whose OWN isolated run actually contains the cited assertion — executed,
+      // failed, or skipped, but not absent. This, not the fixer's broad list, is what a resolution
+      // binds to.
+      const containing = runs.filter((r) => resolveTestExecution(r.runnerOutput ?? "", named).execution !== "absent");
+      if (containing.length > 1) {
+        trustedTierRuns[findingId] = {
+          tiers,
+          testFiles: files,
+          candidateSha: candidate,
+          ambiguousFiles: containing.map((r) => r.file),
+        };
+        continue;
       }
+      const bound = containing[0];
       trustedTierRuns[findingId] = {
         tiers,
         testFiles: files,
-        ...(blocked !== undefined ? { blocked } : { runnerOutput: outputs.join("\n") }),
+        candidateSha: candidate,
+        ...(bound !== undefined ? { assertionFile: bound.file, runnerOutput: bound.runnerOutput ?? "" } : {}),
       };
     }
   }
