@@ -160,6 +160,11 @@ const ALLOWLIST: readonly AllowEntry[] = [
     reason: "fanoutParentOf early-out: a parent-less row HAS no fanout parent — a structural guard on the retry lineage walk, not a terminal read.",
   },
   {
+    file: "src/v2/retry.ts",
+    pattern: /if \(task\.parentId === undefined\) return false/,
+    reason: "isRedReviewChild early-out (FG-629): a parent-less row is not a red_review child — a structural guard on the retry lineage walk, not a terminal read.",
+  },
+  {
     file: "src/v2/runNext.ts",
     pattern: /args\.parentId === undefined/,
     count: 2,

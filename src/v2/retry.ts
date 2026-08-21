@@ -97,6 +97,42 @@ export class FanoutChildRetryError extends Error {
   }
 }
 
+// FG-629: a workflow-step RED reviewer is dispatched INLINE as part of its
+// primary's step (dispatchReds), parented to the primary it audits — never through
+// the ready queue. `forge retry` mints a fresh parentId-undefined PRIMARY (see the
+// PRIMARY note on the new row below), so a retried red is a `retry_replacement`
+// primary in the red's phase: dispatchSingleStep reuses it as the phase's pending
+// primary and runs it under the STEP's agent/prompt (runNext.ts's `agentRole =
+// step.agent`), producing a duplicate primary artifact wearing the red's role — and
+// then dispatches a fresh red wave against that duplicate. The original artifact the
+// red was meant to re-review is never touched. That silent substitution is the whole
+// of FG-629, so it is refused.
+//
+// Refused UNCONDITIONALLY (not behind --force, unlike the fanout-child and
+// ordered-wave refusals): those name a forced path that is merely wasteful, but there
+// is no coherent reading of "mint a primary from a red" — forcing it only reproduces
+// the exact corruption. The recovery runs through the primary instead (a crashed red
+// now lands the primary blocked_by_red — FG-628 — settled via its gate).
+//
+// Standalone Error (like FanoutChildRetryError) rather than a RetryNotAllowedError:
+// the base class renders a "Use --force to retry anyway" line this refusal must not,
+// and the CLI already has a catch arm for these structural refusals.
+export class RedReviewRetryError extends Error {
+  constructor(public taskId: string, public primaryId: string, public phase: string) {
+    super(
+      `Task ${taskId} is a workflow-step red reviewer of primary ${primaryId} — a red is not independently retryable. ` +
+        `It runs INLINE as part of ${primaryId}'s step (never through the ready queue), so \`forge retry\` cannot re-run it: ` +
+        `it would mint a fresh PRIMARY in phase '${phase}' carrying the step's primary prompt — a duplicate artifact reviewed by ` +
+        `a fresh red wave, not a re-run of this review. Recover through the primary instead: a crashed red now lands it ` +
+        `blocked_by_red (FG-628), so inspect it with \`forge show ${primaryId}\`, then either ` +
+        `\`forge gate ${primaryId} advance --force --rationale "..."\` to waive the review, or ` +
+        `\`forge gate ${primaryId} request-changes --force --rationale "..."\` to re-run the step (primary + its reds), which ` +
+        `re-executes the review and gives ${primaryId} a real verdict.`,
+    );
+    this.name = "RedReviewRetryError";
+  }
+}
+
 // FG-688: the OTHER misadvising surface, and the one the ticket says an operator
 // is actually left with. `forge retry` mints a fresh PRIMARY with parentId unset
 // (see the PRIMARY note on the new row below), while adoption is scoped to the
@@ -523,6 +559,35 @@ function fanoutParentOf(task: Task, run: Run): Task | undefined {
   return getTask(task.parentId);
 }
 
+/** FG-629: is `task` a workflow-step RED reviewer (classifier kind `red_review`)?
+ *  Answered by classifyTaskLineage, NOT a `red-` role-name prefix — a reviewer whose
+ *  agent name does not start with `red-` (feature.yml's `shipping-reviewer`) is a
+ *  red_review too, and is equally corrupted by a retry (see RedReviewRetryError). An
+ *  ad-hoc `forge invoke red-wide` row is classified `adhoc_invoke`, never red_review,
+ *  so the FG-507 direct re-dispatch of an invoke-attached red is untouched.
+ *
+ *  Decided from `task.parentId` (never a parent-row lookup): a red_review always
+ *  carries its parent id, and the primary row may have been force-gated out of the
+ *  way while the red still needs recovery — the refusal must fire on the red's own
+ *  lineage regardless.
+ *
+ *  Fails CLOSED on a load failure, mirroring fanoutParentOf: it returns false and
+ *  leaves the refusal to fanoutParentOf, which classifies a parented non-recovery row
+ *  against a degraded empty-steps workflow (no declared reds) as `fanout_child` and
+ *  refuses it. A red_review is therefore never silently permitted on an unloadable
+ *  workflow — it is caught by the fanout-child guard one step earlier instead. */
+function isRedReviewChild(task: Task, run: Run): boolean {
+  if (task.parentId === undefined) return false;
+  let workflow: Workflow;
+  try {
+    workflow = loadWorkflow(run.workflow, run.projectDir ? { projectDir: run.projectDir } : {});
+  } catch {
+    return false;
+  }
+  const kinds = classifyTaskLineage(workflow, tasksForRun(task.runId));
+  return kinds.get(task.id) === "red_review";
+}
+
 export type RetryOutcome = {
   task: Task;
   newTask: Task;
@@ -576,6 +641,16 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   const fanoutParent = run ? fanoutParentOf(task, run) : undefined;
   if (fanoutParent && !opts?.force) {
     throw new FanoutChildRetryError(taskId, fanoutParent.id);
+  }
+
+  // FG-629: a workflow-step red reviewer is not independently retryable — retrying it
+  // mints a duplicate primary and a fresh red wave (see RedReviewRetryError). Refused
+  // UNCONDITIONALLY (no --force reading): the recovery runs through the primary, not
+  // the red. Checked after the fanout-child guard because both need `run` and the two
+  // lineage kinds are mutually exclusive; on an unloadable workflow the fanout-child
+  // guard above has already fired, so `parentId` here is a proven red_review.
+  if (run && isRedReviewChild(task, run)) {
+    throw new RedReviewRetryError(taskId, task.parentId!, task.phase);
   }
 
   // AWN-3: consult the per-failure_kind retry policy. Non-retryable kinds (gate

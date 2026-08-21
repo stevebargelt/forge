@@ -13,7 +13,7 @@ import { getTask, insertTask, tasksForRun } from "../store/tasks.js";
 import { failTask } from "./failure-kind.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
-import { FanoutChildRetryError, retry } from "./retry.js";
+import { FanoutChildRetryError, RedReviewRetryError, retry } from "./retry.js";
 import { classifyTaskLineage, isFanoutChildRow } from "./lifecycle-evaluator.js";
 import type { Run, Task } from "../types/index.js";
 import type { Workflow } from "./schema.js";
@@ -149,14 +149,21 @@ async function dispatchFanoutWithReviewer(): Promise<{ runId: string; reviewer: 
   return { runId, reviewer, child };
 }
 
-test("FG-527: a failed shipping-reviewer red is retried through the workflow ready queue", async () => {
-  const { reviewer } = await dispatchFanoutWithReviewer();
+test("FG-629: a failed shipping-reviewer red is REFUSED — retrying it would mint a duplicate primary + fresh red wave", async () => {
+  // FG-527 originally let this retry through the ready queue, minting a fresh primary
+  // — which is exactly the FG-629 defect: that primary is reused by dispatchFanoutStep
+  // as the wave's parent and re-runs the whole fanout under the reviewer's role. The
+  // reviewer is now refused; recovery runs through the primary it reviewed.
+  const { runId, reviewer } = await dispatchFanoutWithReviewer();
   failTask(reviewer.id, { runId: reviewer.runId, kind: "container_crash", error: "retry me" });
+  const before = tasksForRun(runId).map((t) => t.id);
 
-  const out = await retry(reviewer.id);
-  assert.equal(out.adHoc, undefined, "workflow reviewer retry is left for the ready queue");
-  assert.equal(getTask(out.newTask.id)!.status, "pending");
-  assert.equal(getTask(out.newTask.id)!.parentId, undefined, "retry mints a fresh primary");
+  await assert.rejects(() => retry(reviewer.id), (e: unknown) => {
+    assert.ok(e instanceof RedReviewRetryError, `expected RedReviewRetryError, got ${e}`);
+    assert.equal((e as RedReviewRetryError).primaryId, reviewer.parentId, "the refusal names the fanout primary the reviewer audited");
+    return true;
+  });
+  assert.deepEqual(tasksForRun(runId).map((t) => t.id), before, "no duplicate primary minted — refused before any write");
 });
 
 test("FG-527: a genuine fanout child remains refused before retry creates a row", async () => {
