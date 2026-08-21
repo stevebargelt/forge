@@ -33,6 +33,7 @@ import {
 import { getRun } from "../../store/runs.js";
 import { getTask } from "../../store/tasks.js";
 import { getDocsDispatch, markDocsDispatchDelivered, openDocsDispatch } from "../../store/reviews.js";
+import { findCoveringGateEvidence, REQUIRED_CI_GATE_COMMAND } from "../../store/host-verifications.js";
 import type {
   CoordinatorDeps,
   FixerContext,
@@ -2095,6 +2096,21 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         },
       };
     },
+
+    // FG-744: the exact-candidate covering-gate evidence the CI-evidence ingestion channel
+    // requires. It reuses the SAME fail-closed trust chain the loop's own verification does
+    // (findCoveringGateEvidence): a green REQUIRED_CI_CHECK_CONTEXT that the project's OWN
+    // ci.yml demonstrably runs the gate command as, with EVERY job of that workflow green at
+    // this exact sha — or a covering host row for the whole derived gate list. `null` for
+    // anything short of that (pending, failing, absent, or a different sha), which the
+    // ingestion reads as "no admissible evidence".
+    coveringGateEvidence: async (sha: string) =>
+      findCoveringGateEvidence({
+        ticketId: ctx.ticketId,
+        projectDir: ctx.projectDir,
+        sha,
+        command: REQUIRED_CI_GATE_COMMAND,
+      }),
   };
 }
 

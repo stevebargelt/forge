@@ -117,6 +117,8 @@ import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult, ReviewDiffS
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck } from "./review-recheck.js";
+import { ingestCandidateCiEvidence } from "./review-ci-evidence.js";
+import type { GateEvidence } from "../store/host-verifications.js";
 import { assessShippingReview, type ShippingAssessment, type ShippingInput } from "./review-shipping.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -456,6 +458,15 @@ export type CoordinatorDeps = {
     review: Review;
     candidateSha: string;
   }) => Awaitable<Omit<ShippingInput, "candidateSha" | "findings">>;
+  /** FG-744: the host's verified covering-gate evidence at a sha — green required CI (or a
+   *  covering host row) for the WHOLE derived gate list (test:all + test:extended), bound to
+   *  the EXACT sha. `null` when nothing covers it. Consumed ONLY by `runCiEvidenceIngestion`,
+   *  the separate entry point the `forge review ingest-ci-evidence` verb drives; it is the
+   *  exact-candidate CI precondition (AC2) for admitting a stranded fix_now finding's
+   *  integration/worktree-tier assertion as resolved. Optional for the same reason
+   *  `commitDocsAmendment` is: no `runNextStage` stage touches it, and the entry point that
+   *  does refuses by name when it is absent. */
+  coveringGateEvidence?: (sha: string) => Awaitable<GateEvidence | null>;
 };
 
 export type StageOutcome = {
@@ -2079,6 +2090,99 @@ export async function runDocsAmendment(
       (declaredNotMoved.length > 0
         ? `. NOTE: declared ${declaredNotMoved.join(", ")} did not move — the commit carries only what did`
         : ""),
+  };
+}
+
+// ─── FG-744: exact-candidate CI evidence ingestion ──────────────────────────
+
+export type CiEvidenceOutcome =
+  | { status: "ingested"; candidateSha: string; resolved: string[]; message: string }
+  | { status: "refused"; reason: string; message: string };
+
+/** FG-744: admit a green EXACT-CANDIDATE required-CI run as executed resolution evidence
+ *  for a stranded `fix_now` finding whose cited assertion lives in a tier the recheck's fast
+ *  gate structurally could not run.
+ *
+ *  A SEPARATE coordinator entry point, not a stage — driven by `forge review ingest-ci-evidence`,
+ *  never by `runNextStage`. The recheck does not repeat at an unchanged candidate, so a finding
+ *  it recorded `inconclusive / not_executed` off a fast-gate lane that could never contain the
+ *  integration/worktree assertion had no mechanical path to `resolved` even after CI went green
+ *  at the exact merge candidate. This is that path — and it is PURE evidence ingestion:
+ *
+ *   - It records a `resolved` resolution on EXISTING findings, bound to the current candidate.
+ *     No fix batch, no candidate move, no stage repeated — the one-fix-batch cap is untouched.
+ *   - Evidence sufficiency is UNCHANGED: the CI run is validated as the same `alternate_lane`
+ *     the recheck already accepts, through the identical `validateResolutionEvidence` path, and
+ *     bound to the fixer's OWN named assertion at the EXACT candidate (ingestCandidateCiEvidence).
+ *   - The exact-candidate CI precondition is the host's verified covering-gate evidence
+ *     (`deps.coveringGateEvidence`): green required CI for the whole derived gate list at this
+ *     exact sha, which is what proves the integration/worktree tier ran off-host. */
+export async function runCiEvidenceIngestion(
+  reviewId: string,
+  raw: unknown,
+  deps: CoordinatorDeps,
+): Promise<CiEvidenceOutcome> {
+  const review = getReview(reviewId);
+  if (!review) throw new Error(`forge: no review ${reviewId}`);
+  const refused = (reason: string, message: string): CiEvidenceOutcome => ({ status: "refused", reason, message });
+
+  const candidate = review.candidateSha;
+  if (candidate === undefined) {
+    return refused(
+      "ci_evidence_no_candidate",
+      `review ${reviewId} has no candidate sha, so there is nothing to bind CI evidence to. Nothing was written.`,
+    );
+  }
+  if (deps.coveringGateEvidence === undefined) {
+    return refused(
+      "ci_evidence_no_gate_authority",
+      `this coordinator was built without covering-gate-evidence authority, so exact-candidate CI evidence cannot ` +
+        `be verified. Nothing was written.`,
+    );
+  }
+
+  const snap = snapshot(reviewId);
+  const expected = snap.findings.filter((f) => f.disposition === "fix_now");
+
+  // The fixer's per-finding named assertion, read the SAME way the recheck reads it (RF-5), so
+  // the assertion this channel binds to is exactly the one the recheck would have executed.
+  const fixerAssertions: Record<string, string> = {};
+  for (const b of snap.batches) {
+    for (const r of fixBatchResults(b.id)) {
+      if (r.executedAssertion !== undefined) fixerAssertions[r.findingId] = r.executedAssertion;
+    }
+  }
+
+  const gateEvidence = await deps.coveringGateEvidence(candidate);
+
+  const ingestion = ingestCandidateCiEvidence(raw, {
+    reviewId,
+    candidateSha: candidate,
+    expected,
+    fixerAssertions,
+    gateEvidence,
+  });
+  if (!ingestion.ok) {
+    return refused("ci_evidence_rejected", ingestion.refusal);
+  }
+
+  for (const a of ingestion.applications) {
+    recordResolution(a.findingId, {
+      resolution: "resolved",
+      evidenceKind: a.evidenceKind,
+      evidence: a.evidence,
+      resolvedSha: candidate,
+    });
+  }
+
+  const resolved = ingestion.applications.map((a) => a.findingRef);
+  return {
+    status: "ingested",
+    candidateSha: candidate,
+    resolved,
+    message:
+      `${resolved.length} stranded fix_now finding(s) resolved from green exact-candidate required-CI evidence at ` +
+      `${candidate}: ${resolved.join(", ")}. No fixer or recheck cycle was dispatched and the candidate did not move.`,
   };
 }
 

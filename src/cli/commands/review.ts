@@ -45,8 +45,10 @@ import { newReviewId } from "../../util/ids.js";
 import { compareIdentity, describeIdentity, identify } from "../../util/path-identity.js";
 import { nextTransition } from "../../v2/review-coordinator.js";
 import {
+  runCiEvidenceIngestion,
   runDocsAmendment,
   runNextStage,
+  type CiEvidenceOutcome,
   type CoordinatorDeps,
   type DocsAmendmentOutcome,
   type StageOutcome,
@@ -322,6 +324,16 @@ type AmendDocsOpts = {
   path?: string[];
   rationale?: string;
   discoveredBy?: string;
+  json?: boolean;
+};
+
+// FG-744: the exact-candidate CI-evidence ingestion verb. `--project` binds the workspace
+// exactly as `continue` does; `--evidence` names the JSON file describing the green
+// exact-candidate CI run(s). The bindings and evidence sufficiency are validated INSIDE
+// runCiEvidenceIngestion / ingestCandidateCiEvidence as named refusals.
+type IngestCiEvidenceOpts = {
+  project?: string;
+  evidence?: string;
   json?: boolean;
 };
 
@@ -674,6 +686,23 @@ function reportAmendment(outcome: DocsAmendmentOutcome, json: boolean): void {
   if (outcome.status === "refused") process.exitCode = 1;
 }
 
+// FG-744: report the CI-evidence ingestion outcome. An `ingested` outcome names the candidate
+// and the findings it resolved; a `refused` outcome surfaces the NAMED refusal verbatim on a
+// non-zero exit, so an inadmissible-evidence refusal reads the same at the CLI as it does in
+// the ledger and the caller can tell nothing was written.
+function reportCiEvidence(outcome: CiEvidenceOutcome, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(outcome, null, 2));
+  } else if (outcome.status === "ingested") {
+    console.log(`✓ ingested exact-candidate CI evidence at ${outcome.candidateSha}`);
+    console.log(`    resolved: ${outcome.resolved.join(", ") || "(none)"}`);
+    console.log(`    ${outcome.message}`);
+  } else {
+    console.error(`✗ ${outcome.reason}: ${outcome.message}`);
+  }
+  if (outcome.status === "refused") process.exitCode = 1;
+}
+
 function snapshotFor(reviewId: string) {
   const review = getReview(reviewId);
   if (!review) throw new Error(`Not found: ${reviewId}`);
@@ -979,6 +1008,44 @@ export function registerReview(program: Command): void {
         ...(opts.discoveredBy !== undefined ? { discoveredBy: opts.discoveredBy } : {}),
       });
       reportAmendment(outcome, opts.json === true);
+    });
+
+  review
+    .command("ingest-ci-evidence")
+    .argument("<review-id>", "review id")
+    .option(
+      "--project <dir>",
+      "override the workspace recorded on the review — the override is RECORDED. Without it the workspace " +
+        "comes from the review row, never from cwd",
+    )
+    .requiredOption(
+      "--evidence <file>",
+      "a JSON file naming the green exact-candidate CI run(s) that executed a stranded fix_now finding's cited " +
+        'assertion: {"review_id", "candidate_sha", "findings": [{"finding_id", "test_file", "ci_lane", ' +
+        '"ci_runner_output"}]}. The assertion identity is the FIXER\'s own executed_assertion, not this file',
+    )
+    .option("--json", "emit the ingestion outcome as JSON")
+    .description(
+      "FG-744: admit a green EXACT-CANDIDATE required-CI run as executed resolution evidence for a stranded " +
+        "fix_now finding whose cited assertion lives in a tier the recheck's fast gate structurally could not run " +
+        "(*.integration.test / *.worktree.test). Records a 'resolved' resolution bound to the candidate; opens NO " +
+        "fixer or recheck cycle and does not move the candidate. Evidence sufficiency is unchanged — a skipped, " +
+        "red, or absent assertion, or CI at another candidate, resolves nothing",
+    )
+    .action(async (reviewId: string, opts: IngestCiEvidenceOpts) => {
+      ensureForgeDirs();
+      assertStoreForLookup(`review ${reviewId}`);
+
+      const built = depsFor(reviewId, opts);
+      if (!built.ok) {
+        console.error(`forge review ingest-ci-evidence: ${built.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const raw = readJsonFile(opts.evidence as string, "CI evidence");
+      const outcome = await runCiEvidenceIngestion(reviewId, raw, built.deps);
+      reportCiEvidence(outcome, opts.json === true);
     });
 
   review
