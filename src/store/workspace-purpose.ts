@@ -422,10 +422,22 @@ export function classifyWorkspacePurpose(input: {
   return writeTransaction(() => {
     const existing = readRow(canonical);
     if (existing) {
-      const existingKind = decodeWorkspaceKind(existing.kind);
-      if (existingKind !== "unclassified" && existingKind !== input.kind) {
+      const recordedRaw = existing.kind;
+      const existingKind = decodeWorkspaceKind(recordedRaw);
+      // RF-2: a kind this binary cannot READ — a value a NEWER binary wrote — decodes to
+      // `unclassified`, but it is NOT the claimable legacy-repair door. Overwriting it
+      // would silently replace a durable fact no operator resolved, letting an older
+      // binary stamp an artifact kind over a newer recorded purpose. Distinguish it from a
+      // genuinely-unrecorded row (the literal "unclassified", or a NULL/empty kind) so the
+      // repair door stays open ONLY where nothing meaningful is recorded, and REFUSE on a
+      // recorded-but-unreadable kind exactly as on a recorded conflicting kind.
+      const recordedButUnreadable =
+        typeof recordedRaw === "string" && recordedRaw.trim().length > 0 && !isWorkspaceKind(recordedRaw);
+      const conflictsWithRecordedKind = existingKind !== "unclassified" && existingKind !== input.kind;
+      if (recordedButUnreadable || conflictsWithRecordedKind) {
+        const shownExisting = recordedButUnreadable ? recordedRaw : existingKind;
         throw new WorkspacePurposeConflictError(
-          `forge: refusing to classify — ${canonical} is already recorded as '${existingKind}', not ` +
+          `forge: refusing to classify — ${canonical} is already recorded as '${shownExisting}', not ` +
             `'${input.kind}'. Reassigning it would silently overwrite a durable fact. If the recorded ` +
             `purpose is wrong, resolve which purpose this workspace actually has first.`,
           { path: canonical, existingKind, requestedKind: input.kind },

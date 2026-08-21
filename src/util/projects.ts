@@ -210,6 +210,31 @@ function preferredCheckout(checkouts: MutableCheckout[]): MutableCheckout {
   })[0]!;
 }
 
+/** FG-745 (RF-1): resolve a record's purpose PER MEMBER, so an artifact checkout that
+ *  CONVERGED onto its source's repository identity cannot suppress its operator sibling
+ *  (nor lose its own artifact fact silently). The invariant: only an EXPLICITLY-recorded
+ *  artifact kind suppresses a top-level entry, so a record is an artifact ONLY when EVERY
+ *  member is a recorded artifact — one operator or unclassified sibling keeps the entry
+ *  VISIBLE. The displayed purpose/owner come from the governing member: the primary's
+ *  artifact row when the whole record is an artifact, otherwise the strongest non-artifact
+ *  claim (an explicit operator member, else `unclassified` — the visible fail-safe). */
+function resolveRecordPurpose(
+  members: MutableCheckout[],
+  primary: MutableCheckout,
+  resolvePurpose: WorkspacePurposeResolver,
+): { purpose: WorkspaceKind; info: ProjectPurposeInfo | undefined } {
+  const memberInfos = members.map((member) => resolvePurpose(member.projectDir));
+  const allArtifact = memberInfos.every(
+    (info) => classificationForKind(info?.purpose ?? DEFAULT_WORKSPACE_KIND) === "artifact",
+  );
+  if (allArtifact) {
+    const primaryInfo = resolvePurpose(primary.projectDir);
+    return { purpose: primaryInfo?.purpose ?? DEFAULT_WORKSPACE_KIND, info: primaryInfo };
+  }
+  const operatorInfo = memberInfos.find((info) => info?.purpose === "operator");
+  return { purpose: operatorInfo?.purpose ?? DEFAULT_WORKSPACE_KIND, info: operatorInfo };
+}
+
 /** Pure aggregation seam used by listProjects and repository-identity tests. */
 export function aggregateProjectSignals(
   signals: ProjectSignal[],
@@ -274,14 +299,13 @@ export function aggregateProjectSignals(
     const projectDirs = [...new Set(sortedMembers.flatMap((member) => [...member.projectDirs]))].sort();
     const lastRunAt = members.reduce<string | undefined>((latest, member) => maxIso(latest, member.lastRunAt), undefined);
     const githubUrl = members.find((member) => member.githubUrl)?.githubUrl;
-    // FG-745: the purpose join. A repository record groups checkouts by converging
-    // identity; a Forge disposable clone / worktree is its OWN repository, so its
-    // record has one member and the primary checkout's proven canonical path is the
-    // key the store recorded at creation (or an operator recorded at repair). The
-    // incomplete-.git forge-fg253 case stays attributable through this recorded row,
-    // not a live git probe. Absence annotates as `unclassified` — visible, flagged.
-    const purposeInfo = resolvePurpose(primary.projectDir);
-    const purpose = purposeInfo?.purpose ?? DEFAULT_WORKSPACE_KIND;
+    // FG-745 (RF-1): the purpose join, resolved PER MEMBER. A repository record groups
+    // checkouts by converging identity; normally a Forge disposable clone / worktree is
+    // its OWN repository (one member, its proven canonical path recorded at creation).
+    // But a clone/worktree CAN converge onto its source checkout's repository identity,
+    // so a record may group an artifact member with its operator sibling. Suppression is
+    // therefore per-member, never from the preferred member: see resolveRecordPurpose.
+    const { purpose, info: purposeInfo } = resolveRecordPurpose(members, primary, resolvePurpose);
     const record: ProjectRecord = {
       key,
       projectDir: primary.projectDir,

@@ -154,6 +154,30 @@ describe("FG-745 workspace-purpose — the classify claim", () => {
     assert.equal(getWorkspacePurpose(dir)?.kind, "evidence_fixture");
   });
 
+  test("REFUSES to overwrite a recorded kind this binary cannot read (RF-2)", () => {
+    const dir = realDir();
+    // A NEWER binary recorded a kind this build's vocabulary does not contain. It decodes
+    // to `unclassified` for READS (fail-open), but it must NEVER become the claimable
+    // legacy-repair door: an older binary must not stamp an artifact kind over a durable
+    // fact it simply cannot read.
+    db.prepare(
+      `INSERT INTO workspace_purposes (path, path_as_written, kind, source, created_at, updated_at)
+         VALUES (?, ?, ?, 'creation', '2026-08-21T00:00:00Z', '2026-08-21T00:00:00Z')`,
+    ).run(dir, dir, "future_isolation_pod");
+    assert.throws(
+      () => classifyWorkspacePurpose({ path: dir, kind: "disposable_clone" }),
+      (err: unknown) => {
+        assert.ok(err instanceof WorkspacePurposeConflictError);
+        assert.match(err.message, /future_isolation_pod/, "the unreadable recorded value is surfaced, not swallowed");
+        assert.equal(err.detail.requestedKind, "disposable_clone");
+        return true;
+      },
+    );
+    // The durable, unreadable fact is preserved verbatim — no silent overwrite.
+    const raw = db.prepare(`SELECT kind FROM workspace_purposes WHERE path = ?`).get(dir) as { kind: string };
+    assert.equal(raw.kind, "future_isolation_pod", "the newer binary's recorded kind survives the refused classify");
+  });
+
   test("re-classifying to the SAME kind is idempotent, not a conflict", () => {
     const dir = realDir();
     classifyWorkspacePurpose({ path: dir, kind: "worktree" });

@@ -1693,6 +1693,11 @@ function ProjectCard({ project, onPick, onReload }) {
   const [showClassify, setShowClassify] = useState(false);
   const onClick = () => onPick(project, null);
   const onKey = (event) => {
+    // RF-3: only the card itself activates on Enter/Space. A key event that bubbled up
+    // from a focused descendant (the classify toggle, the classify form's select/submit,
+    // a checkout row, the GitHub link) must reach its OWN native activation — swallowing
+    // it here with preventDefault() would both suppress that control and open the card.
+    if (event.target !== event.currentTarget) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       onClick();

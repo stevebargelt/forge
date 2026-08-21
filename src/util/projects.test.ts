@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregateProjectSignals, findProject, listProjects, operatorProjects, type RepositoryIdentityResolver } from "./projects.js";
+import { aggregateProjectSignals, findProject, listProjects, operatorProjects, type RepositoryIdentityResolver, type WorkspacePurposeResolver } from "./projects.js";
 import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
 import { captureProcessIdentity } from "./process-identity.js";
 
@@ -190,6 +190,41 @@ test("FG-745: aggregateProjectSignals defaults to unclassified/visible when no p
   assert.equal(projects[0]?.purpose, "unclassified", "no recorded purpose reads as the visible fail-safe");
   assert.equal(projects[0]?.classification, "unclassified");
   assert.equal(operatorProjects(projects).length, 1, "an unclassified project stays a top-level entry");
+});
+
+test("FG-745 RF-1: an artifact checkout that CONVERGED onto its operator sibling's repository never suppresses it", () => {
+  // A Forge disposable clone shares its SOURCE checkout's repository identity (same key,
+  // distinct checkout roots) — the exact convergence the purpose join must survive. The
+  // artifact member is recorded `disposable_clone`; the operator sibling has no recorded
+  // purpose. The grouped record must stay VISIBLE (only an all-artifact record suppresses).
+  const operatorDir = "/tmp/fg745-rf1/operator";
+  const artifactDir = "/tmp/fg745-rf1/artifact-clone";
+  const purposes: Record<string, ReturnType<WorkspacePurposeResolver>> = {
+    [artifactDir]: { purpose: "disposable_clone", owner: { projectIdentity: "pk-owner", runId: "run-a" } },
+  };
+  const resolvePurpose: WorkspacePurposeResolver = (root) => purposes[root];
+  const signals = [
+    { projectDir: operatorDir, runCount: 2 },
+    { projectDir: artifactDir, runCount: 1 },
+  ];
+  const id = identity({
+    [operatorDir]: { key: "repo-conv", remoteName: "forge", branch: "main" },
+    [artifactDir]: { key: "repo-conv" },
+  });
+
+  const records = aggregateProjectSignals(signals, id, resolvePurpose);
+  assert.equal(records.length, 1, "the converged checkouts group into one repository record");
+  assert.notEqual(records[0]!.classification, "artifact", "an operator sibling keeps the record off the artifact path");
+  assert.equal(operatorProjects(records).length, 1, "the operator project is NEVER suppressed by its artifact sibling");
+
+  // Mirror: when EVERY member is a recorded artifact, the record IS suppressed.
+  const allArtifact = aggregateProjectSignals(
+    signals,
+    id,
+    (root) => (root === operatorDir ? { purpose: "worktree" as const } : purposes[root]),
+  );
+  assert.equal(allArtifact[0]!.classification, "artifact", "an all-artifact record classifies as an artifact");
+  assert.equal(operatorProjects(allArtifact).length, 0, "an all-artifact repository record is suppressed");
 });
 
 test("FG-745: operatorProjects drops only records classified as artifacts", () => {

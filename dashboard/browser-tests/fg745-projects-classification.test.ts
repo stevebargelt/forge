@@ -135,6 +135,39 @@ test("the grid renders the visible projects, flags unclassified, and never shows
   await page.close();
 });
 
+// RF-3 regression: the new classify controls must be keyboard-operable INDEPENDENTLY of
+// the project card. The card activates on Enter/Space (role="button"); before the fix its
+// handler also swallowed key events that BUBBLED from a focused descendant — so activating
+// the classify toggle from the keyboard both suppressed the toggle (preventDefault) and
+// navigated the card away (onPick → activity view). The toggle must open its own form and
+// leave the Projects grid mounted.
+test("RF-3: keyboard-activating the classify toggle opens its form and does NOT activate the card", async () => {
+  const page = await newPage();
+  await page.goto(`${BASE}/#projects`);
+  await page.locator(".project-card").first().waitFor();
+
+  const card = page.locator(".project-card", { has: page.locator(`.project-path`, { hasText: independent }) });
+  await card.waitFor();
+
+  const toggle = card.locator(".project-classify-toggle");
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+
+  // The toggle activated in place: its classify form is disclosed.
+  await card.locator(".project-classify-select").waitFor({ timeout: 3000 });
+  assert.ok(
+    await card.locator(".project-classify-select").isVisible(),
+    "keyboard activation of the toggle opened its own form",
+  );
+  // The card did NOT navigate: the Projects grid is still mounted (onPick never fired).
+  assert.equal(
+    await page.locator(".projects-grid").count(),
+    1,
+    "the card's Enter/Space handler ignored the key event bubbling from the toggle",
+  );
+  await page.close();
+});
+
 // The classify affordance's EFFECT on membership is proven against the shared seam
 // (listProjects + operatorProjects — the same one `forge projects list` and the
 // dashboard consume) rather than the dashboard's /api/projects, whose short-lived
