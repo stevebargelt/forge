@@ -106,7 +106,7 @@ const REQUIRED_RULE_IDS: Record<OperatorWorkflowId, readonly string[]> = {
 
 const REQUIRED_PROHIBITION_IDS: Record<OperatorWorkflowId, readonly string[]> = {
   orient: ["no-whole-backlog-read", "no-auto-recommend", "no-padding-empty-sections"],
-  handoff: ["no-whole-backlog-read", "no-auto-push", "no-padding-empty-sections"],
+  handoff: ["no-whole-backlog-read", "no-auto-push", "no-padding-empty-sections", "no-auto-memory-edit", "no-reviewed-stamp"],
 };
 
 test("every required rule and prohibition is named by id", () => {
@@ -261,6 +261,54 @@ test("handoff carries the notes-block contract; orientation writes nothing", () 
   );
 
   assert.equal(operatorWorkflow("orient").notesBlock, undefined, "orientation is a read; it applies no write");
+});
+
+// ---- FG-550: handoff flags memory its own session invalidated ---------------
+//
+// The session that created the drift already has the context to name it. Handoff
+// captures that at creation time — cheaply, without stamps — instead of leaving it
+// for a later /memory-review to reconstruct from the codebase.
+
+test("handoff carries an optional, propose-only memory-invalidation section that never stamps", () => {
+  const notes = operatorWorkflow("handoff").notesBlock;
+  assert.ok(notes);
+  const section = notes.sections.find((s) => s.id === "invalidated-memories");
+  assert.ok(section, "handoff must carry the memory-invalidation section");
+
+  // Optional: omitted entirely when no current-session change contradicts memory,
+  // consistent with the no-padding rule.
+  assert.equal(section.omitWhenEmpty, true, "the section must be omittable, not padded with 'nothing to report'");
+
+  // It names specific files + a bounded per-claim correction.
+  assert.match(section.heading, /invalidated/i);
+  assert.match(section.content, /specific file/i);
+  assert.match(section.content, /one-line/i);
+
+  // It is scoped to THIS session's own changes, not a full corpus re-review.
+  assert.match(section.content, /this session/i);
+  assert.match(section.content, /do not scan or re-review the whole memory corpus/i);
+
+  // Propose only — never edits memory/CLAUDE.md and never writes a reviewed stamp.
+  assert.match(section.content, /reviewed stamp/i);
+  assert.match(section.content, /Propose only/i);
+
+  // It comes before the shipped punch list, which stays last.
+  const ids = notes.sections.map((s) => s.id);
+  assert.ok(ids.indexOf("invalidated-memories") < ids.indexOf("shipped"));
+});
+
+test("the handoff Do-NOT list forbids writing a reviewed stamp and still forbids unapproved memory/CLAUDE.md edits", () => {
+  const handoff = operatorWorkflow("handoff");
+  const byId = new Map(handoff.prohibitions.map((p) => [p.id, p]));
+
+  const stamp = byId.get("no-reviewed-stamp");
+  assert.ok(stamp, "handoff must explicitly forbid writing a reviewed stamp");
+  assert.match(stamp.statement, /reviewed:/);
+  assert.match(stamp.statement, /^Do not /);
+
+  const memory = byId.get("no-auto-memory-edit");
+  assert.ok(memory, "handoff must still forbid unapproved memory/CLAUDE.md edits");
+  assert.match(memory.statement, /CLAUDE\.md/);
 });
 
 // ---- Ownership marker + stamp round trip -----------------------------------

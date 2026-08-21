@@ -415,6 +415,80 @@ test("FG-253 preservation: the operator's `.agents/skills/` neighbours are untou
   assertHostIsolated();
 });
 
+test("FG-550: init and upgrade deliver the handoff memory-drift guard, repair Forge bytes, and retain a project override", async () => {
+  const root = disposable("fg550-handoff-adapter-");
+  const target = renderedAdapterTargets(currentAdapterStamp()).find(
+    (entry) =>
+      entry.surface === "claude-command" && entry.workflow === "handoff",
+  );
+  assert.ok(
+    target,
+    "fixture precondition: Forge renders a /handoff Claude command",
+  );
+  const handoffPath = join(root, ...target.relPath.split("/"));
+
+  // A fresh real `forge init` must expose the current canonical workflow through
+  // its project adapter. This is intentionally an end-to-end assertion over the
+  // provisioned bytes rather than a second assertion about the source definition.
+  await forgeInit(root);
+  assert.equal(readFileSync(handoffPath, "utf8"), target.bytes);
+  const installed = readFileSync(handoffPath, "utf8");
+  assert.match(installed, /Memories this session may have invalidated/);
+  assert.match(installed, /specific file/i);
+  assert.match(installed, /one-line proposed correction/i);
+  assert.match(installed, /OWN changes or decisions contradict/);
+  assert.match(installed, /do not scan or re-review the whole memory corpus/i);
+  assert.match(installed, /Do not write or refresh a `reviewed:` stamp/);
+
+  // A stale Forge-owned adapter is safe for upgrade to repair. Keep the ownership
+  // marker intact while removing the new contract, so this proves ownership-based
+  // refresh rather than an install into an absent path.
+  const stale = installed.replace(
+    "**Memories this session may have invalidated:**",
+    "**Memory notes:**",
+  );
+  assert.notEqual(
+    stale,
+    installed,
+    "fixture precondition: the rendered handoff contains the FG-550 section",
+  );
+  writeFileSync(handoffPath, stale);
+  const repaired = forgeUpgrade(root);
+  assert.equal(
+    readFileSync(handoffPath, "utf8"),
+    target.bytes,
+    "forge upgrade must refresh Forge-owned handoff bytes",
+  );
+  assert.notEqual(
+    repaired.adapterSurfaces,
+    "user-override",
+    "a repaired Forge adapter is not a project override",
+  );
+
+  // Once the project deliberately replaces the regular file, both provisioning
+  // paths must retain it. This is the modern equivalent of preserving an
+  // intentional project-local command override; Forge no longer installs command
+  // symlinks, so the adapter is materialized and ownership-marked instead.
+  const projectOverride =
+    "# Project handoff override\n\nKeep this command local.\n";
+  writeFileSync(handoffPath, projectOverride);
+  const initOutput = await forgeInit(root);
+  const overrideResult = forgeUpgrade(root);
+  assert.equal(readFileSync(handoffPath, "utf8"), projectOverride);
+  assert.ok(
+    initOutput.includes(target.relPath),
+    "forge init must report the retained project-local handoff override",
+  );
+  assert.ok(
+    overrideResult.adapterOverrides.some((entry) =>
+      entry.includes(target.relPath),
+    ),
+    "forge upgrade must report the retained project-local handoff override",
+  );
+  assert.equal(overrideResult.adapterSurfaces, "user-override");
+  assertHostIsolated();
+});
+
 test("FG-253 preservation: the cycle never writes provider state into the home directory", async () => {
   const root = disposable("fg253-preserve-home-");
   plantProtectedFiles(root);
