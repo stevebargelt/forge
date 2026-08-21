@@ -18,6 +18,11 @@
 //
 // A probe callsite must stay side-effect-free: it may only observe. If a probe
 // ever needs to do more than call this function, it stops being a probe.
+//
+// FG-677's terminal-run closeout does NOT add probes here. Its three convergence models
+// (git-workspace, publication-worktree, readiness) are crash-safe structurally — "gone on
+// disk = done", with no separate ledger to keep consistent — so each converges from disk
+// truth on the next pass with no crash-injection window to cover.
 
 let crashHook: ((point: string) => void) | undefined;
 

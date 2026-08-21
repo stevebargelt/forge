@@ -469,6 +469,21 @@ export function listOpenLaunchObservations(limit = 200): LaunchObservation[] {
   return rows.map(rowToLaunchObservation);
 }
 
+/** FG-677: the recorded working directories of OPEN (non-terminal) launch observations —
+ *  the live-launch cwds the active-process cwd guard treats as additional holders of a
+ *  deletion candidate. A row is a past OBSERVATION, never a present liveness probe, but an
+ *  open observation is the store's best attributable signal that a launch is still working
+ *  in a directory; the guard compares by proven-physical identity, so a vanished cwd never
+ *  manufactures a match. Bounded and newest-first, same as listOpenLaunchObservations. */
+export function openLaunchCwds(limit = 200): Array<{ cwd: string; description: string }> {
+  return listOpenLaunchObservations(limit)
+    .filter((o) => typeof o.cwd === "string" && o.cwd !== "")
+    .map((o) => ({
+      cwd: o.cwd,
+      description: o.name ? `open launch ${o.launchId} (${o.name})` : `open launch ${o.launchId}`,
+    }));
+}
+
 /** RF-5: the launch ids this store records as belonging to a project whose filesystem
  *  identity is NOT PROVABLY the same as `projectDir` — the launches a project-scoped
  *  automatic sweep must NOT retire, so a project-local retention override can never purge

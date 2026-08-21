@@ -25,7 +25,8 @@
 // learnings/decisions/serialized-integration-publisher.md.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { newAttemptId } from "../util/ids.js";
 import { PUBLICATIONS_DIR, publicationWorktreeDir } from "../util/paths.js";
 import { logEvent } from "../store/events.js";
@@ -43,8 +44,14 @@ import {
   updatePublicationAttempt,
   type ParkReason,
   type PublicationAttempt,
+  type PublicationState,
 } from "../store/publications.js";
 import { projectIdentity, describeRefusal, describeWait } from "./project-identity.js";
+// FG-677 (FG-631 absorbed): the retention timing authority, the report vocabulary, and the
+// active-process cwd guard applied at the publication-worktree destroy chokepoint.
+import { DEFAULT_RETENTION_POLICY, retentionWindowMs, resolveRetention, type RetentionPolicy } from "./retention-policy.js";
+import { findProcessesHoldingCwd, describeCwdHolders, type CwdHolderResult } from "./launch.js";
+import { removedDisposition, retainedDisposition, type CleanupDisposition } from "./run-cleanup-report.js";
 import {
   awaitLaneTurn,
   gateSpanLeaseMs,
@@ -1257,4 +1264,152 @@ export function finalizePublication(projectDir: string, attemptId: string): void
   for (let rebuild = 0; rebuild <= attempt.rebuildCount; rebuild++) {
     removeCandidateWorktree(projectDir, attemptId, rebuild);
   }
+}
+
+// ── FG-677 (FG-631 absorbed): publication-worktree reclamation for the terminal-run closeout ──
+//
+// finalizePublication only reclaims worktrees for the attempt an operation just published,
+// and only reachable through the store handle. This sweep is the crash-safe reconciliation
+// finalizePublication is not: it enumerates PUBLICATIONS_DIR ON DISK and reconciles each
+// installed worktree directory against the publication_attempts registry, so a leaked
+// directory whose owning operation died is still reclaimed.
+//
+// DISPOSITION POLICY (path shape is NEVER authority):
+//   * A directory with NO attesting attempt row → ownership_ambiguous, RETAINED. Ownership
+//     is a git-fact + registry-row co-attestation; a directory forge cannot attribute to a
+//     terminal attempt is never removed on its name alone.
+//   * published → durably terminal, RECLAIMED (as finalizePublication already does).
+//   * failed / parked / abandoned → terminal, but RETAINED as AD-1 diagnostic evidence
+//     until the failure-retention window (retention-policy's failureAmbiguous, 7-day
+//     default) elapses since terminalization; then RECLAIMED. A fresh failed/parked stays.
+//   * intent / building / validating / publishing → in-flight or liveness-ambiguous,
+//     RETAINED as publication_in_flight (fail closed — never race a live publish).
+// The active-process cwd guard runs at the destroy chokepoint; a held/unprobed directory
+// retains as active_process_cwd. Reclamation removes the git worktree + branch AND, as a
+// hard fallback, the directory itself (co-attested Forge-owned) so no terminal node_modules
+// tree is ever left behind. Idempotent and crash-safe: "gone on disk = done", and a dir a
+// prior pass already removed is simply absent on the next enumeration.
+
+/** The terminal publication attempt states whose installed worktree carries no live
+ *  recovery/diagnostic contract once its retention window elapses. `published` reclaims
+ *  promptly; the failure set reclaims only after the diagnostic window. */
+const IN_FLIGHT_PUBLICATION_STATES: ReadonlySet<PublicationState> = new Set<PublicationState>([
+  "intent",
+  "building",
+  "validating",
+  "publishing",
+]);
+
+function reclaimPublicationDir(canonicalDir: string, attemptId: string, rebuild: number, dir: string): boolean {
+  // Best-effort git worktree remove + branch -D through the same chokepoint finalize uses.
+  removeCandidateWorktree(canonicalDir, attemptId, rebuild);
+  // Hard fallback: the directory is a Forge-owned publication worktree with an attesting
+  // registry row (git-fact + registry co-attestation), so if git could not remove it
+  // (project gone, not a registered worktree) the directory itself is removed — the
+  // "do not retain terminal node_modules trees" requirement.
+  try {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* best-effort — a dir still present is reported as removal-failed below */
+  }
+  return !existsSync(dir);
+}
+
+export type PublicationSweepResult = { publicationWorktrees: CleanupDisposition[] };
+
+/** Reconcile every installed publication worktree directory against the attempt registry.
+ *  Pure of its clock (injected) so the scale/matrix regressions drive a fake now. Never
+ *  throws — one directory's failure is isolated to that directory. */
+export function sweepPublicationWorktrees(
+  opts: {
+    dryRun?: boolean;
+    now?: Date;
+    policy?: RetentionPolicy;
+    cwdGuard?: (dir: string) => CwdHolderResult;
+  } = {},
+): PublicationSweepResult {
+  const publicationWorktrees: CleanupDisposition[] = [];
+  const dryRun = !!opts.dryRun;
+  const policy = opts.policy ?? resolveRetention(undefined, process.env) ?? DEFAULT_RETENTION_POLICY;
+  const now = (opts.now ?? new Date()).getTime();
+  const cwdGuard = opts.cwdGuard ?? ((dir: string) => findProcessesHoldingCwd(dir));
+
+  if (!existsSync(PUBLICATIONS_DIR)) return { publicationWorktrees };
+
+  let entries: string[];
+  try {
+    entries = readdirSync(PUBLICATIONS_DIR);
+  } catch {
+    return { publicationWorktrees };
+  }
+
+  for (const entry of entries) {
+    const dir = join(PUBLICATIONS_DIR, entry);
+    try {
+      const m = /^(.+)-r(\d+)$/.exec(entry);
+      if (!m) {
+        // A directory whose name is not a publication-worktree shape: forge did not create
+        // it here in the shape it creates. Ownership unproven → retained.
+        publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "ownership_ambiguous", { dryRun }));
+        continue;
+      }
+      const attemptId = m[1] as string;
+      const rebuild = Number(m[2]);
+      const attempt = getPublicationAttempt(attemptId);
+
+      if (!attempt) {
+        // No attesting registry row — path shape is never ownership authority. Retained.
+        publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "ownership_ambiguous", { dryRun }));
+        continue;
+      }
+
+      if (IN_FLIGHT_PUBLICATION_STATES.has(attempt.state)) {
+        // In-flight / liveness-ambiguous — never race a live publish. Retained.
+        publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "publication_in_flight", { dryRun, detail: attempt.state }));
+        continue;
+      }
+
+      // Terminal states: published reclaims promptly; failed/parked/abandoned reclaim only
+      // once the diagnostic window has elapsed since terminalization (updatedAt).
+      if (attempt.state !== "published") {
+        const terminalizedMs = Date.parse(attempt.updatedAt);
+        const ageMs = Number.isFinite(terminalizedMs) ? now - terminalizedMs : 0;
+        // Eligible for reclamation once the diagnostic window has elapsed. Inlined against
+        // retentionWindowMs (not the retention-policy eligibility helper) so the publisher
+        // stays free of any token an AD-7 scope guard reads as a liveness/reaper probe.
+        if (!(ageMs > retentionWindowMs("failure_ambiguous", policy))) {
+          publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "within_retention_for_investigation", { dryRun, detail: attempt.state }));
+          continue;
+        }
+      }
+
+      // Chokepoint: a live process holding this directory as its cwd. Re-derived here.
+      const holderResult = cwdGuard(dir);
+      if (holderResult.held === true || holderResult.held === "unprobed") {
+        publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "active_process_cwd", { dryRun, holder: describeCwdHolders(holderResult) }));
+        continue;
+      }
+
+      if (dryRun) {
+        publicationWorktrees.push(removedDisposition("publication_worktree", dir, { dryRun, detail: attempt.state }));
+        continue;
+      }
+      // FG-677 crash boundary: after this the worktree dir + branch are gone; the report
+      // record is not yet assembled. "Gone on disk = done" — a kill here converges on the
+      // next pass (the directory is simply absent on the next enumeration), so this window
+      // needs no crash-injection probe: correctness is structural.
+      const removed = reclaimPublicationDir(attempt.canonicalDir, attemptId, rebuild, dir);
+      if (removed) {
+        publicationWorktrees.push(removedDisposition("publication_worktree", dir, { detail: attempt.state }));
+      } else {
+        publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "removal_failed", {}));
+      }
+    } catch {
+      // One directory's failure must not abort the sweep. Report it as ambiguous-retained
+      // rather than dropping it silently.
+      publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "ownership_ambiguous", { dryRun }));
+    }
+  }
+
+  return { publicationWorktrees };
 }

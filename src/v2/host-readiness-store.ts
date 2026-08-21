@@ -25,6 +25,8 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { hostReadinessDir } from "../util/paths.js";
+// FG-677 (FG-632 absorbed): the report vocabulary the readiness prune emits through.
+import { removedDisposition, retainedDisposition, type CleanupDisposition } from "./run-cleanup-report.js";
 
 /** The fields a readiness assertion is BOUND to. Every one of them is a
  *  correctness key, not a cache optimization:
@@ -245,4 +247,95 @@ export function workspaceHasNodeModules(workspace: string): boolean {
   } catch {
     return false; // unreadable — treat as absent rather than assume it is installed
   }
+}
+
+// ── FG-677 (FG-632 absorbed): host readiness-record prune for the terminal-run closeout ──
+//
+// This keyspace has ONE record per workspace (a SHA slug of the workspace path) and no
+// enumeration for cleanup — a record whose workspace is retired lingers indefinitely. The
+// prune below is the bounded, idempotent reconciliation FG-632 requires.
+//
+// SAFETY (non-negotiable):
+//   * A record is pruned ONLY when its bound workspace was POSITIVELY RETIRED IN THE SAME
+//     PASS (workspaceRetired, wired from the git-workspace + publication dispositions) AND
+//     no live dispatch can still consume it (hasLiveReader). The record disposition is TIED
+//     to the workspace disposition — never an independent prune keyed on the record alone.
+//   * The setup lock's ABSENCE is NEVER treated as proof no live reader exists (the lock
+//     covers setup only, not verification). hasLiveReader is a POSITIVE check; when it is
+//     unknown the record is retained.
+//   * Orphaned records whose workspace path is gone are covered through the same ownership
+//     reasoning (workspaceRetired), never through path-absence alone — a bare missing
+//     directory is not authority to delete the record.
+// Idempotent: a record a prior pass deleted is simply absent on the next enumeration, so a
+// second pass no-ops (the fixpoint the tests assert).
+
+export type ReadinessPruneResult = { readinessRecords: CleanupDisposition[] };
+
+/** Reconcile host readiness records against the workspaces this pass retired. Bounded (one
+ *  readdir of the keyspace), dry-run visible, never throws. */
+export function pruneReadinessRecords(
+  opts: {
+    dryRun?: boolean;
+    /** Positively retired this pass — the ONLY authority to prune a bound record. */
+    workspaceRetired?: (workspace: string) => boolean;
+    /** A POSITIVE live-reader check. Defaults to "no known live reader"; a caller with a
+     *  dispatch view supplies the real predicate. Never derived from the setup lock. */
+    hasLiveReader?: (workspace: string) => boolean;
+  } = {},
+): ReadinessPruneResult {
+  const readinessRecords: CleanupDisposition[] = [];
+  const dryRun = !!opts.dryRun;
+  const workspaceRetired = opts.workspaceRetired ?? (() => false);
+  const hasLiveReader = opts.hasLiveReader ?? (() => false);
+
+  const dir = hostReadinessDir();
+  if (!existsSync(dir)) return { readinessRecords };
+
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return { readinessRecords };
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue; // skip .lock and transient .json.tmp
+    const file = join(dir, entry);
+    try {
+      let workspace: string | undefined;
+      try {
+        const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<HostReadinessRecord>;
+        workspace = typeof parsed.workspace === "string" ? parsed.workspace : undefined;
+      } catch {
+        workspace = undefined;
+      }
+      if (workspace === undefined) {
+        // Cannot attribute the record to a workspace — never delete what we cannot bind.
+        readinessRecords.push(retainedDisposition("readiness_record", file, "ownership_ambiguous", { dryRun }));
+        continue;
+      }
+      if (!workspaceRetired(workspace)) {
+        // The bound workspace was NOT positively retired this pass — retain, tied to it.
+        readinessRecords.push(retainedDisposition("readiness_record", file, "ownership_ambiguous", { dryRun, detail: workspace }));
+        continue;
+      }
+      if (hasLiveReader(workspace)) {
+        readinessRecords.push(retainedDisposition("readiness_record", file, "readiness_live_reader", { dryRun, detail: workspace }));
+        continue;
+      }
+      if (dryRun) {
+        readinessRecords.push(removedDisposition("readiness_record", file, { dryRun, detail: workspace }));
+        continue;
+      }
+      // FG-677 crash boundary: after this the record file is unlinked; the report is not yet
+      // assembled. Idempotent — the record is simply absent on the next enumeration, so this
+      // window needs no crash-injection probe: correctness is structural.
+      clearReadinessRecord(workspace);
+      readinessRecords.push(removedDisposition("readiness_record", file, { detail: workspace }));
+    } catch {
+      readinessRecords.push(retainedDisposition("readiness_record", file, "ownership_ambiguous", { dryRun }));
+    }
+  }
+
+  return { readinessRecords };
 }

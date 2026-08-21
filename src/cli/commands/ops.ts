@@ -10,12 +10,26 @@ import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-loc
 import { getDb, storeExists } from "../../store/db.js";
 import { renderedEmptyStore } from "../no-store.js";
 import { logEvent, eventsForTask } from "../../store/events.js";
-import { defaultContainerReap, defaultContainerList, defaultContainerExitInfo, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
+import { defaultContainerReap, defaultContainerList, defaultContainerExitInfo, disposeRunGitWorkspaces, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 import { getContainerCausalEvidenceFromEvents, type ContainerCausalEvidence, type ContainerExitInfo } from "../../v2/failure-kind.js";
 import { classifyRetention, reapEligible, resolveRetention, type RetentionPolicy } from "../../v2/retention-policy.js";
 import { readRetentionConfig } from "../../backlog/config.js";
 import { sweepTerminalLaunches, type LaunchSweepResult, type TmuxRunner } from "../../v2/launch.js";
 import { launchIdsOwnedByOtherProjects } from "../../store/launch-observations.js";
+// FG-677: the terminal-run closeout sections + the unified report vocabulary.
+import { getRun, listRuns } from "../../store/runs.js";
+import { tasksForRun } from "../../store/tasks.js";
+import { classifyRunTerminalState } from "../../v2/ready-queue.js";
+import { sweepPublicationWorktrees } from "../../v2/integration-publisher.js";
+import { pruneReadinessRecords } from "../../v2/host-readiness-store.js";
+import { provenSameOnly } from "../../util/path-identity.js";
+import type { ContainerAlive } from "../../v2/reconcile.js";
+import type { CwdHolderResult } from "../../v2/launch.js";
+import {
+  emptyRunCleanupReport,
+  formatRunCleanupReport,
+  type RunCleanupReport,
+} from "../../v2/run-cleanup-report.js";
 import { emitMilestone } from "../../notify/milestone.js";
 import { performAdjudicate, type AdjudicateResult } from "../../ops/adjudication.js";
 import { userInfo } from "node:os";
@@ -455,7 +469,115 @@ export type AutomaticCleanupResult = {
   policy: RetentionPolicy;
   launches: LaunchSweepResult | { error: string };
   containers: ReapContainersOutcome | { error: string };
+  // FG-677: the terminal-run closeout's OWNED sections (git workspaces, generated
+  // branches, publication worktrees, readiness records), each independently guarded and
+  // composed alongside — never merged with — the FG-590 launches/containers sections
+  // above, which are REPORTED into report.reportedElsewhere, not re-run.
+  report: RunCleanupReport;
 };
+
+/** FG-677: a run is closed out only when it is DURABLY TERMINAL. Gated on the shared
+ *  terminal-state classifier (classifyRunTerminalState) so the closeout never acts on a
+ *  run still in flight; a run whose status is already a terminal disposition
+ *  (complete/failed/abandoned) is durably terminal by definition. */
+function isRunDurablyTerminal(runId: string): boolean {
+  const run = getRun(runId);
+  if (!run) return false;
+  if (run.status === "complete" || run.status === "failed" || run.status === "abandoned") return true;
+  const tasks = tasksForRun(runId);
+  return tasks.length > 0 && classifyRunTerminalState(undefined, tasks) !== null;
+}
+
+function cleanupErrorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** FG-677: assemble the terminal-run closeout report. Three independently-erroring
+ *  sections — git-workspace/branch (per durably-terminal run), publication-worktree, and
+ *  readiness — with the readiness prune's workspaceRetired predicate wired from the
+ *  workspaces the git-workspace + publication sections positively retired IN THIS PASS. On
+ *  a dry run nothing is mutated; the proposed dispositions match the real pass because each
+ *  section re-derives its own safety proofs immediately before acting and forks only at the
+ *  mutation. */
+function performRunCloseout(opts: {
+  dryRun?: boolean;
+  projectDir: string;
+  runId?: string;
+  now?: Date;
+  policy: RetentionPolicy;
+  // Injected for tests; production uses the real docker/tmux probes inside each section.
+  containerAlive?: ContainerAlive;
+  cwdGuard?: (path: string) => CwdHolderResult;
+}): RunCleanupReport {
+  const report = emptyRunCleanupReport({ dryRun: opts.dryRun, ...(opts.runId ? { runId: opts.runId } : {}) });
+  const dryRun = !!opts.dryRun;
+  // Workspaces this pass positively retired (or, under dry run, would retire) — the ONLY
+  // authority the readiness prune uses to remove a bound record.
+  const retired = new Set<string>();
+
+  // ── git-workspace + generated-branch section (per durably-terminal run) ──
+  if (storeExists()) {
+    try {
+      const runIds = opts.runId
+        ? [opts.runId]
+        : listRuns()
+            .filter((r) => r.projectDir && provenSameOnly(r.projectDir, opts.projectDir))
+            .map((r) => r.id);
+      for (const rid of runIds) {
+        if (!isRunDurablyTerminal(rid)) {
+          // Only surface a not-terminal run when the caller named it explicitly; a
+          // full-project sweep silently skips runs still in flight.
+          if (opts.runId) {
+            report.gitWorkspaces.push({ resourceClass: "git_workspace", path: `run ${rid}`, action: "retained", reason: "run_not_terminal" });
+          }
+          continue;
+        }
+        const res = disposeRunGitWorkspaces(rid, {
+          dryRun,
+          ...(opts.containerAlive ? { containerAlive: opts.containerAlive } : {}),
+          ...(opts.cwdGuard ? { cwdGuard: (p: string) => opts.cwdGuard!(p) } : {}),
+        });
+        report.gitWorkspaces.push(...res.gitWorkspaces);
+        report.generatedBranches.push(...res.generatedBranches);
+        for (const w of res.retiredWorkspaces) retired.add(w);
+      }
+    } catch (e) {
+      report.sectionErrors.gitWorkspaces = cleanupErrorMessage(e);
+    }
+
+    // ── publication-worktree section (host-global sweep, project-agnostic on disk) ──
+    try {
+      const res = sweepPublicationWorktrees({ dryRun, ...(opts.now ? { now: opts.now } : {}), policy: opts.policy, ...(opts.cwdGuard ? { cwdGuard: opts.cwdGuard } : {}) });
+      report.publicationWorktrees.push(...res.publicationWorktrees);
+      for (const d of res.publicationWorktrees) if (d.action === "removed") retired.add(d.path);
+    } catch (e) {
+      report.sectionErrors.publications = cleanupErrorMessage(e);
+    }
+  }
+
+  // ── readiness-record prune (tied to the workspaces retired above) ──
+  try {
+    const res = pruneReadinessRecords({ dryRun, workspaceRetired: (w) => retired.has(w) });
+    report.readinessRecords.push(...res.readinessRecords);
+  } catch (e) {
+    report.sectionErrors.readiness = cleanupErrorMessage(e);
+  }
+
+  return report;
+}
+
+function summarizeLaunches(l: AutomaticCleanupResult["launches"], dryRun: boolean): string {
+  if ("error" in l) return `error: ${l.error}`;
+  if (dryRun) return "(dry-run) launch sweep skipped (it removes, so it does not run under --dry-run)";
+  return `retired ${l.removed.length}, retained ${l.retained.length}, running (untouched) ${l.skippedRunning.length}`;
+}
+
+function summarizeContainers(c: AutomaticCleanupResult["containers"]): string {
+  if ("error" in c) return `error: ${c.error}`;
+  if (c.dockerUnavailable) return "docker unavailable — no scan performed";
+  const verb = c.dryRun ? "would retire" : "retired";
+  return `${verb} ${c.reaped.length}/${c.scanned}, retained ${c.retained.length}`;
+}
 
 export function performAutomaticCleanup(
   opts: {
@@ -466,8 +588,15 @@ export function performAutomaticCleanup(
     reap?: ContainerReap;
     listContainers?: ContainerLister;
     containerExitInfo?: ContainerExitInfo;
+    // FG-677: the wave-boundary caller (forge next) names the run it just settled so the
+    // git-workspace closeout targets exactly that run. Absent (the manual full sweep), the
+    // closeout enumerates every durably-terminal run in the project.
+    runId?: string;
     // Injected for tests; production resolves from config + env below.
     policy?: RetentionPolicy;
+    // FG-677: injected for tests; production uses the real docker/tmux probes.
+    containerAlive?: ContainerAlive;
+    cwdGuard?: (path: string) => CwdHolderResult;
   } = {},
 ): AutomaticCleanupResult {
   const projectDir = opts.projectDir ?? process.cwd();
@@ -515,7 +644,28 @@ export function performAutomaticCleanup(
     containers = { error: e instanceof Error ? e.message : String(e) };
   }
 
-  return { policy, launches, containers };
+  // FG-677: the terminal-run closeout's OWNED sections. Independently guarded — a closeout
+  // problem never breaks the launches/containers sections above or the wave that hosts them.
+  let report: RunCleanupReport;
+  try {
+    report = performRunCloseout({
+      dryRun: opts.dryRun,
+      projectDir,
+      ...(opts.runId ? { runId: opts.runId } : {}),
+      ...(opts.now ? { now: opts.now } : {}),
+      policy,
+      ...(opts.containerAlive ? { containerAlive: opts.containerAlive } : {}),
+      ...(opts.cwdGuard ? { cwdGuard: opts.cwdGuard } : {}),
+    });
+  } catch (e) {
+    report = emptyRunCleanupReport({ dryRun: opts.dryRun, ...(opts.runId ? { runId: opts.runId } : {}) });
+    report.sectionErrors.closeout = cleanupErrorMessage(e);
+  }
+  // The FG-590 launch/container disposition is REPORTED here, never re-run or re-authorized.
+  report.reportedElsewhere.launches = summarizeLaunches(launches, !!opts.dryRun);
+  report.reportedElsewhere.containers = summarizeContainers(containers);
+
+  return { policy, launches, containers, report };
 }
 
 /** Read the optional per-project retention override, never letting a read problem abort
@@ -701,20 +851,25 @@ export function registerOps(program: Command): void {
       if (outcome.dryRun) console.log("No writes.");
     });
 
-  // FG-590: `forge ops cleanup` — the immediate manual sweep of BOTH terminal-resource
-  // paths under the automatic retention policy. The same work the `forge next` wave does
-  // at its boundary, on demand. --dry-run reports the container candidates without
-  // removing anything and skips the (destructive) launch sweep.
+  // FG-677 (FG-590 base): `forge ops cleanup` — the immediate manual terminal-run closeout,
+  // the same work the `forge next` wave does at its boundary, on demand. It reconciles the
+  // OWNED disposable artifacts (git workspaces, generated branches, publication worktrees,
+  // readiness records) and REPORTS the separate FG-590 tmux/container disposition without
+  // re-running it. --dry-run performs no mutation and reports the exact proposed
+  // dispositions the subsequent real pass would perform.
   ops
     .command("cleanup")
-    .option("--dry-run", "report container candidates; remove nothing (also skips the launch sweep)")
-    .option("--project <dir>", "scope container reap to a specific project dir (default: cwd)")
+    .option("--dry-run", "inventory only: perform NO mutation; report the exact proposed disposition and proof for every artifact")
+    .option("--project <dir>", "scope the closeout to a specific project dir (default: cwd)")
     .option("--json", "emit structured JSON")
     .description(
-      "Automatically retire terminal launch tmux sessions and expired retained task containers under the " +
-        "configured retention policy (success retires promptly; failed/ambiguous is kept for its diagnostic " +
-        "window, evidence-preserved). Defaults live in code; override with .forge/config.yml `retention:` or " +
-        "FORGE_RETENTION_* env. Never removes a running launch, a running container, or a non-terminal task's container."
+      "Terminal-run closeout: reconcile every disposable git workspace, generated branch, publication worktree, " +
+        "and host readiness record a durably-terminal run created — removing only artifacts proven safe and retaining " +
+        "every uniquely-held, active, or ambiguous artifact with a named reason and recovery action. Also retires terminal " +
+        "launch tmux sessions and expired retained task containers under the configured retention policy (success retires " +
+        "promptly; failed/ambiguous is kept for its diagnostic window). Defaults live in code; override with " +
+        ".forge/config.yml `retention:` or FORGE_RETENTION_* env. Never removes a running launch/container, a non-terminal " +
+        "task's container, a workspace held by a live process/mount, or an artifact of ambiguous ownership."
     )
     .action((opts: { dryRun?: boolean; project?: string; json?: boolean }) => {
       ensureForgeDirs();
@@ -725,6 +880,10 @@ export function registerOps(program: Command): void {
         console.log(JSON.stringify(result, null, 2));
         return;
       }
+
+      // FG-677: the owned closeout report first — every retained artifact with its reason,
+      // path, and recovery action; every removed artifact named.
+      console.log(formatRunCleanupReport(result.report));
 
       const l = result.launches;
       if ("error" in l) {

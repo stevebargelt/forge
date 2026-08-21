@@ -53,7 +53,10 @@ export function registerNext(program: Command): void {
           // resource (its destroy chokepoints re-probe liveness). Scoped to this run's
           // project for containers; the launch sweep is host-global (launches are host
           // resources) and only ever removes past-retention terminal launches.
-          try { performAutomaticCleanup({ projectDir: run.projectDir ?? undefined }); } catch { /* the sweep is never the point of this command */ }
+          // FG-677: also drive the terminal-run closeout (git workspaces, generated
+          // branches, publication worktrees, readiness records) for THIS run, gated on
+          // durable terminality inside the closeout. Same best-effort swallow.
+          try { performAutomaticCleanup({ projectDir: run.projectDir ?? undefined, runId }); } catch { /* the sweep is never the point of this command */ }
 
           if (run.status === "abandoned" || run.status === "complete" || run.status === "failed") {
             console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);

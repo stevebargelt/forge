@@ -35,6 +35,15 @@ import { publicationAttemptsForTask } from "../store/publications.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
 import { removeWorktreeIfSafe, reapTaskWorkspace, classifyWorkspace, worktreeBranchName, type CaptureAuthority } from "./worktree-lifecycle.js";
+// FG-677: the active-process cwd reverse-lookup guard, and the report vocabulary the
+// terminal-run closeout emits its per-resource dispositions through.
+import { findProcessesHoldingCwd, describeCwdHolders, type CwdHolderResult } from "./launch.js";
+import { openLaunchCwds } from "../store/launch-observations.js";
+import {
+  removedDisposition,
+  retainedDisposition,
+  type CleanupDisposition,
+} from "./run-cleanup-report.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
@@ -228,6 +237,33 @@ export function defaultContainerAlive(name: string): boolean {
     if (/No such object|no such container/i.test(stderr)) return false; // genuinely gone
     return true; // ambiguous → assume alive, don't reconcile
   }
+}
+
+// FG-677: the ONE workspace-liveness gate, shared by the reconcile-time FG-356 reaper and
+// the terminal-run closeout so there is a single guarded chokepoint, not two that can drift.
+// Re-derived against FRESH state at the destroy chokepoint (never an inventory snapshot):
+//   1. a live process (incl. the long-lived tmux server) holding the workspace as its cwd,
+//   2. an independent docker probe (the caller's containerAlive, NEVER tasks.status) that a
+//      live container still has it mounted.
+// Both fail closed: an unprobeable cwd, or a container that cannot be confirmed dead, RETAINS.
+export type WorkspaceLivenessGate =
+  | { retain: false }
+  | { retain: true; reason: "active_process_cwd" | "active_mount"; holder: string };
+
+export function workspaceLivenessGate(
+  workspacePath: string,
+  taskId: string,
+  deps: { cwdGuard: (p: string) => CwdHolderResult; containerAlive: ContainerAlive },
+): WorkspaceLivenessGate {
+  const holderResult = deps.cwdGuard(workspacePath);
+  if (holderResult.held === true || holderResult.held === "unprobed") {
+    return { retain: true, reason: "active_process_cwd", holder: describeCwdHolders(holderResult) };
+  }
+  const containerName = `forge-${taskId}`;
+  if (deps.containerAlive(containerName)) {
+    return { retain: true, reason: "active_mount", holder: containerName };
+  }
+  return { retain: false };
 }
 
 /** FG-455 p4 / FG-492: best-effort exit-code/OOM/signal/timing probe for a
@@ -1518,6 +1554,18 @@ function reconcileRunCore(
   // retained workspace gets one durable event naming its path and branch — a
   // crashed task's uncaptured work is never silently discarded, and never
   // silently forgotten either.
+  //
+  // FG-677: read the live-launch cwds ONCE for the whole loop (bounded store read) so the
+  // active-process cwd gate below can compare each workspace against them by proven-physical
+  // identity. A store read failure degrades to an empty list — the tmux pane/server probe
+  // inside the gate still runs, so the incident case (a launch working IN the workspace) is
+  // covered by the process probe even when this store read is unavailable.
+  let reaperLaunchCwds: Array<{ cwd: string; description: string }> = [];
+  try {
+    reaperLaunchCwds = openLaunchCwds();
+  } catch {
+    reaperLaunchCwds = [];
+  }
   for (const t of tasksForRun(runId)) {
     if (!TERMINAL_TASK.has(t.status)) continue;
     const workspacePath = t.worktreePath;
@@ -1549,6 +1597,24 @@ function reconcileRunCore(
         const substrate = classifyWorkspace(workspacePath);
         if (substrate === "absent") continue;
         retain(substrate, worktreeBranchName(runId, t.id), "retained_failure_kind", [failureKind]);
+        continue;
+      }
+
+      // FG-677: the fail-closed ACTIVE-PROCESS-CWD gate, ahead of the content-proof reap
+      // and re-derived against fresh state. A workspace held as a live process's working
+      // directory (incl. the long-lived tmux server — the 2026-08-05 bricking incident) is
+      // RETAINED, never deleted underneath the process. Only the cwd gate runs here: the
+      // reconcile-time reaper's `containerAlive` param has a DIFFERENT, pre-existing meaning
+      // (container-gone detection for RUNNING tasks; the FG-356 reaper tests drive it with
+      // ALIVE and still expect terminal workspaces to reap), so the independent
+      // container-MOUNT gate is applied at the closeout chokepoint (disposeRunGitWorkspaces)
+      // where a dedicated, injectable mount probe exists rather than being conflated here.
+      const gate = workspaceLivenessGate(workspacePath, t.id, {
+        cwdGuard: (p) => findProcessesHoldingCwd(p, { extraCwds: reaperLaunchCwds }),
+        containerAlive: () => false,
+      });
+      if (gate.retain) {
+        retain(classifyWorkspace(workspacePath), worktreeBranchName(runId, t.id), gate.reason, [gate.holder]);
         continue;
       }
 
@@ -1778,4 +1844,165 @@ export function reconcileRuns(
   // reconcileRun) above so this aggregate recovery is not re-fired per run.
   recoverCiWaitsForRuns(runIds);
   return results;
+}
+
+// ── FG-677: git-workspace + generated-branch disposition for the terminal-run closeout ──
+//
+// Routes a terminal run's private clones, linked task/review worktrees, stale worktree
+// registrations, and Forge-generated task branches through the EXISTING reapTaskWorkspace
+// proof stack (FG-693 identity, substrate ownership, submodules, dirty/untracked/ignored,
+// stash/unpushed-ref capture reachability, disposeCapturedBranch so branch-name shape never
+// authorizes deletion). It is NOT a second safety checker: it adds two fail-closed LIVENESS
+// gates AHEAD of the reap, then defers every content proof to reapTaskWorkspace itself.
+//
+// The two added gates, re-derived at the chokepoint against FRESH state (never the inventory
+// snapshot):
+//   1. the active-process cwd guard (findProcessesHoldingCwd) — a live process (incl. the
+//      long-lived tmux server) holding the workspace as its working directory retains it as
+//      active_process_cwd with the holder named (the 2026-08-05 bricking incident);
+//   2. an independent container-alive / docker-inspect probe (defaultContainerAlive, NEVER
+//      tasks.status) — a workspace whose forge-<taskId> container is still alive retains as
+//      active_mount, so a mounted-but-status-failed workspace is never deleted underneath a
+//      live container.
+//
+// Durable events reuse the once-per-(task,reason) recording and gitRemoved-vs-pathAbsent
+// honesty of the FG-356 reaper above. On a dry run NOTHING is mutated and NO event is
+// written — the returned dispositions are a proposal whose content proofs are identical to
+// the real pass (reapTaskWorkspace runs the same proofs, forking only at the mutation).
+
+export type GitWorkspaceDispositionResult = {
+  gitWorkspaces: CleanupDisposition[];
+  generatedBranches: CleanupDisposition[];
+  /** Workspace paths this pass positively retired — the wire the readiness prune ties its
+   *  record disposition to (a record is pruned only if its workspace was retired HERE). */
+  retiredWorkspaces: string[];
+};
+
+/** The terminal-run git-workspace + generated-branch closeout section. Never throws (each
+ *  task is independently guarded); a run with no recorded projectDir or no terminal task
+ *  workspaces yields an empty result. */
+export function disposeRunGitWorkspaces(
+  runId: string,
+  opts: {
+    dryRun?: boolean;
+    cwdGuard?: (workspacePath: string, extraCwds: Array<{ cwd: string; description: string }>) => CwdHolderResult;
+    containerAlive?: ContainerAlive;
+  } = {},
+): GitWorkspaceDispositionResult {
+  const gitWorkspaces: CleanupDisposition[] = [];
+  const generatedBranches: CleanupDisposition[] = [];
+  const retiredWorkspaces: string[] = [];
+  const dryRun = !!opts.dryRun;
+  const containerAlive = opts.containerAlive ?? defaultContainerAlive;
+  const cwdGuard =
+    opts.cwdGuard ?? ((p: string, extraCwds: Array<{ cwd: string; description: string }>) => findProcessesHoldingCwd(p, { extraCwds }));
+
+  const run = getRun(runId);
+  if (!run || !run.projectDir) return { gitWorkspaces, generatedBranches, retiredWorkspaces };
+  const projectDir = run.projectDir;
+
+  // The live-launch cwds are read ONCE per pass (bounded store read), then compared per
+  // candidate by proven-physical identity inside the guard.
+  let launchCwds: Array<{ cwd: string; description: string }> = [];
+  try {
+    launchCwds = openLaunchCwds();
+  } catch {
+    launchCwds = [];
+  }
+
+  // The real pass records at most one event per (task, reason); a dry run records nothing.
+  const retainEvent = (taskId: string, taskStatus: string, workspacePath: string, branch: string, substrate: string, reason: string, details: string[]): void => {
+    if (dryRun) return;
+    try {
+      const recorded = eventsForTask(taskId).some(
+        (e) => e.eventType === "task.workspace_retained" && (e.payload as { reason?: unknown } | null)?.reason === reason,
+      );
+      if (recorded) return;
+      logEvent("task.workspace_retained", { runId, taskId, payload: { workspacePath, branch, substrate, reason, details, taskStatus } });
+    } catch { /* FG-459: never throw */ }
+  };
+  const reapedEvent = (taskId: string, payload: Record<string, unknown>): void => {
+    if (dryRun) return;
+    try {
+      logEvent("task.workspace_reaped", { runId, taskId, payload });
+    } catch { /* FG-459: never throw */ }
+  };
+
+  for (const t of tasksForRun(runId)) {
+    if (!TERMINAL_TASK.has(t.status)) continue;
+    const workspacePath = t.worktreePath;
+    if (!workspacePath) continue;
+    const branch = worktreeBranchName(runId, t.id);
+    try {
+      // ── Chokepoint gate 1: a failure kind that preserves the workspace as evidence.
+      // Answered without probing git, exactly as the FG-356 reaper does.
+      const failureKind = t.status === "failed" ? failureKindForTask(t.id) : undefined;
+      if (failureKind !== undefined && RETAIN_WORKSPACE_FAILURE_KINDS.has(failureKind)) {
+        const substrate = classifyWorkspace(workspacePath);
+        if (substrate === "absent") continue;
+        gitWorkspaces.push(retainedDisposition("git_workspace", workspacePath, "retained_failure_kind", { dryRun, detail: failureKind }));
+        retainEvent(t.id, t.status, workspacePath, branch, substrate, "retained_failure_kind", [failureKind]);
+        continue;
+      }
+
+      // ── Chokepoint gates 2 & 3: the SHARED liveness gate (a live process holding the
+      // workspace as its cwd, or a live container still mounting it). Re-derived against
+      // FRESH state, never the inventory snapshot; held/unprobed/mounted → retain.
+      const gate = workspaceLivenessGate(workspacePath, t.id, { cwdGuard: (p) => cwdGuard(p, launchCwds), containerAlive });
+      if (gate.retain) {
+        gitWorkspaces.push(retainedDisposition("git_workspace", workspacePath, gate.reason, { dryRun, holder: gate.holder }));
+        retainEvent(t.id, t.status, workspacePath, branch, classifyWorkspace(workspacePath), gate.reason, [gate.holder]);
+        continue;
+      }
+
+      // ── The content proofs + disposal: the EXISTING reapTaskWorkspace stack, unchanged.
+      const outcome = reapTaskWorkspace(workspacePath, runId, t.id, projectDir, captureAuthorityFor(t.id), { dryRun });
+      if (outcome.action === "absent") continue;
+      if (outcome.action === "retained") {
+        gitWorkspaces.push(retainedDisposition("git_workspace", workspacePath, outcome.reason, { dryRun, detail: outcome.substrate }));
+        retainEvent(t.id, t.status, workspacePath, branch, outcome.substrate, outcome.reason, outcome.details);
+        continue;
+      }
+      if (outcome.action === "deferred") {
+        // A deferral is NOT a disposition (verdict not reached) — report it as a retain
+        // with the transient reason so the operator sees why it stayed, and record the
+        // reap_deferred event on the same once-per-(task,reason) rule.
+        gitWorkspaces.push(retainedDisposition("git_workspace", workspacePath, outcome.reason, { dryRun, detail: outcome.substrate }));
+        if (!dryRun) {
+          try {
+            const already = eventsForTask(t.id).some(
+              (e) => e.eventType === "task.workspace_reap_deferred" && (e.payload as { reason?: unknown } | null)?.reason === outcome.reason,
+            );
+            if (!already) {
+              logEvent("task.workspace_reap_deferred", { runId, taskId: t.id, payload: { workspacePath, branch: outcome.branch, substrate: outcome.substrate, reason: outcome.reason, details: outcome.details, taskStatus: t.status } });
+            }
+          } catch { /* FG-459 */ }
+        }
+        continue;
+      }
+      if (outcome.action === "branch_reaped") {
+        generatedBranches.push(removedDisposition("generated_branch", outcome.branch, { dryRun }));
+        reapedEvent(t.id, { workspacePath, branch: outcome.branch, substrate: "absent", branchRemoved: true, reason: "branch_deletion_retried", taskStatus: t.status });
+        continue;
+      }
+      // outcome.action === "reaped"
+      // FG-677 crash boundary: the tree is now gone on disk; the durable event has NOT been
+      // written yet. A kill here leaves an absent workspace with no reap event — the next
+      // pass sees classifyWorkspace === "absent" and converges (branch retry only), the
+      // crash-safe fixpoint. There is no separate ledger to keep consistent ("gone on disk =
+      // done"), so this window needs no crash-injection probe: correctness is structural.
+      gitWorkspaces.push(removedDisposition("git_workspace", workspacePath, { dryRun, detail: outcome.substrate }));
+      retiredWorkspaces.push(workspacePath);
+      if (outcome.branchRemoved) {
+        generatedBranches.push(removedDisposition("generated_branch", outcome.branch, { dryRun }));
+      } else {
+        // The tree went but the branch tip was NOT proven captured by merged/published
+        // state — branch-name shape never authorizes force-deleting it. Retained, named.
+        generatedBranches.push(retainedDisposition("generated_branch", outcome.branch, "branch_uncaptured", { dryRun }));
+      }
+      reapedEvent(t.id, { workspacePath, branch: outcome.branch, substrate: outcome.substrate, branchRemoved: outcome.branchRemoved, removal: outcome.removal, reason: "work_captured", taskStatus: t.status });
+    } catch { /* FG-459: one task's workspace must not abort the pass */ }
+  }
+
+  return { gitWorkspaces, generatedBranches, retiredWorkspaces };
 }

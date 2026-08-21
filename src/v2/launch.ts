@@ -42,6 +42,10 @@ import { FORGE_HOME } from "../util/paths.js";
 import { checkAbi } from "../cli/node-abi.js";
 import { readReleaseManifest } from "./release.js";
 import { classifyRetention, reapEligible, type RetentionClass, type RetentionPolicy } from "./retention-policy.js";
+// FG-677: the ACTING/DESTRUCTIVE path-identity projection — used by the reverse-lookup
+// cwd guard so an unproven path identity never authorizes deleting a directory a live
+// process might be sitting in.
+import { provenSameOnly } from "../util/path-identity.js";
 
 // FG-679: THE DURABLE OBSERVATION IS DELIBERATELY NOT WRITTEN FROM THIS MODULE.
 //
@@ -1170,6 +1174,139 @@ export function probeTmuxServerCwd(opts: { tmux?: TmuxRunner } = {}): TmuxServer
   if (existsSync(path)) return { state: "ok", path };
   const cost = tmuxSessionCost(tmux);
   return { state: "missing", path, ...(cost ? cost : {}) };
+}
+
+// ── FG-677: the active-process cwd reverse-lookup guard ──────────────────────
+//
+// The 2026-08-05 incident in the ticket: a workspace that is clean, captured, and
+// terminal by every CONTENT proof can still be load-bearing for a LIVE process that
+// holds it as its working directory. `~/code/forge-fg678` was correctly disposable by
+// every content proof, and deleting it bricked every session the long-lived tmux
+// server forked thereafter (node dies with ENOENT/uv_cwd reading a deleted cwd).
+//
+// This guard is the LIVENESS proof that must run at the destroy chokepoint before any
+// workspace deletion. Given a deletion-candidate path it enumerates the Forge-attributable
+// candidate pids — every tmux pane pid, the tmux server pid, plus any live launch/container
+// pids the caller supplies — reads each holder's working directory (readProcCwd, the same
+// procfs/lsof probe probeTmuxServerCwd uses), and compares each to the candidate under
+// FG-693 proven-physical identity (provenSameOnly: an UNPROVEN identity never authorizes
+// the delete). It inherits readProcCwd's honesty posture EXACTLY: an unreadable /
+// unsupported-platform cwd, or a tmux enumeration that could not run, is `unprobed` and
+// forces RETAIN — the guard never guesses a directory is unheld.
+
+/** A live process proven to hold the candidate path as its working directory. */
+export type CwdHolder = { pid: number; description: string; cwd: string };
+
+/** The guard's verdict.
+ *   - held:true  → a live process PROVABLY holds the path (retain, name the holder(s)).
+ *   - "unprobed" → some candidate could not be read / enumerated (fail closed: retain).
+ *   - held:false → every candidate was read and NONE holds the path (safe to proceed). */
+export type CwdHolderResult =
+  | { held: true; holders: CwdHolder[] }
+  | { held: "unprobed"; reason: string }
+  | { held: false };
+
+/** Enumerate the tmux-attributable candidate pids: the server pid and every pane pid.
+ *  `unprobed` is true when tmux could not answer for a reason OTHER than "no server"
+ *  (a genuinely-absent server holds nothing, and is a proven negative — not unprobed). */
+function enumerateTmuxPids(tmux: TmuxRunner): { pids: Array<{ pid: number; description: string }>; unprobed: boolean } {
+  const pids: Array<{ pid: number; description: string }> = [];
+  let unprobed = false;
+
+  // The server pid.
+  try {
+    const out = tmux(["display-message", "-p", "#{pid}"]);
+    const pid = Number(String(out ?? "").trim());
+    if (Number.isInteger(pid) && pid > 0) pids.push({ pid, description: `tmux server pid ${pid}` });
+  } catch (e) {
+    const stderr = String((e as { stderr?: unknown }).stderr ?? "").trim();
+    // A genuinely-absent server is a proven negative (nothing to hold the path); any
+    // other failure is unprobed — the FG-614 honesty rule (do not attribute an opaque
+    // failure to something forge never verified).
+    if (!(/no server running/.test(stderr) || /error connecting to .*\(No such file or directory\)/.test(stderr))) {
+      unprobed = true;
+    }
+  }
+
+  // Every pane's process pid across every session.
+  try {
+    const out = tmux(["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]);
+    for (const line of String(out ?? "").split("\n").map((l) => l.trim()).filter((l) => l !== "")) {
+      const [pidRaw, ...rest] = line.split(" ");
+      const pid = Number(pidRaw);
+      if (Number.isInteger(pid) && pid > 0) {
+        const session = rest.join(" ").trim();
+        pids.push({ pid, description: session !== "" ? `tmux pane pid ${pid} (session ${session})` : `tmux pane pid ${pid}` });
+      }
+    }
+  } catch (e) {
+    const stderr = String((e as { stderr?: unknown }).stderr ?? "").trim();
+    if (!(/no server running/.test(stderr) || /error connecting to .*\(No such file or directory\)/.test(stderr))) {
+      unprobed = true;
+    }
+  }
+
+  return { pids, unprobed };
+}
+
+/** Does any live Forge-attributable process hold `candidatePath` as its working
+ *  directory? The liveness proof for the FG-677 workspace destroy chokepoint.
+ *
+ *  `extraPids` lets a caller add live launch/container pids it knows about (their cwd is
+ *  read the same way). `extraCwds` lets a caller add already-known holder cwds (e.g. the
+ *  recorded cwd of an OPEN launch observation) compared by path identity directly — no
+ *  pid needed. Both are additive; the tmux panes + server are always enumerated. */
+export function findProcessesHoldingCwd(
+  candidatePath: string,
+  opts: {
+    tmux?: TmuxRunner;
+    extraPids?: Array<{ pid: number; description: string }>;
+    extraCwds?: Array<{ cwd: string; description: string }>;
+  } = {},
+): CwdHolderResult {
+  const tmux = opts.tmux ?? defaultTmux;
+  const holders: CwdHolder[] = [];
+  let anyUnprobed = false;
+  let unprobedReason = "";
+
+  const tmuxPids = enumerateTmuxPids(tmux);
+  if (tmuxPids.unprobed) {
+    anyUnprobed = true;
+    unprobedReason = "tmux could not enumerate its panes/server";
+  }
+
+  const candidates = [...tmuxPids.pids, ...(opts.extraPids ?? [])];
+  for (const c of candidates) {
+    const cwd = readProcCwd(c.pid);
+    if (cwd === undefined || cwd === "") {
+      // Could not read this process's cwd — cannot prove it does NOT hold the path.
+      anyUnprobed = true;
+      if (unprobedReason === "") unprobedReason = `could not read the working directory of ${c.description}`;
+      continue;
+    }
+    if (provenSameOnly(cwd, candidatePath)) {
+      holders.push({ pid: c.pid, description: c.description, cwd });
+    }
+  }
+
+  // Path-only holders (e.g. a live launch observation's recorded cwd). provenSameOnly
+  // refuses on an unproven identity, so a vanished cwd never manufactures a match.
+  for (const e of opts.extraCwds ?? []) {
+    if (provenSameOnly(e.cwd, candidatePath)) {
+      holders.push({ pid: -1, description: e.description, cwd: e.cwd });
+    }
+  }
+
+  if (holders.length > 0) return { held: true, holders };
+  if (anyUnprobed) return { held: "unprobed", reason: unprobedReason || "a candidate process cwd could not be read" };
+  return { held: false };
+}
+
+/** Render a CwdHolderResult's holders for a report/log line. */
+export function describeCwdHolders(result: CwdHolderResult): string {
+  if (result.held === true) return result.holders.map((h) => h.description).join("; ");
+  if (result.held === "unprobed") return `unprobed: ${result.reason}`;
+  return "no holder";
 }
 
 /** The ONE named rendering of the bricked-server condition (FG-614). It names the

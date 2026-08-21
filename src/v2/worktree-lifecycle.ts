@@ -1500,7 +1500,14 @@ export function reapTaskWorkspace(
   runId: string,
   taskId: string,
   projectDir: string,
-  authority: CaptureAuthority = { anchors: [] }
+  authority: CaptureAuthority = { anchors: [] },
+  // FG-677: dry-run runs EVERY proof identically and forks ONLY at the final,
+  // irreversible mutation — so a dry-run's proposed disposition matches the real
+  // pass exactly (absent intervening state change), which is the closeout's dry-run
+  // parity contract. No filesystem or ref is mutated when opts.dryRun is set; the
+  // returned outcome is what the real pass WOULD produce, using read-only predictors
+  // for the removability the real mutations would have decided.
+  opts: { dryRun?: boolean } = {}
 ): WorkspaceReapOutcome {
   const branch = worktreeBranchName(runId, taskId);
   const substrate = classifyWorkspace(workspacePath);
@@ -1510,6 +1517,21 @@ export function reapTaskWorkspace(
   const captured = (commit: string): boolean =>
     isAncestorOfHead(projectDir, commit) ||
     authority.anchors.some((anchor) => isAncestorOf(projectDir, commit, anchor));
+
+  // FG-677 read-only predictors of the removability the real mutations decide. Used
+  // ONLY on the dry-run fork so a proposal need not delete anything to describe itself.
+  //   * A captured-branch disposal (disposeCapturedBranch) removes the ref when it is
+  //     gone or its tip is captured — computed here without deleting.
+  //   * A merged-only disposal (deleteMergedBranch, the linked-worktree branch path)
+  //     removes the ref when it is gone or merged into projectDir HEAD.
+  const wouldDisposeCapturedBranch = (): boolean => {
+    const tip = resolveCommit(projectDir, branch);
+    return tip === undefined || captured(tip);
+  };
+  const wouldDeleteMergedBranch = (): boolean => {
+    const tip = resolveCommit(projectDir, branch);
+    return tip === undefined || isAncestorOfHead(projectDir, tip);
+  };
 
   if (substrate === "absent") {
     // The tree can be gone while the branch is not: the deletion below runs
@@ -1525,6 +1547,9 @@ export function reapTaskWorkspace(
     // task's own deterministic branch, and a tip nothing proves captured is still
     // never forced: it survives untouched and records nothing.
     if (resolveCommit(projectDir, branch) === undefined) return { action: "absent", branch };
+    if (opts.dryRun) {
+      return wouldDisposeCapturedBranch() ? { action: "branch_reaped", branch } : { action: "absent", branch };
+    }
     return disposeCapturedBranch(projectDir, branch, captured)
       ? { action: "branch_reaped", branch }
       : { action: "absent", branch };
@@ -1625,6 +1650,11 @@ export function reapTaskWorkspace(
       };
     }
 
+    // FG-677: dry-run proposal — every proof above has passed, so the real pass WOULD
+    // reap. Predict the branch disposal read-only and return without mutating anything.
+    if (opts.dryRun) {
+      return { action: "reaped", substrate, branch, branchRemoved: wouldDisposeCapturedBranch(), removal: "git_removed" };
+    }
     try {
       rmSync(workspacePath, { recursive: true, force: true });
     } catch {
@@ -1699,6 +1729,12 @@ export function reapTaskWorkspace(
   const notOurs = ownershipMismatch(workspacePath, projectDir, branch);
   if (notOurs.length > 0) {
     return { action: "retained", substrate, branch, reason: "workspace_not_owned", details: notOurs };
+  }
+
+  // FG-677: dry-run proposal — every proof has passed, so the real pass WOULD reap.
+  // Predict the merged-only branch disposal read-only; return without mutating.
+  if (opts.dryRun) {
+    return { action: "reaped", substrate, branch, branchRemoved: wouldDeleteMergedBranch(), removal: "git_removed" };
   }
 
   // Path absence is what decides whether there is still a workspace to retain;
