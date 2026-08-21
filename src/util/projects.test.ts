@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregateProjectSignals, findProject, listProjects, type RepositoryIdentityResolver } from "./projects.js";
+import { aggregateProjectSignals, findProject, listProjects, operatorProjects, type RepositoryIdentityResolver } from "./projects.js";
 import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
 import { captureProcessIdentity } from "./process-identity.js";
 
@@ -182,4 +182,23 @@ test("FG-576: a dead launcher's record contributes no live session", () => {
     rmSync(heartbeatsDir, { recursive: true, force: true });
     rmSync(projectDir, { recursive: true, force: true });
   }
+});
+
+test("FG-745: aggregateProjectSignals defaults to unclassified/visible when no purpose is recorded", () => {
+  const dir = "/tmp/fg745-default";
+  const projects = aggregateProjectSignals([{ projectDir: dir, runCount: 1 }], identity({ [dir]: { key: "repo-x" } }));
+  assert.equal(projects[0]?.purpose, "unclassified", "no recorded purpose reads as the visible fail-safe");
+  assert.equal(projects[0]?.classification, "unclassified");
+  assert.equal(operatorProjects(projects).length, 1, "an unclassified project stays a top-level entry");
+});
+
+test("FG-745: operatorProjects drops only records classified as artifacts", () => {
+  const dir = "/tmp/fg745-artifact";
+  const projects = aggregateProjectSignals(
+    [{ projectDir: dir, runCount: 1 }],
+    identity({ [dir]: { key: "repo-y" } }),
+    () => ({ purpose: "evidence_fixture" }),
+  );
+  assert.equal(projects[0]?.classification, "artifact");
+  assert.equal(operatorProjects(projects).length, 0, "a recorded evidence fixture is suppressed");
 });

@@ -15,7 +15,7 @@ import { basename, join } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta, projectColorForKey } from "@forge/project-meta";
 import { readBacklogConfig } from "@forge/backlog-config";
-import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
+import { listProjects, sortProjects, operatorProjects, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
 import { LEGACY_BLOCKED_SOURCE, isStatusBearingEvidenceSource } from "@forge/blocked-source";
@@ -1918,6 +1918,24 @@ export function projectsForDashboard(): ProjectRecord[] {
   const projects = presentationRegistry(sortProjects(listProjects(), "activity"));
   projectCache = { at: now, projects };
   return projects;
+}
+
+// FG-745: the OPERATOR-project membership projection, for the Projects grid. It is
+// the FULL annotated set (projectsForDashboard, which every record already carries
+// purpose/owner/classification/retentionReason through since listProjects annotates)
+// with the shared operatorProjects() filter applied — the SAME membership `forge
+// projects list` computes, so the CLI and GET /api/projects agree (AC7). It drops
+// ONLY records recorded as an explicit artifact kind and keeps operator + (flagged)
+// unclassified — the visible fail-safe; no path/name/age/run-count/remote heuristic
+// decides visibility.
+//
+// CRITICAL (AC5): this is applied ONLY to the Projects grid. scopeSql / inFlight() /
+// recentActivity() and resolveProjectScope() consume the UNFILTERED
+// projectsForDashboard(), so an active artifact's runs and live session stay reachable
+// in Current Activity and its scope still resolves — the Projects presentation filter
+// never hides live work.
+export function operatorProjectsForDashboard(): ProjectRecord[] {
+  return operatorProjects(projectsForDashboard());
 }
 
 // FG-595: presentation-only view over the canonical ProjectRecord aggregate.

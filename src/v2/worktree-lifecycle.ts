@@ -29,6 +29,8 @@ import { findGitRoot } from "../util/git-root.js";
 import { compareIdentity, describeIdentity, identify, provenPhysical } from "../util/path-identity.js";
 import { createDependencyMountpoints } from "./dependency-provisioning.js";
 import { provisionWorkspaceCommitMsgHook } from "../util/commit-msg-hook.js";
+import { recordWorkspacePurpose, type WorkspaceKind } from "../store/workspace-purpose.js";
+import { resolveProjectIdentity } from "../backlog/storage-mode.js";
 import { WORKTREES_DIR, cloneDir, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 
 // ── Branch naming ─────────────────────────────────────────────────────────────
@@ -37,6 +39,38 @@ import { WORKTREES_DIR, cloneDir, worktreeDir, integrationWorktreeDir } from "..
  *  never stored — any caller can re-derive it. */
 export function worktreeBranchName(runId: string, taskId: string): string {
   return `forge/${runId}/${taskId}`;
+}
+
+/** FG-745: record what a Forge-created workspace IS, DECLARED at creation. The kind
+ *  and owning project/run are asserted here — never later inferred from the path,
+ *  a basename, or a run count. BEST-EFFORT IN BOTH DIRECTIONS: an unwritable store,
+ *  an unresolvable owner, or any store error must never turn workspace creation into
+ *  a failure (the same contract recordLaunchObservation takes). The owner's durable
+ *  project_identity (FG-663) is resolved from the source projectDir while it is still
+ *  readable; a resolution miss records the artifact kind alone, which is enough to
+ *  suppress the top-level Projects entry. */
+function recordArtifactWorkspacePurpose(
+  kind: WorkspaceKind,
+  workspacePath: string,
+  projectDir: string,
+  runId: string,
+  taskId: string,
+): void {
+  try {
+    let projectIdentity: string | null = null;
+    try {
+      projectIdentity = resolveProjectIdentity(projectDir);
+    } catch {
+      projectIdentity = null;
+    }
+    recordWorkspacePurpose({
+      path: workspacePath,
+      kind,
+      owner: { projectIdentity, runId, taskId },
+    });
+  } catch {
+    /* best-effort: an artifact whose purpose could not be recorded is still created */
+  }
 }
 
 // ── Feature gate ──────────────────────────────────────────────────────────────
@@ -344,6 +378,9 @@ export function createWorktree(
     // Non-fatal: diagnostic best-effort only.
   }
 
+  // FG-745: this is a Forge-owned per-task worktree, not an operator project.
+  recordArtifactWorkspacePurpose("worktree", worktreePath, projectDir, runId, taskId);
+
   return { worktreePath, untrackedFiles };
 }
 
@@ -539,6 +576,9 @@ export function createTaskClone(
   } catch {
     // Non-fatal: diagnostic best-effort only.
   }
+
+  // FG-745: this is a Forge-owned disposable private clone, not an operator project.
+  recordArtifactWorkspacePurpose("disposable_clone", clonePath, projectDir, runId, taskId);
 
   return { clonePath, branch, baseSha, untrackedFiles };
 }

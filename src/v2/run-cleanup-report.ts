@@ -187,6 +187,20 @@ export function retainedDisposition(
   };
 }
 
+/** FG-745: the thin bridge from a RETAINED git-workspace disposition to the durable
+ *  workspace-purpose row that should carry its retention reason (AC6). PURE by
+ *  design — this module writes nothing (no store, per the header). It only decides
+ *  WHICH dispositions carry a reason worth persisting and returns {path, reason};
+ *  the impure store write lives in the reconcile caller. A removed workspace, a
+ *  reason-less record, or a non-git-workspace resource yields undefined. */
+export function retainedWorkspacePurposeUpdate(
+  d: CleanupDisposition,
+): { path: string; reason: CleanupReason } | undefined {
+  if (d.resourceClass !== "git_workspace") return undefined;
+  if (d.action !== "retained" || d.reason === undefined) return undefined;
+  return { path: d.path, reason: d.reason };
+}
+
 /** An empty report skeleton the orchestrator fills in section by section. */
 export function emptyRunCleanupReport(opts: { runId?: string; dryRun?: boolean } = {}): RunCleanupReport {
   return {

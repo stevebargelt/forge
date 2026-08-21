@@ -18,6 +18,14 @@ import { findForgeProjects } from "./find-forge-projects.js";
 import { resolveProjectMeta } from "./project-meta.js";
 import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
 import {
+  getWorkspacePurpose,
+  classificationForKind,
+  DEFAULT_WORKSPACE_KIND,
+  type WorkspaceKind,
+  type WorkspaceClassification,
+} from "../store/workspace-purpose.js";
+import type { CleanupReason } from "../v2/run-cleanup-report.js";
+import {
   repositoryCheckoutIdentity,
   type RepositoryCheckoutIdentity,
 } from "./repository-identity.js";
@@ -51,7 +59,72 @@ export type ProjectRecord = {
   readmeFirstLine?: string;
   liveSessions: number;   // #153/FG-576: live interactive orchestrator sessions, any provider, counted once each
   githubUrl?: string;
+  // ── FG-745: durable workspace purpose / ownership, as STRUCTURED data ─────────
+  // Every record carries these so both the CLI and the dashboard consume ONE shared
+  // seam (AC7). `purpose` is the recorded workspace kind (default 'unclassified' —
+  // the VISIBLE fail-safe); `classification` is its three-valued presentation form.
+  // Artifact status is a RECORDED FACT joined from the workspace_purposes store by
+  // the primary checkout's proven canonical path — never inferred from a path
+  // prefix, basename, ticket-shaped name, run count, missing remote, or age.
+  //
+  // Optional on the TYPE only so hand-built fixtures need not spell them; the real
+  // aggregation path (aggregateProjectSignals) ALWAYS populates both, defaulting to
+  // 'unclassified' (the visible fail-safe). operatorProjects() treats an absent
+  // classification as visible, never as an artifact.
+  purpose?: WorkspaceKind;
+  classification?: WorkspaceClassification;
+  /** The owning project/run declared for a Forge artifact (FG-663 identity). */
+  owner?: WorkspaceProjectOwner;
+  /** An FG-677 retention outcome carried onto the artifact's purpose row (AC6). */
+  retentionReason?: CleanupReason;
 };
+
+/** The owner attribution surfaced on an annotated ProjectRecord. */
+export type WorkspaceProjectOwner = {
+  projectIdentity?: string;
+  runId?: string;
+  taskId?: string;
+};
+
+/** What a purpose resolver returns for one checkout root. Undefined means "no
+ *  recorded purpose" — which annotates as `unclassified` (visible fail-safe). */
+export type ProjectPurposeInfo = {
+  purpose: WorkspaceKind;
+  owner?: WorkspaceProjectOwner;
+  retentionReason?: CleanupReason;
+};
+
+/** Injected the same way as RepositoryIdentityResolver, so aggregateProjectSignals
+ *  stays a pure seam the projection-matrix tests can drive with a fake store. The
+ *  default (below) reads the real workspace_purposes store by proven canonical path. */
+export type WorkspacePurposeResolver = (checkoutRoot: string) => ProjectPurposeInfo | undefined;
+
+/** The default resolver: join a checkout root to its recorded purpose in the store
+ *  by its PROVEN canonical path. Never throws (getWorkspacePurpose degrades to
+ *  undefined on an unmigrated/read-only/absent store), so a store hiccup renders
+ *  `unclassified/visible`, never a hidden project. */
+export function storeWorkspacePurposeResolver(checkoutRoot: string): ProjectPurposeInfo | undefined {
+  const purpose = getWorkspacePurpose(checkoutRoot);
+  if (!purpose) return undefined;
+  const owner: WorkspaceProjectOwner = {};
+  if (purpose.projectIdentity) owner.projectIdentity = purpose.projectIdentity;
+  if (purpose.runId) owner.runId = purpose.runId;
+  if (purpose.taskId) owner.taskId = purpose.taskId;
+  return {
+    purpose: purpose.kind,
+    ...(Object.keys(owner).length > 0 ? { owner } : {}),
+    ...(purpose.reason ? { retentionReason: purpose.reason } : {}),
+  };
+}
+
+/** The pure membership filter both the CLI (`forge projects list`) and the dashboard
+ *  grid consume (AC7). Drops ONLY records whose purpose is an EXPLICITLY-recorded
+ *  artifact kind; KEEPS operator projects AND unclassified ones (the visible,
+ *  flagged fail-safe). It consults nothing but the recorded `classification` — no
+ *  path, name, age, run-count, or remote-presence signal decides visibility. */
+export function operatorProjects(records: ProjectRecord[]): ProjectRecord[] {
+  return records.filter((record) => record.classification !== "artifact");
+}
 
 // FG-438: re-exported so the dashboard can derive per-project GitHub links without
 // listProjects() (a hot path) paying the git-remote cost for every caller.
@@ -141,6 +214,7 @@ function preferredCheckout(checkouts: MutableCheckout[]): MutableCheckout {
 export function aggregateProjectSignals(
   signals: ProjectSignal[],
   resolveIdentity: RepositoryIdentityResolver = repositoryCheckoutIdentity,
+  resolvePurpose: WorkspacePurposeResolver = () => undefined,
 ): ProjectRecord[] {
   const resolved = signals.map((signal) => ({ signal, identity: resolveIdentity(signal.projectDir) }));
   const byCheckout = new Map<string, MutableCheckout>();
@@ -200,6 +274,14 @@ export function aggregateProjectSignals(
     const projectDirs = [...new Set(sortedMembers.flatMap((member) => [...member.projectDirs]))].sort();
     const lastRunAt = members.reduce<string | undefined>((latest, member) => maxIso(latest, member.lastRunAt), undefined);
     const githubUrl = members.find((member) => member.githubUrl)?.githubUrl;
+    // FG-745: the purpose join. A repository record groups checkouts by converging
+    // identity; a Forge disposable clone / worktree is its OWN repository, so its
+    // record has one member and the primary checkout's proven canonical path is the
+    // key the store recorded at creation (or an operator recorded at repair). The
+    // incomplete-.git forge-fg253 case stays attributable through this recorded row,
+    // not a live git probe. Absence annotates as `unclassified` — visible, flagged.
+    const purposeInfo = resolvePurpose(primary.projectDir);
+    const purpose = purposeInfo?.purpose ?? DEFAULT_WORKSPACE_KIND;
     const record: ProjectRecord = {
       key,
       projectDir: primary.projectDir,
@@ -211,6 +293,10 @@ export function aggregateProjectSignals(
       runCount: members.reduce((sum, member) => sum + member.runCount, 0),
       inFlightCount: members.reduce((sum, member) => sum + member.inFlightCount, 0),
       liveSessions: members.reduce((sum, member) => sum + member.liveSessions, 0),
+      purpose,
+      classification: classificationForKind(purpose),
+      ...(purposeInfo?.owner ? { owner: purposeInfo.owner } : {}),
+      ...(purposeInfo?.retentionReason ? { retentionReason: purposeInfo.retentionReason } : {}),
       ...(meta.description ? { description: meta.description } : {}),
       ...(lastRunAt ? { lastRunAt } : {}),
       ...(githubUrl ? { githubUrl } : {}),
@@ -240,7 +326,10 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
       .filter((session) => session.projectDir)
       .map((session) => ({ projectDir: session.projectDir, liveSessions: 1 })),
   ];
-  return aggregateProjectSignals(signals);
+  // The FULL annotated set: run-scoping and `forge projects show` reach every record,
+  // including suppressed artifacts. The operatorProjects() membership filter is applied
+  // by the CLI list and the dashboard grid — this is the one shared seam (AC7).
+  return aggregateProjectSignals(signals, repositoryCheckoutIdentity, storeWorkspacePurposeResolver);
 }
 
 export function findProject(query: string, projects: ProjectRecord[]): ProjectRecord | undefined {

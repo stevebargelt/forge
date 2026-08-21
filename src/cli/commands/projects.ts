@@ -1,7 +1,13 @@
 import type { Command } from "commander";
-import { listProjects, sortProjects, findProject, type ProjectRecord } from "../../util/projects.js";
+import { listProjects, sortProjects, findProject, operatorProjects, type ProjectRecord } from "../../util/projects.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { listRuns } from "../../store/runs.js";
+import {
+  classifyWorkspacePurpose,
+  isWorkspaceKind,
+  WORKSPACE_KIND_VALUES,
+  WorkspacePurposeConflictError,
+} from "../../store/workspace-purpose.js";
 
 export function registerProjects(program: Command): void {
   const projects = program
@@ -22,7 +28,12 @@ export function registerProjects(program: Command): void {
         ...(opts.scanRoot.length > 0 ? { scanRoots: opts.scanRoot } : {}),
         scanMaxDepth: opts.scanDepth,
       };
-      const recs = sortProjects(listProjects(listOpts), order);
+      // FG-745: the Projects list represents OPERATOR projects. operatorProjects()
+      // drops only records recorded as an explicit artifact kind (disposable_clone /
+      // worktree / evidence_fixture) and keeps operator + (flagged) unclassified — the
+      // SAME membership GET /api/projects applies, so the two agree (AC7). No path,
+      // name, age, run-count, or remote heuristic decides visibility.
+      const recs = sortProjects(operatorProjects(listProjects(listOpts)), order);
       if (opts.json) {
         console.log(JSON.stringify({ projects: recs }, null, 2));
         return;
@@ -64,6 +75,62 @@ export function registerProjects(program: Command): void {
       }
       printShow(match);
     });
+
+  projects
+    .command("classify")
+    .argument("<dir>", "the workspace directory to classify (a path on this host)")
+    .requiredOption(
+      "--purpose <kind>",
+      `workspace kind: ${WORKSPACE_KIND_VALUES.join(" | ")}`,
+    )
+    .option("--owner-identity <projectIdentity>", "the durable project identity that owns this artifact")
+    .option("--run <runId>", "the run that created this artifact")
+    .option("--task <taskId>", "the task that created this artifact")
+    .option("--json", "emit JSON instead of a human-readable line")
+    .description(
+      "Classify a legacy or manually-created workspace's purpose (FG-745 repair path). " +
+        "Refuses to silently reassign a directory already recorded with a different purpose.",
+    )
+    .action(
+      (
+        dir: string,
+        opts: { purpose: string; ownerIdentity?: string; run?: string; task?: string; json?: boolean },
+      ) => {
+        ensureForgeDirs();
+        if (!isWorkspaceKind(opts.purpose)) {
+          console.error(
+            `Unknown --purpose "${opts.purpose}". Expected one of: ${WORKSPACE_KIND_VALUES.join(", ")}.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const owner = {
+          ...(opts.ownerIdentity ? { projectIdentity: opts.ownerIdentity } : {}),
+          ...(opts.run ? { runId: opts.run } : {}),
+          ...(opts.task ? { taskId: opts.task } : {}),
+        };
+        try {
+          const result = classifyWorkspacePurpose({
+            path: dir,
+            kind: opts.purpose,
+            ...(Object.keys(owner).length > 0 ? { owner } : {}),
+          });
+          if (opts.json) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            const from = result.previousKind ? ` (was ${result.previousKind})` : "";
+            console.log(`Classified ${result.path} as ${result.kind}${from}.`);
+          }
+        } catch (err) {
+          if (err instanceof WorkspacePurposeConflictError) {
+            console.error(err.message);
+          } else {
+            console.error(err instanceof Error ? err.message : String(err));
+          }
+          process.exitCode = 1;
+        }
+      },
+    );
 }
 
 // commander option collector for repeatable --scan-root flags.
@@ -96,6 +163,9 @@ function printShow(r: ProjectRecord): void {
   console.log(`Project:  ${r.label}`);
   console.log(`Path:     ${r.projectDir}`);
   console.log(`Color:    ${r.color}`);
+  console.log(`Purpose:  ${r.purpose} (${r.classification})`);
+  if (r.owner?.projectIdentity) console.log(`Owner:    ${r.owner.projectIdentity}${r.owner.runId ? ` (run ${r.owner.runId})` : ""}`);
+  if (r.retentionReason)   console.log(`Retained: ${r.retentionReason}`);
   if (r.description)        console.log(`Desc:     ${r.description}`);
   if (r.readmeFirstLine)    console.log(`README:   ${r.readmeFirstLine}`);
   console.log(``);
