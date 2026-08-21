@@ -117,6 +117,14 @@ const ALLOWLIST: readonly AllowEntry[] = [
       "truth — FG-608 moved only the TICKET source to the host-wide DB.",
   },
   {
+    file: "src/orient/snapshot.ts",
+    pattern: /join\([^)]*["']backlog["'],\s*["']notes\.md["']\)/,
+    reason:
+      "FG-588: the orient snapshot reads backlog/notes.md — FG-380 per-checkout operational state (session " +
+      "handoff), not ticket truth. It stays branch-local and file-backed after the db cutover, exactly like the " +
+      "`forge backlog notes show` read this mirrors; ticket reads go through the structured.ts seam.",
+  },
+  {
     file: "src/integration-cli-spawn.ts",
     pattern: /resolve\(INTEGRATION_BUILD_DIR, ["']backlog["'], ["']container-authority\.testkit\.js["']\)/,
     reason:

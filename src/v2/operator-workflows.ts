@@ -195,19 +195,14 @@ const ORIENT: OperatorWorkflowDefinition = {
   },
   probes: [
     {
-      id: "backlog-notes-show",
-      command: "forge backlog notes show",
-      purpose: "the narrative handoff written by the prior session",
-    },
-    {
-      id: "backlog-list-active",
-      command: "forge backlog list --status active",
-      purpose: "currently-open tickets, titles only",
-    },
-    {
-      id: "backlog-list-done",
-      command: "forge backlog list --status done 2>&1 | head -30",
-      purpose: "recently closed tickets, for reconciling against the notes' priorities",
+      id: "orient-snapshot",
+      command: "forge orient snapshot --json",
+      purpose:
+        "the ONE compact, bounded, read-only state-of-play: project liveness (live-session and in-flight counts, " +
+        "last activity), bounded handoff fields (Where we left off, Picked up next, any invalidated-memory flag), " +
+        "active-ticket count plus a capped identity set, the exact status/title of every ticket referenced by " +
+        "Picked up next, and an ops summary (total, counts by severity, a bounded highest-severity identity set) — " +
+        "with explicit truncation metadata, and no bulk payload",
     },
     {
       id: "git-status",
@@ -218,18 +213,6 @@ const ORIENT: OperatorWorkflowDefinition = {
       id: "git-log-unpushed",
       command: "git log --oneline origin/main..HEAD 2>/dev/null",
       purpose: "commits ahead of origin",
-      tolerateEmpty: true,
-    },
-    {
-      id: "forge-projects-show",
-      command: 'forge projects show "$(basename "$PWD")" 2>/dev/null',
-      purpose: "this project's run history and live sessions",
-      tolerateEmpty: true,
-    },
-    {
-      id: "forge-ops-check",
-      command: "forge ops check --json 2>/dev/null",
-      purpose: "read-only operational incidents scoped to this project",
       tolerateEmpty: true,
     },
   ],
@@ -264,11 +247,24 @@ const ORIENT: OperatorWorkflowDefinition = {
       id: "parallel-probe-batch",
       kind: "probe-execution",
       statement:
-        "Run the probe set as ONE parallel batch, not sequentially, and treat a tolerated probe's empty output as " +
-        "absence of signal rather than a finding.",
+        "Run the snapshot and the two Git reads as ONE parallel batch, not sequentially, and treat a tolerated " +
+        "probe's empty output as absence of signal rather than a finding.",
       rationale:
-        "The probes are independent reads; serializing them spends session latency for nothing, and an older " +
-        "install legitimately has no `forge ops check`.",
+        "The three probes are independent reads; serializing them spends session latency for nothing, and a project " +
+        "with no unpushed commits legitimately produces empty git-log output.",
+    },
+    {
+      id: "conditional-drilldown",
+      kind: "probe-execution",
+      statement:
+        "The snapshot is the whole ordinary read. Drill in for full detail ONLY for an identity the snapshot marks " +
+        "as needing attention: `forge backlog show <id>` for a stale/closed/missing referenced ticket, " +
+        "`forge ops check --json` for an incident you are about to act on, `forge projects show` for an in-flight " +
+        "run that is not this session. Never fetch full ticket bodies, all done tickets, ten recent runs, or " +
+        "complete incident evidence up front.",
+      rationale:
+        "The bulk payload orientation used to load unconditionally is exactly what the snapshot removed; re-fetching " +
+        "it for every session, rather than only for the identities that need it, reintroduces the cost this bounds.",
     },
     {
       id: "report-ordering",
@@ -282,26 +278,30 @@ const ORIENT: OperatorWorkflowDefinition = {
       id: "stale-ticket-reconciliation",
       kind: "reconciliation",
       statement:
-        'Before reporting, extract every `#<number>` reference from the notes\' "Picked up next" section and check ' +
-        "each against the active list. A ref that is absent from the active list — closed, merged, or gone — is " +
-        'STALE: surface it under "Needs attention" as "notes list #N as a next step, but it is no longer active ' +
-        '(closed/merged) — likely already shipped; the live next move is elsewhere", citing the closing commit sha ' +
-        "when it is visible in the git log output.",
+        "Reconcile the notes' forward pointer against live state using the snapshot's `referencedTickets`, which " +
+        'resolves every ticket referenced by "Picked up next" to an EXACT status/title — including a ticket closed ' +
+        "long ago, or one that no longer exists. A ref whose status is `done` or `missing` is STALE: surface it " +
+        'under "Needs attention" as "notes list #N as a next step, but it is closed/missing — likely already ' +
+        'shipped or moved; the live next move is elsewhere". Drill in with `forge backlog show <id>` only when you ' +
+        "need the closing commit or body.",
       rationale:
         "The notes' priority list is a claim from the prior session, not live state; treating it as live is how a " +
-        "session spends itself re-doing shipped work.",
+        "session spends itself re-doing shipped work. Exact per-ticket resolution is why a closed ticket of any age " +
+        "is never mistaken for a missing one.",
     },
     {
       id: "ops-incident-surfacing",
       kind: "surfacing",
       statement:
-        'When the ops probe returns a non-empty array, surface it under "Needs attention" as "Ops attention: N ' +
-        'incident(s) — <kind>, e.g. retry_orphan (run-x / task-y)", highest severity first, naming the kind plus ' +
-        "run/task ids. Omit the line entirely when the array is empty. These are read-only signals scoped to this " +
-        "project: orientation reports them, it does not act on them.",
+        'When the snapshot\'s `ops.total` is non-zero, surface it under "Needs attention" as "Ops attention: N ' +
+        'incident(s) — <kind>, e.g. retry_orphan (run-x / task-y)", highest severity first from ' +
+        "`ops.highestSeverity`, naming the kind plus run/task ids and the per-severity counts. Omit the line " +
+        "entirely when `ops.total` is zero. These are read-only signals scoped to this project: orientation reports " +
+        "them, it does not act on them, and it fetches full evidence with `forge ops check --json` only when it is " +
+        "about to act on one.",
       rationale:
         "An incident the operator never sees is an incident nobody owns; an incident orientation ACTS on is work " +
-        "the operator did not authorize.",
+        "the operator did not authorize. The bounded projection is enough to report; full evidence is a drill-down.",
     },
     {
       id: "end-with-one-question",
@@ -480,12 +480,17 @@ const HANDOFF: OperatorWorkflowDefinition = {
       {
         id: "where-we-left-off",
         heading: "**Where we left off:**",
-        content: "one sentence on the mid-conversation thread or the last operator direction",
+        content:
+          "one sentence on the mid-conversation thread or the last operator direction — keep it to a few sentences; " +
+          "orientation reads only a bounded prefix of each forward field and marks anything longer as truncated, so " +
+          "detailed history belongs in the ticket, plan, or commit, not here",
       },
       {
         id: "picked-up-next",
         heading: "**Picked up next:**",
-        content: "2-3 concrete starting moves the next session can take, ordered by priority",
+        content:
+          "2-3 concrete starting moves the next session can take, ordered by priority — a bounded forward pointer, " +
+          "not a full plan; orientation truncates an overlong field rather than injecting it wholesale",
       },
       {
         id: "external-state",

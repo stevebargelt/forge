@@ -41,6 +41,7 @@ import { registerProviders } from "./commands/providers.js";
 import { registerDoctor } from "./commands/doctor.js";
 import { registerSetup } from "./commands/setup.js";
 import { registerOps } from "./commands/ops.js";
+import { registerOrient } from "./commands/orient.js";
 import { registerDependencyCache } from "./commands/dependency-cache.js";
 import { registerRaci } from "./commands/raci.js";
 import { registerPi } from "./commands/pi.js";
@@ -119,6 +120,7 @@ export function buildProgram(): Command {
   registerDoctor(program);
   registerSetup(program);
   registerOps(program);
+  registerOrient(program);
   registerDependencyCache(program);
   registerRaci(program);
   registerPi(program);
