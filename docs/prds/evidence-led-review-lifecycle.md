@@ -532,6 +532,15 @@ was unavailable — and the finding's result is `inconclusive`. It is never
 `resolved`. Accepting that gap is a disposition decision carrying its own
 authority and rationale, not a resolution.
 
+This stage's own gate is the review's fast tier (typecheck plus unit `test`)
+only, so a cited assertion that lives in an integration- or worktree-tier test
+file is `not_executed` here for a structural reason, not a skip — that
+runner's output cannot contain it. This stage's answer to that shape is
+unchanged: `inconclusive`. As of FG-744 a narrow, separate coordinator entry
+point can later admit green exact-candidate required CI as resolution
+evidence for exactly that gap, without opening a new fixer or recheck cycle;
+see the FG-744 refinement below.
+
 The rechecker verifies this evidence; it does not merely repeat the fixer's
 claim. If the required proof is unavailable, the result is `inconclusive`
 unless the appropriate authority explicitly accepts the limitation.
@@ -1369,6 +1378,77 @@ actual boundary that cannot ship together.
 > [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#reviews--review_findings-tables-fg-638-dashboard-read-path). No new table, no
 > migration. The threat model, the acceptance scenarios, and every scope
 > bullet above are otherwise unaltered by this note. Operator-facing detail is
+> [Review coordinator](../concepts.md#review-coordinator).
+
+### FG-744 refinement — exact-candidate CI-evidence ingestion
+
+> **[SHIPPED 2026-08-20 (FG-744).]** Stage 8's recheck runs the review's own
+> fast gate (typecheck plus unit `test`) only. When a fixer's cited
+> `executed_assertion` lived in an integration- or worktree-tier test file
+> (`*.integration.test.ts` / `*.worktree.test.ts`), that runner's output
+> structurally could not contain it, so the finding was correctly recorded
+> `inconclusive` / `not_executed` even where the assertion existed, passed,
+> and its tier had already gone green in required CI at the exact candidate.
+> Because the recheck does not repeat at an unchanged candidate, that finding
+> had no mechanical path to `resolved` afterward — the FG-737 RF-1 occurrence
+> that surfaced the gap. This refinement closes that gap with a channel, not a
+> change to the recheck's own behavior: Stage 8 still runs the fast gate only
+> and still returns `inconclusive` / `not_executed` for a tier it cannot run.
+>
+> **`forge review ingest-ci-evidence <review-id> --evidence <file>
+> [--project <dir>] [--json]`** is a bounded coordinator verb, not a stage —
+> driven directly rather than through `forge review continue`, since there is
+> no finding transition to trigger it. `--evidence` names a JSON file,
+> `{"review_id", "candidate_sha", "findings": [{"finding_id", "test_file",
+> "ci_lane", "ci_runner_output"}]}`, naming which required-CI lane executed
+> the cited assertion and attaching that lane's own runner output. The
+> assertion identity is never taken from the file — only from the fixer's own
+> recorded `executed_assertion` — so the operator cannot substitute a
+> different test for the one remediation actually identified.
+>
+> - **AC1 — the tier gate.** A cited assertion in a fast-tier test file is
+>   refused by name: that assertion is the ordinary recheck's job, and this
+>   channel exists only for a tier the fast gate structurally cannot run.
+> - **AC2 — the exact-candidate CI precondition.** Refuses
+>   (`ci_evidence_rejected`) unless the host's own verified covering-gate
+>   evidence is GREEN required CI (or a covering host row) for the whole
+>   derived gate list (`test:all` + `test:extended`), bound to the EXACT
+>   current candidate sha — proof the integration/worktree tier ran off-host.
+>   A pending, failing, or absent run, or CI at a different candidate,
+>   resolves nothing; a coordinator built without that authority refuses
+>   `ci_evidence_no_gate_authority` rather than treating an unset check as a
+>   pass.
+> - **AC3 — evidence sufficiency is unchanged.** The CI run is modelled as
+>   exactly the `alternate_lane` the recheck already accepts and validated
+>   through the identical evidence path (`validateResolutionEvidence`): a
+>   skipped test, a red executed test, absence from the cited lane's output,
+>   or output naming a different assertion than the fixer's own all still
+>   refuse. Skipped, red, absent, or inspection-only evidence never resolves
+>   through this channel any more than it does through the recheck itself.
+> - **AC4 — pure evidence ingestion, never a new remediation cycle.** A
+>   successful ingestion records a `resolved` resolution on the named
+>   findings, bound to the current candidate, and nothing else — no fix
+>   batch, no candidate move, no stage repeated. The one-fix-batch-per-review
+>   cap (Stage 5) is untouched, and a finding already resolved at the current
+>   candidate is refused rather than relitigated.
+> - **RF-5 — bound to the fixer's own assertion.** A finding whose fixer
+>   named no `executed_assertion` refuses; there is nothing for CI evidence
+>   to bind to, and the operator cannot supply one.
+> - **RF-2/RF-7 — immune to a concurrent candidate move.** The candidate sha
+>   is re-read inside the same write transaction that records the
+>   resolutions, not merely checked before it, so a candidate advance landing
+>   during the awaited covering-gate lookup aborts the whole application
+>   (`ci_evidence_candidate_moved`) rather than applying evidence against a
+>   candidate the review has already left.
+> - **RF-3 — all-or-nothing across a multi-finding batch.** A storage failure
+>   partway through rolls every resolution in that ingestion back, rather
+>   than leaving some findings resolved off a result the rest of which never
+>   applied.
+>
+> New schema: none. The channel reuses the existing `resolution` /
+> `resolution_evidence_kind` / `resolution_evidence` / `resolved_sha` columns
+> on `review_findings` and the existing `review.finding_resolution_recorded`
+> event; no new table, column, or event. Operator-facing detail is
 > [Review coordinator](../concepts.md#review-coordinator).
 
 ### Migration safety
