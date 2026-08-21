@@ -533,6 +533,20 @@ Columns: `id` (PK), `kind` (`pr_checks | push_actions | workflow_dispatch`), `re
 
 Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as its siblings — an older binary reads and ignores it.
 
+### `workspace_purposes` table (FG-745 dashboard/CLI read path)
+
+The durable record of **what a Forge-owned on-disk workspace IS** — a genuine operator project, or a Forge artifact (a disposable task clone, a per-task worktree, a deliberately-retained evidence fixture) — so the Projects tab and `forge projects list` can stop promoting every surviving `runs.project_dir` to a top-level project merely because it still exists on disk. One row per workspace, keyed on its **proven canonical path** (`provenPhysical`/realpath, FG-693), resolved before the write transaction opens.
+
+Columns: `path` (PK, the proven canonical path), `path_as_written` (the caller's spelling, verbatim — audit/display only, decides nothing), `kind`, `project_identity` / `run_id` / `task_id` (nullable — the FG-663 owner declared at creation or supplied at operator repair), `reason` (nullable — an FG-677 retention outcome carried onto the row, e.g. `active_process_cwd`, `ownership_ambiguous`), `source` (`creation | retention | operator`), `created_at`, `updated_at`. No secondary index — reads are by `path` (the primary key) or a bounded path-IN-list join for the projection.
+
+`kind` is the CLOSED vocabulary — `operator | disposable_clone | worktree | evidence_fixture | unclassified` — unconstrained TEXT with no CHECK (FG-585 enum-as-convention), so an old/new binary never fights a constraint the other lacks. Only `disposable_clone`, `worktree` and `evidence_fixture` suppress a repository record from `operatorProjects()`; `operator` is a project, and `unclassified` is the **visible fail-safe** — a workspace nothing ever declared stays a top-level entry (flagged, not hidden), because hiding a real independent project is the expensive mistake. This is the INVERSE of `launch_observations.purpose`'s fail-closed-to-`generic` (FG-700): an absent table, a `NULL`, an empty string, or a value only a newer binary understands all decode to `unclassified` — never to an artifact kind, so an older binary can never silently stamp an artifact kind over a purpose a newer one recorded. Artifact status is a RECORDED FACT, never inferred from a path prefix, a basename, a ticket-shaped name, a run count, a missing remote, or an age.
+
+Written at creation by `createWorktree` (kind `worktree`) and `createTaskClone` (kind `disposable_clone`) in `src/v2/worktree-lifecycle.ts`, best-effort — an unresolvable path or an unwritable store never turns workspace creation into a failure. `disposeRunGitWorkspaces` (`src/v2/reconcile.ts`) carries a **retained** git-workspace's FG-677 reason onto this row (also best-effort) so a retained artifact stays off the Projects tab without the reap/retain decision itself changing; see [Reaping an orphaned workspace](concepts.md#reaping-an-orphaned-workspace). An operator repairs a legacy or manually-created directory's record with `forge projects classify <dir> --purpose <kind>` (`classifyWorkspacePurpose`), which REFUSES — `WorkspacePurposeConflictError` — rather than silently reassigning a directory already recorded with a different kind, including one recorded by a kind this binary's vocabulary does not contain (a newer binary's write): a kind decoding to `unclassified` for reads is not, for that reason alone, the claimable legacy-repair door.
+
+`listProjects`/`aggregateProjectSignals` (`src/util/projects.ts`) join this store per checkout member of a grouped repository record, not from the preferred member alone: a record is classified `artifact` only when **every** member resolves to a recorded artifact kind, so a disposable clone that converged onto its operator source's repository identity can never suppress that operator sibling. `operatorProjects()` is the shared membership filter both `forge projects list` and `GET /api/projects` apply, so the two agree.
+
+Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as its siblings — an older binary reads and ignores it.
+
 ## Filesystem contract
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
@@ -743,7 +757,7 @@ The dashboard server exposes JSON endpoints. Default base URL: `http://127.0.0.1
 |---|---|---|
 | `GET /api/feed` | `since`, `limit` (1–500, default 100), `projectDir` | Recent agent outputs across all projects |
 | `GET /api/in-flight` | `projectDir` | Currently-running / awaiting-gate tasks |
-| `GET /api/projects` | — | Project registry: name, color, last activity, live sessions |
+| `GET /api/projects` | — | Operator-project registry: name, color, last activity, live sessions. FG-745: filtered to `operatorProjects()` membership — a workspace recorded as an explicit artifact kind (`disposable_clone` \| `worktree` \| `evidence_fixture`) is omitted; an `unclassified` legacy directory is included and flagged. The same membership `forge projects list` computes, so the CLI and this route agree. See [`workspace_purposes` table](#workspace_purposes-table-fg-745-dashboardcli-read-path) |
 | `GET /api/task/:id` | — | Full task detail (result + stdout/stderr + verdicts + gates) |
 | `GET /api/governance` | `projectDir` | RACI Workbench panel (`WorkbenchPanel`): source, derived, effective, recorded (see shape below) |
 | `GET /api/ops` | `since` (default `30d`), `projectDir` | Ops metrics rollup |
@@ -768,6 +782,7 @@ The dashboard server exposes JSON endpoints. Default base URL: `http://127.0.0.1
 | `POST /api/queue/dequeue` | `projectKey` or `projectDir` | FG-591: unselect a ticket. Body `{ticketId}` → `forge queue dequeue <id> --project <checkout> --json`. A **planning** act: the rank is retained and a live claim is never released (D4) — stopping work is `forge queue cancel`, which is CLI-only and unreachable from here |
 | `POST /api/queue/rank` | `projectKey` or `projectDir` | FG-591: relative rank. Body `{ticketId, reference, placement: "before"\|"after", expectVersion}` → `forge queue rank-before\|rank-after <id> <reference> --expect-version <n> --project <checkout> --json` |
 | `POST /api/queue/reorder` | `projectKey` or `projectDir` | FG-591: reorder, either one move (`{ticketId, to, expectVersion}`) or the whole order (`{order: [...], expectVersion}`) → `forge queue reorder … --expect-version <n> --project <checkout> --json`. The two forms are mutually exclusive |
+| `POST /api/projects/classify` | — | FG-745 (AC8): the operator classify/repair mutation for an `unclassified` (or misrecorded) workspace. Body `{dir, purpose, ownerIdentity?, run?, task?}` → `forge projects classify <dir> --purpose <purpose> --json [--owner-identity <id>] [--run <id>] [--task <id>]`. See [below](#post-apiprojectsclassify--the-operator-classifyrepair-mutation-fg-745) |
 
 ### `GET /api/queue` response shape (`QueueBoard`)
 
@@ -819,6 +834,14 @@ The dashboard's **only** write surface, and it still writes nothing itself: each
 **Responses.** `200 {ok: true, verb, result}` where `result` is the CLI's own `--json` object, verbatim. `400` a payload refusal, `403` cross-origin, `404` unknown project, `409` **the CLI's own refusal passed through concretely** (a stale `--expect-version`, a markdown-mode project, a not-ready ticket with its refinement proposal) with `{ok: false, verb, exitCode, error}`, `413` an oversize body, `415` a forgeable content type, `503` too many mutations in flight, `504` the child outran its timeout. Every response carries `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and none carries a CORS header.
 
 **Relationship to the FG-679 BD-7 guard.** BD-7 governs the *serving and polling* paths — the endpoints a browser hits on a timer, where an outbound call is a surprise. A named, guarded, operator-initiated mutation route is the case DEC-015 already accepted. `dashboard/src/fg679-serving-path-no-subprocess.integration.test.ts` is therefore neither **widened** to cover these routes (it would simply be red — they spawn a process by design) nor **narrowed** to excuse them; it keeps its own three paths and its `/api/in-flight` negative control, and a test in this ticket's suite asserts that over the guard's own source.
+
+### `POST /api/projects/classify` — the operator classify/repair mutation (FG-745)
+
+The Projects tab's only write route besides queue planning, and it shells out the same DEC-015 way: `forge projects classify <dir> --purpose <purpose> --json [--owner-identity <id>] [--run <id>] [--task <id>]` — the atomic, REFUSE-on-conflict claim — and writes no DB row itself. Implementation: `dashboard/src/server.ts` (`handleProjectsClassify`); reuses `guardBindAddress` / `guardMutationRequest` / `resolveForgeBinary` / `runForgeVerb` from `dashboard/src/queue-mutation.ts`, so it is refused by the same bind-address, `Sec-Fetch-Site`/`Origin`/`Host` provenance, and `Content-Type: application/json` guards [`POST /api/queue/*`](#post-apiqueue--the-queue-planning-writes-fg-591) documents above, in the same order, before any subprocess is resolved.
+
+**Payload.** Body at most 16 KiB, a JSON object. `dir` is required: an absolute path (`/…`), no leading `-`, no NUL, ≤ 4096 bytes — validated as a non-flag operand before it becomes argv, the same discipline the queue mutations apply. `purpose` must be one of `operator | disposable_clone | worktree | evidence_fixture | unclassified` (duplicated from the store's vocabulary deliberately: DEC-015 keeps this route off the store, so the CLI stays the authoritative validator and this is only a pre-subprocess sanity refusal). `ownerIdentity` / `run` / `task` are optional and, when present, must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`.
+
+**Responses.** `200 {ok: true, result}` where `result` is `forge projects classify`'s own `--json` object. `400` a payload refusal. `409` the CLI's own refusal passed through verbatim (`{ok: false, error}`) — notably `WorkspacePurposeConflictError`, when `dir` is already recorded with a different kind. `413` an oversize body, `415`/`403` the shared content-type/provenance guards, `504` the child outran its timeout. Every response carries `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, no CORS header.
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)
 
@@ -927,11 +950,12 @@ Returns `404` if the task is not found. On success, returns a JSON object with t
 
 The dashboard does NOT write to the DB or filesystem. All mutating actions shell out to the `forge` binary — the entry co-located with the dashboard, or `FORGE_BIN`, or `forge` on `$PATH` (see [`POST /api/queue/*`](#post-apiqueue--the-queue-planning-writes-fg-591) for the resolution order).
 
-Mutating commands the dashboard actually invokes today — the four FG-591 queue-planning routes, and nothing else:
+Mutating commands the dashboard actually invokes today — the four FG-591 queue-planning routes, plus the FG-745 projects-classify route, and nothing else:
 - `forge queue enqueue <id> --project <dir> --json [--note <text>]`
 - `forge queue dequeue <id> --project <dir> --json`
 - `forge queue rank-before | rank-after <id> <reference> --expect-version <n> --project <dir> --json`
 - `forge queue reorder <id> --to <n> | --order <id,id,…> --expect-version <n> --project <dir> --json`
+- `forge projects classify <dir> --purpose <kind> --json [--owner-identity <id>] [--run <id>] [--task <id>]` (FG-745, [above](#post-apiprojectsclassify--the-operator-classifyrepair-mutation-fg-745))
 
 Deliberately NOT invokable from the dashboard (FG-591 D2): `forge queue dispatcher arm | disarm | run`, `--max-active-runs`, `--lease-ttl`, and `forge queue cancel`. Those authorize or stop unattended container execution and stay CLI-only.
 
