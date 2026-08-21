@@ -175,7 +175,7 @@ function runCli(args: string[], overrides: Record<string, string> = {}): { statu
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-function readRecord(): { argv: string[]; cwd: string; env: Record<string, string> } {
+function readRecord(): { argv: string[]; cwd: string; env: Record<string, string>; pid: number } {
   assert.ok(existsSync(roots.record), "the fake claude recorded nothing — it was never launched");
   return JSON.parse(readFileSync(roots.record, "utf8"));
 }
@@ -193,19 +193,65 @@ async function waitFor(predicate: () => boolean, timeoutMs = 20_000): Promise<vo
   }
 }
 
+function processHasExited(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (err: unknown) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  // A killed child can briefly be a zombie while init reaps it. It has already
+  // exited and cannot write into roots.base, although kill(pid, 0) still succeeds.
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  return status.status !== 0 || status.stdout.trim().startsWith("Z");
+}
+
+async function reapProcessGroup(leader: ChildProcess, descendantPid?: number): Promise<void> {
+  assert.ok(leader.pid, "the launcher did not receive a process id");
+  // `detached` makes the launcher the leader of a new Unix process group. Killing
+  // the negative PID reaches the held provider child too; killing only the leader
+  // leaves that child briefly able to write inside this test's disposable root.
+  try {
+    process.kill(-leader.pid, "SIGKILL");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+  }
+  if (leader.exitCode === null && leader.signalCode === null) {
+    await new Promise<void>((resolve) => leader.once("exit", () => resolve()));
+  }
+  if (descendantPid !== undefined) {
+    await waitFor(() => processHasExited(descendantPid), 20_000);
+  }
+}
+
+async function removeRoots(): Promise<void> {
+  // force ignores missing entries, but not a concurrent final write. Descendants
+  // are reaped by the crash test above; this bounded retry only covers an in-flight
+  // filesystem operation already underway when the group was killed.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmSync(roots.base, { recursive: true, force: true });
+      return;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 4 || (code !== "ENOTEMPTY" && code !== "EBUSY")) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+}
+
 beforeEach(() => {
   roots = makeRoots();
   envSnapshot = Object.fromEntries(MANAGED_ENV.map((k) => [k, process.env[k]]));
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   for (const [key, value] of Object.entries(envSnapshot)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
   closeDb();
-  rmSync(roots.base, { recursive: true, force: true });
+  await removeRoots();
 });
 
 // ─── AC15: --explain inspects the effective choice and spawns NOTHING ────────
@@ -364,15 +410,21 @@ test("integ FG-576 AC7/D17: a launcher killed mid-session leaves a record that c
     cwd: roots.project,
     env: launchEnv({ FAKE_CLAUDE_MODE: "hold", FAKE_CLAUDE_READY: roots.ready }),
     stdio: "ignore",
+    detached: true,
   });
 
   try {
-    await waitFor(() => loadHeartbeats({ heartbeatsDir: roots.orchestrators }).length === 1, 60_000);
+    await waitFor(
+      () => loadHeartbeats({ heartbeatsDir: roots.orchestrators }).length === 1 && existsSync(roots.record),
+      60_000,
+    );
     assert.equal(loadHeartbeats({ heartbeatsDir: roots.orchestrators })[0]!.state, "live");
+    const heldProviderPid = readRecord().pid;
 
-    // The launcher dies with no chance to close anything — the crash case.
-    cli.kill("SIGKILL");
-    await new Promise<void>((r) => cli.on("exit", () => r()));
+    // The launcher dies with no chance to close anything — the crash case. Reap
+    // its whole group after the crash observation so the held provider cannot keep
+    // writing into roots.base while afterEach removes it.
+    await reapProcessGroup(cli, heldProviderPid);
 
     let after: ReturnType<typeof loadHeartbeats>[number] | undefined;
     await waitFor(() => {
@@ -396,11 +448,7 @@ test("integ FG-576 AC7/D17: a launcher killed mid-session leaves a record that c
     assert.equal(receipt.claimsRunning, true);
     assert.equal(receipt.launcherPid, cli.pid);
   } finally {
-    try {
-      cli.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
+    if (cli.exitCode === null && cli.signalCode === null) await reapProcessGroup(cli);
   }
 });
 
