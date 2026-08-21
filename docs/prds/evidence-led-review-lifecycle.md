@@ -1371,6 +1371,69 @@ actual boundary that cannot ship together.
 > bullet above are otherwise unaltered by this note. Operator-facing detail is
 > [Review coordinator](../concepts.md#review-coordinator).
 
+### FG-744 refinement (fork C) — trusted tier execution for a higher-tier cited assertion
+
+> **[SHIPPED 2026-08-21 (FG-744).]** The evidence-led recheck bound a `fix_now`
+> finding's resolution to the rechecker's own dispatch output — the review's
+> fast gate, typecheck plus unit `test`. When a fixer's cited assertion lived
+> in an integration or worktree tier instead (`*.integration.test.ts` /
+> `*.worktree.test.ts`), that dispatch structurally could not contain it, so
+> the finding recorded `not_executed`/`inconclusive` even though the assertion
+> existed, passed, and its own tier had gone green — every `demonstrated`
+> finding fixed above the fast gate hit this unconditionally. Of the forks
+> considered, the operator chose **fork C**: the recheck now EXECUTES the tier
+> the cited assertion lives in itself, so resolution rests on trusted local
+> execution rather than on an operator-supplied claim. The earlier
+> operator-supplied CI-evidence ingestion path is intentionally NOT built here
+> — a demonstrated trust bypass — and its safe replacement (authenticated
+> per-test CI evidence) is the separate, not-yet-built FG-751.
+>
+> **The trusted run is scoped, isolated, and candidate-bound.** When a fixer
+> names an executed assertion and lists a higher-tier file among its changed
+> files, the coordinator runs that tier itself, host-side, scoped to the file
+> — reproducing the exact `node --test` invocation
+> `scripts/run-integration-tests.sh` (integration) and the `test:worktree`
+> package script (worktree) use for that tier, since neither entry point can
+> be pointed at one file (`tierTestCommand` in
+> `src/cli/commands/review-wiring.ts`; pinned against the live tier
+> definitions by `fg744-tier-runner.test.ts` so the two cannot drift). Each
+> fixer-listed higher-tier file runs in ISOLATION rather than as a combined
+> set (RF-2/RF-4), so a resolution binds to the assertion's OWN test file: a
+> cited name appearing in more than one listed file is an ambiguous binding,
+> refused rather than guessed at, and one appearing in none of them leaves
+> nothing to bind to. The run is stamped with the candidate sha it executed at
+> (RF-3), and resolves nothing if that sha is not the recheck's current one —
+> a run bound to a different candidate is not evidence about this one, the
+> same rule every other candidate-bound resolution follows.
+>
+> **The tier run is fenced by the same clean-workspace-at-the-candidate check
+> Stages 1/7/9 verification use, both before it starts and after it finishes
+> (RF-1).** A workspace that is not clean at the candidate before the tier
+> runs cannot produce evidence about it, and the tier itself runs arbitrary
+> test code that can move HEAD or dirty the tree — so the post-run check is
+> re-evaluated on whatever output was captured, pass or fail, and a workspace
+> no longer clean at the candidate afterward is `blocked_environment`, never
+> an accepted result, even one that looks like a pass. Short of those refusal
+> arms the evidence-sufficiency bar is otherwise UNCHANGED: only a cited
+> assertion proven, in its own isolated run, to have executed and passed
+> resolves (`resolved`, `evidence_kind: regression_test`); a red assertion is
+> `still_present` coverage `executed` — the finding still present, never a
+> resolution; a skipped or absent one is `inconclusive` coverage
+> `not_executed`, exactly as every other arm of this lifecycle already
+> requires.
+>
+> **The seam is optional and additive.** `CoordinatorDeps.runTrustedTier` is
+> an optional dependency; a caller that wires none keeps the pre-FG-744
+> behavior unchanged — a higher-tier cited assertion still records
+> `not_executed` — so no existing caller had to grow a seam it does not
+> exercise. No new schema: a trusted tier run is ephemeral, threaded through
+> `RecheckContext.trustedTierRuns` and consumed inside the same
+> `ingestRecheck` pass that produces every other finding's `resolution`,
+> `coverage`, and `evidence_kind`; nothing new is persisted. The threat model,
+> the acceptance scenarios, and every scope bullet above are otherwise
+> unaltered by this note. Operator-facing detail is
+> [review-rechecker](../concepts.md#review-rechecker).
+
 ### Migration safety
 
 - Persist exactly one `review_mode` per run:

@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
+import { pinnedVerificationEnv } from "../../v2/host-readiness.js";
 import { applyOrchestratorBlock } from "./init.js";
 import { resolveCommitRange } from "../../v2/review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
@@ -548,6 +549,25 @@ function recheckerTask(ctx: RecheckContextIn): string {
     ),
     "```",
   ].join("\n");
+}
+
+/** FG-744 (fork C): the exact `node --test` runner each higher tier uses, scoped to a single
+ *  file — the SAME invocation `scripts/run-integration-tests.sh` (integration bulk) and the
+ *  `test:worktree` package script run, and the one forge-test reproduces when it narrows a tier
+ *  to one path (FG-695). Reproduced rather than shelled through those entry points because both
+ *  select their own file set (`$(find …)` / a k/N shard selector) and cannot be pointed at one
+ *  file. The integration tier adds `integration-build-preload.ts` so a scoped integration test
+ *  transpiles the src graph exactly as the bulk lane does; the worktree tier does not.
+ *  fg744-tier-runner.test.ts pins these against the live tier definitions so they cannot drift. */
+export function tierTestCommand(
+  tier: "integration" | "worktree",
+  files: readonly string[],
+): { cmd: string; args: string[] } {
+  const preload =
+    tier === "integration"
+      ? ["--import", "tsx", "--import", "./src/integration-build-preload.ts", "--import", "./src/test-setup.ts"]
+      : ["--import", "tsx", "--import", "./src/test-setup.ts"];
+  return { cmd: "node", args: [...preload, "--test", ...files] };
 }
 
 /** FG-649: the paths `git status --porcelain -z --untracked-files=all` reports as moved.
@@ -2025,6 +2045,45 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         ...dispatchedProtocol(res),
         ...(res.error !== undefined ? { error: res.error } : {}),
       };
+    },
+
+    // FG-744 (fork C): forge runs the tier that actually contains a fixer's cited assertion,
+    // host-side, at the candidate. This is the trusted LOCAL execution the recheck resolves on —
+    // no operator-supplied output is admitted (FG-751 owns authenticated CI evidence). The same
+    // candidate-checkout invariant Stages 1/7/9 verification runs under is enforced first: a
+    // workspace that is not clean AT the candidate cannot produce evidence about it, so it is a
+    // `blocked` environment fault, never a silent run against a different tree.
+    runTrustedTier: async ({ tier, testFiles, candidateSha }) => {
+      const refusal = workspaceRefusal(candidateSha);
+      if (refusal !== undefined) return { blocked: `${refusal.reason}: ${refusal.message}` };
+      const { cmd, args } = tierTestCommand(tier, testFiles);
+      let output: string;
+      try {
+        output = execFileSync(cmd, args, {
+          cwd: ctx.projectDir,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: pinnedVerificationEnv("review-recheck"),
+        });
+      } catch (e) {
+        // A NON-ZERO EXIT IS NOT A BLOCK. node:test exits non-zero when a test FAILS, and a
+        // red cited assertion is the finding still being present — real TAP output the recheck
+        // reads as `failed`, never a blocked environment. Only a spawn that produced NO output
+        // at all (the binary missing, the workspace unreadable) is an environment fault.
+        const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
+        const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+        if (out.trim() === "") return { blocked: (e as Error).message };
+        output = out;
+      }
+      // RF-1: the pre-run refusal proves the tree was the clean candidate BEFORE the tier ran, but
+      // the tier runs arbitrary test code that can move HEAD or dirty the tree. Re-confirm the
+      // candidate is still checked out clean AFTER the run — output captured from a tree the tier
+      // itself changed is not evidence about the candidate, so it is a `blocked` environment fault,
+      // never an accepted result. (Evaluated on the captured `output`, pass or fail: a failing
+      // assertion — the finding still present — is a legitimate result only if the tree held still.)
+      const postRefusal = workspaceRefusal(candidateSha);
+      if (postRefusal !== undefined) return { blocked: `${postRefusal.reason}: ${postRefusal.message}` };
+      return { runnerOutput: output };
     },
 
     shippingInput: async ({ review, candidateSha }) => {

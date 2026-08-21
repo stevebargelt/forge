@@ -626,3 +626,214 @@ test("FG-657: a lane covering EVERY test the claim names resolves it through the
   assert.match(a?.detail ?? "", /mandatory lane 'ci' executed/);
   assert.equal(r.returnsToDisposition, false);
 });
+
+// ─── FG-744 (fork C): trusted tier execution resolves a higher-tier assertion ────────
+//
+// This is the FG-737 RF-1 shape: a fixer's cited assertion lives in an INTEGRATION-tier test
+// the review's fast gate cannot execute. Under the fast-gate recheck the assertion is absent
+// from the runner output, so the finding records `not_executed` (see the OLD-behavior test
+// below). Fork C runs THAT tier itself and resolves on its own execution — the trusted local
+// proof — and NEVER admits a skipped/red/absent/unnamed run.
+
+const ASSERTION_744 = "the reconcile path guards a partial write";
+const INTEGRATION_EXECUTED = `TAP version 13\nok 1 - ${ASSERTION_744}\n1..1\n# pass 1`;
+
+/** The exact FG-737 RF-1 finding: demonstrated, its cited assertion in an integration test. The
+ *  rechecker's self-reported evidence is the FAST gate, which does not contain that assertion. */
+function tierEntry() {
+  return resolvedEntry("RF-1", {
+    evidence: {
+      kind: "regression_test",
+      test_name: ASSERTION_744,
+      test_file: "src/v2/fg737.integration.test.ts",
+      // The fast gate the rechecker ran cannot contain an integration assertion — it is absent.
+      runner_output: "TAP version 13\n1..0\n# fast unit gate: this assertion runs at the integration tier",
+    },
+  });
+}
+
+test("FG-744 / AC4: OLD behavior — a fast-gate recheck of an integration-tier assertion records not_executed", () => {
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    // No trusted tier run wired — the pre-FG-744 path.
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive", "the fast gate cannot contain the integration assertion");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("FG-744 / AC1+AC4: forge's trusted integration-tier run of the cited assertion resolves the finding, bound to the candidate", () => {
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts"],
+        candidateSha: SHA,
+        assertionFile: "src/v2/fg737.integration.test.ts",
+        runnerOutput: INTEGRATION_EXECUTED,
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "resolved", "forge's own tier execution is the trusted proof");
+  assert.equal(r.applications[0]?.coverage, "executed");
+  assert.equal(r.applications[0]?.evidenceKind, "regression_test");
+  assert.match(r.applications[0]?.detail ?? "", /executed and passed in forge's integration tier/);
+  assert.equal(r.returnsToDisposition, false);
+});
+
+test("FG-744 / AC3: a SKIPPED assertion in the trusted tier run never resolves", () => {
+  const skipped = `TAP version 13\nok 1 - ${ASSERTION_744} # SKIP no db\n1..1\n# skipped 1`;
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts"],
+        candidateSha: SHA,
+        assertionFile: "src/v2/fg737.integration.test.ts",
+        runnerOutput: skipped,
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+  assert.match(r.applications[0]?.detail ?? "", /SKIPPED/);
+});
+
+test("FG-744 / AC3: a RED (failing) assertion in the trusted tier run is the finding still present, never resolved", () => {
+  const red = `TAP version 13\nnot ok 1 - ${ASSERTION_744}\n1..1\n# fail 1`;
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts"],
+        candidateSha: SHA,
+        assertionFile: "src/v2/fg737.integration.test.ts",
+        runnerOutput: red,
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "still_present");
+  assert.equal(r.applications[0]?.coverage, "executed", "a red test RAN — that is executed coverage, but it never resolves");
+  assert.match(r.applications[0]?.detail ?? "", /FAILED/);
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("FG-744 / AC3: an ABSENT assertion (no fixer-listed file contains it) never resolves", () => {
+  // The fixer named an assertion that appears in NO listed higher-tier file, so the coordinator
+  // binds no `assertionFile`: the run printed a different test, and there is nothing that contains
+  // the cited assertion to bind the resolution to.
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts"],
+        candidateSha: SHA,
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+  assert.match(r.applications[0]?.detail ?? "", /contained the\s+cited assertion|no fixer-listed higher-tier file/);
+});
+
+test("FG-744 / AC3: a BLOCKED trusted tier run records blocked_environment coverage — never green", () => {
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts"],
+        candidateSha: SHA,
+        blocked: "workspace_dirty_at_candidate: uncommitted changes",
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive");
+  assert.equal(r.applications[0]?.coverage, "blocked_environment");
+});
+
+test("FG-744 / RF-3: a trusted run bound to a DIFFERENT candidate sha never resolves", () => {
+  // The run executed and the assertion passed — but at another candidate. A resolution is strictly
+  // bound to the exact current candidate; a run carried across a candidate move is not evidence
+  // about this one, so an otherwise-green trusted run resolves nothing.
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts"],
+        candidateSha: "a-stale-earlier-candidate",
+        assertionFile: "src/v2/fg737.integration.test.ts",
+        runnerOutput: INTEGRATION_EXECUTED,
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+  assert.match(r.applications[0]?.detail ?? "", /bound to candidate a-stale-earlier-candidate/);
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("FG-744 / RF-4: the cited assertion in MORE THAN ONE listed file is an ambiguous binding, never resolved", () => {
+  // A same-named passing assertion in an unrelated fixer-listed file cannot stand in for the one
+  // the finding names — forge cannot know which was meant, so it refuses rather than picking one.
+  const r = ingestRecheck(output({ rechecked: [tierEntry()] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
+    fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
+    trustedTierRuns: {
+      [`${REVIEW}/RF-1`]: {
+        tiers: ["integration"],
+        testFiles: ["src/v2/fg737.integration.test.ts", "src/v2/unrelated.integration.test.ts"],
+        candidateSha: SHA,
+        ambiguousFiles: ["src/v2/fg737.integration.test.ts", "src/v2/unrelated.integration.test.ts"],
+      },
+    },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+  assert.match(r.applications[0]?.detail ?? "", /appears in more than one fixer-listed higher-tier file/);
+  assert.equal(r.returnsToDisposition, true);
+});

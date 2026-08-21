@@ -34,8 +34,18 @@ export const SRC_DIR = here;
  *  every one of those fixed-depth walks lands on the repo root BY CONSTRUCTION —
  *  identically to running the same file under tsx from src/. A single-file bundle
  *  would collapse every module onto one import.meta.url and silently mis-resolve
- *  seeds/templates/docker/git-root; the per-file mirror is what preserves them. */
-export const INTEGRATION_BUILD_DIR = resolve(REPO_ROOT, ".forge-integration-build");
+ *  seeds/templates/docker/git-root; the per-file mirror is what preserves them.
+ *
+ *  FORGE_INTEGRATION_BUILD_DIR overrides the location (default byte-identical to
+ *  the sibling path above). A test that spawns a NESTED integration-tier `node
+ *  --test` sets it to a per-invocation dir so the nested preload's wipe + rebuild
+ *  never contends on the shard's shared `.forge-integration-build`. That override
+ *  MUST itself be a sibling of src/ at REPO_ROOT depth (e.g.
+ *  `<REPO_ROOT>/.forge-integration-build.<invocation-id>`) so the same fixed-depth
+ *  walks keep landing on the repo root; an arbitrary tmpdir would break them. */
+export const INTEGRATION_BUILD_DIR = process.env.FORGE_INTEGRATION_BUILD_DIR
+  ? resolve(process.env.FORGE_INTEGRATION_BUILD_DIR)
+  : resolve(REPO_ROOT, ".forge-integration-build");
 
 /** The node executable that runs the built CLI. */
 export const NODE_EXEC = process.execPath;

@@ -310,6 +310,30 @@ export function executedIdentityOf(ev: ResolutionEvidence): string[] {
   }
 }
 
+// ─── test-tier detection by filename suffix (FG-744) ────────────────────────
+
+/** The test tiers, keyed to the SAME filename-suffix convention the project's package.json
+ *  scripts select on: `test:worktree` finds `*.worktree.test.ts`, `test:integration` finds
+ *  `*.integration.test.ts`, and `test:unit` (the review's fast gate) excludes both. This is
+ *  not a second classifier — it names the one convention already in force so the recheck can
+ *  key a trusted tier run to the exact cited assertion without a scheme that could drift from
+ *  it. */
+export type TestTier = "fast" | "integration" | "worktree";
+
+export function testTierForFile(path: string): TestTier {
+  if (path.endsWith(".worktree.test.ts")) return "worktree";
+  if (path.endsWith(".integration.test.ts")) return "integration";
+  return "fast";
+}
+
+/** Is this a test file whose tier the review's fast gate (typecheck + unit `test`) does NOT
+ *  run? The fast gate structurally cannot contain an integration/worktree assertion, so a
+ *  recheck that binds a resolution from fast-gate output records `not_executed` for one even
+ *  though the assertion exists and passes at its own tier — the FG-744 defect. */
+export function isHigherTierTestFile(path: string): boolean {
+  return path.endsWith(".test.ts") && testTierForFile(path) !== "fast";
+}
+
 /** How one member of a cited list is named in a refusal. A blank member has no name to
  *  print, and printing the empty string reads as a test called nothing. */
 function memberLabel(names: readonly string[], index: number): string {
