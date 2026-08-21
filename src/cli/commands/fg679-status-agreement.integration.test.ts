@@ -25,7 +25,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deriveCurrentActivity } from "../../v2/current-activity.js";
+import { deriveCurrentActivity, withRetentionDisposition, type CurrentActivityWithRetention } from "../../v2/current-activity.js";
+import { resolveRetention } from "../../v2/retention-policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..", "..");
@@ -85,12 +86,18 @@ function forge(args: string[]): { status: number | null; stdout: string; stderr:
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-/** The derivation, read through a SEPARATE connection to the same store — the
- *  dashboard's position exactly. */
-function derived(scope: { runId?: string }): ReturnType<typeof deriveCurrentActivity> {
+/** The derivation, read through a SEPARATE connection to the same store, then annotated
+ *  with the FG-590 retention surface EXACTLY as both `forge status --json` and the
+ *  dashboard do — the shared `withRetentionDisposition` over the resolved policy (no
+ *  project retention override in this repo → env-over-defaults, identical to the CLI).
+ *  This is the dashboard's position exactly. The retention fields carry through to the
+ *  deep-equal below, so agreement stays byte-for-byte (FG-679/BD-9) with the FG-590
+ *  fields present on BOTH sides rather than dropped from the assertion. */
+function derived(scope: { runId?: string }): CurrentActivityWithRetention {
   const db = new Database(dbPath, { readonly: true });
   try {
-    return deriveCurrentActivity(db, { now: NOW, scope });
+    const activity = deriveCurrentActivity(db, { now: NOW, scope });
+    return withRetentionDisposition(activity, resolveRetention(undefined, process.env), NOW.getTime());
   } finally {
     db.close();
   }
@@ -98,7 +105,7 @@ function derived(scope: { runId?: string }): ReturnType<typeof deriveCurrentActi
 
 /** Everything except the wall-clock stamp, which is the one field that legitimately
  *  differs between two calls. */
-function comparable(activity: ReturnType<typeof deriveCurrentActivity>): unknown {
+function comparable(activity: CurrentActivityWithRetention): unknown {
   const { generatedAt: _ignored, ...rest } = activity;
   return rest;
 }
@@ -117,7 +124,7 @@ describe("FG-679 BD-9 — /status and the dashboard answer from ONE derivation",
   test("(a) a host launch running with no active agent task: `forge status --json` and the shared derivation agree exactly", () => {
     const res = forge(["status", "run-agree", "--json"]);
     assert.equal(res.status, 0, res.stderr);
-    const payload = JSON.parse(res.stdout) as { currentActivity: ReturnType<typeof deriveCurrentActivity> };
+    const payload = JSON.parse(res.stdout) as { currentActivity: CurrentActivityWithRetention };
     assert.ok(payload.currentActivity, "`forge status --json` carries the Current activity block");
     assert.deepEqual(comparable(payload.currentActivity), comparable(derived({ runId: "run-agree" })));
 
@@ -133,7 +140,7 @@ describe("FG-679 BD-9 — /status and the dashboard answer from ONE derivation",
 
   test("(b) a pending required check with no active agent task: both name the same sha and the same contexts", () => {
     const res = forge(["status", "run-agree", "--json"]);
-    const payload = JSON.parse(res.stdout) as { currentActivity: ReturnType<typeof deriveCurrentActivity> };
+    const payload = JSON.parse(res.stdout) as { currentActivity: CurrentActivityWithRetention };
     const fromDerivation = derived({ runId: "run-agree" });
 
     assert.deepEqual(payload.currentActivity.requiredCi, fromDerivation.requiredCi);
@@ -173,7 +180,7 @@ describe("FG-679 BD-9 — /status and the dashboard answer from ONE derivation",
   test("the host-wide `forge status --all` surface renders Current activity too, so /status can enumerate host-wide", () => {
     const res = forge(["status", "--all", "--json"]);
     assert.equal(res.status, 0, res.stderr);
-    const payload = JSON.parse(res.stdout) as { currentActivity: ReturnType<typeof deriveCurrentActivity> };
+    const payload = JSON.parse(res.stdout) as { currentActivity: CurrentActivityWithRetention };
     assert.deepEqual(comparable(payload.currentActivity), comparable(derived({})));
 
     const human = forge(["status", "--all"]);

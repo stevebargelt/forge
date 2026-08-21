@@ -14,46 +14,14 @@ import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
 import { promoteLaunchObservations } from "../../store/launch-observations.js";
-import { deriveCurrentActivity, renderCurrentActivityLines, type CurrentActivity, type HostLaunchActivity } from "../../v2/current-activity.js";
-import { isTerminalStatus } from "../../v2/launch.js";
-import { classifyRetention, resolveRetention, retentionDisposition, type RetentionDisposition, type RetentionPolicy } from "../../v2/retention-policy.js";
+import { deriveCurrentActivity, renderCurrentActivityLines, withRetentionDisposition } from "../../v2/current-activity.js";
+import { resolveRetention, type RetentionPolicy } from "../../v2/retention-policy.js";
 import { readRetentionConfig } from "../../backlog/config.js";
 
-// FG-590: annotate the host-launch buckets of a CurrentActivity with the SHARED
-// retention disposition so a retained-for-investigation resource is labeled distinctly
-// from an expired/eligible or leaked one — the SAME rule (retentionDisposition) the
-// automatic cleanup and the dashboard use, never a second hand-rolled classification.
-// A non-terminal (running) launch has no disposition (null): it is live work, never a
-// cleanup candidate. The resolved policy is surfaced too so an operator/orchestrator can
-// see the active retention windows. Computed over data currentActivity already produced —
-// no new tmux/docker probe is spent here.
-export function withRetentionDisposition(
-  activity: CurrentActivity,
-  policy: RetentionPolicy,
-  nowMs: number,
-): CurrentActivity & {
-  retentionPolicy: RetentionPolicy;
-  hostVerification: Array<HostLaunchActivity & { retentionDisposition: RetentionDisposition | null }>;
-  launches: Array<HostLaunchActivity & { retentionDisposition: RetentionDisposition | null }>;
-  unassociated: Array<HostLaunchActivity & { retentionDisposition: RetentionDisposition | null }>;
-} {
-  const annotate = (l: HostLaunchActivity): HostLaunchActivity & { retentionDisposition: RetentionDisposition | null } => {
-    let disposition: RetentionDisposition | null = null;
-    if (isTerminalStatus(l.recordedStatus)) {
-      const startedMs = Date.parse(l.startedAt);
-      const ageMs = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
-      disposition = retentionDisposition(classifyRetention({ kind: "launch", state: l.recordedStatus.state }), ageMs, policy);
-    }
-    return { ...l, retentionDisposition: disposition };
-  };
-  return {
-    ...activity,
-    retentionPolicy: policy,
-    hostVerification: activity.hostVerification.map(annotate),
-    launches: activity.launches.map(annotate),
-    unassociated: activity.unassociated.map(annotate),
-  };
-}
+// FG-590: the retention annotation is the SHARED `withRetentionDisposition` (in
+// current-activity.ts) so `forge status` and the dashboard cannot drift into labeling
+// differently. Re-exported for the FG-590 disposition test that already imports it here.
+export { withRetentionDisposition };
 
 export function registerStatus(program: Command): void {
   program

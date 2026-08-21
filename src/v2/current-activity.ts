@@ -59,7 +59,7 @@ import { basename } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { compareIdentity, identify } from "../util/path-identity.js";
 import { retargetProofIdentity } from "../store/legacy-path-attribution.js";
-import { isLaunchId, statusLine, type LaunchStatus } from "./launch.js";
+import { isLaunchId, isTerminalStatus, statusLine, type LaunchStatus } from "./launch.js";
 import { loadWorkflow } from "./loader.js";
 import type { Gate } from "./schema.js";
 import {
@@ -73,7 +73,7 @@ import {
   type LaunchPurpose,
 } from "../store/launch-observations.js";
 import { isTerminalReviewState } from "../store/reviews.js";
-import type { RetentionDisposition } from "./retention-policy.js";
+import { classifyRetention, retentionDisposition, type RetentionDisposition, type RetentionPolicy } from "./retention-policy.js";
 import {
   CI_WAIT_LIVE_WHERE,
   isCiWaitLive,
@@ -395,6 +395,52 @@ export type CurrentActivity = {
    *  project or run view would be inventing the very ownership BD-2 forbids. */
   unassociated: HostLaunchActivity[];
 };
+
+/** A CurrentActivity carrying the FG-590 retention surface: the resolved policy at top
+ *  level and a `retentionDisposition` on every host-launch row. This is the ONE shape
+ *  `forge status --json` and the dashboard both emit, so the two surfaces agree
+ *  byte-for-byte (FG-679/BD-9) rather than each annotating its own way. */
+export type CurrentActivityWithRetention = CurrentActivity & {
+  retentionPolicy: RetentionPolicy;
+  hostVerification: Array<HostLaunchActivity & { retentionDisposition: RetentionDisposition | null }>;
+  launches: Array<HostLaunchActivity & { retentionDisposition: RetentionDisposition | null }>;
+  unassociated: Array<HostLaunchActivity & { retentionDisposition: RetentionDisposition | null }>;
+};
+
+/** FG-590: annotate the host-launch buckets of a CurrentActivity with the SHARED
+ *  retention disposition so a retained-for-investigation resource is labeled distinctly
+ *  from an expired/eligible or leaked one — the SAME rule (retentionDisposition) the
+ *  automatic cleanup and both surfaces use, never a second hand-rolled classification.
+ *  A non-terminal (running) launch has no disposition (null): it is live work, never a
+ *  cleanup candidate. The resolved policy is surfaced too so an operator/orchestrator can
+ *  see the active retention windows. Computed over data currentActivity already produced —
+ *  no new tmux/docker probe is spent here.
+ *
+ *  This lives beside the derivation (not on either surface) so `forge status` and the
+ *  dashboard cannot drift into annotating differently (FG-679/BD-9). The derivation
+ *  itself stays clock/policy-free; this wrapper is where the clock and policy enter. */
+export function withRetentionDisposition(
+  activity: CurrentActivity,
+  policy: RetentionPolicy,
+  nowMs: number,
+): CurrentActivityWithRetention {
+  const annotate = (l: HostLaunchActivity): HostLaunchActivity & { retentionDisposition: RetentionDisposition | null } => {
+    let disposition: RetentionDisposition | null = null;
+    if (isTerminalStatus(l.recordedStatus)) {
+      const startedMs = Date.parse(l.startedAt);
+      const ageMs = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
+      disposition = retentionDisposition(classifyRetention({ kind: "launch", state: l.recordedStatus.state }), ageMs, policy);
+    }
+    return { ...l, retentionDisposition: disposition };
+  };
+  return {
+    ...activity,
+    retentionPolicy: policy,
+    hostVerification: activity.hostVerification.map(annotate),
+    launches: activity.launches.map(annotate),
+    unassociated: activity.unassociated.map(annotate),
+  };
+}
 
 function projectLabelOf(projectDir: string | null): string | null {
   // Deliberately the basename and nothing more. `projectPresentation` in the

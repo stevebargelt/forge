@@ -73,17 +73,15 @@ import {
   isLaunchId,
   observationIsFresh,
   statusLine,
+  withRetentionDisposition,
   type CurrentActivity,
   type CurrentActivityScope,
+  type CurrentActivityWithRetention,
 } from "@forge/current-activity";
-// FG-590: the ONE shared retention rule, imported rather than duplicated — the dashboard
-// labels a terminal host launch's disposition (retained-for-investigation vs expired vs
-// leaked) with the SAME function `forge status` and the automatic cleanup use.
+// FG-590: the ONE shared retention annotation `forge status` also uses — same function,
+// so the two surfaces carry the disposition AND the resolved policy identically (FG-679).
 import {
-  classifyRetention,
   resolveRetention,
-  retentionDisposition,
-  type RetentionDisposition,
   type RetentionPolicy,
 } from "@forge/retention-policy";
 
@@ -3531,24 +3529,10 @@ function activityScope(scope: ProjectScope, runId?: string): CurrentActivityScop
  *  construction, not two renderers). A running launch is live work, never a cleanup
  *  candidate → null. The policy is resolved from FORGE_* env over the code defaults (the
  *  dashboard is host-wide; the per-project config override is a `forge status` nicety). */
-export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: number = Date.now()): CurrentActivity {
+export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: number = Date.now()): CurrentActivityWithRetention {
   const activity = deriveCurrentActivity(db(), { now: new Date(nowMs), scope: activityScope(scope, runId) });
   const policy = resolveRetention(undefined, process.env);
-  const annotate = <T extends { recordedStatus: { state: string }; startedAt: string }>(l: T): T & { retentionDisposition: RetentionDisposition | null } => {
-    let disposition: RetentionDisposition | null = null;
-    if (l.recordedStatus.state !== "running") {
-      const startedMs = Date.parse(l.startedAt);
-      const ageMs = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
-      disposition = retentionDisposition(classifyRetention({ kind: "launch", state: l.recordedStatus.state }), ageMs, policy);
-    }
-    return { ...l, retentionDisposition: disposition };
-  };
-  return {
-    ...activity,
-    hostVerification: activity.hostVerification.map(annotate),
-    launches: activity.launches.map(annotate),
-    unassociated: activity.unassociated.map(annotate),
-  };
+  return withRetentionDisposition(activity, policy, nowMs);
 }
 
 /** FG-590: exported so a consumer/test can resolve the active retention policy the same
