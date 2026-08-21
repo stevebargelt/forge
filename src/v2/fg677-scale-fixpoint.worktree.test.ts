@@ -72,6 +72,8 @@ test("FG-677 scale: 50 clean workspaces/branches + 40 published worktrees reclai
     recordPublicationIntent({ attemptId: id, projectKey: "proj", canonicalDir: projectDir, runId: RUN_ID, taskId: `task-${i}`, target: "local", leaseTtlMs: 60_000 });
     updatePublicationAttempt(id, { state: "published", worktreePath: publicationWorktreeDir(id, 0), rebuildCount: 0 });
     const dir = publicationWorktreeDir(id, 0);
+    // RF-2: a REAL git worktree so the sweep's git-fact attestation passes.
+    git(projectDir, "worktree", "add", dir, "-b", `forge/publish/${id}/r0`);
     mkdirSync(join(dir, "node_modules"), { recursive: true });
     pubDirs.push(dir);
   }

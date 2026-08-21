@@ -7,6 +7,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, rmSync, mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -23,18 +24,29 @@ const tmpDirs: string[] = [];
 const NEVER_HELD = (): CwdHolderResult => ({ held: false });
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+function git(cwd: string, ...args: string[]): void { execFileSync("git", args, { cwd, stdio: "ignore" }); }
+function initRepo(dir: string): void {
+  git(dir, "init", "-b", "main"); git(dir, "config", "user.email", "t@forge.test"); git(dir, "config", "user.name", "Forge Test");
+  writeFileSync(join(dir, "README.md"), "# repo\n"); git(dir, "add", "."); git(dir, "commit", "-m", "initial");
+}
 function tmpProject(): string {
   const d = mkdtempSync(join(tmpdir(), "fg677-pub-proj-"));
   tmpDirs.push(d);
+  initRepo(d);
   return d;
 }
 
-/** Create a registered attempt in the given terminal/in-flight state, and its worktree
- *  dir on disk (with a node_modules subtree so reclamation is proven to remove it). */
+/** Create a registered attempt in the given terminal/in-flight state, and its REAL git
+ *  worktree on disk (with a node_modules subtree so reclamation is proven to remove it).
+ *  RF-2: the sweep only reclaims a directory git itself attests is a registered worktree, so
+ *  the fixture must add a genuine worktree, not a bare directory. */
 function makeAttempt(id: string, state: PublicationState): string {
-  recordPublicationIntent({ attemptId: id, projectKey: "proj", canonicalDir: tmpProject(), runId: "run-p", taskId: `task-${id}`, target: "local", leaseTtlMs: 60_000 });
+  const projectDir = tmpProject();
+  recordPublicationIntent({ attemptId: id, projectKey: "proj", canonicalDir: projectDir, runId: "run-p", taskId: `task-${id}`, target: "local", leaseTtlMs: 60_000 });
   updatePublicationAttempt(id, { state, worktreePath: publicationWorktreeDir(id, 0), rebuildCount: 0 });
   const dir = publicationWorktreeDir(id, 0);
+  mkdirSync(PUBLICATIONS_DIR, { recursive: true });
+  git(projectDir, "worktree", "add", dir, "-b", `forge/publish/${id}/r0`);
   mkdirSync(join(dir, "node_modules", "left-pack"), { recursive: true });
   writeFileSync(join(dir, "node_modules", "left-pack", "index.js"), "module.exports = 1;");
   return dir;
@@ -128,6 +140,45 @@ test("FG-677 publication: DRY-RUN removes nothing and proposes exactly what the 
   const real = sweepPublicationWorktrees({ cwdGuard: NEVER_HELD });
   assert.ok(!existsSync(published));
   assert.equal(dispositionFor(real.publicationWorktrees, published)!.action, "removed");
+});
+
+test("FG-677/RF-2: a published attempt whose on-disk dir is NOT a git worktree is RETAINED ownership_ambiguous, never force-removed", () => {
+  // The registry row co-attests the attempt and the dir name matches the shape — but the
+  // directory is a bare directory git never registered (a name collision / unattested
+  // orphan). Deletion authority requires a GIT-FACT, so a name + attempt row is never
+  // enough: the sweep must retain it rather than force-remove it.
+  const projectDir = tmpProject();
+  recordPublicationIntent({ attemptId: "pub-bare", projectKey: "proj", canonicalDir: projectDir, runId: "run-p", taskId: "task-bare", target: "local", leaseTtlMs: 60_000 });
+  updatePublicationAttempt("pub-bare", { state: "published", worktreePath: publicationWorktreeDir("pub-bare", 0), rebuildCount: 0 });
+  const dir = publicationWorktreeDir("pub-bare", 0);
+  mkdirSync(join(dir, "node_modules"), { recursive: true }); // a bare dir — NOT `git worktree add`
+
+  const { publicationWorktrees } = sweepPublicationWorktrees({ cwdGuard: NEVER_HELD });
+
+  assert.ok(existsSync(dir), "an unattested (non-worktree) directory is never force-removed");
+  assert.equal(dispositionFor(publicationWorktrees, dir)!.action, "retained");
+  assert.equal(dispositionFor(publicationWorktrees, dir)!.reason, "ownership_ambiguous");
+});
+
+test("FG-677/RF-6: a project-scoped sweep reclaims the owning project's worktree and NEVER touches another project's", () => {
+  const projectA = tmpProject();
+  const projectB = tmpProject();
+  const mk = (id: string, projectDir: string): string => {
+    recordPublicationIntent({ attemptId: id, projectKey: "proj", canonicalDir: projectDir, runId: "run-p", taskId: `task-${id}`, target: "local", leaseTtlMs: 60_000 });
+    updatePublicationAttempt(id, { state: "published", worktreePath: publicationWorktreeDir(id, 0), rebuildCount: 0 });
+    const dir = publicationWorktreeDir(id, 0);
+    git(projectDir, "worktree", "add", dir, "-b", `forge/publish/${id}/r0`);
+    return dir;
+  };
+  const dirA = mk("pub-scope-a", projectA);
+  const dirB = mk("pub-scope-b", projectB);
+
+  const { publicationWorktrees } = sweepPublicationWorktrees({ cwdGuard: NEVER_HELD, scopeToProjectDir: projectA });
+
+  assert.ok(!existsSync(dirA), "the owning project's worktree is reclaimed");
+  assert.equal(dispositionFor(publicationWorktrees, dirA)!.action, "removed");
+  assert.ok(existsSync(dirB), "another project's worktree is NEVER retired by a project-scoped sweep");
+  assert.equal(dispositionFor(publicationWorktrees, dirB), undefined, "and it is not even reported in the scoped pass");
 });
 
 test("FG-677 publication scale: >=36 published attempts reclaim with a 2nd-pass fixpoint and no node_modules left", () => {

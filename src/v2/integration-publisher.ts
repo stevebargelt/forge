@@ -47,6 +47,7 @@ import {
   type PublicationState,
 } from "../store/publications.js";
 import { projectIdentity, describeRefusal, describeWait } from "./project-identity.js";
+import { provenSameOnly } from "../util/path-identity.js";
 // FG-677 (FG-631 absorbed): the retention timing authority, the report vocabulary, and the
 // active-process cwd guard applied at the publication-worktree destroy chokepoint.
 import { DEFAULT_RETENTION_POLICY, retentionWindowMs, resolveRetention, type RetentionPolicy } from "./retention-policy.js";
@@ -1300,6 +1301,28 @@ const IN_FLIGHT_PUBLICATION_STATES: ReadonlySet<PublicationState> = new Set<Publ
   "publishing",
 ]);
 
+/** RF-2: git's OWN attestation that `dir` is a registered worktree of the attested
+ *  project. `git worktree list --porcelain` in the attempt's canonical project dir is the
+ *  git-fact; each `worktree <path>` line is compared to `dir` under FG-693 proven-physical
+ *  path identity (provenSameOnly), so a name collision, or a bare directory git never
+ *  registered, is never matched. Any failure to obtain the fact (project gone, not a repo)
+ *  returns false — unproven ownership fails closed. The registry row is the co-attestation;
+ *  neither the `<attemptId>-r<n>` name shape nor the branch name is ever deletion authority. */
+function gitAttestsPublicationWorktree(canonicalDir: string, dir: string): boolean {
+  let out: string;
+  try {
+    out = git(canonicalDir, ["worktree", "list", "--porcelain"]);
+  } catch {
+    return false; // no git-fact obtainable → not proven → retain
+  }
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("worktree ")) continue;
+    const wt = line.slice("worktree ".length).trim();
+    if (wt !== "" && provenSameOnly(wt, dir)) return true;
+  }
+  return false;
+}
+
 function reclaimPublicationDir(canonicalDir: string, attemptId: string, rebuild: number, dir: string): boolean {
   // Best-effort git worktree remove + branch -D through the same chokepoint finalize uses.
   removeCandidateWorktree(canonicalDir, attemptId, rebuild);
@@ -1326,6 +1349,11 @@ export function sweepPublicationWorktrees(
     now?: Date;
     policy?: RetentionPolicy;
     cwdGuard?: (dir: string) => CwdHolderResult;
+    // RF-6: scope the sweep to the OWNING project. When set, a directory whose attesting
+    // attempt belongs to a different project (proven-different canonical dir) is out of
+    // scope and left entirely untouched — a project-scoped closeout must never retire
+    // another project's publication worktrees. Absent → host-global (every project).
+    scopeToProjectDir?: string;
   } = {},
 ): PublicationSweepResult {
   const publicationWorktrees: CleanupDisposition[] = [];
@@ -1363,6 +1391,15 @@ export function sweepPublicationWorktrees(
         continue;
       }
 
+      // RF-6: out of scope for a project-scoped closeout — the attesting attempt belongs to
+      // a DIFFERENT project. Skip it entirely (never reported, never touched) so one
+      // project's command/wave can never retire another project's publication worktree. The
+      // destructive-class projection (provenSameOnly) treats an unprovable identity as
+      // out-of-scope, so an ambiguous canonical dir is left alone rather than swept.
+      if (opts.scopeToProjectDir !== undefined && !provenSameOnly(attempt.canonicalDir, opts.scopeToProjectDir)) {
+        continue;
+      }
+
       if (IN_FLIGHT_PUBLICATION_STATES.has(attempt.state)) {
         // In-flight / liveness-ambiguous — never race a live publish. Retained.
         publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "publication_in_flight", { dryRun, detail: attempt.state }));
@@ -1387,6 +1424,17 @@ export function sweepPublicationWorktrees(
       const holderResult = cwdGuard(dir);
       if (holderResult.held === true || holderResult.held === "unprobed") {
         publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "active_process_cwd", { dryRun, holder: describeCwdHolders(holderResult) }));
+        continue;
+      }
+
+      // RF-2: PROVE the on-disk directory IS the attested Git worktree before ANY removal —
+      // a git-fact (git worktree list attests it, under FG-693 proven-physical path identity)
+      // plus the registry-row co-attestation (the attempt above). A publication-shaped name
+      // plus an attempt row is never deletion authority; an unattested or name-colliding
+      // directory is ownership_ambiguous and retained (fail closed). Applied before the
+      // dry-run branch so the proposal matches the real pass exactly.
+      if (!gitAttestsPublicationWorktree(attempt.canonicalDir, dir)) {
+        publicationWorktrees.push(retainedDisposition("publication_worktree", dir, "ownership_ambiguous", { dryRun, detail: attempt.state }));
         continue;
       }
 

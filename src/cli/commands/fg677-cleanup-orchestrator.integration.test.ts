@@ -65,6 +65,9 @@ function setupFixture(projectDir: string): { wtPath: string; pubDir: string; bou
   recordPublicationIntent({ attemptId: "att-1", projectKey: "proj", canonicalDir: projectDir, runId: RUN_ID, taskId: "task-a", target: "local", leaseTtlMs: 60_000 });
   updatePublicationAttempt("att-1", { state: "published", worktreePath: publicationWorktreeDir("att-1", 0), rebuildCount: 0 });
   const pubDir = publicationWorktreeDir("att-1", 0);
+  // RF-2: a REAL git worktree — the sweep reclaims only what git attests as a registered
+  // worktree of this project, so a bare directory would be retained ownership_ambiguous.
+  git(projectDir, "worktree", "add", pubDir, "-b", "forge/publish/att-1/r0");
   mkdirSync(join(pubDir, "node_modules"), { recursive: true });
 
   mkdirSync(hostReadinessDir(), { recursive: true });
@@ -157,6 +160,34 @@ test("FG-677 orchestrator: a NON-TERMINAL run is not closed out (run_not_termina
 
   assert.ok(existsSync(wtPath), "a non-terminal run's workspace is never touched");
   assert.ok(result.report.gitWorkspaces.some((d) => d.reason === "run_not_terminal"));
+});
+
+test("FG-677/RF-1: a live reader appearing at the readiness chokepoint fails closed — record RETAINED readiness_live_reader, not pruned", () => {
+  const projectDir = tmpDir("fg677-orch-proj-");
+  initRepo(projectDir);
+  const { pubDir, boundRec } = setupFixture(projectDir);
+
+  // TOCTOU: the publication dir is NOT held when the publication sweep retires it (first
+  // probe of that path), but a dispatch begins reading its readiness record before the
+  // readiness prune (the second probe). The prune must re-probe liveness at ITS OWN
+  // chokepoint and, finding a reader, retain the record — never prune assuming no reader.
+  const probeCount = new Map<string, number>();
+  const racingCwdGuard = (p: string): CwdHolderResult => {
+    const n = (probeCount.get(p) ?? 0) + 1;
+    probeCount.set(p, n);
+    if (p === pubDir && n >= 2) return { held: true, holders: [{ pid: 4242, description: "live host-verification reader", cwd: p }] };
+    return { held: false };
+  };
+
+  const result = performAutomaticCleanup({
+    projectDir, runId: RUN_ID,
+    containerAlive: NO_CONTAINER, cwdGuard: racingCwdGuard,
+    listContainers: DOCKER_DOWN, tmux: NO_LAUNCH_TMUX,
+  });
+
+  assert.ok(!existsSync(pubDir), "the publication worktree was still retired (it was not held at ITS chokepoint)");
+  assert.ok(existsSync(boundRec), "the readiness record is retained — a live reader raced in after the workspace was retired");
+  assert.ok(result.report.readinessRecords.some((r) => r.path === boundRec && r.action === "retained" && r.reason === "readiness_live_reader"));
 });
 
 test("FG-677 orchestrator: a race making the container LIVE before deletion fails closed (active_mount)", () => {

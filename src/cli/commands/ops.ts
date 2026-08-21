@@ -14,7 +14,7 @@ import { defaultContainerReap, defaultContainerList, defaultContainerExitInfo, d
 import { getContainerCausalEvidenceFromEvents, type ContainerCausalEvidence, type ContainerExitInfo } from "../../v2/failure-kind.js";
 import { classifyRetention, reapEligible, resolveRetention, type RetentionPolicy } from "../../v2/retention-policy.js";
 import { readRetentionConfig } from "../../backlog/config.js";
-import { sweepTerminalLaunches, type LaunchSweepResult, type TmuxRunner } from "../../v2/launch.js";
+import { sweepTerminalLaunches, findProcessesHoldingCwd, type LaunchSweepResult, type TmuxRunner } from "../../v2/launch.js";
 import { launchIdsOwnedByOtherProjects } from "../../store/launch-observations.js";
 // FG-677: the terminal-run closeout sections + the unified report vocabulary.
 import { getRun, listRuns } from "../../store/runs.js";
@@ -545,9 +545,11 @@ function performRunCloseout(opts: {
       report.sectionErrors.gitWorkspaces = cleanupErrorMessage(e);
     }
 
-    // ── publication-worktree section (host-global sweep, project-agnostic on disk) ──
+    // ── publication-worktree section (RF-6: scoped to the OWNING project) ──
+    // The sweep is scoped to opts.projectDir so a project-scoped closeout never retires
+    // another project's publication worktrees (cross-project blast radius).
     try {
-      const res = sweepPublicationWorktrees({ dryRun, ...(opts.now ? { now: opts.now } : {}), policy: opts.policy, ...(opts.cwdGuard ? { cwdGuard: opts.cwdGuard } : {}) });
+      const res = sweepPublicationWorktrees({ dryRun, scopeToProjectDir: opts.projectDir, ...(opts.now ? { now: opts.now } : {}), policy: opts.policy, ...(opts.cwdGuard ? { cwdGuard: opts.cwdGuard } : {}) });
       report.publicationWorktrees.push(...res.publicationWorktrees);
       for (const d of res.publicationWorktrees) if (d.action === "removed") retired.add(d.path);
     } catch (e) {
@@ -556,8 +558,22 @@ function performRunCloseout(opts: {
   }
 
   // ── readiness-record prune (tied to the workspaces retired above) ──
+  // RF-1: a record is pruned only when its bound workspace was positively retired this pass
+  // AND a POSITIVE live-reader re-probe at THIS chokepoint proves no dispatch can still
+  // consume it. Liveness is re-proven here against fresh state — never assumed absent — and
+  // a held OR unprobed workspace is treated as ALIVE and retained (fail closed). The probe
+  // is a fresh cwd-holder check (a host verification reader runs in the workspace), the same
+  // signal the git-workspace and publication chokepoints use.
+  const cwdGuard = opts.cwdGuard ?? ((p: string) => findProcessesHoldingCwd(p));
   try {
-    const res = pruneReadinessRecords({ dryRun, workspaceRetired: (w) => retired.has(w) });
+    const res = pruneReadinessRecords({
+      dryRun,
+      workspaceRetired: (w) => retired.has(w),
+      hasLiveReader: (w) => {
+        const held = cwdGuard(w);
+        return held.held === true || held.held === "unprobed";
+      },
+    });
     report.readinessRecords.push(...res.readinessRecords);
   } catch (e) {
     report.sectionErrors.readiness = cleanupErrorMessage(e);

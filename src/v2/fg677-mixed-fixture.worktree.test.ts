@@ -84,6 +84,9 @@ test("FG-677 mixed: disposable artifacts removed while unique/dirty/active/ambig
     updatePublicationAttempt(id, { state, worktreePath: publicationWorktreeDir(id, 0), rebuildCount: 0 });
     if (ageDays > 0) db.prepare("UPDATE publication_attempts SET updated_at = ? WHERE attempt_id = ?").run(new Date(Date.now() - ageDays * DAY_MS).toISOString(), id);
     const dir = publicationWorktreeDir(id, 0);
+    // RF-2: a REAL git worktree — the sweep reclaims only what git attests as a registered
+    // worktree, so a bare directory would (correctly) be retained ownership_ambiguous.
+    git(projectDir, "worktree", "add", dir, "-b", `forge/publish/${id}/r0`);
     mkdirSync(join(dir, "node_modules"), { recursive: true });
     return dir;
   };
