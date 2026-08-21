@@ -116,7 +116,8 @@ import {
 import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult, ReviewDiffSizeUnit } from "./review-diff.js";
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
-import { ingestRecheck } from "./review-recheck.js";
+import { ingestRecheck, type TrustedTierRun } from "./review-recheck.js";
+import { isHigherTierTestFile, testTierForFile } from "./review-evidence.js";
 import { assessShippingReview, type ShippingAssessment, type ShippingInput } from "./review-shipping.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -452,6 +453,20 @@ export type CoordinatorDeps = {
     dependencyEnvironment?: DependencyEnvironmentReceipt;
     protocol?: { role: string; sha256: string; taskId: string };
   }>;
+  /** FG-744 (fork C): run the tier that actually contains a fixer's cited assertion — an
+   *  integration (`*.integration.test.ts`) or worktree (`*.worktree.test.ts`) tier the review's
+   *  fast gate does not run — scoped to that test file at the candidate, host-side. Returns the
+   *  runner output forge captured, or a `blocked` reason when the environment could not execute
+   *  it. This is the trusted LOCAL execution fork C resolves on; NO operator-supplied output is
+   *  admitted (authenticated per-test CI evidence is FG-751). OPTIONAL: a caller that wires no
+   *  tier runner keeps the pre-FG-744 behavior — a higher-tier assertion the fast gate cannot
+   *  contain records `not_executed` — so no existing test has to grow a seam it does not exercise;
+   *  the real wiring always provides it. */
+  runTrustedTier?: (ctx: {
+    tier: "integration" | "worktree";
+    testFiles: string[];
+    candidateSha: string;
+  }) => Awaitable<{ runnerOutput?: string; blocked?: string }>;
   shippingInput: (ctx: {
     review: Review;
     candidateSha: string;
@@ -2109,6 +2124,11 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   // a `resolved` verdict is bound to THIS assertion having executed — not merely rendered into the
   // rechecker's free-text claim, where nothing checked that the recheck ran the named test.
   const fixerAssertions: Record<string, string> = {};
+  // FG-744 (fork C): the higher-tier test file(s) a fixer's cited assertion lives in, per
+  // finding id — an integration/worktree file the review's fast gate cannot execute. Keyed
+  // ONLY when the fixer also named an executed assertion: without a named identity there is
+  // nothing for the trusted tier run to bind its resolution to.
+  const fixerTierFiles: Record<string, string[]> = {};
   for (const b of snap.batches) {
     for (const r of fixBatchResults(b.id)) {
       if (r.evidence === undefined && r.executedAssertion === undefined) continue;
@@ -2119,7 +2139,52 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
         r.executedAssertion !== undefined
           ? `${r.evidence ?? ""}\n\nexecuted assertion: ${r.executedAssertion}`.trim()
           : (r.evidence as string);
-      if (r.executedAssertion !== undefined) fixerAssertions[r.findingId] = r.executedAssertion;
+      if (r.executedAssertion !== undefined) {
+        fixerAssertions[r.findingId] = r.executedAssertion;
+        const higher = (r.filesChanged ?? []).filter(isHigherTierTestFile);
+        if (higher.length > 0) fixerTierFiles[r.findingId] = [...new Set(higher)];
+      }
+    }
+  }
+
+  // FG-744 (fork C): TRUSTED TIER EXECUTION. When a fixer's cited assertion lives in an
+  // integration/worktree test file, the review's fast gate cannot execute it, so forge runs
+  // THAT tier itself (scoped to the file) at the candidate and resolves on its own execution —
+  // the only trusted proof. Keyed by finding id and threaded into ingestion, where it is
+  // authoritative for those findings. A caller that wired no `runTrustedTier` keeps the
+  // pre-FG-744 behavior (the higher-tier assertion records `not_executed`), so this is skipped
+  // wholesale when the seam is absent.
+  const trustedTierRuns: Record<string, TrustedTierRun> = {};
+  if (deps.runTrustedTier !== undefined && Object.keys(fixerTierFiles).length > 0) {
+    const runTrustedTier = deps.runTrustedTier;
+    // One run per distinct (tier, file-set) — several findings can share a test file, and the
+    // tier is deterministic in the candidate, so re-running it per finding would only burn time.
+    const cache = new Map<string, { runnerOutput?: string; blocked?: string }>();
+    for (const [findingId, files] of Object.entries(fixerTierFiles)) {
+      const byTier = new Map<"integration" | "worktree", string[]>();
+      for (const file of files) {
+        const tier = testTierForFile(file) as "integration" | "worktree";
+        byTier.set(tier, [...(byTier.get(tier) ?? []), file]);
+      }
+      const tiers: string[] = [];
+      const outputs: string[] = [];
+      let blocked: string | undefined;
+      for (const [tier, tierFiles] of byTier) {
+        const key = `${tier}::${[...tierFiles].sort().join(",")}`;
+        let res = cache.get(key);
+        if (res === undefined) {
+          res = await runTrustedTier({ tier, testFiles: tierFiles, candidateSha: candidate });
+          cache.set(key, res);
+        }
+        tiers.push(tier);
+        if (res.blocked !== undefined) blocked = res.blocked;
+        if (res.runnerOutput !== undefined) outputs.push(res.runnerOutput);
+      }
+      trustedTierRuns[findingId] = {
+        tiers,
+        testFiles: files,
+        ...(blocked !== undefined ? { blocked } : { runnerOutput: outputs.join("\n") }),
+      };
     }
   }
 
@@ -2205,7 +2270,13 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
     };
   }
 
-  const ingestion = ingestRecheck(dispatch.result, { reviewId, candidateSha: candidate, expected, fixerAssertions });
+  const ingestion = ingestRecheck(dispatch.result, {
+    reviewId,
+    candidateSha: candidate,
+    expected,
+    fixerAssertions,
+    trustedTierRuns,
+  });
   if (!ingestion.ok) {
     return { transition, status: "refused", message: ingestion.refusal };
   }

@@ -24,6 +24,7 @@ import {
   classifyRecheckCoverage,
   executedIdentityOf,
   ranTestNames,
+  resolveTestExecution,
   validateResolutionEvidence,
   type CoverageOutcome,
   type ResolutionEvidenceKind,
@@ -110,6 +111,27 @@ export type RecheckIngestion =
     }
   | { ok: false; refusal: string };
 
+/** FG-744 (fork C): forge's OWN execution of the tier that actually contains a fixer's cited
+ *  assertion — an integration (`*.integration.test.ts`) or worktree (`*.worktree.test.ts`) tier
+ *  the review's fast gate does not run. The fast gate the rechecker runs structurally cannot
+ *  contain such an assertion, so binding a resolution from its output records `not_executed`
+ *  even though the assertion exists and passes at its own tier. This is the trusted LOCAL
+ *  execution that replaces that fast-gate output for the finding it covers. The only trusted
+ *  proof is forge running the tier itself; no operator-supplied output is ever admitted here
+ *  (authenticated per-test CI evidence is FG-751, a separate ticket). */
+export type TrustedTierRun = {
+  /** The tier(s) forge executed for this finding (integration/worktree). */
+  tiers: string[];
+  /** The higher-tier test file(s) the run was scoped to. */
+  testFiles: string[];
+  /** The combined runner output forge captured. Undefined only when `blocked` is set. */
+  runnerOutput?: string;
+  /** Set when forge could not execute the tier at all — an environment fault. Routes the
+   *  finding to `blocked_environment` coverage, exactly as a rechecker-declared block does,
+   *  so the stage stops with nothing written rather than recording a false verdict. */
+  blocked?: string;
+};
+
 export type RecheckContext = {
   reviewId: string;
   candidateSha: string;
@@ -121,6 +143,12 @@ export type RecheckContext = {
    *  `inconclusive`/`not_executed`, never resolved on a DIFFERENT test than the one remediation
    *  identified. Absent for a finding the fixer named no assertion for (a non-demonstrated one). */
   fixerAssertions?: Record<string, string>;
+  /** FG-744 (fork C): forge's OWN trusted tier execution, keyed by finding id, for a finding
+   *  whose fixer-cited assertion lives in a tier the fast gate does not run. When present for a
+   *  finding, THIS local execution — not the rechecker's self-reported runner_output — is the
+   *  authority for that finding's resolution: it resolves ONLY on proof the fixer's exact cited
+   *  assertion EXECUTED and PASSED here, at this candidate. See TrustedTierRun. */
+  trustedTierRuns?: Record<string, TrustedTierRun>;
 };
 
 /** Ingest a rechecker's output, host-side.
@@ -190,6 +218,20 @@ export function ingestRecheck(raw: unknown, ctx: RecheckContext): RecheckIngesti
 
   const applications: RecheckApplication[] = [];
   for (const { finding, entry } of resolved) {
+    // FG-744 (fork C): forge ran the tier that actually contains this finding's cited
+    // assertion. That LOCAL execution is the authority — not the rechecker's self-reported
+    // runner_output, which comes from the fast gate that structurally cannot contain an
+    // integration/worktree assertion (so it would record `not_executed` for one that exists
+    // and passes). The finding resolves ONLY on proof the fixer's EXACT cited assertion
+    // executed and passed here, bound to this candidate; a skipped, red, absent or unnamed
+    // assertion never resolves. The rechecker's own verdict for this id is superseded by
+    // forge's execution, exactly because the only trusted proof is forge running the tier.
+    const trusted = ctx.trustedTierRuns?.[finding.id];
+    if (trusted !== undefined) {
+      applications.push(applyTrustedTierRun(finding, trusted, ctx.fixerAssertions?.[finding.id]));
+      continue;
+    }
+
     if (entry.result !== "resolved") {
       // FG-664: THE COVERAGE RECORDED HERE IS CLASSIFIED, NEVER ASSUMED. This arm used to
       // push `coverage: "executed"` as a constant, so a lane that could not run a single
@@ -297,6 +339,78 @@ export function ingestRecheck(raw: unknown, ctx: RecheckContext): RecheckIngesti
     newFindings: out.new_findings,
     returnsToDisposition: applications.some((a) => a.resolution !== "resolved") || out.new_findings.length > 0,
     toleratedRootKeys: toleratedRootKeys(raw, RECHECK_ROOT_KEYS),
+  };
+}
+
+/** FG-744 (fork C): decide a finding from forge's OWN trusted tier run. The evidence-sufficiency
+ *  bar is UNCHANGED — only a proven execution of the exact cited assertion resolves; a blocked
+ *  environment, a skipped test, a red (failed) test, an absent one, or a run with no fixer-named
+ *  assertion to bind resolves NOTHING. A regression_test that executed and passed satisfies every
+ *  reachability, so no proportionality arm is needed here. */
+function applyTrustedTierRun(
+  finding: ReviewFinding,
+  trusted: TrustedTierRun,
+  named: string | undefined,
+): RecheckApplication {
+  const where = `${trusted.tiers.join("+")} tier (${trusted.testFiles.join(", ")})`;
+
+  if (trusted.blocked !== undefined) {
+    // The environment could not run the tier. `blocked_environment` coverage is never green
+    // and never resolved — the coordinator STOPS the stage on it, so nothing is recorded as
+    // present or absent from a lane that could not run.
+    return {
+      findingId: finding.id,
+      findingRef: finding.findingRef,
+      resolution: "inconclusive",
+      coverage: "blocked_environment",
+      detail:
+        `${finding.findingRef}: forge could not execute the ${where} at the candidate (${trusted.blocked}) — ` +
+        `coverage is blocked_environment, never green and never resolved.`,
+    };
+  }
+
+  // The fast gate cannot contain this assertion, so a tier run with no fixer-named assertion to
+  // bind proves nothing about THIS finding — there is no identity to check executed.
+  if (named === undefined || named.trim() === "") {
+    return {
+      findingId: finding.id,
+      findingRef: finding.findingRef,
+      resolution: "inconclusive",
+      coverage: "not_executed",
+      detail:
+        `${finding.findingRef}: forge executed the ${where} but the fixer named no executed assertion to bind the ` +
+        `resolution to — recorded inconclusive, not resolved on an unnamed test.`,
+    };
+  }
+
+  const { execution, test } = resolveTestExecution(trusted.runnerOutput ?? "", named);
+  if (execution === "executed") {
+    const detail = `'${named}' executed and passed in forge's ${where} run at the candidate`;
+    return {
+      findingId: finding.id,
+      findingRef: finding.findingRef,
+      resolution: "resolved",
+      evidenceKind: "regression_test",
+      evidence: detail,
+      coverage: "executed",
+      detail,
+    };
+  }
+
+  // A RED assertion is the finding still being present — it RAN, so its coverage is `executed`,
+  // but it never resolves. A skipped or absent one never ran at all.
+  return {
+    findingId: finding.id,
+    findingRef: finding.findingRef,
+    resolution: execution === "failed" ? "still_present" : "inconclusive",
+    coverage: execution === "failed" ? "executed" : "not_executed",
+    detail:
+      execution === "failed"
+        ? `${finding.findingRef}: '${test}' FAILED in forge's ${where} run at the candidate — a red assertion is ` +
+          `the finding still being present, never a resolution.`
+        : `${finding.findingRef}: the fixer's cited assertion '${named}' ` +
+          `${execution === "skipped" ? "SKIPPED" : "did not appear"} in forge's ${where} run at the candidate — ` +
+          `a ${execution === "skipped" ? "skipped test" : "test that never ran"} never resolves a finding.`,
   };
 }
 

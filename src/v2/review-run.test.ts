@@ -982,6 +982,81 @@ test("FG-649 / RF-8: a completed review cycle never re-dispatches either resolve
   );
 });
 
+test("FG-744 / AC1+AC4: the recheck EXECUTES the integration tier of a fixer's cited assertion and resolves on that trusted run", async () => {
+  // FG-737 RF-1 shape: the fixer's cited assertion lives in an integration test the review's
+  // fast gate cannot run, and the rechecker's self-reported evidence is that fast gate — which
+  // structurally cannot contain the assertion. Under the OLD behavior that recorded
+  // `not_executed`; fork C runs the integration tier itself and resolves on that trusted
+  // execution, bound to the exact candidate.
+  const tierCalls: Array<{ tier: string; testFiles: string[]; candidateSha: string }> = [];
+  const ASSERTION = "the reconcile path guards a partial write";
+  const INTEGRATION_FILE = "src/v2/fg737-reconcile.integration.test.ts";
+
+  const h = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded, proven at the integration tier",
+          files_changed: ["src/v2/reconcile.ts", INTEGRATION_FILE],
+          evidence: "added the named integration regression test",
+          executed_assertion: ASSERTION,
+        })),
+      },
+    }),
+    // The rechecker ran the FAST gate; its output cannot contain the integration assertion.
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-1",
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: {
+            kind: "regression_test",
+            test_name: ASSERTION,
+            test_file: INTEGRATION_FILE,
+            runner_output: "TAP version 13\n1..0\n# the fast unit gate does not run integration tests",
+          },
+        })),
+        new_findings: [],
+      },
+    }),
+    // Forge's OWN trusted execution of the integration tier — the assertion executes and passes.
+    runTrustedTier: (ctx) => {
+      tierCalls.push({ tier: ctx.tier, testFiles: ctx.testFiles, candidateSha: ctx.candidateSha });
+      return { runnerOutput: `TAP version 13\nok 1 - ${ASSERTION}\n1..1\n# pass 1` };
+    },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.status, "advanced");
+
+  // AC1: the recheck actually executed the INTEGRATION tier, scoped to the cited test file,
+  // at the candidate — not a fast-gate runner that structurally could not contain it.
+  assert.equal(tierCalls.length, 1, "forge ran the trusted tier exactly once");
+  assert.equal(tierCalls[0]?.tier, "integration");
+  assert.deepEqual(tierCalls[0]?.testFiles, [INTEGRATION_FILE]);
+  assert.equal(tierCalls[0]?.candidateSha, h.head());
+
+  // AC4: the finding reaches `resolved`, bound to the exact candidate.
+  const resolved = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1") as ReviewFinding;
+  assert.equal(resolved.resolution, "resolved", "the trusted integration-tier run is the proof");
+  assert.equal(resolved.resolvedSha, h.head());
+  assert.equal(resolved.resolutionEvidenceKind, "regression_test");
+});
+
 test("FG-639 / RF-8: the store-level guard still holds — a scope_change cannot clear a carried finding's proof", () => {
   // The FG-649 narrowing above means a resolved finding is not normally re-carried at all, so
   // this store-level exclusion is now defence in depth rather than the first line. It is still
