@@ -435,7 +435,14 @@ test("integ FG-576 AC7/D17: a launcher killed mid-session leaves a record that c
     }, 60_000);
     assert.ok(after, "the launcher heartbeat record must remain available for orphan classification");
     // Classified by PROCESS IDENTITY, not by elapsed heartbeat time: the record is
-    // seconds old, and it is still correctly dead.
+    // seconds old, and it is still correctly dead. Prove the heartbeat is actually
+    // RECENT — well inside any interaction-staleness window — so `orphaned/dead` here
+    // can ONLY be a pid-death verdict and never an elapsed-time one (AC2/D17).
+    const heartbeatAgeMs = Date.now() - Date.parse(after.lastSeen);
+    assert.ok(
+      heartbeatAgeMs >= 0 && heartbeatAgeMs < 5 * 60_000,
+      `the settled record's heartbeat must be recent, not stale — age ${heartbeatAgeMs}ms`,
+    );
     assert.equal(after.state, "orphaned");
     assert.equal(after.isLive, false);
     assert.equal(after.processLiveness, "dead");
