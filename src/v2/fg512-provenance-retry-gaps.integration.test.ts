@@ -38,7 +38,7 @@ import { failTask } from "./failure-kind.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { gate } from "./gate.js";
-import { retry, RetryDispatchKindUnknownError, FanoutChildRetryError, RetryNotAllowedError } from "./retry.js";
+import { retry, RetryDispatchKindUnknownError, FanoutChildRetryError, RedReviewRetryError, RetryNotAllowedError } from "./retry.js";
 import { taskDispatchKind } from "./run-kind.js";
 import { isOnRejectRecoveryTask } from "./ready-queue.js";
 import type { Workflow } from "./schema.js";
@@ -170,7 +170,7 @@ afterEach(() => {
 
 // ── Gap 1: RETRY through each stamped row CLASS ──────────────────────────────
 
-test("FG-512 gap1 (red): retrying a runner-stamped RED row routes through the workflow-step path, not ad-hoc", async () => {
+test("FG-512 gap1 (red)/FG-629: a runner-stamped RED row classifies as a workflow step (not ad-hoc) — and is therefore REFUSED, not re-dispatched", async () => {
   const dir = projectDir();
   const wf: Workflow = {
     name: "fg512g-red",
@@ -231,15 +231,18 @@ steps:
   crashRow(red);
   const failedRed = getTask(red.id)!;
   const run = getRun(runId)!;
+  // The FG-512 point survives: a stamped red is a workflow step, NOT an ad-hoc
+  // invoke row — which is exactly why FG-629 refuses it (an ad-hoc red re-dispatches
+  // directly; a workflow-step red would otherwise mint a duplicate primary).
   assert.equal(taskDispatchKind(failedRed, run).kind, "workflow_step", "a stamped red classifies as a workflow step");
 
-  const out = await retry(red.id);
-  assert.equal(out.adHoc, undefined, "the retried red is a workflow step — left to `forge next`, not ad-hoc re-dispatched");
-  const retried = getTask(out.newTask.id)!;
-  assert.equal(retried.status, "pending");
-  assert.equal(retried.parentId, undefined, "retry mints a PRIMARY row (runNext.dispatchStep only reuses pending primaries)");
-  assert.equal(retried.taskPackage.dispatchSource, "workflow", "provenance is carried onto the retried row");
-  assert.equal(taskDispatchKind(retried, run).kind, "workflow_step", "the retried row still routes as a workflow step");
+  const before = tasksForRun(runId).map((t) => t.id);
+  await assert.rejects(() => retry(red.id), (e: unknown) => {
+    assert.ok(e instanceof RedReviewRetryError, `expected RedReviewRetryError, got ${e}`);
+    assert.equal((e as RedReviewRetryError).primaryId, red.parentId, "the refusal names the primary the red reviewed");
+    return true;
+  });
+  assert.deepEqual(tasksForRun(runId).map((t) => t.id), before, "no row minted — refused before any write (no duplicate primary)");
 });
 
 test("FG-512 gap1 (fanout child): retry stays REFUSED regardless of provenance; --force proceeds as a workflow step", async () => {
@@ -263,6 +266,30 @@ test("FG-512 gap1 (fanout child): retry stays REFUSED regardless of provenance; 
       },
     ],
   };
+  // FG-629 RF-1: retry()'s classifier must be able to LOAD this workflow to prove the
+  // child is a genuine fanout_child (not a red_review) — otherwise it fails CLOSED and
+  // refuses even under --force. Persist the YAML to disk so the classification is real
+  // and --force correctly overrides a PROVEN fanout child (this test's actual point).
+  const workflowDir = join(dir, ".forge", "workflows");
+  mkdirSync(workflowDir, { recursive: true });
+  writeFileSync(join(workflowDir, "fg512g-fanout.yml"), `name: fg512g-fanout
+description: seed then fan out
+inputs: []
+steps:
+  - id: seed
+    agent: engineer
+    gate: auto
+  - id: spread
+    agent: engineer
+    gate: auto
+    depends_on: [seed]
+    fanout:
+      from_upstream:
+        step: seed
+        array_key: items
+        input_key: item
+      failure_mode: continue
+`);
   const { runId } = startRun({ workflow: wf, title: "fg512g fanout", inputs: {}, projectDir: dir });
   await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, items: ["a", "b"] }) });
   await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });

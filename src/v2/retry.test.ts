@@ -12,6 +12,7 @@ import {
   retry,
   RetryNotAllowedError,
   FanoutChildRetryError,
+  RedReviewRetryError,
   OrderedFanoutParentRetryError,
   OrderedWaveReDriveUnavailableError,
   reapRetainedContainer,
@@ -664,13 +665,17 @@ test("FG-688: integration_blocked's final step is a re-drive, not `forge retry <
   assert.match(d.advice ?? "", /rebase the worker's branch/);
 });
 
-// FG-527: the fanout-child guard classifies through classifyTaskLineage, not the
-// legacy `red-` role-name prefix. A red review — whether or not its agent name
-// starts with `red-` — is `red_review`, so retrying it is ALLOWED; only a genuine
-// `fanout_child` is refused (see the fanout-child test above). The build step of
-// the retry-fixture declares both a `red-`-prefixed red (red-security) and one
-// that is NOT prefixed (shipping-reviewer), so these two cells exercise both.
-test("retry: a RED reviewer child (red-security, `red-`-prefixed) is red_review, not a fanout child — retry allowed", async () => {
+// FG-629: a workflow-step red reviewer (classifier kind `red_review`, whether or not
+// its agent name starts with `red-`) is NOT independently retryable. Retrying it used
+// to mint a fresh parentId-undefined primary (see the git history of these two cells,
+// which asserted exactly that) — which dispatchSingleStep then reuses as the phase's
+// primary and runs under the STEP's agent/prompt, producing a duplicate artifact and
+// a fresh red wave. `forge retry` now REFUSES with RedReviewRetryError, naming the
+// primary the red reviewed and the through-the-primary recovery, and writes no row.
+// The build step of the retry-fixture declares both a `red-`-prefixed red
+// (red-security) and one that is NOT prefixed (shipping-reviewer), so these two cells
+// exercise both classification paths.
+test("retry (FG-629): a RED reviewer child (red-security, `red-`-prefixed) is refused — no duplicate primary minted", async () => {
   insertTask({
     id: "primary-with-red", runId: RUN.id, phase: "build", agentRole: "engineer", status: "complete",
     taskPackage: { taskId: "primary-with-red", runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
@@ -681,17 +686,36 @@ test("retry: a RED reviewer child (red-security, `red-`-prefixed) is red_review,
     taskPackage: { taskId: "red-child", runId: RUN.id, phase: "build", role: "red-security", inputs: {}, composedSystemPrompt: "" },
     createdAt: "2026-05-30T00:00:00Z",
   });
+  const before = tasksForRun(RUN.id).map((t) => t.id);
 
-  const out = await retry("red-child");
-  assert.equal(out.newTask.status, "pending");
-  assert.equal(out.newTask.parentId, undefined);
+  await assert.rejects(() => retry("red-child"), (e: unknown) => {
+    assert.ok(e instanceof RedReviewRetryError, `expected RedReviewRetryError, got ${e}`);
+    assert.equal((e as RedReviewRetryError).primaryId, "primary-with-red", "the refusal names the primary the red reviewed");
+    assert.match((e as RedReviewRetryError).message, /forge gate primary-with-red/, "and points recovery through the primary's gate");
+    return true;
+  });
+  assert.deepEqual(tasksForRun(RUN.id).map((t) => t.id), before, "no row created — refused before any write");
 });
 
-test("retry (FG-527): a failed shipping-reviewer red on a fanout step — NO `red-` prefix — is red_review, so retry is allowed", async () => {
-  // The behavior change this ticket ships: the legacy prefix heuristic classified
-  // this as a fanout child and threw FanoutChildRetryError; the classifier calls it
-  // red_review (the `build` step declares `shipping-reviewer` as a red), so the
-  // retry proceeds and mints a fresh primary.
+test("retry (FG-629): --force does NOT override a red_review refusal — there is no coherent forced 'mint a primary from a red'", async () => {
+  insertTask({
+    id: "primary-force", runId: RUN.id, phase: "build", agentRole: "engineer", status: "complete",
+    taskPackage: { taskId: "primary-force", runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-30T00:00:00Z",
+  });
+  insertTask({
+    id: "red-force", runId: RUN.id, parentId: "primary-force", phase: "build", agentRole: "red-security", status: "failed", error: "boom",
+    taskPackage: { taskId: "red-force", runId: RUN.id, phase: "build", role: "red-security", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-30T00:00:00Z",
+  });
+
+  await assert.rejects(() => retry("red-force", { force: true }), RedReviewRetryError);
+});
+
+test("retry (FG-629): a failed shipping-reviewer red on a fanout step — NO `red-` prefix — is red_review, so retry is refused", async () => {
+  // The classifier calls this red_review (the `build` step declares
+  // `shipping-reviewer` as a red), so it goes through the SAME FG-629 refusal as a
+  // `red-`-prefixed red — the name prefix never enters into it.
   insertTask({
     id: "primary-with-sr", runId: RUN.id, phase: "build", agentRole: "engineer", status: "complete",
     taskPackage: { taskId: "primary-with-sr", runId: RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
@@ -702,10 +726,25 @@ test("retry (FG-527): a failed shipping-reviewer red on a fanout step — NO `re
     taskPackage: { taskId: "sr-child", runId: RUN.id, phase: "build", role: "shipping-reviewer", inputs: {}, composedSystemPrompt: "" },
     createdAt: "2026-05-30T00:00:00Z",
   });
+  const before = tasksForRun(RUN.id).map((t) => t.id);
 
-  const out = await retry("sr-child");
-  assert.equal(out.newTask.status, "pending", "shipping-reviewer red is retryable — no FanoutChildRetryError");
-  assert.equal(out.newTask.parentId, undefined, "retry mints a fresh primary, not a parented child");
+  await assert.rejects(() => retry("sr-child"), (e: unknown) => {
+    assert.ok(e instanceof RedReviewRetryError, `expected RedReviewRetryError, got ${e}`);
+    assert.equal((e as RedReviewRetryError).primaryId, "primary-with-sr");
+    return true;
+  });
+  assert.deepEqual(tasksForRun(RUN.id).map((t) => t.id), before, "no row created — refused before any write");
+});
+
+test("retry (FG-629): an ad-hoc `forge invoke` red (dispatchSource=invoke) is NOT a red_review — its direct re-dispatch is untouched", async () => {
+  // The refusal keys on classifier kind red_review, which an invoke-attached red
+  // (adhoc_invoke, phase `task`, no parent) never is — so the FG-507 direct
+  // re-dispatch of a `forge invoke red-wide` task still plans an ad-hoc dispatch.
+  adHocFailedTask("adhoc-red-fg629");
+
+  const out = await retry("adhoc-red-fg629");
+  assert.ok(out.adHoc !== undefined, "an ad-hoc invoke red re-dispatches directly, not through a red_review refusal");
+  assert.equal(out.newTask.status, "pending");
 });
 
 // ── FG-492: reap-before-retry hygiene ────────────────────────────────────────

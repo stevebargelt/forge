@@ -4,6 +4,7 @@ import {
   dispatchRetriedAdHocTask,
   RetryNotAllowedError,
   FanoutChildRetryError,
+  RedReviewRetryError,
   PublishedTaskRetryError,
   AdHocRedispatchUnavailableError,
   RetryDispatchKindUnknownError,
@@ -79,6 +80,7 @@ export function registerRetry(program: Command): void {
         }
         if (
           e instanceof FanoutChildRetryError ||
+          e instanceof RedReviewRetryError ||
           e instanceof PublishedTaskRetryError ||
           e instanceof AdHocRedispatchUnavailableError ||
           e instanceof RetryDispatchKindUnknownError
