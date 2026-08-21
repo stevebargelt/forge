@@ -681,6 +681,45 @@ const ALLOWLIST: Allow[] = [
       "disposition and nothing reads it to decide a transition; the next pass re-derives the same deferral from the same " +
       "gc.pid and appends it then, deduped per (task, reason) so repeated reconciles stay at fixpoint.",
   },
+  // ── reconcile.ts: FG-677's terminal-run closeout git-workspace section ──────
+  // disposeRunGitWorkspaces is the SAME append-only, once-per-(task,reason) reaper as the
+  // FG-356 loop above, on the closeout's manual/dry-run surface. Its writes carry the exact
+  // same crash reasoning: the irreversible half (the fs delete inside reapTaskWorkspace) is
+  // gated on proof; these event appends are provenance nothing reads to decide a transition,
+  // and a crash on either side re-derives the same disposition from disk truth on the next
+  // pass (absent path → no-op) with no separate ledger to keep consistent.
+  {
+    file: "v2/reconcile.ts",
+    fn: "disposeRunGitWorkspaces",
+    call: "logEvent",
+    near: "task.workspace_retained",
+    reason:
+      "FG-677: the retention record for a workspace the closeout REFUSED to dispose of (uncaptured work, a live-process " +
+      "cwd, a live mount, or ambiguous ownership) — append-only, deduped per (task, reason). The refusal is the " +
+      "conservative outcome, so a crash on either side changes nothing on disk; the next pass re-derives the same refusal " +
+      "and appends the event then, which is what keeps repeated closeouts at fixpoint.",
+  },
+  {
+    file: "v2/reconcile.ts",
+    fn: "disposeRunGitWorkspaces",
+    call: "logEvent",
+    near: "task.workspace_reaped",
+    reason:
+      "FG-677: the disposal record written AFTER the workspace is already gone from disk (the fs delete happened inside " +
+      "reapTaskWorkspace, gated on proof) — append-only provenance with no paired status write. A crash before the append " +
+      "leaves a reaped tree with no event, and the next pass finds the path absent and no-ops: the only loss is a line of " +
+      "provenance about a workspace proven to hold nothing unrecovered. Nothing reads it to decide a transition.",
+  },
+  {
+    file: "v2/reconcile.ts",
+    fn: "disposeRunGitWorkspaces",
+    call: "logEvent",
+    near: "task.workspace_reap_deferred",
+    reason:
+      "FG-677: the closeout's record that a clone's disposal was POSTPONED (parent mid-gc) — append-only, deduped per " +
+      "(task, reason), and the deferral is the conservative outcome (nothing on disk changes on either side). The next " +
+      "pass re-derives the same deferral and appends it then, so repeated closeouts stay at fixpoint.",
+  },
   // ── runNext.ts: the PRE-container dispatch path ─────────────────────────────
   // FG-530's covered surface is runNext's POST-container finalize path — the
   // sequence that turns an agent's result into lifecycle state. Everything below

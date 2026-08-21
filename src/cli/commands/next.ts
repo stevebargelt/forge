@@ -7,9 +7,32 @@ import { validateCredsForNewRun } from "../../util/creds.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { runNext, type RunNextResult } from "../../v2/runNext.js";
 import { formatRunFailure } from "../../v2/ready-queue.js";
-import { resolveSeedGeneration } from "../../v2/seed-generation.js";
+import { resolveSeedGeneration, type SeedGeneration } from "../../v2/seed-generation.js";
+import type { Workflow } from "../../v2/schema.js";
 import { promoteLaunchObservations } from "../../store/launch-observations.js";
 import { performAutomaticCleanup } from "./ops.js";
+
+/** Best-effort terminal-run closeout. The sweep is never the point of `forge next`, so a
+ *  cleanup problem never breaks the command that hosts it. */
+function closeoutTerminalRun(o: { projectDir?: string; runId: string }): void {
+  try { performAutomaticCleanup(o); } catch { /* the sweep is never the point of this command */ }
+}
+
+/** RF-5: run the wave, THEN close out — never before. The closeout MUST follow the wave that
+ *  can make the run terminal; ordering it earlier (as next.ts:59 once did) means a run
+ *  terminalized by THIS wave is left with its disposable Git artifacts un-reconciled at this
+ *  wave boundary — and nothing re-runs `forge next` on a now-terminal run to converge them.
+ *  Extracted with injectable deps so the ordering is directly testable. */
+export async function runWaveThenCloseout(
+  args: { runId: string; projectDir: string; workflow: Workflow; seedGeneration: SeedGeneration | null },
+  deps: { runNext?: typeof runNext; closeout?: (o: { projectDir?: string; runId: string }) => void } = {},
+): Promise<RunNextResult> {
+  const runNextFn = deps.runNext ?? runNext;
+  const closeout = deps.closeout ?? closeoutTerminalRun;
+  const result = await runNextFn({ runId: args.runId, workflow: args.workflow, seedGeneration: args.seedGeneration });
+  closeout({ projectDir: args.projectDir, runId: args.runId });
+  return result;
+}
 
 // FG-585: a truthful one-line failure detail for `forge next` — names the
 // phase(s) that failed and the phase(s) that could never dispatch as a result.
@@ -46,16 +69,12 @@ export function registerNext(program: Command): void {
           const run = getRun(runId);
           if (!run) throw new Error(`Run not found: ${runId}`);
 
-          // FG-590: retire terminal launch tmux sessions and expired retained task
-          // containers at the wave boundary — the daemon-free cleanup mechanism. Best
-          // effort and swallowed exactly like the promotion sweep above: cleanup is never
-          // the point of `forge next`, and it never removes a running or non-terminal
-          // resource (its destroy chokepoints re-probe liveness). Scoped to this run's
-          // project for containers; the launch sweep is host-global (launches are host
-          // resources) and only ever removes past-retention terminal launches.
-          try { performAutomaticCleanup({ projectDir: run.projectDir ?? undefined }); } catch { /* the sweep is never the point of this command */ }
-
+          // RF-5: a run already terminal at entry is closed out here — nothing dispatches,
+          // so this is the wave boundary that must converge its disposable Git artifacts
+          // (and it is the crash-safe fixpoint if a prior wave's closeout was interrupted).
+          // Best effort and swallowed: cleanup is never the point of `forge next`.
           if (run.status === "abandoned" || run.status === "complete" || run.status === "failed") {
+            closeoutTerminalRun({ projectDir: run.projectDir ?? undefined, runId });
             console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);
             return;
           }
@@ -70,7 +89,10 @@ export function registerNext(program: Command): void {
           // under a mixed/incomplete/flat surface.
           const seedGeneration = resolveSeedGeneration();
           const workflow = loadWorkflow(run.workflow, { projectDir, seedGeneration });
-          const result = await runNext({ runId, workflow, seedGeneration });
+          // RF-5: dispatch the wave, THEN close out — the closeout follows the transition
+          // that may make this run terminal, so a run terminalized by this very wave has its
+          // disposable Git artifacts reconciled at this boundary rather than skipped.
+          const result = await runWaveThenCloseout({ runId, projectDir, workflow, seedGeneration });
 
           if (result.dispatchedSteps.length === 0) {
             console.log(`Run ${runId}: nothing ready to dispatch.`);

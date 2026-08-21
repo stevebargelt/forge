@@ -146,6 +146,41 @@ rule: `within_retention_for_investigation` (deliberately kept), `expired_eligibl
 prompt window). A retained-for-investigation resource is never shown as a leak, and a leak
 is never shown as still-useful evidence.
 
+## Terminal-run closeout (FG-677)
+
+`forge ops cleanup` is the **terminal-run closeout**: one idempotent, crash-safe operation
+that reconciles every disposable Git workspace, generated branch, publication worktree, and
+host readiness record a durably-terminal run created. It **owns** those four resource classes
+(absorbing the FG-631 publication-worktree and FG-632 readiness policies) and additionally
+**reports** the FG-590 tmux-launch and container disposition without re-running it. It runs
+automatically at the `forge next` wave boundary and on demand via the command; there is no
+daemon. Full operator guide: [`how-to-terminal-cleanup.md`](how-to-terminal-cleanup.md).
+
+**What it removes vs retains.** It removes only artifacts it can positively prove disposable
+and retains everything else with a named reason and a concrete recovery action. Retention
+reasons include `active_process_cwd` (a live process — including the long-lived tmux server —
+holds the directory as its working directory; the holder is named), `active_mount` (a live
+container still has the workspace mounted, probed via docker, never inferred from task
+status), `ownership_ambiguous` (no attesting registry row, or — for a publication worktree —
+git itself does not attest the directory as a registered worktree of the owning project;
+registry row and path shape are each never authority alone),
+`publication_in_flight`, `readiness_live_reader`, `within_retention_for_investigation`, plus
+the content proofs `uncommitted_work` / `unmerged_commits` / `branch_uncaptured` /
+`submodules_present`. An artifact that cannot be probed is retained, never guessed disposable.
+
+**Dry-run.** `forge ops cleanup --dry-run` is inventory-only: it mutates nothing and prints
+the exact proposed disposition and proof for every artifact, matching what the subsequent
+real pass performs (absent intervening state change).
+
+**Branch safety.** A generated branch is deleted only when its commits are proven captured by
+Forge-owned published/merged state; the `forge/<runId>/<taskId>` name shape never authorizes
+deletion.
+
+**Crash-safety.** Killing the closeout between the filesystem delete, the git/branch &
+registry prune, and the durable record converges truthfully on the next pass and reaches a
+fixpoint — each convergence model reconciles from disk truth with no separate ledger to keep
+consistent.
+
 ## Stream Deck First Page Ideas
 
 - Needs Me: open dashboard filtered to human action required.
