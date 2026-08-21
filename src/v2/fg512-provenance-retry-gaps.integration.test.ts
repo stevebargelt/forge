@@ -266,6 +266,30 @@ test("FG-512 gap1 (fanout child): retry stays REFUSED regardless of provenance; 
       },
     ],
   };
+  // FG-629 RF-1: retry()'s classifier must be able to LOAD this workflow to prove the
+  // child is a genuine fanout_child (not a red_review) — otherwise it fails CLOSED and
+  // refuses even under --force. Persist the YAML to disk so the classification is real
+  // and --force correctly overrides a PROVEN fanout child (this test's actual point).
+  const workflowDir = join(dir, ".forge", "workflows");
+  mkdirSync(workflowDir, { recursive: true });
+  writeFileSync(join(workflowDir, "fg512g-fanout.yml"), `name: fg512g-fanout
+description: seed then fan out
+inputs: []
+steps:
+  - id: seed
+    agent: engineer
+    gate: auto
+  - id: spread
+    agent: engineer
+    gate: auto
+    depends_on: [seed]
+    fanout:
+      from_upstream:
+        step: seed
+        array_key: items
+        input_key: item
+      failure_mode: continue
+`);
   const { runId } = startRun({ workflow: wf, title: "fg512g fanout", inputs: {}, projectDir: dir });
   await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, items: ["a", "b"] }) });
   await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });

@@ -14,10 +14,11 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
+import { getRun } from "../store/runs.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
-import { retry, RedReviewRetryError } from "./retry.js";
+import { retry, RedReviewRetryError, RetryDispatchKindUnknownError } from "./retry.js";
 import { gate } from "./gate.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
@@ -187,6 +188,47 @@ test("FG-629: retrying a crashed workflow-step red is refused, minting no duplic
     after.filter((t) => t.parentId === undefined && t.phase === "build").length,
     1,
     "still exactly ONE primary in phase build — the retry did not plant a second one",
+  );
+});
+
+// FG-629 RF-1: the refusal above proves a red is refused when its workflow LOADS. The
+// open hole was the opposite: when the workflow will NOT load, the classifier that
+// proves red_review can't run, `isRedReviewChild` returns false, and the only guard
+// left — FanoutChildRetryError — is force-BYPASSABLE. So a red with --force fell
+// through to the primary-minting code. This drives a genuine dispatched red, THEN
+// breaks the workflow's load (a project-override YAML whose declared name mismatches,
+// which loadWorkflow rejects), THEN forces a retry: it must be refused fail-CLOSED and
+// mint no duplicate primary.
+test("FG-629 RF-1: a red whose workflow fails to load is refused even under --force — no duplicate primary", async () => {
+  const { runId } = await driveCrashedRed();
+  const primary = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined)!;
+  const red = tasksForRun(runId).find((t) => t.agentRole === "red-wide" && t.parentId === primary.id)!;
+  assert.equal(red.status, "failed", "fixture: the red really did fail (retry only accepts failed)");
+
+  // Break workflow loading: a project override that declares a mismatched name is
+  // rejected by loadWorkflow (name-match guard), so the run's workflow is unloadable
+  // from here on — exactly the state in which red_review and fanout_child cannot be
+  // told apart.
+  const projectDir = getRun(runId)!.projectDir!;
+  const overridePath = join(projectDir, ".forge", "workflows", `${WORKFLOW.name}.yml`);
+  mkdirSync(dirname(overridePath), { recursive: true });
+  writeFileSync(overridePath, `name: not-${WORKFLOW.name}\ndescription: broken override to force an unloadable workflow\ninputs: []\nsteps: []\n`);
+
+  const before = tasksForRun(runId).map((t) => t.id);
+
+  await assert.rejects(() => retry(red.id, { force: true }), (e: unknown) => {
+    assert.ok(e instanceof RetryDispatchKindUnknownError, `expected RetryDispatchKindUnknownError, got ${e}`);
+    assert.equal((e as RetryDispatchKindUnknownError).reason, "workflow_unloadable");
+    assert.match((e as Error).message, /RED reviewer/, "the refusal names the red-vs-fanout ambiguity, not step-vs-adhoc");
+    return true;
+  });
+
+  const after = tasksForRun(runId);
+  assert.deepEqual(after.map((t) => t.id), before, "refused before any write — no duplicate primary, no new red task");
+  assert.equal(
+    after.filter((t) => t.parentId === undefined && t.phase === "build").length,
+    1,
+    "still exactly ONE primary in phase build — the forced retry planted no second one",
   );
 });
 

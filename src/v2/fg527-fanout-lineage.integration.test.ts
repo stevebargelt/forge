@@ -13,7 +13,7 @@ import { getTask, insertTask, tasksForRun } from "../store/tasks.js";
 import { failTask } from "./failure-kind.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
-import { FanoutChildRetryError, RedReviewRetryError, retry } from "./retry.js";
+import { FanoutChildRetryError, RedReviewRetryError, RetryDispatchKindUnknownError, retry } from "./retry.js";
 import { classifyTaskLineage, isFanoutChildRow } from "./lifecycle-evaluator.js";
 import type { Run, Task } from "../types/index.js";
 import type { Workflow } from "./schema.js";
@@ -225,12 +225,20 @@ test("FG-527: a pending adhoc invoke in a fanout step named task is not adopted 
   assert.equal(tasksForRun(runId).filter((task) => task.parentId === parent.id).length, 2, "the real parent owns both fanout children");
 });
 
-test("FG-527: an unloadable-workflow fanout child is refused fail-CLOSED; --force overrides", async () => {
+test("FG-527/FG-629 RF-1: a parented row on an unloadable workflow is refused fail-CLOSED, and --force does NOT override it", async () => {
   // The structural guard must fail CLOSED when the workflow won't load: a run whose
-  // workflow name cannot resolve must NOT let a fanout child be retried (that would
+  // workflow name cannot resolve must NOT let a parented row be retried (that would
   // mint a stray primary in the fanout phase). fanoutParentOf classifies against a
   // degraded empty-steps workflow, so a parented non-recovery row resolves to
-  // fanout_child and is refused — recoverable via --force.
+  // fanout_child and is refused.
+  //
+  // FG-629 RF-1 hardens the --force side: on an unloadable workflow a red_review is
+  // INDISTINGUISHABLE from a fanout child (the step's declared reds[] is exactly what
+  // won't load), and a red's retry refusal is unconditional. So --force can no longer
+  // override this refusal — the pre-RF-1 behavior (force mints a fresh primary) is the
+  // very hole RF-1 closes: it would have re-dispatched a red as a duplicate primary.
+  // The refusal is now the "cannot classify because the workflow won't load" error,
+  // whose recovery is to restore the YAML.
   const run: Run = { id: "run-fg527-unloadable", workflow: "missing-fg527-workflow", title: "fg527", status: "active", createdAt: "2026-08-15T00:00:00Z", projectDir: projectDir() };
   insertRun(run);
   insertTask({
@@ -248,14 +256,19 @@ test("FG-527: an unloadable-workflow fanout child is refused fail-CLOSED; --forc
   const before = tasksForRun(run.id).map((task) => task.id);
 
   await assert.rejects(() => retry(failed.id), (error: unknown) => {
-    assert.ok(error instanceof FanoutChildRetryError, `expected FanoutChildRetryError, got ${error}`);
-    assert.equal((error as FanoutChildRetryError).parentId, "former-parent");
+    assert.ok(error instanceof RetryDispatchKindUnknownError, `expected RetryDispatchKindUnknownError, got ${error}`);
+    assert.equal((error as RetryDispatchKindUnknownError).reason, "workflow_unloadable");
+    assert.match((error as Error).message, /RED reviewer/, "the refusal names why an unloadable workflow can't be re-dispatched");
     return true;
   });
   assert.deepEqual(tasksForRun(run.id).map((task) => task.id), before, "no row created — refused before any write");
 
-  const out = await retry(failed.id, { force: true });
-  assert.ok(out.adHoc === undefined, "forced retry of a stamped child is a workflow step, not ad-hoc");
-  assert.equal(out.newTask.status, "pending");
-  assert.equal(getTask(out.newTask.id)!.parentId, undefined, "the forced retry mints a fresh PRIMARY");
+  // FG-629 RF-1: --force must NOT bypass the fail-closed refusal on an unloadable
+  // workflow — the row could be a red, and there is no coherent forced 'mint a primary
+  // from a red'. Recovery is to restore the workflow YAML, not to force.
+  await assert.rejects(() => retry(failed.id, { force: true }), (error: unknown) => {
+    assert.ok(error instanceof RetryDispatchKindUnknownError, `expected RetryDispatchKindUnknownError under --force, got ${error}`);
+    return true;
+  });
+  assert.deepEqual(tasksForRun(run.id).map((task) => task.id), before, "still no row created — --force does not override the fail-closed refusal");
 });
