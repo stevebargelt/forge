@@ -566,6 +566,10 @@ section.projects-grid {
   color: var(--ok);
   line-height: 1.4;
 }
+/* RF-1: the confirmation receives focus when the classified form is removed, so a
+   keyboard operator is never stranded on a detached submit button. Give the
+   programmatic focus a visible ring. */
+.project-classify-done:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .project-desc {
   font-size: 13px;

@@ -1809,6 +1809,15 @@ function ClassifyControl({ project, onReload }) {
   // next uncached read. The confirmation makes the write's success perceivable now,
   // without the client second-guessing membership (which stays server-derived).
   const [done, setDone] = useState(null);
+  // RF-1: a successful classify removes the whole form — including the focused submit
+  // button — and renders the status div in its place. Without moving focus, a keyboard
+  // operator is stranded on a detached element (focus falls back to <body>). Land focus
+  // on the confirmation itself, which is programmatically focusable (tabindex=-1) and
+  // carries role="status" so it is announced.
+  const doneRef = useRef(null);
+  useEffect(() => {
+    if (done && doneRef.current) doneRef.current.focus();
+  }, [done]);
   const dir = project.primaryCheckout || project.projectDir;
   const stop = (event) => event.stopPropagation();
   const submit = useCallback(
@@ -1849,7 +1858,13 @@ function ClassifyControl({ project, onReload }) {
   if (done) {
     const label = (CLASSIFY_OPTIONS.find((opt) => opt.value === done) || { label: done }).label;
     return html`
-      <div class="project-classify project-classify-done" role="status" onClick=${stop}>
+      <div
+        class="project-classify project-classify-done"
+        role="status"
+        tabindex="-1"
+        ref=${doneRef}
+        onClick=${stop}
+      >
         Reclassified as ${label}. The Projects list refreshes shortly.
       </div>
     `;

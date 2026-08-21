@@ -232,3 +232,40 @@ test("classifying an independent project as an operator project keeps it in oper
   assert.equal(record!.classification, "operator", "and is no longer flagged unclassified");
   await page.close();
 });
+
+// RF-1: a successful classify removes the whole form, including the focused submit
+// button, and renders the status confirmation in its place. A keyboard operator must
+// not be stranded on the detached button (focus falling back to <body>) — focus lands
+// on the confirmation, which is programmatically focusable and announced (role=status).
+test("RF-1: after a keyboard-driven classify, focus lands on the confirmation, not <body>", async () => {
+  const page = await newPage();
+  await page.goto(`${BASE}/#projects`);
+  await page.locator(".project-card").first().waitFor();
+
+  const card = page.locator(".project-card", { has: page.locator(`.project-path`, { hasText: legacy }) });
+  await card.waitFor();
+
+  // Open the form and drive the submit from the KEYBOARD, so the focused element at the
+  // moment of success is the submit button that is about to be removed.
+  await card.locator(".project-classify-toggle").click();
+  await card.locator(".project-classify-select").selectOption("disposable_clone");
+  const submit = card.locator(".project-classify-submit");
+  await submit.focus();
+  const classified = page.waitForResponse((r) => r.url().endsWith("/api/projects/classify") && r.request().method() === "POST");
+  await page.keyboard.press("Enter");
+  assert.equal((await classified).status(), 200, "the keyboard-driven classify succeeded");
+
+  const doneEl = card.locator(".project-classify-done");
+  await doneEl.waitFor({ timeout: 5000 });
+  // The confirmation replaced the form; focus must have followed it there.
+  await page.waitForFunction(
+    () => document.activeElement?.classList.contains("project-classify-done") ?? false,
+    undefined,
+    { timeout: 3000 },
+  );
+  assert.ok(
+    await doneEl.evaluate((el) => el === document.activeElement),
+    "focus moved to the status confirmation, so the keyboard operator is not stranded on <body>",
+  );
+  await page.close();
+});

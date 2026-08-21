@@ -86,6 +86,7 @@ export function registerProjects(program: Command): void {
     .option("--owner-identity <projectIdentity>", "the durable project identity that owns this artifact")
     .option("--run <runId>", "the run that created this artifact")
     .option("--task <taskId>", "the task that created this artifact")
+    .option("--actor <who>", "the acting operator, recorded on the classify audit trail (defaults to $USER)")
     .option("--json", "emit JSON instead of a human-readable line")
     .description(
       "Classify a legacy or manually-created workspace's purpose (FG-745 repair path). " +
@@ -94,7 +95,7 @@ export function registerProjects(program: Command): void {
     .action(
       (
         dir: string,
-        opts: { purpose: string; ownerIdentity?: string; run?: string; task?: string; json?: boolean },
+        opts: { purpose: string; ownerIdentity?: string; run?: string; task?: string; actor?: string; json?: boolean },
       ) => {
         ensureForgeDirs();
         if (!isWorkspaceKind(opts.purpose)) {
@@ -109,11 +110,15 @@ export function registerProjects(program: Command): void {
           ...(opts.run ? { runId: opts.run } : {}),
           ...(opts.task ? { taskId: opts.task } : {}),
         };
+        // Best-effort attribution for the audit trail: an explicit --actor, else the OS
+        // user running the CLI. Never fabricated — an empty $USER stays unattributed.
+        const actor = opts.actor ?? process.env["USER"] ?? undefined;
         try {
           const result = classifyWorkspacePurpose({
             path: dir,
             kind: opts.purpose,
             ...(Object.keys(owner).length > 0 ? { owner } : {}),
+            ...(actor ? { actor } : {}),
           });
           if (opts.json) {
             console.log(JSON.stringify(result, null, 2));

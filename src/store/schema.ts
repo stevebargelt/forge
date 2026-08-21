@@ -1438,6 +1438,35 @@ CREATE TABLE IF NOT EXISTS workspace_purposes (
   updated_at       TEXT NOT NULL
 );
 
+-- FG-745 (review RF-2): the APPEND-ONLY audit log of operator classify/repair
+-- decisions on a workspace purpose. The purpose row above holds only the CURRENT
+-- value: classifyWorkspacePurpose UPDATEs kind/source in place, so a reclassification
+-- that changes a top-level project's VISIBILITY (unclassified/operator -> an artifact
+-- kind, or the reverse) left no durable record of what it changed or when. The
+-- unauthenticated operator surface makes that gap a security concern — AC8 requires the
+-- repair to be auditable and reversible, which the current value alone is not.
+--
+-- Each row is ONE classify decision: prior_kind (what the purpose read BEFORE — an
+-- absent row reads 'unclassified', the visible fail-safe, so a fresh classify records
+-- that) -> new_kind, with the source, the acting operator when one is supplied (the
+-- surface is unauthenticated, so actor is NULL when no identity is available, never
+-- fabricated), and the timestamp. Written inside the SAME writeTransaction as the
+-- purpose upsert, so the audit row and the value it explains are one atomic unit (AC8).
+--
+-- A brand-new table via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
+-- additive-only BD-15 contract as workspace_purposes above; user_version is NOT bumped.
+-- Keyed on path only for reads (WHERE path = ? ORDER BY at); the append is a bare INSERT
+-- so no index pins a column undroppable.
+CREATE TABLE IF NOT EXISTS workspace_purpose_events (
+  id               INTEGER PRIMARY KEY,
+  path             TEXT NOT NULL,
+  prior_kind       TEXT NOT NULL,
+  new_kind         TEXT NOT NULL,
+  source           TEXT NOT NULL,
+  actor            TEXT,
+  at               TEXT NOT NULL
+);
+
 -- FG-591 (the operator work queue and its dispatcher): FOUR brand-new tables, all
 -- arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
 -- additive-only BD-15 contract as every table above. user_version is NOT bumped, so
@@ -1920,6 +1949,11 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "workspace_purposes", column: "run_id", ddl: "ALTER TABLE workspace_purposes ADD COLUMN run_id TEXT" },
   { table: "workspace_purposes", column: "task_id", ddl: "ALTER TABLE workspace_purposes ADD COLUMN task_id TEXT" },
   { table: "workspace_purposes", column: "reason", ddl: "ALTER TABLE workspace_purposes ADD COLUMN reason TEXT" },
+
+  // FG-745 (review RF-2): the workspace_purpose_events audit table arrives WHOLE too;
+  // only its nullable `actor` column is restorable, so it is the one entry the parity
+  // guard needs (the NOT NULL columns are undroppable and covered by list-completeness).
+  { table: "workspace_purpose_events", column: "actor", ddl: "ALTER TABLE workspace_purpose_events ADD COLUMN actor TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

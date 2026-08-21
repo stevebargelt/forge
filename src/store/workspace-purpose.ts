@@ -394,6 +394,85 @@ export type ClassifyWorkspaceResult = {
   previousKind?: WorkspaceKind;
 };
 
+/** FG-745 (review RF-2): one APPEND-ONLY audit record of a classify/repair decision.
+ *  The purpose row carries only the current value; this carries what a
+ *  visibility-changing decision changed (priorKind -> newKind), the acting operator
+ *  when one is supplied (NULL when the surface could not attribute it), and when. */
+export type WorkspacePurposeEvent = {
+  path: string;
+  priorKind: WorkspaceKind;
+  newKind: WorkspaceKind;
+  source: WorkspacePurposeSource;
+  actor: string | null;
+  at: string;
+};
+
+type WorkspacePurposeEventRow = {
+  path: string;
+  prior_kind: string;
+  new_kind: string;
+  source: string;
+  actor: string | null;
+  at: string;
+};
+
+/** Append ONE audit row for a classify decision. Called inside the caller's
+ *  writeTransaction so the audit row and the purpose value it explains commit together
+ *  (AC8: the repair is atomic AND auditable). The table arrives whole via SCHEMA_SQL on
+ *  any writable open, so a classify (itself a write) always has it. */
+function recordClassifyEvent(event: {
+  path: string;
+  priorKind: WorkspaceKind;
+  newKind: WorkspaceKind;
+  source: WorkspacePurposeSource;
+  actor: string | null;
+  at: string;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO workspace_purpose_events (path, prior_kind, new_kind, source, actor, at)
+       VALUES (@path, @prior_kind, @new_kind, @source, @actor, @at)`,
+    )
+    .run({
+      path: event.path,
+      prior_kind: event.priorKind,
+      new_kind: event.newKind,
+      source: event.source,
+      actor: event.actor,
+      at: event.at,
+    });
+}
+
+/** The append-only classification history for a workspace, oldest first. Resolves the
+ *  PROVEN canonical identity first (the key the audit rows are written under), then
+ *  reads them. Shape-probe guarded and never throws: an unmigrated/read-only/absent
+ *  store, or a path that does not resolve, reads back as an empty history. */
+export function workspacePurposeHistory(path: string): WorkspacePurposeEvent[] {
+  try {
+    const canonical = provenPhysical(path);
+    if (canonical === null) return [];
+    const db = getDb();
+    const cols = db.prepare(`PRAGMA table_info(workspace_purpose_events)`).all() as Array<{ name: string }>;
+    if (cols.length === 0) return [];
+    const rows = db
+      .prepare(
+        `SELECT path, prior_kind, new_kind, source, actor, at
+           FROM workspace_purpose_events WHERE path = ? ORDER BY at, id`,
+      )
+      .all(canonical) as WorkspacePurposeEventRow[];
+    return rows.map((row) => ({
+      path: row.path,
+      priorKind: decodeWorkspaceKind(row.prior_kind),
+      newKind: decodeWorkspaceKind(row.new_kind),
+      source: (row.source as WorkspacePurposeSource) ?? "operator",
+      actor: row.actor,
+      at: row.at,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 /** THE BOUNDED OPERATOR CLASSIFY/REPAIR CLAIM (AC3, AC8). Atomic and
  *  REFUSE-on-conflict, mirroring project-registry.ts's authority ladder:
  *
@@ -410,6 +489,10 @@ export function classifyWorkspacePurpose(input: {
   path: string;
   kind: WorkspaceKind;
   owner?: WorkspaceOwner | undefined;
+  /** FG-745 (review RF-2): the acting operator, recorded on the audit row. The operator
+   *  surface is unauthenticated, so this is best-effort context (the CLI's OS user, the
+   *  dashboard's surface marker) — never fabricated: absent stays NULL. */
+  actor?: string | undefined;
 }): ClassifyWorkspaceResult {
   const canonical = provenPhysical(input.path);
   if (canonical === null) {
@@ -419,6 +502,7 @@ export function classifyWorkspacePurpose(input: {
     );
   }
   const now = nowIso();
+  const actor = input.actor ?? null;
   return writeTransaction(() => {
     const existing = readRow(canonical);
     if (existing) {
@@ -459,6 +543,14 @@ export function classifyWorkspacePurpose(input: {
           now,
           canonical,
         );
+      recordClassifyEvent({
+        path: canonical,
+        priorKind: existingKind,
+        newKind: input.kind,
+        source: "operator",
+        actor,
+        at: now,
+      });
       return { path: canonical, kind: input.kind, previousKind: existingKind };
     }
     insertRow(
@@ -472,6 +564,16 @@ export function classifyWorkspacePurpose(input: {
       },
       now,
     );
+    // An absent row read as `unclassified` (the visible fail-safe), so that is the
+    // truthful prior kind for a fresh classify — the audit trail begins with it.
+    recordClassifyEvent({
+      path: canonical,
+      priorKind: DEFAULT_WORKSPACE_KIND,
+      newKind: input.kind,
+      source: "operator",
+      actor,
+      at: now,
+    });
     return { path: canonical, kind: input.kind };
   });
 }

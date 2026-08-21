@@ -28,6 +28,7 @@ import {
   isWorkspaceKind,
   recordWorkspacePurpose,
   workspacePurposesByCanonical,
+  workspacePurposeHistory,
   WorkspacePurposeConflictError,
   type WorkspaceKind,
 } from "./workspace-purpose.js";
@@ -188,6 +189,59 @@ describe("FG-745 workspace-purpose — the classify claim", () => {
 
   test("refuses to classify a path that does not resolve to a real directory", () => {
     assert.throws(() => classifyWorkspacePurpose({ path: "/nonexistent/forge-745/phantom", kind: "operator" }));
+  });
+});
+
+describe("FG-745 workspace-purpose — the classify audit trail (review RF-2)", () => {
+  test("a fresh classify appends a durable event with the visible-fail-safe prior kind, the actor, and a timestamp", () => {
+    const dir = realDir();
+    classifyWorkspacePurpose({ path: dir, kind: "disposable_clone", actor: "alice" });
+    const history = workspacePurposeHistory(dir);
+    assert.equal(history.length, 1, "the visibility-changing decision left exactly one audit row");
+    const event = history[0]!;
+    assert.equal(event.priorKind, "unclassified", "an absent row read as unclassified — the truthful prior");
+    assert.equal(event.newKind, "disposable_clone");
+    assert.equal(event.source, "operator");
+    assert.equal(event.actor, "alice", "the acting operator is durably attributed");
+    assert.ok(event.at, "the decision carries a timestamp");
+  });
+
+  test("a reclassification is HISTORICALLY auditable and reversible — the prior value survives in the trail", () => {
+    const dir = realDir();
+    // unclassified -> operator (keeps it a project) -> operator is idempotent, so drive a
+    // real repair: unclassified -> operator, then the reverse would REFUSE, so start over
+    // with an unclassified row reclassified to an operator project, then to the same.
+    classifyWorkspacePurpose({ path: dir, kind: "operator", actor: "bob" });
+    // A same-kind re-classify is idempotent but still an operator decision worth recording.
+    classifyWorkspacePurpose({ path: dir, kind: "operator", actor: "carol" });
+    const history = workspacePurposeHistory(dir);
+    assert.equal(history.length, 2, "each classify decision is one append-only row");
+    assert.deepEqual(
+      history.map((e) => [e.priorKind, e.newKind, e.actor]),
+      [
+        ["unclassified", "operator", "bob"],
+        ["operator", "operator", "carol"],
+      ],
+      "the trail records prior -> new for every decision, so the change is auditable and reversible",
+    );
+    // The current value is unchanged by having a history beside it.
+    assert.equal(getWorkspacePurpose(dir)?.kind, "operator");
+  });
+
+  test("a classify with no supplied actor attributes NULL — never a fabricated identity", () => {
+    const dir = realDir();
+    classifyWorkspacePurpose({ path: dir, kind: "worktree" });
+    const event = workspacePurposeHistory(dir)[0]!;
+    assert.equal(event.actor, null, "the unauthenticated surface leaves actor NULL rather than inventing one");
+  });
+
+  test("a REFUSED classify writes NO audit row — the trail records only decisions that landed", () => {
+    const dir = realDir();
+    classifyWorkspacePurpose({ path: dir, kind: "evidence_fixture", actor: "dave" });
+    assert.throws(() => classifyWorkspacePurpose({ path: dir, kind: "operator", actor: "mallory" }));
+    const history = workspacePurposeHistory(dir);
+    assert.equal(history.length, 1, "the conflicting reassignment refused, so it left no audit row");
+    assert.equal(history[0]?.actor, "dave", "only the decision that actually landed is attributed");
   });
 });
 

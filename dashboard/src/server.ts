@@ -814,7 +814,12 @@ async function handleProjectsClassify(req: IncomingMessage, res: ServerResponse)
     sendJson(res, 400, { ok: false, error: `purpose must be one of: ${CLASSIFY_PURPOSES.join(", ")}.` });
     return;
   }
-  const argv = ["projects", "classify", dir, "--purpose", purpose, "--json"];
+  // FG-745 (review RF-2): attribute the audit row to the SURFACE, server-side. The
+  // actor is NOT taken from the request body — a value the unauthenticated client could
+  // forge would attribute the decision to whomever it named. "dashboard" records the
+  // honest, unforgeable fact: this visibility change came through the network-reachable
+  // operator surface (distinct from a host shell user, which the CLI records as $USER).
+  const argv = ["projects", "classify", dir, "--purpose", purpose, "--actor", "dashboard", "--json"];
   for (const [field, flag] of [["ownerIdentity", "--owner-identity"], ["run", "--run"], ["task", "--task"]] as const) {
     const raw = input[field];
     if (raw === undefined || raw === null || raw === "") continue;

@@ -245,6 +245,28 @@ function declaredProjectKey(projectDirs: readonly string[]): string | null {
   return null;
 }
 
+/** The durable identity keys ONE project matches on `runs.project_identity`: its `repo-`
+ *  evidence key, the `pk-` it maps to in the project_identity registry, and (for a
+ *  pre-cutover clone whose evidence has no registry row) the git-tracked config key it
+ *  declares. The declared key is added ONLY when it is unregistered or maps to THIS
+ *  project's evidence, never widening into a different repository (FG-663 RF-2/RF-3).
+ *  Reads the registry directly; the CALLER owns the try/catch degrade-to-paths policy. */
+function projectIdentityKeys(project: ProjectRecord): Set<string> {
+  const identities = new Set<string>([project.key]);
+  const pk = db()
+    .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
+    .get(project.key) as { project_key: string } | undefined;
+  if (pk?.project_key) identities.add(pk.project_key);
+  const declared = declaredProjectKey(project.projectDirs);
+  if (declared) {
+    const owner = db()
+      .prepare(`SELECT repo_evidence_key FROM project_identity WHERE project_key = ?`)
+      .get(declared) as { repo_evidence_key: string } | undefined;
+    if (!owner || owner.repo_evidence_key === project.key) identities.add(declared);
+  }
+  return identities;
+}
+
 function scopeProjectIdentities(paths: readonly string[]): Set<string> {
   const identities = new Set<string>();
   if (paths.length === 0) return identities;
@@ -255,26 +277,7 @@ function scopeProjectIdentities(paths: readonly string[]): Set<string> {
     // Absolute paths belong to at most one project, so `owning` is 0 or 1; a scope
     // that names more than one project (or none) is not a single project's scope.
     if (owning.length !== 1) return identities;
-    const project = owning[0]!;
-    identities.add(project.key);
-    const pk = db()
-      .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
-      .get(project.key) as { project_key: string } | undefined;
-    if (pk?.project_key) identities.add(pk.project_key);
-    // FG-663 (RF-2): capture stores the git-tracked, clone-inherited config
-    // project_key when this checkout's evidence has NO registry row (a pre-cutover
-    // clone — the common case, since this very repo declares a key). Mirror that
-    // rule here — reading the declared key from a live member checkout — so such a
-    // run is a member of its own project's scope. Add it ONLY when it is
-    // unregistered or maps to THIS project's evidence, never widening a scope into
-    // a different repository (the same RF-3 cross-check capture applies).
-    const declared = declaredProjectKey(project.projectDirs);
-    if (declared) {
-      const owner = db()
-        .prepare(`SELECT repo_evidence_key FROM project_identity WHERE project_key = ?`)
-        .get(declared) as { repo_evidence_key: string } | undefined;
-      if (!owner || owner.repo_evidence_key === project.key) identities.add(declared);
-    }
+    for (const id of projectIdentityKeys(owning[0]!)) identities.add(id);
   } catch {
     // The registry read is best-effort: a store a peer wrote before the
     // project_identity table existed, or a partial schema, degrades this scope to
@@ -1976,7 +1979,32 @@ let projectCache: { at: number; projects: ProjectRecord[] } | null = null;
 export function resolveProjectScope(projectKey?: string, projectDir?: string): ProjectScope {
   if (projectDir) return projectDir;
   if (!projectKey) return undefined;
-  return projectsForDashboard().find((project) => project.key === projectKey)?.projectDirs ?? [];
+  const projects = projectsForDashboard();
+  const selected = projects.find((project) => project.key === projectKey);
+  if (!selected) return [];
+  const dirs = new Set<string>(selected.projectDirs);
+  // FG-745 (review RF-3 / AC5): a SEPARATELY-IDENTIFIED artifact — one whose repository
+  // identity does not converge with its owner (e.g. a private no-remote clone) — is its
+  // OWN ProjectRecord, suppressed from the Projects grid but with live work that must
+  // still surface under its owner in Current Activity. Add every such artifact's member
+  // paths to the owner's scope, matched on the DECLARED owner identity the artifact
+  // carries (project_identity), never on a path/name/kind. Purpose-BLIND: the ownership
+  // link adds the paths, so the suppression classification never enters run-scoping —
+  // the invariant that suppression lives ONLY in the Projects projection.
+  try {
+    const ownerIdentities = projectIdentityKeys(selected);
+    for (const project of projects) {
+      if (project.key === projectKey) continue;
+      const ownerId = project.owner?.projectIdentity;
+      if (ownerId && ownerIdentities.has(ownerId)) {
+        for (const dir of project.projectDirs) dirs.add(dir);
+      }
+    }
+  } catch {
+    // A registry read failure degrades to the selected project's own scope — never a
+    // cross-project widening, the same fail-quiet the identity resolution takes.
+  }
+  return [...dirs];
 }
 
 // ─── backlog ticket truth (FG-608, FG-496 Slice C) ──────────────────────────
