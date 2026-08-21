@@ -7,11 +7,11 @@ import assert from "node:assert/strict";
 import type { Incident, IncidentKind, IncidentSeverity } from "../types/index.js";
 import {
   ACTIVE_TICKET_IDS_CAP,
-  HANDOFF_FIELD_MAX_CHARS,
+  HANDOFF_FIELD_MAX_BYTES,
   OPS_HIGHEST_CAP,
   ORIENT_SNAPSHOT_SCHEMA,
   ORIENT_SNAPSHOT_VERSION,
-  REFERENCED_TICKET_TITLE_MAX_CHARS,
+  REFERENCED_TICKET_TITLE_MAX_BYTES,
   REFERENCED_TICKETS_CAP,
   extractHandoffField,
   extractTicketRefs,
@@ -182,14 +182,14 @@ test("RF-2: a very long referenced title is truncated with metadata and the snap
   );
   const ref = s.referencedTickets.refs[0]!;
   assert.equal(ref.titleTruncated, true, "an over-limit title must be flagged truncated");
-  assert.equal(ref.title?.length, REFERENCED_TICKET_TITLE_MAX_CHARS, "title is cut to the cap");
-  assert.equal(ref.titleFullLength, 6000, "the untruncated length is preserved as metadata");
-  const json = JSON.stringify(s);
-  assert.ok(json.length <= 5 * 1024, `snapshot is ${json.length} bytes, over the 5 KB budget`);
+  assert.equal(Buffer.byteLength(ref.title ?? "", "utf8"), REFERENCED_TICKET_TITLE_MAX_BYTES, "title is cut to the byte cap");
+  assert.equal(ref.titleFullBytes, 6000, "the untruncated byte length is preserved as metadata");
+  const bytes = Buffer.byteLength(JSON.stringify(s), "utf8");
+  assert.ok(bytes <= 5 * 1024, `snapshot is ${bytes} bytes, over the 5 KB budget`);
 });
 
 test("RF-2: a title at or under the cap is carried whole with no truncation flag", () => {
-  const title = "T".repeat(REFERENCED_TICKET_TITLE_MAX_CHARS);
+  const title = "T".repeat(REFERENCED_TICKET_TITLE_MAX_BYTES);
   const s = projectOrientSnapshot(
     baseInputs({
       notesText: "**Picked up next:** finish FG-1.",
@@ -199,7 +199,7 @@ test("RF-2: a title at or under the cap is carried whole with no truncation flag
   const ref = s.referencedTickets.refs[0]!;
   assert.equal(ref.titleTruncated, false);
   assert.equal(ref.title, title);
-  assert.equal(ref.titleFullLength, REFERENCED_TICKET_TITLE_MAX_CHARS);
+  assert.equal(ref.titleFullBytes, REFERENCED_TICKET_TITLE_MAX_BYTES);
 });
 
 test("RF-3: a Picked-up-next referencing MANY tickets caps the collection with count/truncated metadata, snapshot stays ≤5KB", () => {
@@ -209,8 +209,8 @@ test("RF-3: a Picked-up-next referencing MANY tickets caps the collection with c
   // than the cap.
   const refCount = REFERENCED_TICKETS_CAP + 200;
   const refIds = Array.from({ length: refCount }, (_, i) => `FG-${i + 1}`);
-  const atCapTitle = "T".repeat(REFERENCED_TICKET_TITLE_MAX_CHARS);
-  const bigField = "x".repeat(HANDOFF_FIELD_MAX_CHARS + 400);
+  const atCapTitle = "T".repeat(REFERENCED_TICKET_TITLE_MAX_BYTES);
+  const bigField = "x".repeat(HANDOFF_FIELD_MAX_BYTES + 400);
   // Every OTHER bounded field maxed too — all three handoff fields over their cap, the
   // active-id set at its cap, ops over theirs — so the ≤5KB assertion guards the whole
   // snapshot's worst case, not the referenced collection in isolation.
@@ -235,11 +235,11 @@ test("RF-3: a Picked-up-next referencing MANY tickets caps the collection with c
   assert.equal(s.referencedTickets.truncated, true, "a cut collection is flagged truncated — never silent");
   // Every emitted ref still carries its (at-cap) title with the per-title contract intact.
   for (const ref of s.referencedTickets.refs) {
-    assert.equal(ref.title?.length, REFERENCED_TICKET_TITLE_MAX_CHARS);
+    assert.equal(Buffer.byteLength(ref.title ?? "", "utf8"), REFERENCED_TICKET_TITLE_MAX_BYTES);
     assert.equal(ref.titleTruncated, false);
   }
-  const json = JSON.stringify(s);
-  assert.ok(json.length <= 5 * 1024, `snapshot is ${json.length} bytes, over the 5 KB budget`);
+  const bytes = Buffer.byteLength(JSON.stringify(s), "utf8");
+  assert.ok(bytes <= 5 * 1024, `snapshot is ${bytes} bytes, over the 5 KB budget`);
 });
 
 test("RF-3: a Picked-up-next referencing at-most-cap tickets is carried whole with no collection truncation", () => {
@@ -255,9 +255,68 @@ test("RF-3: a Picked-up-next referencing at-most-cap tickets is carried whole wi
   assert.equal(s.referencedTickets.truncated, false);
 });
 
-test("over-limit: active ids capped with truncation, handoff fields truncated with fullLength, ops bounded", () => {
+test("RF-1: multi-byte Unicode handoff/titles keep the snapshot within the 5 KB BYTE bound", () => {
+  // The demonstrated defect: char/code-unit caps do NOT bound serialized size. An emoji
+  // is 2 UTF-16 code units but 4 UTF-8 bytes, so a field capped by JS string length can
+  // carry ~2× its char count in bytes. Reproduce the finding's scenario exactly — 204
+  // refs (4 emitted) with titles of 100 😀 (200 code units / 400 bytes each), and each of
+  // the three handoff fields at 250 😀 (500 code units / 1000 bytes) — plus every other
+  // bounded field maxed, and assert the WHOLE serialized snapshot stays within 5 KB of
+  // UTF-8 bytes (not JS string length, which is what the pre-fix cap/test measured).
+  const emoji = "😀";
+  const refCount = 204;
+  const refIds = Array.from({ length: refCount }, (_, i) => `FG-${i + 1}`);
+  // A one-byte ASCII prefix pushes the byte-cap boundary INTO an emoji (the cap is a
+  // multiple of 4, so pure emoji would align exactly and never exercise split-avoidance).
+  // A naive byte-slice would leave a lone surrogate here; truncateToUtf8Bytes must not.
+  const bigTitle = "z" + emoji.repeat(100); // 401 bytes
+  const bigField = "z" + emoji.repeat(250); // 1001 bytes
+  const notes = [
+    `**Where we left off:** ${bigField}`,
+    `**Picked up next:** ${refIds.join(", ")}. ${bigField}`,
+    `**Memories this session may have invalidated:** ${bigField}`,
+  ].join("\n\n");
+  const s = projectOrientSnapshot(
+    baseInputs({
+      notesText: notes,
+      activeIds: Array.from({ length: ACTIVE_TICKET_IDS_CAP + 50 }, (_, i) => `FG-${i + 1000}`),
+      incidents: Array.from({ length: OPS_HIGHEST_CAP + 8 }, (_, i) =>
+        incident("high", "reconcile_candidate", `run-${i}`, `task-${i}`),
+      ),
+      resolveTicket: (id) => ({ id, status: "active", title: bigTitle }),
+    }),
+  );
+
+  // Each over-limit Unicode field is truncated by BYTES, flagged, and never split
+  // mid-code-point (a lone surrogate would corrupt the JSON).
+  for (const field of [s.handoff.whereWeLeftOff, s.handoff.pickedUpNext, s.handoff.invalidatedMemories]) {
+    assert.ok(field, "handoff field should be present");
+    assert.equal(field!.truncated, true, "an over-byte-budget Unicode field must be flagged truncated");
+    assert.ok(Buffer.byteLength(field!.text, "utf8") <= HANDOFF_FIELD_MAX_BYTES, "field text stays within the byte cap");
+    // A lone surrogate (a split code point) would be replaced by U+FFFD on UTF-8
+    // re-encode, so a clean round-trip proves truncation kept every code point whole.
+    assert.equal(Buffer.from(field!.text, "utf8").toString("utf8"), field!.text, "truncation left a lone surrogate — a code point was split");
+    assert.ok(field!.fullBytes > HANDOFF_FIELD_MAX_BYTES, "fullBytes records the untruncated byte size");
+  }
+  // The two pure-Unicode fields report exactly their source's byte length (pickedUpNext
+  // also carries the ref list, so its fullBytes is larger — checked above via the bound).
+  assert.equal(s.handoff.whereWeLeftOff!.fullBytes, Buffer.byteLength(bigField, "utf8"));
+  assert.equal(s.handoff.invalidatedMemories!.fullBytes, Buffer.byteLength(bigField, "utf8"));
+  for (const ref of s.referencedTickets.refs) {
+    assert.equal(ref.titleTruncated, true);
+    assert.ok(Buffer.byteLength(ref.title ?? "", "utf8") <= REFERENCED_TICKET_TITLE_MAX_BYTES, "title stays within the byte cap");
+    assert.equal(Buffer.from(ref.title ?? "", "utf8").toString("utf8"), ref.title ?? "", "title truncation left a lone surrogate — a code point was split");
+    assert.equal(ref.titleFullBytes, Buffer.byteLength(bigTitle, "utf8"));
+  }
+
+  // The invariant: serialized UTF-8 bytes — not JS string length — stay within 5 KB.
+  const bytes = Buffer.byteLength(JSON.stringify(s), "utf8");
+  assert.ok(bytes <= 5 * 1024, `snapshot is ${bytes} UTF-8 bytes, over the 5 KB byte budget`);
+});
+
+test("over-limit: active ids capped with truncation, handoff fields truncated with fullBytes, ops bounded", () => {
   const activeIds = Array.from({ length: ACTIVE_TICKET_IDS_CAP + 25 }, (_, i) => `FG-${i + 1}`);
-  const longField = "x".repeat(HANDOFF_FIELD_MAX_CHARS + 400);
+  const longField = "x".repeat(HANDOFF_FIELD_MAX_BYTES + 400);
   const notes = `**Where we left off:** ${longField}\n\n**Picked up next:** ${longField}`;
   const incidents = Array.from({ length: OPS_HIGHEST_CAP + 8 }, (_, i) => incident("medium", "reconcile_candidate", `run-${i}`, `task-${i}`));
   const s = projectOrientSnapshot(
@@ -269,8 +328,8 @@ test("over-limit: active ids capped with truncation, handoff fields truncated wi
   assert.equal(s.activeTickets.truncated, true);
 
   assert.equal(s.handoff.whereWeLeftOff?.truncated, true);
-  assert.equal(s.handoff.whereWeLeftOff?.text.length, HANDOFF_FIELD_MAX_CHARS);
-  assert.equal(s.handoff.whereWeLeftOff?.fullLength, HANDOFF_FIELD_MAX_CHARS + 400);
+  assert.equal(Buffer.byteLength(s.handoff.whereWeLeftOff?.text ?? "", "utf8"), HANDOFF_FIELD_MAX_BYTES);
+  assert.equal(s.handoff.whereWeLeftOff?.fullBytes, HANDOFF_FIELD_MAX_BYTES + 400);
 
   assert.equal(s.ops.total, OPS_HIGHEST_CAP + 8);
   assert.equal(s.ops.highestSeverity.length, OPS_HIGHEST_CAP);
@@ -330,7 +389,7 @@ test("byte-budget regression: a 100-active / 20-incident / normal-handoff snapsh
     }),
   );
   const json = JSON.stringify(s);
-  assert.ok(json.length <= 5 * 1024, `snapshot is ${json.length} bytes, over the 5 KB budget`);
+  assert.ok(Buffer.byteLength(json, "utf8") <= 5 * 1024, `snapshot is ${Buffer.byteLength(json, "utf8")} bytes, over the 5 KB budget`);
   assert.ok(!json.includes("EVIDENCE_MARKER"), "incident evidence leaked into the ordinary snapshot");
   assert.ok(!json.includes("RECOMMENDED_ACTION_MARKER"), "recommended-action prose leaked into the snapshot");
   // Active tickets contribute IDS only — no titles. (The referenced ticket DOES

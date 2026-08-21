@@ -43,17 +43,21 @@ export const ACTIVE_TICKET_IDS_CAP = 100;
  *  when it is about to act. */
 export const OPS_HIGHEST_CAP = 6;
 
-/** The concrete bound on a forward handoff field. An overlong field is represented
- *  as an explicit truncated state (text prefix + fullLength), never injected
- *  wholesale — the bounded-notes contract this ticket establishes. */
-export const HANDOFF_FIELD_MAX_CHARS = 500;
+/** The concrete bound on a forward handoff field, in UTF-8 BYTES — not JS string
+ *  length. A char/code-unit cap does NOT bound serialized size: multi-byte Unicode
+ *  (e.g. an emoji is 1–2 code units but 4 UTF-8 bytes) can carry several times its
+ *  char count in bytes, so the snapshot's 5 KB budget is a byte budget and every
+ *  content cap measures bytes. An overlong field is represented as an explicit
+ *  truncated state (byte-bounded text prefix + fullBytes), never injected wholesale. */
+export const HANDOFF_FIELD_MAX_BYTES = 500;
 
-/** The concrete bound on a referenced ticket's title. A referenced ticket carries a
+/** The concrete bound on a referenced ticket's title, in UTF-8 BYTES (see
+ *  HANDOFF_FIELD_MAX_BYTES on why bytes, not chars). A referenced ticket carries a
  *  title (unlike an active-id row), so one ticket with a pathological title could
  *  otherwise push the whole snapshot past its byte budget with no notice. Over-limit
- *  titles are truncated with explicit `titleTruncated` + `titleFullLength` metadata —
+ *  titles are truncated with explicit `titleTruncated` + `titleFullBytes` metadata —
  *  the same never-silent-truncation contract the handoff fields hold. */
-export const REFERENCED_TICKET_TITLE_MAX_CHARS = 200;
+export const REFERENCED_TICKET_TITLE_MAX_BYTES = 200;
 
 /** The concrete bound on the referenced-ticket COLLECTION. Capping each title (above)
  *  bounds one ticket; it does NOT bound the count. `Picked up next` is extracted from
@@ -62,18 +66,19 @@ export const REFERENCED_TICKET_TITLE_MAX_CHARS = 200;
  *  the aggregate: 4 refs × the ~200-char title cap keeps the collection near 1 KB, which
  *  fits the residual after the other bounded fields (3 handoff fields, 100 active ids,
  *  the ops set) are maxed — so the whole snapshot stays within its 5 KB bound however
- *  many tickets `Picked up next` names. `count` + `truncated` say when the collection was
+ *  many tickets `Picked up next` names (each title byte-capped above). `count` + `truncated` say when the collection was
  *  cut, so the orchestrator drills in for the rest — the same never-silent-truncation
  *  contract. Reconciliation stays exact for the emitted set; the tail is drill-in. */
 export const REFERENCED_TICKETS_CAP = 4;
 
-/** A forward handoff field, bounded. `truncated` + `fullLength` make an over-limit
+/** A forward handoff field, bounded. `truncated` + `fullBytes` make an over-limit
  *  field an explicit state rather than a silent cut. */
 export type OrientBoundedField = {
   text: string;
   truncated: boolean;
-  /** Length of the untruncated (trimmed) field, so the reader knows what was cut. */
-  fullLength: number;
+  /** UTF-8 byte length of the untruncated (trimmed) field, so the reader knows what
+   *  was cut — the snapshot's size bound is a byte bound. */
+  fullBytes: number;
 };
 
 /** The EXACT resolution of a `Picked up next` ticket ref, before the snapshot bounds
@@ -88,12 +93,12 @@ export type OrientResolvedTicket = {
 };
 
 /** A referenced ticket as it appears in the snapshot: the exact resolution with its
- *  title bounded. `titleTruncated` + `titleFullLength` make an over-limit title an
+ *  title bounded. `titleTruncated` + `titleFullBytes` make an over-limit title an
  *  explicit state rather than a silent cut. */
 export type OrientTicketRef = OrientResolvedTicket & {
   titleTruncated: boolean;
-  /** Length of the untruncated (resolved) title, 0 when the title is null. */
-  titleFullLength: number;
+  /** UTF-8 byte length of the untruncated (resolved) title, 0 when the title is null. */
+  titleFullBytes: number;
 };
 
 /** The bounded incident projection: identity only. Full `evidence` and
@@ -186,12 +191,27 @@ const ALL_HANDOFF_HEADINGS = [
   "Shipped (for reference)",
 ] as const;
 
+/** Truncate `text` so its UTF-8 encoding is at most `maxBytes`, never splitting a
+ *  multi-byte code point. `for…of` iterates by code point, so a surrogate pair (an
+ *  emoji, an astral-plane glyph) is kept or dropped whole — never cut mid-character. */
+function truncateToUtf8Bytes(text: string, maxBytes: number): string {
+  let used = 0;
+  let out = "";
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch, "utf8");
+    if (used + size > maxBytes) break;
+    used += size;
+    out += ch;
+  }
+  return out;
+}
+
 function boundField(raw: string | undefined): OrientBoundedField | null {
   const text = (raw ?? "").trim();
   if (!text) return null;
-  const fullLength = text.length;
-  if (fullLength <= HANDOFF_FIELD_MAX_CHARS) return { text, truncated: false, fullLength };
-  return { text: text.slice(0, HANDOFF_FIELD_MAX_CHARS), truncated: true, fullLength };
+  const fullBytes = Buffer.byteLength(text, "utf8");
+  if (fullBytes <= HANDOFF_FIELD_MAX_BYTES) return { text, truncated: false, fullBytes };
+  return { text: truncateToUtf8Bytes(text, HANDOFF_FIELD_MAX_BYTES), truncated: true, fullBytes };
 }
 
 /** Bound a resolved ticket's title to the snapshot budget. A null title (missing or
@@ -200,12 +220,17 @@ function boundField(raw: string | undefined): OrientBoundedField | null {
  *  past its byte bound. */
 function boundTicketRef(resolved: OrientResolvedTicket): OrientTicketRef {
   const { title } = resolved;
-  if (title === null) return { ...resolved, title: null, titleTruncated: false, titleFullLength: 0 };
-  const titleFullLength = title.length;
-  if (titleFullLength <= REFERENCED_TICKET_TITLE_MAX_CHARS) {
-    return { ...resolved, title, titleTruncated: false, titleFullLength };
+  if (title === null) return { ...resolved, title: null, titleTruncated: false, titleFullBytes: 0 };
+  const titleFullBytes = Buffer.byteLength(title, "utf8");
+  if (titleFullBytes <= REFERENCED_TICKET_TITLE_MAX_BYTES) {
+    return { ...resolved, title, titleTruncated: false, titleFullBytes };
   }
-  return { ...resolved, title: title.slice(0, REFERENCED_TICKET_TITLE_MAX_CHARS), titleTruncated: true, titleFullLength };
+  return {
+    ...resolved,
+    title: truncateToUtf8Bytes(title, REFERENCED_TICKET_TITLE_MAX_BYTES),
+    titleTruncated: true,
+    titleFullBytes,
+  };
 }
 
 /** Extract one heading's content from the notes block. Returns the text after the
