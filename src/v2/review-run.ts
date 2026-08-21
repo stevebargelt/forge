@@ -119,6 +119,7 @@ import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck } from "./review-recheck.js";
 import { ingestCandidateCiEvidence } from "./review-ci-evidence.js";
 import type { GateEvidence } from "../store/host-verifications.js";
+import { writeTransaction } from "../store/db.js";
 import { assessShippingReview, type ShippingAssessment, type ShippingInput } from "./review-shipping.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -2099,6 +2100,11 @@ export type CiEvidenceOutcome =
   | { status: "ingested"; candidateSha: string; resolved: string[]; message: string }
   | { status: "refused"; reason: string; message: string };
 
+// RF-2/RF-7: a candidate move detected AFTER the awaited covering-gate lookup aborts the
+// whole application. Thrown from inside the write transaction so the transaction rolls back
+// and no resolution is recorded against a candidate the review has left.
+const CI_EVIDENCE_CANDIDATE_MOVED = Symbol("ci-evidence-candidate-moved");
+
 /** FG-744: admit a green EXACT-CANDIDATE required-CI run as executed resolution evidence
  *  for a stranded `fix_now` finding whose cited assertion lives in a tier the recheck's fast
  *  gate structurally could not run.
@@ -2166,13 +2172,41 @@ export async function runCiEvidenceIngestion(
     return refused("ci_evidence_rejected", ingestion.refusal);
   }
 
-  for (const a of ingestion.applications) {
-    recordResolution(a.findingId, {
-      resolution: "resolved",
-      evidenceKind: a.evidenceKind,
-      evidence: a.evidence,
-      resolvedSha: candidate,
+  // The candidate was snapshotted (line above) BEFORE the awaited covering-gate lookup, so a
+  // candidate move could have landed during that await — applying evidence bound to the stale
+  // snapshot would resolve findings against a candidate the review has already left (RF-2/RF-7).
+  // And the batch must be all-or-nothing: a storage failure partway through must not leave some
+  // findings resolved off a result the rest of which never applied (RF-3). Both are the same
+  // write: re-read the candidate INSIDE the write transaction — so the check and the writes hold
+  // one lock and a concurrent move cannot slip between them — abort the whole transaction if it
+  // moved, and let any mid-batch failure roll every resolution back.
+  let movedTo: string | undefined;
+  try {
+    writeTransaction(() => {
+      const current = getReview(reviewId);
+      if (!current || current.candidateSha !== candidate) {
+        movedTo = current?.candidateSha;
+        throw CI_EVIDENCE_CANDIDATE_MOVED;
+      }
+      for (const a of ingestion.applications) {
+        recordResolution(a.findingId, {
+          resolution: "resolved",
+          evidenceKind: a.evidenceKind,
+          evidence: a.evidence,
+          resolvedSha: candidate,
+        });
+      }
     });
+  } catch (err) {
+    if (err === CI_EVIDENCE_CANDIDATE_MOVED) {
+      return refused(
+        "ci_evidence_candidate_moved",
+        `the review candidate moved from ${candidate} to ${movedTo ?? "(none)"} while covering-gate evidence was ` +
+          `being fetched — CI evidence is strictly bound to the EXACT current candidate and is never applied against ` +
+          `a stale snapshot. Nothing was written.`,
+      );
+    }
+    throw err;
   }
 
   const resolved = ingestion.applications.map((a) => a.findingRef);

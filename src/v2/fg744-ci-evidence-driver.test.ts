@@ -22,6 +22,7 @@ import {
   recordDisposition,
   recordResolution,
   recordStageEvidence,
+  updateReview,
 } from "../store/reviews.js";
 import {
   ensureFixBatch,
@@ -117,6 +118,65 @@ function strandFinding(): string {
     meta: { fixCycleKey: fixCycleKey(fixBatchesForReview(REVIEW)), unresolved: [finding!.findingRef] },
   });
   return id;
+}
+
+/** Two stranded fix_now findings sharing one committed fix batch — the multi-finding shape
+ *  RF-3's all-or-nothing guarantee is about. Both cite the integration-tier assertion and are
+ *  left `inconclusive / not_executed` off the fast gate, exactly like strandFinding's one. */
+function strandTwo(): { a: string; b: string } {
+  const findings = ingestFindings(REVIEW, [
+    {
+      summary: "finding A: stale-launcher rebind",
+      severity: "high",
+      riskLens: "backend",
+      reachability: "demonstrated",
+      evidence: "A",
+      file: "src/campaign/reconcile.ts",
+      line: 42,
+      discoveredSha: SHA,
+      sources: [{ redRole: "red-backend" }],
+    },
+    {
+      summary: "finding B: sibling rebind",
+      severity: "high",
+      riskLens: "backend",
+      reachability: "demonstrated",
+      evidence: "B",
+      file: "src/campaign/reconcile.ts",
+      line: 88,
+      discoveredSha: SHA,
+      sources: [{ redRole: "red-backend" }],
+    },
+  ]);
+  const [fa, fb] = findings;
+  recordDisposition(fa!.id, { decision: "fix_now", rationale: "remediate this cycle", operator: false });
+  recordDisposition(fb!.id, { decision: "fix_now", rationale: "remediate this cycle", operator: false });
+
+  const fixNow = findingsForReview(REVIEW).filter((f) => f.disposition === "fix_now");
+  const batch = ensureFixBatch(REVIEW, SHA, fixNow).batch;
+  markFixBatchDispatched(batch.id, "task-fixer-1");
+  const ing = ingestFixBatchResults(
+    batch.id,
+    "task-fixer-1",
+    { batchId: batch.id, revision: batch.revision },
+    [
+      { findingId: fa!.id, result: "fixed", summary: "fenced A", filesChanged: [TEST_FILE], evidence: "added the integration regression", executedAssertion: ASSERTION },
+      { findingId: fb!.id, result: "fixed", summary: "fenced B", filesChanged: [TEST_FILE], evidence: "added the integration regression", executedAssertion: ASSERTION },
+    ],
+  );
+  assert.equal(ing.ok, true, ing.ok ? "" : ing.refusal);
+
+  recordStageEvidence(REVIEW, "fix", { sha: SHA, detail: "one batch fixed", meta: { fixBatchId: batch.id, revision: batch.revision } });
+  recordStageEvidence(REVIEW, "verified_final", { sha: SHA, detail: "green" });
+  for (const f of [fa!, fb!]) {
+    recordResolution(f.id, { resolution: "inconclusive", evidenceKind: "not_executed", evidence: "the cited integration assertion did not appear in the fast-gate output", resolvedSha: SHA });
+  }
+  recordStageEvidence(REVIEW, "recheck", {
+    sha: SHA,
+    detail: "2 known ids rechecked; inconclusive",
+    meta: { fixCycleKey: fixCycleKey(fixBatchesForReview(REVIEW)), unresolved: [fa!.findingRef, fb!.findingRef] },
+  });
+  return { a: fa!.id, b: fb!.id };
 }
 
 function ciDeps(gate: GateEvidence | null): Partial<CoordinatorDeps> {
@@ -224,4 +284,46 @@ test("FG-744: the ingestion refuses when the coordinator has no covering-gate-ev
   assert.equal(outcome.status, "refused");
   if (outcome.status !== "refused") return;
   assert.equal(outcome.reason, "ci_evidence_no_gate_authority");
+});
+
+test("FG-744 / RF-2, RF-7: a candidate move during the covering-gate lookup refuses and changes nothing", async () => {
+  const id = strandFinding();
+
+  // The covering-gate lookup is the awaited window RF-2/RF-7 name: a concurrent candidate
+  // advance lands WHILE it runs. The returned gate still describes the pre-move candidate.
+  const deps: Partial<CoordinatorDeps> = {
+    coveringGateEvidence: () => {
+      updateReview(REVIEW, { candidateSha: "moved999" });
+      return ciGate;
+    },
+  };
+
+  const outcome = await runCiEvidenceIngestion(REVIEW, ciEvidenceInput(), deps as CoordinatorDeps);
+  assert.equal(outcome.status, "refused");
+  if (outcome.status !== "refused") return;
+  assert.equal(outcome.reason, "ci_evidence_candidate_moved");
+  assert.match(outcome.message, /moved from 8e9fe0d0 to moved999/);
+  assert.equal(getFinding(id)!.resolution, "inconclusive", "the stranded resolution is untouched — nothing was written");
+});
+
+test("FG-744 / RF-3: a storage failure mid-batch rolls the whole batch back, not a partial ingest", async () => {
+  const { a, b } = strandTwo();
+
+  // Force the SECOND resolution write to fail at the DB, the mid-batch storage failure RF-3
+  // names. Applications are applied in input order, so B is the one that dies.
+  db.exec(`CREATE TRIGGER boom_on_b BEFORE UPDATE ON review_findings WHEN NEW.id = '${b}' BEGIN SELECT RAISE(ABORT, 'boom'); END`);
+
+  const input = {
+    review_id: REVIEW,
+    candidate_sha: SHA,
+    findings: [
+      { finding_id: a, test_file: TEST_FILE, ci_lane: "CI / test-extended", ci_runner_output: `ok 1 - ${ASSERTION}` },
+      { finding_id: b, test_file: TEST_FILE, ci_lane: "CI / test-extended", ci_runner_output: `ok 1 - ${ASSERTION}` },
+    ],
+  };
+  await assert.rejects(() => runCiEvidenceIngestion(REVIEW, input, ciDeps(ciGate) as CoordinatorDeps), /boom/);
+
+  // A's write, which happened BEFORE B's failure, must be rolled back with it — all-or-nothing.
+  assert.equal(getFinding(a)!.resolution, "inconclusive", "the first finding's resolution rolled back with the batch");
+  assert.equal(getFinding(b)!.resolution, "inconclusive", "the failed finding was never resolved");
 });
