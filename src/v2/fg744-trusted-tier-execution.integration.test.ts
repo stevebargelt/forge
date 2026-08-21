@@ -7,9 +7,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { tierTestCommand } from "../cli/commands/review-wiring.js";
@@ -18,6 +18,15 @@ import { ingestRecheck } from "./review-recheck.js";
 import type { ReviewFinding } from "../store/reviews.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const SHARED_BUILD_DIR = resolve(REPO_ROOT, ".forge-integration-build");
+
+/** An opaque snapshot of the shard's shared build dir, so a test can prove its
+ *  nested integration-tier run neither created, wiped, nor rebuilt it. */
+function sharedBuildDirState(): string {
+  if (!existsSync(SHARED_BUILD_DIR)) return "absent";
+  const s = statSync(SHARED_BUILD_DIR);
+  return `${s.mtimeMs}:${s.ino}`;
+}
 const REVIEW = "review-fg744-integration";
 const CANDIDATE = "candidate-fg744";
 const ASSERTION = "fg744 trusted tier probe executed";
@@ -39,6 +48,14 @@ function runIntegrationTier(probe: string): string {
   const { cmd, args } = tierTestCommand("integration", [probe]);
   const env = { ...process.env };
   delete env["NODE_TEST_CONTEXT"];
+  // Isolate the NESTED integration-tier run's build tree from the shard's shared
+  // `.forge-integration-build`. Without this the nested preload rmSync-wipes +
+  // rebuilds the single REPO_ROOT build dir concurrently with the sibling
+  // subprocesses of this shard, yanking `<dir>/cli/index.js` out from under them
+  // mid-spawn (FG-744 CI integration_7 hazard). A per-invocation temp dir gives
+  // the nested run its own tree and its own coordination markers.
+  const buildDir = mkdtempSync(join(tmpdir(), "fg744-nested-build-"));
+  env["FORGE_INTEGRATION_BUILD_DIR"] = buildDir;
   try {
     return execFileSync(cmd, args, {
       cwd: REPO_ROOT,
@@ -49,6 +66,8 @@ function runIntegrationTier(probe: string): string {
   } catch (e) {
     const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
     return `${err.stdout ?? ""}${err.stderr ?? ""}`;
+  } finally {
+    rmSync(buildDir, { recursive: true, force: true });
   }
 }
 
@@ -97,10 +116,15 @@ test("FG-744: forge's integration-tier runner really executes a scoped cited ass
     ].join("\n"),
   );
 
+  const sharedBefore = sharedBuildDirState();
   try {
     const { args } = tierTestCommand("integration", [probe]);
     assert.ok(args.includes("./src/integration-build-preload.ts"), "the integration-tier preload is retained");
     const output = runIntegrationTier(probe);
+    // The nested run isolates its tree via FORGE_INTEGRATION_BUILD_DIR, so it must
+    // NOT have created, wiped, or rebuilt the shard's shared build dir — that wipe
+    // was the CI integration_7 hazard this fix removes.
+    assert.equal(sharedBuildDirState(), sharedBefore, "nested run must not touch the shared .forge-integration-build");
     // The exact per-test identity the recheck binds resolution through — proven EXECUTED in
     // forge's own runner output, not merely "the suite exited green".
     assert.equal(testExecution(output, ASSERTION), "executed");

@@ -28,6 +28,7 @@
 // to a direct devDependency + regenerate the lockfile (the container mount is
 // read-only, so that could not be finalized here).
 
+import { createHash } from "node:crypto";
 import { mkdirSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -118,7 +119,13 @@ async function buildOnce(): Promise<void> {
 // a later `node --test` invocation (e.g. the runner's serial lane after the bulk
 // lane, or a dev host re-running the tier) finds no ready sentinel and rebuilds
 // fresh — preserving the always-rebuild fail-safe per invocation.
-const INVOCATION = invocationId(process.ppid, parentStartToken(process.ppid));
+// Fold the RESOLVED build dir into the invocation identity so a run that isolates
+// its tree via FORGE_INTEGRATION_BUILD_DIR (e.g. a nested integration-tier spawn)
+// coordinates on markers unique to its own dir and never contends on — or reuses a
+// stale READY for — the shard's shared `.forge-integration-build`. Subprocesses of
+// one invocation share both ppid+start token AND build dir, so they still agree.
+const BUILD_DIR_TAG = createHash("sha1").update(INTEGRATION_BUILD_DIR).digest("hex").slice(0, 12);
+const INVOCATION = `${invocationId(process.ppid, parentStartToken(process.ppid))}.${BUILD_DIR_TAG}`;
 const { lockDir: LOCK_DIR, ready: READY } = invocationMarkers(INVOCATION);
 const READY_TIMEOUT_MS = 120_000;
 
