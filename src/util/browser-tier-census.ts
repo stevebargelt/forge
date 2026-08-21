@@ -107,6 +107,11 @@ export const BROWSER_TIER_DIR = join(
 // stale past its freshness cutoff STILL renders, its label degraded to unavailable
 // rather than dropped or shown running) and `fg694-home-in-flight` to 10 (a registered
 // CI wait keeps Home WAITING, never IDLE, folded into In flight with nothing else live).
+// FG-745 adds `fg745-projects-classification` (4 tests): the Projects grid derives
+// visibility SOLELY from the /api/projects payload against the real server, store and
+// co-located classify CLI — a recorded disposable artifact is suppressed, an unrecorded
+// independent/legacy project renders `unclassified` with a working classify affordance,
+// and classifying a legacy directory away removes its card.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "fg386-shipping-audit.test.ts": 9,
@@ -121,6 +126,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg679-current-activity.test.ts": 16,
   "fg694-home-in-flight.test.ts": 10,
   "fg699-scope-invalidation.test.ts": 6,
+  "fg745-projects-classification.test.ts": 4,
   // FG-590 adds `fg590-retention-disposition` (2 tests): the terminal-launch retention
   // disposition (retained-for-investigation vs expired/eligible vs leaked) rendered into
   // the page via the shared rule, and the running-launch/legacy no-claim case.
