@@ -146,6 +146,34 @@ The `dashboard_browser` job provisions the browser the same way the agent image 
 
 **Dashboard browser** — assertions that need a rendered page: the dashboard's UI contracts, driven in a real Chrome. These live in `dashboard/browser-tests/`, not under `src/`, and are the one tier that must resolve a browser — see [The dashboard browser tier](#the-dashboard-browser-tier-fg-642). Never guard one with a skip when Chrome is missing; use `requireChrome()` so the absence fails.
 
+### Regression example: automatic terminal-resource cleanup (FG-590)
+
+The FG-590 cleanup subsystem (see `docs/operator-surface-addons.md` → Automatic
+terminal-resource cleanup) is a good worked example of tier placement, because it spans a
+pure policy, filesystem truth, and DB+docker truth:
+
+- **Unit** — `src/v2/retention-policy.test.ts` (classification, override precedence, the
+  three surface dispositions), `src/backlog/config.test.ts` (the optional `retention:`
+  override reader), `src/v2/fg590-launch-sweep.test.ts` (the launch sweep, driven by an
+  injected clock and injected tmux), `src/cli/commands/fg590-reap-policy.test.ts`
+  (evidence-before-rm, fail-closed retain, the running/non-terminal guards),
+  `src/cli/commands/fg590-status-disposition.test.ts` (the shared status label, including
+  the human `forge status` render), and the RF-1/RF-2 cases in
+  `src/cli/commands/ops.test.ts` (the destroy-chokepoint liveness re-probe, and the pre-rm
+  evidence capture recorded as `container.evidence_captured` rather than `container.reaped`).
+- **Integration** — `src/v2/fg590-cleanup-lifecycle.integration.test.ts` (the boundary +
+  five falsification cases, advancing a fake clock past each retention boundary) and
+  `src/v2/fg590-cleanup-scale.integration.test.ts` (≥500 terminal launches + 25 retained
+  containers converging in one bounded pass, with tmux-probe counters proving probes are
+  spent only on no-exit-record candidates and a second pass does not rescan resolved
+  history).
+- **Dashboard browser** — `dashboard/browser-tests/fg590-retention-disposition.test.ts`
+  (the retained-vs-expired/leaked render decision).
+
+All cleanup tests inject the clock (`now`/`nowMs`), tmux, docker listing, reaper, and
+exit-info probes, so none touch a real tmux server or docker daemon — the pattern to follow
+for any lifecycle-cleanup regression.
+
 ## Placement rule
 
 > **Do not put subprocess-heavy, git/worktree, real-DB, or sleep/long-running tests in the unit tier.** Those go to integration (`.integration.test.ts`) or worktree (`.worktree.test.ts`). The unit tier must stay fast and pure so it remains useful for rapid local iteration — and, since FG-495, it IS the canonical gate CI and the review-loop run on every commit/round, so purity here is load-bearing for suite speed, not just local ergonomics.

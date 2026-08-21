@@ -9,6 +9,7 @@ import { runNext, type RunNextResult } from "../../v2/runNext.js";
 import { formatRunFailure } from "../../v2/ready-queue.js";
 import { resolveSeedGeneration } from "../../v2/seed-generation.js";
 import { promoteLaunchObservations } from "../../store/launch-observations.js";
+import { performAutomaticCleanup } from "./ops.js";
 
 // FG-585: a truthful one-line failure detail for `forge next` — names the
 // phase(s) that failed and the phase(s) that could never dispatch as a result.
@@ -44,6 +45,15 @@ export function registerNext(program: Command): void {
 
           const run = getRun(runId);
           if (!run) throw new Error(`Run not found: ${runId}`);
+
+          // FG-590: retire terminal launch tmux sessions and expired retained task
+          // containers at the wave boundary — the daemon-free cleanup mechanism. Best
+          // effort and swallowed exactly like the promotion sweep above: cleanup is never
+          // the point of `forge next`, and it never removes a running or non-terminal
+          // resource (its destroy chokepoints re-probe liveness). Scoped to this run's
+          // project for containers; the launch sweep is host-global (launches are host
+          // resources) and only ever removes past-retention terminal launches.
+          try { performAutomaticCleanup({ projectDir: run.projectDir ?? undefined }); } catch { /* the sweep is never the point of this command */ }
 
           if (run.status === "abandoned" || run.status === "complete" || run.status === "failed") {
             console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);

@@ -42,7 +42,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { getDb, writeTransaction } from "./db.js";
-import { provenPhysical } from "../util/path-identity.js";
+import { provenPhysical, identify, compareIdentity, type PathIdentityInput } from "../util/path-identity.js";
 import { LAUNCHES_DIR, classifyExit, isLaunchId, parseExitRecord, type LaunchMeta, type LaunchStatus } from "../v2/launch.js";
 
 /** How a launch's placement was AUTHORIZED. Enum-as-convention (FG-585): TEXT with
@@ -467,6 +467,47 @@ export function listOpenLaunchObservations(limit = 200): LaunchObservation[] {
     .prepare(`SELECT ${launchObservationColumns(db)} FROM launch_observations WHERE terminal = 0 ORDER BY started_at DESC LIMIT ?`)
     .all(limit) as LaunchObservationRow[];
   return rows.map(rowToLaunchObservation);
+}
+
+/** RF-5: the launch ids this store records as belonging to a project whose filesystem
+ *  identity is NOT PROVABLY the same as `projectDir` — the launches a project-scoped
+ *  automatic sweep must NOT retire, so a project-local retention override can never purge
+ *  another project's launches on the host.
+ *
+ *  A launch is EXCLUDED (returned here) only when it carries a non-null recorded project
+ *  home that does not prove-equal `projectDir` — a provably different project, or one whose
+ *  identity cannot be decided (the destructive projection: refuse to act on an
+ *  indeterminate comparison). A launch with NO observation row, or a null project home, is
+ *  NOT returned: it is unowned/host-global and stays eligible for the ordinary sweep, so
+ *  this scoping removes only cross-project reach, never the leaked-launch cleanup FG-590
+ *  exists for. The proven canonical identity recorded at write time (`project_dir_canonical`)
+ *  decides membership with no filesystem call; a legacy null-canonical row falls back to
+ *  comparing its recorded spelling.
+ *
+ *  RF-5: THROWS on a store/query failure — it does NOT swallow the error into an empty set.
+ *  An empty result must mean "the store was read and no launch is owned by another project"
+ *  (sweep proceeds correctly), never "ownership could not be read" (which, returned empty,
+ *  would let a project-local zero-window sweep purge ANOTHER project's launch). The caller
+ *  fails CLOSED on the throw — it must never proceed to purge on absence of ownership
+ *  evidence. */
+export function launchIdsOwnedByOtherProjects(projectDir: string): Set<string> {
+  const excluded = new Set<string>();
+  const caller = identify(projectDir);
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT launch_id, project_dir, project_dir_canonical FROM launch_observations
+       WHERE project_dir IS NOT NULL AND project_dir <> ''`,
+    )
+    .all() as Array<{ launch_id: string; project_dir: string; project_dir_canonical: string | null }>;
+  for (const row of rows) {
+    const rowIdentity: PathIdentityInput =
+      row.project_dir_canonical && row.project_dir_canonical !== ""
+        ? { kind: "resolved", physical: row.project_dir_canonical, asWritten: row.project_dir }
+        : row.project_dir;
+    if (compareIdentity(rowIdentity, caller) !== "same") excluded.add(row.launch_id);
+  }
+  return excluded;
 }
 
 export function listLaunchObservations(limit = 500): LaunchObservation[] {

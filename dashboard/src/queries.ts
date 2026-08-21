@@ -73,9 +73,17 @@ import {
   isLaunchId,
   observationIsFresh,
   statusLine,
+  withRetentionDisposition,
   type CurrentActivity,
   type CurrentActivityScope,
+  type CurrentActivityWithRetention,
 } from "@forge/current-activity";
+// FG-590: the ONE shared retention annotation `forge status` also uses — same function,
+// so the two surfaces carry the disposition AND the resolved policy identically (FG-679).
+import {
+  resolveRetention,
+  type RetentionPolicy,
+} from "@forge/retention-policy";
 
 export { type ProjectRecord };
 
@@ -3513,9 +3521,24 @@ function activityScope(scope: ProjectScope, runId?: string): CurrentActivityScop
 }
 
 /** The ONE shared derivation `forge status` also calls (BD-9). The dashboard adds
- *  no interpretation of its own — agreement is structural, not asserted. */
-export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: number = Date.now()): CurrentActivity {
-  return deriveCurrentActivity(db(), { now: new Date(nowMs), scope: activityScope(scope, runId) });
+ *  no interpretation of its own — agreement is structural, not asserted.
+ *
+ *  FG-590: each host-launch row is annotated with `retentionDisposition` via the SHARED
+ *  retention rule, so the dashboard labels a retained-for-investigation launch distinctly
+ *  from an expired/leaked one with the SAME function `forge status` uses (agreement by
+ *  construction, not two renderers). A running launch is live work, never a cleanup
+ *  candidate → null. The policy is resolved from FORGE_* env over the code defaults (the
+ *  dashboard is host-wide; the per-project config override is a `forge status` nicety). */
+export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: number = Date.now()): CurrentActivityWithRetention {
+  const activity = deriveCurrentActivity(db(), { now: new Date(nowMs), scope: activityScope(scope, runId) });
+  const policy = resolveRetention(undefined, process.env);
+  return withRetentionDisposition(activity, policy, nowMs);
+}
+
+/** FG-590: exported so a consumer/test can resolve the active retention policy the same
+ *  way this surface does. */
+export function retentionPolicyForDashboard(): RetentionPolicy {
+  return resolveRetention(undefined, process.env);
 }
 
 /** BD-10: launch detail addressed by IDENTITY. The id is validated against the same

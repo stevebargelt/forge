@@ -177,3 +177,52 @@ test("writeBacklogConfig: setting prefix PRESERVES an already-committed project_
   assert.equal(cfg.projectKey, "pk-keepme");
   assert.equal(cfg.prefix, "ZZ");
 });
+
+// ── FG-590: the optional retention override reader ──
+
+import { readRetentionConfig } from "./config.js";
+
+test("FG-590 readRetentionConfig: absent file returns undefined (defaults ship in code — the upgrade AC)", () => {
+  const dir = tmp();
+  assert.equal(readRetentionConfig(dir), undefined);
+});
+
+test("FG-590 readRetentionConfig: absent retention block returns undefined and writes no config", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  writeFileSync(join(dir, ".forge", "config.yml"), "backlog:\n  prefix: FG\n");
+  assert.equal(readRetentionConfig(dir), undefined);
+  // No config file was materialized/rewritten — the block is READ-ONLY.
+  assert.equal(readFileSync(join(dir, ".forge", "config.yml"), "utf8"), "backlog:\n  prefix: FG\n");
+});
+
+test("FG-590 readRetentionConfig: a present block is honored, field by field", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  writeFileSync(join(dir, ".forge", "config.yml"), "retention:\n  successMs: 1000\n  failureAmbiguousMs: 2000\n");
+  assert.deepEqual(readRetentionConfig(dir), { successMs: 1000, failureAmbiguousMs: 2000 });
+});
+
+test("FG-590 readRetentionConfig: a partial block contributes only its named field", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  writeFileSync(join(dir, ".forge", "config.yml"), "retention:\n  successMs: 42\n");
+  assert.deepEqual(readRetentionConfig(dir), { successMs: 42 });
+});
+
+test("FG-590 readRetentionConfig: a malformed/foreign block falls back to defaults, never throws", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  // Foreign shapes: a non-object retention, and non-numeric/negative fields.
+  writeFileSync(join(dir, ".forge", "config.yml"), "retention: not-an-object\n");
+  assert.equal(readRetentionConfig(dir), undefined);
+  writeFileSync(join(dir, ".forge", "config.yml"), "retention:\n  successMs: nope\n  failureAmbiguousMs: -5\n");
+  assert.equal(readRetentionConfig(dir), undefined);
+});
+
+test("FG-590 readRetentionConfig: malformed YAML reads as no override", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  writeFileSync(join(dir, ".forge", "config.yml"), "retention: : : :\n  bad");
+  assert.equal(readRetentionConfig(dir), undefined);
+});

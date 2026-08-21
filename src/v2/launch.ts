@@ -41,6 +41,7 @@ import { fileURLToPath } from "node:url";
 import { FORGE_HOME } from "../util/paths.js";
 import { checkAbi } from "../cli/node-abi.js";
 import { readReleaseManifest } from "./release.js";
+import { classifyRetention, reapEligible, type RetentionClass, type RetentionPolicy } from "./retention-policy.js";
 
 // FG-679: THE DURABLE OBSERVATION IS DELIBERATELY NOT WRITTEN FROM THIS MODULE.
 //
@@ -1623,6 +1624,127 @@ export function removeLaunch(id: string, opts: { force?: boolean; tmux?: TmuxRun
     try { tmux(["kill-session", "-t", view.tmuxSession]); } catch { /* already gone */ }
   }
   rmSync(launchDir(id), { recursive: true, force: true });
+}
+
+// ── FG-590: automatic retirement of terminal launch tmux sessions + records ──
+//
+// The filesystem-authoritative half of the cleanup subsystem. A launch is a directory
+// under LAUNCHES_DIR; its terminality is derived (never stored) from the on-disk exit
+// record and, only when there is no exit record, one tmux liveness probe (readLaunch).
+// Removal goes through the EXISTING removeLaunch chokepoint, which re-probes liveness
+// immediately before destroying and refuses a running launch without --force — so a
+// terminal transition racing this sweep can never remove a still-running launch.
+//
+// rmSync of the launch dir IS the durable resolution: "gone on disk = done". A crash
+// between kill-session and rmSync leaves the dir (with its exit record / marker) and the
+// next pass converges truthfully from that disk truth — there is NO separate ledger to
+// keep consistent (deliberately unlike the container path, whose truth is DB + docker).
+
+/** FG-590: the durable terminal marker written ONCE on first terminal observation. It
+ *  anchors the retention clock (terminalAt) and lets later passes skip the tmux/exit
+ *  reclassification for an already-resolved launch — the scale property. `state` is kept
+ *  for diagnostics; `cls` is what the retention gate reads. */
+type LaunchTerminalMarker = { terminalAt: string; state: string; cls: RetentionClass };
+
+const TERMINAL_MARKER_FILE = "terminal.json";
+
+function readTerminalMarker(id: string): LaunchTerminalMarker | undefined {
+  const path = join(launchDir(id), TERMINAL_MARKER_FILE);
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const p = JSON.parse(raw) as Partial<LaunchTerminalMarker>;
+    if (typeof p.terminalAt !== "string" || typeof p.state !== "string") return undefined;
+    if (p.cls !== "success" && p.cls !== "failure_ambiguous") return undefined;
+    return { terminalAt: p.terminalAt, state: p.state, cls: p.cls };
+  } catch {
+    return undefined;
+  }
+}
+
+export type LaunchSweepResult = {
+  /** Terminal launches examined this pass (running launches are not counted here). */
+  scanned: number;
+  /** Past-retention terminal launches removed through removeLaunch. */
+  removed: string[];
+  /** Terminal launches still inside their retention window — left for a later pass. */
+  retained: string[];
+  /** Launches observed RUNNING — never touched (the protected invariant). */
+  skippedRunning: string[];
+  /** Ids whose removal was refused/threw (e.g. a launch that flipped back to running,
+   *  refused by removeLaunch without --force) — surfaced, never forced. */
+  errors: string[];
+};
+
+/** Sweep terminal `forge launch` records: retire a successful launch promptly and a
+ *  failed/signaled/owner-gone/unknown one after its diagnostic window, both measured
+ *  from first terminal observation. Pure of its clock and tmux (both injected) so the
+ *  boundary/scale regressions can drive a fake clock and count probes. Never throws.
+ *
+ *  RF-5: `scope`, when supplied, EXCLUDES a launch from the sweep entirely (not counted,
+ *  not touched) when it returns false. This module is deliberately store-free, so it
+ *  cannot know which project OWNS a launch; the caller (performAutomaticCleanup) computes
+ *  that from the launch-observation store and passes a predicate that returns false for a
+ *  launch owned by ANOTHER project. That is what keeps a project-local retention override
+ *  from purging another project's launches — the destroy paths, not this module, own the
+ *  scoping just as they own the never-remove-a-running-launch rule. */
+export function sweepTerminalLaunches(
+  policy: RetentionPolicy,
+  opts: { now?: Date; tmux?: TmuxRunner; scope?: (launchId: string) => boolean } = {},
+): LaunchSweepResult {
+  const tmux = opts.tmux ?? defaultTmux;
+  const now = opts.now ?? new Date();
+  const result: LaunchSweepResult = { scanned: 0, removed: [], retained: [], skippedRunning: [], errors: [] };
+  if (!existsSync(LAUNCHES_DIR)) return result;
+
+  for (const entry of readdirSync(LAUNCHES_DIR)) {
+    if (!/^[a-z0-9][a-z0-9-]*$/i.test(entry)) continue;
+    // RF-5: a launch owned by another project is out of this sweep's scope — left
+    // untouched so a project-local retention override never retires it.
+    if (opts.scope && !opts.scope(entry)) continue;
+
+    // Cheap path: an already-anchored terminal launch skips reclassification entirely —
+    // no readLaunch, no tmux probe (scale AC: resolved history is not rescanned).
+    let marker = readTerminalMarker(entry);
+    if (!marker) {
+      const view = readLaunch(entry, tmux);
+      if (!view) continue; // vanished / transiently unreadable — a later pass converges
+      if (view.status.state === "running") {
+        result.skippedRunning.push(entry);
+        continue;
+      }
+      const cls = classifyRetention({ kind: "launch", state: view.status.state });
+      marker = { terminalAt: now.toISOString(), state: view.status.state, cls };
+      // Anchor age durably ONCE. Best-effort: a failed write just means the next pass
+      // re-observes and re-anchors — it never removes a launch it could not anchor.
+      try {
+        writeJsonAtomic(join(launchDir(entry), TERMINAL_MARKER_FILE), marker);
+      } catch {
+        /* re-anchored next pass */
+      }
+    }
+
+    result.scanned++;
+    const anchoredMs = Date.parse(marker.terminalAt);
+    const ageMs = Number.isFinite(anchoredMs) ? now.getTime() - anchoredMs : 0;
+    if (!reapEligible(marker.cls, ageMs, policy)) {
+      result.retained.push(entry);
+      continue;
+    }
+    try {
+      // removeLaunch re-probes liveness at the chokepoint and refuses a running launch
+      // without --force; rmSync of the dir is the durable resolution.
+      removeLaunch(entry, { tmux });
+      result.removed.push(entry);
+    } catch {
+      result.errors.push(entry);
+    }
+  }
+  return result;
 }
 
 // ── FG-552: the blocking completion primitive (`forge launch wait`) ──

@@ -14,7 +14,14 @@ import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
 import { promoteLaunchObservations } from "../../store/launch-observations.js";
-import { deriveCurrentActivity, renderCurrentActivityLines } from "../../v2/current-activity.js";
+import { deriveCurrentActivity, renderCurrentActivityLines, withRetentionDisposition } from "../../v2/current-activity.js";
+import { resolveRetention, type RetentionPolicy } from "../../v2/retention-policy.js";
+import { readRetentionConfig } from "../../backlog/config.js";
+
+// FG-590: the retention annotation is the SHARED `withRetentionDisposition` (in
+// current-activity.ts) so `forge status` and the dashboard cannot drift into labeling
+// differently. Re-exported for the FG-590 disposition test that already imports it here.
+export { withRetentionDisposition };
 
 export function registerStatus(program: Command): void {
   program
@@ -46,6 +53,15 @@ export function registerStatus(program: Command): void {
       const currentActivity = (scope: { runId?: string; projectDirs?: readonly string[] }) =>
         deriveCurrentActivity(getDb(opts.readOnly ? { readOnly: true } : undefined), { scope });
 
+      // FG-590: resolve the retention policy once (config override → FORGE_* env → code
+      // defaults) so the JSON surface can label each terminal host launch's disposition.
+      let retentionPolicy: RetentionPolicy;
+      try {
+        retentionPolicy = resolveRetention(readRetentionConfig(resolve(opts.workspace ?? process.cwd())), process.env);
+      } catch {
+        retentionPolicy = resolveRetention(undefined, process.env);
+      }
+
       // AWN-1: reconcile crash/Docker state before reporting (writable path only).
       // Scope it to EXACTLY the runs this command will display — a workspace-
       // scoped `forge status` must not reconcile (and mutate) other workspaces'
@@ -74,7 +90,7 @@ export function registerStatus(program: Command): void {
             status: r.status,
             createdAt: r.createdAt,
             completedAt: r.completedAt ?? null,
-          })), currentActivity: activity }, null, 2));
+          })), currentActivity: withRetentionDisposition(activity, retentionPolicy, Date.now()) }, null, 2));
           return;
         }
         if (runs.length === 0) {
@@ -86,14 +102,16 @@ export function registerStatus(program: Command): void {
           // A host with no run rows can still have work in flight — that is exactly
           // the blind spot FG-679 closes, so the surface is printed either way.
           console.log("");
-          for (const line of renderCurrentActivityLines(activity)) console.log(line);
+          // FG-590 (RF-8): the human surface carries the SAME retention disposition the
+          // JSON path annotates — surfaced by renderCurrentActivityLines off the annotated rows.
+          for (const line of renderCurrentActivityLines(withRetentionDisposition(activity, retentionPolicy, Date.now()))) console.log(line);
           return;
         }
         for (const r of runs) {
           console.log(`${r.id}  [${r.status}]  ${r.workflow}  —  ${r.title}`);
         }
         console.log("");
-        for (const line of renderCurrentActivityLines(activity)) console.log(line);
+        for (const line of renderCurrentActivityLines(withRetentionDisposition(activity, retentionPolicy, Date.now()))) console.log(line);
         return;
       }
 
@@ -186,7 +204,7 @@ export function registerStatus(program: Command): void {
           // the only place `status --json` names a phase that never dispatched.
           runFailure: runFailure ?? null,
           tasks: tasksJson,
-          currentActivity: runActivity,
+          currentActivity: withRetentionDisposition(runActivity, retentionPolicy, Date.now()),
         }, null, 2));
         return;
       }
@@ -252,7 +270,7 @@ export function registerStatus(program: Command): void {
       }
 
       console.log("");
-      for (const line of renderCurrentActivityLines(runActivity)) console.log(line);
+      for (const line of renderCurrentActivityLines(withRetentionDisposition(runActivity, retentionPolicy, Date.now()))) console.log(line);
     });
 }
 

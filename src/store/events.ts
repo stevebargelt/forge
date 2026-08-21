@@ -133,6 +133,14 @@ export type EventType =
   // exists for the same task, clearing the container_reap_failed incident.
   // Happy-path task-completion reaps never emit this (FG-503 AC4 still holds).
   | "container.reaped"
+  // RF-2: the PRE-rm diagnostic evidence capture (exit/signal/OOM/timing) the
+  // automatic reap persists before a destructive rm of a failed/ambiguous container.
+  // Deliberately DISTINCT from container.reaped so it is NOT a resolution marker: the
+  // rm may still error and leave the container present, and detectContainerReapFailed /
+  // the absence-heal scan must never read this pre-rm capture as "cleanup resolved".
+  // The diagnostic reader keys on the `containerEvidence` payload, not the event type,
+  // so it still finds this evidence.
+  | "container.evidence_captured"
   // FG-437: durable phase-boundary markers around the (separate, short-lived)
   // dependency provisioner container, so a mid-provision crash is visible to
   // reconcile even though the task's own container.started hasn't fired yet.

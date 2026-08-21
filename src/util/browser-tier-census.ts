@@ -121,6 +121,10 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg679-current-activity.test.ts": 16,
   "fg694-home-in-flight.test.ts": 10,
   "fg699-scope-invalidation.test.ts": 6,
+  // FG-590 adds `fg590-retention-disposition` (2 tests): the terminal-launch retention
+  // disposition (retained-for-investigation vs expired/eligible vs leaked) rendered into
+  // the page via the shared rule, and the running-launch/legacy no-claim case.
+  "fg590-retention-disposition.test.ts": 2,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,

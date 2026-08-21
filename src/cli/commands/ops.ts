@@ -9,8 +9,13 @@ import { getTask } from "../../store/tasks.js";
 import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-lock.js";
 import { getDb, storeExists } from "../../store/db.js";
 import { renderedEmptyStore } from "../no-store.js";
-import { logEvent } from "../../store/events.js";
-import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
+import { logEvent, eventsForTask } from "../../store/events.js";
+import { defaultContainerReap, defaultContainerList, defaultContainerExitInfo, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
+import { getContainerCausalEvidenceFromEvents, type ContainerCausalEvidence, type ContainerExitInfo } from "../../v2/failure-kind.js";
+import { classifyRetention, reapEligible, resolveRetention, type RetentionPolicy } from "../../v2/retention-policy.js";
+import { readRetentionConfig } from "../../backlog/config.js";
+import { sweepTerminalLaunches, type LaunchSweepResult, type TmuxRunner } from "../../v2/launch.js";
+import { launchIdsOwnedByOtherProjects } from "../../store/launch-observations.js";
 import { emitMilestone } from "../../notify/milestone.js";
 import { performAdjudicate, type AdjudicateResult } from "../../ops/adjudication.js";
 import { userInfo } from "node:os";
@@ -168,25 +173,40 @@ export type ReapContainersOutcome = {
   // still true — only the DB write failed — so this never blocks the sweep;
   // the next sweep's absence-heal pass closes it.
   resolutionWriteErrors: string[];
+  // FG-590: a FAILED/AMBIGUOUS container we DID NOT reap because its exit/signal/
+  // OOM/timing evidence could not be persisted before the destructive rm — fail
+  // closed. The container is deliberately LEFT so the failure evidence is never
+  // destroyed unrecorded, and it is surfaced here so the cleanup failure is visible.
+  evidenceFailed: string[];
+  // RF-2/RF-1: a candidate we DID NOT reap because it was found running and left
+  // alive. Two backstops feed this bucket: (1) a FRESH liveness re-probe at the
+  // destroy chokepoint found it running (it restarted since the initial `docker ps
+  // -a` scan) or could not confirm it dead; (2) the non-forced `docker rm` itself
+  // refused to remove it because it came back to running in the residual window
+  // between that re-probe and the rm (the atomic daemon-level guarantee, RF-1). A
+  // running container is never removed across that race — mirrors the launch
+  // sweep's skippedRunning bucket.
+  skippedRunning: string[];
 };
 
 type ReapCandidateSource = "failed_retained" | "completed_leak";
 type TaskLookupRow = { status: string; completedAt: string | null; projectDir: string | null; runId: string };
 
 export function performOpsReapContainers(
-  opts: { dryRun?: boolean; olderThanMinutes?: number; projectDir?: string } = {},
+  opts: { dryRun?: boolean; olderThanMinutes?: number; projectDir?: string; policy?: RetentionPolicy; nowMs?: number } = {},
   reap: ContainerReap = defaultContainerReap,
   listContainers: ContainerLister = defaultContainerList,
+  containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
 ): ReapContainersOutcome {
   const containers = listContainers();
   if (containers === undefined) {
-    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], dockerUnavailable: true };
+    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], evidenceFailed: [], skippedRunning: [], dockerUnavailable: true };
   }
 
   // No store means no forge task can own any of these containers; the reap has
   // nothing it may act on and must not open (or create) a store to say so.
   if (!storeExists()) {
-    return { dryRun: !!opts.dryRun, scanned: containers.length, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], dockerUnavailable: false };
+    return { dryRun: !!opts.dryRun, scanned: containers.length, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], evidenceFailed: [], skippedRunning: [], dockerUnavailable: false };
   }
   const db = getDb({ readOnly: true });
   const lookupTask = db.prepare(
@@ -194,7 +214,8 @@ export function performOpsReapContainers(
      FROM tasks t JOIN runs r ON r.id = t.run_id WHERE t.id = ?`
   );
 
-  const cutoffMs = opts.olderThanMinutes !== undefined ? Date.now() - opts.olderThanMinutes * 60_000 : undefined;
+  const nowForAge = opts.nowMs ?? Date.now();
+  const cutoffMs = opts.olderThanMinutes !== undefined ? nowForAge - opts.olderThanMinutes * 60_000 : undefined;
   const reaped: string[] = [];
   const retained: string[] = [];
   const errors: string[] = [];
@@ -202,7 +223,29 @@ export function performOpsReapContainers(
   const completedTaskLeaksUnconfirmed: string[] = [];
   const absenceHealed: string[] = [];
   const resolutionWriteErrors: string[] = [];
+  const evidenceFailed: string[] = [];
+  const skippedRunning: string[] = [];
   let scanned = 0;
+  const nowMs = nowForAge;
+
+  // RF-1 (TOCTOU): the destroy chokepoint re-probes liveness PER CONTAINER against a
+  // FRESH listing taken immediately before THAT container's reap — never a snapshot
+  // memoized across the whole sweep, and never the initial scan snapshot
+  // (`container.running` above came from `containers`, fetched at the top of this call).
+  // A single memoized re-list still loses the race: a container reported stopped when
+  // that one list was taken can restart before its own (later) reap, and the stale
+  // snapshot would greenlight destroying live work. So re-list at every chokepoint and
+  // treat a candidate that is now running — or that we cannot confirm dead (the fresh
+  // list is unreachable) — as ALIVE: never destroyed on absence of evidence. Mirrors the
+  // launch sweep, whose removeLaunch chokepoint re-probes via readLaunch per launch
+  // immediately before destroying.
+  const isRunningAtChokepoint = (name: string): boolean => {
+    const fresh = listContainers();
+    if (fresh === undefined) return true; // docker now unreachable — cannot determine, treat as alive
+    const entry = fresh.find((c) => c.name === name);
+    if (!entry) return false; // gone from disk — the reap below will confirm not_found
+    return entry.running;
+  };
 
   // FG-505: the post-rm resolution write (and the absence-heal write below)
   // must never abort the sweep — if `docker rm` already confirmed the
@@ -215,6 +258,46 @@ export function performOpsReapContainers(
       return true;
     } catch {
       resolutionWriteErrors.push(containerName);
+      return false;
+    }
+  }
+
+  // FG-590: before the destructive rm of a FAILED/AMBIGUOUS container, GUARANTEE the
+  // exit/signal/OOM/timing (and missing-evidence) facts `forge show --diagnostic` needs
+  // are durable. Reconcile usually recorded them at failure time already; when it did
+  // (getContainerCausalEvidenceFromEvents finds a containerEvidence payload) there is
+  // nothing to do. When it did NOT, capture them now via the same defaultContainerExitInfo
+  // probe and persist a containerEvidence payload the diagnostic reader will find. A
+  // durable exit code alone is NOT proof the task is terminal (that gate is the task's DB
+  // status above), so this only ADDS evidence — it never drives task state. Returns false
+  // if the persist WRITE fails: the caller then fails closed and retains the container so
+  // the evidence is never destroyed unrecorded.
+  //
+  // RF-2: the pre-rm capture is recorded under `container.evidence_captured`, NOT
+  // `container.reaped`. `container.reaped` is the durable RESOLUTION marker — the reap
+  // succeeded — and detectContainerReapFailed / the absence-heal query below treat any
+  // `container.reaped` newer than a `container.reap_failed` as "cleanup resolved". Emitting
+  // it BEFORE the rm (when the rm may still error and leave the container present) fabricated
+  // a resolution and could suppress a still-unresolved reap_failed incident. The diagnostic
+  // reader keys on the `containerEvidence` payload, not the event type, so it still finds
+  // this; only the resolution markers, which key on the type, no longer match it.
+  function ensureFailureEvidencePersisted(runId: string, taskId: string, containerName: string): boolean {
+    if (getContainerCausalEvidenceFromEvents(eventsForTask(taskId)) !== undefined) return true;
+    const info = containerExitInfo(containerName);
+    const evidence: ContainerCausalEvidence = {
+      containerName,
+      containerExitedEventObserved: false,
+      ...(info.exitCode !== undefined ? { dockerExitCode: info.exitCode } : {}),
+      ...(info.signal !== undefined ? { signal: info.signal } : {}),
+      ...(info.oomKilled !== undefined ? { oomKilled: info.oomKilled } : {}),
+      ...(info.startedAt !== undefined ? { startedAt: info.startedAt } : {}),
+      ...(info.finishedAt !== undefined ? { finishedAt: info.finishedAt } : {}),
+      ...(info.dockerStateError !== undefined ? { dockerStateError: info.dockerStateError } : {}),
+    };
+    try {
+      logEvent("container.evidence_captured", { runId, taskId, payload: { containerName, stage: "pre_reap_evidence", containerEvidence: evidence } });
+      return true;
+    } catch {
       return false;
     }
   }
@@ -232,14 +315,27 @@ export function performOpsReapContainers(
     const source: ReapCandidateSource = row.status === "complete" ? "completed_leak" : "failed_retained";
     const containerName = container.name;
 
+    // Disk truth (the container's own finishedAt) is preferred for the age check;
+    // the task's completedAt is the fallback when docker couldn't confirm it (still
+    // a valid signal — for the crash-window leak, markTaskComplete already ran).
+    const anchor = container.finishedAt ?? row.completedAt;
+    const ageMs = anchor ? nowMs - new Date(anchor).getTime() : undefined;
+
     if (cutoffMs !== undefined) {
-      // Disk truth (the container's own finishedAt) is preferred for the age
-      // check; the task's completedAt is the fallback when docker couldn't
-      // confirm it (still a valid signal — for the crash-window leak this
-      // fix targets, markTaskComplete already ran before the process died).
-      const anchor = container.finishedAt ?? row.completedAt;
-      const ageMs = anchor ? new Date(anchor).getTime() : undefined;
-      if (ageMs === undefined || ageMs > cutoffMs) {
+      // FG-492/FG-503: the explicit --older-than-minutes gate — UNCHANGED. When the
+      // operator names a single cutoff it wins over the per-outcome policy below.
+      const ageAt = anchor ? new Date(anchor).getTime() : undefined;
+      if (ageAt === undefined || ageAt > cutoffMs) {
+        retained.push(containerName);
+        continue;
+      }
+    } else if (opts.policy !== undefined) {
+      // FG-590: automatic, per-outcome retention. A complete task's leaked container is
+      // retired on the success window; a failed/ambiguous one is retained for the whole
+      // diagnostic window. An UNKNOWN age (no finishedAt AND no completedAt) is retained,
+      // never reaped on missing evidence.
+      const cls = classifyRetention({ kind: "container", taskStatus: row.status });
+      if (ageMs === undefined || !reapEligible(cls, ageMs, opts.policy)) {
         retained.push(containerName);
         continue;
       }
@@ -250,6 +346,25 @@ export function performOpsReapContainers(
       if (source === "completed_leak") completedTaskLeaks.push(containerName);
       continue;
     }
+
+    // RF-1: re-probe liveness at the single destroy chokepoint — never remove a container
+    // that came back to running after the initial scan (or one we cannot confirm dead).
+    if (isRunningAtChokepoint(containerName)) {
+      skippedRunning.push(containerName);
+      continue;
+    }
+
+    // FG-590: on the AUTOMATIC (policy-driven) path, fail closed BEFORE the destructive
+    // rm of a failed/ambiguous container — if its diagnostic evidence cannot be made
+    // durable, retain it and report, never destroy failure evidence unrecorded. This is
+    // gated on `opts.policy` so the existing manual `forge ops reap-containers` (no policy)
+    // stays byte-for-byte unchanged; the automatic cleanup that runs unattended is the one
+    // that must not silently destroy evidence. Successful-task leaks carry no such evidence
+    // requirement (nothing failed) and skip this.
+    if (opts.policy !== undefined && source === "failed_retained" && !ensureFailureEvidencePersisted(row.runId, taskId, containerName)) {
+      evidenceFailed.push(containerName);
+      continue;
+    }
     // "not_found" (already gone — e.g. FORGE_CONTAINER_RETENTION=off never kept
     // it, or a prior sweep already reaped it since we listed it) is equally
     // "nothing left behind" as "killed" — both count as reaped from this
@@ -257,7 +372,13 @@ export function performOpsReapContainers(
     // "not_found" also means it was never actually a leak — excluded from
     // completedTaskLeaks accordingly.
     const outcome = reap(containerName);
-    if (outcome === "error") {
+    if (outcome === "skipped_running") {
+      // RF-1: the atomic backstop. Even though the chokepoint re-probe above saw
+      // it stopped, the container restarted before the (non-forced) rm, so the
+      // docker daemon itself refused to remove it. It is alive and was correctly
+      // left — never a reap error, never counted as reaped. Skip.
+      skippedRunning.push(containerName);
+    } else if (outcome === "error") {
       errors.push(containerName);
       // FG-504: NOT confirmed gone — must never join completedTaskLeaks
       // (that list is the "now swept" set the CLI reports as resolved).
@@ -317,7 +438,113 @@ export function performOpsReapContainers(
     }
   }
 
-  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, completedTaskLeaksUnconfirmed, absenceHealed, resolutionWriteErrors, dockerUnavailable: false };
+  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, completedTaskLeaksUnconfirmed, absenceHealed, resolutionWriteErrors, evidenceFailed, skippedRunning, dockerUnavailable: false };
+}
+
+// FG-590: the daemon-free automatic cleanup orchestrator. It drives BOTH terminal-resource
+// paths — the filesystem-authoritative launch sweep and the DB+docker-authoritative
+// container reap — under ONE resolved retention policy (readRetentionConfig overrides →
+// FORGE_* env → code defaults). It is attached to the `forge next` wave boundary (next.ts)
+// and exposed as `forge ops cleanup`; there is no resident scheduler.
+//
+// SAFETY POSTURE. It NEVER throws into its caller (each path is independently guarded), so
+// a cleanup problem never breaks the wave that hosts it. The container reap opens the store
+// READ-ONLY and only when one already exists (storeExists) — a store-less or clean host does
+// no store write and mints nothing. The launch sweep touches only $FORGE_HOME/launches.
+export type AutomaticCleanupResult = {
+  policy: RetentionPolicy;
+  launches: LaunchSweepResult | { error: string };
+  containers: ReapContainersOutcome | { error: string };
+};
+
+export function performAutomaticCleanup(
+  opts: {
+    dryRun?: boolean;
+    projectDir?: string;
+    now?: Date;
+    tmux?: TmuxRunner;
+    reap?: ContainerReap;
+    listContainers?: ContainerLister;
+    containerExitInfo?: ContainerExitInfo;
+    // Injected for tests; production resolves from config + env below.
+    policy?: RetentionPolicy;
+  } = {},
+): AutomaticCleanupResult {
+  const projectDir = opts.projectDir ?? process.cwd();
+  const policy =
+    opts.policy ??
+    resolveRetention(safeReadRetentionOverrides(projectDir), process.env);
+
+  let launches: AutomaticCleanupResult["launches"];
+  try {
+    // RF-5: scope the launch sweep to this project. The container reap is already
+    // projectDir-scoped; the launch sweep was host-global, so a project-local retention
+    // override (a repo `.forge/config.yml` or a FORGE_* env with a short/zero window) would
+    // retire terminal launches OWNED BY OTHER PROJECTS. Exclude any launch the observation
+    // store places in a provably-different project; unowned/host-global launches stay in
+    // scope.
+    const foreignResult = safeForeignLaunchIds(projectDir);
+    if (!foreignResult.ok) {
+      // RF-5: cross-project ownership could not be established. FAIL CLOSED — retire NOTHING
+      // (removing now could purge another project's terminal launch) and surface the failure
+      // rather than silently sweeping over launches we cannot prove are ours to remove.
+      launches = { error: `launch sweep skipped: cannot establish cross-project ownership (${foreignResult.error})` };
+    } else {
+      const foreign = foreignResult.foreign;
+      // The launch sweep does not remove anything on a dry run — it only reports would-be
+      // work — so a dry run passes a clock but never destroys. sweepTerminalLaunches itself
+      // has no dry-run mode (it removes), so a dry-run cleanup skips the destructive sweep
+      // and reports an empty result rather than removing launches.
+      launches = opts.dryRun
+        ? { scanned: 0, removed: [], retained: [], skippedRunning: [], errors: [] }
+        : sweepTerminalLaunches(policy, { now: opts.now, tmux: opts.tmux, scope: (id) => !foreign.has(id) });
+    }
+  } catch (e) {
+    launches = { error: e instanceof Error ? e.message : String(e) };
+  }
+
+  let containers: AutomaticCleanupResult["containers"];
+  try {
+    containers = performOpsReapContainers(
+      { dryRun: opts.dryRun, projectDir, policy, ...(opts.now ? { nowMs: opts.now.getTime() } : {}) },
+      opts.reap ?? defaultContainerReap,
+      opts.listContainers ?? defaultContainerList,
+      opts.containerExitInfo ?? defaultContainerExitInfo,
+    );
+  } catch (e) {
+    containers = { error: e instanceof Error ? e.message : String(e) };
+  }
+
+  return { policy, launches, containers };
+}
+
+/** Read the optional per-project retention override, never letting a read problem abort
+ *  cleanup — a symlink/parse issue reads as "no override" and the code defaults apply. */
+function safeReadRetentionOverrides(projectDir: string): ReturnType<typeof readRetentionConfig> {
+  try {
+    return readRetentionConfig(projectDir);
+  } catch {
+    return undefined;
+  }
+}
+
+/** RF-5: the launch ids owned by a project OTHER than this one, to exclude from the
+ *  project-scoped launch sweep — or an explicit FAILURE when cross-project ownership
+ *  cannot be established. It FAILS CLOSED: a store/query problem is NOT flattened into
+ *  "no foreign launches" (which would let a project-local zero-window sweep purge another
+ *  project's terminal launch). The caller must retire NOTHING and surface the failure when
+ *  this returns `{ ok: false }`, never widen the deletion scope on absence of evidence. */
+type ForeignLaunchIds = { ok: true; foreign: Set<string> } | { ok: false; error: string };
+function safeForeignLaunchIds(projectDir: string): ForeignLaunchIds {
+  // No store means no launch is recorded as owned by any project — nothing to exclude,
+  // and the read must NOT open (or mint) a store to say so (store-less host invariant).
+  // This is a PROVEN "no foreign launches", not an unread store, so it is ok:true.
+  if (!storeExists()) return { ok: true, foreign: new Set() };
+  try {
+    return { ok: true, foreign: launchIdsOwnedByOtherProjects(projectDir) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export function registerOps(program: Command): void {
@@ -465,7 +692,64 @@ export function registerOps(program: Command): void {
       // `docker rm`), not by this sweep's own reap attempt.
       if (outcome.absenceHealed.length > 0) console.log(`  healed by absence (container gone, prior reap resolution now recorded): ${outcome.absenceHealed.join(", ")}`);
       if (outcome.resolutionWriteErrors.length > 0) console.log(`  resolution write failed (container confirmed gone, but the event insert threw — a later sweep will heal it): ${outcome.resolutionWriteErrors.join(", ")}`);
+      // FG-590: a failed/ambiguous container we REFUSED to reap because its diagnostic
+      // evidence could not be persisted — fail closed, retained, and named here.
+      if (outcome.evidenceFailed.length > 0) console.log(`  RETAINED — evidence could not be persisted before reap (failing closed, left for inspection): ${outcome.evidenceFailed.join(", ")}`);
+      // RF-1: a candidate that came back to running (or could not be confirmed dead) at
+      // the destroy chokepoint — never removed across the race.
+      if (outcome.skippedRunning.length > 0) console.log(`  skipped (running again / liveness unconfirmed at reap time): ${outcome.skippedRunning.join(", ")}`);
       if (outcome.dryRun) console.log("No writes.");
+    });
+
+  // FG-590: `forge ops cleanup` — the immediate manual sweep of BOTH terminal-resource
+  // paths under the automatic retention policy. The same work the `forge next` wave does
+  // at its boundary, on demand. --dry-run reports the container candidates without
+  // removing anything and skips the (destructive) launch sweep.
+  ops
+    .command("cleanup")
+    .option("--dry-run", "report container candidates; remove nothing (also skips the launch sweep)")
+    .option("--project <dir>", "scope container reap to a specific project dir (default: cwd)")
+    .option("--json", "emit structured JSON")
+    .description(
+      "Automatically retire terminal launch tmux sessions and expired retained task containers under the " +
+        "configured retention policy (success retires promptly; failed/ambiguous is kept for its diagnostic " +
+        "window, evidence-preserved). Defaults live in code; override with .forge/config.yml `retention:` or " +
+        "FORGE_RETENTION_* env. Never removes a running launch, a running container, or a non-terminal task's container."
+    )
+    .action((opts: { dryRun?: boolean; project?: string; json?: boolean }) => {
+      ensureForgeDirs();
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const result = performAutomaticCleanup({ dryRun: opts.dryRun, projectDir });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      const l = result.launches;
+      if ("error" in l) {
+        console.log(`launch sweep failed: ${l.error}`);
+      } else if (opts.dryRun) {
+        console.log("launches: (dry-run) launch sweep skipped — it removes, so it does not run under --dry-run.");
+      } else {
+        console.log(`launches: retired ${l.removed.length}, retained ${l.retained.length}, running (untouched) ${l.skippedRunning.length}.`);
+        if (l.errors.length > 0) console.log(`  refused (raced back to running / removal error): ${l.errors.join(", ")}`);
+      }
+
+      const c = result.containers;
+      if ("error" in c) {
+        console.log(`container reap failed: ${c.error}`);
+      } else if (c.dockerUnavailable) {
+        console.log("containers: docker unavailable — no scan performed.");
+      } else {
+        const verb = c.dryRun ? "(dry-run) would retire" : "retired";
+        console.log(`containers: ${verb} ${c.reaped.length}/${c.scanned}, retained (within window) ${c.retained.length}.`);
+        if (c.errors.length > 0) console.log(`  reap failed (not confirmed gone): ${c.errors.join(", ")}`);
+        if (c.evidenceFailed.length > 0) console.log(`  RETAINED — evidence not persisted before reap (failing closed): ${c.evidenceFailed.join(", ")}`);
+        if (c.skippedRunning.length > 0) console.log(`  skipped (running again / liveness unconfirmed at reap time): ${c.skippedRunning.join(", ")}`);
+        if (c.absenceHealed.length > 0) console.log(`  healed by absence: ${c.absenceHealed.join(", ")}`);
+      }
+      if (opts.dryRun) console.log("No writes.");
     });
 
   // FG-703: `forge ops adjudicate <taskId>` — operator-authorized, fail-closed,
