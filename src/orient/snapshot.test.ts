@@ -11,11 +11,13 @@ import {
   OPS_HIGHEST_CAP,
   ORIENT_SNAPSHOT_SCHEMA,
   ORIENT_SNAPSHOT_VERSION,
+  REFERENCED_TICKET_TITLE_MAX_CHARS,
   extractHandoffField,
   extractTicketRefs,
   projectOrientSnapshot,
+  resolveTicketRef,
+  type OrientResolvedTicket,
   type OrientSnapshotInputs,
-  type OrientTicketRef,
 } from "./snapshot.js";
 
 function incident(severity: IncidentSeverity, kind: IncidentKind, runId: string, taskId: string | null): Incident {
@@ -75,7 +77,7 @@ test("normal state: bounded handoff fields, active ids sorted by sticky desc, re
     "",
     "**Shipped (for reference):** FG-587 the thing.",
   ].join("\n");
-  const resolved: Record<string, OrientTicketRef> = {
+  const resolved: Record<string, OrientResolvedTicket> = {
     "FG-588": { id: "FG-588", status: "active", title: "Bound /orient context cost" },
     "FG-600": { id: "FG-600", status: "active", title: "Something else" },
   };
@@ -110,7 +112,7 @@ test("stale handoff: present notes but no Picked up next section", () => {
 });
 
 test("closed and missing refs are distinguished — a done ticket of any age is not 'missing'", () => {
-  const resolved: Record<string, OrientTicketRef> = {
+  const resolved: Record<string, OrientResolvedTicket> = {
     "FG-10": { id: "FG-10", status: "done", title: "Long-closed work" },
     "FG-999": { id: "FG-999", status: "missing", title: null },
   };
@@ -123,6 +125,80 @@ test("closed and missing refs are distinguished — a done ticket of any age is 
   const byId = new Map(s.referencedTickets.map((r) => [r.id, r]));
   assert.equal(byId.get("FG-10")?.status, "done", "a closed ticket resolves as done, never missing");
   assert.equal(byId.get("FG-999")?.status, "missing");
+});
+
+test("RF-1: an existing-but-unreadable ticket resolves as 'unreadable', never 'missing'", () => {
+  // Exists but the read fails — the read-failure-after-existence-check case that was
+  // being misreported as an absent ticket.
+  const unreadable = resolveTicketRef(
+    "FG-1",
+    () => true,
+    () => {
+      throw new Error("read failed");
+    },
+  );
+  assert.equal(unreadable.status, "unreadable");
+  assert.notEqual(unreadable.status, "missing");
+
+  // Existence itself indeterminable — still an error state, not 'missing'.
+  const existenceThrew = resolveTicketRef(
+    "FG-2",
+    () => {
+      throw new Error("existence check failed");
+    },
+    () => ({ status: "active", title: "x" }),
+  );
+  assert.equal(existenceThrew.status, "unreadable");
+
+  // An actually-absent ticket is the ONLY 'missing'.
+  const absent = resolveTicketRef("FG-3", () => false, () => ({ status: "active", title: "x" }));
+  assert.equal(absent.status, "missing");
+
+  // A readable ticket carries its real status/title.
+  const ok = resolveTicketRef("FG-4", () => true, () => ({ status: "done", title: "t" }));
+  assert.equal(ok.status, "done");
+  assert.equal(ok.title, "t");
+});
+
+test("RF-1: an unreadable referenced ticket propagates through the projection as unreadable", () => {
+  const s = projectOrientSnapshot(
+    baseInputs({
+      notesText: "**Picked up next:** resume FG-7.",
+      resolveTicket: (id) => ({ id, status: "unreadable", title: null }),
+    }),
+  );
+  assert.equal(s.referencedTickets[0]?.status, "unreadable");
+  assert.notEqual(s.referencedTickets[0]?.status, "missing");
+});
+
+test("RF-2: a very long referenced title is truncated with metadata and the snapshot stays ≤5KB", () => {
+  const longTitle = "T".repeat(6000);
+  const s = projectOrientSnapshot(
+    baseInputs({
+      notesText: "**Picked up next:** finish FG-1.",
+      resolveTicket: (id) => ({ id, status: "active", title: longTitle }),
+    }),
+  );
+  const ref = s.referencedTickets[0]!;
+  assert.equal(ref.titleTruncated, true, "an over-limit title must be flagged truncated");
+  assert.equal(ref.title?.length, REFERENCED_TICKET_TITLE_MAX_CHARS, "title is cut to the cap");
+  assert.equal(ref.titleFullLength, 6000, "the untruncated length is preserved as metadata");
+  const json = JSON.stringify(s);
+  assert.ok(json.length <= 5 * 1024, `snapshot is ${json.length} bytes, over the 5 KB budget`);
+});
+
+test("RF-2: a title at or under the cap is carried whole with no truncation flag", () => {
+  const title = "T".repeat(REFERENCED_TICKET_TITLE_MAX_CHARS);
+  const s = projectOrientSnapshot(
+    baseInputs({
+      notesText: "**Picked up next:** finish FG-1.",
+      resolveTicket: (id) => ({ id, status: "active", title }),
+    }),
+  );
+  const ref = s.referencedTickets[0]!;
+  assert.equal(ref.titleTruncated, false);
+  assert.equal(ref.title, title);
+  assert.equal(ref.titleFullLength, REFERENCED_TICKET_TITLE_MAX_CHARS);
 });
 
 test("over-limit: active ids capped with truncation, handoff fields truncated with fullLength, ops bounded", () => {

@@ -48,6 +48,13 @@ export const OPS_HIGHEST_CAP = 6;
  *  wholesale — the bounded-notes contract this ticket establishes. */
 export const HANDOFF_FIELD_MAX_CHARS = 500;
 
+/** The concrete bound on a referenced ticket's title. A referenced ticket carries a
+ *  title (unlike an active-id row), so one ticket with a pathological title could
+ *  otherwise push the whole snapshot past its byte budget with no notice. Over-limit
+ *  titles are truncated with explicit `titleTruncated` + `titleFullLength` metadata —
+ *  the same never-silent-truncation contract the handoff fields hold. */
+export const REFERENCED_TICKET_TITLE_MAX_CHARS = 200;
+
 /** A forward handoff field, bounded. `truncated` + `fullLength` make an over-limit
  *  field an explicit state rather than a silent cut. */
 export type OrientBoundedField = {
@@ -57,13 +64,24 @@ export type OrientBoundedField = {
   fullLength: number;
 };
 
-/** A ticket referenced by `Picked up next`, resolved to exact identity — `missing`
- *  when no such ticket exists, so a closed ticket of any age is never confused with
- *  an absent one (the `done | head -30` defect). */
-export type OrientTicketRef = {
+/** The EXACT resolution of a `Picked up next` ticket ref, before the snapshot bounds
+ *  its title. `missing` means no such ticket exists — so a closed ticket of any age is
+ *  never confused with an absent one (the `done | head -30` defect). `unreadable` means
+ *  the ticket EXISTS but could not be read: an error state that must never be conflated
+ *  with an actually-absent ticket. */
+export type OrientResolvedTicket = {
   id: string;
-  status: TicketStatus | "missing";
+  status: TicketStatus | "missing" | "unreadable";
   title: string | null;
+};
+
+/** A referenced ticket as it appears in the snapshot: the exact resolution with its
+ *  title bounded. `titleTruncated` + `titleFullLength` make an over-limit title an
+ *  explicit state rather than a silent cut. */
+export type OrientTicketRef = OrientResolvedTicket & {
+  titleTruncated: boolean;
+  /** Length of the untruncated (resolved) title, 0 when the title is null. */
+  titleFullLength: number;
 };
 
 /** The bounded incident projection: identity only. Full `evidence` and
@@ -120,8 +138,8 @@ export type OrientSnapshotInputs = {
   /** Every active ticket id (sticky), unbounded — the projection sorts and caps. */
   activeIds: string[];
   /** Exact resolver for a referenced ticket id. Injected so the projection stays
-   *  pure and testable without a store. */
-  resolveTicket: (id: string) => OrientTicketRef;
+   *  pure and testable without a store; the projection bounds the returned title. */
+  resolveTicket: (id: string) => OrientResolvedTicket;
   incidents: readonly Incident[];
   /** Backlog id prefix (e.g. "FG"), for normalizing bare `#N` refs. */
   prefix: string;
@@ -155,6 +173,20 @@ function boundField(raw: string | undefined): OrientBoundedField | null {
   const fullLength = text.length;
   if (fullLength <= HANDOFF_FIELD_MAX_CHARS) return { text, truncated: false, fullLength };
   return { text: text.slice(0, HANDOFF_FIELD_MAX_CHARS), truncated: true, fullLength };
+}
+
+/** Bound a resolved ticket's title to the snapshot budget. A null title (missing or
+ *  unreadable) stays null with no truncation; an over-limit title is cut to the cap
+ *  and flagged, so a single referenced ticket can never silently push the snapshot
+ *  past its byte bound. */
+function boundTicketRef(resolved: OrientResolvedTicket): OrientTicketRef {
+  const { title } = resolved;
+  if (title === null) return { ...resolved, title: null, titleTruncated: false, titleFullLength: 0 };
+  const titleFullLength = title.length;
+  if (titleFullLength <= REFERENCED_TICKET_TITLE_MAX_CHARS) {
+    return { ...resolved, title, titleTruncated: false, titleFullLength };
+  }
+  return { ...resolved, title: title.slice(0, REFERENCED_TICKET_TITLE_MAX_CHARS), titleTruncated: true, titleFullLength };
 }
 
 /** Extract one heading's content from the notes block. Returns the text after the
@@ -224,7 +256,7 @@ export function projectOrientSnapshot(inputs: OrientSnapshotInputs): OrientSnaps
   // real status/title regardless of age. The active-id list below is capped and
   // never the basis for reconciliation.
   const refs = pickedUpNextRaw ? extractTicketRefs(pickedUpNextRaw, inputs.prefix) : [];
-  const referencedTickets = refs.map((id) => inputs.resolveTicket(id));
+  const referencedTickets = refs.map((id) => boundTicketRef(inputs.resolveTicket(id)));
 
   const sortedActive = [...inputs.activeIds].sort((a, b) => stickyNumber(b) - stickyNumber(a));
   const ids = sortedActive.slice(0, ACTIVE_TICKET_IDS_CAP);
@@ -293,14 +325,37 @@ function safeIncidents(projectDir: string): Incident[] {
   }
 }
 
-function safeResolveTicket(projectDir: string, id: string): OrientTicketRef {
+/** Resolve a referenced ticket, distinguishing three outcomes the caller must never
+ *  conflate: an actually-absent ticket is `missing`; a ticket that exists but whose
+ *  read fails (or whose very existence can't be determined) is `unreadable` — an error
+ *  state, NOT missing; anything else is its real status/title. Pure over its injected
+ *  probes so the branch logic is testable without a store. */
+export function resolveTicketRef(
+  id: string,
+  exists: () => boolean,
+  read: () => { status: TicketStatus; title: string | null },
+): OrientResolvedTicket {
+  let present: boolean;
   try {
-    if (!ticketExists(projectDir, id)) return { id, status: "missing", title: null };
-    const t = readTicket(projectDir, id);
+    present = exists();
+  } catch {
+    return { id, status: "unreadable", title: null };
+  }
+  if (!present) return { id, status: "missing", title: null };
+  try {
+    const t = read();
     return { id, status: t.status, title: t.title };
   } catch {
-    return { id, status: "missing", title: null };
+    return { id, status: "unreadable", title: null };
   }
+}
+
+function safeResolveTicket(projectDir: string, id: string): OrientResolvedTicket {
+  return resolveTicketRef(
+    id,
+    () => ticketExists(projectDir, id),
+    () => readTicket(projectDir, id),
+  );
 }
 
 function resolveProjectFacts(projectDir: string): OrientSnapshot["project"] {
