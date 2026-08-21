@@ -47,14 +47,21 @@ per provider, so a rule added to the definition can't exist on one surface and n
   an older build ignores the directory silently. Forge runs no positive activation probe, so every rendered skill
   says activation is **unverified**, never claimed, and names the CLI fallback below.
 - **Every other provider** (the generic fallback) — Forge writes **no files**. This is a documented absence, not a
-  missing feature: the `forge` CLI (`forge backlog notes show`, `forge backlog list --status active`, …) is the
+  missing feature: the `forge` CLI (`forge orient snapshot --json`, `forge backlog notes replace -`, …) is the
   interface either way, and it's what the rendered adapters themselves fall back to when activation doesn't happen.
 
-`/orient` — start-of-session orientation. Runs the probe set (`forge backlog notes show` + `forge backlog list
---status active` + `forge backlog list --status done` + git state + `forge projects show <project>` + `forge ops
-check`) as one parallel batch, reports a compact state-of-play, ends with exactly one question — "What do we forge
-next?" Never re-states the orchestrator role (the CLAUDE.md block already does); performing the start-of-session
-protocol IS the demonstration.
+`/orient` — start-of-session orientation. Runs the probe set (`forge orient snapshot --json` — the ONE compact,
+bounded, read-only projection of project liveness, bounded handoff fields, an active-ticket count plus a capped
+identity set, the exact status/title of the tickets `Picked up next` references (resolved regardless of age, and
+itself capped at a bounded set with `count`/`truncated` metadata so an unbounded reference list can't push the
+snapshot past its size budget), and an ops summary of counts plus a bounded highest-severity identity set — together
+with `git status` and the unpushed-commit log) as one parallel batch, reports a compact state-of-play, and drills
+into full detail only for an identity the snapshot flags as needing attention (`forge backlog show <id>` for a
+stale/closed/missing referenced ticket, or one past the bounded set, `forge ops check --json` for an incident it is
+about to act on, `forge projects show` for an in-flight run that is not this session) rather than fetching full
+ticket bodies, all done tickets, recent runs, or complete incident evidence up front (FG-588). It ends with exactly
+one question — "What do we forge next?" Never re-states the orchestrator role (the CLAUDE.md block already does);
+performing the start-of-session protocol IS the demonstration.
 
 `/handoff` — end-of-session ritual. Drafts the backlog notes block in the forward-looking shape
 (where-we-left-off / picked-up-next / external state / decisions worth not relitigating / memories this session may

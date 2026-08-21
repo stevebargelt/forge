@@ -162,6 +162,37 @@ test("probe commands render verbatim, in order, and nothing reaches around the C
   }
 });
 
+test("FG-588: the canonical /orient adapter performs one bounded Forge read and keeps bulk detail conditional", () => {
+  const orient = operatorWorkflow("orient");
+  const rendered = renderClaudeCommand("orient", STAMP);
+
+  assert.deepEqual(
+    orient.probes.map((probe) => probe.command),
+    ["forge orient snapshot --json", "git status", "git log --oneline origin/main..HEAD 2>/dev/null"],
+    "ordinary orientation must use the compact snapshot plus the two Git reads",
+  );
+  for (const oldBulkRead of [
+    "forge backlog notes show",
+    "forge backlog list --status active",
+    "forge backlog list --status done",
+    "forge projects show",
+    "forge ops check --json",
+  ]) {
+    assert.ok(!orient.probes.some((probe) => probe.command.includes(oldBulkRead)), `ordinary orient still probes '${oldBulkRead}'`);
+  }
+
+  // The rendered command is the canonical project-installed adapter, not a
+  // per-project copy. Its ordinary probe block stays compact, while the workflow
+  // explicitly retains the full-detail commands only as attention-driven drills.
+  assert.match(rendered, /`forge orient snapshot --json`/);
+  const drillDown = orient.rules.find((rule) => rule.id === "conditional-drilldown");
+  assert.ok(drillDown, "orient must declare when full detail is allowed");
+  assert.match(drillDown.statement, /forge backlog show <id>/);
+  assert.match(drillDown.statement, /forge ops check --json/);
+  assert.match(drillDown.statement, /forge projects show/);
+  assert.match(rendered, /The snapshot is the whole ordinary read/);
+});
+
 test("only the workflow with a durable write renders an apply section", () => {
   const handoff = renderClaudeCommand("handoff", STAMP);
   const notes = operatorWorkflow("handoff").notesBlock;
