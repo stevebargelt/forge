@@ -26,8 +26,11 @@ export function renderHuman(s: OrientSnapshot): string {
   const at = s.activeTickets;
   lines.push(`Active tickets: ${at.count}${at.truncated ? ` (showing ${at.ids.length})` : ""}${at.ids.length ? ` — ${at.ids.slice(0, 3).join(", ")}` : ""}`);
 
-  for (const ref of s.referencedTickets) {
+  for (const ref of s.referencedTickets.refs) {
     lines.push(`  ref ${ref.id}: ${ref.status}${ref.title ? ` — ${ref.title}` : ""}`);
+  }
+  if (s.referencedTickets.truncated) {
+    lines.push(`  … ${s.referencedTickets.count} referenced ticket(s) total, showing ${s.referencedTickets.refs.length} — drill in for the rest`);
   }
 
   if (s.ops.total > 0) {

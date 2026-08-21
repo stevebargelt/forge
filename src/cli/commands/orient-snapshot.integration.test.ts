@@ -114,7 +114,7 @@ test("a handoff with no Picked up next is reported stale, with no referenced tic
   assert.equal(snap.handoff.present, true);
   assert.equal(snap.handoff.pickedUpNext, null);
   assert.equal(snap.handoff.stale, true);
-  assert.deepEqual(snap.referencedTickets, []);
+  assert.deepEqual(snap.referencedTickets, { count: 0, refs: [], truncated: false });
 });
 
 test("no notes at all: a fresh project reports an absent handoff without erroring", () => {

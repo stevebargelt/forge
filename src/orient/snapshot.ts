@@ -55,6 +55,18 @@ export const HANDOFF_FIELD_MAX_CHARS = 500;
  *  the same never-silent-truncation contract the handoff fields hold. */
 export const REFERENCED_TICKET_TITLE_MAX_CHARS = 200;
 
+/** The concrete bound on the referenced-ticket COLLECTION. Capping each title (above)
+ *  bounds one ticket; it does NOT bound the count. `Picked up next` is extracted from
+ *  the UNtruncated notes, so it can reference arbitrarily many tickets — enough at-cap
+ *  titles would push the snapshot past its byte budget with no notice. This cap holds
+ *  the aggregate: 4 refs × the ~200-char title cap keeps the collection near 1 KB, which
+ *  fits the residual after the other bounded fields (3 handoff fields, 100 active ids,
+ *  the ops set) are maxed — so the whole snapshot stays within its 5 KB bound however
+ *  many tickets `Picked up next` names. `count` + `truncated` say when the collection was
+ *  cut, so the orchestrator drills in for the rest — the same never-silent-truncation
+ *  contract. Reconciliation stays exact for the emitted set; the tail is drill-in. */
+export const REFERENCED_TICKETS_CAP = 4;
+
 /** A forward handoff field, bounded. `truncated` + `fullLength` make an over-limit
  *  field an explicit state rather than a silent cut. */
 export type OrientBoundedField = {
@@ -121,7 +133,14 @@ export type OrientSnapshot = {
     /** count > ids.length — the identity set was capped. */
     truncated: boolean;
   };
-  referencedTickets: OrientTicketRef[];
+  referencedTickets: {
+    /** Total distinct refs found in `Picked up next` (before the cap). */
+    count: number;
+    /** The bounded emitted set — reconcile these exactly; drill in for the rest. */
+    refs: OrientTicketRef[];
+    /** count > refs.length — the referenced-ticket collection was capped. */
+    truncated: boolean;
+  };
   ops: {
     total: number;
     bySeverity: { high: number; medium: number; low: number };
@@ -255,8 +274,9 @@ export function projectOrientSnapshot(inputs: OrientSnapshotInputs): OrientSnaps
   // Reconcile the forward pointer EXACTLY: resolve every referenced ticket to its
   // real status/title regardless of age. The active-id list below is capped and
   // never the basis for reconciliation.
-  const refs = pickedUpNextRaw ? extractTicketRefs(pickedUpNextRaw, inputs.prefix) : [];
-  const referencedTickets = refs.map((id) => boundTicketRef(inputs.resolveTicket(id)));
+  const allRefs = pickedUpNextRaw ? extractTicketRefs(pickedUpNextRaw, inputs.prefix) : [];
+  const refs = allRefs.slice(0, REFERENCED_TICKETS_CAP).map((id) => boundTicketRef(inputs.resolveTicket(id)));
+  const referencedTickets = { count: allRefs.length, refs, truncated: allRefs.length > refs.length };
 
   const sortedActive = [...inputs.activeIds].sort((a, b) => stickyNumber(b) - stickyNumber(a));
   const ids = sortedActive.slice(0, ACTIVE_TICKET_IDS_CAP);

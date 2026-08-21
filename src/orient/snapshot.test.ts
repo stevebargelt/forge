@@ -12,6 +12,7 @@ import {
   ORIENT_SNAPSHOT_SCHEMA,
   ORIENT_SNAPSHOT_VERSION,
   REFERENCED_TICKET_TITLE_MAX_CHARS,
+  REFERENCED_TICKETS_CAP,
   extractHandoffField,
   extractTicketRefs,
   projectOrientSnapshot,
@@ -63,7 +64,7 @@ test("empty state: no notes, no tickets, no incidents — everything absent, not
   assert.equal(s.handoff.pickedUpNext, null);
   assert.equal(s.handoff.stale, false);
   assert.deepEqual(s.activeTickets, { count: 0, ids: [], truncated: false });
-  assert.deepEqual(s.referencedTickets, []);
+  assert.deepEqual(s.referencedTickets, { count: 0, refs: [], truncated: false });
   assert.deepEqual(s.ops, { total: 0, bySeverity: { high: 0, medium: 0, low: 0 }, highestSeverity: [], truncated: false });
 });
 
@@ -94,11 +95,11 @@ test("normal state: bounded handoff fields, active ids sorted by sticky desc, re
   assert.equal(s.handoff.stale, false);
   assert.deepEqual(s.activeTickets.ids, ["FG-600", "FG-588", "FG-587"]);
   assert.deepEqual(
-    s.referencedTickets.map((r) => r.id),
+    s.referencedTickets.refs.map((r) => r.id),
     ["FG-588", "FG-600"],
     "only Picked-up-next refs are resolved, not Shipped",
   );
-  assert.equal(s.referencedTickets[0]?.status, "active");
+  assert.equal(s.referencedTickets.refs[0]?.status, "active");
 });
 
 test("stale handoff: present notes but no Picked up next section", () => {
@@ -108,7 +109,7 @@ test("stale handoff: present notes but no Picked up next section", () => {
   assert.equal(s.handoff.present, true);
   assert.equal(s.handoff.pickedUpNext, null);
   assert.equal(s.handoff.stale, true);
-  assert.deepEqual(s.referencedTickets, []);
+  assert.deepEqual(s.referencedTickets, { count: 0, refs: [], truncated: false });
 });
 
 test("closed and missing refs are distinguished — a done ticket of any age is not 'missing'", () => {
@@ -122,7 +123,7 @@ test("closed and missing refs are distinguished — a done ticket of any age is 
       resolveTicket: (id) => resolved[id] ?? { id, status: "missing", title: null },
     }),
   );
-  const byId = new Map(s.referencedTickets.map((r) => [r.id, r]));
+  const byId = new Map(s.referencedTickets.refs.map((r) => [r.id, r]));
   assert.equal(byId.get("FG-10")?.status, "done", "a closed ticket resolves as done, never missing");
   assert.equal(byId.get("FG-999")?.status, "missing");
 });
@@ -167,8 +168,8 @@ test("RF-1: an unreadable referenced ticket propagates through the projection as
       resolveTicket: (id) => ({ id, status: "unreadable", title: null }),
     }),
   );
-  assert.equal(s.referencedTickets[0]?.status, "unreadable");
-  assert.notEqual(s.referencedTickets[0]?.status, "missing");
+  assert.equal(s.referencedTickets.refs[0]?.status, "unreadable");
+  assert.notEqual(s.referencedTickets.refs[0]?.status, "missing");
 });
 
 test("RF-2: a very long referenced title is truncated with metadata and the snapshot stays ≤5KB", () => {
@@ -179,7 +180,7 @@ test("RF-2: a very long referenced title is truncated with metadata and the snap
       resolveTicket: (id) => ({ id, status: "active", title: longTitle }),
     }),
   );
-  const ref = s.referencedTickets[0]!;
+  const ref = s.referencedTickets.refs[0]!;
   assert.equal(ref.titleTruncated, true, "an over-limit title must be flagged truncated");
   assert.equal(ref.title?.length, REFERENCED_TICKET_TITLE_MAX_CHARS, "title is cut to the cap");
   assert.equal(ref.titleFullLength, 6000, "the untruncated length is preserved as metadata");
@@ -195,10 +196,63 @@ test("RF-2: a title at or under the cap is carried whole with no truncation flag
       resolveTicket: (id) => ({ id, status: "active", title }),
     }),
   );
-  const ref = s.referencedTickets[0]!;
+  const ref = s.referencedTickets.refs[0]!;
   assert.equal(ref.titleTruncated, false);
   assert.equal(ref.title, title);
   assert.equal(ref.titleFullLength, REFERENCED_TICKET_TITLE_MAX_CHARS);
+});
+
+test("RF-3: a Picked-up-next referencing MANY tickets caps the collection with count/truncated metadata, snapshot stays ≤5KB", () => {
+  // Many valid refs, each resolving to a title AT the per-title cap — the RF-2 fix
+  // bounds each title but not the count, so without a collection cap the aggregate
+  // blows the 5 KB budget silently. Build a Picked-up-next that names far more refs
+  // than the cap.
+  const refCount = REFERENCED_TICKETS_CAP + 200;
+  const refIds = Array.from({ length: refCount }, (_, i) => `FG-${i + 1}`);
+  const atCapTitle = "T".repeat(REFERENCED_TICKET_TITLE_MAX_CHARS);
+  const bigField = "x".repeat(HANDOFF_FIELD_MAX_CHARS + 400);
+  // Every OTHER bounded field maxed too — all three handoff fields over their cap, the
+  // active-id set at its cap, ops over theirs — so the ≤5KB assertion guards the whole
+  // snapshot's worst case, not the referenced collection in isolation.
+  const notes = [
+    `**Where we left off:** ${bigField}`,
+    `**Picked up next:** ${refIds.join(", ")}. ${bigField}`,
+    `**Memories this session may have invalidated:** ${bigField}`,
+  ].join("\n\n");
+  const s = projectOrientSnapshot(
+    baseInputs({
+      notesText: notes,
+      activeIds: Array.from({ length: ACTIVE_TICKET_IDS_CAP + 50 }, (_, i) => `FG-${i + 1000}`),
+      incidents: Array.from({ length: OPS_HIGHEST_CAP + 8 }, (_, i) =>
+        incident("high", "reconcile_candidate", `run-${i}`, `task-${i}`),
+      ),
+      resolveTicket: (id) => ({ id, status: "active", title: atCapTitle }),
+    }),
+  );
+
+  assert.equal(s.referencedTickets.count, refCount, "count reflects EVERY ref found, before the cap");
+  assert.equal(s.referencedTickets.refs.length, REFERENCED_TICKETS_CAP, "the emitted collection is capped");
+  assert.equal(s.referencedTickets.truncated, true, "a cut collection is flagged truncated — never silent");
+  // Every emitted ref still carries its (at-cap) title with the per-title contract intact.
+  for (const ref of s.referencedTickets.refs) {
+    assert.equal(ref.title?.length, REFERENCED_TICKET_TITLE_MAX_CHARS);
+    assert.equal(ref.titleTruncated, false);
+  }
+  const json = JSON.stringify(s);
+  assert.ok(json.length <= 5 * 1024, `snapshot is ${json.length} bytes, over the 5 KB budget`);
+});
+
+test("RF-3: a Picked-up-next referencing at-most-cap tickets is carried whole with no collection truncation", () => {
+  const refIds = Array.from({ length: REFERENCED_TICKETS_CAP }, (_, i) => `FG-${i + 1}`);
+  const s = projectOrientSnapshot(
+    baseInputs({
+      notesText: `**Picked up next:** ${refIds.join(", ")}.`,
+      resolveTicket: (id) => ({ id, status: "active", title: "short" }),
+    }),
+  );
+  assert.equal(s.referencedTickets.count, REFERENCED_TICKETS_CAP);
+  assert.equal(s.referencedTickets.refs.length, REFERENCED_TICKETS_CAP);
+  assert.equal(s.referencedTickets.truncated, false);
 });
 
 test("over-limit: active ids capped with truncation, handoff fields truncated with fullLength, ops bounded", () => {
