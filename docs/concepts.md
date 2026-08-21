@@ -57,10 +57,13 @@ next?" Never re-states the orchestrator role (the CLAUDE.md block already does);
 protocol IS the demonstration.
 
 `/handoff` — end-of-session ritual. Drafts the backlog notes block in the forward-looking shape
-(where-we-left-off / picked-up-next / external state / decisions worth not relitigating / shipped-for-reference),
-applies it immediately via a quoted-heredoc `forge backlog notes replace -` (no review pause — the quoted
-delimiter is what lets backticks/`$`/quotes in the block land verbatim), and asks before pushing any unpushed
-commits rather than pushing automatically.
+(where-we-left-off / picked-up-next / external state / decisions worth not relitigating / memories this session may
+have invalidated / shipped-for-reference), applies it immediately via a quoted-heredoc `forge backlog notes replace
+-` (no review pause — the quoted delimiter is what lets backticks/`$`/quotes in the block land verbatim), and asks
+before pushing any unpushed commits rather than pushing automatically. The optional memory-invalidation section
+flags only memory files this session's own changes contradict, with a one-line proposed correction each — it
+proposes, never edits a memory file and never writes a `reviewed:` stamp (that verification is `/memory-review`'s
+job, not handoff's).
 
 Both workflows hard-code "use the `forge backlog` CLI, do NOT read backlog files directly." The CLI is the bounded interface that protects orchestrator context cost; projects store notes at `backlog/notes.md` and tickets under `backlog/{stories,epics,ideas,done}/` (in the default markdown storage mode — see **Backlog storage mode** below).
 

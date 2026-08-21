@@ -453,6 +453,16 @@ const HANDOFF: OperatorWorkflowDefinition = {
         "first and getting an explicit yes.",
     },
     {
+      id: "no-reviewed-stamp",
+      statement:
+        "Do not write or refresh a `reviewed:` stamp when flagging a memory this session may have invalidated — " +
+        "flag the file and a proposed correction only.",
+      rationale:
+        "Handoff's flag is cheap and unverified; a reviewed stamp asserts the claim was re-checked against current " +
+        "sources, which is /memory-review's job. Letting handoff stamp would forge that assurance and erode the " +
+        "reviewed-stamp integrity the audit cadence depends on.",
+    },
+    {
       id: "no-shipped-first",
       statement: 'Do not lead the notes with "what shipped" — the forward-looking sections are the value.',
     },
@@ -489,6 +499,17 @@ const HANDOFF: OperatorWorkflowDefinition = {
         content:
           "items considered and closed/deferred this session, one line each, so future-self does not re-debate " +
           "settled calls",
+        omitWhenEmpty: true,
+      },
+      {
+        id: "invalidated-memories",
+        heading: "**Memories this session may have invalidated:**",
+        content:
+          "memory files this session's OWN changes or decisions contradict — name each specific file and give a " +
+          "bounded one-line proposed correction. Consider ONLY memory implicated by changes or decisions made this " +
+          "session; do not scan or re-review the whole memory corpus. Propose only: do not edit any memory file, " +
+          "touch CLAUDE.md, or write a reviewed stamp — verifying the correction and owning the stamp is " +
+          "/memory-review's job",
         omitWhenEmpty: true,
       },
       {
