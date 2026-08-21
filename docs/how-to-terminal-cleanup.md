@@ -79,7 +79,10 @@ A retained artifact always names the exact reason and its path. The reasons:
 - `active_mount` — a **live container** still has the workspace mounted (probed directly via
   docker, never inferred from a task's status).
 - `ownership_ambiguous` — Forge cannot positively attribute the directory to a terminal
-  attempt (no attesting registry row). Path shape is never ownership proof.
+  attempt: no attesting registry row, or, for a publication worktree, `git worktree list`
+  in the owning project itself does not attest the directory as a registered worktree (a
+  name collision or an orphaned bare directory git never registered). Registry row, name
+  shape, and directory shape are each individually never ownership proof.
 - `publication_in_flight` — a publication attempt is still in flight or its liveness is
   ambiguous; never raced.
 - `readiness_live_reader` — a live dispatch may still consume the readiness record.

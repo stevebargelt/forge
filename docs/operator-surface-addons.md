@@ -161,7 +161,9 @@ and retains everything else with a named reason and a concrete recovery action. 
 reasons include `active_process_cwd` (a live process — including the long-lived tmux server —
 holds the directory as its working directory; the holder is named), `active_mount` (a live
 container still has the workspace mounted, probed via docker, never inferred from task
-status), `ownership_ambiguous` (no attesting registry row — path shape is never authority),
+status), `ownership_ambiguous` (no attesting registry row, or — for a publication worktree —
+git itself does not attest the directory as a registered worktree of the owning project;
+registry row and path shape are each never authority alone),
 `publication_in_flight`, `readiness_live_reader`, `within_retention_for_investigation`, plus
 the content proofs `uncommitted_work` / `unmerged_commits` / `branch_uncaptured` /
 `submodules_present`. An artifact that cannot be probed is retained, never guessed disposable.
