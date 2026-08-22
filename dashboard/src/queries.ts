@@ -18,8 +18,17 @@ import { readBacklogConfig } from "@forge/backlog-config";
 import { listProjects, sortProjects, operatorProjects, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
-import { buildConfigGraph } from "../../src/v2/config-graph.js";
+import { buildConfigGraph, redactGraph } from "../../src/v2/config-graph.js";
 import type { ConfigGraph } from "../../src/v2/config-graph-types.js";
+// FG-348: the ONE shared Run Map + Explain builders (pure, consumed byte-identically
+// by the `forge explain` CLI) plus the tolerant workflow loader + manifest reader.
+import { buildRunMap, type RunMapVerdict } from "../../src/v2/run-map.js";
+import { buildTaskExplain } from "../../src/v2/task-explain.js";
+import { RUN_EXPLAIN_VERSION, type RunMapGraph, type TaskExplain } from "../../src/v2/run-explain-types.js";
+import { loadWorkflowWithSource } from "../../src/v2/loader.js";
+import { readTaskManifest } from "../../src/v2/task-manifest.js";
+import type { Workflow } from "../../src/v2/schema.js";
+import type { TaskPackage } from "@forge/types";
 import { LEGACY_BLOCKED_SOURCE, isStatusBearingEvidenceSource } from "@forge/blocked-source";
 import {
   findReconcileCandidates,
@@ -2473,6 +2482,301 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
 // dir into graph.project.dir and the source paths derived from it.
 export function effectiveConfigGraph(projectDir?: string): ConfigGraph {
   return buildConfigGraph({ projectDir: resolve(projectDir ?? process.cwd()) });
+}
+
+// ── FG-348: Run Map graph + task-level Explain ─────────────────────────────
+//
+// The dashboard read model over the SAME pure builders the `forge explain`
+// orchestrator JSON prints — returned UNMODIFIED, which is what makes CLI and
+// dashboard byte-identical. Both ride the SAME redaction boundary as
+// buildConfigGraph (redactGraph), reused rather than re-expressed.
+//
+// BOUNDED SERVING PATH (FG-742/BD-13): runMap reads ONLY indexed SQLite
+// (idx_tasks_run, idx_verdicts_task) — NO per-task manifest or container-log
+// read. The heavy per-task manifest read is lazy and single-task, done only by
+// taskExplain when a node's panel opens.
+
+/** The same redaction boundary buildConfigGraph rides, reused verbatim so a
+ *  run-map/explain payload can never redact differently from the config graph. */
+function redactExplain<T>(payload: T): T {
+  return redactGraph(payload as unknown as ConfigGraph) as unknown as T;
+}
+
+/** Does the OPEN (possibly aged) runs table carry this additive column? Same
+ *  read-only posture as hasRunsProjectIdentity — un-memoized, fail-closed. */
+function runsHasColumn(name: string): boolean {
+  try {
+    return (db().prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).some(
+      (c) => c.name === name,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The AWN-7 resolved_* task columns, absent on a pre-AWN-7 store. */
+function tasksResolvedSelect(): string {
+  let present = false;
+  try {
+    present = (db().prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>).some(
+      (c) => c.name === "resolved_profile",
+    );
+  } catch {
+    present = false;
+  }
+  return present ? ", t.resolved_profile, t.resolved_provider, t.resolved_auth, t.resolved_by" : "";
+}
+
+type RunMapTaskRow = {
+  id: string;
+  run_id: string;
+  parent_id: string | null;
+  phase: string;
+  agent_role: string;
+  agent_alias: string | null;
+  agent_model: string | null;
+  resolved_profile?: string | null;
+  resolved_provider?: string | null;
+  resolved_auth?: string | null;
+  resolved_by?: string | null;
+  status: string;
+  task_package: string;
+  result?: string | null;
+  created_at: string;
+};
+
+/** Reconstruct the subset of the Task shape the pure builders read. The builders
+ *  touch only these fields (lineage classification + presentation), so a partial
+ *  row is sufficient and avoids reading columns the run map never uses. */
+function rowToTaskForExplain(row: RunMapTaskRow): Task {
+  let taskPackage: TaskPackage;
+  try {
+    taskPackage = JSON.parse(row.task_package) as TaskPackage;
+  } catch {
+    taskPackage = { taskId: row.id, runId: row.run_id, phase: row.phase, role: row.agent_role, inputs: {}, composedSystemPrompt: "" };
+  }
+  return {
+    id: row.id,
+    runId: row.run_id,
+    parentId: row.parent_id ?? undefined,
+    phase: row.phase,
+    agentRole: row.agent_role,
+    agentAlias: row.agent_alias ?? undefined,
+    agentModel: row.agent_model ?? undefined,
+    resolvedProfile: row.resolved_profile ?? undefined,
+    resolvedProvider: row.resolved_provider ?? undefined,
+    resolvedAuth: row.resolved_auth ?? undefined,
+    resolvedBy: row.resolved_by ?? undefined,
+    status: row.status as Task["status"],
+    taskPackage,
+    result: row.result ? safeJsonParse(row.result) : undefined,
+    createdAt: row.created_at,
+  };
+}
+
+/** Load the run's workflow tolerantly — an unresolvable name yields undefined so
+ *  a legacy/renamed workflow degrades to an execution-only graph, never a throw. */
+function tolerantWorkflowForRun(
+  name: string,
+  projectDir: string | null | undefined,
+): { workflow?: Workflow; source?: "host" | "project" } {
+  try {
+    const loaded = loadWorkflowWithSource(name, projectDir ? { projectDir } : {});
+    return { workflow: loaded, source: loaded.source };
+  } catch {
+    return {};
+  }
+}
+
+/** A degraded, redacted RunMapGraph for a run that is missing or out of scope —
+ *  a payload, never a throw or a 500 (per the bounded-degradation contract). */
+function degradedRunMap(runId: string, reason: string): RunMapGraph {
+  return redactExplain({
+    version: RUN_EXPLAIN_VERSION,
+    run: { runId, workflow: "unknown", title: "unknown", status: "unknown", createdAt: "" },
+    workflowResolved: false,
+    phases: [],
+    edges: [],
+    nodes: [],
+    fanoutGroups: [],
+    redAttachments: [],
+    warnings: [reason],
+  });
+}
+
+/** The Run Map graph for a run, scoped and redacted. Never throws; degrades to a
+ *  redacted payload for a missing/out-of-scope run. */
+export function runMap(runId: string, scope?: ProjectScope): RunMapGraph {
+  const canonical = hasCanonicalColumn("runs") ? ", r.project_dir_canonical" : "";
+  const identity = runsProjectIdentitySelect();
+  const reviewMode = runsHasColumn("review_mode") ? ", r.review_mode" : "";
+  const runRow = db()
+    .prepare(
+      `SELECT r.id, r.workflow, r.title, r.status, r.created_at, r.project_dir${reviewMode}${canonical}${identity}
+       FROM runs r WHERE r.id = ?`,
+    )
+    .get(runId) as
+    | {
+        id: string;
+        workflow: string;
+        title: string;
+        status: string;
+        created_at: string;
+        project_dir: string | null;
+        review_mode?: string | null;
+        project_dir_canonical?: string | null;
+        project_identity?: string | null;
+      }
+    | undefined;
+  if (!runRow) return degradedRunMap(runId, "Run not found.");
+
+  const targets = resolveScope(scope);
+  if (
+    !scopeIncludes(targets, {
+      projectDir: runRow.project_dir,
+      canonical: runRow.project_dir_canonical ?? null,
+      identity: runRow.project_identity ?? null,
+    })
+  ) {
+    return degradedRunMap(runId, "Run is outside the selected project scope.");
+  }
+
+  const taskRows = db()
+    .prepare(
+      `SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_alias, t.agent_model, t.status, t.task_package, t.created_at${tasksResolvedSelect()}
+       FROM tasks t WHERE t.run_id = ? ORDER BY t.created_at ASC`,
+    )
+    .all(runId) as RunMapTaskRow[];
+  const tasks = taskRows.map(rowToTaskForExplain);
+
+  const verdicts = db()
+    .prepare(
+      `SELECT task_id, red_task_id, red_role FROM verdicts
+       WHERE task_id IN (SELECT id FROM tasks WHERE run_id = ?) ORDER BY created_at ASC`,
+    )
+    .all(runId) as Array<{ task_id: string; red_task_id: string; red_role: string }>;
+  const runMapVerdicts: RunMapVerdict[] = verdicts.map((v) => ({
+    taskId: v.task_id,
+    redTaskId: v.red_task_id,
+    redRole: v.red_role,
+  }));
+
+  const run: Run = {
+    id: runRow.id,
+    workflow: runRow.workflow,
+    title: runRow.title,
+    status: runRow.status as Run["status"],
+    createdAt: runRow.created_at,
+    ...(runRow.project_dir ? { projectDir: runRow.project_dir } : {}),
+    ...(runRow.review_mode ? { reviewMode: runRow.review_mode as Run["reviewMode"] } : {}),
+  };
+  const { workflow, source } = tolerantWorkflowForRun(runRow.workflow, runRow.project_dir);
+  const graph = buildRunMap({
+    run,
+    tasks,
+    verdicts: runMapVerdicts,
+    ...(workflow ? { workflow } : {}),
+    ...(source ? { workflowSource: source } : {}),
+  });
+  return redactExplain(graph);
+}
+
+/** A degraded, redacted TaskExplain for a task that is missing or out of scope. */
+function degradedTaskExplain(taskId: string, reason: string): TaskExplain {
+  return redactExplain({
+    version: RUN_EXPLAIN_VERSION,
+    taskId,
+    runId: "unknown",
+    role: "unknown",
+    status: "unknown",
+    warnings: [reason],
+  });
+}
+
+/** The task-level Explain for one task, scoped and redacted. The ONLY per-task
+ *  manifest read on this surface — lazy, single-task, only when a panel opens.
+ *  Never throws; degrades to a redacted payload for a missing/out-of-scope task. */
+export function taskExplain(taskId: string, scope?: ProjectScope): TaskExplain {
+  const canonical = hasCanonicalColumn("runs") ? ", r.project_dir_canonical" : "";
+  const identity = runsProjectIdentitySelect();
+  const reviewMode = runsHasColumn("review_mode") ? ", r.review_mode" : "";
+  const row = db()
+    .prepare(
+      `SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_alias, t.agent_model, t.status, t.task_package, t.result, t.created_at${tasksResolvedSelect()},
+              r.workflow, r.project_dir${reviewMode}${canonical}${identity}
+       FROM tasks t JOIN runs r ON r.id = t.run_id WHERE t.id = ?`,
+    )
+    .get(taskId) as
+    | (RunMapTaskRow & {
+        workflow: string;
+        project_dir: string | null;
+        review_mode?: string | null;
+        project_dir_canonical?: string | null;
+        project_identity?: string | null;
+      })
+    | undefined;
+  if (!row) return degradedTaskExplain(taskId, "Task not found.");
+
+  const targets = resolveScope(scope);
+  if (
+    !scopeIncludes(targets, {
+      projectDir: row.project_dir,
+      canonical: row.project_dir_canonical ?? null,
+      identity: row.project_identity ?? null,
+    })
+  ) {
+    return degradedTaskExplain(taskId, "Task is outside the selected project scope.");
+  }
+
+  const task = rowToTaskForExplain(row);
+
+  const manifest = readTaskManifest(join(runsDir(), row.run_id, taskId));
+
+  const gates = db()
+    .prepare(`SELECT decision, rationale, decided_by, decided_at FROM gates WHERE task_id = ? ORDER BY decided_at ASC`)
+    .all(taskId) as Array<{ decision: string; rationale: string | null; decided_by: string; decided_at: string }>;
+
+  const verdicts = db()
+    .prepare(
+      `SELECT red_task_id, red_role, verdict, confidence, authority, findings FROM verdicts WHERE task_id = ? ORDER BY created_at ASC`,
+    )
+    .all(taskId) as Array<{
+    red_task_id: string;
+    red_role: string;
+    verdict: string;
+    confidence: number;
+    authority: string;
+    findings: string;
+  }>;
+
+  const { workflow } = tolerantWorkflowForRun(row.workflow, row.project_dir);
+  const gateType = workflow?.steps.find((s) => s.id === task.phase)?.gate;
+
+  // Artifact availability probed here (single task) — bounded, not a graph sweep.
+  const dir = join(runsDir(), row.run_id, taskId);
+  const artifacts = [
+    { kind: "result", name: "result.json", available: row.result != null && row.result !== "" },
+    { kind: "stdout", name: "container.stdout.log", available: existsSync(join(dir, "container.stdout.log")) },
+    { kind: "stderr", name: "container.stderr.log", available: existsSync(join(dir, "container.stderr.log")) },
+    { kind: "manifest", name: "manifest.json", available: manifest !== undefined },
+  ];
+
+  const explain = buildTaskExplain({
+    task,
+    gates: gates.map((g) => ({ decision: g.decision, rationale: g.rationale, decidedBy: g.decided_by, decidedAt: g.decided_at })),
+    verdicts: verdicts.map((v) => ({
+      redTaskId: v.red_task_id,
+      redRole: v.red_role,
+      verdict: v.verdict,
+      confidence: v.confidence,
+      authority: v.authority,
+      findings: safeJsonParse(v.findings),
+    })),
+    ...(manifest ? { manifest } : {}),
+    ...(gateType ? { gateType } : {}),
+    artifacts,
+  });
+  return redactExplain(explain);
 }
 
 // ── FG-487: host-side verification visibility ──────────────────────────────

@@ -13,7 +13,9 @@ import { ReviewsView } from "./reviews.js";
 import { ShippingAuditView } from "./shipping-audit.js";
 import { CampaignsView } from "./campaigns.js";
 import { ControlPlaneView } from "./control-plane.js";
-import { initialView, hashForView } from "./view-routing.js";
+import { RunMap } from "./run-map.js";
+import { RunExplainPanel } from "./run-explain-panel.js";
+import { initialView, hashForView, runIdFromHash } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
@@ -93,6 +95,14 @@ function App() {
   // Scope token for the control-plane read — see pollControlPlane. A response
   // for the old scope must never overwrite the graph just switched to.
   const controlPlaneSeq = useRef(0);
+  // FG-348: the Run Map graph for the currently-selected run + the Explain panel's
+  // open task. selectedRunId is deep-linkable via #run-map/<runId>.
+  const [selectedRunId, setSelectedRunId] = useState(() => runIdFromHash(window.location.hash));
+  const [runMapGraph, setRunMapGraph] = useState(null);
+  // Scope+run token for the run-map read: a response for a scope/run we have
+  // navigated away from must never repaint the graph now on screen.
+  const runMapSeq = useRef(0);
+  const [selectedExplainTaskId, setSelectedExplainTaskId] = useState(null);
   const [backlog, setBacklog] = useState(null);
   const [queue, setQueue] = useState(null);
   // Sequence token for the queue read — see pollQueue.
@@ -417,6 +427,44 @@ function App() {
     return () => clearInterval(id);
   }, [pollControlPlane, view]);
 
+  // FG-348: the run-map read carries the SAME scope + seq-guard discipline as
+  // pollControlPlane — a response for a scope/run left behind must never repaint.
+  const pollRunMap = useCallback(async () => {
+    const seq = (runMapSeq.current += 1);
+    if (!selectedRunId) { setRunMapGraph(null); return; }
+    try {
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const res = await fetch(`/api/run/${encodeURIComponent(selectedRunId)}/map${q}`);
+      if (seq !== runMapSeq.current) return;
+      if (res.ok) {
+        // Re-check AFTER the body decode too: a scope/run change during
+        // res.json() must not render the retired graph.
+        const graph = await res.json();
+        if (seq !== runMapSeq.current) return;
+        setRunMapGraph(graph);
+      }
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== runMapSeq.current) return;
+      setError(String(e));
+    }
+  }, [selectedRunId, projectFilter, checkoutFilter]);
+
+  // Invalidate the on-screen map the instant the scope OR the selected run
+  // changes, so a previous scope/run's graph is never shown under the new one
+  // while its request is in flight.
+  useEffect(() => {
+    runMapSeq.current += 1;
+    setRunMapGraph(null);
+  }, [selectedRunId, projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "run-map") return;
+    pollRunMap();
+    const id = setInterval(pollRunMap, POLL_MS);
+    return () => clearInterval(id);
+  }, [pollRunMap, view]);
+
   const pollReviews = useCallback(async () => {
     try {
       const res = await fetch(appendScope(`/api/reviews?limit=25`, projectFilter, checkoutFilter));
@@ -589,7 +637,12 @@ function App() {
   }, [verifyTicketId, verifyItemId, projectFilter, checkoutFilter]);
 
   useEffect(() => {
-    const onHash = () => setView(initialView(window.location.hash));
+    const onHash = () => {
+      setView(initialView(window.location.hash));
+      // FG-348: keep the selected run in step with the hash so a deep link
+      // (#run-map/<runId>) and the back button both land on the right run.
+      setSelectedRunId(runIdFromHash(window.location.hash));
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -597,6 +650,14 @@ function App() {
   const switchView = (next) => {
     setView(next);
     window.location.hash = hashForView(next);
+  };
+
+  // FG-348: open the Run Map for a specific run (from the activity/in-flight feed
+  // or a deep link). Sets the run AND the deep-linkable hash together.
+  const openRunMap = (runId) => {
+    setSelectedRunId(runId);
+    setView("run-map");
+    window.location.hash = hashForView("run-map", runId);
   };
 
   const filterByProject = (project, checkoutDir = null) => {
@@ -627,6 +688,7 @@ function App() {
             <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
             <button class=${"tab " + (view === "shipping" ? "tab-active" : "")} onClick=${() => switchView("shipping")}>shipping</button>
             <button class=${"tab " + (view === "campaigns" ? "tab-active" : "")} onClick=${() => switchView("campaigns")}>campaigns</button>
+            <button class=${"tab " + (view === "run-map" ? "tab-active" : "")} onClick=${() => switchView("run-map")}>run map</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -686,6 +748,10 @@ function App() {
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">The control-plane config graph is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
           : html`<${ControlPlaneView} data=${controlPlane} />`
+        : view === "run-map"
+        ? !selectedRunId
+          ? html`<div class="card muted" style="margin-top: 20px;">Open a run from the activity feed to see its Run Map, or deep-link one via <span class="mono">#run-map/&lt;runId&gt;</span>.</div>`
+          : html`<${RunMap} graph=${runMapGraph} onSelect=${(taskId) => setSelectedExplainTaskId(taskId)} />`
         : view === "backlog"
         ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
         : view === "queue"
@@ -777,13 +843,18 @@ function App() {
             <h2>Recent agent outputs</h2>
             ${feed.length === 0
               ? html`<div class="muted">No completed agent outputs yet.</div>`
-              : feed.map((e) => html`<${FeedCard} key=${e.taskId} entry=${e} onClick=${() => setSelectedTaskId(e.taskId)} />`)
+              : feed.map((e) => html`<${FeedCard} key=${e.taskId} entry=${e} onClick=${() => setSelectedTaskId(e.taskId)} onOpenRunMap=${openRunMap} />`)
             }
           </section>
         `
       }
 
       ${selectedTaskId ? html`<${TaskDetail} taskId=${selectedTaskId} onClose=${() => setSelectedTaskId(null)} />` : null}
+      ${selectedExplainTaskId ? html`<${RunExplainPanel}
+        taskId=${selectedExplainTaskId}
+        scopeQuery=${projectScopeQuery(projectFilter, checkoutFilter)}
+        onClose=${() => setSelectedExplainTaskId(null)}
+      />` : null}
     </div>
   `;
 }
@@ -2262,7 +2333,7 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
   `;
 }
 
-function FeedCard({ entry, onClick }) {
+function FeedCard({ entry, onClick, onOpenRunMap }) {
   return html`
     <div class="card" onClick=${onClick}>
       <div class="head">
@@ -2274,6 +2345,11 @@ function FeedCard({ entry, onClick }) {
           <span class="context">${entry.runTitle}</span>
         </div>
         <div class="row">
+          ${onOpenRunMap ? html`<button
+            class="rm-open-btn"
+            title="open the run map"
+            onClick=${(e) => { e.stopPropagation(); onOpenRunMap(entry.runId); }}
+          >run map</button>` : null}
           <span class="badge status-${entry.status}">${entry.status.replace(/_/g, " ")}</span>
           ${entry.durationMs != null ? html`<span class="muted mono" style="font-size: 11px;" title="run-time (started → completed)">⏱ ${formatDuration(entry.durationMs)}</span>` : null}
           <span class="muted mono" style="font-size: 11px;">${formatRelativeTime(entry.completedAt)}</span>
