@@ -59,6 +59,43 @@ overrides:
 subscription); a *pinned* auth (`bedrock`/`api`/`subscription`) fails loud if
 unavailable rather than silently switching.
 
+### Or let `forge setup` author it (FG-346)
+
+`forge setup` can author `~/.forge/model-policy.yml` for you instead of you
+hand-writing the YAML above — it asks (interactively) or generates (from flags)
+a policy from the providers `forge providers doctor` actually finds on this
+host, reading real model ids out of the installed seed rather than inventing
+free text. This is **initial authoring only** — it never touches an existing
+policy unless you pass `--reconfigure`, and it is not a migration path
+(`forge upgrade` remains the sole migration authority — see below).
+
+- **TTY, no existing policy** — prompts for a profile per capability (default,
+  reasoning-heavy, review, fast/cheap work) and per notable role pin
+  (research-primary, research-skeptic), previews the generated YAML, and
+  writes it only on confirmation.
+- **`--reconfigure`** — re-runs the same Q&A against an *existing* policy, with
+  your current choices pre-selected as defaults (Enter keeps them).
+- **Non-interactive with a complete selection** (`--yes`, or no TTY, plus at
+  least `--default-profile`) — generates deterministically, no prompts:
+
+  ```bash
+  forge setup --yes --default-profile claude-subscription \
+    --reasoning claude-subscription --pin red-security=claude-bedrock
+  ```
+
+  Other selection flags: `--review`, `--fast`, `--spec-writer`,
+  `--fast-orchestrator`, and repeatable `--pin <role>=<profile>`.
+- **Non-interactive with no/incomplete flags** — retains the seed default (the
+  prior behavior) with a named advisory; setup never blocks waiting on a
+  prompt that can't happen.
+- **No usable provider detected** — advisory, nothing written; run
+  `forge auth login` / `codex login` etc. and re-run.
+
+A present `model-policy.yml` is never overwritten without `--reconfigure` —
+bare `forge setup` against an existing policy is always a no-op preserve.
+`--dry-run` previews the generated YAML (interactive or flag-driven) without
+writing it.
+
 ## Schema versioning and migration
 
 `model-policy.yml` carries a root `schema_version`; the current version is `2`.

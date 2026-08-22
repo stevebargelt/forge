@@ -35,7 +35,7 @@ Don't use `npm link` for this. It puts a `forge` on `$PATH` symlinked into your 
 
 Verify: `which forge` should print a path; `forge release current` should name the release you promoted; `forge --help` should list the commands.
 
-After installing, run `forge setup` to create the active model policy from the seed and get a full readiness report before dispatching any agents. Full new-machine checklist: `docs/work-laptop-setup.md`.
+After installing, run `forge setup` to author the active model policy — it asks which providers/profiles to route to (or generates from flags), falling back to the seed default non-interactively with no flags — and get a full readiness report before dispatching any agents. Full new-machine checklist: `docs/work-laptop-setup.md`.
 
 ## 2. Set up credentials (once per machine)
 
@@ -241,7 +241,7 @@ cd ~/code/forge
 
 Moving the machine-wide `forge` onto new commits is still `release build` → `release promote` from an updated checkout (step 1). This step refreshes `~/.forge/` and project state — not the stable `forge` itself.
 
-After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, policies, and seed drift — and surfaces any problems before the next dispatch. It is skipped on a `--dry-run`, and skipped (saying so) when the seed install didn't run, since its verdict would describe a `~/.forge` the upgrade never touched. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
+After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, policies, and seed drift — and surfaces any problems before the next dispatch. It is skipped on a `--dry-run`, and skipped (saying so) when the seed install didn't run, since its verdict would describe a `~/.forge` the upgrade never touched. Run `forge doctor` for the full report, or `forge setup` on a new machine to author the active model policy (interactively, or from flags) at the same time.
 
 New machine? See `docs/work-laptop-setup.md` for the full setup checklist.
 
