@@ -12,12 +12,16 @@
 //   sets a durable marker in the same transaction as the running→paused CAS; the dispatch
 //   decision point refuses to continue while that marker is set.
 //
-// RF-3 (fail closed when the continuation write fails, crash-safe-resume invariant): the RF-1
-//   ordering only protects AC6 if the reopen-to-running is GATED on the continuation write
-//   succeeding. If recordItemBoundaryContinuation throws, the controller must NOT flip the
-//   campaign back to running (that reopens the RF-1 hole — a subsequent crash leaves it
-//   'running' with nothing in flight and nothing to adopt). It leaves the campaign PAUSED with
-//   the park intact so resume/recover re-drives it (the reservation stays authoritative).
+// RF-3 (fail closed ONLY on a genuine loss of recoverable backing): the RF-1 ordering protects
+//   AC6, but the reopen must fail closed ONLY when it would leave nothing recovery can adopt —
+//   NOT on every throw or skip. The reopen is backed (and proceeds) when a continuation was
+//   freshly recorded, OR one ALREADY EXISTS (a UNIQUE-constraint means the row is durably
+//   present — an idempotent re-record, i.e. success), OR the authoritative reservation (the
+//   durable item-launch linkage) backs recovery. Only when NONE of those hold — no continuation
+//   and no reservation — does the campaign stay PAUSED with the park intact so resume/recover
+//   re-drives it (the RF-1 crash hazard). Treating an idempotent re-record or a
+//   reservation-backed boundary as a failure was an over-correction that broke FG-750's core
+//   "the gate park does not stop independent work".
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -265,9 +269,19 @@ test("RF-2 control: without an operator pause, the controller's own item park co
   assert.equal(isCampaignOperatorPaused(campaignId), false, "no operator-pause marker was ever set");
 });
 
-// ── RF-3: fail closed when the continuation write fails ───────────────────────
+// ── RF-3: fail closed ONLY on a genuine loss of recoverable backing ───────────
+//
+// The RF-1 ordering (record before reopen) protects AC6, but "fail closed" must mean fail
+// closed ONLY when the reopen would leave nothing recovery can adopt — NOT on every throw or
+// skip. Two boundary-write outcomes are legitimate successes and MUST let the reopen proceed:
+//   1. a UNIQUE-constraint / already-exists re-record — the continuation IS durably present, so
+//      recovery can adopt it (this test); and
+//   2. the owner-less in-process drive that records no continuation at all — the durable
+//      reservation stays authoritative (covered by the FG-475 gate-park test).
+// The genuine fail-closed case (no continuation, no reservation) stays paused — the RF-1
+// (revision) skip test below.
 
-test("RF-3: a failed item-boundary continuation write keeps the campaign PAUSED — it is NOT reopened to running with nothing in flight", async () => {
+test("RF-3: an already-exists (UNIQUE-constraint) item-boundary continuation is treated as SUCCESS — the continuation is durably present, so the reopen PROCEEDS", async () => {
   const owner = "ctrl-1";
   const { campaignId, aId, bId } = runningCampaign(owner);
   const launched: string[] = [];
@@ -278,9 +292,9 @@ test("RF-3: a failed item-boundary continuation write keeps the campaign PAUSED 
       // A parks item-scoped and commits the campaign pause (the controller's OWN park).
       parkItemScoped(cid, itemId, owner);
       await parkCampaign(cid, itemId, "decision_needed", { exemption: "item-carries-context" });
-      // Force the reopen-path continuation write to THROW: a row already occupies A's
-      // continuation id, so the re-record hits the PRIMARY KEY and raises. (Models any
-      // failure of the boundary write — an IO error, a lost DB, a constraint clash.)
+      // A row already occupies A's continuation id, so the reopen-path re-record hits the
+      // PRIMARY KEY and raises UNIQUE-constraint. That is NOT a failure: the continuation IS
+      // durably recorded, so recovery can adopt it and the reopen is safe.
       recordContinuation({
         continuationId: campaignContinuationId(cid, aId),
         consumerKind: "campaign",
@@ -290,8 +304,9 @@ test("RF-3: a failed item-boundary continuation write keeps the campaign PAUSED 
       });
       return { itemRecords: [], stopReason: "paused", stopScope: "item" };
     }
-    // Fail closed means we never got here — B must NOT be dispatched.
-    throw new Error("B must not be dispatched after a failed continuation write");
+    // The reopen proceeded (already-exists = success) — B is dispatched, then settles.
+    updateCampaignItem(bId, { lifecycleStatus: "complete", outcome: "shipped" });
+    return { itemRecords: [] };
   };
 
   const result = await driveRemainingItems(campaignId, {
@@ -303,16 +318,18 @@ test("RF-3: a failed item-boundary continuation write keeps the campaign PAUSED 
     controllerLeaseTtlMs: DEFAULT_CONTROLLER_LEASE_MS,
   });
 
-  assert.deepEqual(launched, [aId], "the failed continuation write halted dispatch — B was never driven");
+  assert.deepEqual(launched, [aId, bId], "the already-exists re-record is success — the reopen proceeds and B is dispatched");
+  // A is still parked awaiting the operator, so after B drains the campaign parks (not
+  // completes) — the point is that the reopen was NOT wrongly fail-closed on an idempotent
+  // re-record.
   assert.equal(result.stopReason, "paused");
-  assert.equal(getCampaign(campaignId)!.status, "paused", "campaign stays PAUSED — not flipped to running with nothing in flight");
   assert.equal(getCampaignItem(aId)!.lifecycleStatus, "awaiting_gate", "A's item-scoped park stays intact for resume/recover to re-drive");
-  assert.equal(getCampaignItem(bId)!.lifecycleStatus, "pending", "B stays pending");
+  assert.equal(getCampaignItem(bId)!.lifecycleStatus, "complete", "B advanced independently of A's park");
   // The durable continuation resolves exactly once — resume/recover adopts it without duplication.
   assert.ok(getContinuation(campaignContinuationId(campaignId, aId)) !== undefined, "A's continuation is durable and adoptable");
 });
 
-test("RF-1 (revision): a SKIPPED item-boundary continuation (no launch linkage) keeps the campaign PAUSED — it is NOT reopened to running with nothing in flight", async () => {
+test("RF-1 (revision): a SKIPPED item-boundary continuation (no launch linkage, no reservation) keeps the campaign PAUSED — it is NOT reopened to running with nothing in flight", async () => {
   const owner = "ctrl-1";
   const { campaignId, aId, bId } = runningCampaign(owner);
   const launched: string[] = [];

@@ -42,7 +42,7 @@ import {
   renewCampaignLease,
   releaseCampaignLease,
 } from "../store/campaign-controller.js";
-import { recordContinuation } from "../store/continuations.js";
+import { recordContinuation, getContinuation } from "../store/continuations.js";
 import {
   campaignContinuationId,
   campaignItemPhase,
@@ -2559,6 +2559,17 @@ function recordItemBoundaryContinuation(campaignId: string, item: CampaignItem, 
   return true;
 }
 
+// FG-750 (RF-3 reconcile): whether the AUTHORITATIVE RESERVATION backs recovery for this
+// boundary — the durable item-launch linkage the recover/resume path re-drives the parked item
+// from, WITHOUT needing a continuation ("the reservation stays authoritative"). This is what
+// makes reopening to running safe even when the item-boundary continuation write skipped or
+// failed: there is still a durable reservation for recovery to adopt. Only when this is absent
+// AND no continuation exists is the reopen the genuine RF-1 crash hazard.
+function boundaryReservationBacksRecovery(campaignId: string, item: CampaignItem): boolean {
+  const gen = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
+  return getItemLaunch(campaignId, item.id, gen) !== undefined;
+}
+
 export async function driveRemainingItems(
   campaignId: string,
   opts: {
@@ -2743,43 +2754,68 @@ export async function driveRemainingItems(
         // adopts (a completed boundary is never re-driven; the parked run is reattached,
         // never re-created).
         //
-        // FG-750 (RF-3): fail closed if that record THROWS. Flipping back to running with no
-        // continuation recorded reopens the exact RF-1 hole — a subsequent crash leaves the
-        // campaign 'running' with nothing in flight and nothing to adopt. So when the
-        // continuation write fails, do NOT resume: leave the campaign PAUSED with the park
-        // intact (the reservation stays authoritative; resume/recover re-drives it) and
-        // surface the failure rather than proceeding silently.
+        // FG-750 (RF-3): fail closed if the reopen would leave NOTHING recovery can adopt —
+        // that is the exact RF-1 hole (a subsequent crash leaves the campaign 'running' with
+        // nothing in flight and nothing to adopt). But "fail closed" means fail closed ONLY on a
+        // genuine loss of recoverable backing, NOT on every throw-or-skip. The reopen is backed
+        // when ANY of these hold, and it is safe to proceed:
+        //   (a) a continuation was freshly recorded in this transition; OR
+        //   (b) a continuation ALREADY EXISTS for this boundary — a UNIQUE-constraint on
+        //       continuation_id means the row IS durably present (an idempotent re-record), which
+        //       is success, not failure; OR
+        //   (c) the authoritative reservation (the durable item-launch linkage) itself backs
+        //       recovery for this boundary — the original "reservation stays authoritative"
+        //       invariant: resume/recover re-drives the parked item from it without a
+        //       continuation.
+        // Only when NONE of those hold — no continuation recorded, none already present, and no
+        // durable launch reservation to adopt — is there genuinely nothing recoverable, and the
+        // campaign must stay PAUSED with the park intact.
         //
-        // FG-750 (RF-1, revision): gate the reopen on a continuation ACTUALLY RECORDED in this
-        // transition, not merely on "did not throw". recordItemBoundaryContinuation SKIPS the
-        // write (returns false) when there is no durable launch linkage to bind — a skip leaves
-        // the campaign with no continuation exactly as a throw does, so a skip must ALSO keep
-        // the campaign paused. Treating skip as success is the RF-1 hole under a different door.
-        let continuationRecorded = false;
+        // The owner-less in-process/programmatic drive records no continuation at all; there the
+        // durable item state / reservation is authoritative exactly as it always was, so the
+        // reopen is unconditionally safe (this is FG-750's core "the gate park does not stop
+        // independent work" — a parked item returns the campaign to running so the next
+        // independent item proceeds).
+        let reopenRecoverable = true;
         if (owner && leaseGeneration !== undefined && durableItem) {
+          reopenRecoverable = false;
+          let threw: unknown;
           try {
-            continuationRecorded = recordItemBoundaryContinuation(campaignId, durableItem, items);
-            if (!continuationRecorded) {
+            reopenRecoverable = recordItemBoundaryContinuation(campaignId, durableItem, items);
+          } catch (err) {
+            threw = err;
+          }
+          if (!reopenRecoverable) {
+            // The write skipped (no launch linkage) or threw. It is still recoverable if the
+            // continuation is now durably present (already-exists / idempotent re-record) or the
+            // reservation backs recovery for this boundary.
+            reopenRecoverable =
+              getContinuation(campaignContinuationId(campaignId, durableItem.id)) !== undefined ||
+              boundaryReservationBacksRecovery(campaignId, durableItem);
+          }
+          if (!reopenRecoverable) {
+            // Genuinely nothing to adopt — stay paused (the RF-1 crash hazard). Surface why.
+            if (threw !== undefined) {
+              const message = threw instanceof Error ? threw.message : String(threw);
               console.error(
-                `campaign ${campaignId}: no item-boundary continuation recorded for ${durableItem.ticketId} (no durable launch linkage to bind) — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it)`
+                `campaign ${campaignId}: item-boundary continuation write failed for ${durableItem.ticketId} with no recoverable backing — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it): ${message}`
+              );
+              logEvent("campaign_item.item_boundary_continuation_failed", {
+                runId: durableItem.runId,
+                payload: { campaignId, itemId: durableItem.id, ticketId: durableItem.ticketId, error: message, decidedAt: nowIso() },
+              });
+            } else {
+              console.error(
+                `campaign ${campaignId}: no item-boundary continuation recorded for ${durableItem.ticketId} and no reservation backing — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it)`
               );
               logEvent("campaign_item.item_boundary_continuation_skipped", {
                 runId: durableItem.runId,
                 payload: { campaignId, itemId: durableItem.id, ticketId: durableItem.ticketId, decidedAt: nowIso() },
               });
             }
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error(
-              `campaign ${campaignId}: item-boundary continuation write failed for ${durableItem.ticketId} — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it): ${message}`
-            );
-            logEvent("campaign_item.item_boundary_continuation_failed", {
-              runId: durableItem.runId,
-              payload: { campaignId, itemId: durableItem.id, ticketId: durableItem.ticketId, error: message, decidedAt: nowIso() },
-            });
           }
         }
-        if (continuationRecorded && resumeCampaignToRunning(campaignId)) continue;
+        if (reopenRecoverable && resumeCampaignToRunning(campaignId)) continue;
       }
       releaseIfOwned();
       return { stopReason: result.stopReason, itemRecords };
