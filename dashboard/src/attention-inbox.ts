@@ -75,9 +75,12 @@ export type InboxEnvelope = {
   generatedAt: string;
   scope: InboxScope;
   items: AttentionItem[];
-  /** True when there are no open items — the client renders the calm empty state. A
-   *  DIFFERENT fact from a failed read, which never reaches this envelope (the route
-   *  returns an {error} body the client resolves to unavailable). */
+  /** True ONLY when every source read succeeded AND there are no open items — the calm
+   *  "no action needed" state. A zero-item read with ANY degraded source is NOT empty:
+   *  `empty` stays false and `degraded` names the failed source(s), so no consumer reads
+   *  a partial-read failure as a healthy empty inbox. A TOTAL failure never reaches this
+   *  envelope at all (the route returns an {error} body the client resolves to
+   *  unavailable). */
   empty: boolean;
   /** Per-source read failures absorbed while still returning the rest — a source that
    *  a store predating its tables cannot answer names itself here rather than taking the
@@ -189,11 +192,17 @@ export type ComposeMeta = {
 export function composeInbox(sources: AttentionItem[][], meta: ComposeMeta): InboxEnvelope {
   const flattened = sources.flat();
   const items = sortAttentionItems(dedupeAttentionItems(flattened));
+  const degraded = meta.degraded ?? [];
   return {
     generatedAt: meta.generatedAt,
     scope: meta.scope,
     items,
-    empty: items.length === 0,
-    degraded: meta.degraded ?? [],
+    // `empty` is the operator-facing "no action needed" claim, so it is TRUE only when
+    // EVERY source read succeeded (no degraded markers) AND nothing was found. A zero-item
+    // read with any degraded source keeps `empty: false` and carries the markers, so a
+    // non-dashboard consumer (forge status, Stream Deck) never reads a failed read as a
+    // calm empty inbox (RF-3 / invariant #4).
+    empty: items.length === 0 && degraded.length === 0,
+    degraded,
   };
 }

@@ -129,6 +129,31 @@ describe("composeInbox", () => {
     assert.deepEqual(envelope.degraded, ["failures"]);
   });
 
+  test("a zero-item read with a degraded source is NOT empty — it names the failure (RF-3)", () => {
+    const envelope = composeInbox([[], []], {
+      generatedAt: "t",
+      scope: { runId: null, projectDirs: null },
+      degraded: ["readiness"],
+    });
+    assert.equal(envelope.items.length, 0);
+    assert.equal(
+      envelope.empty,
+      false,
+      "a source read FAILED, so the envelope must not claim the calm empty state to a consumer",
+    );
+    assert.deepEqual(envelope.degraded, ["readiness"], "the failed source is named for the consumer");
+  });
+
+  test("a zero-item read with ALL sources OK still reports empty true", () => {
+    const envelope = composeInbox([[], []], {
+      generatedAt: "t",
+      scope: { runId: null, projectDirs: null },
+      degraded: [],
+    });
+    assert.equal(envelope.empty, true, "no items and no degradation is the honest empty state");
+    assert.deepEqual(envelope.degraded, []);
+  });
+
   test("collapses cross-source duplicates on the same run", () => {
     const runLink = { runId: "run-x", taskId: null, ticketId: null, campaignId: null, itemId: null, projectDir: null, projectLabel: null };
     const envelope = composeInbox(
