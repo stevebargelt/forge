@@ -148,6 +148,9 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // guard); and a scope change during the response BODY decode (`await res.json()`)
   // cannot render the retired checkout's graph either (the post-decode seq check).
   "fg349-control-plane-scope.test.ts": 3,
+  // FG-743 adds `fg743-campaign-wait-lifecycle` (1 test): terminal historical campaign
+  // waits are not rendered as live in-flight work.
+  "fg743-campaign-wait-lifecycle.test.ts": 1,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,
