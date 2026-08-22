@@ -130,6 +130,12 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg694-home-in-flight.test.ts": 10,
   "fg699-scope-invalidation.test.ts": 6,
   "fg745-projects-classification.test.ts": 6,
+  // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
+  // identities that share ONE display label keep SEPARATE client model-mix drill-downs
+  // and independent expand state — the client joins the mix map by durable identity key,
+  // never by the (non-unique) label, so it never re-collapses what RF-1 fixed on the
+  // backend.
+  "fg747-client-model-mix.test.ts": 1,
   // FG-590 adds `fg590-retention-disposition` (2 tests): the terminal-launch retention
   // disposition (retained-for-investigation vs expired/eligible vs leaked) rendered into
   // the page via the shared rule, and the running-launch/legacy no-claim case.

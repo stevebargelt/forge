@@ -70,7 +70,11 @@ export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChan
 
   const maxW = rollup.reduce((m, r) => Math.max(m, weighted(r)), 0);
 
-  const mixByBucket = new Map((modelMix ?? []).map(b => [b.bucket, b.models]));
+  // FG-747 RF-3: join the model-mix drill-down to rollup rows by the durable identity
+  // KEY the backend groups on — NOT b.bucket (the display label, which is not unique).
+  // Keying by label re-collapsed same-label independent identities on the client,
+  // undoing the RF-1 backend fix. Expand state below is keyed the same way.
+  const mixByKey = new Map((modelMix ?? []).map(b => [b.key, b.models]));
 
   const [expandedBucket, setExpandedBucket] = useState(null);
   const toggleBucket = (name) => setExpandedBucket(prev => prev === name ? null : name);
@@ -173,7 +177,7 @@ export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChan
       <div class="usage-rollup">
         ${rollup.length === 0
           ? html`<div class="muted" style="padding: 16px 0;">No usage data for this period.</div>`
-          : rollup.map(r => html`<${UsageRow} key=${r.bucket} row=${r} maxW=${maxW} isExpanded=${expandedBucket === r.bucket} onToggle=${toggleBucket} modelModels=${mixByBucket.get(r.bucket) ?? []} />`)
+          : rollup.map(r => html`<${UsageRow} key=${r.key} row=${r} maxW=${maxW} isExpanded=${expandedBucket === r.key} onToggle=${toggleBucket} modelModels=${mixByKey.get(r.key) ?? []} />`)
         }
       </div>
 
@@ -217,7 +221,7 @@ function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
 
   return html`
     <div class="usage-row-wrap">
-      <div class="usage-row" onClick=${() => onToggle(row.bucket)}>
+      <div class="usage-row" onClick=${() => onToggle(row.key)}>
         <div class="usage-bucket" title=${row.bucket}>
           <span style="margin-right: 4px; font-size: 10px;">${isExpanded ? "▾" : "▸"}</span>${label}
         </div>

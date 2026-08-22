@@ -1074,6 +1074,11 @@ function safeJsonParse(s: string): unknown {
 export type GroupBy = "role" | "workflow" | "project" | "model" | "alias";
 
 export type UsageRollupRow = {
+  // FG-747 RF-3: the DURABLE identity key the row groups on (the sentinel, a `repo-`
+  // evidence key, or a raw `pk-`/`repo-`). `bucket` is its human LABEL and is NOT
+  // unique — two independent identities can share one. Client joins/drill-downs MUST
+  // key on `key`, never `bucket`, or same-label identities re-collapse on the client.
+  key: string;
   bucket: string;
   inputTokens: number;
   outputTokens: number;
@@ -1822,6 +1827,7 @@ export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScop
   // sentinel -> "Unattributed legacy usage").
   const registry = usageProjectLabelRegistry(groupBy);
   return rows.map((r) => ({
+    key: r.bucket,
     bucket: groupBy === "project" ? resolveUsageProjectLabel(r.bucket, registry) : r.bucket,
     inputTokens: r.in_tok ?? 0,
     outputTokens: r.out_tok ?? 0,
@@ -1884,6 +1890,10 @@ export function usageTimeSeries(since = "30d", scope?: ProjectScope): UsageTimeS
 }
 
 export type ModelMixBucket = {
+  // FG-747 RF-3: durable identity key (see UsageRollupRow.key). The client joins the
+  // model-mix drill-down to a rollup row by `key`, never by the `bucket` label — two
+  // distinct identities with the same label must stay SEPARATE drill-downs.
+  key: string;
   bucket: string;
   models: Array<{ model: string; weightedTokens: number; requests: number }>;
 };
@@ -1948,7 +1958,7 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
 
   const map = new Map<string, ModelMixBucket>();
   for (const row of rows) {
-    if (!map.has(row.bucket)) map.set(row.bucket, { bucket: label(row.bucket), models: [] });
+    if (!map.has(row.bucket)) map.set(row.bucket, { key: row.bucket, bucket: label(row.bucket), models: [] });
     map.get(row.bucket)!.models.push({
       model: row.model ?? "(unknown model)",
       weightedTokens: row.weighted ?? 0,
