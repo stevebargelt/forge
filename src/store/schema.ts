@@ -1467,6 +1467,47 @@ CREATE TABLE IF NOT EXISTS workspace_purpose_events (
   at               TEXT NOT NULL
 );
 
+-- FG-747: the APPEND-ONLY audit log of the legacy usage-attribution repair. Usage
+-- grouped by "project" now keys on the durable runs.project_identity (FG-663); rows
+-- written before that column existed carry NULL and would otherwise sit forever in
+-- the "Unattributed legacy usage" bucket. The repair backfills project_identity on
+-- those NULL rows ONLY from durable, retarget-proof evidence — a workspace_purposes
+-- row's recorded owner identity, or an explicit operator path->identity mapping —
+-- and NEVER from a basename, ticket-shaped suffix, path prefix, branch, title, age,
+-- or missing remote. Each apply writes ONE row here per (source checkout -> new
+-- identity) mapping, inside the SAME writeTransaction as the UPDATE, so the audit row
+-- and the rows it explains commit atomically (AC8).
+--
+-- prior_identity is NULL (a legacy row's identity was, by definition, unset).
+-- The request/token counts are the aggregate of the model_calls MOVED by this
+-- mapping, captured at apply time, so the trail is self-describing and reversible:
+-- the UPDATE only re-keys project_identity, never deletes a model_call or a run, so
+-- whole-corpus SUM(requests) and every token column are identical before and after.
+-- Re-running the repair maps nothing new (the rows are no longer NULL), which is what
+-- makes apply idempotent.
+--
+-- A brand-new table via CREATE TABLE IF NOT EXISTS on the ordinary open path — the
+-- same additive-only BD-15 contract as workspace_purpose_events above. user_version is
+-- NOT bumped and no CHECK/UNIQUE pins a column undroppable, so an older peer forge
+-- opens this store unharmed. This is the audit/idempotency/reversal trail only — NOT a
+-- second grouping source of truth (grouping still reads runs.project_identity).
+CREATE TABLE IF NOT EXISTS usage_legacy_repair_events (
+  id                    INTEGER PRIMARY KEY,
+  source_path           TEXT NOT NULL,
+  prior_identity        TEXT,
+  new_identity          TEXT NOT NULL,
+  evidence              TEXT NOT NULL,
+  run_count             INTEGER NOT NULL,
+  requests              INTEGER NOT NULL,
+  input_tokens          INTEGER NOT NULL,
+  output_tokens         INTEGER NOT NULL,
+  cache_read_tokens     INTEGER NOT NULL,
+  cache_creation_tokens INTEGER NOT NULL,
+  source                TEXT NOT NULL,
+  actor                 TEXT,
+  at                    TEXT NOT NULL
+);
+
 -- FG-591 (the operator work queue and its dispatcher): FOUR brand-new tables, all
 -- arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
 -- additive-only BD-15 contract as every table above. user_version is NOT bumped, so
@@ -1954,6 +1995,15 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // only its nullable `actor` column is restorable, so it is the one entry the parity
   // guard needs (the NOT NULL columns are undroppable and covered by list-completeness).
   { table: "workspace_purpose_events", column: "actor", ddl: "ALTER TABLE workspace_purpose_events ADD COLUMN actor TEXT" },
+
+  // FG-747: the usage_legacy_repair_events audit table arrives WHOLE via CREATE TABLE
+  // IF NOT EXISTS, but the fresh-vs-migrated parity guard strips EVERY restorable column
+  // off EVERY table and relies on this list to restore it. Only its two NULLABLE columns
+  // (prior_identity — always NULL for a legacy row; actor — NULL when the surface cannot
+  // attribute the operator) are restorable; every other column is NOT NULL and undroppable,
+  // covered by list-completeness and re-created only by the CREATE.
+  { table: "usage_legacy_repair_events", column: "prior_identity", ddl: "ALTER TABLE usage_legacy_repair_events ADD COLUMN prior_identity TEXT" },
+  { table: "usage_legacy_repair_events", column: "actor", ddl: "ALTER TABLE usage_legacy_repair_events ADD COLUMN actor TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

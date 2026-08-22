@@ -280,10 +280,18 @@ test("opsMetrics, the runtime trends and the throughput trend all agree across s
 });
 
 test("usageRollup: token usage is attributed through every spelling", () => {
+  // FG-747: the `project` dimension now buckets by DURABLE project identity, not by
+  // the recorded checkout path — so the bucket is ONE stable identity label across
+  // every spelling of the checkout, no longer the path bytes. The FG-693 invariant
+  // this test guards (scope resolution through every spelling) is unchanged: one
+  // bucket, 100 input tokens, whichever spelling names the checkout.
+  let identityBucket: string | undefined;
   for (const [label, spelling] of ALPHA_SPELLINGS) {
     const rows = usageRollup("project", "all", spelling);
     assert.equal(rows.length, 1, `one project bucket scoped by ${label}`);
-    assert.equal(rows[0]?.bucket, alpha, "the bucket LABEL is the recorded spelling, not the query's");
+    identityBucket ??= rows[0]?.bucket;
+    assert.equal(rows[0]?.bucket, identityBucket, `identity-stable bucket across spellings (${label})`);
+    assert.notEqual(rows[0]?.bucket, spelling, `bucket is a durable identity label, not the checkout path (${label})`);
     assert.equal(rows[0]?.inputTokens, 100);
   }
 });

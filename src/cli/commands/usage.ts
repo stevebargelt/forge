@@ -25,6 +25,14 @@ import { ensureForgeDirs } from "../../util/paths.js";
 import { getDb } from "../../store/db.js";
 import { renderedEmptyStore } from "../no-store.js";
 import { captureUsageForTask, extractUsageByLogFormat } from "../../store/model-calls.js";
+import { projectGroupingSql, resolveUsageProjectLabel, hasRunsProjectIdentity } from "../../store/usage-grouping.js";
+import { listProjects } from "../../util/projects.js";
+import {
+  planLegacyRepair,
+  applyLegacyRepair,
+  type LegacyRepairPlan,
+} from "../../store/usage-legacy-repair.js";
+import { userInfo } from "node:os";
 
 // #262: read the runtime log_format recorded in the task's manifest (written
 // since #292) so backfill selects the right usage parser instead of defaulting to
@@ -77,7 +85,7 @@ export function registerUsage(program: Command): void {
     .description("Show usage rollups grouped by --by; default groups by role")
     .option("--by <dim>", "role | workflow | project | model | alias (default: role)", "role")
     .option("--since <window>", "time window: 1d | 7d | 30d | all (default: all)", "all")
-    .option("--project <dir>", "filter to one project's runs")
+    .option("--project <dir>", "filter to ONE exact checkout/workspace path (a path filter, NOT the `--by project` accounting bucket)")
     .option("--run <id>", "filter to a single run (e.g. the per-provider split within one run)")
     .option("--task <id>", "filter to a single task")
     .option("--json", "emit JSON instead of a table")
@@ -121,6 +129,111 @@ export function registerUsage(program: Command): void {
       console.log(`Scanned ${s.scanned} task(s); ${s.withData} had usable data; ${verb} ${s.totalRows} model_call row(s); ${s.withAlias} tagged with alias.`);
       if (s.withErrors > 0) console.log(`(${s.withErrors} task(s) had parse errors — likely incomplete logs)`);
     });
+
+  // FG-747: legacy usage-attribution repair. Runs written before FG-663 carry a NULL
+  // project_identity and sit in the "Unattributed legacy usage" bucket. This backfills
+  // that column from DURABLE, retarget-proof evidence only (a workspace_purposes owner
+  // identity, or an explicit operator `--map path=identity`) — never from a path/name
+  // heuristic. Default is a DRY-RUN (report, no mutation); `--apply` mutates.
+  usage
+    .command("repair")
+    .description("Attribute NULL-identity legacy usage rows to their durable project (safe, evidence-only)")
+    .option("--apply", "apply the repair (default is a dry-run report that mutates nothing)")
+    .option(
+      "--map <path=identity...>",
+      "explicit operator mapping: an exact checkout/workspace path = its durable project identity (repeatable)",
+    )
+    .option("--json", "emit JSON instead of a table")
+    .action((opts: { apply?: boolean; map?: string[]; json?: boolean }) => {
+      ensureForgeDirs();
+      const mapping = parseRepairMapping(opts.map);
+      if (!opts.apply) {
+        const plan = planLegacyRepair(mapping);
+        if (opts.json) {
+          console.log(JSON.stringify({ mode: "dry-run", ...plan }, null, 2));
+          return;
+        }
+        printRepairPlan(plan);
+        return;
+      }
+      // Apply: the OS user is best-effort actor context (never fabricated) recorded on
+      // the audit row. Idempotent — a re-run maps nothing new.
+      const actor = osUserOrNull();
+      const result = applyLegacyRepair(mapping, actor);
+      if (opts.json) {
+        console.log(JSON.stringify({ mode: "apply", ...result }, null, 2));
+        return;
+      }
+      if (result.applied.length === 0) {
+        console.log("No legacy rows attributed (nothing had durable evidence or an operator mapping, or the repair already ran).");
+        return;
+      }
+      for (const a of result.applied) {
+        console.log(`  ${a.newIdentity}  ←  ${a.sourcePath}  (${a.runsUpdated} run(s), via ${a.evidence})`);
+      }
+      console.log(`Attributed ${result.runsUpdated} legacy run(s). Model-call totals are unchanged (only project attribution moved).`);
+      console.log("The dashboard reflects this within its next poll / presentation-cache window (~30s); a brief lag is expected, not a failure.");
+    });
+}
+
+/** Parse repeated `--map path=identity` tokens into a path -> identity map. A token
+ *  without `=`, or with an empty side, is refused loudly rather than silently dropped
+ *  (a mis-typed mapping must never quietly attribute nothing). */
+function parseRepairMapping(tokens: string[] | undefined): Map<string, string> {
+  const mapping = new Map<string, string>();
+  for (const token of tokens ?? []) {
+    const eq = token.indexOf("=");
+    if (eq <= 0 || eq === token.length - 1) {
+      throw new Error(`--map expects <path>=<identity> (got: ${token})`);
+    }
+    mapping.set(token.slice(0, eq), token.slice(eq + 1));
+  }
+  return mapping;
+}
+
+function osUserOrNull(): string | null {
+  try {
+    const name = userInfo().username;
+    return name && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+function printRepairPlan(plan: LegacyRepairPlan): void {
+  if (plan.identityColumnAbsent) {
+    console.log("This store has no runs.project_identity column (aged/peer store); nothing to repair.");
+    return;
+  }
+  if (plan.mappings.length === 0 && plan.unresolved.length === 0) {
+    console.log("No NULL-identity legacy usage rows. Nothing to repair.");
+    return;
+  }
+  if (plan.mappings.length > 0) {
+    console.log(`Proposed attributions (${plan.mappings.length}) — dry-run, nothing written:`);
+    for (const m of plan.mappings) {
+      console.log(
+        `  ${m.proposedIdentity}  ←  ${m.sourcePath}` +
+          `  [${m.runCount} run(s), ${m.requests} request(s), in=${m.inputTokens} out=${m.outputTokens}` +
+          ` cr=${m.cacheReadTokens} cc=${m.cacheCreationTokens}]  via ${m.evidence}`,
+      );
+    }
+  }
+  if (plan.unresolved.length > 0) {
+    console.log(`\nUnresolved — stay in "Unattributed legacy usage" (${plan.unresolved.length}):`);
+    for (const u of plan.unresolved) {
+      console.log(`  ${u.sourcePath}  [${u.runCount} run(s), ${u.requests} request(s)]  (no durable evidence, no operator mapping)`);
+    }
+  }
+  console.log(`\nRun \`forge usage repair --apply\` (optionally with --map <path>=<identity>) to attribute the proposed rows.`);
+}
+
+function safeListProjects(): ReadonlyArray<{ key: string; label: string }> {
+  try {
+    return listProjects();
+  } catch {
+    return [];
+  }
 }
 
 function parseGroupBy(raw: string): GroupBy {
@@ -140,7 +253,7 @@ function parseSinceClause(raw: string): string {
   return `AND mc.created_at >= '${cutoff}'`;
 }
 
-function aggregate(opts: {
+export function aggregate(opts: {
   by: GroupBy;
   sinceClause: string;
   projectFilter: string | undefined;
@@ -149,15 +262,25 @@ function aggregate(opts: {
   limit: number;
 }): Row[] {
   const { by, sinceClause, projectFilter, runFilter, taskFilter, limit } = opts;
-  // Build the GROUP BY expression based on dimension.
+  const db = getDb({ readOnly: true });
+  // FG-747: the `project` dimension keys on the durable runs.project_identity through
+  // the ONE shared grouping contract (usage-grouping.ts) so the CLI and the dashboard
+  // group and label identically (AC4). The other dimensions are unchanged.
+  const projectGrouping = projectGroupingSql(db, "r");
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
     workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
-    project:  "COALESCE(r.project_dir,'(unknown project)')",
+    project:  projectGrouping.bucketExpr,
     model:    "COALESCE(mc.model,     '(unknown model)')",
     alias:    "COALESCE(mc.alias,     '(no alias)')",
   };
+  // The registry join is spliced in ONLY for the project dimension. It is a LEFT JOIN
+  // on project_identity's PRIMARY KEY, so it re-keys a row's bucket without ever
+  // dropping or duplicating a model_call (AC8).
+  const groupingJoin = by === "project" ? projectGrouping.join : "";
   const sqlLit = (v: string) => `'${v.replace(/'/g, "''")}'`;
+  // `--project <dir>` stays an EXACT checkout/workspace filter (a different dimension
+  // from `--by project`, which is the durable-identity accounting bucket — AC10).
   const projectClause = projectFilter ? `AND r.project_dir = ${sqlLit(projectFilter)}` : "";
   const runClause = runFilter ? `AND t.run_id = ${sqlLit(runFilter)}` : "";
   const taskClause = taskFilter ? `AND mc.task_id = ${sqlLit(taskFilter)}` : "";
@@ -172,6 +295,7 @@ function aggregate(opts: {
     FROM model_calls mc
     LEFT JOIN tasks t ON t.id = mc.task_id
     LEFT JOIN runs  r ON r.id = t.run_id
+    ${groupingJoin}
     WHERE 1 = 1
       ${sinceClause}
       ${projectClause}
@@ -181,7 +305,7 @@ function aggregate(opts: {
     ORDER BY (SUM(mc.input_tokens) + SUM(mc.cache_creation_tokens) + SUM(mc.cache_read_tokens) + SUM(mc.output_tokens)) DESC
     LIMIT ?
   `;
-  const raw = getDb({ readOnly: true }).prepare(sql).all(limit) as Array<{
+  const raw = db.prepare(sql).all(limit) as Array<{
     bucket: string;
     in_tok: number;
     out_tok: number;
@@ -189,8 +313,14 @@ function aggregate(opts: {
     create_tok: number;
     req_count: number;
   }>;
+  // For the project dimension the SQL bucket is the durable identity KEY; resolve it
+  // to the same human label the dashboard renders (all Forge checkouts -> "Forge";
+  // the sentinel -> "Unattributed legacy usage"). Skipped when the identity column is
+  // absent (degraded legacy path already buckets by project_dir) or on a registry read
+  // failure — label then falls back to the raw key, never a thrown rollup.
+  const registry = by === "project" && hasRunsProjectIdentity(db) ? safeListProjects() : [];
   return raw.map((r) => ({
-    bucket: r.bucket,
+    bucket: by === "project" ? resolveUsageProjectLabel(r.bucket, registry) : r.bucket,
     inputTokens: r.in_tok ?? 0,
     outputTokens: r.out_tok ?? 0,
     cacheReadTokens: r.read_tok ?? 0,
