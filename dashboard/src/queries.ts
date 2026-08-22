@@ -58,6 +58,12 @@ import {
 // is dragged into this typecheck than the alias would have pulled. Worth an alias
 // in a follow-up.
 import { identify, provenPhysical } from "../../src/util/path-identity.js";
+// FG-747: the ONE usage `project`-dimension grouping/normalization contract, shared
+// with the CLI so both group and label identically (AC4). Imported RELATIVELY for the
+// same reason as path-identity above (adding a `@forge/*` alias would edit
+// dashboard/tsconfig.json, outside this step's file boundary). Worth an alias in a
+// follow-up.
+import { projectGroupingSql, resolveUsageProjectLabel } from "../../src/store/usage-grouping.js";
 import { findRemoteControlUrlInText } from "@forge/orchestrator-credential";
 // The SAME loopback predicate that gates this surface's writes. Imported, never
 // re-expressed: two definitions of "is this bind loopback" is one edit away from
@@ -1068,6 +1074,11 @@ function safeJsonParse(s: string): unknown {
 export type GroupBy = "role" | "workflow" | "project" | "model" | "alias";
 
 export type UsageRollupRow = {
+  // FG-747 RF-3: the DURABLE identity key the row groups on (the sentinel, a `repo-`
+  // evidence key, or a raw `pk-`/`repo-`). `bucket` is its human LABEL and is NOT
+  // unique — two independent identities can share one. Client joins/drill-downs MUST
+  // key on `key`, never `bucket`, or same-label identities re-collapse on the client.
+  key: string;
   bucket: string;
   inputTokens: number;
   outputTokens: number;
@@ -1731,14 +1742,42 @@ export function completedRunTrends(
   };
 }
 
+// FG-747: the project registry used to resolve a usage bucket KEY to its label —
+// but ONLY for the project dimension AND only when the store carries the identity
+// column (an aged/peer store on the degraded legacy path already buckets by
+// project_dir path, so its buckets need no registry lookup). Gating on the column is
+// also what keeps a minimal read-store — one that lacks project_dir_canonical, which
+// listProjects()->uniqueProjectDirs() reads — from being touched here.
+//
+// Uses the UNFILTERED listProjects() (key -> label), the SAME registry the CLI's
+// `forge usage show --by project` resolves against, so the two agree on every bucket's
+// label including a project whose checkout is gone from disk (AC4). projectsForDashboard()
+// would presentation-FILTER those out and diverge from the CLI. Best-effort: a registry
+// read failure degrades to raw keys (label = key), never a thrown rollup.
+function usageProjectLabelRegistry(groupBy: GroupBy): ReadonlyArray<{ key: string; label: string }> {
+  if (groupBy !== "project" || !hasRunsProjectIdentity()) return [];
+  try {
+    return listProjects();
+  } catch {
+    return [];
+  }
+}
+
 export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScope, limit = 50): UsageRollupRow[] {
+  // FG-747: the `project` dimension keys on the durable runs.project_identity through
+  // the ONE shared grouping contract, so this and the CLI group and label identically
+  // (AC4). The registry JOIN is LEFT on project_identity's PRIMARY KEY, so it re-keys a
+  // row's bucket without ever dropping or fanning out a model_call (AC8). Other
+  // dimensions are unchanged.
+  const projectGrouping = projectGroupingSql(db(), "r");
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
     workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
-    project:  "COALESCE(r.project_dir,'(unknown project)')",
+    project:  projectGrouping.bucketExpr,
     model:    "COALESCE(mc.model,     '(unknown model)')",
     alias:    "COALESCE(mc.alias,     '(no alias)')",
   };
+  const groupingJoin = groupBy === "project" ? projectGrouping.join : "";
   const params: unknown[] = [];
   let sinceClause = "";
   if (since !== "all") {
@@ -1765,6 +1804,7 @@ export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScop
     FROM model_calls mc
     LEFT JOIN tasks t ON t.id = mc.task_id
     LEFT JOIN runs  r ON r.id = t.run_id
+    ${groupingJoin}
     WHERE 1 = 1
       ${sinceClause}
       ${projectClause}
@@ -1782,8 +1822,13 @@ export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScop
     req_count: number;
   }>;
 
+  // For the project dimension the SQL bucket is the durable identity KEY; resolve it
+  // to the same human label the CLI renders (all Forge checkouts -> "Forge"; the
+  // sentinel -> "Unattributed legacy usage").
+  const registry = usageProjectLabelRegistry(groupBy);
   return rows.map((r) => ({
-    bucket: r.bucket,
+    key: r.bucket,
+    bucket: groupBy === "project" ? resolveUsageProjectLabel(r.bucket, registry) : r.bucket,
     inputTokens: r.in_tok ?? 0,
     outputTokens: r.out_tok ?? 0,
     cacheReadTokens: r.read_tok ?? 0,
@@ -1845,18 +1890,26 @@ export function usageTimeSeries(since = "30d", scope?: ProjectScope): UsageTimeS
 }
 
 export type ModelMixBucket = {
+  // FG-747 RF-3: durable identity key (see UsageRollupRow.key). The client joins the
+  // model-mix drill-down to a rollup row by `key`, never by the `bucket` label — two
+  // distinct identities with the same label must stay SEPARATE drill-downs.
+  key: string;
   bucket: string;
   models: Array<{ model: string; weightedTokens: number; requests: number }>;
 };
 
 export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectScope): ModelMixBucket[] {
+  // FG-747: same shared `project` grouping contract as usageRollup (AC4). Only the
+  // project dimension changes; the LEFT-JOIN keeps the counted population identical.
+  const projectGrouping = projectGroupingSql(db(), "r");
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
     workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
-    project:  "COALESCE(r.project_dir,'(unknown project)')",
+    project:  projectGrouping.bucketExpr,
     model:    "COALESCE(mc.model,     '(unknown model)')",
     alias:    "COALESCE(mc.alias,     '(no alias)')",
   };
+  const groupingJoin = groupBy === "project" ? projectGrouping.join : "";
   const params: unknown[] = [];
   let sinceClause = "";
   if (since !== "all") {
@@ -1880,6 +1933,7 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
     FROM model_calls mc
     LEFT JOIN tasks t ON t.id = mc.task_id
     LEFT JOIN runs  r ON r.id = t.run_id
+    ${groupingJoin}
     WHERE 1 = 1
       ${sinceClause}
       ${projectClause}
@@ -1894,9 +1948,17 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
     requests: number;
   }>;
 
+  // Resolve the durable identity KEY to the same label the CLI renders (project
+  // dimension only). Group by the durable KEY, never the resolved label: labels are
+  // presentation metadata and are not unique, so two independent identities that share
+  // a configured/fallback label must stay SEPARATE buckets (AC3/AC4).
+  const registry = usageProjectLabelRegistry(groupBy);
+  const label = (bucketKey: string): string =>
+    groupBy === "project" ? resolveUsageProjectLabel(bucketKey, registry) : bucketKey;
+
   const map = new Map<string, ModelMixBucket>();
   for (const row of rows) {
-    if (!map.has(row.bucket)) map.set(row.bucket, { bucket: row.bucket, models: [] });
+    if (!map.has(row.bucket)) map.set(row.bucket, { key: row.bucket, bucket: label(row.bucket), models: [] });
     map.get(row.bucket)!.models.push({
       model: row.model ?? "(unknown model)",
       weightedTokens: row.weighted ?? 0,

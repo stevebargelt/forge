@@ -11,8 +11,10 @@ import { join } from "node:path";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
+import { insertUsageRows } from "../../store/model-calls.js";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { performBackfill } from "./usage.js";
+import { performBackfill, aggregate } from "./usage.js";
+import { UNATTRIBUTED_LEGACY_LABEL } from "../../store/usage-grouping.js";
 
 // A real pi --mode json shape: usage lives on agent_end's assistant messages.
 // The claude parser (which keys off type:"assistant" events) finds nothing here.
@@ -82,4 +84,69 @@ test("#262 backfill: a pi log WITHOUT a manifest falls back to claude and record
     assert.equal(s.scanned, 1);
     assert.equal(s.withData, 0, "claude parser finds no usage in a pi stream — proves the manifest is what enables it");
   });
+});
+
+// ─── FG-747: `--by project` groups on durable identity, not checkout path ──────
+
+let usageSeq = 0;
+function seedProjectUsage(projectDir: string, identity: string | null, requests: number): void {
+  const n = usageSeq++;
+  const runId = `run-p${n}`;
+  const taskId = `task-p${n}`;
+  insertRun(
+    { id: runId, workflow: "invoke", title: runId, status: "complete", createdAt: "2026-07-01T00:00:00Z", projectDir },
+    { value: identity },
+  );
+  insertTask({
+    id: taskId, runId, phase: "engineer", agentRole: "engineer", status: "complete",
+    taskPackage: { taskId, runId, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-07-01T00:00:00Z",
+  });
+  insertUsageRows(
+    Array.from({ length: requests }, (_, i) => ({
+      taskId, requestId: `${taskId}-r${i}`, model: "claude-sonnet", alias: "prod",
+      inputTokens: 100, outputTokens: 10, cacheReadTokens: 5, cacheCreationTokens: 2,
+      createdAt: "2026-07-01T00:00:00Z",
+    })),
+  );
+}
+
+function projectAggregate() {
+  return aggregate({ by: "project", sinceClause: "", projectFilter: undefined, limit: 50 });
+}
+
+test("FG-747 CLI `--by project`: many checkouts of one identity collapse to ONE bucket", () => {
+  const db = makeInMemoryDb();
+  const prev = setDbForTest(db);
+  try {
+    seedProjectUsage("/forge", "repo-forge", 3);
+    seedProjectUsage("/forge-clones/fg356", "repo-forge", 4);
+    seedProjectUsage("/forge-worktrees/fg591", "repo-forge", 5);
+    seedProjectUsage("/other", "repo-other", 2);
+    const rows = projectAggregate();
+    const forge = rows.find((r) => r.bucket === "repo-forge");
+    assert.ok(forge, "one Forge bucket (no live checkout on disk -> label is the raw evidence key)");
+    assert.equal(forge!.requests, 12, "every request counted once");
+    assert.equal(rows.find((r) => r.bucket === "repo-other")?.requests, 2, "independent project stays separate");
+  } finally {
+    if (prev) setDbForTest(prev);
+    db.close();
+  }
+});
+
+test("FG-747 CLI `--by project`: NULL-identity rows render as the 'Unattributed legacy usage' bucket", () => {
+  const db = makeInMemoryDb();
+  const prev = setDbForTest(db);
+  try {
+    seedProjectUsage("/legacy-a", null, 2);
+    seedProjectUsage("/legacy-b", null, 3);
+    const rows = projectAggregate();
+    const legacy = rows.find((r) => r.bucket === UNATTRIBUTED_LEGACY_LABEL);
+    assert.ok(legacy, "one unattributed-legacy bucket, never a path/name-derived project");
+    assert.equal(legacy!.requests, 5);
+    assert.equal(rows.length, 1, "both legacy checkouts roll up together");
+  } finally {
+    if (prev) setDbForTest(prev);
+    db.close();
+  }
 });
