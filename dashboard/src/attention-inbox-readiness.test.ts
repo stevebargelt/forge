@@ -109,3 +109,81 @@ describe("readinessAttentionItems — a review item is bounded to its run being 
     db.close();
   });
 });
+
+// FG-402 (CI dashboard_browser, PR #303): the readiness staleness filter matches
+// ra.body_hash = t.body_hash to drop superseded assessments — but tickets.body_hash is a
+// migration-added column absent from a minimal store (the browser-tier fixture seeds
+// tickets WITHOUT it). Naming t.body_hash there throws `SqliteError: no such column`, which
+// used to fail the readiness read and cascade into the Home browser tests. The staleness
+// predicate is now guarded by hasColumn(db, "tickets", "body_hash").
+describe("readinessAttentionItems — the staleness filter is guarded when tickets lacks body_hash (FG-402)", () => {
+  // The healthy-empty schema minus tickets.body_hash — the browser-tier shape.
+  function seedNoBodyHash(db: Database.Database): void {
+    db.exec(`
+      CREATE TABLE tickets (project_key TEXT, ticket_id TEXT, status TEXT, title TEXT);
+      CREATE TABLE readiness_assessments (project_key TEXT, ticket_id TEXT, body_hash TEXT, outcome TEXT, gaps_json TEXT, evaluated_at TEXT);
+      CREATE TABLE runs (id TEXT, project_dir TEXT, project_identity TEXT, status TEXT);
+      CREATE TABLE reviews (id TEXT, run_id TEXT, subject_task_id TEXT, ticket_id TEXT, state TEXT, updated_at TEXT);
+      CREATE TABLE review_findings (id TEXT, review_id TEXT, disposition TEXT, resolution TEXT);
+    `);
+  }
+
+  test("a tickets table WITHOUT body_hash does not throw and returns the readiness item", () => {
+    const db = new Database(":memory:");
+    seedNoBodyHash(db);
+    db.prepare("INSERT INTO tickets (project_key, ticket_id, status, title) VALUES (?, ?, ?, ?)").run(
+      "pk",
+      "FG-9",
+      "active",
+      "needs work",
+    );
+    db.prepare(
+      "INSERT INTO readiness_assessments (project_key, ticket_id, body_hash, outcome, gaps_json, evaluated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("pk", "FG-9", "h-any", "needs_refinement", null, "2026-08-22T00:00:00Z");
+
+    // Against the unguarded `ra.body_hash = t.body_hash` query this throws SqliteError and
+    // degrades; with the hasColumn guard the staleness predicate is omitted and the item surfaces.
+    const result = readinessAttentionItems(db, undefined, 0);
+    assert.deepEqual(result.degraded, [], "a store without body_hash must NOT be a read failure");
+    assert.equal(result.items.length, 1, "the assessment is treated as current when body_hash is absent");
+    assert.equal(result.items[0]!.id, "readiness:FG-9");
+    db.close();
+  });
+
+  test("WITH body_hash present, the staleness match still filters superseded assessments", () => {
+    const db = new Database(":memory:");
+    seedHealthyEmpty(db);
+    // Current: assessment body_hash matches the ticket's — surfaces.
+    db.prepare("INSERT INTO tickets (project_key, ticket_id, status, body_hash, title) VALUES (?, ?, ?, ?, ?)").run(
+      "pk",
+      "FG-current",
+      "active",
+      "h-current",
+      "current",
+    );
+    db.prepare(
+      "INSERT INTO readiness_assessments (project_key, ticket_id, body_hash, outcome, gaps_json, evaluated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("pk", "FG-current", "h-current", "needs_refinement", null, "2026-08-22T00:00:00Z");
+    // Stale: the ticket has been edited since the assessment — its hash no longer matches, so
+    // the assessment is superseded evidence and must be filtered out.
+    db.prepare("INSERT INTO tickets (project_key, ticket_id, status, body_hash, title) VALUES (?, ?, ?, ?, ?)").run(
+      "pk",
+      "FG-stale",
+      "active",
+      "h-new",
+      "stale",
+    );
+    db.prepare(
+      "INSERT INTO readiness_assessments (project_key, ticket_id, body_hash, outcome, gaps_json, evaluated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("pk", "FG-stale", "h-old", "blocked", null, "2026-08-22T00:00:00Z");
+
+    const result = readinessAttentionItems(db, undefined, 0);
+    assert.deepEqual(result.degraded, []);
+    assert.deepEqual(
+      result.items.map((i) => i.id),
+      ["readiness:FG-current"],
+      "the current assessment surfaces; the superseded (stale body_hash) one is filtered",
+    );
+    db.close();
+  });
+});

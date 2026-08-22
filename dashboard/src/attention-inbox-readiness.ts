@@ -47,6 +47,14 @@ function projectDirScope(scope: InboxProjectScope, qualifier: string): { clause:
   return { clause: ` AND ${qualifier}.project_dir IN (${dirs.map(() => "?").join(", ")})`, params: dirs };
 }
 
+function hasColumn(db: Database, table: string, column: string): boolean {
+  // PRAGMA table_info returns zero rows for a missing table rather than throwing, so
+  // a store whose tickets table predates body_hash reads back false here rather than
+  // taking the whole read down when the staleness predicate names a column not there.
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((r) => r.name === column);
+}
+
 function safeParseGaps(json: string | null): string[] {
   if (!json) return [];
   try {
@@ -67,6 +75,12 @@ type ReadinessRow = {
 
 function readinessItems(db: Database, scope: InboxProjectScope): SourceResult {
   const sub = projectDirSubquery(scope);
+  // Staleness (superseded-evidence) filtering needs tickets.body_hash. It exists in the
+  // real schema, but a minimal store (e.g. the browser-tier fixture) can seed tickets
+  // without it — naming t.body_hash there throws SqliteError and fails the whole read.
+  // Guard it: keep the staleness match when the column is present, omit it (treat the
+  // assessment as current) when it is absent, rather than referencing a column not there.
+  const staleness = hasColumn(db, "tickets", "body_hash") ? " AND ra.body_hash = t.body_hash" : "";
   let rows: ReadinessRow[];
   try {
     rows = db
@@ -76,8 +90,7 @@ function readinessItems(db: Database, scope: InboxProjectScope): SourceResult {
            FROM readiness_assessments ra
            JOIN tickets t ON t.project_key = ra.project_key AND t.ticket_id = ra.ticket_id
           WHERE t.status = 'active'
-            AND ra.outcome IN ('needs_refinement', 'blocked')
-            AND ra.body_hash = t.body_hash${sub.clause}
+            AND ra.outcome IN ('needs_refinement', 'blocked')${staleness}${sub.clause}
           ORDER BY ra.ticket_id ASC`,
       )
       .all(...sub.params) as ReadinessRow[];
