@@ -199,6 +199,28 @@ describe("FG-743 AC4 — a nonterminal item whose ticket became done retains no 
     });
     assert.equal(derive().operatorWaits.length, 1);
   });
+
+  // FG-743/RF-1: `tickets` is keyed by (project_key, ticket_id), so two projects can each
+  // carry FG-970. A `done` FG-970 in project B must NOT clear a live hard-stop on project
+  // A's still-active FG-970 — reconciliation is ALL-rows-done, never any-row-done.
+  test("a done ticket in ANOTHER project does not suppress this project's live hard-stop", () => {
+    addCampaign({ id: "camp-A", status: "paused" });
+    addTicket("FG-970", "active", "pk-project-A");
+    addTicket("FG-970", "done", "pk-project-B");
+    addCampaignItem({
+      id: "item-A",
+      campaignId: "camp-A",
+      ticketId: "FG-970",
+      lifecycleStatus: "blocked_by_red",
+      reason: "authoritative reviewer blocked the build",
+      requestedHumanAction: "resolve the reviewer block then resume",
+    });
+
+    const waits = derive().operatorWaits;
+    assert.equal(waits.length, 1, "the sibling project's done FG-970 must not drop A's live wait");
+    assert.equal(waits[0]!.ticketId, "FG-970");
+    assert.equal(waits[0]!.campaignId, "camp-A");
+  });
 });
 
 // ─────────────────── AC5 — the aged FG-472 shape (done ticket + old paused) ──────────────

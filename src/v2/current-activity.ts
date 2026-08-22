@@ -904,11 +904,21 @@ type CampaignStopRow = {
   requested_human_action: string;
   updated_at: string | null;
   campaign_status: string;
-  /** FG-743: 1 when a ticket row for `ticket_id` records status `done`, else 0. The
+  /** FG-743: 1 only when `ticket_id` is CLOSED across the whole shadow — at least one
+   *  `tickets` row carries it and EVERY row that does records `done`, else 0. The
    *  RECONCILIATION signal — a done ticket means the item's work shipped, so a retained
    *  "close the ticket" instruction is already satisfied. 0 on a store with no `tickets`
    *  table (the aged read-only shape), the fail-open direction: absence of proof of
-   *  closure is not proof of closure. */
+   *  closure is not proof of closure.
+   *
+   *  FG-743/RF-1: the ALL-rows-done test is deliberate, not MAX-over-rows. `tickets` is
+   *  keyed by (project_key, ticket_id) so two projects can each carry an `FG-123`, and
+   *  this module cannot resolve a project_key from a workspace path without shelling
+   *  `git` (BD-7/BD-18). Reading closure off ANY matching row let a `done` `FG-123` in
+   *  project B suppress a LIVE hard-stop on project A's still-active `FG-123` — a
+   *  false-negative drop of an unresolved operator decision. Requiring every row to be
+   *  `done` scopes conservatively: one still-active row anywhere keeps the wait visible,
+   *  the same direction `readClosedTicketIds` takes for the identical collision. */
   ticket_done: number;
   project_dir: string | null;
   project_dir_canonical?: string | null;
@@ -953,11 +963,16 @@ function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
   const canonical = hasCanonicalColumn(db, "campaigns") ? ", c.project_dir_canonical" : "";
   // The `tickets` table can be absent on an aged/read-only handle too; guard it the same
   // way and read every item as not-done (`0`) there rather than naming a table that throws.
-  // Project-agnostic on ticket_id, matching the store's own `ticketKnown` (reviews.ts): a
-  // done ticket in this store is durable whichever project owns it. MAX over the CASE is 1
-  // iff any matching row is `done`, 0 otherwise (including no matching row at all).
+  // FG-743/RF-1: closure is ALL-rows-done, not any-row-done. `tickets` is keyed by
+  // (project_key, ticket_id), so a `done` `FG-123` in one project must not clear a live
+  // hard-stop on a still-active `FG-123` in another. COUNT(*) > 0 rejects the no-matching-
+  // row case (an unimported ticket is unproven, not closed); the SUM is 0 iff no matching
+  // row is anything other than `done`. This mirrors `readClosedTicketIds` exactly — the one
+  // place this module already reconciles the same (project_key, ticket_id) collision.
   const ticketDone = hasColumn(db, "tickets", "status")
-    ? `(SELECT COALESCE(MAX(CASE WHEN t.status = '${CLOSED_TICKET_STATUS}' THEN 1 ELSE 0 END), 0)
+    ? `(SELECT CASE WHEN COUNT(*) > 0
+                     AND SUM(CASE WHEN t.status = '${CLOSED_TICKET_STATUS}' THEN 0 ELSE 1 END) = 0
+                    THEN 1 ELSE 0 END
           FROM tickets t WHERE t.ticket_id = ci.ticket_id)`
     : "0";
   const rows = db.prepare(`
