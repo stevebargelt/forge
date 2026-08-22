@@ -903,24 +903,67 @@ type CampaignStopRow = {
   reason: string | null;
   requested_human_action: string;
   updated_at: string | null;
+  campaign_status: string;
+  /** FG-743: 1 when a ticket row for `ticket_id` records status `done`, else 0. The
+   *  RECONCILIATION signal — a done ticket means the item's work shipped, so a retained
+   *  "close the ticket" instruction is already satisfied. 0 on a store with no `tickets`
+   *  table (the aged read-only shape), the fail-open direction: absence of proof of
+   *  closure is not proof of closure. */
+  ticket_done: number;
   project_dir: string | null;
   project_dir_canonical?: string | null;
 };
+
+/** FG-743: a campaign in one of these statuses is OVER (CAMPAIGN_TRANSITIONS in
+ *  src/types has each as a terminal sink). Its parked items are HISTORY — inspectable via
+ *  `forge campaign show/report` (AC6) — never live operator waits, even when an aged item
+ *  still carries a `requested_human_action`. `paused`/`running` are the only nonterminal
+ *  statuses and are deliberately absent. */
+const TERMINAL_CAMPAIGN_STATUSES: readonly string[] = ["complete", "failed", "abandoned"];
+
+/** FG-743: the campaign/item/ticket lifecycle predicate for a LIVE campaign operator
+ *  wait. A parked item that named an operator authority (`requested_human_action`) is a
+ *  live wait ONLY when:
+ *    - its parent campaign is still nonterminal (paused/running) — a terminal campaign's
+ *      parked items are history (AC1/AC2); and
+ *    - its work is not already reconciled — a `done` ticket means the item shipped, so a
+ *      retained "close the ticket" instruction is already satisfied and no operator action
+ *      remains, so the wait is cleared rather than presented with obsolete prose (AC4/AC5).
+ *  The row's own park (lifecycle NOT IN complete/failed/pending/running) is already
+ *  filtered in SQL; this is the parent + reconciliation half of the same question. */
+function isLiveCampaignOperatorWait(row: CampaignStopRow): boolean {
+  if (TERMINAL_CAMPAIGN_STATUSES.includes(row.campaign_status)) return false;
+  if (row.ticket_done === 1) return false;
+  return true;
+}
 
 /** Campaign items that STOPPED THEMSELVES and named the operator authority they need —
  *  a non-null `requested_human_action` is the durable hard-stop signal. Only LIVE parks
  *  survive: a `complete`/`failed`/`pending`/`running` item is not a wait (it advanced or
  *  never parked), so the parked set (awaiting_gate / blocked_by_red / awaiting_recovery)
- *  is what remains. The item carries no project dir of its own; the campaign does. */
+ *  is what remains. FG-743: the park alone is not enough — a stop under a TERMINAL campaign
+ *  or against an already-`done` ticket is historical, not live, so the shared
+ *  `isLiveCampaignOperatorWait` predicate finishes the membership decision. The item
+ *  carries no project dir of its own; the campaign does. */
 function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
   // A read-only handle can predate the campaign tables; PRAGMA doubles as the existence
   // check (zero rows for a missing table), so a store without them reads as no hard stops
   // rather than throwing on the JOIN and taking the whole surface down.
   if (!hasColumn(db, "campaign_items", "requested_human_action") || !hasColumn(db, "campaigns", "project_dir")) return [];
   const canonical = hasCanonicalColumn(db, "campaigns") ? ", c.project_dir_canonical" : "";
-  return db.prepare(`
+  // The `tickets` table can be absent on an aged/read-only handle too; guard it the same
+  // way and read every item as not-done (`0`) there rather than naming a table that throws.
+  // Project-agnostic on ticket_id, matching the store's own `ticketKnown` (reviews.ts): a
+  // done ticket in this store is durable whichever project owns it. MAX over the CASE is 1
+  // iff any matching row is `done`, 0 otherwise (including no matching row at all).
+  const ticketDone = hasColumn(db, "tickets", "status")
+    ? `(SELECT COALESCE(MAX(CASE WHEN t.status = '${CLOSED_TICKET_STATUS}' THEN 1 ELSE 0 END), 0)
+          FROM tickets t WHERE t.ticket_id = ci.ticket_id)`
+    : "0";
+  const rows = db.prepare(`
     SELECT ci.id, ci.campaign_id, ci.ticket_id, ci.run_id, ci.lifecycle_status,
            ci.blocker_kind, ci.reason, ci.requested_human_action, ci.updated_at,
+           c.status AS campaign_status, ${ticketDone} AS ticket_done,
            c.project_dir${canonical}
       FROM campaign_items ci
       JOIN campaigns c ON c.id = ci.campaign_id
@@ -928,6 +971,7 @@ function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
        AND ci.lifecycle_status NOT IN ('complete', 'failed', 'pending', 'running')
      ORDER BY ci.updated_at DESC
   `).all() as CampaignStopRow[];
+  return rows.filter(isLiveCampaignOperatorWait);
 }
 
 function campaignStopToOperatorWait(row: CampaignStopRow, placement: "run" | "project" | "host"): OperatorWaitActivity {

@@ -1,0 +1,227 @@
+// FG-743: Current Activity must show only PRESENTLY ACTIONABLE campaign operator waits.
+// FG-734 made a parked `campaign_items.requested_human_action` visible as a
+// `waiting_on_operator` entry, but it treated the park alone as liveness — never checking
+// the PARENT campaign lifecycle or reconciling the stored instruction against terminal
+// ticket state. So 1000+-hour-old rows under abandoned campaigns, and a done ticket under
+// an old paused campaign, reappeared under `Current activity` as live in-flight work.
+//
+// What is pinned here (the shared campaign/item/ticket lifecycle predicate):
+//
+//   TERMINAL-PARENT EXCLUSION (AC1/AC2). A parked item with a requested_human_action under
+//   a campaign that is complete / failed / abandoned is HISTORY, not a live wait — absent
+//   from Current Activity even though the item still carries the action.
+//
+//   ACTIONABLE-PARENT PRESERVATION (AC3). A paused/running campaign with a genuinely
+//   unresolved, actionable stop stays visible with its identity + reason.
+//
+//   DONE-TICKET RECONCILIATION (AC4/AC5). A nonterminal campaign item whose ticket has
+//   since become `done` does not retain a now-false "close the ticket" instruction — the
+//   wait clears, because no operator action remains.
+//
+//   HISTORY PRESERVED (AC6). Filtering never deletes or rewrites a campaign row: the
+//   excluded items remain in the store for `forge campaign show/report` to expose.
+
+import { test, describe, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+import { makeInMemoryDb } from "../store/db.js";
+import { deriveCurrentActivity, type StepGateResolver } from "./current-activity.js";
+
+const NOW = new Date("2026-08-22T12:00:00.000Z");
+const PROJECT = "/repos/forge";
+const ago = (ms: number): string => new Date(NOW.getTime() - ms).toISOString();
+const HOURS = 3_600_000;
+
+let db: DatabaseInstance;
+
+beforeEach(() => {
+  db = makeInMemoryDb();
+});
+
+afterEach(() => {
+  db.close();
+});
+
+function addCampaign(seed: { id: string; status: string; projectDir?: string | null }): void {
+  db.prepare(`
+    INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, project_dir)
+    VALUES (@id, @status, 'list', '{}', 'sequential', @ts, @ts, @projectDir)
+  `).run({ id: seed.id, status: seed.status, ts: ago(1000 * HOURS), projectDir: seed.projectDir === undefined ? PROJECT : seed.projectDir });
+}
+
+function addCampaignItem(seed: {
+  id: string;
+  campaignId: string;
+  ticketId: string;
+  runId?: string | null;
+  lifecycleStatus?: string;
+  blockerKind?: string | null;
+  reason?: string | null;
+  requestedHumanAction?: string | null;
+  updatedAt?: string;
+}): void {
+  db.prepare(`
+    INSERT INTO campaign_items (
+      id, campaign_id, item_order, ticket_id, run_id, lifecycle_status,
+      blocker_kind, reason, requested_human_action, created_at, updated_at
+    ) VALUES (
+      @id, @campaignId, 1, @ticketId, @runId, @lifecycleStatus,
+      @blockerKind, @reason, @requestedHumanAction, @createdAt, @updatedAt
+    )
+  `).run({
+    id: seed.id,
+    campaignId: seed.campaignId,
+    ticketId: seed.ticketId,
+    runId: seed.runId ?? null,
+    lifecycleStatus: seed.lifecycleStatus ?? "awaiting_gate",
+    blockerKind: seed.blockerKind ?? null,
+    reason: seed.reason ?? null,
+    requestedHumanAction: seed.requestedHumanAction ?? null,
+    createdAt: ago(1000 * HOURS),
+    updatedAt: seed.updatedAt ?? ago(1000 * HOURS),
+  });
+}
+
+function addTicket(ticketId: string, status: string, projectKey = "pk-forge"): void {
+  db.prepare(`
+    INSERT INTO tickets (project_key, ticket_id, type, status, title, body, imported_at)
+    VALUES (?, ?, 'story', ?, ?, '', ?)
+  `).run(projectKey, ticketId, status, `ticket ${ticketId}`, ago(1000 * HOURS));
+}
+
+// Campaign hard stops never consult the step-gate resolver (that is the human-gate path),
+// so every test here resolves nothing.
+const noGates: StepGateResolver = () => "auto";
+const derive = () => deriveCurrentActivity(db, { now: NOW, resolveStepGate: noGates });
+
+// ───────────────────── AC1 — terminal-parent exclusion, all three names ─────────────────
+
+describe("FG-743 AC1 — a parked item under a TERMINAL campaign is not a live operator wait", () => {
+  for (const status of ["complete", "failed", "abandoned"] as const) {
+    test(`campaign status '${status}' → the parked item is absent from Current Activity`, () => {
+      addCampaign({ id: `camp-${status}`, status });
+      addCampaignItem({
+        id: `item-${status}`,
+        campaignId: `camp-${status}`,
+        ticketId: "FG-900",
+        lifecycleStatus: "blocked_by_red",
+        requestedHumanAction: "resolve the reviewer block then resume",
+      });
+      assert.equal(derive().operatorWaits.length, 0);
+    });
+  }
+});
+
+// ──────────── AC2 — the three reproduced abandoned rows, history preserved ───────────────
+
+describe("FG-743 AC2 — the reproduced abandoned-campaign rows no longer appear as live waits", () => {
+  test("FG-366 / FG-425 / FG-422 under abandoned campaigns are all absent — and their rows are NOT deleted", () => {
+    const reproduced = [
+      { item: "item-366", campaign: "campaign-7a56519b2f3d", ticket: "FG-366" },
+      { item: "item-425", campaign: "campaign-e89beee993ec", ticket: "FG-425" },
+      { item: "item-422", campaign: "campaign-922c83b7c577", ticket: "FG-422" },
+    ];
+    for (const r of reproduced) {
+      addCampaign({ id: r.campaign, status: "abandoned" });
+      addCampaignItem({
+        id: r.item,
+        campaignId: r.campaign,
+        ticketId: r.ticket,
+        lifecycleStatus: "awaiting_recovery",
+        reason: "aged historical hard stop",
+        requestedHumanAction: "resolve then resume",
+        updatedAt: ago(1200 * HOURS),
+      });
+    }
+
+    assert.equal(derive().operatorWaits.length, 0, "none of the abandoned-campaign rows are live");
+
+    // AC6: the derivation FILTERS, it does not delete. Every historical row still exists.
+    const remaining = db.prepare(`SELECT COUNT(*) AS n FROM campaign_items`).get() as { n: number };
+    assert.equal(remaining.n, reproduced.length, "campaign history is preserved for forge campaign show/report");
+  });
+});
+
+// ─────────────── AC3 — an actionable paused/running campaign stays visible ───────────────
+
+describe("FG-743 AC3 — a genuinely unresolved stop under a nonterminal campaign remains visible", () => {
+  for (const status of ["paused", "running"] as const) {
+    test(`a ${status} campaign with an unresolved actionable stop keeps its identity + reason`, () => {
+      addCampaign({ id: `camp-${status}`, status });
+      addCampaignItem({
+        id: `item-${status}`,
+        campaignId: `camp-${status}`,
+        ticketId: "FG-950",
+        runId: "run-950",
+        lifecycleStatus: "blocked_by_red",
+        blockerKind: "human_decision",
+        reason: "authoritative reviewer blocked the build",
+        requestedHumanAction: "resolve the reviewer block then resume",
+      });
+
+      const waits = derive().operatorWaits;
+      assert.equal(waits.length, 1);
+      const w = waits[0]!;
+      assert.equal(w.source, "campaign_hard_stop");
+      assert.equal(w.ticketId, "FG-950");
+      assert.equal(w.campaignId, `camp-${status}`);
+      assert.equal(w.reason, "authoritative reviewer blocked the build");
+      assert.equal(w.requestedAction, "resolve the reviewer block then resume");
+    });
+  }
+});
+
+// ─────────────── AC4 — a done ticket clears the now-false "close the ticket" ─────────────
+
+describe("FG-743 AC4 — a nonterminal item whose ticket became done retains no stale instruction", () => {
+  test("done ticket under a paused campaign → the wait clears (no operator action remains)", () => {
+    addCampaign({ id: "camp-recon", status: "paused" });
+    addTicket("FG-960", "done");
+    addCampaignItem({
+      id: "item-recon",
+      campaignId: "camp-recon",
+      ticketId: "FG-960",
+      lifecycleStatus: "awaiting_gate",
+      requestedHumanAction: "close the ticket",
+    });
+    assert.equal(derive().operatorWaits.length, 0);
+  });
+
+  test("an ACTIVE ticket under the same shape stays visible — only closure reconciles it", () => {
+    addCampaign({ id: "camp-active", status: "paused" });
+    addTicket("FG-961", "active");
+    addCampaignItem({
+      id: "item-active",
+      campaignId: "camp-active",
+      ticketId: "FG-961",
+      lifecycleStatus: "awaiting_gate",
+      requestedHumanAction: "close the ticket",
+    });
+    assert.equal(derive().operatorWaits.length, 1);
+  });
+});
+
+// ─────────────────── AC5 — the aged FG-472 shape (done ticket + old paused) ──────────────
+
+describe("FG-743 AC5 — the FG-472 shape cannot be presented as current with obsolete prose", () => {
+  test("a done FG-472 under a still-paused campaign is absent, and its history survives", () => {
+    addCampaign({ id: "campaign-2753b15667d7", status: "paused", projectDir: PROJECT });
+    addTicket("FG-472", "done");
+    addCampaignItem({
+      id: "item-472",
+      campaignId: "campaign-2753b15667d7",
+      ticketId: "FG-472",
+      lifecycleStatus: "awaiting_gate",
+      reason: "item done but campaign never resumed",
+      requestedHumanAction: "close the ticket",
+      updatedAt: ago(1000 * HOURS),
+    });
+
+    assert.equal(derive().operatorWaits.length, 0, "the obsolete close-the-ticket wait is cleared");
+
+    const row = db.prepare(`SELECT requested_human_action FROM campaign_items WHERE id = 'item-472'`).get() as
+      | { requested_human_action: string }
+      | undefined;
+    assert.equal(row?.requested_human_action, "close the ticket", "the historical requested-action evidence is untouched");
+  });
+});
