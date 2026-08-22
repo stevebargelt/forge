@@ -24,7 +24,7 @@ export function setDoneAuditMapForTest(map: Map<string, DoneAuditResult> | null)
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
-import { campaignBlocker, probeCampaignSystemRetryEvidence, evaluateCampaignSystemShipEligibility } from "./executor.js";
+import { campaignBlocker, probeCampaignSystemRetryEvidence, evaluateCampaignSystemShipEligibility, isItemScopedPark } from "./executor.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
@@ -82,6 +82,25 @@ function computeDirtyGitState(projectDir: string): string | null {
 function findInFlightItem(items: CampaignItem[]): CampaignItem | undefined {
   return items.find(
     (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+  );
+}
+
+// FG-750: during a RUNNING campaign an item may be parked awaiting an operator
+// decision (item-scoped) while a later independent item runs — the campaign
+// continues rather than halting. That parked item is NOT a wedge, so it must not be
+// read as recovery-needed. Only an in-flight item that is neither running nor an
+// item-scoped park indicates a genuine controller/state mismatch. show/report and
+// the dashboard therefore surface BOTH the waiting-on-operator item and the running
+// one simultaneously while the campaign stays running (each item's row carries its
+// own durable lifecycleStatus/outcome/requestedHumanAction).
+function stuckInFlightItem(items: CampaignItem[]): CampaignItem | undefined {
+  return items.find(
+    (i) =>
+      i.lifecycleStatus !== "pending" &&
+      i.lifecycleStatus !== "complete" &&
+      i.lifecycleStatus !== "failed" &&
+      i.lifecycleStatus !== "running" &&
+      !isItemScopedPark(i)
   );
 }
 
@@ -427,8 +446,8 @@ function computeNextShowAction(
   getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
-    const inf = findInFlightItem(items);
-    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(campaign.id, inf);
+    const stuck = stuckInFlightItem(items);
+    if (stuck) return recoveryNeededAction(campaign.id, stuck);
     return "running";
   }
   if (campaign.status === "complete") return doneAuditGapAction(items, doneAuditMap) ?? "complete — none";
@@ -500,8 +519,8 @@ export type CampaignVerdict = "all_shipped" | "complete_with_issues" | "not_comp
 
 function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToContinue {
   if (campaign.status === "running") {
-    const inf = findInFlightItem(items);
-    if (inf && inf.lifecycleStatus !== "running") return "recovery_needed";
+    const stuck = stuckInFlightItem(items);
+    if (stuck) return "recovery_needed";
     return "running";
   }
   if (campaign.status === "complete" || campaign.status === "failed" || campaign.status === "abandoned") {
@@ -542,8 +561,8 @@ function computeNextOperatorAction(
   getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
-    const inf = findInFlightItem(items);
-    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(campaign.id, inf);
+    const stuck = stuckInFlightItem(items);
+    if (stuck) return recoveryNeededAction(campaign.id, stuck);
     return "campaign is running — monitor progress";
   }
   if (campaign.status === "complete") {

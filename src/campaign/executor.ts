@@ -150,6 +150,15 @@ export type CampaignItemRecord = {
 export type DriveOneItemResult = {
   itemRecords: CampaignItemRecord[];
   stopReason?: CampaignStopReason;
+  // FG-750: present with stopReason "paused" when THIS drive committed an ITEM-SCOPED
+  // operator park (one item waiting on a human decision) — as opposed to a
+  // campaign-scoped stop (a shared blocker, a lane escalation, or an operator pause
+  // that won the running→paused race). The controller retains the parked item and
+  // continues with the next independent eligible item only when the scope is "item".
+  // Set from parkCampaign's own commit boolean on the in-process path (precise: an
+  // operator pause that pre-empted the park leaves it unset); reconstructed from the
+  // durable park shape on the cross-process launch path.
+  stopScope?: "item" | "campaign";
 };
 
 // FG-596: how the launch-per-item controller drives item N. The DEFAULT (production)
@@ -261,7 +270,29 @@ type BlockedItemEntry = {
   id: string;
   ticket: StructuredTicket;
   blockerKind: BlockerKind;
+  // FG-750: how this item became a blocker. A "park" blocker (an item parked
+  // awaiting an operator decision, or a later item transitively held on such a
+  // park) blocks ONLY its explicit direct dependents — never an item that is merely
+  // later in approved order or that carries no dependency metadata. A "failure"
+  // blocker keeps the FG-393 continue-policy (unknown relation holds in sequential
+  // mode). Sequential order is never, on its own, a dependency edge.
+  source: "failure" | "park";
 };
+
+// FG-750: an ITEM-SCOPED park is an operator decision about ONE item — a human
+// gate, a review-disposition withhold, or a blocking reviewer verdict. Its
+// blockerKind is item-local (or absent, for a pure human gate). A shared blocker, a
+// recovery wedge (awaiting_gate + campaign_system), or a lane escalation is
+// campaign-scoped and halts the whole campaign. This is a pure function of durable
+// state so the controller's continue/halt decision, the after-drain park, and the
+// report surfaces all classify a park identically.
+export function isItemScopedPark(item: CampaignItem | undefined): boolean {
+  if (!item) return false;
+  if (item.lifecycleStatus !== "awaiting_gate" && item.lifecycleStatus !== "blocked_by_red") return false;
+  if (isRecoveryShape(item)) return false;
+  if (item.blockerKind && isSharedBlocker(item.blockerKind)) return false;
+  return true;
+}
 
 // Evaluate whether a later item should be held given the current set of blocked items.
 // Returns { hold: true, reason, holderId } or { hold: false }.
@@ -276,13 +307,23 @@ function evaluateForHold(
     const rel = laterTicket
       ? relationToBlocked({ id: blocker.id, related: blocker.ticket.related }, { id: laterTicket.id, related: laterTicket.related })
       : "unknown";
-    const policy = evaluateContinuePolicy(blocker.blockerKind, rel, mode);
+    // FG-750: a parked item (and anything transitively held on it) blocks ONLY its
+    // explicit direct dependents — never an item that is merely later in order or has
+    // no dependency metadata. A failure blocker keeps the FG-393 policy.
+    const policy =
+      blocker.source === "park"
+        ? rel === "dependent"
+          ? "hold_dependents"
+          : "continue_allowed"
+        : evaluateContinuePolicy(blocker.blockerKind, rel, mode);
 
     if (policy === "hold_dependents" || policy === "hold_campaign") {
       const reason =
-        rel === "dependent"
-          ? `held because related to blocked item ${blocker.id}`
-          : `held because dependency relation is unknown in sequential mode`;
+        blocker.source === "park"
+          ? `held because it depends on parked item ${blocker.id}`
+          : rel === "dependent"
+            ? `held because related to blocked item ${blocker.id}`
+            : `held because dependency relation is unknown in sequential mode`;
       return { hold: true, reason, holderId: blocker.id };
     }
   }
@@ -451,7 +492,7 @@ async function finalizeInvokeDispatch(
 
   // LOCAL blocker — continue. Add to blockedItems so subsequent items can be evaluated.
   if (laterTicket) {
-    blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind });
+    blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind, source: "failure" });
   } else {
     // Ticket not in ticketMap (deleted?). Use a synthetic entry with no related field
     // so downstream items get "unknown" relation and are conservatively held.
@@ -459,6 +500,7 @@ async function finalizeInvokeDispatch(
       id: item.ticketId,
       ticket: { id: item.ticketId, type: "story", status: "active", title: item.ticketId, body: "" } as StructuredTicket,
       blockerKind,
+      source: "failure",
     });
   }
   return null;
@@ -768,7 +810,7 @@ export async function driveWorkflowItem(
     // a launched drive-item child (enforceFence); absent for the in-process/programmatic drive.
     fenceAuthorizes?: () => boolean;
   } = { runNextFn: runNext },
-): Promise<{ outcome: "continue" | "paused" | "recovery_needed"; itemRecord: CampaignItemRecord }> {
+): Promise<{ outcome: "continue" | "paused" | "recovery_needed"; itemRecord: CampaignItemRecord; stopScope?: "item" | "campaign" }> {
   const itemId = item.id;
   const ticketId = item.ticketId;
   const doGate = fns.gateFn ?? gate;
@@ -915,9 +957,11 @@ export async function driveWorkflowItem(
         blockerKind: "scope",
         requestedHumanAction: `workflow blocked by authoritative reviewer at step ${blockedRedTask.phase}`,
       });
-      await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
+      // FG-750: a blocking reviewer verdict is an item-local (scope) block — item-scoped.
+      const redCommitted = await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
       return {
         outcome: "paused",
+        ...(redCommitted ? { stopScope: "item" as const } : {}),
         itemRecord: {
           itemId,
           ticketId,
@@ -932,6 +976,11 @@ export async function driveWorkflowItem(
     // Step 4: For each awaiting_gate task, branch on gate type.
     const awaitingTasks = tasks.filter((t) => t.status === "awaiting_gate");
     let parked = false;
+    // FG-750: true when the park that set `parked` was an ITEM-SCOPED operator decision
+    // (review disposition / failing verdict / human gate) AND this drive committed the
+    // pause. An inconclusive verdict (campaign_system) is campaign-scoped and leaves it
+    // false, as does a pause an operator won first.
+    let parkedItemScope = false;
 
     for (const awaitingTask of awaitingTasks) {
       const step = findStep(workflow, awaitingTask.phase);
@@ -960,7 +1009,7 @@ export async function driveWorkflowItem(
               `review_disposition gate withholds at step ${step?.id ?? awaitingTask.phase}: ` +
               `${err instanceof Error ? err.message : String(err)}`,
           });
-          await parkCampaign(campaignId, itemId, "decision_needed", { exemption: "item-carries-context" }, { bodyBlockerKind: "review_disposition" });
+          parkedItemScope = await parkCampaign(campaignId, itemId, "decision_needed", { exemption: "item-carries-context" }, { bodyBlockerKind: "review_disposition" });
           parked = true;
           break;
         }
@@ -980,7 +1029,7 @@ export async function driveWorkflowItem(
             blockerKind: "scope",
             requestedHumanAction: `workflow blocked by failing verdict at step ${step?.id ?? awaitingTask.phase}`,
           });
-          await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
+          parkedItemScope = await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
           parked = true;
           break;
         } else {
@@ -1007,7 +1056,7 @@ export async function driveWorkflowItem(
         // FG-516 (finding F2): a gate:human park persists no blockerKind by design
         // (that unset field marks the out-of-band reconcile shape), so compose a
         // body-only label — otherwise the pushed body carries no blocker kind at all.
-        await parkCampaign(campaignId, itemId, "decision_needed", { exemption: "item-carries-context" }, { bodyBlockerKind: "human_gate" });
+        parkedItemScope = await parkCampaign(campaignId, itemId, "decision_needed", { exemption: "item-carries-context" }, { bodyBlockerKind: "human_gate" });
         parked = true;
         break;
       }
@@ -1017,6 +1066,7 @@ export async function driveWorkflowItem(
       const updatedItem = getCampaignItem(itemId);
       return {
         outcome: "paused",
+        ...(parkedItemScope ? { stopScope: "item" as const } : {}),
         itemRecord: {
           itemId,
           ticketId,
@@ -1438,8 +1488,11 @@ async function driveInvokeLaneItem(
     });
 
     if (outcome !== "shipped") {
+      // FG-750: an unshipped invoke item parks waiting on an operator decision — an
+      // item-scoped park. When this drive commits the pause, tell the controller to
+      // continue with the next independent eligible item.
       if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
-        return { stopReason: "paused", itemRecords };
+        return { stopReason: "paused", stopScope: "item", itemRecords };
       }
       const post = getCampaign(campaignId);
       return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
@@ -1502,8 +1555,9 @@ async function driveInvokeLaneItem(
   });
 
   if (outcome !== "shipped") {
+    // FG-750: item-scoped park (unshipped invoke item awaiting an operator decision).
     if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
-      return { stopReason: "paused", itemRecords };
+      return { stopReason: "paused", stopScope: "item", itemRecords };
     }
     const post = getCampaign(campaignId);
     return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
@@ -1635,7 +1689,17 @@ export async function driveOneCampaignItem(
       !isSharedBlocker(prior.blockerKind)
     ) {
       const t = ticketMap.get(prior.ticketId);
-      if (t) blockedItems.push({ id: prior.ticketId, ticket: t, blockerKind: prior.blockerKind });
+      if (t) blockedItems.push({ id: prior.ticketId, ticket: t, blockerKind: prior.blockerKind, source: "failure" });
+    } else if (isItemScopedPark(prior)) {
+      // FG-750: a prior item parked awaiting an operator decision is unavailable —
+      // hold only its EXPLICIT direct dependents; independent later items proceed.
+      const t = ticketMap.get(prior.ticketId);
+      if (t) blockedItems.push({ id: prior.ticketId, ticket: t, blockerKind: prior.blockerKind ?? "scope", source: "park" });
+    } else if (prior.outcome === "held" && prior.blockerKind === "dependency") {
+      // FG-750: an item already held on a parked/failed dependency is itself
+      // transitively unavailable, so its own explicit dependents must hold too.
+      const t = ticketMap.get(prior.ticketId);
+      if (t) blockedItems.push({ id: prior.ticketId, ticket: t, blockerKind: "scope", source: "park" });
     }
   }
 
@@ -1650,7 +1714,7 @@ export async function driveOneCampaignItem(
         !isSharedBlocker(item.blockerKind)
       ) {
         const t = ticketMap.get(item.ticketId);
-        if (t) blockedItems.push({ id: item.ticketId, ticket: t, blockerKind: item.blockerKind });
+        if (t) blockedItems.push({ id: item.ticketId, ticket: t, blockerKind: item.blockerKind, source: "failure" });
       }
       continue;
     }
@@ -1929,7 +1993,10 @@ export async function driveOneCampaignItem(
 
       if (driveResult.outcome === "paused") {
         const c = getCampaign(campaignId);
-        return { stopReason: c?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+        if (c?.status === "abandoned") return { stopReason: "abandoned", itemRecords };
+        // FG-750: propagate the item-scoped-park signal so the controller continues
+        // with the next independent eligible item instead of halting the campaign.
+        return { stopReason: "paused", ...(driveResult.stopScope ? { stopScope: driveResult.stopScope } : {}), itemRecords };
       }
 
       // Item reached terminal — handle blocked-items tracking and cooperative pause.
@@ -1938,12 +2005,13 @@ export async function driveOneCampaignItem(
         if (!isSharedBlocker(termItem.blockerKind)) {
           const laterTicket = ticketMap.get(item.ticketId);
           if (laterTicket) {
-            blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind: termItem.blockerKind });
+            blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind: termItem.blockerKind, source: "failure" });
           } else {
             blockedItems.push({
               id: item.ticketId,
               ticket: { id: item.ticketId, type: "story", status: "active", title: item.ticketId, body: "" } as StructuredTicket,
               blockerKind: termItem.blockerKind,
+              source: "failure",
             });
           }
         }
@@ -2305,7 +2373,10 @@ export async function driveOneCampaignItem(
 
       if (driveResult.outcome === "paused") {
         const c = getCampaign(campaignId);
-        return { stopReason: c?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+        if (c?.status === "abandoned") return { stopReason: "abandoned", itemRecords };
+        // FG-750: propagate the item-scoped-park signal so the controller continues
+        // with the next independent eligible item instead of halting the campaign.
+        return { stopReason: "paused", ...(driveResult.stopScope ? { stopScope: driveResult.stopScope } : {}), itemRecords };
       }
 
       // Item reached terminal — record worktree evidence if available.
@@ -2332,12 +2403,13 @@ export async function driveOneCampaignItem(
         } else {
           // Local blocker (scope) — add to blockedItems so later items can be evaluated.
           if (laterTicket) {
-            blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind: termItem.blockerKind });
+            blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind: termItem.blockerKind, source: "failure" });
           } else {
             blockedItems.push({
               id: item.ticketId,
               ticket: { id: item.ticketId, type: "story", status: "active", title: item.ticketId, body: "" } as StructuredTicket,
               blockerKind: termItem.blockerKind,
+              source: "failure",
             });
           }
         }
@@ -2624,6 +2696,41 @@ export async function driveRemainingItems(
     }
     itemRecords.push(...result.itemRecords);
     if (result.stopReason) {
+      // FG-750: distinguish an ITEM-SCOPED operator park from a campaign-scoped stop.
+      // A sequential campaign runs one item at a time — it does NOT make every later
+      // item depend on every earlier one. When THIS item parked waiting on an operator
+      // decision (a human gate / review disposition / blocking reviewer verdict — an
+      // item-local blocker, or none), retain it (its run/workspace/evidence/question/
+      // recommendation/resume-action are already durable) and return the campaign to
+      // running so the NEXT independent eligible item in approved order can proceed. Its
+      // true dependency descendants are held by the durable-state rebuild the next drive
+      // performs. A campaign-scoped stop (shared blocker, lane escalation, recovery
+      // wedge, operator pause/abandon) halts the whole campaign, unchanged.
+      const durableItem = getCampaignItem(item.id);
+      // Only continue past the park when there is genuinely later work still to drive.
+      // If the parked item is effectively the last one (no later pending item), leave the
+      // campaign paused exactly as before — flipping it back to running only to re-park it
+      // would be pointless churn and a second pause notification for the same item.
+      const idx = items.findIndex((i) => i.id === item.id);
+      const laterPending = items
+        .slice(idx + 1)
+        .some((i) => getCampaignItem(i.id)?.lifecycleStatus === "pending");
+      if (
+        result.stopReason === "paused" &&
+        result.stopScope === "item" &&
+        isItemScopedPark(durableItem) &&
+        laterPending &&
+        resumeCampaignToRunning(campaignId)
+      ) {
+        // Record the item-boundary continuation for the parked item so a crash between
+        // parking this item and launching the next one recovers without duplicating
+        // either (a completed boundary is never re-driven; the parked run is reattached,
+        // never re-created).
+        if (owner && leaseGeneration !== undefined && durableItem) {
+          try { recordItemBoundaryContinuation(campaignId, durableItem, items); } catch { /* best-effort: reservation stays authoritative */ }
+        }
+        continue;
+      }
       releaseIfOwned();
       return { stopReason: result.stopReason, itemRecords };
     }
@@ -2654,9 +2761,16 @@ export async function driveRemainingItems(
   // FG-516 (finding F3): the held pause is an unattended running→paused park, so it
   // still notifies (scoped to a campaign fallback run; the per campaign+item dedupe key
   // keeps a re-park across resumes from spamming).
+  // FG-750: the campaign-scoped stop when no eligible work remains. Items parked awaiting
+  // an operator decision (item-scoped parks the controller continued past) and items held
+  // on a parked/failed dependency both keep the campaign paused — completing while an item
+  // still waits on the operator would be a false "complete". Already-parked items fired
+  // their pause milestone when they parked, so ONLY the newly-held items are notified here;
+  // the CAS still carries the whole campaign to paused when either kind remains.
   const finalItems = listCampaignItems(campaignId);
   const heldItemIds = [...new Set(finalItems.filter((i) => i.outcome === "held").map((i) => i.id))];
-  if (heldItemIds.length > 0) {
+  const anyParked = finalItems.some((i) => isItemScopedPark(i));
+  if (heldItemIds.length > 0 || anyParked) {
     if (await parkCampaign(campaignId, heldItemIds, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) })) {
       return { stopReason: "paused", itemRecords };
     }
@@ -2719,7 +2833,7 @@ export function deriveDriveItemResultFromDurableState(
   campaignId: string,
   itemId: string,
   disposition: LaunchStatus | undefined,
-): { itemRecords: CampaignItemRecord[]; stopReason?: CampaignStopReason; driveError?: Error } {
+): { itemRecords: CampaignItemRecord[]; stopReason?: CampaignStopReason; driveError?: Error; stopScope?: "item" | "campaign" } {
   const durableItem = getCampaignItem(itemId);
   const record: CampaignItemRecord | undefined = durableItem
     ? {
@@ -2774,9 +2888,15 @@ export function deriveDriveItemResultFromDurableState(
   }
 
   // (4) The drive parked the campaign. Distinguish the recovery shape (fail-closed, an
-  // item still carrying an unadopted run) from an operator-actionable pause.
+  // item still carrying an unadopted run) from an operator-actionable pause. FG-750: a
+  // pause whose item settled at an ITEM-SCOPED operator-park shape is reconstructed as
+  // stopScope "item" so the controller continues with the next independent eligible item
+  // (the launch path reads the child's outcome from durable state, never its return
+  // value, so this is where the cross-process scope is recovered).
   if (campaign.status !== "running") {
-    return { itemRecords, stopReason: isRecoveryShape(durableItem) ? "recovery_needed" : "paused" };
+    if (isRecoveryShape(durableItem)) return { itemRecords, stopReason: "recovery_needed" };
+    if (isItemScopedPark(durableItem)) return { itemRecords, stopReason: "paused", stopScope: "item" };
+    return { itemRecords, stopReason: "paused" };
   }
 
   // (5) Campaign still running and the child ended cleanly (or settled the item): the
@@ -3072,7 +3192,13 @@ export function launchDriveItemUnderForge(
     }
 
     try { removeLaunch(meta.id, seams.tmux ? { tmux: seams.tmux } : {}); } catch { /* best-effort cleanup */ }
-    return { itemRecords: derived.itemRecords, ...(derived.stopReason ? { stopReason: derived.stopReason } : {}) };
+    // FG-750: carry the reconstructed item-scoped-park scope back to the controller so
+    // the launch-per-item production path continues with the next independent item too.
+    return {
+      itemRecords: derived.itemRecords,
+      ...(derived.stopReason ? { stopReason: derived.stopReason } : {}),
+      ...(derived.stopScope ? { stopScope: derived.stopScope } : {}),
+    };
   };
 }
 
