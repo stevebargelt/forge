@@ -48,7 +48,14 @@ that vocabulary. `buildConfigGraph()` (`src/v2/config-graph.ts`) runs a final
 whole-graph redaction sweep (`redactGraph` → `redactSecrets`) over every string
 in the object, including each row's verbatim `native` verdict, as
 defense-in-depth over the per-row redaction each section builder already
-performs before assembling its row. Provider/auth readiness in the Capabilities
+performs before assembling its row. A build that throws instead of returning a
+graph (defense-in-depth only — `buildConfigGraph` itself does not throw) is caught
+by the `/api/config-graph` route and reported as `200 {error: message}` rather than
+blanking the page; that `message` is a surfaced exception string outside the graph
+object, so it is routed through `redactSecrets` directly (`degradedGraphErrorPayload`,
+`dashboard/src/http-error.ts`) before it leaves the process — the degraded path
+carries the same redaction guarantee as the graph object, not a gap the whole-graph
+sweep happens not to cover. Provider/auth readiness in the Capabilities
 panel is checked by env-var **presence** only, exactly like the `auth` block
 above — a provider's readiness is never derived from reading its value, and no
 capability or prerequisite row probes a subprocess or makes a billed call.
