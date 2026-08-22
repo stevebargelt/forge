@@ -34,11 +34,12 @@ function activityFromProductionShape(): CurrentActivity {
     VALUES ('pk-fg743', ?, 'story', ?, ?, '', ?)
   `).run(id, status, `fixture ${id}`, AGED_AT);
 
-  for (const [campaignId, itemId, ticketId] of [
+  const rows: [string, string, string][] = [
     ["campaign-7a56519b2f3d", "item-366", "FG-366"],
     ["campaign-e89beee993ec", "item-425", "FG-425"],
     ["campaign-922c83b7c577", "item-422", "FG-422"],
-  ]) {
+  ];
+  for (const [campaignId, itemId, ticketId] of rows) {
     campaign(campaignId, "abandoned");
     item(itemId, campaignId, ticketId, "aged historical hard stop", "resolve then resume");
   }
