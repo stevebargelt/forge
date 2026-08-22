@@ -242,11 +242,16 @@ export function inboxView(load) {
   const envelope = load.envelope;
   const items = envelope.items.map(inboxItemSummary);
   const degraded = Array.isArray(envelope.degraded) ? envelope.degraded : [];
+  // Genuinely empty (all sources read OK, nothing to act on) is a DIFFERENT fact from a
+  // partial-read failure that happened to return no items: only the former earns the calm
+  // "no action needed" copy. A zero-item read with a degraded source keeps `empty: false`
+  // so the view shows the degraded warning, never the empty state (invariant #4).
+  const empty = items.length === 0 && degraded.length === 0;
   return {
     phase,
     items,
-    empty: items.length === 0,
-    message: items.length === 0 ? INBOX_EMPTY_LABEL : null,
+    empty,
+    message: empty ? INBOX_EMPTY_LABEL : null,
     degraded,
   };
 }

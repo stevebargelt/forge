@@ -109,6 +109,14 @@ describe("inboxView — load states", () => {
     assert.equal(view.items[0]!.badgeLabel, "Auth / setup");
   });
 
+  test("a zero-item read with a degraded source is NOT the calm empty state", () => {
+    const view = inboxView(ready([], { degraded: ["readiness"] }));
+    assert.equal(view.phase, "ready");
+    assert.equal(view.empty, false);
+    assert.notEqual(view.message, INBOX_EMPTY_LABEL);
+    assert.deepEqual(view.degraded, ["readiness"]);
+  });
+
   test("an {error} body is unavailable, never an observed empty inbox", () => {
     assert.equal(isAttentionInboxPayload({ error: "old store" }), false);
     const load = inboxFromBody({ error: "old store" });
@@ -152,6 +160,13 @@ describe("AttentionInboxSection — rendered honesty", () => {
   test("the empty state renders 'No human action is currently needed'", () => {
     const text = textOf(h(AttentionInboxSection as never, { load: ready([]), now: NOW, onRetry: () => {} }) as unknown as Vnode);
     assert.match(text, new RegExp(INBOX_EMPTY_LABEL));
+  });
+
+  test("a partial-read failure (no items + degraded source) shows the warning, NOT the empty copy", () => {
+    const load = ready([], { degraded: ["readiness"] });
+    const text = textOf(h(AttentionInboxSection as never, { load, now: NOW, onRetry: () => {} }) as unknown as Vnode);
+    assert.match(text, /Some sources could not be read: readiness\./);
+    assert.doesNotMatch(text, new RegExp(INBOX_EMPTY_LABEL));
   });
 
   test("an unavailable read renders the unavailable banner, NOT the empty copy", () => {

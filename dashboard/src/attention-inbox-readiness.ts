@@ -11,11 +11,20 @@
 // read-only handle, no git/gh/tmux/docker/CLI. Bounded to live/open work: a settled
 // review or a closed ticket produces nothing, so a resolved source clears itself with no
 // stored flag (protected_invariant #2). Each sub-read is guarded independently so a store
-// predating one of the tables degrades that source alone rather than the whole mapper.
+// predating one of the tables degrades that source alone rather than the whole mapper —
+// and a failed sub-read NAMES itself in the returned `degraded` list rather than
+// swallowing to an empty items array, so the inbox never renders a read failure as a calm
+// empty "no action needed" state.
 
 import type { Database } from "better-sqlite3";
 import type { AttentionItem, AttentionSeverity } from "./attention-inbox.js";
 import type { InboxProjectScope } from "./attention-inbox-failures.js";
+
+// A single source's contribution: the items it produced AND the names of any sub-source
+// whose read failed. A failed read reports its name in `degraded` (never swallows to an
+// empty items array), so the aggregator surfaces an explicit unavailable marker rather
+// than a calm "no action needed" inbox.
+export type SourceResult = { items: AttentionItem[]; degraded: string[] };
 
 function projectDirSubquery(scope: InboxProjectScope): { clause: string; params: string[] } {
   // Readiness rows are keyed by project_key, which has no project_dir of its own. For a
@@ -56,7 +65,7 @@ type ReadinessRow = {
   title: string | null;
 };
 
-function readinessItems(db: Database, scope: InboxProjectScope): AttentionItem[] {
+function readinessItems(db: Database, scope: InboxProjectScope): SourceResult {
   const sub = projectDirSubquery(scope);
   let rows: ReadinessRow[];
   try {
@@ -72,12 +81,15 @@ function readinessItems(db: Database, scope: InboxProjectScope): AttentionItem[]
           ORDER BY ra.ticket_id ASC`,
       )
       .all(...sub.params) as ReadinessRow[];
-  } catch {
-    // An old store with no readiness_assessments/tickets tables: this source degrades
-    // to nothing rather than taking the reviews source down with it.
-    return [];
+  } catch (err) {
+    // A read failure here (an old store with no readiness_assessments/tickets tables,
+    // or a genuine read error) degrades THIS source alone rather than taking reviews
+    // down with it — but it names itself in `degraded` so the inbox renders an explicit
+    // unavailable marker, never a calm empty "no action needed" state (invariant #4).
+    console.error("readinessAttentionItems: reading readiness items failed:", err);
+    return { items: [], degraded: ["readiness"] };
   }
-  return rows.map((row) => {
+  const items: AttentionItem[] = rows.map((row) => {
     const blocked = row.outcome === "blocked";
     const gaps = safeParseGaps(row.gaps_json);
     const severity: AttentionSeverity = blocked ? "high" : "medium";
@@ -108,6 +120,7 @@ function readinessItems(db: Database, scope: InboxProjectScope): AttentionItem[]
       },
     };
   });
+  return { items, degraded: [] };
 }
 
 type OpenReviewRow = {
@@ -121,7 +134,7 @@ type OpenReviewRow = {
   arch_questions: number;
 };
 
-function reviewItems(db: Database, scope: InboxProjectScope): AttentionItem[] {
+function reviewItems(db: Database, scope: InboxProjectScope): SourceResult {
   const project = projectDirScope(scope, "runs");
   let rows: OpenReviewRow[];
   try {
@@ -138,8 +151,11 @@ function reviewItems(db: Database, scope: InboxProjectScope): AttentionItem[] {
           ORDER BY reviews.updated_at DESC, reviews.id DESC`,
       )
       .all(...project.params) as OpenReviewRow[];
-  } catch {
-    return [];
+  } catch (err) {
+    // Same contract as readinessItems: a read failure degrades the review source alone
+    // and names itself in `degraded` rather than swallowing to a calm empty inbox.
+    console.error("readinessAttentionItems: reading review items failed:", err);
+    return { items: [], degraded: ["review"] };
   }
   const items: AttentionItem[] = [];
   for (const row of rows) {
@@ -170,9 +186,11 @@ function reviewItems(db: Database, scope: InboxProjectScope): AttentionItem[] {
       },
     });
   }
-  return items;
+  return { items, degraded: [] };
 }
 
-export function readinessAttentionItems(db: Database, scope: InboxProjectScope, _now: number): AttentionItem[] {
-  return [...readinessItems(db, scope), ...reviewItems(db, scope)];
+export function readinessAttentionItems(db: Database, scope: InboxProjectScope, _now: number): SourceResult {
+  const readiness = readinessItems(db, scope);
+  const reviews = reviewItems(db, scope);
+  return { items: [...readiness.items, ...reviews.items], degraded: [...readiness.degraded, ...reviews.degraded] };
 }

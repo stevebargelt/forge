@@ -4016,7 +4016,12 @@ export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now())
 
   let readinessItems: AttentionItem[] = [];
   try {
-    readinessItems = readinessAttentionItems(handle, scope, nowMs);
+    const readiness = readinessAttentionItems(handle, scope, nowMs);
+    readinessItems = readiness.items;
+    // A per-source read failure names itself (e.g. "readiness", "review") rather than
+    // throwing; surface each marker so a partial failure renders as degraded, never as a
+    // calm empty inbox.
+    for (const marker of readiness.degraded) if (!degraded.includes(marker)) degraded.push(marker);
   } catch (err) {
     degraded.push("readiness");
     console.error("attentionInbox: reading readiness/review items failed:", err);
