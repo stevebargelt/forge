@@ -302,6 +302,7 @@
     "src/v2/task-manifest.integration.test.ts": 1653,
     "src/campaign/fg737-detached-resume-fence.integration.test.ts": 1681,
     "src/campaign/fg750-item-scoped-continuation.integration.test.ts": 16263,
+    "src/campaign/fg750-rf-continuation-safety.integration.test.ts": 1400,
     "src/cli/commands/fg590-cleanup-orchestrator.integration.test.ts": 2058,
     "src/cli/commands/fg625-review-loop-evidence-repro.integration.test.ts": 4332,
     "src/cli/commands/fg677-cleanup-orchestrator.integration.test.ts": 10714,

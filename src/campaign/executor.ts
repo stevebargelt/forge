@@ -26,6 +26,8 @@ import {
   reserveCampaignDriveDispatch,
   updateCampaignPlanForReapproval,
   tryTransitionCampaignToRunning,
+  isCampaignOperatorPaused,
+  clearOperatorPauseMarker,
   type CampaignDriveReservation,
 } from "../store/campaigns.js";
 import { getDb, writeTransaction } from "../store/db.js";
@@ -2720,16 +2722,25 @@ export async function driveRemainingItems(
         result.stopScope === "item" &&
         isItemScopedPark(durableItem) &&
         laterPending &&
-        resumeCampaignToRunning(campaignId)
+        // FG-750 (RF-2): an operator campaign-wide pause is a campaign-scoped stop that MUST
+        // halt dispatch. The cross-process launch path reconstructs stopScope "item" from the
+        // durable park shape alone, which cannot tell an operator pause (that won the
+        // running→paused race) from the controller's OWN item-park pause — both leave the
+        // identical shape. Re-check the durable operator-pause marker at this dispatch
+        // decision point and refuse to continue when it is set.
+        !isCampaignOperatorPaused(campaignId)
       ) {
-        // Record the item-boundary continuation for the parked item so a crash between
-        // parking this item and launching the next one recovers without duplicating
-        // either (a completed boundary is never re-driven; the parked run is reattached,
+        // FG-750 (RF-1): record the item-boundary continuation BEFORE flipping the campaign
+        // back to running, so the durable "running" state is ALWAYS backed by a continuation
+        // recovery can adopt. A crash between reopening the park and dispatching the next
+        // item can then never leave the campaign running with nothing in flight: the worst
+        // case is a paused campaign with the continuation already recorded, which resume
+        // adopts (a completed boundary is never re-driven; the parked run is reattached,
         // never re-created).
         if (owner && leaseGeneration !== undefined && durableItem) {
           try { recordItemBoundaryContinuation(campaignId, durableItem, items); } catch { /* best-effort: reservation stays authoritative */ }
         }
-        continue;
+        if (resumeCampaignToRunning(campaignId)) continue;
       }
       releaseIfOwned();
       return { stopReason: result.stopReason, itemRecords };
@@ -3294,6 +3305,10 @@ export async function resumeCampaign(
     return { stopReason: blocker, itemRecords };
   }
 
+  // FG-750 (RF-2): an operator-driven resume clears the operator-pause marker, so the next
+  // item-scoped park is free to continue normally. The controller's own item-park resume
+  // never touches the marker — it only continues when the marker is absent.
+  clearOperatorPauseMarker(id);
   if (!resumeCampaignToRunning(id)) {
     const current = getCampaign(id);
     return {

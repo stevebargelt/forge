@@ -197,6 +197,15 @@ export function campaignLeaseHeldBy(campaignId: string, owner: string, generatio
   return row !== undefined;
 }
 
+/** FG-750 (RF-1): a controller lease row EXISTS for this campaign but has strictly
+ *  expired — i.e. a controller was driving and its lease lapsed without a clean
+ *  release (a crash). Absence of a lease row returns false: an in-process /
+ *  never-leased drive is not a crashed controller. Read-only; the store's own clock. */
+export function campaignControllerLeaseExpired(campaignId: string): boolean {
+  const lease = getCampaignLease(campaignId);
+  return lease !== undefined && lease.leaseExpiresAtMs < storeNowMs();
+}
+
 /** Release/settle the lease when the campaign becomes terminal or durably parks (D1).
  *  Owner/generation-scoped so a stale controller can never clear the live holder's lease. */
 export function releaseCampaignLease(campaignId: string, owner: string, generation: number): boolean {

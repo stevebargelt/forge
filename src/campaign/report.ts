@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getCampaign, listCampaigns, listCampaignItems } from "../store/campaigns.js";
+import { campaignControllerLeaseExpired } from "../store/campaign-controller.js";
 import { getRun } from "../store/runs.js";
 import { tasksForRun } from "../store/tasks.js";
 import { verdictsForRun } from "../store/verdicts.js";
@@ -101,6 +102,26 @@ function stuckInFlightItem(items: CampaignItem[]): CampaignItem | undefined {
       i.lifecycleStatus !== "failed" &&
       i.lifecycleStatus !== "running" &&
       !isItemScopedPark(i)
+  );
+}
+
+// FG-750 (RF-1): a RUNNING campaign whose controller has died with work still undone —
+// the phantom-running shape. A crash between reopening an item-scoped park and dispatching
+// the next item leaves the campaign 'running' with the parked item durable but NOTHING in
+// flight; stuckInFlightItem deliberately excludes the item-scoped park, so that shape would
+// otherwise read as healthy-running forever. The controller lease is the liveness signal: a
+// live controller renews it continuously (D1 heartbeat), so an EXPIRED lease row means the
+// controller is gone. When no item is currently running and the lease has lapsed, the
+// campaign needs recovery (`forge campaign recover` re-drives the next eligible item),
+// never "running". Gated on an EXPIRED lease row existing, so an in-process / never-leased
+// drive (no lease row) is never mislabelled. Returns the item to name in the guidance — the
+// parked item that recovery must continue past, else the first item still to run.
+function phantomRunningController(campaign: Campaign, items: CampaignItem[]): CampaignItem | undefined {
+  if (items.some((i) => i.lifecycleStatus === "running")) return undefined;
+  if (!campaignControllerLeaseExpired(campaign.id)) return undefined;
+  return (
+    items.find((i) => isItemScopedPark(i)) ??
+    items.find((i) => i.lifecycleStatus === "pending" && i.outcome !== "held")
   );
 }
 
@@ -446,7 +467,7 @@ function computeNextShowAction(
   getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
-    const stuck = stuckInFlightItem(items);
+    const stuck = stuckInFlightItem(items) ?? phantomRunningController(campaign, items);
     if (stuck) return recoveryNeededAction(campaign.id, stuck);
     return "running";
   }
@@ -519,7 +540,7 @@ export type CampaignVerdict = "all_shipped" | "complete_with_issues" | "not_comp
 
 function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToContinue {
   if (campaign.status === "running") {
-    const stuck = stuckInFlightItem(items);
+    const stuck = stuckInFlightItem(items) ?? phantomRunningController(campaign, items);
     if (stuck) return "recovery_needed";
     return "running";
   }
@@ -561,7 +582,7 @@ function computeNextOperatorAction(
   getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
-    const stuck = stuckInFlightItem(items);
+    const stuck = stuckInFlightItem(items) ?? phantomRunningController(campaign, items);
     if (stuck) return recoveryNeededAction(campaign.id, stuck);
     return "campaign is running — monitor progress";
   }
