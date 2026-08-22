@@ -85,9 +85,16 @@ policy unless you pass `--reconfigure`, and it is not a migration path
 
   Other selection flags: `--review`, `--fast`, `--spec-writer`,
   `--fast-orchestrator`, and repeatable `--pin <role>=<profile>`.
-- **Non-interactive with no/incomplete flags** — retains the seed default (the
-  prior behavior) with a named advisory; setup never blocks waiting on a
-  prompt that can't happen.
+  Combined with `--reconfigure` this OVERWRITES the existing policy, so setup
+  prints the proposed YAML before writing it — the same preview the
+  interactive path shows — even though there's no prompt to confirm it.
+- **Non-interactive with no/incomplete flags** — copies the installed
+  `model-policy.example.yml` seed verbatim as the seed-default fallback, with a
+  named advisory; setup never blocks waiting on a prompt that can't happen.
+- **Non-interactive with no/incomplete flags, and no seed installed** — a
+  damaged or incomplete install has nothing to copy: setup writes **nothing**
+  and reports a named advisory pointing at `forge upgrade` (which installs the
+  seed) rather than reporting a phantom "created" policy.
 - **No usable provider detected** — advisory, nothing written; run
   `forge auth login` / `codex login` etc. and re-run.
 
