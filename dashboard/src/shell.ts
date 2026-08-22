@@ -1347,6 +1347,119 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 }
 .workbench-section:first-child .workbench-section-label { border-top: none; padding-top: 0; margin-top: 16px; }
 
+/* ── FG-348 Run Map + Explain ─────────────────────────────────────────────── */
+.rm-view { margin-top: 12px; }
+.rm-header { margin-bottom: 12px; }
+.rm-degraded {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  border: 1px dashed var(--warn); color: var(--warn);
+}
+.rm-warnings { margin: 8px 0 16px; display: flex; flex-direction: column; gap: 6px; }
+.rm-warning {
+  background: rgba(250, 204, 21, 0.10);
+  border-left: 3px solid var(--warn);
+  color: var(--fg);
+  padding: 8px 12px; border-radius: 4px; font-size: 13px;
+}
+/* The DAG canvas: layers laid left-to-right, arrows between them. */
+.rm-canvas { display: flex; align-items: flex-start; gap: 8px; overflow-x: auto; padding: 8px 0 16px; }
+.rm-layer { display: flex; flex-direction: column; gap: 16px; min-width: 220px; }
+.rm-arrow { align-self: center; color: var(--fg-faint); font-size: 20px; padding: 0 4px; }
+.rm-column { display: flex; flex-direction: column; gap: 8px; }
+.rm-phase {
+  background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px;
+}
+/* A fanout PHASE is border-distinguished (dashed) — never color-only. */
+.rm-phase-fanout { border-style: dashed; }
+.rm-phase-inferred { border-color: var(--warn); }
+.rm-phase-name { font-weight: 700; font-size: 13px; }
+.rm-phase-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--fg-dim); margin-top: 4px; }
+.rm-phase-role { color: var(--accent); }
+.rm-phase-flag { color: var(--magenta); }
+.rm-phase-deps { font-size: 10px; color: var(--fg-faint); margin-top: 4px; }
+.rm-nodes { display: flex; flex-direction: column; gap: 8px; }
+.rm-node-group { display: flex; flex-direction: column; gap: 4px; }
+.rm-node {
+  text-align: left; width: 100%;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; cursor: pointer; color: var(--fg); font: inherit;
+}
+.rm-node:hover { border-color: var(--accent); }
+.rm-node-inferred { border-style: dotted; }
+.rm-node-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.rm-role { font-weight: 600; font-size: 13px; }
+.rm-node-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--fg-dim); margin-top: 4px; }
+.rm-gate { color: var(--fg-dim); }
+.rm-model { color: var(--info); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.rm-model-inferred { color: var(--warn); }
+.rm-lineage { color: var(--fg-faint); font-style: italic; }
+.rm-status { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.rm-status-complete { color: var(--ok); }
+.rm-status-failed, .rm-status-blocked_by_red { color: var(--err); }
+.rm-status-running { color: var(--info); }
+.rm-status-awaiting_gate, .rm-status-awaiting_red, .rm-status-awaiting_recovery { color: var(--warn); }
+/* Reds attach under their primary, shape-distinguished (◆ + solid left accent). */
+.rm-reds { display: flex; flex-direction: column; gap: 4px; margin-left: 16px; }
+.rm-red {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  text-align: left; width: 100%;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-left: 3px solid var(--magenta); border-radius: 4px;
+  padding: 5px 8px; cursor: pointer; color: var(--fg); font: inherit; font-size: 11px;
+}
+.rm-red:hover { border-color: var(--accent); }
+.rm-red-mark { color: var(--magenta); }
+.rm-red-role { font-weight: 600; }
+.rm-red-via { color: var(--fg-faint); }
+/* A fanout GROUP node: dashed border + ⑃ mark — shape-distinct from reds. */
+.rm-fanout { border: 1px dashed var(--fg-faint); border-radius: 6px; }
+.rm-fanout-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: transparent; border: none; color: var(--fg); font: inherit;
+  padding: 8px 10px; cursor: pointer; font-size: 12px;
+}
+.rm-fanout-mark { color: var(--magenta); }
+.rm-fanout-children { display: flex; flex-direction: column; gap: 8px; padding: 0 8px 8px; }
+.rm-empty { font-size: 12px; padding: 4px 0; }
+.rm-open-btn {
+  background: transparent; border: 1px solid var(--border); border-radius: 4px;
+  color: var(--accent); font: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.rm-open-btn:hover { border-color: var(--accent); }
+
+/* Explain panel — reuses .detail-overlay/.detail. */
+.rx-panel { max-width: 720px; }
+.rx-heading { margin: 0 0 12px; font-size: 18px; }
+.rx-identity { display: flex; gap: 10px; align-items: baseline; margin-bottom: 12px; font-size: 13px; }
+.rx-warnings { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
+.rx-warning {
+  background: rgba(250, 204, 21, 0.10);
+  border-left: 3px solid var(--warn);
+  padding: 8px 12px; border-radius: 4px; font-size: 13px; color: var(--fg);
+}
+.rx-block { border-top: 1px solid var(--border); padding: 10px 0; }
+.rx-block-head { display: flex; justify-content: space-between; align-items: baseline; }
+.rx-block-title { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
+.rx-status { font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.rx-status-recorded { color: var(--ok); }
+.rx-status-inferred { color: var(--warn); }
+.rx-status-unknown { color: var(--fg-faint); }
+.rx-block-body { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.rx-field { display: flex; gap: 10px; font-size: 12px; }
+.rx-field-label { color: var(--fg-dim); min-width: 130px; }
+.rx-field-value { color: var(--fg); word-break: break-all; }
+.rx-decision { font-size: 12px; margin: 3px 0; }
+.rx-decision-verb { font-weight: 600; margin-right: 8px; }
+.rx-decision-rationale { color: var(--fg-dim); margin-top: 2px; }
+.rx-red { display: flex; gap: 8px; align-items: baseline; font-size: 12px; margin: 2px 0; }
+.rx-verdict-pass { color: var(--ok); }
+.rx-verdict-fail { color: var(--err); }
+.rx-verdict-inconclusive { color: var(--warn); }
+.rx-artifacts { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.rx-artifact { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.rx-artifact-absent { color: var(--fg-faint); }
+
 /* Health badge — text + color signal (non-color a11y: symbol prefix, FG-123). */
 .gov-health-badge {
   display: inline-block;

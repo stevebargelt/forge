@@ -60,6 +60,28 @@ panel is checked by env-var **presence** only, exactly like the `auth` block
 above — a provider's readiness is never derived from reading its value, and no
 capability or prerequisite row probes a subprocess or makes a billed call.
 
+## Run Map / task Explain (FG-348)
+
+`forge explain run|task [--json]`, the dashboard's Run Map canvas and Explain panel,
+and their `/api/run/:id/map` / `/api/task/:id/explain` read paths reuse the SAME
+`redactGraph` (→ `redactSecrets`) whole-payload sweep the [control-plane config
+graph](#control-plane-config-graph-fg-349) applies — reused verbatim, not
+re-expressed, so these surfaces and the config graph can never redact differently.
+A thrown build is caught by each route and reported as `200 {error: message}`
+rather than blanking the page, with that `message` routed through the same
+sweep before it leaves the process — the same degraded-path discipline as
+`/api/config-graph`.
+
+Task Explain's `upstream` block adds a narrower guard the structural sweep alone
+doesn't cover: task inputs are free-form and can be attacker-influenced, so any
+string under any key could be a bearer token or credential with no surrounding
+structure (`redactSecrets` blanks credential-*shaped* substrings — basic-auth
+URLs, `_authToken=`, `Authorization:` headers — but by deliberate policy does not
+catch a bare token value on its own). Rather than preview raw input content
+(even truncated), each upstream input is reduced to its SHAPE — a key name plus
+a type/length summary (`string[42]`, `array[3]`, `object{5}`) — never the value
+itself. See `summarizeInput` in `src/v2/task-explain.ts`.
+
 ## Auth profiles
 
 - `required_env` is checked by **name** only; forge never reads or logs the values.

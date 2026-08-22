@@ -151,6 +151,13 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // FG-743 adds `fg743-campaign-wait-lifecycle` (1 test): terminal historical campaign
   // waits are not rendered as live in-flight work.
   "fg743-campaign-wait-lifecycle.test.ts": 1,
+  // FG-348 adds `fg348-run-map` (4 tests): the Run Map + task Explain browser view —
+  // a run deep-linked via #run-map/<id> renders its graph and a node click opens the
+  // "Why this task?" Explain panel, a checkout-scope change invalidates the map and a
+  // late leaving-scope response cannot repaint it (runMapSeq guard), a degraded/legacy
+  // run renders inferred labels with its warning and no page error, and the view boots
+  // offline under a script-src 'self' CSP with no external/CDN fetch.
+  "fg348-run-map.test.ts": 4,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,

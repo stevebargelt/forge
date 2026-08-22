@@ -788,6 +788,8 @@ The dashboard server exposes JSON endpoints. Default base URL: `http://127.0.0.1
 | `GET /api/in-flight` | `projectDir` | Currently-running / awaiting-gate tasks |
 | `GET /api/projects` | — | Operator-project registry: name, color, last activity, live sessions. FG-745: filtered to `operatorProjects()` membership — a workspace recorded as an explicit artifact kind (`disposable_clone` \| `worktree` \| `evidence_fixture`) is omitted; an `unclassified` legacy directory is included and flagged. The same membership `forge projects list` computes, so the CLI and this route agree. See [`workspace_purposes` table](#workspace_purposes-table-fg-745-dashboardcli-read-path) |
 | `GET /api/task/:id` | — | Full task detail (result + stdout/stderr + verdicts + gates) |
+| `GET /api/run/:id/map` | `projectDir` (exact checkout required; `projectKey` alone is `409`) | Read-only Run Map graph (`RunMapGraph`, FG-348): workflow/execution shape — phases, dependency edges, fanout groups, red attachments, per-task control-plane badges. Byte-identical with `forge explain run --json` (see shape below) |
+| `GET /api/task/:id/explain` | `projectDir` (exact checkout required; `projectKey` alone is `409`) | Read-only task-level Explain (`TaskExplain`, FG-348): one task's recorded control-plane provenance — workflow source, model resolution, runtime, mount mode, gate decisions, reds, upstream inputs, artifact availability. Byte-identical with `forge explain task --json` (see shape below) |
 | `GET /api/governance` | `projectDir` | RACI Workbench panel (`WorkbenchPanel`): source, derived, effective, recorded (see shape below) |
 | `GET /api/config-graph` | `projectDir` (exact checkout required; `projectKey` alone is `409`) | Control-Plane tab's EFFECTIVE config graph (`ConfigGraph`, FG-349): Sources provenance rows + provider/runtime capabilities, byte-identical with `forge config graph --json` (see shape below) |
 | `GET /api/ops` | `since` (default `30d`), `projectDir` | Ops metrics rollup |
@@ -987,6 +989,37 @@ Returns `404` if the task is not found. On success, returns a JSON object with t
 - `failureKind` — nullable string: `failure_kind` field from the most-recent `task.failed` event; `null` if the task didn't fail
 - `idle` — nullable idle-countdown object (non-null only for running tasks)
 - `resultSizeBytes` — nullable number: UTF-8 byte length of the raw `tasks.result` JSON string; `null` if the task has no result
+
+### `GET /api/run/:id/map` response shape (`RunMapGraph`)
+
+Read-only (FG-348). `?projectDir=<path>` selects the checkout; `?projectKey=` alone (no exact `projectDir`) is a `409` — the same restriction `/api/config-graph` and `/api/governance` apply. Backed by `buildRunMap()` (`src/v2/run-map.ts`), the SAME pure builder `forge explain run --json` prints unmodified, so the CLI and dashboard are byte-identical for the same run. The dashboard's own query (`runMap()` in `dashboard/src/queries.ts`) reads ONLY indexed SQLite (`tasks`/`verdicts` by `run_id`) — no per-task manifest or container-log read, so opening the Run Map never pays a per-node filesystem cost; that's the lazy `taskExplain` read below. A missing run, or one outside the request's project scope, degrades to a redacted payload (`workflowResolved: false`, empty graph, `warnings: ["Run not found."]` / `["Run is outside the selected project scope."]`) rather than a `404`; a thrown build is caught by the route and returned the same way `/api/config-graph` degrades — `200` with a redacted error message, never a blank page. Every string in the graph is redacted (`redactGraph`, the SAME sweep `/api/config-graph` applies) — see [Secret hygiene & redaction](redaction.md).
+
+- `version` — the graph's own schema version (`RUN_EXPLAIN_VERSION`, currently `1`, shared with `TaskExplain` below).
+- `run` — `{ runId, workflow, title, status, createdAt, projectDir?, reviewMode? }`.
+- `workflowResolved` — `false` when the run's workflow definition would not load; the graph is then the execution-only fallback below, with every phase/node label inferred from task rows rather than a throw.
+- `phases` — one `RunMapPhase` per workflow step (workflow layer) when `workflowResolved`, else one per distinct task `phase` value observed in the run's rows (`inferred: true`): `{ id, label, role?, gate?, dependsOn[], fanout, manual, reds[], inferred?, native? }`.
+- `edges` — `{ from, to }` phase-dependency edges, from each phase's `dependsOn`.
+- `nodes` — one `RunMapNode` per task row: `{ taskId, phase, role, status, gate?, lineage, model?, parentId?, inferred?, native }`. `lineage` is `primary | retry_replacement | on_reject_recovery | red_review | fanout_child | adhoc_invoke | legacy_ambiguous_invoke | unknown` — the last only on the degraded (no-workflow) path where lineage cannot be classified. `model` is a compact badge (`{ alias?, model?, profile?, inferred? }`), present even for a legacy row with no resolution record (as an inferred/unknown badge).
+- `fanoutGroups` — one `FanoutGroup` per fanout phase: `{ phase, parentTaskId?, childTaskIds[], count }`, so the canvas renders one expandable group rather than every child inline.
+- `redAttachments` — one `RedAttachment` per red reviewer: `{ redTaskId, redRole, primaryTaskId, via }`. `via` is `"verdict"` (authoritative — a `verdicts` row names the pairing) or `"parent"` (fallback — `parent_id` + red role, used only when no verdict row exists yet).
+- `warnings` — degradation callouts, e.g. an unresolvable workflow or an out-of-scope/missing run.
+
+### `GET /api/task/:id/explain` response shape (`TaskExplain`)
+
+Read-only (FG-348). Same `?projectDir=<path>` / `?projectKey=` `409` restriction as the Run Map above. Backed by `buildTaskExplain()` (`src/v2/task-explain.ts`), the SAME pure builder `forge explain task --json` prints unmodified. Unlike the Run Map, this route DOES read the task's manifest (`readTaskManifest`) — it is the only per-task manifest read on this serving surface, deliberately lazy and single-task, paid only when one task's panel actually opens rather than for every node in the graph. A missing task, or one outside project scope, degrades to a redacted payload the same way the Run Map does (`warnings: ["Task not found."]` / `["Task is outside the selected project scope."]`); a thrown build is caught and returned `200` with a redacted error message. Every string is redacted by the same `redactGraph` sweep the Run Map and config graph use.
+
+- `version` — `RUN_EXPLAIN_VERSION`, shared with the Run Map.
+- `taskId` / `runId` / `role` / `status` — the task's own identity fields.
+- `warnings` — degradation callouts: mount inferred, model policy absent, task predates `manifest.json`, project workflow override active, an out-of-scope/missing task, etc., plus any receipt-recorded warning carried verbatim.
+- Every remaining field is an independently-optional BLOCK, each carrying its own `status: "recorded" | "inferred" | "unknown"` — `"recorded"` read from the task's manifest receipt (authoritative), `"inferred"` a best-effort reconstruction when the receipt's specific sub-record is absent, `"unknown"` when there is no manifest at all (a task that predates `manifest.json`). Blocks degrade independently, block-by-block, rather than by one coarse run-age heuristic:
+  - `workflowSource` — `{ name?, source?, path?, status, native? }`.
+  - `modelResolution` — `{ alias?, model?, profile?, provider?, auth?, costTier?, resolvedBy?, capabilitySource?, mappingPath?, status, native? }`.
+  - `runtime` — `{ name?, kind?, logFormat?, promptStrategy?, authStrategy?, status, native? }`.
+  - `mountMode` — `{ mountMode?: "rw" | "ro", projectDir?, invocationCwd?, resolvedFromSubdir?, explicitSubproject?, status, native? }`.
+  - `gate` — `{ gateType?, decisions: GateDecisionEntry[], status }`, `gateType` from the backing workflow step's declared gate when resolvable.
+  - `reds` — `{ reds: RedEntry[], status }`, each `{ redTaskId, redRole, verdict, confidence, authority, findingCount }`.
+  - `upstream` — `{ inputs: UpstreamInput[], status }`. Each input is `{ key, summary }` — `summary` is a compact, redaction-safe SHAPE description (type + length/count) of the input value, **never** the raw value's content, which may carry secrets a structural redactor can't catch.
+  - `artifacts` — `ArtifactRef[]`, `{ kind, name, available }` for `result` (`result.json`), `stdout`/`stderr` (`container.stdout.log`/`container.stderr.log`), and `manifest` (`manifest.json`) — the same four the CLI's `forge explain task` probes, so the two surfaces never diverge on what's available.
 
 ## CLI surface (for mutations)
 
