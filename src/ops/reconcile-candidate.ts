@@ -56,14 +56,32 @@ export type ReconcileCandidate = {
   hasResult: boolean;
 };
 
+/** FG-742: a per-`docker inspect` wall-clock bound. This probe runs SYNCHRONOUSLY
+ *  (execFileSync) on whatever thread invokes it — including the dashboard's SINGLE
+ *  event-loop thread, which /api/in-flight shares with /api/current-activity. An
+ *  unbounded inspect against a slow or hung docker daemon blocks that thread for as
+ *  long as the daemon takes to answer, and a concurrent current-activity poll queued
+ *  behind it then exceeds its 8s client deadline (the FG-742 timeout). Bounding each
+ *  inspect turns "docker is momentarily hung" into a bounded stall that resolves to
+ *  `unknown` — the already-conservative state that never manufactures a reconcile
+ *  candidate, so a timed-out probe can only under-annotate (render a gone container as
+ *  ordinary running), never falsely mark live work terminal. */
+export const RECONCILE_PROBE_TIMEOUT_MS = 2000;
+
 /** Probe a container's liveness three-state. `docker inspect` returning "true"
  *  is alive; "false" (exited-but-not-removed) or a clear "no such object" is
- *  gone; anything else (daemon down, docker missing) is unknown — never coerced
- *  to gone, so an ambiguous docker failure cannot manufacture a candidate. */
+ *  gone; anything else (daemon down, docker missing, or the probe TIMED OUT under
+ *  RECONCILE_PROBE_TIMEOUT_MS) is unknown — never coerced to gone, so an ambiguous
+ *  docker failure cannot manufacture a candidate. */
 export function probeContainerLiveness(name: string): LivenessState {
   try {
     const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", name], {
       stdio: ["ignore", "pipe", "pipe"],
+      // A hung daemon is killed rather than allowed to hold the caller's thread; the
+      // resulting error falls through to `unknown` below, exactly like any other
+      // ambiguous failure.
+      timeout: RECONCILE_PROBE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     })
       .toString()
       .trim();
@@ -71,8 +89,36 @@ export function probeContainerLiveness(name: string): LivenessState {
   } catch (e) {
     const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? "";
     if (/No such object|no such container/i.test(stderr)) return "gone"; // genuinely gone
-    return "unknown"; // ambiguous → not a candidate
+    return "unknown"; // ambiguous (or timed out) → not a candidate
   }
+}
+
+/** FG-742: the dashboard-serving-path isolation budget. findReconcileCandidates probes
+ *  every eligible running task SYNCHRONOUSLY in a single event-loop tick, so N slow
+ *  inspects stall the shared dashboard thread for the SUM of their durations — the
+ *  per-inspect bound above caps each one, this caps the whole fan-out. Chosen with
+ *  substantial headroom below the 8s current-activity client deadline: the worst-case
+ *  shared-thread stall one /api/in-flight poll can impose is ~BUDGET + one in-flight
+ *  RECONCILE_PROBE_TIMEOUT_MS (the last probe admitted just under the budget), i.e.
+ *  ~4.5s, which keeps a concurrent current-activity read comfortably inside its
+ *  deadline even when docker is hung. */
+export const RECONCILE_FANOUT_BUDGET_MS = 2500;
+
+/** FG-742: wrap a liveness probe in a TOTAL wall-clock budget for one fan-out. Once
+ *  the budget is spent, further probes short-circuit to `unknown` — conservative,
+ *  never a reconcile candidate — WITHOUT spawning docker, so no single /api/in-flight
+ *  request can hold the event loop longer than the budget plus the one inspect already
+ *  in flight. That N-independent bound is what isolates /api/current-activity from a
+ *  slow docker daemon on the shared single-threaded process. Constructed per request so
+ *  each poll gets a fresh budget; the CLI reconcile path deliberately does NOT use it,
+ *  because a batch reconcile wants accuracy over a bounded serving latency. */
+export function budgetedLivenessProbe(
+  budgetMs: number,
+  inner: LivenessProbe = probeContainerLiveness,
+  now: () => number = () => Date.now(),
+): LivenessProbe {
+  const deadline = now() + budgetMs;
+  return (name) => (now() >= deadline ? "unknown" : inner(name));
 }
 
 /** Default result probe: a parseable, non-empty result.json on disk. Mirrors

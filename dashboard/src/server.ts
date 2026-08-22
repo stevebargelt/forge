@@ -37,6 +37,7 @@ import {
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
+import { budgetedLivenessProbe, RECONCILE_FANOUT_BUDGET_MS } from "@forge/reconcile-candidate";
 import { assembleCampaignReport, assembleCampaignSummaries } from "@forge/campaign-report";
 import type { ReportResult } from "@forge/campaign-report";
 import { runInReadOnlyDbScope } from "@forge/store-db";
@@ -140,7 +141,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (path === "/api/in-flight") {
-    const data = inFlight(scopeFromUrl(url));
+    // FG-742: /api/in-flight `docker inspect`s each eligible running task synchronously
+    // (FG-290's reconcile annotation, BD-13's recorded serving-path exception). On the
+    // single-threaded dashboard process that fan-out blocks the event loop, and a
+    // concurrent /api/current-activity poll queued behind a slow/hung docker daemon then
+    // exceeds its 8s client deadline. A per-request budget bounds how long this poll can
+    // hold the loop, isolating the current-activity read from a slow sibling. current-
+    // activity itself stays outbound-call-free (BD-7) and takes no probe.
+    const data = inFlight(scopeFromUrl(url), budgetedLivenessProbe(RECONCILE_FANOUT_BUDGET_MS));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
