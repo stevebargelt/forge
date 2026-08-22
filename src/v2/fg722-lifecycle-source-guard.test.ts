@@ -130,6 +130,11 @@ const ALLOWLIST: readonly AllowEntry[] = [
     reason: "Display COUNT: top-level-only task list for the runs query view; children roll up under their parent.",
   },
   {
+    file: "src/v2/run-map.ts",
+    pattern: /t\.parentId === undefined\) continue/,
+    reason: "DISPLAY graph-structure red->primary attachment: the fallback for a red row absent from the verdicts table (coveredReds) — narrows so its parentId can be the display primaryTaskId. Red lineage already comes from the evaluator (classifyTaskLineage -> red_review); this is not a terminal/lifecycle decision.",
+  },
+  {
     file: "src/v2/re-drive-eligibility.ts",
     pattern: /t\.parentId === undefined && t\.createdAt >= parent\.createdAt/,
     reason: "Supersession guard on a MUTATION: refuses a re-drive when a newer parent-less attempt already superseded this one; not a run-terminal read.",
