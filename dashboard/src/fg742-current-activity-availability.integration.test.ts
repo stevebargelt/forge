@@ -17,19 +17,39 @@
 // THE CONTRACT THIS TEST PINS. A per-request budget (RECONCILE_FANOUT_BUDGET_MS) plus a
 // per-inspect timeout (RECONCILE_PROBE_TIMEOUT_MS) bound how long one /api/in-flight
 // poll can hold the loop, regardless of how many containers it probes or how hung docker
-// is. So current-activity stays comfortably inside its deadline. This drives the REAL
-// server over a REAL slow `docker` (a PATH shim that sleeps), against a store seeded with
-// thousands of launch/task/event/review rows, and measures the current-activity wall
-// clock repeatedly — not one sample.
+// is. So current-activity stays comfortably inside its deadline.
+//
+// HOW THE SIBLING IS MADE SLOW — DETERMINISTICALLY, not via a real docker race (RF-1).
+// The slowness is a CONTROLLABLE docker-inspect fan-out injected into the real server
+// (`__setInFlightProbeForTest`): each simulated inspect blocks the event loop for a fixed
+// PER_INSPECT_BLOCK_MS via `Atomics.wait` — the same synchronous-thread-hold a hung
+// `execFileSync` imposes, but with a duration the test owns rather than a `sleep` shim's
+// wall-clock. That determinism lets this file ESTABLISH the causal chain the earlier
+// single-sample check only assumed:
+//   1. an UNBOUNDED fan-out (RUNNING_TASKS x block) exceeds the 8s deadline outright —
+//      so anything queued behind it aborts (the negative control: the bound is
+//      load-bearing, not decorative);
+//   2. the BUDGETED fan-out clips that same fan-out well under the deadline, probing
+//      strictly FEWER than RUNNING_TASKS containers (the budget short-circuits the tail);
+//   3. under REAL concurrent polling a current-activity read QUEUES behind the block — its
+//      latency reflects the ~3s hold — yet still lands inside its budget with headroom,
+//      repeated across bursts rather than sampled once.
 
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import { Worker } from "node:worker_threads";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { applyMigrations } from "../../src/store/db.js";
+import {
+  budgetedLivenessProbe,
+  RECONCILE_FANOUT_BUDGET_MS,
+  RECONCILE_PROBE_TIMEOUT_MS,
+} from "../../src/ops/reconcile-candidate.js";
+import type { LivenessProbe, LivenessState } from "../../src/ops/reconcile-candidate.js";
 import {
   CURRENT_ACTIVITY_TIMEOUT_MS,
 } from "../client/current-activity-render.js";
@@ -41,8 +61,8 @@ const BASE = `http://127.0.0.1:${TEST_PORT}`;
 // sibling is polled concurrently — deliberately far below the 8s client deadline so the
 // assertion demonstrates SUBSTANTIAL headroom, not a photo-finish. The worst-case
 // shared-thread stall the bounded fan-out can impose is ~RECONCILE_FANOUT_BUDGET_MS +
-// one RECONCILE_PROBE_TIMEOUT_MS (~4.5s); 6s leaves room for CI jitter while staying a
-// full 2s under the deadline.
+// one RECONCILE_PROBE_TIMEOUT_MS; 6s leaves room for CI jitter while staying a full 2s
+// under the deadline.
 const SERVER_BUDGET_MS = 6000;
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg742-home-"));
@@ -59,7 +79,7 @@ const LIVE_RUN = "run-live-fg742";
 const LIVE_TICKET = "FG-742";
 const LIVE_SHA = "f".repeat(40);
 const PROJECT = "/proj/forge";
-const RUNNING_TASKS = 6; // enough that an UNBOUNDED fan-out (6 x sleep) blows the 8s deadline
+const RUNNING_TASKS = 6; // enough that an UNBOUNDED fan-out (6 x block) blows the 8s deadline
 const iso = (ms: number) => new Date(ms).toISOString();
 const now = Date.now();
 
@@ -127,16 +147,17 @@ const seed = db.transaction(() => {
 seed();
 db.close();
 
-// ── A SLOW `docker` shim, first on PATH: a hung/very-slow daemon ─────────────────────
-// It sleeps longer than the per-inspect timeout so the reconcile probe MUST bound it;
-// every invocation is logged so the current-activity path can be proven to spawn none.
+// ── A logging `docker` shim, first on PATH ───────────────────────────────────────────
+// The SLOWNESS lives in the injected probe below, not here — this shim only records that
+// a path shelled out to docker, so /api/current-activity can be proven to spawn NONE
+// (BD-7). It returns instantly.
 const RIG = mkdtempSync(join(tmpdir(), "fg742-rig-"));
 const CALL_LOG = join(RIG, "calls.log");
 writeFileSync(CALL_LOG, "");
 const SHIM_DIR = join(RIG, "bin");
 mkdirSync(SHIM_DIR, { recursive: true });
 const dockerShim = join(SHIM_DIR, "docker");
-writeFileSync(dockerShim, `#!/bin/sh\nprintf '%s\\n' "docker $*" >> "${CALL_LOG}"\nsleep 3\nprintf 'true\\n'\n`);
+writeFileSync(dockerShim, `#!/bin/sh\nprintf '%s\\n' "docker $*" >> "${CALL_LOG}"\nprintf 'true\\n'\n`);
 chmodSync(dockerShim, 0o755);
 process.env.PATH = `${SHIM_DIR}:${process.env.PATH ?? ""}`;
 
@@ -144,10 +165,39 @@ function dockerCalls(): string[] {
   return readFileSync(CALL_LOG, "utf8").split("\n").filter((l) => l.trim() !== "");
 }
 
+// ── The controllable slow docker-inspect fan-out (RF-1) ──────────────────────────────
+// A deterministic stand-in for a hung `docker inspect`: it holds the SINGLE event-loop
+// thread synchronously for PER_INSPECT_BLOCK_MS — the exact starvation a real
+// `execFileSync` against a slow daemon imposes — via `Atomics.wait`, which blocks the
+// thread for the timeout with no waker. RUNNING_TASKS x PER_INSPECT_BLOCK_MS deliberately
+// exceeds the 8s deadline, so an UNBOUNDED fan-out blows it and the per-request budget is
+// what has to clip it back under.
+const PER_INSPECT_BLOCK_MS = 1500;
+assert.ok(
+  RUNNING_TASKS * PER_INSPECT_BLOCK_MS > CURRENT_ACTIVITY_TIMEOUT_MS,
+  "an unbounded fan-out must exceed the client deadline for the negative control to mean anything",
+);
+assert.ok(
+  PER_INSPECT_BLOCK_MS <= RECONCILE_PROBE_TIMEOUT_MS,
+  "each simulated inspect must model a probe within the per-inspect timeout, not one longer than production allows",
+);
+
+let probeCalls = 0;
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+const slowInspect: LivenessProbe = (_name): LivenessState => {
+  probeCalls++;
+  sleepSync(PER_INSPECT_BLOCK_MS);
+  // A hung daemon resolves to `unknown` — conservative, never a reconcile candidate.
+  return "unknown";
+};
+
 const realFetch = globalThis.fetch;
-const { server } = await import("./server.js");
+const { server, __setInFlightProbeForTest } = await import("./server.js");
 
 after(() => {
+  __setInFlightProbeForTest(null);
   rmSync(RIG, { recursive: true, force: true });
   rmSync(tmpHome, { recursive: true, force: true });
   server.closeAllConnections?.();
@@ -175,10 +225,17 @@ async function timedCurrentActivity(): Promise<{ ms: number; body: CaBody }> {
   return { ms: Date.now() - t0, body };
 }
 
+async function timedInFlight(): Promise<number> {
+  const t0 = Date.now();
+  await (await realFetch(`${BASE}/api/in-flight`)).text();
+  return Date.now() - t0;
+}
+
 test("FG-742: the aged store ALONE does not make current-activity slow — the query is fast in isolation", async () => {
   // No concurrent /api/in-flight here, so no docker block. If the thousands of retained
   // rows were the cause, this would be slow; it is not, which is why the fix targets the
   // sibling's event-loop block and NOT the store volume (AC2).
+  __setInFlightProbeForTest(null);
   const samples: number[] = [];
   for (let i = 0; i < 10; i++) samples.push((await timedCurrentActivity()).ms);
   const max = Math.max(...samples);
@@ -186,54 +243,120 @@ test("FG-742: the aged store ALONE does not make current-activity slow — the q
 });
 
 test("FG-742: current-activity path spawns NO subprocess — the isolation does not weaken BD-7", async () => {
+  __setInFlightProbeForTest(null);
   writeFileSync(CALL_LOG, "");
   for (let i = 0; i < 3; i++) await timedCurrentActivity();
   assert.deepEqual(dockerCalls(), [], `current-activity must make no outbound call; observed: ${dockerCalls().join(", ")}`);
 });
 
-test("FG-742: /api/in-flight's slow docker fan-out IS bounded — the negative control is live", async () => {
-  // Proves the shim is actually reached (so the contention test below is not vacuous) AND
-  // that the whole fan-out is bounded well under the deadline despite a hung daemon.
-  writeFileSync(CALL_LOG, "");
-  const t0 = Date.now();
-  await (await realFetch(`${BASE}/api/in-flight`)).text();
-  const ms = Date.now() - t0;
-  assert.ok(dockerCalls().some((c) => c.startsWith("docker inspect")), "the docker probe shim must be reached");
-  assert.ok(ms < SERVER_BUDGET_MS, `a single /api/in-flight poll must not hold the thread past the budget; took ${ms}ms with ${RUNNING_TASKS} running containers`);
+test("FG-742: an UNBOUNDED docker fan-out exceeds the current-activity deadline — the bound is load-bearing", async () => {
+  // The negative control: with the budget REMOVED (the raw slow probe wired straight in),
+  // a single /api/in-flight poll fans out over every running container unbounded and holds
+  // the shared thread past the 8s client deadline. A current-activity read queued behind
+  // this WOULD abort — which is the whole failure FG-742 fixes. Deterministic: the block
+  // is RUNNING_TASKS x PER_INSPECT_BLOCK_MS, owned by this test, not a docker race.
+  probeCalls = 0;
+  __setInFlightProbeForTest(() => slowInspect);
+  const ms = await timedInFlight();
+  assert.equal(probeCalls, RUNNING_TASKS, `an unbounded fan-out probes every running container; probed ${probeCalls}/${RUNNING_TASKS}`);
+  assert.ok(
+    ms >= CURRENT_ACTIVITY_TIMEOUT_MS,
+    `unbounded, one /api/in-flight poll must hold the loop past the ${CURRENT_ACTIVITY_TIMEOUT_MS}ms deadline; took ${ms}ms`,
+  );
 });
 
-test("FG-742: current-activity stays inside its deadline while a slow sibling is polled concurrently (repeated)", async () => {
-  // Each burst fires ONE slow /api/in-flight (the event-loop block) alongside several
-  // current-activity reads, so the reads must queue behind the block on the shared
-  // thread. Repeated across bursts — never a single-sample assertion (AC4). Bursts are
-  // serialized so only one bounded block is ever outstanding at a time.
-  const BURSTS = 4;
-  const READS_PER_BURST = 4;
+test("FG-742: the BUDGETED fan-out clips the same slow probe well under the deadline — and probes fewer containers", async () => {
+  // The positive control: the SAME slow probe, now wrapped in the per-request budget the
+  // route actually wires (budgetedLivenessProbe(RECONCILE_FANOUT_BUDGET_MS)). The budget
+  // short-circuits the tail of the fan-out to `unknown` WITHOUT blocking, so the poll
+  // returns far inside the budget and demonstrably probes FEWER than every container.
+  probeCalls = 0;
+  __setInFlightProbeForTest(() => budgetedLivenessProbe(RECONCILE_FANOUT_BUDGET_MS, slowInspect));
+  const ms = await timedInFlight();
+  assert.ok(
+    probeCalls > 0 && probeCalls < RUNNING_TASKS,
+    `the budget must clip the fan-out: expected some-but-not-all of ${RUNNING_TASKS} probed, got ${probeCalls}`,
+  );
+  assert.ok(ms < SERVER_BUDGET_MS, `the bounded fan-out must stay well under the budget; took ${ms}ms (budget ${SERVER_BUDGET_MS}ms)`);
+});
+
+// A current-activity poller that runs OFF the server's event-loop thread (a Worker), so
+// it can issue its poll while that thread is frozen inside the fan-out — the arrival
+// mid-block an in-process client can never produce, because the block freezes the client
+// too (the reads always outran it). On each "poll" message it waits on the shared barrier
+// the fan-out flips the instant it starts holding the loop, THEN fetches — so the request
+// is provably in flight during the block and must queue behind it.
+const POLLER_SRC = `
+  const { parentPort, workerData } = require("node:worker_threads");
+  const barrier = new Int32Array(workerData.buffer);
+  parentPort.on("message", async () => {
+    Atomics.wait(barrier, 0, 0);
+    const t0 = Date.now();
+    const res = await fetch(workerData.base + "/api/current-activity");
+    const body = await res.json();
+    parentPort.postMessage({ ms: Date.now() - t0, body });
+  });
+`;
+
+test("FG-742: a current-activity poll arriving DURING the bounded block queues behind it yet stays inside its deadline (repeated)", async () => {
+  // The regression proper: a current-activity poll that lands WHILE /api/in-flight holds
+  // the single event loop must be delayed by that hold (queued behind the slow sibling)
+  // and still answer inside its deadline — the exact coupling RF-1 flagged the earlier
+  // check for asserting without establishing. The bound (test above) is what makes the
+  // hold survivable; test "an UNBOUNDED docker fan-out…" is the negative control showing
+  // the same queued poll would abort without it. Repeated across bursts, never one sample.
+  const barrier = new Int32Array(new SharedArrayBuffer(4));
+  __setInFlightProbeForTest(() =>
+    budgetedLivenessProbe(RECONCILE_FANOUT_BUDGET_MS, (name) => {
+      // The instant the fan-out begins holding the loop, release the off-thread poller.
+      Atomics.store(barrier, 0, 1);
+      Atomics.notify(barrier, 0);
+      return slowInspect(name);
+    }),
+  );
+  const poller = new Worker(POLLER_SRC, { eval: true, workerData: { base: BASE, buffer: barrier.buffer } });
+
+  const BURSTS = 3;
+  // A poll that queued behind the block waits the whole bounded fan-out (~2 x block); one
+  // that somehow raced ahead would return in single-digit ms (see the isolation test).
+  // >= one full inspect block cleanly proves the poll genuinely queued behind the sibling.
+  const QUEUING_EVIDENCE_MS = PER_INSPECT_BLOCK_MS;
   const latencies: number[] = [];
-  for (let b = 0; b < BURSTS; b++) {
-    const callsBefore = dockerCalls().length;
-    const inflight = realFetch(`${BASE}/api/in-flight`).then((r) => r.text());
-    const reads = Array.from({ length: READS_PER_BURST }, () => timedCurrentActivity());
-    const [, ...results] = await Promise.all([inflight, ...reads]);
-    const burstCalls = dockerCalls().slice(callsBefore);
-    assert.ok(
-      burstCalls.some((call) => call.startsWith("docker inspect")),
-      `burst ${b + 1} must exercise the slow sibling route rather than only current-activity`,
-    );
-    for (const r of results) {
-      latencies.push(r.ms);
-      // The core operator wait signal did not disappear behind an unavailable message:
-      // the live candidate's pending CI observation is still served, unevicted by the
-      // 80 historical ci_observed rows.
-      const obs = r.body.requiredCi.observations.find((o) => o.ticketId === LIVE_TICKET);
-      assert.ok(obs, `the live CI wait signal must survive under load; state=${r.body.requiredCi.state}`);
+  try {
+    for (let b = 0; b < BURSTS; b++) {
+      Atomics.store(barrier, 0, 0); // re-arm the barrier for this burst
+      const polled = new Promise<{ ms: number; body: CaBody }>((resolve) => poller.once("message", resolve));
+      poller.postMessage("poll");
+      await new Promise((r) => setTimeout(r, 25)); // let the poller reach the barrier first
+      const callsBefore = probeCalls;
+      await realFetch(`${BASE}/api/in-flight`).then((r) => r.text());
+      assert.ok(
+        probeCalls > callsBefore,
+        `burst ${b + 1} must exercise the slow sibling route rather than only current-activity`,
+      );
+      const { ms, body } = await polled;
+      latencies.push(ms);
+      // The poll genuinely queued behind the block...
+      assert.ok(
+        ms >= QUEUING_EVIDENCE_MS,
+        `the concurrent poll must queue behind the slow sibling (latency >= ${QUEUING_EVIDENCE_MS}ms); ` +
+          `burst ${b + 1} returned in ${ms}ms — it did not actually overlap the block`,
+      );
+      // ...yet stayed well inside its deadline, with headroom.
+      assert.ok(
+        ms < SERVER_BUDGET_MS,
+        `current-activity must stay well inside its ${CURRENT_ACTIVITY_TIMEOUT_MS}ms deadline under concurrent slow polling; ` +
+          `burst ${b + 1} took ${ms}ms budget=${SERVER_BUDGET_MS}ms`,
+      );
+      // The core operator wait signal did not disappear behind an unavailable message: the
+      // live candidate's pending CI observation is still served, unevicted by the 80
+      // historical ci_observed rows.
+      const obs = body.requiredCi.observations.find((o) => o.ticketId === LIVE_TICKET);
+      assert.ok(obs, `the live CI wait signal must survive under load; state=${body.requiredCi.state}`);
       assert.equal(obs!.candidateSha, LIVE_SHA);
     }
+  } finally {
+    await poller.terminate();
   }
-  const max = Math.max(...latencies);
-  assert.ok(
-    max < SERVER_BUDGET_MS,
-    `current-activity must stay well inside its ${CURRENT_ACTIVITY_TIMEOUT_MS}ms deadline under concurrent slow polling; ` +
-      `max=${max}ms budget=${SERVER_BUDGET_MS}ms samples=[${latencies.join(",")}]`,
-  );
+  assert.equal(latencies.length, BURSTS, "every burst must have produced a measured concurrent poll");
 });

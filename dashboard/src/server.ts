@@ -38,6 +38,7 @@ import {
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
 import { budgetedLivenessProbe, RECONCILE_FANOUT_BUDGET_MS } from "@forge/reconcile-candidate";
+import type { LivenessProbe } from "@forge/reconcile-candidate";
 import { assembleCampaignReport, assembleCampaignSummaries } from "@forge/campaign-report";
 import type { ReportResult } from "@forge/campaign-report";
 import { runInReadOnlyDbScope } from "@forge/store-db";
@@ -62,6 +63,17 @@ const CLIENT_DIR = resolve(HERE, "..", "client");
 export const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   void handle(req, res).catch(() => finishUnhandledRequest(res));
 });
+
+// FG-742: the /api/in-flight liveness probe is overridable so the concurrent-polling
+// regression can drive a DETERMINISTIC slow/hung docker-inspect fan-out through the real
+// server without spawning docker — and can also stand up an UNBOUNDED fan-out to prove the
+// bound is what keeps a queued /api/current-activity poll inside its deadline. Unset in
+// production, where every poll gets a fresh budgeted real-docker probe (the isolation this
+// ticket added); the factory shape mirrors that per-request construction.
+let inFlightProbeOverride: (() => LivenessProbe) | null = null;
+export function __setInFlightProbeForTest(factory: (() => LivenessProbe) | null): void {
+  inFlightProbeOverride = factory;
+}
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${HOST}:${PORT}`);
@@ -148,7 +160,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // exceeds its 8s client deadline. A per-request budget bounds how long this poll can
     // hold the loop, isolating the current-activity read from a slow sibling. current-
     // activity itself stays outbound-call-free (BD-7) and takes no probe.
-    const data = inFlight(scopeFromUrl(url), budgetedLivenessProbe(RECONCILE_FANOUT_BUDGET_MS));
+    const probe = (inFlightProbeOverride ?? (() => budgetedLivenessProbe(RECONCILE_FANOUT_BUDGET_MS)))();
+    const data = inFlight(scopeFromUrl(url), probe);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
