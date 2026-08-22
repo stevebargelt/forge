@@ -931,19 +931,32 @@ type CampaignStopRow = {
  *  statuses and are deliberately absent. */
 const TERMINAL_CAMPAIGN_STATUSES: readonly string[] = ["complete", "failed", "abandoned"];
 
+/** FG-743/RF-1: a `done` ticket reconciles a wait ONLY when the retained instruction is a
+ *  "close the ticket" ask — the request whose fulfillment IS the ticket reaching `done`.
+ *  A genuinely unrelated, still-unresolved operator DECISION (e.g. "accept the risk or
+ *  abandon the campaign") is NOT satisfied by a done ticket, so scoping the suppression to
+ *  the closure ask is what keeps that decision visible (AC3/AC4) instead of over-suppressing
+ *  it into a false-negative drop. Matched on the durable `requested_human_action` text —
+ *  the only closure signal the row carries. */
+function isTicketClosureReconciliation(requestedAction: string): boolean {
+  return /\bclos(e|ing|ed)\b/i.test(requestedAction) && /\bticket\b/i.test(requestedAction);
+}
+
 /** FG-743: the campaign/item/ticket lifecycle predicate for a LIVE campaign operator
  *  wait. A parked item that named an operator authority (`requested_human_action`) is a
  *  live wait ONLY when:
  *    - its parent campaign is still nonterminal (paused/running) — a terminal campaign's
  *      parked items are history (AC1/AC2); and
- *    - its work is not already reconciled — a `done` ticket means the item shipped, so a
- *      retained "close the ticket" instruction is already satisfied and no operator action
- *      remains, so the wait is cleared rather than presented with obsolete prose (AC4/AC5).
+ *    - its work is not already reconciled BY CLOSURE — a `done` ticket clears the wait only
+ *      when the retained ask was to close the ticket, which the done state has satisfied, so
+ *      no operator action remains (AC4/AC5). A done ticket does NOT clear an unrelated
+ *      operator decision the ticket state never answered (FG-743/RF-1: the over-suppression
+ *      false-negative — that wait stays visible with its actionable reason).
  *  The row's own park (lifecycle NOT IN complete/failed/pending/running) is already
  *  filtered in SQL; this is the parent + reconciliation half of the same question. */
 function isLiveCampaignOperatorWait(row: CampaignStopRow): boolean {
   if (TERMINAL_CAMPAIGN_STATUSES.includes(row.campaign_status)) return false;
-  if (row.ticket_done === 1) return false;
+  if (row.ticket_done === 1 && isTicketClosureReconciliation(row.requested_human_action)) return false;
   return true;
 }
 

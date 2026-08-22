@@ -103,10 +103,15 @@ test("FG-743 E2E: Home and Activity show only the unresolved paused campaign wai
   }
 
   await page.goto(`${baseUrl}/#activity`);
-  const section = page.locator("section.current-activity section.ca-section", { has: page.locator(".ca-operator-wait-row") });
+  // The operator-visible surviving wait folds into In flight (the collapsed Activity →
+  // Diagnostics `section.current-activity` copy is not what an operator reads). Mirror the
+  // Home assertion: verify the wait's actionable identity AND reason, not merely presence (AC3).
+  const section = page.locator("section.in-flight");
   await section.locator(".ca-operator-wait-row").waitFor();
   const activity = await section.innerText();
   assert.match(activity, /FG-743-live/);
+  assert.match(activity, /operator must accept or reject the risk/, "the surviving wait renders its actionable reason (AC3), not merely its ticket id");
+  assert.match(activity, /accept the risk or abandon the campaign/, "the surviving wait renders its actionable requested action (AC3), not merely its ticket id");
   assert.equal(await section.locator(".ca-operator-wait-row").count(), 1, "the dashboard renders the filtered shared set without a client-only exception");
   await page.close();
 });

@@ -282,6 +282,40 @@ describe("FG-743/RF-1 — a done ticket in ANOTHER project cannot suppress this 
   });
 });
 
+// ──── AC4/RF-1 — a done ticket clears ONLY a close-the-ticket ask, not any parked action ────
+//
+// The done-ticket suppression is licensed narrowly: it clears the wait iff the retained
+// instruction was to CLOSE the ticket, which a `done` ticket has satisfied. An unrelated,
+// still-unresolved operator DECISION ("accept the risk or abandon the campaign") is not
+// answered by the ticket reaching `done`, so it must REMAIN visible with its actionable
+// identity + reason even when the ticket is coincidentally done — the over-suppression
+// false-negative AC3/AC4 forbid.
+
+describe("FG-743/RF-1 — a done ticket does NOT suppress a non-closure operator decision", () => {
+  test("done ticket + an 'accept the risk or abandon' decision stays visible with its reason", () => {
+    addCampaign({ id: "camp-decide", status: "paused" });
+    addTicket("FG-990", "done");
+    addCampaignItem({
+      id: "item-decide",
+      campaignId: "camp-decide",
+      ticketId: "FG-990",
+      lifecycleStatus: "awaiting_gate",
+      blockerKind: "human_decision",
+      reason: "operator must accept or reject the risk",
+      requestedHumanAction: "accept the risk or abandon the campaign",
+    });
+
+    // DISCRIMINATING: against the pre-fix `ticket_done === 1 → false` predicate this reads
+    // 0 waits (the decision is silently dropped); it survives only once suppression is
+    // scoped to a close-the-ticket ask.
+    const waits = derive().operatorWaits;
+    assert.equal(waits.length, 1, "a done ticket clears only a close-the-ticket ask, never an unrelated decision");
+    assert.equal(waits[0]!.ticketId, "FG-990");
+    assert.equal(waits[0]!.reason, "operator must accept or reject the risk");
+    assert.equal(waits[0]!.requestedAction, "accept the risk or abandon the campaign");
+  });
+});
+
 // ─────────────────── AC5 — the aged FG-472 shape (done ticket + old paused) ──────────────
 
 describe("FG-743 AC5 — the FG-472 shape cannot be presented as current with obsolete prose", () => {
