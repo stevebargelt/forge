@@ -12,6 +12,7 @@ import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
 import { ShippingAuditView } from "./shipping-audit.js";
 import { CampaignsView } from "./campaigns.js";
+import { ControlPlaneView } from "./control-plane.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
@@ -88,6 +89,10 @@ function App() {
   const runtimeSeq = useRef(0);
   const completedRunsSeq = useRef(0);
   const [governance, setGovernance] = useState(null);
+  const [controlPlane, setControlPlane] = useState(null);
+  // Scope token for the control-plane read — see pollControlPlane. A response
+  // for the old scope must never overwrite the graph just switched to.
+  const controlPlaneSeq = useRef(0);
   const [backlog, setBacklog] = useState(null);
   const [queue, setQueue] = useState(null);
   // Sequence token for the queue read — see pollQueue.
@@ -373,6 +378,45 @@ function App() {
     return () => clearInterval(id);
   }, [pollGovernance, view]);
 
+  const pollControlPlane = useCallback(async () => {
+    // Scope token like pollShippingAudit: a read for the previous scope
+    // (project/checkout) must never overwrite the graph just switched to.
+    const seq = (controlPlaneSeq.current += 1);
+    // Checkout-specific: a project without an exact checkout has no single graph.
+    if (projectFilter && !checkoutFilter) { setControlPlane(null); return; }
+    try {
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const res = await fetch(`/api/config-graph${q}`);
+      if (seq !== controlPlaneSeq.current) return;
+      if (res.ok) {
+        // Decode the body BEFORE the scope re-check: a scope change during the
+        // await res.json() body decode must not render the retired checkout's graph.
+        const graph = await res.json();
+        if (seq !== controlPlaneSeq.current) return;
+        setControlPlane(graph);
+      }
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== controlPlaneSeq.current) return;
+      setError(String(e));
+    }
+  }, [projectFilter, checkoutFilter]);
+
+  // Clear the graph the instant the scope changes so a previous checkout's config
+  // graph is never rendered under the new scope while its request is in flight. The
+  // seq bump retires whatever read is still outstanding for the old scope.
+  useEffect(() => {
+    controlPlaneSeq.current += 1;
+    setControlPlane(null);
+  }, [projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "control-plane") return;
+    pollControlPlane();
+    const id = setInterval(pollControlPlane, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollControlPlane, view]);
+
   const pollReviews = useCallback(async () => {
     try {
       const res = await fetch(appendScope(`/api/reviews?limit=25`, projectFilter, checkoutFilter));
@@ -577,6 +621,7 @@ function App() {
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>workbench</button>
+            <button class=${"tab " + (view === "control-plane" ? "tab-active" : "")} onClick=${() => switchView("control-plane")}>control plane</button>
             <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
             <button class=${"tab " + (view === "queue" ? "tab-active" : "")} onClick=${() => switchView("queue")}>queue</button>
             <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
@@ -637,6 +682,10 @@ function App() {
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
           : html`<${GovernanceView} data=${governance} />`
+        : view === "control-plane"
+        ? projectFilter && !checkoutFilter
+          ? html`<div class="card muted" style="margin-top: 20px;">The control-plane config graph is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
+          : html`<${ControlPlaneView} data=${controlPlane} />`
         : view === "backlog"
         ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
         : view === "queue"

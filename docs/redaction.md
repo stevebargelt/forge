@@ -38,6 +38,28 @@ constraint counts. It stores **no secrets, token material, or auth file paths** 
 the same discipline as the `auth` block. Auth profile names and runtime paths are
 config references, not credential material.
 
+## Control-plane config graph (FG-349)
+
+`forge config graph [--json]`, the dashboard's control-plane tab, and its
+`/api/config-graph` read path expose the same kind of provenance as the
+`controlPlane` manifest block above, but live (EFFECTIVE) rather than
+dispatch-time (RECORDED) — see `docs/concepts.md` and `docs/invariants.md` for
+that vocabulary. `buildConfigGraph()` (`src/v2/config-graph.ts`) runs a final
+whole-graph redaction sweep (`redactGraph` → `redactSecrets`) over every string
+in the object, including each row's verbatim `native` verdict, as
+defense-in-depth over the per-row redaction each section builder already
+performs before assembling its row. A build that throws instead of returning a
+graph (defense-in-depth only — `buildConfigGraph` itself does not throw) is caught
+by the `/api/config-graph` route and reported as `200 {error: message}` rather than
+blanking the page; that `message` is a surfaced exception string outside the graph
+object, so it is routed through `redactSecrets` directly (`degradedGraphErrorPayload`,
+`dashboard/src/http-error.ts`) before it leaves the process — the degraded path
+carries the same redaction guarantee as the graph object, not a gap the whole-graph
+sweep happens not to cover. Provider/auth readiness in the Capabilities
+panel is checked by env-var **presence** only, exactly like the `auth` block
+above — a provider's readiness is never derived from reading its value, and no
+capability or prerequisite row probes a subprocess or makes a billed call.
+
 ## Auth profiles
 
 - `required_env` is checked by **name** only; forge never reads or logs the values.

@@ -33,7 +33,7 @@ import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, operatorProjectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
-  currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit,
+  currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -43,7 +43,7 @@ import { runInReadOnlyDbScope } from "@forge/store-db";
 import type { Campaign } from "@forge/types";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
-import { finishUnhandledRequest } from "./http-error.js";
+import { finishUnhandledRequest, degradedGraphErrorPayload } from "./http-error.js";
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 import {
   guardBindAddress,
@@ -219,6 +219,32 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(routingGovernance(projectDir)));
+    return;
+  }
+
+  if (path === "/api/config-graph") {
+    // FG-349: read-only EFFECTIVE config graph (Control-Plane Sources +
+    // provider/runtime capabilities) for the selected checkout. Pure GET — NOT a
+    // POST-mutation route, no subprocess. Checkout-specific: a projectKey without
+    // an exact projectDir is refused, like /api/governance.
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    if (url.searchParams.has("projectKey") && !projectDir) {
+      res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Select an exact checkout for the control-plane config graph." }));
+      return;
+    }
+    // Build the payload BEFORE writeHead so a degraded read never leaves a
+    // half-written response / blank page.
+    let payload: string;
+    try {
+      payload = JSON.stringify(effectiveConfigGraph(projectDir));
+    } catch (err) {
+      console.error("/api/config-graph: building the config graph failed:", err);
+      // Route the degraded-response error string through the same redaction
+      // boundary the config-graph object uses — an exception message is a surfaced
+      // string and must not leak a secret outside the redaction guarantee.
+      payload = degradedGraphErrorPayload(err);
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;
   }
 
