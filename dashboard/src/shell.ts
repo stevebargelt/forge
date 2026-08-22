@@ -688,7 +688,7 @@ section.current-activity { margin-top: 28px; }
 }
 .ca-unavailable-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ca-unavailable-detail { margin-top: 4px; font-size: 12px; color: var(--fg-dim); }
-.ca-retry {
+.ca-retry, .inbox-retry {
   flex: none;
   padding: 4px 12px;
   border: 1px solid var(--border);
@@ -699,8 +699,8 @@ section.current-activity { margin-top: 28px; }
   font-size: 12px;
   cursor: pointer;
 }
-.ca-retry:hover { border-color: var(--accent); }
-.ca-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ca-retry:hover, .inbox-retry:hover { border-color: var(--accent); }
+.ca-retry:focus-visible, .inbox-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ca-section .item.ca-row {
   display: grid;
   grid-template-columns: minmax(0, auto) 1fr auto;

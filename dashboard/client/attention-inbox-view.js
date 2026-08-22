@@ -82,7 +82,7 @@ function InboxUnavailable({ view, onRetry }) {
     <div class="inbox-unavailable" role="alert">
       <div class="inbox-unavailable-head">
         <strong>${view.message}</strong>
-        <button type="button" class="ca-retry" onClick=${() => onRetry && onRetry()}>Retry</button>
+        <button type="button" class="inbox-retry" onClick=${() => onRetry && onRetry()}>Retry</button>
       </div>
       <div class="inbox-unavailable-detail">${view.detail}</div>
     </div>
