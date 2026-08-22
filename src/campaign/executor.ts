@@ -2564,10 +2564,25 @@ function recordItemBoundaryContinuation(campaignId: string, item: CampaignItem, 
 // from, WITHOUT needing a continuation ("the reservation stays authoritative"). This is what
 // makes reopening to running safe even when the item-boundary continuation write skipped or
 // failed: there is still a durable reservation for recovery to adopt. Only when this is absent
-// AND no continuation exists is the reopen the genuine RF-1 crash hazard.
+// AND no continuation matching this attempt exists is the reopen the genuine RF-1 crash hazard.
 function boundaryReservationBacksRecovery(campaignId: string, item: CampaignItem): boolean {
   const gen = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
   return getItemLaunch(campaignId, item.id, gen) !== undefined;
+}
+
+// FG-750 (RF-1): whether an ALREADY-EXISTING boundary continuation backs THIS attempt's reopen.
+// The continuation id is stable as (campaignId, itemId) across attempts — the attempt identity
+// lives in the phase, not the id (see campaignContinuationId / campaignItemPhase). So a row left
+// by a PRIOR attempt (a superseded escalation/retry generation) shares this boundary's id, and
+// accepting it as backing would mask a genuine crash gap: recovery would adopt a stale prior
+// attempt's continuation for a newer attempt. Match the row to the current attempt's generation
+// phase before treating it as backing; a stale/mismatched continuation is NOT backing (the caller
+// falls through to the reservation, else stays paused).
+function existingContinuationBacksThisAttempt(campaignId: string, item: CampaignItem): boolean {
+  const existing = getContinuation(campaignContinuationId(campaignId, item.id));
+  if (!existing) return false;
+  const gen = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
+  return existing.currentPhase === campaignItemPhase(item.id, gen);
 }
 
 export async function driveRemainingItems(
@@ -2760,9 +2775,11 @@ export async function driveRemainingItems(
         // genuine loss of recoverable backing, NOT on every throw-or-skip. The reopen is backed
         // when ANY of these hold, and it is safe to proceed:
         //   (a) a continuation was freshly recorded in this transition; OR
-        //   (b) a continuation ALREADY EXISTS for this boundary — a UNIQUE-constraint on
-        //       continuation_id means the row IS durably present (an idempotent re-record), which
-        //       is success, not failure; OR
+        //   (b) a continuation ALREADY EXISTS for this boundary AND represents THIS attempt — a
+        //       UNIQUE-constraint on continuation_id means the row IS durably present (an idempotent
+        //       re-record of the current attempt's boundary), which is success, not failure. The
+        //       continuation id is stable across attempts (RF-1), so a row left by a PRIOR attempt
+        //       does NOT count: it is matched to the current attempt's generation phase first; OR
         //   (c) the authoritative reservation (the durable item-launch linkage) itself backs
         //       recovery for this boundary — the original "reservation stays authoritative"
         //       invariant: resume/recover re-drives the parked item from it without a
@@ -2790,7 +2807,7 @@ export async function driveRemainingItems(
             // continuation is now durably present (already-exists / idempotent re-record) or the
             // reservation backs recovery for this boundary.
             reopenRecoverable =
-              getContinuation(campaignContinuationId(campaignId, durableItem.id)) !== undefined ||
+              existingContinuationBacksThisAttempt(campaignId, durableItem) ||
               boundaryReservationBacksRecovery(campaignId, durableItem);
           }
           if (!reopenRecoverable) {

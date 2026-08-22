@@ -48,7 +48,7 @@ import { parkCampaign } from "./park.js";
 import { getContinuation, recordContinuation } from "../store/continuations.js";
 import { writeTicket } from "../backlog/structured.js";
 import { driveRemainingItems, DEFAULT_CONTROLLER_LEASE_MS, type DriveOneItemResult } from "./executor.js";
-import { campaignContinuationId } from "./continuation-adapter.js";
+import { campaignContinuationId, campaignItemPhase } from "./continuation-adapter.js";
 import { assembleCampaignShow, assembleCampaignReport, setDoneAuditMapForTest } from "./report.js";
 
 let db: DatabaseInstance;
@@ -371,4 +371,62 @@ test("RF-1 (revision): a SKIPPED item-boundary continuation (no launch linkage, 
   // No continuation was recorded for A — the skip left nothing to adopt, which is exactly
   // why the reopen was refused (a running flip here would be a phantom).
   assert.equal(getContinuation(campaignContinuationId(campaignId, aId)), undefined, "no continuation was recorded on the skip path");
+});
+
+// ── RF-1 (revision): a stale PRIOR-attempt continuation does not back a NEWER attempt ──
+//
+// The continuation id is stable as (campaignId, itemId) across attempts — the attempt identity
+// lives in the phase, not the id. A continuation LEFT BEHIND by a prior attempt (a superseded
+// escalation/retry generation) therefore shares the current boundary's id. Accepting it as
+// already-exists backing for a NEWER attempt would mask a genuine crash gap: recovery would adopt
+// a stale prior attempt's continuation. The reopen must match the row to the CURRENT attempt's
+// generation phase; a mismatched/stale row is NOT backing, so with no reservation for the current
+// attempt the campaign stays PAUSED.
+test("RF-1: a stale prior-attempt continuation (mismatched generation) does NOT back a newer attempt's reopen — the campaign stays PAUSED", async () => {
+  const owner = "ctrl-1";
+  const { campaignId, aId, bId } = runningCampaign(owner);
+  const launched: string[] = [];
+
+  const launch = async (cid: string, itemId: string): Promise<DriveOneItemResult> => {
+    launched.push(itemId);
+    if (itemId === aId) {
+      // A is on its SECOND attempt (a retry/escalation bumped attemptGeneration to 2), parked
+      // item-scoped — but WITHOUT a durable item-launch linkage for generation 2 (no reservation
+      // recovery can adopt for this attempt).
+      updateCampaignItem(itemId, {
+        lifecycleStatus: "awaiting_gate",
+        runId: `run-${itemId}`,
+        requestedHumanAction: "operator decision needed",
+        attemptGeneration: 2,
+      });
+      // A continuation left over from the PRIOR attempt (generation 1) still occupies A's stable
+      // boundary id. It is bound to generation 1's phase/launch, NOT this attempt's.
+      recordContinuation({
+        continuationId: campaignContinuationId(cid, aId),
+        consumerKind: "campaign",
+        sourceLaunchId: `launch-${aId}-gen1`,
+        currentPhase: campaignItemPhase(aId, 1),
+        nextAction: { kind: "noop" },
+      });
+      await parkCampaign(cid, itemId, "decision_needed", { exemption: "item-carries-context" });
+      return { itemRecords: [], stopReason: "paused", stopScope: "item" };
+    }
+    // The stale continuation must NOT be treated as backing — B must NOT be dispatched.
+    throw new Error("B must not be dispatched when only a stale prior-attempt continuation exists");
+  };
+
+  const result = await driveRemainingItems(campaignId, {
+    dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }),
+    projectDir,
+    mode: "sequential",
+    launchDriveItem: launch,
+    controllerOwner: owner,
+    controllerLeaseTtlMs: DEFAULT_CONTROLLER_LEASE_MS,
+  });
+
+  assert.deepEqual(launched, [aId], "the stale prior-attempt continuation did not back the reopen — B was never driven");
+  assert.equal(result.stopReason, "paused");
+  assert.equal(getCampaign(campaignId)!.status, "paused", "campaign stays PAUSED — a stale continuation is not recoverable backing for a newer attempt");
+  assert.equal(getCampaignItem(aId)!.lifecycleStatus, "awaiting_gate", "A's item-scoped park stays intact for resume/recover to re-drive");
+  assert.equal(getCampaignItem(bId)!.lifecycleStatus, "pending", "B stays pending");
 });
