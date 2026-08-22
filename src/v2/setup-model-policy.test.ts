@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
   type HostModelPolicyDeps,
   type Prompt,
 } from "./setup-model-policy.js";
+import { copySeedExclusive } from "../cli/commands/setup.js";
 import { loadModelPolicy } from "./loader.js";
 import { ModelPolicySchema } from "./schema.js";
 import type { AuthProbe } from "./provider-doctor.js";
@@ -227,6 +228,37 @@ test("RF-3: an EEXIST from the exclusive-create writer is reported as preserved,
     assert.equal(res.wrote, false);
     assert.match(res.advisory ?? "", /concurrently|preserved/);
   });
+});
+
+// RF-4: the seed-fallback copy is ALSO exclusive. This exercises the SHIPPED copySeed
+// impl (copySeedExclusive) against a real dest that appeared concurrently: it must
+// throw EEXIST rather than overwrite, and the orchestrator must report it as preserved.
+// Discriminating — a bare copyFileSync would clobber the existing content and this test
+// would fail on both the content assert and action === "preserved".
+test("RF-4: the seed-fallback copy preserves a concurrently-created policy, never clobbers", async () => {
+  const seedDir = mkdtempSync(join(tmpdir(), "fg346-rf4-"));
+  const seedPath = join(seedDir, "model-policy.example.yml");
+  const destPath = join(seedDir, "model-policy.yml");
+  writeFileSync(seedPath, "SEED CONTENT\n");
+  writeFileSync(destPath, "EXISTING HOST POLICY\n"); // appeared after the policyPresent snapshot
+  try {
+    await withDeps(
+      { isTTY: false, selection: undefined, copySeed: () => copySeedExclusive(seedPath, destPath) },
+      async (deps) => {
+        const res = await runHostModelPolicySetup(deps);
+        assert.equal(res.action, "preserved", "concurrent create reported as preserved, not clobbered");
+        assert.equal(res.wrote, false);
+        assert.match(res.advisory ?? "", /concurrently|preserved/);
+        assert.equal(
+          readFileSync(destPath, "utf8"),
+          "EXISTING HOST POLICY\n",
+          "existing policy content preserved — the seed did not overwrite it",
+        );
+      },
+    );
+  } finally {
+    rmSync(seedDir, { recursive: true, force: true });
+  }
 });
 
 test("non-interactive + complete flags: deterministic generate, one write, no prompt", async () => {

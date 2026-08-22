@@ -288,6 +288,20 @@ function invalidResult(err: unknown): HostModelPolicyResult {
   };
 }
 
+// A policy appeared between the absent-policy snapshot and our exclusive write/copy
+// (a concurrent bare setup). Both the exclusive writer (RF-3) and the exclusive
+// seed-copy (RF-4) surface it as EEXIST; report it as preserved, never overwritten.
+function concurrentPreservedResult(): HostModelPolicyResult {
+  const advisory =
+    "a host model-policy.yml appeared concurrently — preserved it, not overwritten. Re-author with `forge setup --reconfigure`.";
+  return {
+    action: "preserved",
+    wrote: false,
+    advisory,
+    step: { name: "model-policy.yml", status: "ok", detail: advisory },
+  };
+}
+
 function writeAndSummarize(deps: HostModelPolicyDeps, yaml: string): HostModelPolicyResult {
   try {
     deps.writePolicy(yaml);
@@ -295,16 +309,7 @@ function writeAndSummarize(deps: HostModelPolicyDeps, yaml: string): HostModelPo
     // TOCTOU close: the writer creates exclusively, so a policy that appeared
     // between the absent-policy check and this write (a concurrent bare setup)
     // refuses rather than clobbering. Report it as preserved, never overwritten.
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
-      const advisory =
-        "a host model-policy.yml appeared concurrently — preserved it, not overwritten. Re-author with `forge setup --reconfigure`.";
-      return {
-        action: "preserved",
-        wrote: false,
-        advisory,
-        step: { name: "model-policy.yml", status: "ok", detail: advisory },
-      };
-    }
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return concurrentPreservedResult();
     throw e;
   }
   const reloaded = deps.reload();
@@ -406,7 +411,16 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
         step: { name: "model-policy.yml", status: "warn", detail: advisory },
       };
     }
-    if (!deps.dryRun) deps.copySeed?.();
+    if (!deps.dryRun) {
+      // RF-4: the seed-copy is exclusive too — a policy that appeared between the
+      // policyPresent snapshot and this copy is preserved, not clobbered.
+      try {
+        deps.copySeed?.();
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") return concurrentPreservedResult();
+        throw e;
+      }
+    }
     const advisory =
       "non-interactive with no selection flags — retained the seed default model policy (no Q&A). " +
       "Run `forge setup` in a TTY, or pass selection flags, to author routing.";

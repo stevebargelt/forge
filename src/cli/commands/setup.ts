@@ -6,7 +6,7 @@
 // live agent run; the DB is never touched. `--dry-run` previews without writing.
 
 import type { Command } from "commander";
-import { existsSync, copyFileSync, writeFileSync } from "node:fs";
+import { existsSync, copyFileSync, writeFileSync, constants as fsConstants } from "node:fs";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
@@ -35,6 +35,15 @@ import {
 
 const MODEL_POLICY_PATH = join(FORGE_HOME, "model-policy.yml");
 const MODEL_POLICY_SEED = join(FORGE_HOME, "model-policy.example.yml");
+
+// FG-346 / RF-4: seed-copy the active policy from the installed example EXCLUSIVELY,
+// mirroring writePolicy's "wx" discipline. This is the absent-authoring fallback ONLY
+// (never reconfigure), so it is always exclusive: a policy that appeared since the
+// policyPresent snapshot (a concurrent bare setup) fails with EEXIST rather than being
+// clobbered. runHostModelPolicySetup catches that EEXIST and reports it as preserved.
+export function copySeedExclusive(seedPath: string, destPath: string): void {
+  if (existsSync(seedPath)) copyFileSync(seedPath, destPath, fsConstants.COPYFILE_EXCL);
+}
 
 // Create the active model policy from the installed example when absent. Never
 // overwrites an existing host policy (preserves personal edits). Returns the step
@@ -104,9 +113,7 @@ export async function provisionModelPolicyInteractive(opts: {
     // EEXIST instead of clobbering it. --reconfigure is an intentional overwrite.
     writePolicy: (yaml) =>
       writeFileSync(MODEL_POLICY_PATH, yaml, opts.reconfigure ? undefined : { flag: "wx" }),
-    copySeed: () => {
-      if (existsSync(MODEL_POLICY_SEED)) copyFileSync(MODEL_POLICY_SEED, MODEL_POLICY_PATH);
-    },
+    copySeed: () => copySeedExclusive(MODEL_POLICY_SEED, MODEL_POLICY_PATH),
     reload: () => safeLoadHostPolicy(),
     summaryCtx: {},
     loadExisting: () => safeLoadHostPolicy(),
