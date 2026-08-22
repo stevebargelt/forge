@@ -5,6 +5,8 @@
 // - GET /api/in-flight   currently-running / awaiting-gate tasks (?projectDir filter)
 // - GET /api/projects    project registry: name, color, last activity, live sessions (#154)
 // - GET /api/task/:id    full task detail (result + stdout/stderr logs + verdicts + gates)
+// - GET /api/run/:id/map      read-only Run Map graph: workflow/execution shape, fanout, reds, gates, per-task badges (?projectKey|?projectDir, FG-348)
+// - GET /api/task/:id/explain read-only task-level Explain: recorded control-plane provenance for one task (?projectKey|?projectDir, FG-348)
 // - GET /api/verifications/in-progress   host verification (review-loop / campaign reconcile) currently running (FG-487)
 // - GET /api/review-loop/phases          active review-loop runs with a distinguishable phase (?projectDir filter, FG-487)
 // - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
@@ -34,6 +36,7 @@ import {
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
+  runMap, taskExplain,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -681,6 +684,51 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "ticketId or itemId required" }));
+    return;
+  }
+
+  // FG-348: read-only Run Map graph for a run. Pure GET, no subprocess, no
+  // mutation. Scope-gated like /api/config-graph (a projectKey without an exact
+  // projectDir is refused). Built BEFORE writeHead so a degraded read never
+  // half-writes; the query itself degrades to a redacted payload rather than
+  // throwing, and the try/catch routes any residual error through the redaction
+  // boundary. Registered before /api/task/:id (whose (.+) is greedy).
+  const runMapMatch = path.match(/^\/api\/run\/([^/]+)\/map$/);
+  if (runMapMatch) {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    if (url.searchParams.has("projectKey") && !projectDir) {
+      res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Select an exact checkout for the run map." }));
+      return;
+    }
+    let payload: string;
+    try {
+      payload = JSON.stringify(runMap(runMapMatch[1]!, scopeFromUrl(url)));
+    } catch (err) {
+      console.error("/api/run/:id/map: building the run map failed:", err);
+      payload = degradedGraphErrorPayload(err);
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  // FG-348: read-only task-level Explain for one task. The ONLY per-task manifest
+  // read on this surface (lazy, single-task). Same scope-gate + degraded-payload
+  // discipline as the run map. Registered before /api/task/:id (greedy (.+)).
+  const explainMatch = path.match(/^\/api\/task\/([^/]+)\/explain$/);
+  if (explainMatch) {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    if (url.searchParams.has("projectKey") && !projectDir) {
+      res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Select an exact checkout for the task explain." }));
+      return;
+    }
+    let payload: string;
+    try {
+      payload = JSON.stringify(taskExplain(explainMatch[1]!, scopeFromUrl(url)));
+    } catch (err) {
+      console.error("/api/task/:id/explain: building the task explain failed:", err);
+      payload = degradedGraphErrorPayload(err);
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;
   }
 
