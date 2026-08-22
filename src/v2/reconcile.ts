@@ -42,8 +42,11 @@ import { openLaunchCwds } from "../store/launch-observations.js";
 import {
   removedDisposition,
   retainedDisposition,
+  retainedWorkspacePurposeUpdate,
   type CleanupDisposition,
 } from "./run-cleanup-report.js";
+import { attachRetentionReason } from "../store/workspace-purpose.js";
+import { resolveProjectIdentity } from "../backlog/storage-mode.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
@@ -2002,6 +2005,34 @@ export function disposeRunGitWorkspaces(
       }
       reapedEvent(t.id, { workspacePath, branch: outcome.branch, substrate: outcome.substrate, branchRemoved: outcome.branchRemoved, removal: outcome.removal, reason: "work_captured", taskStatus: t.status });
     } catch { /* FG-459: one task's workspace must not abort the pass */ }
+  }
+
+  // FG-745 (AC6): carry each RETAINED git-workspace's reason onto its durable
+  // workspace-purpose row, so an FG-677 retention outcome (active_process_cwd,
+  // active_mount, ownership_ambiguous, …) is representable WITHOUT the retained
+  // workspace becoming a top-level operator project. Real passes only — a dry run
+  // mutates nothing. Best-effort: a store write must never abort the pass, and it
+  // NEVER changes what was removed vs retained (the reaper already decided that above).
+  if (!dryRun) {
+    let ownerIdentity: string | null = null;
+    try {
+      ownerIdentity = resolveProjectIdentity(projectDir);
+    } catch {
+      ownerIdentity = null;
+    }
+    for (const disposition of gitWorkspaces) {
+      const update = retainedWorkspacePurposeUpdate(disposition);
+      if (!update) continue;
+      try {
+        attachRetentionReason({
+          path: update.path,
+          reason: update.reason,
+          owner: { projectIdentity: ownerIdentity, runId },
+        });
+      } catch {
+        /* best-effort: an unrecorded retention reason never blocks the pass */
+      }
+    }
   }
 
   return { gitWorkspaces, generatedBranches, retiredWorkspaces };

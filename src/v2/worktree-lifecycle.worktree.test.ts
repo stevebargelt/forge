@@ -24,8 +24,13 @@ import {
   cleanupFailedCloneSetup,
   cleanupFailedWorktreeSetup,
   cleanupIntegrationWorktree,
+  createWorktree,
+  createTaskClone,
 } from "./worktree-lifecycle.js";
 import { cloneDir, worktreeDir, integrationWorktreeDir, WORKTREES_DIR } from "../util/paths.js";
+import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { getWorkspacePurpose } from "../store/workspace-purpose.js";
+import type { Database as DatabaseInstance } from "better-sqlite3";
 
 const tmpDirs: string[] = [];
 
@@ -429,4 +434,70 @@ test("FG-693: the ordinary failed-clone cleanup still disposes of the clone AND 
     "",
     "and its anchor goes with it — the refusal above must not have made this path timid",
   );
+});
+
+// ── FG-745: purpose recording at the Forge CREATION sites ────────────────────────
+
+function headSha(dir: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+}
+
+test("FG-745: createWorktree records a 'worktree' purpose with owner run/task", () => {
+  const projectDir = makeTmpDir("forge-fg745-wt-");
+  initGitRepo(projectDir);
+  const db = makeInMemoryDb();
+  const prev = setDbForTest(db);
+  try {
+    const runId = "run-fg745-wt";
+    const taskId = "task-fg745-wt";
+    const { worktreePath } = createWorktree(projectDir, runId, taskId);
+    const purpose = getWorkspacePurpose(worktreePath);
+    assert.ok(purpose, "the created worktree has a recorded purpose row");
+    assert.equal(purpose.kind, "worktree");
+    assert.equal(purpose.runId, runId);
+    assert.equal(purpose.taskId, taskId);
+  } finally {
+    setDbForTest(prev as DatabaseInstance);
+    db.close();
+  }
+});
+
+test("FG-745: createTaskClone records a 'disposable_clone' purpose", () => {
+  const projectDir = makeTmpDir("forge-fg745-clone-");
+  initGitRepo(projectDir);
+  const db = makeInMemoryDb();
+  const prev = setDbForTest(db);
+  try {
+    const runId = "run-fg745-clone";
+    const taskId = "task-fg745-clone";
+    const { clonePath } = createTaskClone(projectDir, runId, taskId, headSha(projectDir));
+    const purpose = getWorkspacePurpose(clonePath);
+    assert.ok(purpose, "the created clone has a recorded purpose row");
+    assert.equal(purpose.kind, "disposable_clone");
+    assert.equal(purpose.runId, runId);
+    assert.equal(purpose.taskId, taskId);
+  } finally {
+    setDbForTest(prev as DatabaseInstance);
+    db.close();
+  }
+});
+
+test("FG-745: a store write failure does not abort createWorktree (best-effort)", () => {
+  const projectDir = makeTmpDir("forge-fg745-nostore-");
+  initGitRepo(projectDir);
+  // A closed DB handle makes every store write throw; creation must still succeed.
+  const db = makeInMemoryDb();
+  const prev = setDbForTest(db);
+  db.close();
+  try {
+    const runId = "run-fg745-nostore";
+    const taskId = "task-fg745-nostore";
+    let result: { worktreePath: string } | undefined;
+    assert.doesNotThrow(() => {
+      result = createWorktree(projectDir, runId, taskId);
+    });
+    assert.ok(result && existsSync(result.worktreePath), "the worktree is created even when the purpose store is unwritable");
+  } finally {
+    setDbForTest(prev as DatabaseInstance);
+  }
 });

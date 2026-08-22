@@ -632,7 +632,7 @@ function App() {
             opsSince=${opsSince}
           />`
         : view === "projects"
-        ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
+        ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} onReload=${poll} />`
         : view === "governance"
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
@@ -1663,7 +1663,7 @@ function RuntimeRoleTable({ summary, activeRole, onRoleChange, window }) {
   `;
 }
 
-function ProjectsView({ projects, onPick }) {
+function ProjectsView({ projects, onPick, onReload }) {
   if (projects.length === 0) {
     return html`
       <section class="projects-grid">
@@ -1675,24 +1675,53 @@ function ProjectsView({ projects, onPick }) {
   }
   return html`
     <section class="projects-grid">
-      ${projects.map((p) => html`<${ProjectCard} key=${p.key} project=${p} onPick=${onPick} />`)}
+      ${projects.map((p) => html`<${ProjectCard} key=${p.key} project=${p} onPick=${onPick} onReload=${onReload} />`)}
     </section>
   `;
 }
 
-function ProjectCard({ project, onPick }) {
+function ProjectCard({ project, onPick, onReload }) {
   const ageState = projectAgeState(project);
+  // FG-745: visibility is decided server-side (GET /api/projects already omits
+  // recorded artifacts). The client NEVER re-filters — it renders whatever the API
+  // returns and only flags an `unclassified` record and offers the repair path.
+  const unclassified = project.classification === "unclassified";
+  // The classify form is disclosed on demand: an always-open form on every
+  // unclassified card is noisy AND would grow the card body, so a compact toggle in
+  // the head reveals it. The badge alone (no body growth) keeps the card's default
+  // shape stable — the card's primary click target stays the project body.
+  const [showClassify, setShowClassify] = useState(false);
   const onClick = () => onPick(project, null);
   const onKey = (event) => {
+    // RF-3: only the card itself activates on Enter/Space. A key event that bubbled up
+    // from a focused descendant (the classify toggle, the classify form's select/submit,
+    // a checkout row, the GitHub link) must reach its OWN native activation — swallowing
+    // it here with preventDefault() would both suppress that control and open the card.
+    if (event.target !== event.currentTarget) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       onClick();
     }
   };
   return html`
-    <div class=${"project-card state-" + ageState} onClick=${onClick} onKeyDown=${onKey} role="button" tabIndex="0" aria-label=${`Open all ${project.label} checkouts`}>
+    <div class=${"project-card state-" + ageState + (unclassified ? " project-unclassified-card" : "")} onClick=${onClick} onKeyDown=${onKey} role="button" tabIndex="0" aria-label=${`Open all ${project.label} checkouts`}>
       <div class="project-card-head">
         <span class="project-chip" style=${{ background: project.color }}>${project.label}</span>
+        ${unclassified
+          ? html`<span
+              class="badge project-unclassified-badge"
+              title="This workspace has no recorded purpose. Classify it as an operator project or a Forge artifact."
+            >unclassified</span>`
+          : null}
+        ${unclassified
+          ? html`<button
+              type="button"
+              class="project-classify-toggle"
+              aria-expanded=${showClassify}
+              title="Classify this workspace as an operator project or a Forge artifact"
+              onClick=${(event) => { event.stopPropagation(); setShowClassify((v) => !v); }}
+            >${showClassify ? "Cancel" : "Classify…"}</button>`
+          : null}
         ${project.liveSessions > 0
           ? html`<span class="live-indicator" title=${`${project.liveSessions} live orchestrator session(s)`}>● LIVE</span>`
           : null}
@@ -1709,6 +1738,7 @@ function ProjectCard({ project, onPick }) {
       </div>
       ${project.description ? html`<div class="project-desc">${project.description}</div>` : null}
       ${!project.description && project.readmeFirstLine ? html`<div class="project-desc faint">${project.readmeFirstLine}</div>` : null}
+      ${projectOwnerLine(project)}
       <div class="project-stats">
         <div>
           <div class="project-stat-label">last activity</div>
@@ -1737,7 +1767,130 @@ function ProjectCard({ project, onPick }) {
           </button>
         `)}
       </div>
+      ${unclassified && showClassify ? html`<${ClassifyControl} project=${project} onReload=${onReload} />` : null}
     </div>
+  `;
+}
+
+// FG-745 (AC1/AC2/AC6): when the API carries a durable owner or retention reason on a
+// record, describe that relationship in-place so a Forge artifact is reachable/described
+// from its owning project. The owner is STRUCTURED data from /api/projects (never
+// inferred client-side); an operator project with no owner renders nothing here.
+function projectOwnerLine(project) {
+  const owner = project.owner;
+  const ownerRef = owner && (owner.projectIdentity || owner.runId || owner.taskId);
+  if (!ownerRef && !project.retentionReason) return null;
+  const parts = [];
+  if (ownerRef) parts.push(`owned by ${owner.projectIdentity || owner.runId || owner.taskId}`);
+  if (owner && owner.runId && owner.projectIdentity) parts.push(`run ${owner.runId}`);
+  if (project.retentionReason) parts.push(`retained: ${project.retentionReason}`);
+  return html`<div class="project-owner faint" title="Recorded workspace ownership / retention (from /api/projects)">${parts.join(" · ")}</div>`;
+}
+
+// FG-745 (AC8): the operator classify/repair affordance for an `unclassified` record.
+// It POSTs to /api/projects/classify — the bounded, atomic, REFUSE-on-conflict claim
+// (it only records a purpose row; it never deletes a workspace or rewrites a run).
+// Choosing an artifact kind suppresses the card on the next reload; choosing "operator"
+// keeps it as a first-class project and clears the unclassified flag. A conflict (409)
+// or any other refusal is surfaced verbatim, never swallowed into a silent reload.
+const CLASSIFY_OPTIONS = [
+  { value: "operator", label: "Operator project" },
+  { value: "disposable_clone", label: "Disposable clone (artifact)" },
+  { value: "worktree", label: "Worktree (artifact)" },
+  { value: "evidence_fixture", label: "Evidence fixture (artifact)" },
+];
+
+function ClassifyControl({ project, onReload }) {
+  const [purpose, setPurpose] = useState("operator");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(null);
+  // A successful classify is confirmed IMMEDIATELY here: the Projects list is served
+  // from a short-lived server-side cache, so the card itself only re-projects on the
+  // next uncached read. The confirmation makes the write's success perceivable now,
+  // without the client second-guessing membership (which stays server-derived).
+  const [done, setDone] = useState(null);
+  // RF-1: a successful classify removes the whole form — including the focused submit
+  // button — and renders the status div in its place. Without moving focus, a keyboard
+  // operator is stranded on a detached element (focus falls back to <body>). Land focus
+  // on the confirmation itself, which is programmatically focusable (tabindex=-1) and
+  // carries role="status" so it is announced.
+  const doneRef = useRef(null);
+  useEffect(() => {
+    if (done && doneRef.current) doneRef.current.focus();
+  }, [done]);
+  const dir = project.primaryCheckout || project.projectDir;
+  const stop = (event) => event.stopPropagation();
+  const submit = useCallback(
+    async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPending(true);
+      setError(null);
+      try {
+        const res = await fetch("/api/projects/classify", {
+          method: "POST",
+          // The non-simple content type is load-bearing server-side: it is what makes
+          // this same-origin mutation legal at all (matches the queue-board fetch).
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir, purpose }),
+        });
+        let payload = null;
+        try {
+          payload = await res.json();
+        } catch {
+          payload = null;
+        }
+        if (res.ok && payload && payload.ok) {
+          setDone(purpose);
+          if (onReload) onReload();
+        } else {
+          setError((payload && payload.error) || `Classify failed (${res.status}).`);
+        }
+      } catch (err) {
+        setError(String(err));
+      } finally {
+        setPending(false);
+      }
+    },
+    [dir, purpose, onReload],
+  );
+
+  if (done) {
+    const label = (CLASSIFY_OPTIONS.find((opt) => opt.value === done) || { label: done }).label;
+    return html`
+      <div
+        class="project-classify project-classify-done"
+        role="status"
+        tabindex="-1"
+        ref=${doneRef}
+        onClick=${stop}
+      >
+        Reclassified as ${label}. The Projects list refreshes shortly.
+      </div>
+    `;
+  }
+
+  const selectId = `classify-purpose-${project.key}`;
+  return html`
+    <form class="project-classify" onSubmit=${submit} onClick=${stop}>
+      <label class="project-classify-label" for=${selectId}>Classify this workspace</label>
+      <div class="project-classify-controls">
+        <select
+          id=${selectId}
+          class="project-classify-select"
+          value=${purpose}
+          disabled=${pending}
+          onChange=${(event) => setPurpose(event.target.value)}
+          onClick=${stop}
+        >
+          ${CLASSIFY_OPTIONS.map((opt) => html`<option key=${opt.value} value=${opt.value}>${opt.label}</option>`)}
+        </select>
+        <button type="submit" class="project-classify-submit" disabled=${pending}>
+          ${pending ? "Classifying…" : "Classify"}
+        </button>
+      </div>
+      ${error ? html`<div class="project-classify-error" role="alert">${error}</div>` : null}
+    </form>
   `;
 }
 

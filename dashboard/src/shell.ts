@@ -480,6 +480,97 @@ section.projects-grid {
   animation: pulse 2s ease-in-out infinite;
 }
 
+/* FG-745: an unclassified record — visible fail-safe. The dashed left border and
+   the badge (text, not colour alone) mark a workspace whose purpose was never
+   recorded, so the operator can classify it. It is never hidden. */
+.project-card.project-unclassified-card { border-left: 3px dashed var(--warn); }
+.project-unclassified-badge {
+  color: var(--warn);
+  background: rgba(250, 204, 21, 0.14);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+}
+.project-classify-toggle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--fg-faint);
+  border-radius: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.project-classify-toggle:hover { background: var(--bg-elev-2); }
+.project-classify-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.project-owner {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* FG-745 (AC8): the operator classify/repair affordance on an unclassified card. */
+.project-classify {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.project-classify-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+}
+.project-classify-controls { display: flex; gap: 6px; align-items: stretch; }
+.project-classify-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.project-classify-select:focus-visible,
+.project-classify-submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.project-classify-submit {
+  flex: 0 0 auto;
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border: 1px solid var(--fg-faint);
+  border-radius: 5px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.project-classify-submit:hover:not(:disabled) { background: var(--border); }
+.project-classify-submit:disabled,
+.project-classify-select:disabled { opacity: 0.6; cursor: default; }
+.project-classify-error {
+  font-size: 11px;
+  color: var(--err);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.project-classify-done {
+  font-size: 11px;
+  color: var(--ok);
+  line-height: 1.4;
+}
+/* RF-1: the confirmation receives focus when the classified form is removed, so a
+   keyboard operator is never stranded on a detached submit button. Give the
+   programmatic focus a visible ring. */
+.project-classify-done:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .project-desc {
   font-size: 13px;
   color: var(--fg);

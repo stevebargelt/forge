@@ -1399,6 +1399,74 @@ CREATE INDEX IF NOT EXISTS idx_ci_waits_run ON ci_waits(run_id);
 CREATE INDEX IF NOT EXISTS idx_ci_waits_project ON ci_waits(project_dir);
 CREATE INDEX IF NOT EXISTS idx_ci_waits_live ON ci_waits(terminal);
 
+-- FG-745: workspace_purposes — WHAT a Forge-owned on-disk workspace IS, so the
+-- Projects tab can represent operator projects while a disposable clone, per-task
+-- worktree, or deliberately-retained evidence fixture stays on disk without becoming
+-- a peer top-level project. A brand-new table via CREATE TABLE IF NOT EXISTS on the
+-- ordinary open path — the same additive-only BD-15 contract as launch_observations /
+-- ci_waits above: SCHEMA_SQL is exec'd on EVERY writable open, so this CREATE is
+-- itself the additive migration that brings an aged ~/.forge/forge.db forward, and a
+-- whole new table needs no ADDITIVE_COLUMNS entry. user_version is NOT bumped.
+--
+-- path is the PROVEN canonical identity (FG-693 provenPhysical / realpath) of the
+-- workspace directory — the ONE name for that tree — resolved BEFORE the write
+-- transaction opens. path_as_written keeps the caller's spelling verbatim (audit
+-- only, decides nothing). kind is the CLOSED workspace vocabulary
+-- (operator | disposable_clone | worktree | evidence_fixture | unclassified),
+-- enum-as-convention (FG-585) with NO CHECK so an old/new binary never fights a
+-- constraint the other lacks; an absent table, a NULL, or an unknown value all decode
+-- to 'unclassified' — the VISIBLE fail-safe, inverted from launch_observations'
+-- fail-closed 'generic'. project_identity/run_id/task_id are the FG-663 owner declared
+-- at creation (or supplied at operator repair); reason carries an FG-677 retention
+-- outcome (active_process_cwd, ownership_ambiguous, …). Artifact status is a RECORDED
+-- FACT — never inferred from a path prefix, basename, ticket-shaped name, run count,
+-- missing remote, or age.
+-- No secondary index: reads are by path (the primary key) — a single-row lookup or a
+-- bounded path-IN-list join for the projection. An index on project_identity would pin
+-- that column undroppable and force an edit to the fg608-migration-parity UNDROPPABLE
+-- set for no query that needs it.
+CREATE TABLE IF NOT EXISTS workspace_purposes (
+  path             TEXT PRIMARY KEY,
+  path_as_written  TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  project_identity TEXT,
+  run_id           TEXT,
+  task_id          TEXT,
+  reason           TEXT,
+  source           TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+
+-- FG-745 (review RF-2): the APPEND-ONLY audit log of operator classify/repair
+-- decisions on a workspace purpose. The purpose row above holds only the CURRENT
+-- value: classifyWorkspacePurpose UPDATEs kind/source in place, so a reclassification
+-- that changes a top-level project's VISIBILITY (unclassified/operator -> an artifact
+-- kind, or the reverse) left no durable record of what it changed or when. The
+-- unauthenticated operator surface makes that gap a security concern — AC8 requires the
+-- repair to be auditable and reversible, which the current value alone is not.
+--
+-- Each row is ONE classify decision: prior_kind (what the purpose read BEFORE — an
+-- absent row reads 'unclassified', the visible fail-safe, so a fresh classify records
+-- that) -> new_kind, with the source, the acting operator when one is supplied (the
+-- surface is unauthenticated, so actor is NULL when no identity is available, never
+-- fabricated), and the timestamp. Written inside the SAME writeTransaction as the
+-- purpose upsert, so the audit row and the value it explains are one atomic unit (AC8).
+--
+-- A brand-new table via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
+-- additive-only BD-15 contract as workspace_purposes above; user_version is NOT bumped.
+-- Keyed on path only for reads (WHERE path = ? ORDER BY at); the append is a bare INSERT
+-- so no index pins a column undroppable.
+CREATE TABLE IF NOT EXISTS workspace_purpose_events (
+  id               INTEGER PRIMARY KEY,
+  path             TEXT NOT NULL,
+  prior_kind       TEXT NOT NULL,
+  new_kind         TEXT NOT NULL,
+  source           TEXT NOT NULL,
+  actor            TEXT,
+  at               TEXT NOT NULL
+);
+
 -- FG-591 (the operator work queue and its dispatcher): FOUR brand-new tables, all
 -- arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
 -- additive-only BD-15 contract as every table above. user_version is NOT bumped, so
@@ -1869,6 +1937,23 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "ci_waits", column: "ticket_id", ddl: "ALTER TABLE ci_waits ADD COLUMN ticket_id TEXT" },
   { table: "ci_waits", column: "project_dir", ddl: "ALTER TABLE ci_waits ADD COLUMN project_dir TEXT" },
   { table: "ci_waits", column: "project_dir_canonical", ddl: "ALTER TABLE ci_waits ADD COLUMN project_dir_canonical TEXT" },
+
+  // FG-745: workspace_purposes arrives WHOLE as a brand-new table (CREATE TABLE IF NOT
+  // EXISTS in SCHEMA_SQL), so on a fresh/aged store none of these ALTERs ever fires —
+  // the CREATE already has them. They exist ONLY so the fresh-vs-migrated parity guard
+  // (fg608-migration-parity) can strip every restorable column and prove applyMigrations
+  // restores it, exactly as launch_observations / ci_waits do. The NOT NULL columns
+  // (path_as_written, kind, source, created_at, updated_at) are undroppable and covered
+  // by the list-completeness half of that guard, so they are deliberately not listed.
+  { table: "workspace_purposes", column: "project_identity", ddl: "ALTER TABLE workspace_purposes ADD COLUMN project_identity TEXT" },
+  { table: "workspace_purposes", column: "run_id", ddl: "ALTER TABLE workspace_purposes ADD COLUMN run_id TEXT" },
+  { table: "workspace_purposes", column: "task_id", ddl: "ALTER TABLE workspace_purposes ADD COLUMN task_id TEXT" },
+  { table: "workspace_purposes", column: "reason", ddl: "ALTER TABLE workspace_purposes ADD COLUMN reason TEXT" },
+
+  // FG-745 (review RF-2): the workspace_purpose_events audit table arrives WHOLE too;
+  // only its nullable `actor` column is restorable, so it is the one entry the parity
+  // guard needs (the NOT NULL columns are undroppable and covered by list-completeness).
+  { table: "workspace_purpose_events", column: "actor", ddl: "ALTER TABLE workspace_purpose_events ADD COLUMN actor TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

@@ -30,7 +30,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
+  recentActivity, inFlight, taskDetail, projectsForDashboard, operatorProjectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit,
@@ -45,6 +45,12 @@ import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
+import {
+  guardBindAddress,
+  guardMutationRequest,
+  resolveForgeBinary,
+  runForgeVerb,
+} from "./queue-mutation.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -78,6 +84,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       resolveOwner: () => resolveOwnerProject(projectsForDashboard(), projectKey, projectDir),
       requestedProjectDir: projectDir,
     });
+    return;
+  }
+
+  // FG-745 (AC8): the bounded operator classify/repair mutation for an unclassified
+  // legacy or manually-created workspace. Same DEC-015 shape as the queue mutations —
+  // it shells exactly `forge projects classify` (the atomic REFUSE-on-conflict claim)
+  // and writes no DB row itself — behind the same bind-address + cross-origin guards.
+  if (req.method === "POST" && path === PROJECTS_CLASSIFY_PATH) {
+    await handleProjectsClassify(req, res);
     return;
   }
 
@@ -183,7 +198,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (path === "/api/projects") {
-    const data = projectsForDashboard();
+    // FG-745: operator-project MEMBERSHIP — the same set `forge projects list`
+    // returns (AC7). A classified artifact is omitted; an unclassified legacy dir is
+    // included and carries `classification: "unclassified"` so the client can flag it
+    // and offer the classify affordance; a one-run/no-remote independent project stays
+    // included (no heuristic decides visibility). Current Activity is unaffected: it
+    // reads the unfiltered projectsForDashboard() scope, so an active artifact's runs
+    // and live session remain visible under its owner (AC5).
+    const data = operatorProjectsForDashboard();
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
@@ -695,6 +717,142 @@ function scopeFromUrl(url: URL): ProjectScope {
     url.searchParams.get("projectKey") ?? undefined,
     url.searchParams.get("projectDir") ?? undefined,
   );
+}
+
+// ─── FG-745: the operator classify/repair mutation ───────────────────────────────
+
+export const PROJECTS_CLASSIFY_PATH = "/api/projects/classify";
+
+/** The workspace-kind vocabulary the route accepts. Duplicated from the store
+ *  DELIBERATELY: DEC-015 keeps this mutation surface off the store (it shells the CLI,
+ *  which is the authoritative validator). A value outside this set is refused here so
+ *  a bad request never reaches a subprocess; the CLI re-validates regardless. */
+const CLASSIFY_PURPOSES = ["operator", "disposable_clone", "worktree", "evidence_fixture", "unclassified"] as const;
+
+const MAX_CLASSIFY_BODY_BYTES = 16 * 1024;
+/** A durable owner/run/task id operand — a charset that cannot express a leading
+ *  `-`, a path separator, `..`, a shell metacharacter, or whitespace. */
+const OWNER_OPERAND = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+function classifyHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res
+    .writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" })
+    .end(JSON.stringify(payload));
+}
+
+async function readClassifyBody(req: IncomingMessage): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }> {
+  let total = 0;
+  const chunks: Buffer[] = [];
+  try {
+    for await (const chunk of req) {
+      const buf = chunk as Buffer;
+      total += buf.length;
+      if (total > MAX_CLASSIFY_BODY_BYTES) {
+        req.destroy();
+        return { ok: false, status: 413, error: `the request body exceeds ${MAX_CLASSIFY_BODY_BYTES} bytes.` };
+      }
+      chunks.push(buf);
+    }
+  } catch {
+    return { ok: false, status: 400, error: "the request body could not be read." };
+  }
+  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
+}
+
+/** Handle POST /api/projects/classify. The ORDER is the security property: every
+ *  refusal happens before a subprocess is spawned. `dir` is caller-supplied (an
+ *  operator names the legacy workspace to classify) and is validated as an absolute,
+ *  non-flag operand; the `forge projects classify` claim it delegates to only records
+ *  a purpose row — it never deletes a workspace or rewrites a run. */
+async function handleProjectsClassify(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const bindRefusal = guardBindAddress();
+  if (bindRefusal) {
+    sendJson(res, bindRefusal.status, { ok: false, error: bindRefusal.error });
+    return;
+  }
+  const headerRefusal = guardMutationRequest({
+    contentType: classifyHeader(req, "content-type"),
+    origin: classifyHeader(req, "origin"),
+    secFetchSite: classifyHeader(req, "sec-fetch-site"),
+    host: classifyHeader(req, "host"),
+  });
+  if (headerRefusal) {
+    sendJson(res, headerRefusal.status, { ok: false, error: headerRefusal.error });
+    return;
+  }
+
+  const body = await readClassifyBody(req);
+  if (!body.ok) {
+    sendJson(res, body.status, { ok: false, error: body.error });
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = body.text.trim() === "" ? {} : JSON.parse(body.text);
+  } catch {
+    sendJson(res, 400, { ok: false, error: "the request body is not valid JSON." });
+    return;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    sendJson(res, 400, { ok: false, error: "the request body must be a JSON object." });
+    return;
+  }
+  const input = parsed as Record<string, unknown>;
+
+  const dir = input["dir"];
+  if (typeof dir !== "string" || dir === "" || !dir.startsWith("/") || dir.startsWith("-") || dir.length > 4096 || dir.includes("\0")) {
+    sendJson(res, 400, { ok: false, error: "dir is required and must be an absolute path with no leading '-' or NUL." });
+    return;
+  }
+  const purpose = input["purpose"];
+  if (typeof purpose !== "string" || !(CLASSIFY_PURPOSES as readonly string[]).includes(purpose)) {
+    sendJson(res, 400, { ok: false, error: `purpose must be one of: ${CLASSIFY_PURPOSES.join(", ")}.` });
+    return;
+  }
+  // FG-745 (review RF-2): attribute the audit row to the SURFACE, server-side. The
+  // actor is NOT taken from the request body — a value the unauthenticated client could
+  // forge would attribute the decision to whomever it named. "dashboard" records the
+  // honest, unforgeable fact: this visibility change came through the network-reachable
+  // operator surface (distinct from a host shell user, which the CLI records as $USER).
+  const argv = ["projects", "classify", dir, "--purpose", purpose, "--actor", "dashboard", "--json"];
+  for (const [field, flag] of [["ownerIdentity", "--owner-identity"], ["run", "--run"], ["task", "--task"]] as const) {
+    const raw = input[field];
+    if (raw === undefined || raw === null || raw === "") continue;
+    if (typeof raw !== "string" || !OWNER_OPERAND.test(raw)) {
+      sendJson(res, 400, { ok: false, error: `${field} must match ${OWNER_OPERAND}.` });
+      return;
+    }
+    argv.push(flag, raw);
+  }
+
+  const binary = resolveForgeBinary();
+  if ("ok" in binary && binary.ok === false) {
+    sendJson(res, binary.status, { ok: false, error: binary.error });
+    return;
+  }
+  const result = await runForgeVerb((binary as { path: string }).path, argv, dirname(HERE));
+  if (result.timedOut) {
+    sendJson(res, 504, { ok: false, error: "`forge projects classify` did not finish in time." });
+    return;
+  }
+  if (result.code !== 0) {
+    const reason = result.stderr.trim() || result.stdout.trim() || `\`forge projects classify\` exited ${result.code}`;
+    // A REFUSE-on-conflict from the atomic claim surfaces here as the CLI's own stderr.
+    sendJson(res, 409, { ok: false, error: reason.slice(-4096).trim() });
+    return;
+  }
+  let cliResult: unknown = null;
+  try {
+    cliResult = JSON.parse(result.stdout);
+  } catch {
+    cliResult = null;
+  }
+  sendJson(res, 200, { ok: true, result: cliResult });
 }
 
 server.listen(PORT, HOST, () => {
