@@ -965,9 +965,11 @@ function isLiveCampaignOperatorWait(row: CampaignStopRow): boolean {
  *  survive: a `complete`/`failed`/`pending`/`running` item is not a wait (it advanced or
  *  never parked), so the parked set (awaiting_gate / blocked_by_red / awaiting_recovery)
  *  is what remains. FG-743: the park alone is not enough — a stop under a TERMINAL campaign
- *  or against an already-`done` ticket is historical, not live, so the shared
- *  `isLiveCampaignOperatorWait` predicate finishes the membership decision. The item
- *  carries no project dir of its own; the campaign does. */
+ *  is historical, not live. A `done` ticket clears the wait ONLY when the retained ask was
+ *  the ticket-closure reconciliation itself, scoped to the item's OWN (project_key,
+ *  ticket_id); an unrelated, still-unresolved operator decision stays live even against a
+ *  done ticket. The shared `isLiveCampaignOperatorWait` predicate finishes the membership
+ *  decision. The item carries no project dir of its own; the campaign does. */
 function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
   // A read-only handle can predate the campaign tables; PRAGMA doubles as the existence
   // check (zero rows for a missing table), so a store without them reads as no hard stops
