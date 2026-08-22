@@ -38,6 +38,21 @@ constraint counts. It stores **no secrets, token material, or auth file paths** 
 the same discipline as the `auth` block. Auth profile names and runtime paths are
 config references, not credential material.
 
+## Control-plane config graph (FG-349)
+
+`forge config graph [--json]`, the dashboard's control-plane tab, and its
+`/api/config-graph` read path expose the same kind of provenance as the
+`controlPlane` manifest block above, but live (EFFECTIVE) rather than
+dispatch-time (RECORDED) — see `docs/concepts.md` and `docs/invariants.md` for
+that vocabulary. `buildConfigGraph()` (`src/v2/config-graph.ts`) runs a final
+whole-graph redaction sweep (`redactGraph` → `redactSecrets`) over every string
+in the object, including each row's verbatim `native` verdict, as
+defense-in-depth over the per-row redaction each section builder already
+performs before assembling its row. Provider/auth readiness in the Capabilities
+panel is checked by env-var **presence** only, exactly like the `auth` block
+above — a provider's readiness is never derived from reading its value, and no
+capability or prerequisite row probes a subprocess or makes a billed call.
+
 ## Auth profiles
 
 - `required_env` is checked by **name** only; forge never reads or logs the values.
