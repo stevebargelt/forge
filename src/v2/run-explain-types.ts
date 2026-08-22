@@ -224,8 +224,9 @@ export type RedsBlock = {
 
 export type UpstreamInput = {
   key: string;
-  /** A compact, redaction-safe summary of the input value — never the raw
-   *  value, which may be large or carry secrets. */
+  /** A compact, redaction-safe SHAPE summary of the input value — its type and
+   *  length/count, NEVER any of the raw value's content, which may be large or
+   *  carry secrets a structural redactor cannot catch (FG-348 RF-3/RF-4). */
   summary: string;
 };
 

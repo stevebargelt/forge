@@ -178,14 +178,35 @@ test("reds block projects verdicts with a finding count", () => {
   assert.equal(explain.reds?.reds[0]?.verdict, "pass");
 });
 
-test("upstream inputs are summarized, never dumped verbatim", () => {
+test("upstream inputs are summarized by shape, never dumped verbatim", () => {
   const task = mkTask({ id: "t1" });
   task.taskPackage.inputs = { brief: "x".repeat(500), fanoutIndex: 2, nested: { a: 1 } };
   const explain = buildTaskExplain(baseInput({ task, manifest: FULL_MANIFEST }));
   const brief = explain.upstream?.inputs.find((i) => i.key === "brief");
-  assert.ok(brief && brief.summary.length <= 81, "long strings are truncated");
+  assert.equal(brief?.summary, "string[500]", "strings surface a length, not their content");
   const nested = explain.upstream?.inputs.find((i) => i.key === "nested");
   assert.equal(nested?.summary, "object{1}");
+});
+
+// FG-348 RF-3/RF-4: a secret placed under any input key must never reach the payload.
+// The structural whole-payload redactor cannot catch a BARE token, so the ONLY safe
+// summary of a string is its shape. Covers both the demonstrated short-token case
+// (RF-4) and the truncated long-string case (RF-3).
+test("string-valued upstream inputs never surface raw value content, so a secret cannot leak", () => {
+  const shortToken = "sk-ant-secret0123456789"; // a bare short bearer/API token (RF-4)
+  const longSecret = "supersecretcredential-".repeat(20); // > 80 chars (RF-3)
+  const task = mkTask({ id: "t1" });
+  task.taskPackage.inputs = { apiKey: shortToken, prompt: longSecret, count: 3 };
+  const explain = buildTaskExplain(baseInput({ task, manifest: FULL_MANIFEST }));
+
+  const payload = JSON.stringify(explain);
+  assert.ok(!payload.includes(shortToken), "a short bare token never appears anywhere in the payload");
+  assert.ok(!payload.includes("supersecretcredential"), "a long secret's content never appears in the payload");
+
+  // The KEY (shape) is still surfaced — the input is auditable without its value.
+  const apiKey = explain.upstream?.inputs.find((i) => i.key === "apiKey");
+  assert.equal(apiKey?.summary, `string[${shortToken.length}]`);
+  assert.ok(explain.upstream?.inputs.some((i) => i.key === "prompt"));
 });
 
 test("a fanout child input surfaces the plan.steps warning", () => {

@@ -1,4 +1,6 @@
 import type { Command } from "commander";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { getRun } from "../../store/runs.js";
 import { tasksForRun, getTask } from "../../store/tasks.js";
 import { verdictsForRun, verdictsForTask } from "../../store/verdicts.js";
@@ -10,7 +12,7 @@ import type { ConfigGraph } from "../../v2/config-graph-types.js";
 import { taskDir } from "../../util/paths.js";
 import { buildRunMap, type RunMapVerdict } from "../../v2/run-map.js";
 import { buildTaskExplain } from "../../v2/task-explain.js";
-import type { RunMapGraph, TaskExplain } from "../../v2/run-explain-types.js";
+import type { ArtifactRef, RunMapGraph, TaskExplain } from "../../v2/run-explain-types.js";
 import type { Workflow } from "../../v2/schema.js";
 
 // `forge explain run <runId> --json` / `forge explain task <taskId> --json` — the
@@ -68,7 +70,18 @@ export function explainTaskGraph(taskId: string): TaskExplain {
   const task = getTask(taskId);
   if (!task) throw new Error(`task '${taskId}' not found`);
   const run = getRun(task.runId);
-  const manifest = readTaskManifest(taskDir(task.runId, taskId));
+  const dir = taskDir(task.runId, taskId);
+  const manifest = readTaskManifest(dir);
+  // Same artifact-availability the dashboard query (taskExplain) supplies, so the
+  // shared builder produces byte-identical output on both surfaces (FG-348 AC5).
+  // Absent, the builder derives a result-only list and the CLI diverges from the
+  // dashboard, which probes all four.
+  const artifacts: ArtifactRef[] = [
+    { kind: "result", name: "result.json", available: task.result !== undefined && task.result !== null },
+    { kind: "stdout", name: "container.stdout.log", available: existsSync(join(dir, "container.stdout.log")) },
+    { kind: "stderr", name: "container.stderr.log", available: existsSync(join(dir, "container.stderr.log")) },
+    { kind: "manifest", name: "manifest.json", available: manifest !== undefined },
+  ];
   const gates = gatesForTask(taskId).map((g) => ({
     decision: g.decision,
     rationale: g.rationale ?? null,
@@ -90,6 +103,7 @@ export function explainTaskGraph(taskId: string): TaskExplain {
     verdicts,
     ...(manifest ? { manifest } : {}),
     ...(gateType ? { gateType } : {}),
+    artifacts,
   });
   return redact(explain);
 }

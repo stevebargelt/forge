@@ -82,14 +82,20 @@ function findingCount(findings: unknown): number {
 }
 
 /** A compact, redaction-safe summary of one input value — never the raw value.
- *  The whole payload additionally rides the redaction boundary in the query, so
- *  even the truncated string preview cannot leak a secret past the process. */
+ *
+ *  FG-348 (RF-3/RF-4): task inputs are free-form and can be attacker-influenced, so
+ *  ANY string under ANY key may be a bearer token, credential, or sensitive prompt.
+ *  The whole-payload redaction sweep the caller applies (redactGraph → redactSecrets)
+ *  is STRUCTURAL — it blanks credential-SHAPED substrings (basic-auth URLs,
+ *  `_authToken=`, `NAME_TOKEN=`, `Authorization:` headers) but by deliberate policy
+ *  does NOT catch a BARE token value with no surrounding structure. So a preview of
+ *  raw string content — even truncated — leaks a bare secret past the process. The
+ *  only fix that honors the invariant ("secrets never leave the process") for both
+ *  short and long strings is to surface the value's SHAPE, never its content: the key
+ *  name and a length, matching how arrays/objects are already summarized. */
 function summarizeInput(value: unknown): string {
   if (value === null) return "null";
-  if (typeof value === "string") {
-    const oneLine = value.replace(/\s+/g, " ").trim();
-    return oneLine.length > 80 ? `${oneLine.slice(0, 77)}…` : oneLine;
-  }
+  if (typeof value === "string") return `string[${value.length}]`;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) return `array[${value.length}]`;
   if (typeof value === "object") return `object{${Object.keys(value as object).length}}`;
