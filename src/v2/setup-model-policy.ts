@@ -62,8 +62,10 @@ export type HostModelPolicyDeps = {
   prompt: Prompt;
   /** Write the generated YAML to the active host policy path. */
   writePolicy: (yaml: string) => void;
-  /** Fallback: copy the seed to the active path (non-interactive, no flags). */
-  copySeed?: () => void;
+  /** Fallback: copy the seed to the active path (non-interactive, no flags).
+   *  Returns true if a seed was actually copied, false if there was no seed to
+   *  copy (a damaged/incomplete install) so the caller can report honestly. */
+  copySeed?: () => boolean;
   /** Reload the just-written policy through the PRODUCTION loader (version gate + Zod). */
   reload: () => ModelPolicy | undefined;
   /** LoadContext for the summary resolver — must resolve to the SAME written policy. */
@@ -78,6 +80,7 @@ export type HostModelPolicyAction =
   | "generated-dry-run"
   | "preserved"
   | "seed-retained"
+  | "no-seed"
   | "no-provider"
   | "cancelled"
   | "invalid-selection";
@@ -396,6 +399,14 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
           step: { name: "model-policy.yml", status: "would-create", detail: "would generate active host policy from flags", next: "run `forge setup` (without --dry-run) to write it" },
         };
       }
+      // RF-1: a non-interactive --reconfigure OVERWRITES an existing policy, so the
+      // operator's output must SHOW the proposed policy before it lands — the same
+      // preview the interactive path prints. --reconfigure + --yes/flags remain the
+      // explicit confirmation; the preview is what makes the overwrite non-silent.
+      if (deps.reconfigure) {
+        deps.log("\nProposed ~/.forge/model-policy.yml (--reconfigure overwrite):\n");
+        deps.log(gen.yaml);
+      }
       return writeAndSummarize(deps, gen.yaml);
     }
 
@@ -414,21 +425,46 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
     if (!deps.dryRun) {
       // RF-4: the seed-copy is exclusive too — a policy that appeared between the
       // policyPresent snapshot and this copy is preserved, not clobbered.
+      let copied: boolean;
       try {
-        deps.copySeed?.();
+        copied = deps.copySeed?.() ?? false;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "EEXIST") return concurrentPreservedResult();
         throw e;
       }
+      // RF-3: copySeed is a no-op when no seed exists (damaged/incomplete install).
+      // Do NOT report a created/retained policy that was never written — say plainly
+      // that nothing was created, with a named advisory pointing at the fix.
+      if (!copied) {
+        const advisory =
+          "non-interactive with no selection flags and no seed model-policy.example.yml to copy — " +
+          "no model policy was created. Install seeds with `forge upgrade`, or run `forge setup` in a " +
+          "TTY / pass selection flags to author one.";
+        return {
+          action: "no-seed",
+          wrote: false,
+          advisory,
+          step: { name: "model-policy.yml", status: "warn", detail: advisory, next: "run `forge upgrade` to install the seed, then re-run `forge setup`" },
+        };
+      }
+      const advisory =
+        "non-interactive with no selection flags — retained the seed default model policy (no Q&A). " +
+        "Run `forge setup` in a TTY, or pass selection flags, to author routing.";
+      return {
+        action: "seed-retained",
+        wrote: true,
+        advisory,
+        step: { name: "model-policy.yml", status: "created", detail: advisory },
+      };
     }
     const advisory =
-      "non-interactive with no selection flags — retained the seed default model policy (no Q&A). " +
+      "non-interactive with no selection flags — would retain the seed default model policy (no Q&A). " +
       "Run `forge setup` in a TTY, or pass selection flags, to author routing.";
     return {
       action: "seed-retained",
-      wrote: !deps.dryRun && !!deps.copySeed,
+      wrote: false,
       advisory,
-      step: { name: "model-policy.yml", status: deps.dryRun ? "would-create" : "created", detail: advisory },
+      step: { name: "model-policy.yml", status: "would-create", detail: advisory },
     };
   }
 

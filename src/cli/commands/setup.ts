@@ -6,9 +6,21 @@
 // live agent run; the DB is never touched. `--dry-run` previews without writing.
 
 import type { Command } from "commander";
-import { existsSync, copyFileSync, writeFileSync, constants as fsConstants } from "node:fs";
+import {
+  existsSync,
+  copyFileSync,
+  writeFileSync,
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+  renameSync,
+  unlinkSync,
+  constants as fsConstants,
+} from "node:fs";
 import { createInterface } from "node:readline";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
+import { randomBytes } from "node:crypto";
 import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { gatherReleaseInputs } from "./doctor.js";
@@ -41,8 +53,55 @@ const MODEL_POLICY_SEED = join(FORGE_HOME, "model-policy.example.yml");
 // (never reconfigure), so it is always exclusive: a policy that appeared since the
 // policyPresent snapshot (a concurrent bare setup) fails with EEXIST rather than being
 // clobbered. runHostModelPolicySetup catches that EEXIST and reports it as preserved.
-export function copySeedExclusive(seedPath: string, destPath: string): void {
-  if (existsSync(seedPath)) copyFileSync(seedPath, destPath, fsConstants.COPYFILE_EXCL);
+//
+// RF-3: returns whether a seed was actually copied. When the seed is absent (a
+// damaged/incomplete install) nothing is written and this returns false, so the
+// caller reports "no policy created" instead of a phantom success.
+export function copySeedExclusive(seedPath: string, destPath: string): boolean {
+  if (!existsSync(seedPath)) return false;
+  copyFileSync(seedPath, destPath, fsConstants.COPYFILE_EXCL);
+  return true;
+}
+
+// RF-2: overwrite an existing file atomically — write a same-directory temp, fsync it
+// to durable storage, then rename over the destination. rename(2) is atomic within a
+// filesystem, so a concurrent reader (or a dispatch loader) sees either the whole old
+// policy or the whole new one, never a truncated/torn file. Used for --reconfigure,
+// which intentionally replaces the live policy in place.
+function atomicOverwrite(destPath: string, data: string): void {
+  const tmp = join(dirname(destPath), `.${basename(destPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, "wx"); // exclusive create at a random name — never write through a planted file/symlink
+    writeSync(fd, data);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, destPath);
+  } catch (e) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup of a partial temp */
+    }
+    throw e;
+  }
+}
+
+// Write the host model policy: --reconfigure OVERWRITES the live file, so it goes
+// through the atomic temp+fsync+rename path (RF-2). Absent-policy authoring keeps the
+// exclusive-create "wx" flag so a concurrently-created policy fails EEXIST rather than
+// being clobbered (the orchestrator reports that as preserved).
+export function writeHostPolicy(destPath: string, yaml: string, reconfigure: boolean): void {
+  if (reconfigure) atomicOverwrite(destPath, yaml);
+  else writeFileSync(destPath, yaml, { flag: "wx" });
 }
 
 // Create the active model policy from the installed example when absent. Never
@@ -110,9 +169,9 @@ export async function provisionModelPolicyInteractive(opts: {
     prompt: makeReadlinePrompt(),
     // Authoring an absent policy writes exclusively ("wx") so a policy that appeared
     // since the policyPresent snapshot (a concurrent bare setup) fails the write with
-    // EEXIST instead of clobbering it. --reconfigure is an intentional overwrite.
-    writePolicy: (yaml) =>
-      writeFileSync(MODEL_POLICY_PATH, yaml, opts.reconfigure ? undefined : { flag: "wx" }),
+    // EEXIST instead of clobbering it. --reconfigure is an intentional overwrite, done
+    // atomically (temp + fsync + rename) so a concurrent reader never sees a torn file.
+    writePolicy: (yaml) => writeHostPolicy(MODEL_POLICY_PATH, yaml, opts.reconfigure),
     copySeed: () => copySeedExclusive(MODEL_POLICY_SEED, MODEL_POLICY_PATH),
     reload: () => safeLoadHostPolicy(),
     summaryCtx: {},

@@ -65,6 +65,7 @@ async function withHarness(
     copySeed: () => {
       h.seedCopies++;
       writeFileSync(join(dir, "model-policy.yml"), "schema_version: 2\n");
+      return true;
     },
     reload: () => {
       try {

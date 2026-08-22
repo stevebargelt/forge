@@ -54,7 +54,7 @@ forge setup
 
 Three things happen in one step:
 
-1. **Authors `~/.forge/model-policy.yml`** — interactively asks which profile to route to each capability (from what `forge providers doctor` finds on this host), or generates deterministically from selection flags non-interactively; falls back to copying `model-policy.example.yml` verbatim when neither a TTY nor selection flags are available. Only when the active policy is absent — an existing policy is never overwritten unless you pass `--reconfigure`. See `docs/how-to-model-policy.md` for the full flag/branch reference.
+1. **Authors `~/.forge/model-policy.yml`** — interactively asks which profile to route to each capability (from what `forge providers doctor` finds on this host), or generates deterministically from selection flags non-interactively. With neither a TTY nor selection flags it copies `model-policy.example.yml` verbatim as the seed-default fallback — **but only when a usable provider is detected and the seed is installed.** If `forge providers doctor` finds no usable provider (or the seed is missing), setup writes **nothing** and prints a named advisory rather than installing a policy for a provider you can't use. Only when the active policy is absent — an existing policy is never overwritten unless you pass `--reconfigure`. See `docs/how-to-model-policy.md` for the full flag/branch reference.
 2. **Refreshes the flat `~/.forge/routing-policy.yml`** from the RACI seed. This file is generated, not hand-maintained — but since FG-583 it is **not** a dispatch source. The routing policy dispatch actually reads is the one compiled **into the atomic seed generation**, which only `forge upgrade` publishes (step 2 above). `forge setup` does **not** publish a generation, so this step alone does not make routing effective for dispatch.
 3. **Runs a read-only release check** — agent image, in-image runtime CLIs (`claude`, `codex`, `pi`), per-profile provider auth, model and routing policy validity. No live agent run; everything is verified statically.
 
@@ -88,7 +88,7 @@ Work through whatever `forge setup` flagged. None of these require a live agent 
 
 **Bedrock, Pi, and Groq are opt-in.** `forge setup` diagnosing them as unavailable is expected and not a blocker unless you plan to use those providers on this machine.
 
-`~/.forge/*` is **host-local personal config and is never committed.** You do not need to hand-write `model-policy.yml` or `routing-policy.yml` — `forge setup` authors both when they're absent: it asks (or generates from flags) `model-policy.yml` from the providers actually detected on this host, falling back to the seed default non-interactively with no flags; `routing-policy.yml` is always recompiled from the RACI seed.
+`~/.forge/*` is **host-local personal config and is never committed.** You do not need to hand-write `model-policy.yml` or `routing-policy.yml` — `forge setup` authors both when they're absent: it asks (or generates from flags) `model-policy.yml` from the providers actually detected on this host, falling back to the seed default non-interactively with no flags **when a usable provider is detected** (with no usable provider it writes nothing and advises); `routing-policy.yml` is always recompiled from the RACI seed.
 
 ## 5. Iterate until green
 

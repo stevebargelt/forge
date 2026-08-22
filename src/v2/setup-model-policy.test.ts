@@ -55,6 +55,7 @@ async function withDeps(
     },
     copySeed: () => {
       state.seedCopies++;
+      return true;
     },
     reload: () => {
       try {
@@ -259,6 +260,65 @@ test("RF-4: the seed-fallback copy preserves a concurrently-created policy, neve
   } finally {
     rmSync(seedDir, { recursive: true, force: true });
   }
+});
+
+// RF-1: a non-interactive --reconfigure with selection flags OVERWRITES the existing
+// policy. It must PREVIEW the proposed policy first — the operator's output has to show
+// exactly what will replace their policy before it lands, not just after. Discriminating:
+// before the fix the non-interactive reconfigure path wrote with no preview logged at all.
+test("RF-1: non-interactive --reconfigure previews the proposed policy before overwriting", async () => {
+  const existing = ModelPolicySchema.parse({
+    schema_version: 2,
+    model_profiles: {
+      "anthropic-subscription-opus": {
+        provider: "anthropic",
+        auth: "subscription",
+        map: { default: { model: "claude-opus-5", cost_tier: "premium" } },
+      },
+    },
+    defaults: { profile: "anthropic-subscription-opus", activity: { default: "anthropic-subscription-opus" } },
+  });
+  await withDeps(
+    {
+      isTTY: false,
+      yes: true,
+      reconfigure: true,
+      policyPresent: true,
+      loadExisting: () => existing,
+      selection: { defaultProfile: "anthropic-subscription-sonnet" },
+    },
+    async (deps, state) => {
+      const res = await runHostModelPolicySetup(deps);
+      assert.equal(res.action, "generated");
+      assert.equal(state.writes.length, 1, "the reconfigure still writes");
+      const preview = state.logs.join("\n");
+      // The proposed policy is logged (the preview) — and it reflects the NEW selection.
+      assert.match(preview, /Proposed .*model-policy\.yml.*reconfigure/i, "an overwrite preview was printed");
+      assert.match(preview, /profile: anthropic-subscription-sonnet/, "preview shows the proposed (new) policy");
+      // The preview precedes the write: the written yaml also appears in what was logged.
+      assert.ok(preview.includes(state.writes[0]!.trim()), "the previewed yaml equals what was written");
+    },
+  );
+});
+
+// RF-3: the seed-copy fallback is a NO-OP when no seed exists (a damaged/incomplete
+// install). The orchestrator must NOT report a created/retained policy that was never
+// written — it reports "no-seed" with a named advisory. Discriminating: before the fix
+// copySeed's void return let the caller infer success from the callback merely existing,
+// so a run with no seed reported status "created" for a file that does not exist.
+test("RF-3: no seed to copy → reports no-seed, nothing written, not a phantom created policy", async () => {
+  await withDeps(
+    { isTTY: false, selection: undefined, copySeed: () => false },
+    async (deps, state) => {
+      const res = await runHostModelPolicySetup(deps);
+      assert.equal(res.action, "no-seed", "honest: no policy was created");
+      assert.equal(res.wrote, false);
+      assert.notEqual(res.step.status, "created", "never reports created when nothing was copied");
+      assert.match(res.advisory ?? "", /no model policy was created/i);
+      assert.match(res.step.next ?? "", /forge upgrade/);
+      assert.equal(state.writes.length, 0);
+    },
+  );
 });
 
 test("non-interactive + complete flags: deterministic generate, one write, no prompt", async () => {
