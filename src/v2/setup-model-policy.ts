@@ -261,12 +261,14 @@ async function gatherAnswersInteractive(
   choices: ProfileChoice[],
   defaults: Answers,
 ): Promise<Answers> {
-  const activity: Record<string, string> = {};
+  // Seed from defaults so existing activity mappings / agent pins OUTSIDE the six
+  // prompted entries survive a reconfigure — the prompts overwrite only their own keys.
+  const activity: Record<string, string> = { ...defaults.activity };
   log("Map each capability to a profile (Enter accepts the default):");
   for (const [cap, label] of CAPABILITY_PROMPTS) {
     activity[cap] = await askProfile(prompt, log, choices, label, defaults.activity[cap] ?? defaults.defaultProfile);
   }
-  const rolePins: Record<string, string> = {};
+  const rolePins: Record<string, string> = { ...defaults.rolePins };
   log("Notable role pins:");
   for (const [role, label] of ROLE_PROMPTS) {
     rolePins[role] = await askProfile(prompt, log, choices, label, defaults.rolePins[role] ?? defaults.defaultProfile);
@@ -287,7 +289,24 @@ function invalidResult(err: unknown): HostModelPolicyResult {
 }
 
 function writeAndSummarize(deps: HostModelPolicyDeps, yaml: string): HostModelPolicyResult {
-  deps.writePolicy(yaml);
+  try {
+    deps.writePolicy(yaml);
+  } catch (e) {
+    // TOCTOU close: the writer creates exclusively, so a policy that appeared
+    // between the absent-policy check and this write (a concurrent bare setup)
+    // refuses rather than clobbering. Report it as preserved, never overwritten.
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      const advisory =
+        "a host model-policy.yml appeared concurrently — preserved it, not overwritten. Re-author with `forge setup --reconfigure`.";
+      return {
+        action: "preserved",
+        wrote: false,
+        advisory,
+        step: { name: "model-policy.yml", status: "ok", detail: advisory },
+      };
+    }
+    throw e;
+  }
   const reloaded = deps.reload();
   if (!reloaded) {
     const advisory = "wrote the model policy, but could not reload it via the loader to confirm routing.";
@@ -346,8 +365,9 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
   const existing = deps.reconfigure ? deps.loadExisting?.() : undefined;
   const defaults = defaultAnswers(choices, existing);
 
-  // Non-interactive.
-  if (!deps.isTTY) {
+  // Non-interactive. --yes forces this deterministic path even on a TTY, so
+  // `forge setup --yes` never blocks on a prompt (the protected invariant).
+  if (!deps.isTTY || deps.yes) {
     if (hasCompleteSelection(deps.selection)) {
       let answers: Answers;
       try {

@@ -99,7 +99,11 @@ export async function provisionModelPolicyInteractive(opts: {
     policyPresent: existsSync(MODEL_POLICY_PATH),
     probes: doctorReport(),
     prompt: makeReadlinePrompt(),
-    writePolicy: (yaml) => writeFileSync(MODEL_POLICY_PATH, yaml),
+    // Authoring an absent policy writes exclusively ("wx") so a policy that appeared
+    // since the policyPresent snapshot (a concurrent bare setup) fails the write with
+    // EEXIST instead of clobbering it. --reconfigure is an intentional overwrite.
+    writePolicy: (yaml) =>
+      writeFileSync(MODEL_POLICY_PATH, yaml, opts.reconfigure ? undefined : { flag: "wx" }),
     copySeed: () => {
       if (existsSync(MODEL_POLICY_SEED)) copyFileSync(MODEL_POLICY_SEED, MODEL_POLICY_PATH);
     },
