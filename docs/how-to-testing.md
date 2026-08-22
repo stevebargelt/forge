@@ -83,7 +83,7 @@ What neither arm sees is an arm that consults the environment and returns green 
 
 ## The dashboard browser tier (FG-642)
 
-`dashboard/browser-tests/*.test.ts` is seventeen suites / 109 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
+`dashboard/browser-tests/*.test.ts` is twenty-two suites / 122 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
 
 ```bash
 npm run test:browser -w dashboard      # the whole tier, ~6.5s with a browser present
@@ -103,7 +103,7 @@ A candidate must be a **file**. Symlinks are followed deliberately — the agent
 
 ### It fails, it never skips
 
-A Chrome-less environment takes every one of the 109 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
+A Chrome-less environment takes every one of the 122 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
 
 ```
 chrome precondition: the dashboard browser tier requires a real Chrome/Chromium binary and none was
@@ -113,7 +113,7 @@ MacOS/Google Chrome; ubuntu: npx playwright-core install --with-deps chromium). 
 environment must FAIL this tier, never skip to green (FG-642).
 ```
 
-Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting the Chrome-less run reports `tierTestTotal()` failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`. Since FG-694 the test carries no count literal of its own: `src/util/browser-tier-census.ts` is the one source of truth for the tier's suite set and per-suite counts (99 tests across 16 suites as of FG-395, which added `fg395-campaigns.test.ts`), and both this guard and `src/util/fg642-browser-tier-consistency.test.ts` resolve their expectation from it — see [`browser-tier-census.ts`](../src/util/browser-tier-census.ts).
+Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting the Chrome-less run reports `tierTestTotal()` failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`. Since FG-694 the test carries no count literal of its own: `src/util/browser-tier-census.ts` is the one source of truth for the tier's suite set and per-suite counts (122 tests across 22 suites as of FG-743, which added `fg743-campaign-wait-lifecycle.test.ts`), and both this guard and `src/util/fg642-browser-tier-consistency.test.ts` resolve their expectation from it — see [`browser-tier-census.ts`](../src/util/browser-tier-census.ts).
 
 ### Running it in an agent container
 
@@ -218,8 +218,8 @@ npm run test:worktree
 # any root aggregate script; run it explicitly (next).
 npm run test:extended
 
-# Dashboard browser tier: 17 suites / 109 tests against a real Chrome (FG-642).
-# Needs a browser — a Chrome-less environment FAILS all 109, it never skips.
+# Dashboard browser tier: 22 suites / 122 tests against a real Chrome (FG-642).
+# Needs a browser — a Chrome-less environment FAILS all 122, it never skips.
 npm run test:browser -w dashboard
 
 # Canonical deterministic gate: unit tier + dashboard workspace
