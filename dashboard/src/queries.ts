@@ -18,6 +18,8 @@ import { readBacklogConfig } from "@forge/backlog-config";
 import { listProjects, sortProjects, operatorProjects, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
+import { buildConfigGraph } from "../../src/v2/config-graph.js";
+import type { ConfigGraph } from "../../src/v2/config-graph-types.js";
 import { LEGACY_BLOCKED_SOURCE, isStatusBearingEvidenceSource } from "@forge/blocked-source";
 import {
   findReconcileCandidates,
@@ -2455,6 +2457,17 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
     effective,
     recorded: { entries: recentRaciAudit(8) },
   };
+}
+
+// ── FG-349: Control-Plane effective config graph ───────────────────────────
+//
+// The in-process dashboard read model over the SAME buildConfigGraph() core the
+// `forge config graph --json` CLI prints — returned UNMODIFIED (no SQL
+// re-derivation, no reshaping), which is what makes the CLI and dashboard
+// byte-identical. buildConfigGraph tolerates a missing/disposed checkout by
+// returning a missing/warning graph, so this never throws.
+export function effectiveConfigGraph(projectDir?: string): ConfigGraph {
+  return buildConfigGraph({ projectDir: projectDir ?? process.cwd() });
 }
 
 // ── FG-487: host-side verification visibility ──────────────────────────────
