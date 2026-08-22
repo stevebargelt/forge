@@ -137,6 +137,36 @@ describe("inboxView — load states", () => {
   test("an item missing its id (row key) rejects the whole payload", () => {
     assert.equal(isAttentionInboxPayload({ items: [{ kind: "waiting_gate" }] }), false);
   });
+
+  // RF-2: an item that has only id+kind — no reason, requestedAction, or source — is
+  // structurally incomplete. Accepting it renders a blank actionable row with its required
+  // operator context silently blanked to ""; instead the whole read must resolve unavailable.
+  test("a structurally incomplete item (id+kind only) is NOT renderable", () => {
+    assert.equal(isRenderableInboxItem({ id: "x", kind: "auth_setup" }), false);
+  });
+
+  test("the finding's exact reproduction — {items:[{id,kind}]} — is a FAILED read, not a blank ready row", () => {
+    const body = { items: [{ id: "x", kind: "auth_setup" }] };
+    assert.equal(isAttentionInboxPayload(body), false);
+    const load = inboxFromBody(body);
+    assert.equal(inboxPhase(load), "unavailable");
+    const view = inboxView(load);
+    assert.equal(view.phase, "unavailable");
+    assert.equal(view.empty, false);
+    assert.notEqual(view.message, INBOX_EMPTY_LABEL);
+  });
+
+  test("an item missing only requestedAction/source still fails the read (each is required)", () => {
+    assert.equal(isRenderableInboxItem({ id: "x", kind: "auth_setup", reason: "auth missing" }), false);
+    assert.equal(
+      isRenderableInboxItem({ id: "x", kind: "auth_setup", reason: "auth missing", requestedAction: "set it up" }),
+      false,
+    );
+    assert.equal(
+      isRenderableInboxItem({ id: "x", kind: "auth_setup", reason: "auth missing", requestedAction: "set it up", source: "task" }),
+      true,
+    );
+  });
 });
 
 describe("AttentionInboxSection — rendered honesty", () => {

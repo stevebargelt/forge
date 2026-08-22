@@ -15,7 +15,7 @@ function seedHealthyEmpty(db: Database.Database): void {
   db.exec(`
     CREATE TABLE tickets (project_key TEXT, ticket_id TEXT, status TEXT, body_hash TEXT, title TEXT);
     CREATE TABLE readiness_assessments (project_key TEXT, ticket_id TEXT, body_hash TEXT, outcome TEXT, gaps_json TEXT, evaluated_at TEXT);
-    CREATE TABLE runs (id TEXT, project_dir TEXT, project_identity TEXT);
+    CREATE TABLE runs (id TEXT, project_dir TEXT, project_identity TEXT, status TEXT);
     CREATE TABLE reviews (id TEXT, run_id TEXT, subject_task_id TEXT, ticket_id TEXT, state TEXT, updated_at TEXT);
     CREATE TABLE review_findings (id TEXT, review_id TEXT, disposition TEXT, resolution TEXT);
   `);
@@ -52,6 +52,60 @@ describe("readinessAttentionItems — a source-read failure degrades by name, ne
     const result = readinessAttentionItems(db, undefined, 0);
     assert.deepEqual(result.items, []);
     assert.deepEqual(result.degraded, [], "a successful empty read must NOT report degradation");
+    db.close();
+  });
+});
+
+// RF-1: the review source is bounded to live work — an OPEN review with an unresolved
+// fix_now finding surfaces ONLY while its parent RUN is active. Once the run completes (or
+// the review has no run at all), the item disappears with no stored resolution flag, so a
+// review left in an open state on a finished run never lingers as false live work.
+describe("readinessAttentionItems — a review item is bounded to its run being active (RF-1)", () => {
+  function seedReviewWithFinding(db: Database.Database, runStatus: string | null): void {
+    seedHealthyEmpty(db);
+    if (runStatus !== null) {
+      db.prepare("INSERT INTO runs (id, project_dir, project_identity, status) VALUES (?, ?, ?, ?)").run(
+        "run-1",
+        "/repo",
+        "/repo",
+        runStatus,
+      );
+    }
+    db.prepare(
+      "INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, state, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("rev-1", runStatus === null ? null : "run-1", "task-1", "FG-1", "awaiting_disposition", "2026-08-22T00:00:00Z");
+    db.prepare("INSERT INTO review_findings (id, review_id, disposition, resolution) VALUES (?, ?, ?, ?)").run(
+      "f-1",
+      "rev-1",
+      "fix_now",
+      null,
+    );
+  }
+
+  test("an open fix_now review on an ACTIVE run surfaces as an inbox item", () => {
+    const db = new Database(":memory:");
+    seedReviewWithFinding(db, "active");
+    const result = readinessAttentionItems(db, undefined, 0);
+    assert.equal(result.items.length, 1, "an open review on a live run is live work");
+    assert.equal(result.items[0]!.id, "review:rev-1");
+    assert.deepEqual(result.degraded, []);
+    db.close();
+  });
+
+  test("the SAME open review on a COMPLETED run no longer surfaces", () => {
+    const db = new Database(":memory:");
+    seedReviewWithFinding(db, "complete");
+    const result = readinessAttentionItems(db, undefined, 0);
+    assert.deepEqual(result.items, [], "a review whose run has completed is not live work");
+    assert.deepEqual(result.degraded, [], "an out-of-scope run is a filter, not a read failure");
+    db.close();
+  });
+
+  test("an open review with NO run at all carries no liveness signal and does not surface", () => {
+    const db = new Database(":memory:");
+    seedReviewWithFinding(db, null);
+    const result = readinessAttentionItems(db, undefined, 0);
+    assert.deepEqual(result.items, []);
     db.close();
   });
 });

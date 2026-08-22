@@ -116,10 +116,14 @@ export function inboxItemAge(item, now) {
 //
 // The ONE table of what the render path dereferences per entry, at every depth it walks
 // into — so a `[null]` items array is a FAILED read, not a payload that validates and
-// then throws mid-render on `item.id`. `id` is the row key (a non-empty string), `kind`
-// drives the badge; reason/requestedAction/severity/links are all read THROUGH guards in
-// inboxItemSummary and render as text or drive a class, so they never crash and are
-// deliberately not required (an older field-shape may omit them).
+// then throws mid-render on `item.id`. `id` is the row key and `kind` drives the badge;
+// reason/requestedAction/source are the REQUIRED operator-context fields (RF-2): the AC
+// says every ready row shows a reason, a requested action, and its source, so an item
+// missing any of them is a structurally incomplete read, not a renderable row. Rejecting
+// it here resolves the whole payload to the explicit unavailable state rather than
+// rendering a blank actionable row with its required context silently blanked to "".
+// severity/startedAt/links stay optional — read THROUGH guards in inboxItemSummary, they
+// render as a label/age/link or their explicit "unknown" fallback, never a crash.
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -132,10 +136,19 @@ function isArrayOf(value, valid) {
 }
 
 /** Is this a renderable inbox item? The id (row key) and kind (badge driver) are the
- *  crash surfaces; both must be present non-empty strings. */
+ *  crash surfaces; reason/requestedAction/source are the required operator context an item
+ *  must carry to be shown as actionable (RF-2). All four must be present non-empty strings;
+ *  an item missing any of them fails the read to an explicit unavailable state rather than
+ *  rendering as a ready row with blank required context. */
 export function isRenderableInboxItem(value) {
   if (!isPlainObject(value)) return false;
-  return isNonEmptyString(value.id) && isNonEmptyString(value.kind);
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.kind) &&
+    isNonEmptyString(value.reason) &&
+    isNonEmptyString(value.requestedAction) &&
+    isNonEmptyString(value.source)
+  );
 }
 
 /** Is this actually an attention-inbox envelope? A 200 carrying an {error} body, an HTML

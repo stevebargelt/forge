@@ -140,14 +140,20 @@ function reviewItems(db: Database, scope: InboxProjectScope): SourceResult {
   try {
     rows = db
       .prepare(
+        // Bounded-to-live (invariant #2): a review item is OPEN only while its parent RUN
+        // is still active — mirrors the failure mapper's `r.status = 'active'` gate. The
+        // INNER JOIN + active filter drops a review whose run has completed (or a review
+        // with no run at all, which carries no liveness signal), so an open finding on a
+        // finished run stops surfacing without a stored resolution flag.
         `SELECT reviews.id AS id, reviews.run_id AS run_id, reviews.subject_task_id AS subject_task_id,
                 reviews.ticket_id AS ticket_id, runs.project_dir AS project_dir, reviews.updated_at AS updated_at,
                 (SELECT COUNT(*) FROM review_findings f WHERE f.review_id = reviews.id
                    AND f.disposition = 'fix_now' AND (f.resolution IS NULL OR f.resolution != 'resolved')) AS fix_now,
                 (SELECT COUNT(*) FROM review_findings f WHERE f.review_id = reviews.id
                    AND f.disposition = 'architecture_question') AS arch_questions
-           FROM reviews LEFT JOIN runs ON runs.id = reviews.run_id
-          WHERE reviews.state NOT IN ('settled', 'failed')${project.clause}
+           FROM reviews JOIN runs ON runs.id = reviews.run_id
+          WHERE reviews.state NOT IN ('settled', 'failed')
+            AND runs.status = 'active'${project.clause}
           ORDER BY reviews.updated_at DESC, reviews.id DESC`,
       )
       .all(...project.params) as OpenReviewRow[];
