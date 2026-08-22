@@ -822,6 +822,49 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
   text-transform: uppercase;
 }
 
+/* FG-402: the Human Attention Inbox. A card list of actionable items; each row carries
+   a kind badge, a severity badge, the reason + requested action, an age, and a link to
+   the relevant surface. No new external assets — inline CSS under the existing
+   script-src 'self' CSP. */
+.attention-inbox { margin: 12px 0 28px; }
+.inbox-loading, .inbox-empty { color: var(--fg-dim); padding: 10px 2px; }
+.inbox-degraded { color: var(--warn); font-size: 12px; padding: 4px 2px 8px; }
+.inbox-list { display: flex; flex-direction: column; gap: 8px; }
+.inbox-row {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) 1fr auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 10px 12px;
+  border: 1px solid var(--border, rgba(154,154,163,0.2));
+  border-radius: 8px;
+}
+.inbox-row-badges { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.inbox-row-head { margin-bottom: 2px; }
+.inbox-reason { color: var(--fg); }
+.inbox-action { font-size: 12px; margin: 2px 0; }
+.inbox-meta { font-size: 11px; }
+.inbox-row-aside { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.inbox-age { font-size: 11px; }
+.inbox-link { font-size: 12px; color: var(--accent, var(--info)); text-decoration: none; white-space: nowrap; }
+.inbox-link:hover { text-decoration: underline; }
+.inbox-unavailable { border: 1px solid rgba(250,204,21,0.35); border-radius: 8px; padding: 12px; }
+.inbox-unavailable-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.inbox-unavailable-detail { color: var(--fg-dim); font-size: 12px; margin-top: 6px; }
+.badge.inbox-kind-waiting_gate { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+.badge.inbox-kind-campaign_paused { background: rgba(250, 204, 21, 0.18); color: var(--warn); }
+.badge.inbox-kind-blocked_by_red_or_reviewer { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.inbox-kind-merge_conflict { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.inbox-kind-integration_blocked_park { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.inbox-kind-auth_setup { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.inbox-kind-missing_acceptance_or_readiness { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.badge.inbox-kind-unknown { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.inbox-sev { font-size: 10px; }
+.badge.inbox-sev-high { background: rgba(248, 113, 113, 0.18); color: var(--err); }
+.badge.inbox-sev-medium { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+.badge.inbox-sev-low { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.inbox-sev-unknown { background: rgba(154, 154, 163, 0.12); color: var(--fg-faint); }
+
 .plan-usage { margin-bottom: 34px; }
 .plan-usage-heading {
   display: flex;

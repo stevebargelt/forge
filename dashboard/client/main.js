@@ -22,6 +22,8 @@ import {
 } from "./verification-render.js";
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
+import { INBOX_LOADING, readAttentionInbox } from "./attention-inbox-render.js";
+import { AttentionInboxSection } from "./attention-inbox-view.js";
 import { formatDuration } from "./duration.js";
 
 const html = htm.bind(h);
@@ -138,6 +140,12 @@ function App() {
   // which answer wins a race the poll should not have started.
   const activityReader = useRef(null);
   if (activityReader.current === null) activityReader.current = createActivityReader(setActivityLoad);
+  // FG-402: the Human Attention Inbox load state, read through the SAME reader contract
+  // as Current activity (one read per URL in flight; failure IS the return value) so a
+  // slow/failed inbox read resolves to unavailable+Retry rather than lingering.
+  const [inboxLoad, setInboxLoad] = useState(INBOX_LOADING);
+  const inboxReader = useRef(null);
+  if (inboxReader.current === null) inboxReader.current = createActivityReader(setInboxLoad, readAttentionInbox);
   // FG-576: the project-scoped orchestrator read. Null until a project is selected —
   // /api/orchestrators has no cross-project form, because it is the one route that
   // can carry a live remote-control credential.
@@ -150,6 +158,8 @@ function App() {
     // showing its last payload as though it were still current; this read owns its
     // own outcome — including its own failure — and always lands.
     activityReader.current.poll(`/api/current-activity${q}`);
+    // FG-402: same own-your-own-outcome discipline as the current-activity poll above.
+    inboxReader.current.poll(`/api/attention-inbox${q}`);
     try {
       const reqs = [
         view === "activity" ? fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`) : Promise.resolve(null),
@@ -183,6 +193,10 @@ function App() {
   // failure copy does not linger over a read that is already running.
   const retryCurrentActivity = useCallback(() => {
     activityReader.current.retry(`/api/current-activity${projectScopeQuery(projectFilter, checkoutFilter)}`);
+  }, [projectFilter, checkoutFilter]);
+
+  const retryInbox = useCallback(() => {
+    inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
   }, [projectFilter, checkoutFilter]);
 
   const pollPlanUsage = useCallback(async () => {
@@ -731,6 +745,8 @@ function App() {
             phases=${reviewLoopPhases}
             activityLoad=${activityLoad}
             onRetryActivity=${retryCurrentActivity}
+            inboxLoad=${inboxLoad}
+            onRetryInbox=${retryInbox}
             now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
@@ -859,7 +875,7 @@ function App() {
   `;
 }
 
-function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
+function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
   return html`
     <section class="home-view" aria-label="Dashboard home">
       <${UsageLimits}
@@ -869,6 +885,7 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
         refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
+      <${AttentionInboxSection} load=${inboxLoad} now=${now} onRetry=${onRetryInbox} />
       <div class="home-in-flight-group">
         <div class="home-section-heading">
           <div>

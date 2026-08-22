@@ -36,7 +36,7 @@ import {
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
-  runMap, taskExplain,
+  runMap, taskExplain, attentionInbox,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -182,6 +182,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/current-activity") {
     const runId = url.searchParams.get("runId") ?? undefined;
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(currentActivity(scopeFromUrl(url), runId)));
+    return;
+  }
+
+  // FG-402: the Human Attention Inbox. GET-only, application/json, NO mutation, NO
+  // shell-out — the SAME pure persisted-state read discipline as /api/current-activity
+  // and the FG-591/FG-386 read routes (BD-7). The payload is built BEFORE writeHead so a
+  // degraded/throwing read yields a 200 carrying an {error} body the client resolves to
+  // an unavailable+Retry state — never a blank/500, and never an observed empty inbox.
+  if (path === "/api/attention-inbox") {
+    let payload: string;
+    try {
+      payload = JSON.stringify(attentionInbox(scopeFromUrl(url)));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/attention-inbox: reading the attention inbox failed:", err);
+      payload = JSON.stringify({ error: message });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;
   }
 
