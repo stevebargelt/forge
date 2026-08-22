@@ -137,6 +137,22 @@ the real, un-redacted value, so install behavior is unchanged; only what gets wr
 and displayed is. Ordinary (non-credential) command text and output pass through
 byte-intact.
 
+## Attention inbox (FG-402)
+
+The dashboard's `/api/attention-inbox` route (`docs/concepts.md` → Attention inbox)
+builds its failure/park items from `retryPolicy`'s curated advice strings
+(`dashboard/src/attention-inbox-failures.ts`). Only the `auth_setup` kind is
+credential-adjacent — it is emitted for a task whose recorded `failure_kind` is
+`auth_missing`/`auth_expired`/`auth_injection_failed` — so ONLY its `reason` and
+`requestedAction` text is passed through the SAME `redactSecrets`
+(`src/v2/host-readiness.ts`) used by **Host-readiness records / events** above,
+before the envelope leaves the process. The call is unconditional rather than keyed
+on whether a given curated string is known to carry a secret; `redactSecrets` is
+idempotent, so a clean string passes through unchanged. Every other item kind's text
+is not routed through redaction — the readiness/review reason text is built from
+stored ticket/finding data and the wait reason/requested-action text is FG-734's own
+already-safe copy, neither of which is free-form command output.
+
 ## `forge backup`
 
 Unlike every artifact above, `forge backup create` (FG-669) is **not** redacted, by

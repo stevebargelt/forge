@@ -95,6 +95,13 @@ import {
   type CurrentActivityScope,
   type CurrentActivityWithRetention,
 } from "@forge/current-activity";
+// FG-402: the Human Attention Inbox. The aggregator (`attentionInbox`) below composes
+// FG-734's already-derived operator/CI waits with the failure/park and readiness/review
+// mappers into the ONE stable external envelope.
+import { composeInbox, type AttentionItem, type InboxEnvelope, type InboxScope } from "./attention-inbox.js";
+import { waitAttentionItems } from "./attention-inbox-waits.js";
+import { failureAttentionItems } from "./attention-inbox-failures.js";
+import { readinessAttentionItems } from "./attention-inbox-readiness.js";
 // FG-590: the ONE shared retention annotation `forge status` also uses — same function,
 // so the two surfaces carry the disposition AND the resolved policy identically (FG-679).
 import {
@@ -3969,6 +3976,62 @@ export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: num
  *  way this surface does. */
 export function retentionPolicyForDashboard(): RetentionPolicy {
   return resolveRetention(undefined, process.env);
+}
+
+// ── FG-402: the Human Attention Inbox aggregator ────────────────────────────────
+//
+// A source-agnostic, OPEN-ONLY projection over persisted Forge state. It reuses the
+// existing `currentActivity(scope)` derivation for operator/CI waits — so the inbox
+// cannot drift from `forge status` / Current activity — and calls the failure/park and
+// readiness/review mappers, then composes them into the ONE stable envelope. Every
+// source read is absorbed into `degraded` on failure so a store that predates one
+// source's tables still returns the rest rather than a blank/500. Pure persisted-state
+// read: no git/gh/tmux/docker/CLI subprocess, no mutation (protected_invariant #1); it
+// shares only the same bounded, cached project-registry evidence read that
+// currentActivity itself already performs.
+export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now()): InboxEnvelope {
+  const inboxScope: InboxScope = {
+    runId: null,
+    projectDirs: scope === undefined ? null : typeof scope === "string" ? [scope] : [...scope],
+  };
+  const degraded: string[] = [];
+  const handle = db();
+
+  let waitItems: AttentionItem[] = [];
+  try {
+    const activity = currentActivity(scope, undefined, nowMs);
+    waitItems = waitAttentionItems({ operatorWaits: activity.operatorWaits, ciWaits: activity.ciWaits });
+  } catch (err) {
+    degraded.push("waits");
+    console.error("attentionInbox: deriving operator/CI waits failed:", err);
+  }
+
+  let failureItems: AttentionItem[] = [];
+  try {
+    failureItems = failureAttentionItems(handle, scope, nowMs);
+  } catch (err) {
+    degraded.push("failures");
+    console.error("attentionInbox: reading failure/park items failed:", err);
+  }
+
+  let readinessItems: AttentionItem[] = [];
+  try {
+    const readiness = readinessAttentionItems(handle, scope, nowMs);
+    readinessItems = readiness.items;
+    // A per-source read failure names itself (e.g. "readiness", "review") rather than
+    // throwing; surface each marker so a partial failure renders as degraded, never as a
+    // calm empty inbox.
+    for (const marker of readiness.degraded) if (!degraded.includes(marker)) degraded.push(marker);
+  } catch (err) {
+    degraded.push("readiness");
+    console.error("attentionInbox: reading readiness/review items failed:", err);
+  }
+
+  return composeInbox([waitItems, failureItems, readinessItems], {
+    generatedAt: new Date(nowMs).toISOString(),
+    scope: inboxScope,
+    degraded,
+  });
 }
 
 /** BD-10: launch detail addressed by IDENTITY. The id is validated against the same

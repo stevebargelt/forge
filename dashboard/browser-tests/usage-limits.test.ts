@@ -154,7 +154,8 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   // surfaces duplicated every agent between them, and the panel measured 810.5px in an
   // 862px viewport. Home has ONE — `In flight` — and the compact host/CI waits are rows
   // inside it. The full panel is on the Activity view, asserted below.
-  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Tasks", "Forge activity"]);
+  // FG-402 added the Attention inbox (kicker "Needs you") as the first Home surface.
+  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Needs you", "Tasks", "Forge activity"]);
   assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 0);
   assert.equal(await page.locator(".home-in-flight-group > .in-flight > h2").count(), 0, "Home heading belongs above the panel");
   assert.deepEqual(await page.locator(".home-ops-summary .stat-num").allTextContents(), ["85%", "1157", "2269", "3", "67", "13", "41"]);
