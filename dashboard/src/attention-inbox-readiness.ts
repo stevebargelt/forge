@@ -80,9 +80,12 @@ function readinessItems(db: Database, scope: InboxProjectScope): SourceResult {
   // without it — naming t.body_hash there throws SqliteError and fails the whole read.
   // Guard it: keep the staleness match when the column is present, omit it (treat the
   // assessment as current) when it is absent, rather than referencing a column not there.
-  const staleness = hasColumn(db, "tickets", "body_hash") ? " AND ra.body_hash = t.body_hash" : "";
   let rows: ReadinessRow[];
   try {
+    // The schema probe runs INSIDE the try: a DB error from its PRAGMA (e.g. a closed
+    // connection) must degrade this source and name itself in `degraded`, exactly like a
+    // failure of the readiness read below — never escape and crash the derivation.
+    const staleness = hasColumn(db, "tickets", "body_hash") ? " AND ra.body_hash = t.body_hash" : "";
     rows = db
       .prepare(
         `SELECT ra.ticket_id AS ticket_id, ra.outcome AS outcome, ra.gaps_json AS gaps_json,

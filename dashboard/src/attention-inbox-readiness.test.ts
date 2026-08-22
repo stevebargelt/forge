@@ -150,6 +150,26 @@ describe("readinessAttentionItems — the staleness filter is guarded when ticke
     db.close();
   });
 
+  test("a DB error during the schema probe degrades by name, never escapes the read (RF-1)", () => {
+    // The schema probe (hasColumn's PRAGMA) is itself a DB read. Against a closed
+    // connection it throws `TypeError: The database connection is not open`. Before the
+    // fix that probe ran OUTSIDE the readiness try/catch, so this error escaped and crashed
+    // the whole derivation instead of producing the named degraded marker. It now runs
+    // inside the try: the readiness source degrades by name rather than throwing.
+    const db = new Database(":memory:");
+    seedHealthyEmpty(db);
+    db.close();
+    let result: ReturnType<typeof readinessAttentionItems> | undefined;
+    assert.doesNotThrow(() => {
+      result = readinessAttentionItems(db, undefined, 0);
+    }, "a DB error from the schema probe must not escape the readiness read");
+    assert.deepEqual(result!.items, []);
+    assert.ok(
+      result!.degraded.includes("readiness"),
+      "a schema-probe DB failure must NAME the readiness source in degraded, never swallow or crash",
+    );
+  });
+
   test("WITH body_hash present, the staleness match still filters superseded assessments", () => {
     const db = new Database(":memory:");
     seedHealthyEmpty(db);
