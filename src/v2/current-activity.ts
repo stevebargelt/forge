@@ -1046,14 +1046,22 @@ function reconcileTicketDone(
 /** FG-743/RF-1: is a ticket row's source checkout the campaign's OWN project? Decided by
  *  proven-path byte equality — the same identity relation `inProjectScope` uses over
  *  `project_dir_canonical`, never a fresh realpath at read time (both sides are ALREADY
- *  proven physicals). Unknown on EITHER side is INDETERMINATE and counts as attributable
- *  (the GUARD direction): a legacy ticket with no `imported_from`, or a campaign whose
- *  identity was never proven, reconciles exactly as the pre-fix predicate did rather than
- *  silently ceasing to reconcile. Only a row whose PROVEN source DIFFERS from the
- *  campaign's PROVEN identity is excluded. */
+ *  proven physicals). Only a row whose PROVEN source DIFFERS from the campaign's PROVEN
+ *  identity is excluded.
+ *
+ *  The two indeterminate directions are NOT symmetric — asymmetry is the whole fix:
+ *    - An UNKNOWN TICKET SOURCE (`imported_from` null/empty: a legacy row from before the
+ *      FG-606 ALTER) is the GUARD direction — attributable, so an aged store with no
+ *      `imported_from` at all reconciles by the bare-id match exactly as the pre-fix
+ *      predicate did rather than silently ceasing to reconcile.
+ *    - An UNPROVEN CAMPAIGN IDENTITY (`campaignCanonical` null/empty) against a PROVEN
+ *      ticket source FAILS CLOSED (RF-1): ownership cannot be proven, and unprovable
+ *      ownership must never clear a live wait. Returning `true` here let a `done` same-id
+ *      ticket owned by ANOTHER project mark the ticket done and suppress an otherwise
+ *      unresolved hard stop. Excluding it keeps the wait visible. */
 function isAttributableToProject(importedFrom: string | null, campaignCanonical: string | null): boolean {
   if (importedFrom === null || importedFrom === "") return true;
-  if (campaignCanonical === null || campaignCanonical === "") return true;
+  if (campaignCanonical === null || campaignCanonical === "") return false;
   return importedFrom === campaignCanonical;
 }
 

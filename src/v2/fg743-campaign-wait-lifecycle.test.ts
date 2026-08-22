@@ -264,6 +264,30 @@ describe("FG-743/RF-1 — a done ticket in ANOTHER project cannot suppress this 
     assert.equal(waits[0]!.ticketId, "FG-980");
   });
 
+  // RF-1 (this revision): an UNPROVEN campaign identity must FAIL CLOSED against a PROVEN
+  // foreign source. Campaign has a project_dir but NO project_dir_canonical (identity never
+  // proven); the only same-id ticket row is a `done` FG-982 proven-owned by project A. The
+  // pre-fix `campaignCanonical === null → attributable` branch marked it done and suppressed
+  // the wait; unprovable ownership must never clear a live hard stop.
+  // DISCRIMINATING: reads 0 waits against the pre-fix predicate, 1 once it fails closed.
+  test("unproven campaign identity does NOT let project A's done FG-982 suppress the live wait", () => {
+    addCampaign({ id: "camp-unproven", status: "paused", projectDir: PROJ_B, projectDirCanonical: null });
+    addTicket("FG-982", "done", "pk-project-a", PROJ_A); // proven-foreign; campaign identity is unproven
+    addCampaignItem({
+      id: "item-unproven",
+      campaignId: "camp-unproven",
+      ticketId: "FG-982",
+      lifecycleStatus: "awaiting_gate",
+      reason: "reviewer blocked the build; identity never proven",
+      requestedHumanAction: "close the ticket then resume",
+    });
+
+    const waits = derive().operatorWaits;
+    assert.equal(waits.length, 1, "an unproven campaign identity fails closed: a foreign done row cannot clear the wait");
+    assert.equal(waits[0]!.campaignId, "camp-unproven");
+    assert.equal(waits[0]!.ticketId, "FG-982");
+  });
+
   // TRUE-POSITIVE guard: the campaign's OWN done ticket still reconciles, and a foreign done
   // row alongside it changes nothing.
   test("project B's OWN done FG-981 DOES suppress the wait, ignoring a foreign done row", () => {
