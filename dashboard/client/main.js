@@ -90,6 +90,9 @@ function App() {
   const completedRunsSeq = useRef(0);
   const [governance, setGovernance] = useState(null);
   const [controlPlane, setControlPlane] = useState(null);
+  // Scope token for the control-plane read — see pollControlPlane. A response
+  // for the old scope must never overwrite the graph just switched to.
+  const controlPlaneSeq = useRef(0);
   const [backlog, setBacklog] = useState(null);
   const [queue, setQueue] = useState(null);
   // Sequence token for the queue read — see pollQueue.
@@ -376,14 +379,29 @@ function App() {
   }, [pollGovernance, view]);
 
   const pollControlPlane = useCallback(async () => {
+    // Scope token like pollShippingAudit: a read for the previous scope
+    // (project/checkout) must never overwrite the graph just switched to.
+    const seq = (controlPlaneSeq.current += 1);
     // Checkout-specific: a project without an exact checkout has no single graph.
     if (projectFilter && !checkoutFilter) { setControlPlane(null); return; }
     try {
       const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/config-graph${q}`);
+      if (seq !== controlPlaneSeq.current) return;
       if (res.ok) setControlPlane(await res.json());
       setNow(Date.now());
-    } catch (e) { setError(String(e)); }
+    } catch (e) {
+      if (seq !== controlPlaneSeq.current) return;
+      setError(String(e));
+    }
+  }, [projectFilter, checkoutFilter]);
+
+  // Clear the graph the instant the scope changes so a previous checkout's config
+  // graph is never rendered under the new scope while its request is in flight. The
+  // seq bump retires whatever read is still outstanding for the old scope.
+  useEffect(() => {
+    controlPlaneSeq.current += 1;
+    setControlPlane(null);
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {

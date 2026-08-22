@@ -11,7 +11,7 @@ import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta, projectColorForKey } from "@forge/project-meta";
 import { readBacklogConfig } from "@forge/backlog-config";
@@ -2466,8 +2466,13 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
 // re-derivation, no reshaping), which is what makes the CLI and dashboard
 // byte-identical. buildConfigGraph tolerates a missing/disposed checkout by
 // returning a missing/warning graph, so this never throws.
+//
+// The projectDir is resolve()'d to an absolute path BEFORE buildConfigGraph —
+// exactly as the CLI (cliConfigGraph) does — so identical inputs (e.g. ".")
+// yield byte-identical graphs from both paths rather than leaking the relative
+// dir into graph.project.dir and the source paths derived from it.
 export function effectiveConfigGraph(projectDir?: string): ConfigGraph {
-  return buildConfigGraph({ projectDir: projectDir ?? process.cwd() });
+  return buildConfigGraph({ projectDir: resolve(projectDir ?? process.cwd()) });
 }
 
 // ── FG-487: host-side verification visibility ──────────────────────────────
