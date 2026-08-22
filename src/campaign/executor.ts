@@ -2542,16 +2542,21 @@ function nextDrivableItem(items: CampaignItem[], afterItemId: string): CampaignI
 // completed item is never re-driven; it is the durable boundary receipt `forge campaign recover`
 // resolves against the linkage when it repairs an in-flight item's missing continuation (P1-G).
 // Idempotent-tolerant: a re-record for the same continuation is swallowed by the caller.
-function recordItemBoundaryContinuation(campaignId: string, item: CampaignItem, items: CampaignItem[]): void {
+// Returns true ONLY when a continuation was ACTUALLY recorded; false when the write was
+// SKIPPED because there is no durable launch linkage to bind (in-process / legacy drive).
+// The reopen-to-running caller (FG-750 RF-1) must treat a skip exactly like a throw — no
+// continuation backs the transition either way, so it must NOT flip the campaign to running.
+function recordItemBoundaryContinuation(campaignId: string, item: CampaignItem, items: CampaignItem[]): boolean {
   const gen = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
   const linkage = getItemLaunch(campaignId, item.id, gen);
   const sourceLaunchId = linkage?.sourceLaunchId;
-  if (!sourceLaunchId) return; // in-process / legacy drive with no durable launch — nothing to bind
+  if (!sourceLaunchId) return false; // in-process / legacy drive with no durable launch — nothing to bind
   const continuationId = campaignContinuationId(campaignId, item.id);
   const currentPhase = campaignItemPhase(item.id, gen);
   const next = nextDrivableItem(items, item.id);
   const nextAction = next ? driveCampaignItemAction(campaignId, next.id) : finalizeCampaignAction(campaignId);
   recordContinuation({ continuationId, consumerKind: "campaign", sourceLaunchId, currentPhase, nextAction });
+  return true;
 }
 
 export async function driveRemainingItems(
@@ -2744,12 +2749,26 @@ export async function driveRemainingItems(
         // continuation write fails, do NOT resume: leave the campaign PAUSED with the park
         // intact (the reservation stays authoritative; resume/recover re-drives it) and
         // surface the failure rather than proceeding silently.
-        let continuationBlocked = false;
+        //
+        // FG-750 (RF-1, revision): gate the reopen on a continuation ACTUALLY RECORDED in this
+        // transition, not merely on "did not throw". recordItemBoundaryContinuation SKIPS the
+        // write (returns false) when there is no durable launch linkage to bind — a skip leaves
+        // the campaign with no continuation exactly as a throw does, so a skip must ALSO keep
+        // the campaign paused. Treating skip as success is the RF-1 hole under a different door.
+        let continuationRecorded = false;
         if (owner && leaseGeneration !== undefined && durableItem) {
           try {
-            recordItemBoundaryContinuation(campaignId, durableItem, items);
+            continuationRecorded = recordItemBoundaryContinuation(campaignId, durableItem, items);
+            if (!continuationRecorded) {
+              console.error(
+                `campaign ${campaignId}: no item-boundary continuation recorded for ${durableItem.ticketId} (no durable launch linkage to bind) — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it)`
+              );
+              logEvent("campaign_item.item_boundary_continuation_skipped", {
+                runId: durableItem.runId,
+                payload: { campaignId, itemId: durableItem.id, ticketId: durableItem.ticketId, decidedAt: nowIso() },
+              });
+            }
           } catch (err) {
-            continuationBlocked = true;
             const message = err instanceof Error ? err.message : String(err);
             console.error(
               `campaign ${campaignId}: item-boundary continuation write failed for ${durableItem.ticketId} — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it): ${message}`
@@ -2760,7 +2779,7 @@ export async function driveRemainingItems(
             });
           }
         }
-        if (!continuationBlocked && resumeCampaignToRunning(campaignId)) continue;
+        if (continuationRecorded && resumeCampaignToRunning(campaignId)) continue;
       }
       releaseIfOwned();
       return { stopReason: result.stopReason, itemRecords };

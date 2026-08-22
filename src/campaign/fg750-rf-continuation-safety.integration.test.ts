@@ -311,3 +311,47 @@ test("RF-3: a failed item-boundary continuation write keeps the campaign PAUSED 
   // The durable continuation resolves exactly once — resume/recover adopts it without duplication.
   assert.ok(getContinuation(campaignContinuationId(campaignId, aId)) !== undefined, "A's continuation is durable and adoptable");
 });
+
+test("RF-1 (revision): a SKIPPED item-boundary continuation (no launch linkage) keeps the campaign PAUSED — it is NOT reopened to running with nothing in flight", async () => {
+  const owner = "ctrl-1";
+  const { campaignId, aId, bId } = runningCampaign(owner);
+  const launched: string[] = [];
+
+  const launch = async (cid: string, itemId: string): Promise<DriveOneItemResult> => {
+    launched.push(itemId);
+    if (itemId === aId) {
+      // A parks item-scoped and commits the campaign pause (the controller's OWN park) —
+      // but WITHOUT a durable item-launch linkage (no recordItemLaunch). The boundary
+      // recorder then has no sourceLaunchId to bind and SKIPS the write (returns false)
+      // rather than throwing. A skip leaves the campaign with NO continuation just as a
+      // throw does, so the reopen must be refused exactly the same way.
+      updateCampaignItem(itemId, {
+        lifecycleStatus: "awaiting_gate",
+        runId: `run-${itemId}`,
+        requestedHumanAction: "operator decision needed",
+      });
+      await parkCampaign(cid, itemId, "decision_needed", { exemption: "item-carries-context" });
+      return { itemRecords: [], stopReason: "paused", stopScope: "item" };
+    }
+    // Refusing to reopen on a skip means we never got here — B must NOT be dispatched.
+    throw new Error("B must not be dispatched when the continuation write was skipped");
+  };
+
+  const result = await driveRemainingItems(campaignId, {
+    dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }),
+    projectDir,
+    mode: "sequential",
+    launchDriveItem: launch,
+    controllerOwner: owner,
+    controllerLeaseTtlMs: DEFAULT_CONTROLLER_LEASE_MS,
+  });
+
+  assert.deepEqual(launched, [aId], "the skipped continuation write halted dispatch — B was never driven");
+  assert.equal(result.stopReason, "paused");
+  assert.equal(getCampaign(campaignId)!.status, "paused", "campaign stays PAUSED — not flipped to running with nothing in flight");
+  assert.equal(getCampaignItem(aId)!.lifecycleStatus, "awaiting_gate", "A's item-scoped park stays intact for resume/recover to re-drive");
+  assert.equal(getCampaignItem(bId)!.lifecycleStatus, "pending", "B stays pending");
+  // No continuation was recorded for A — the skip left nothing to adopt, which is exactly
+  // why the reopen was refused (a running flip here would be a phantom).
+  assert.equal(getContinuation(campaignContinuationId(campaignId, aId)), undefined, "no continuation was recorded on the skip path");
+});
