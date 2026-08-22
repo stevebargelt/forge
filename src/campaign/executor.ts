@@ -2737,10 +2737,30 @@ export async function driveRemainingItems(
         // case is a paused campaign with the continuation already recorded, which resume
         // adopts (a completed boundary is never re-driven; the parked run is reattached,
         // never re-created).
+        //
+        // FG-750 (RF-3): fail closed if that record THROWS. Flipping back to running with no
+        // continuation recorded reopens the exact RF-1 hole — a subsequent crash leaves the
+        // campaign 'running' with nothing in flight and nothing to adopt. So when the
+        // continuation write fails, do NOT resume: leave the campaign PAUSED with the park
+        // intact (the reservation stays authoritative; resume/recover re-drives it) and
+        // surface the failure rather than proceeding silently.
+        let continuationBlocked = false;
         if (owner && leaseGeneration !== undefined && durableItem) {
-          try { recordItemBoundaryContinuation(campaignId, durableItem, items); } catch { /* best-effort: reservation stays authoritative */ }
+          try {
+            recordItemBoundaryContinuation(campaignId, durableItem, items);
+          } catch (err) {
+            continuationBlocked = true;
+            const message = err instanceof Error ? err.message : String(err);
+            console.error(
+              `campaign ${campaignId}: item-boundary continuation write failed for ${durableItem.ticketId} — keeping the campaign PAUSED with the park intact (resume/recover will re-drive it): ${message}`
+            );
+            logEvent("campaign_item.item_boundary_continuation_failed", {
+              runId: durableItem.runId,
+              payload: { campaignId, itemId: durableItem.id, ticketId: durableItem.ticketId, error: message, decidedAt: nowIso() },
+            });
+          }
         }
-        if (resumeCampaignToRunning(campaignId)) continue;
+        if (!continuationBlocked && resumeCampaignToRunning(campaignId)) continue;
       }
       releaseIfOwned();
       return { stopReason: result.stopReason, itemRecords };

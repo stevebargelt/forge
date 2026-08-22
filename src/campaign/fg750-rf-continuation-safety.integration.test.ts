@@ -11,6 +11,13 @@
 //   continuation must NOT resume over an operator's campaign-wide pause. The operator pause
 //   sets a durable marker in the same transaction as the running→paused CAS; the dispatch
 //   decision point refuses to continue while that marker is set.
+//
+// RF-3 (fail closed when the continuation write fails, crash-safe-resume invariant): the RF-1
+//   ordering only protects AC6 if the reopen-to-running is GATED on the continuation write
+//   succeeding. If recordItemBoundaryContinuation throws, the controller must NOT flip the
+//   campaign back to running (that reopens the RF-1 hole — a subsequent crash leaves it
+//   'running' with nothing in flight and nothing to adopt). It leaves the campaign PAUSED with
+//   the park intact so resume/recover re-drives it (the reservation stays authoritative).
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -34,7 +41,7 @@ import {
 } from "../store/campaigns.js";
 import { acquireCampaignLease, recordItemLaunch } from "../store/campaign-controller.js";
 import { parkCampaign } from "./park.js";
-import { getContinuation } from "../store/continuations.js";
+import { getContinuation, recordContinuation } from "../store/continuations.js";
 import { writeTicket } from "../backlog/structured.js";
 import { driveRemainingItems, DEFAULT_CONTROLLER_LEASE_MS, type DriveOneItemResult } from "./executor.js";
 import { campaignContinuationId } from "./continuation-adapter.js";
@@ -256,4 +263,51 @@ test("RF-2 control: without an operator pause, the controller's own item park co
 
   assert.deepEqual(launched, [aId, bId], "no operator pause → B is dispatched after A parks");
   assert.equal(isCampaignOperatorPaused(campaignId), false, "no operator-pause marker was ever set");
+});
+
+// ── RF-3: fail closed when the continuation write fails ───────────────────────
+
+test("RF-3: a failed item-boundary continuation write keeps the campaign PAUSED — it is NOT reopened to running with nothing in flight", async () => {
+  const owner = "ctrl-1";
+  const { campaignId, aId, bId } = runningCampaign(owner);
+  const launched: string[] = [];
+
+  const launch = async (cid: string, itemId: string): Promise<DriveOneItemResult> => {
+    launched.push(itemId);
+    if (itemId === aId) {
+      // A parks item-scoped and commits the campaign pause (the controller's OWN park).
+      parkItemScoped(cid, itemId, owner);
+      await parkCampaign(cid, itemId, "decision_needed", { exemption: "item-carries-context" });
+      // Force the reopen-path continuation write to THROW: a row already occupies A's
+      // continuation id, so the re-record hits the PRIMARY KEY and raises. (Models any
+      // failure of the boundary write — an IO error, a lost DB, a constraint clash.)
+      recordContinuation({
+        continuationId: campaignContinuationId(cid, aId),
+        consumerKind: "campaign",
+        sourceLaunchId: `launch-${aId}`,
+        currentPhase: "pre",
+        nextAction: { kind: "noop" },
+      });
+      return { itemRecords: [], stopReason: "paused", stopScope: "item" };
+    }
+    // Fail closed means we never got here — B must NOT be dispatched.
+    throw new Error("B must not be dispatched after a failed continuation write");
+  };
+
+  const result = await driveRemainingItems(campaignId, {
+    dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }),
+    projectDir,
+    mode: "sequential",
+    launchDriveItem: launch,
+    controllerOwner: owner,
+    controllerLeaseTtlMs: DEFAULT_CONTROLLER_LEASE_MS,
+  });
+
+  assert.deepEqual(launched, [aId], "the failed continuation write halted dispatch — B was never driven");
+  assert.equal(result.stopReason, "paused");
+  assert.equal(getCampaign(campaignId)!.status, "paused", "campaign stays PAUSED — not flipped to running with nothing in flight");
+  assert.equal(getCampaignItem(aId)!.lifecycleStatus, "awaiting_gate", "A's item-scoped park stays intact for resume/recover to re-drive");
+  assert.equal(getCampaignItem(bId)!.lifecycleStatus, "pending", "B stays pending");
+  // The durable continuation resolves exactly once — resume/recover adopts it without duplication.
+  assert.ok(getContinuation(campaignContinuationId(campaignId, aId)) !== undefined, "A's continuation is durable and adoptable");
 });
