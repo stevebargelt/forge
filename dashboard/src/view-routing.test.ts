@@ -16,6 +16,13 @@ test("known view hashes remain directly addressable", () => {
   // handoff note lands on it rather than silently falling back to home.
   assert.equal(initialView("#reviews"), "reviews");
   assert.equal(hashForView("reviews"), "#reviews");
+  // FG-349: the Control Plane area is a deep-linkable view.
+  assert.equal(initialView("#control-plane"), "control-plane");
+  assert.equal(hashForView("control-plane"), "#control-plane");
+});
+
+test("FG-349: an unknown hash still falls back to home, control-plane is opt-in", () => {
+  assert.equal(initialView("#control-planes"), "home");
 });
 
 test("home owns the hashless route while other views retain explicit hashes", () => {

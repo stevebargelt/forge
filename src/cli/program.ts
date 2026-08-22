@@ -48,6 +48,7 @@ import { registerPi } from "./commands/pi.js";
 import { registerReview } from "./commands/review.js";
 import { registerReviewLoop } from "./commands/review-loop.js";
 import { registerRoute } from "./commands/route.js";
+import { registerConfig } from "./commands/config.js";
 import { registerCheckAgentDiff } from "./commands/check-agent-diff.js";
 import { registerCampaign } from "./commands/campaign.js";
 import { registerReadiness } from "./commands/readiness.js";
@@ -127,6 +128,7 @@ export function buildProgram(): Command {
   registerReview(program);
   registerReviewLoop(program);
   registerRoute(program);
+  registerConfig(program);
   registerCheckAgentDiff(program);
   registerCampaign(program);
   registerReadiness(program);
