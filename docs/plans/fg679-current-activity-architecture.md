@@ -103,6 +103,18 @@ per BD-13 and BD-18, absent measured latency, failure, or dashboard-hang impact 
 that the call occurs. If someone later measures such an impact, that measurement is the ticket — the
 observation that a subprocess exists is not.
 
+*(Note 2026-08-22: FG-742 is exactly that follow-up for Exception 1 — a measured impact, not a
+re-litigation of the bare fact. `/api/current-activity`'s 8s client deadline aborted because it shares
+the dashboard's single event-loop thread with `/api/in-flight`, and queued behind Exception 1's
+`docker inspect` fan-out against a slow or hung daemon. Exception 1 itself is unchanged — `/api/in-flight`
+still shells out to `docker inspect` per running container, still outside the BD-7 guard — but the
+shared-thread cost that shellout can impose is now bounded rather than unbounded: a per-inspect timeout
+(`RECONCILE_PROBE_TIMEOUT_MS`, 2s) and a per-request fan-out budget (`RECONCILE_FANOUT_BUDGET_MS`, 2.5s),
+wired via `budgetedLivenessProbe` at the `/api/in-flight` route, cap the worst-case stall at ~4.5s
+regardless of container count or daemon health — comfortably inside current-activity's deadline. See
+`dashboard/CLAUDE.md`'s single-threaded-serving-contract note and the regression at
+`dashboard/src/fg742-current-activity-availability.integration.test.ts`.)*
+
 ## No daemon — and why that is BD-16, not an absence of precedent
 
 FG-679 introduces no daemon and no resident observer. **The reason is BD-16: the terminal outcome is
