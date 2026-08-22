@@ -165,3 +165,30 @@ test("FG-495: dashboard/package.json's test script excludes *.integration.test.t
     `dashboard must define a "test:integration" script that runs *.integration.test.ts files, got: ${testIntegrationScript}`,
   );
 });
+
+// FG-752: a red dashboard `tsc --noEmit` once shipped to main because the
+// required `test` job's typecheck step ran only the ROOT `tsc --noEmit` — it
+// never typechecked the dashboard workspace, and the dashboard_browser tier
+// runs those files through tsx (which strips types), not tsc. This asserts the
+// gate command the required job runs (`npm run typecheck`) also drives the
+// dashboard workspace's tsc, so removing that coverage fails here — and this
+// file is a root unit-tier test, so it executes inside the required `test` job.
+test("FG-752: root typecheck script covers the dashboard workspace tsc", () => {
+  const rootPkg = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  );
+  const typecheckScript = rootPkg.scripts?.typecheck ?? "";
+  assert.ok(
+    /typecheck\s+-w\s+dashboard/.test(typecheckScript),
+    `root "typecheck" script must run the dashboard workspace tsc (npm run typecheck -w dashboard) so a red dashboard typecheck blocks the required merge gate, got: ${typecheckScript}`,
+  );
+
+  const dashboardPkg = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../dashboard/package.json", import.meta.url)), "utf8"),
+  );
+  const dashboardTypecheck = dashboardPkg.scripts?.typecheck ?? "";
+  assert.ok(
+    dashboardTypecheck.includes("tsc") && dashboardTypecheck.includes("--noEmit"),
+    `dashboard's "typecheck" script must run tsc --noEmit, got: ${dashboardTypecheck}`,
+  );
+});
