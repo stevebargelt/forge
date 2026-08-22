@@ -42,11 +42,17 @@ afterEach(() => {
   db.close();
 });
 
-function addCampaign(seed: { id: string; status: string; projectDir?: string | null }): void {
+function addCampaign(seed: { id: string; status: string; projectDir?: string | null; projectDirCanonical?: string | null }): void {
   db.prepare(`
-    INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, project_dir)
-    VALUES (@id, @status, 'list', '{}', 'sequential', @ts, @ts, @projectDir)
-  `).run({ id: seed.id, status: seed.status, ts: ago(1000 * HOURS), projectDir: seed.projectDir === undefined ? PROJECT : seed.projectDir });
+    INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, project_dir, project_dir_canonical)
+    VALUES (@id, @status, 'list', '{}', 'sequential', @ts, @ts, @projectDir, @canonical)
+  `).run({
+    id: seed.id,
+    status: seed.status,
+    ts: ago(1000 * HOURS),
+    projectDir: seed.projectDir === undefined ? PROJECT : seed.projectDir,
+    canonical: seed.projectDirCanonical ?? null,
+  });
 }
 
 function addCampaignItem(seed: {
@@ -82,11 +88,11 @@ function addCampaignItem(seed: {
   });
 }
 
-function addTicket(ticketId: string, status: string, projectKey = "pk-forge"): void {
+function addTicket(ticketId: string, status: string, projectKey = "pk-forge", importedFrom: string | null = null): void {
   db.prepare(`
-    INSERT INTO tickets (project_key, ticket_id, type, status, title, body, imported_at)
-    VALUES (?, ?, 'story', ?, ?, '', ?)
-  `).run(projectKey, ticketId, status, `ticket ${ticketId}`, ago(1000 * HOURS));
+    INSERT INTO tickets (project_key, ticket_id, type, status, title, body, imported_at, imported_from)
+    VALUES (?, ?, 'story', ?, ?, '', ?, ?)
+  `).run(projectKey, ticketId, status, `ticket ${ticketId}`, ago(1000 * HOURS), importedFrom);
 }
 
 // Campaign hard stops never consult the step-gate resolver (that is the human-gate path),
@@ -220,6 +226,59 @@ describe("FG-743 AC4 — a nonterminal item whose ticket became done retains no 
     assert.equal(waits.length, 1, "the sibling project's done FG-970 must not drop A's live wait");
     assert.equal(waits[0]!.ticketId, "FG-970");
     assert.equal(waits[0]!.campaignId, "camp-A");
+  });
+});
+
+// ──────── AC4/RF-1 — done-ticket reconciliation is scoped to the campaign's OWN project ────────
+//
+// `tickets` is keyed by (project_key, ticket_id): the same id lives in every project that
+// carries it, and this module may not shell `git` to resolve a project_key from a path
+// (BD-7/BD-18). Closure is therefore scoped by FILESYSTEM IDENTITY — the ticket's recorded
+// source checkout (`imported_from`, a proven realpath) vs the campaign's proven
+// `project_dir_canonical`. A `done` FG-X in ANOTHER project must not clear a live hard-stop on
+// THIS project's FG-X — INCLUDING when this project never imported FG-X at all, the
+// false-negative the earlier ALL-rows-done predicate left standing (its sole `done` row for an
+// absent-here ticket "fully determined" a closure this campaign's project never made).
+
+describe("FG-743/RF-1 — a done ticket in ANOTHER project cannot suppress this project's live wait", () => {
+  const PROJ_A = "/repos/project-a";
+  const PROJ_B = "/repos/project-b";
+
+  // DISCRIMINATING: fails against `WHERE t.ticket_id = ci.ticket_id` (COUNT=1, all done →
+  // suppressed), passes once the done row's foreign project excludes it.
+  test("done FG-980 owned by project A does NOT drop project B's live wait when B never imported it", () => {
+    addCampaign({ id: "camp-B", status: "paused", projectDir: PROJ_B, projectDirCanonical: PROJ_B });
+    addTicket("FG-980", "done", "pk-project-a", PROJ_A); // owner is A; B has NO FG-980 row at all
+    addCampaignItem({
+      id: "item-B",
+      campaignId: "camp-B",
+      ticketId: "FG-980",
+      lifecycleStatus: "blocked_by_red",
+      reason: "authoritative reviewer blocked the build",
+      requestedHumanAction: "resolve the reviewer block then resume",
+    });
+
+    const waits = derive().operatorWaits;
+    assert.equal(waits.length, 1, "project A's done FG-980 must not drop B's live wait for a ticket absent in B");
+    assert.equal(waits[0]!.campaignId, "camp-B");
+    assert.equal(waits[0]!.ticketId, "FG-980");
+  });
+
+  // TRUE-POSITIVE guard: the campaign's OWN done ticket still reconciles, and a foreign done
+  // row alongside it changes nothing.
+  test("project B's OWN done FG-981 DOES suppress the wait, ignoring a foreign done row", () => {
+    addCampaign({ id: "camp-B2", status: "paused", projectDir: PROJ_B, projectDirCanonical: PROJ_B });
+    addTicket("FG-981", "done", "pk-project-a", PROJ_A); // foreign — must be ignored
+    addTicket("FG-981", "done", "pk-project-b", PROJ_B); // the campaign's OWN project — reconciles
+    addCampaignItem({
+      id: "item-B2",
+      campaignId: "camp-B2",
+      ticketId: "FG-981",
+      lifecycleStatus: "awaiting_gate",
+      requestedHumanAction: "close the ticket",
+    });
+
+    assert.equal(derive().operatorWaits.length, 0, "the campaign's own done FG-981 clears the now-satisfied instruction");
   });
 });
 

@@ -904,21 +904,21 @@ type CampaignStopRow = {
   requested_human_action: string;
   updated_at: string | null;
   campaign_status: string;
-  /** FG-743: 1 only when `ticket_id` is CLOSED across the whole shadow — at least one
-   *  `tickets` row carries it and EVERY row that does records `done`, else 0. The
-   *  RECONCILIATION signal — a done ticket means the item's work shipped, so a retained
-   *  "close the ticket" instruction is already satisfied. 0 on a store with no `tickets`
-   *  table (the aged read-only shape), the fail-open direction: absence of proof of
-   *  closure is not proof of closure.
+  /** FG-743: 1 only when the item's OWN-project ticket is CLOSED — the RECONCILIATION
+   *  signal that a "close the ticket" instruction is already satisfied. Computed in JS by
+   *  `reconcileTicketDone`, NOT a SQL subquery, because the owning project is decided by
+   *  FILESYSTEM IDENTITY (see that function). 0 on a store with no `tickets` table (the
+   *  aged read-only shape), the fail-open direction: absence of proof of closure is not
+   *  proof of closure.
    *
-   *  FG-743/RF-1: the ALL-rows-done test is deliberate, not MAX-over-rows. `tickets` is
-   *  keyed by (project_key, ticket_id) so two projects can each carry an `FG-123`, and
-   *  this module cannot resolve a project_key from a workspace path without shelling
-   *  `git` (BD-7/BD-18). Reading closure off ANY matching row let a `done` `FG-123` in
-   *  project B suppress a LIVE hard-stop on project A's still-active `FG-123` — a
-   *  false-negative drop of an unresolved operator decision. Requiring every row to be
-   *  `done` scopes conservatively: one still-active row anywhere keeps the wait visible,
-   *  the same direction `readClosedTicketIds` takes for the identical collision. */
+   *  FG-743/RF-1: this is SCOPED TO THE CAMPAIGN'S PROJECT, not ALL-rows-done. `tickets`
+   *  is keyed by (project_key, ticket_id) so two projects can each carry an `FG-123`. The
+   *  earlier ALL-rows-done predicate still dropped a LIVE hard-stop on project A's
+   *  `FG-123` whenever A's own row was ABSENT and a `done` `FG-123` existed in project B —
+   *  the sole surviving `done` row "fully determined" closure for a ticket A never
+   *  imported. `reconcileTicketDone` counts only rows ATTRIBUTABLE to the campaign's
+   *  proven identity, so a proven-different project's `done` row can no longer suppress
+   *  the wait, absent row or not. */
   ticket_done: number;
   project_dir: string | null;
   project_dir_canonical?: string | null;
@@ -961,32 +961,85 @@ function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
   // rather than throwing on the JOIN and taking the whole surface down.
   if (!hasColumn(db, "campaign_items", "requested_human_action") || !hasColumn(db, "campaigns", "project_dir")) return [];
   const canonical = hasCanonicalColumn(db, "campaigns") ? ", c.project_dir_canonical" : "";
-  // The `tickets` table can be absent on an aged/read-only handle too; guard it the same
-  // way and read every item as not-done (`0`) there rather than naming a table that throws.
-  // FG-743/RF-1: closure is ALL-rows-done, not any-row-done. `tickets` is keyed by
-  // (project_key, ticket_id), so a `done` `FG-123` in one project must not clear a live
-  // hard-stop on a still-active `FG-123` in another. COUNT(*) > 0 rejects the no-matching-
-  // row case (an unimported ticket is unproven, not closed); the SUM is 0 iff no matching
-  // row is anything other than `done`. This mirrors `readClosedTicketIds` exactly — the one
-  // place this module already reconciles the same (project_key, ticket_id) collision.
-  const ticketDone = hasColumn(db, "tickets", "status")
-    ? `(SELECT CASE WHEN COUNT(*) > 0
-                     AND SUM(CASE WHEN t.status = '${CLOSED_TICKET_STATUS}' THEN 0 ELSE 1 END) = 0
-                    THEN 1 ELSE 0 END
-          FROM tickets t WHERE t.ticket_id = ci.ticket_id)`
-    : "0";
   const rows = db.prepare(`
     SELECT ci.id, ci.campaign_id, ci.ticket_id, ci.run_id, ci.lifecycle_status,
            ci.blocker_kind, ci.reason, ci.requested_human_action, ci.updated_at,
-           c.status AS campaign_status, ${ticketDone} AS ticket_done,
+           c.status AS campaign_status,
            c.project_dir${canonical}
       FROM campaign_items ci
       JOIN campaigns c ON c.id = ci.campaign_id
      WHERE ci.requested_human_action IS NOT NULL
        AND ci.lifecycle_status NOT IN ('complete', 'failed', 'pending', 'running')
      ORDER BY ci.updated_at DESC
-  `).all() as CampaignStopRow[];
-  return rows.filter(isLiveCampaignOperatorWait);
+  `).all() as Array<Omit<CampaignStopRow, "ticket_done">>;
+  // FG-743/RF-1: ticket_done is decided PER ROW against the CAMPAIGN'S OWN project, not by
+  // a bare ticket_id match. Computed in JS (below) because the owning project is a
+  // filesystem-identity question the SQL subquery could not ask.
+  const ticketDone = reconcileTicketDone(db, rows);
+  return rows.map((r) => ({ ...r, ticket_done: ticketDone(r) })).filter(isLiveCampaignOperatorWait);
+}
+
+/** FG-743/RF-1: the OWN-PROJECT ticket-done reconciliation. `tickets` is keyed by
+ *  (project_key, ticket_id): the same id lives in every project that carries it, and this
+ *  module may not shell `git` to turn a workspace path into a project_key (BD-7/BD-18). So
+ *  the owning project is decided by FILESYSTEM IDENTITY — the ONE relation this module
+ *  already scopes by — between the ticket's recorded source checkout (`imported_from`, a
+ *  proven `realpath`) and the campaign's PROVEN identity (`project_dir_canonical`, also a
+ *  proven `realpath`). Byte equality of two proven physicals is exactly the comparison
+ *  `inProjectScope` makes over `project_dir_canonical`; no realpath is spent here (both
+ *  sides are ALREADY proven), so a store of paths gone from disk still reconciles.
+ *
+ *  A ticket_id is `done` for a campaign row iff at least one ATTRIBUTABLE `tickets` row
+ *  exists for it and EVERY attributable row is `done`. A row whose PROVEN source is a
+ *  DIFFERENT project is excluded, so a `done` `FG-123` in project B can no longer clear a
+ *  live hard-stop on project A's `FG-123` — including the case the ALL-rows-done predicate
+ *  missed, where A never imported `FG-123` at all and B's `done` row was the only one.
+ *
+ *  0 on a store with no `tickets` table or no `status` column (the aged read-only shape):
+ *  no proof of closure is available, and absence of proof is not proof, so every wait
+ *  reads not-done rather than the query throwing on a missing table. */
+function reconcileTicketDone(
+  db: DatabaseInstance,
+  rows: ReadonlyArray<{ ticket_id: string; project_dir_canonical?: string | null }>,
+): (row: { ticket_id: string; project_dir_canonical?: string | null }) => number {
+  if (!hasColumn(db, "tickets", "status")) return () => 0;
+  const ids = [...new Set(rows.map((r) => r.ticket_id))];
+  if (ids.length === 0) return () => 0;
+  // `imported_from` arrived by ALTER (FG-606) so an aged `tickets` can lack it; a row read
+  // without it carries a null source, which is INDETERMINATE and reconciles as before.
+  const importedFrom = hasColumn(db, "tickets", "imported_from") ? "imported_from" : "NULL AS imported_from";
+  const placeholders = ids.map(() => "?").join(", ");
+  const ticketRows = db.prepare(`
+    SELECT ticket_id, status, ${importedFrom} FROM tickets WHERE ticket_id IN (${placeholders})
+  `).all(...ids) as Array<{ ticket_id: string; status: string; imported_from: string | null }>;
+  const byId = new Map<string, Array<{ status: string; imported_from: string | null }>>();
+  for (const t of ticketRows) {
+    const list = byId.get(t.ticket_id);
+    if (list) list.push(t);
+    else byId.set(t.ticket_id, [t]);
+  }
+  return (row) => {
+    const candidates = byId.get(row.ticket_id);
+    if (candidates === undefined) return 0;
+    const campaignCanonical = row.project_dir_canonical ?? null;
+    const attributable = candidates.filter((c) => isAttributableToProject(c.imported_from, campaignCanonical));
+    if (attributable.length === 0) return 0;
+    return attributable.every((c) => c.status === CLOSED_TICKET_STATUS) ? 1 : 0;
+  };
+}
+
+/** FG-743/RF-1: is a ticket row's source checkout the campaign's OWN project? Decided by
+ *  proven-path byte equality — the same identity relation `inProjectScope` uses over
+ *  `project_dir_canonical`, never a fresh realpath at read time (both sides are ALREADY
+ *  proven physicals). Unknown on EITHER side is INDETERMINATE and counts as attributable
+ *  (the GUARD direction): a legacy ticket with no `imported_from`, or a campaign whose
+ *  identity was never proven, reconciles exactly as the pre-fix predicate did rather than
+ *  silently ceasing to reconcile. Only a row whose PROVEN source DIFFERS from the
+ *  campaign's PROVEN identity is excluded. */
+function isAttributableToProject(importedFrom: string | null, campaignCanonical: string | null): boolean {
+  if (importedFrom === null || importedFrom === "") return true;
+  if (campaignCanonical === null || campaignCanonical === "") return true;
+  return importedFrom === campaignCanonical;
 }
 
 function campaignStopToOperatorWait(row: CampaignStopRow, placement: "run" | "project" | "host"): OperatorWaitActivity {
