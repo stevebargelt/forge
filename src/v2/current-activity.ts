@@ -903,31 +903,166 @@ type CampaignStopRow = {
   reason: string | null;
   requested_human_action: string;
   updated_at: string | null;
+  campaign_status: string;
+  /** FG-743: 1 only when the item's OWN-project ticket is CLOSED — the RECONCILIATION
+   *  signal that a "close the ticket" instruction is already satisfied. Computed in JS by
+   *  `reconcileTicketDone`, NOT a SQL subquery, because the owning project is decided by
+   *  FILESYSTEM IDENTITY (see that function). 0 on a store with no `tickets` table (the
+   *  aged read-only shape), the fail-open direction: absence of proof of closure is not
+   *  proof of closure.
+   *
+   *  FG-743/RF-1: this is SCOPED TO THE CAMPAIGN'S PROJECT, not ALL-rows-done. `tickets`
+   *  is keyed by (project_key, ticket_id) so two projects can each carry an `FG-123`. The
+   *  earlier ALL-rows-done predicate still dropped a LIVE hard-stop on project A's
+   *  `FG-123` whenever A's own row was ABSENT and a `done` `FG-123` existed in project B —
+   *  the sole surviving `done` row "fully determined" closure for a ticket A never
+   *  imported. `reconcileTicketDone` counts only rows ATTRIBUTABLE to the campaign's
+   *  proven identity, so a proven-different project's `done` row can no longer suppress
+   *  the wait, absent row or not. */
+  ticket_done: number;
   project_dir: string | null;
   project_dir_canonical?: string | null;
 };
+
+/** FG-743: a campaign in one of these statuses is OVER (CAMPAIGN_TRANSITIONS in
+ *  src/types has each as a terminal sink). Its parked items are HISTORY — inspectable via
+ *  `forge campaign show/report` (AC6) — never live operator waits, even when an aged item
+ *  still carries a `requested_human_action`. `paused`/`running` are the only nonterminal
+ *  statuses and are deliberately absent. */
+const TERMINAL_CAMPAIGN_STATUSES: readonly string[] = ["complete", "failed", "abandoned"];
+
+/** FG-743/RF-1: a `done` ticket reconciles a wait ONLY when the retained instruction is a
+ *  "close the ticket" ask — the request whose fulfillment IS the ticket reaching `done`.
+ *  A genuinely unrelated, still-unresolved operator DECISION (e.g. "accept the risk or
+ *  abandon the campaign") is NOT satisfied by a done ticket, so scoping the suppression to
+ *  the closure ask is what keeps that decision visible (AC3/AC4) instead of over-suppressing
+ *  it into a false-negative drop. Matched on the durable `requested_human_action` text —
+ *  the only closure signal the row carries. */
+function isTicketClosureReconciliation(requestedAction: string): boolean {
+  return /\bclos(e|ing|ed)\b/i.test(requestedAction) && /\bticket\b/i.test(requestedAction);
+}
+
+/** FG-743: the campaign/item/ticket lifecycle predicate for a LIVE campaign operator
+ *  wait. A parked item that named an operator authority (`requested_human_action`) is a
+ *  live wait ONLY when:
+ *    - its parent campaign is still nonterminal (paused/running) — a terminal campaign's
+ *      parked items are history (AC1/AC2); and
+ *    - its work is not already reconciled BY CLOSURE — a `done` ticket clears the wait only
+ *      when the retained ask was to close the ticket, which the done state has satisfied, so
+ *      no operator action remains (AC4/AC5). A done ticket does NOT clear an unrelated
+ *      operator decision the ticket state never answered (FG-743/RF-1: the over-suppression
+ *      false-negative — that wait stays visible with its actionable reason).
+ *  The row's own park (lifecycle NOT IN complete/failed/pending/running) is already
+ *  filtered in SQL; this is the parent + reconciliation half of the same question. */
+function isLiveCampaignOperatorWait(row: CampaignStopRow): boolean {
+  if (TERMINAL_CAMPAIGN_STATUSES.includes(row.campaign_status)) return false;
+  if (row.ticket_done === 1 && isTicketClosureReconciliation(row.requested_human_action)) return false;
+  return true;
+}
 
 /** Campaign items that STOPPED THEMSELVES and named the operator authority they need —
  *  a non-null `requested_human_action` is the durable hard-stop signal. Only LIVE parks
  *  survive: a `complete`/`failed`/`pending`/`running` item is not a wait (it advanced or
  *  never parked), so the parked set (awaiting_gate / blocked_by_red / awaiting_recovery)
- *  is what remains. The item carries no project dir of its own; the campaign does. */
+ *  is what remains. FG-743: the park alone is not enough — a stop under a TERMINAL campaign
+ *  is historical, not live. A `done` ticket clears the wait ONLY when the retained ask was
+ *  the ticket-closure reconciliation itself, scoped to the item's OWN (project_key,
+ *  ticket_id); an unrelated, still-unresolved operator decision stays live even against a
+ *  done ticket. The shared `isLiveCampaignOperatorWait` predicate finishes the membership
+ *  decision. The item carries no project dir of its own; the campaign does. */
 function readCampaignHardStops(db: DatabaseInstance): CampaignStopRow[] {
   // A read-only handle can predate the campaign tables; PRAGMA doubles as the existence
   // check (zero rows for a missing table), so a store without them reads as no hard stops
   // rather than throwing on the JOIN and taking the whole surface down.
   if (!hasColumn(db, "campaign_items", "requested_human_action") || !hasColumn(db, "campaigns", "project_dir")) return [];
   const canonical = hasCanonicalColumn(db, "campaigns") ? ", c.project_dir_canonical" : "";
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT ci.id, ci.campaign_id, ci.ticket_id, ci.run_id, ci.lifecycle_status,
            ci.blocker_kind, ci.reason, ci.requested_human_action, ci.updated_at,
+           c.status AS campaign_status,
            c.project_dir${canonical}
       FROM campaign_items ci
       JOIN campaigns c ON c.id = ci.campaign_id
      WHERE ci.requested_human_action IS NOT NULL
        AND ci.lifecycle_status NOT IN ('complete', 'failed', 'pending', 'running')
      ORDER BY ci.updated_at DESC
-  `).all() as CampaignStopRow[];
+  `).all() as Array<Omit<CampaignStopRow, "ticket_done">>;
+  // FG-743/RF-1: ticket_done is decided PER ROW against the CAMPAIGN'S OWN project, not by
+  // a bare ticket_id match. Computed in JS (below) because the owning project is a
+  // filesystem-identity question the SQL subquery could not ask.
+  const ticketDone = reconcileTicketDone(db, rows);
+  return rows.map((r) => ({ ...r, ticket_done: ticketDone(r) })).filter(isLiveCampaignOperatorWait);
+}
+
+/** FG-743/RF-1: the OWN-PROJECT ticket-done reconciliation. `tickets` is keyed by
+ *  (project_key, ticket_id): the same id lives in every project that carries it, and this
+ *  module may not shell `git` to turn a workspace path into a project_key (BD-7/BD-18). So
+ *  the owning project is decided by FILESYSTEM IDENTITY — the ONE relation this module
+ *  already scopes by — between the ticket's recorded source checkout (`imported_from`, a
+ *  proven `realpath`) and the campaign's PROVEN identity (`project_dir_canonical`, also a
+ *  proven `realpath`). Byte equality of two proven physicals is exactly the comparison
+ *  `inProjectScope` makes over `project_dir_canonical`; no realpath is spent here (both
+ *  sides are ALREADY proven), so a store of paths gone from disk still reconciles.
+ *
+ *  A ticket_id is `done` for a campaign row iff at least one ATTRIBUTABLE `tickets` row
+ *  exists for it and EVERY attributable row is `done`. A row whose PROVEN source is a
+ *  DIFFERENT project is excluded, so a `done` `FG-123` in project B can no longer clear a
+ *  live hard-stop on project A's `FG-123` — including the case the ALL-rows-done predicate
+ *  missed, where A never imported `FG-123` at all and B's `done` row was the only one.
+ *
+ *  0 on a store with no `tickets` table or no `status` column (the aged read-only shape):
+ *  no proof of closure is available, and absence of proof is not proof, so every wait
+ *  reads not-done rather than the query throwing on a missing table. */
+function reconcileTicketDone(
+  db: DatabaseInstance,
+  rows: ReadonlyArray<{ ticket_id: string; project_dir_canonical?: string | null }>,
+): (row: { ticket_id: string; project_dir_canonical?: string | null }) => number {
+  if (!hasColumn(db, "tickets", "status")) return () => 0;
+  const ids = [...new Set(rows.map((r) => r.ticket_id))];
+  if (ids.length === 0) return () => 0;
+  // `imported_from` arrived by ALTER (FG-606) so an aged `tickets` can lack it; a row read
+  // without it carries a null source, which is INDETERMINATE and reconciles as before.
+  const importedFrom = hasColumn(db, "tickets", "imported_from") ? "imported_from" : "NULL AS imported_from";
+  const placeholders = ids.map(() => "?").join(", ");
+  const ticketRows = db.prepare(`
+    SELECT ticket_id, status, ${importedFrom} FROM tickets WHERE ticket_id IN (${placeholders})
+  `).all(...ids) as Array<{ ticket_id: string; status: string; imported_from: string | null }>;
+  const byId = new Map<string, Array<{ status: string; imported_from: string | null }>>();
+  for (const t of ticketRows) {
+    const list = byId.get(t.ticket_id);
+    if (list) list.push(t);
+    else byId.set(t.ticket_id, [t]);
+  }
+  return (row) => {
+    const candidates = byId.get(row.ticket_id);
+    if (candidates === undefined) return 0;
+    const campaignCanonical = row.project_dir_canonical ?? null;
+    const attributable = candidates.filter((c) => isAttributableToProject(c.imported_from, campaignCanonical));
+    if (attributable.length === 0) return 0;
+    return attributable.every((c) => c.status === CLOSED_TICKET_STATUS) ? 1 : 0;
+  };
+}
+
+/** FG-743/RF-1: is a ticket row's source checkout the campaign's OWN project? Decided by
+ *  proven-path byte equality — the same identity relation `inProjectScope` uses over
+ *  `project_dir_canonical`, never a fresh realpath at read time (both sides are ALREADY
+ *  proven physicals). Only a row whose PROVEN source DIFFERS from the campaign's PROVEN
+ *  identity is excluded.
+ *
+ *  The two indeterminate directions are NOT symmetric — asymmetry is the whole fix:
+ *    - An UNKNOWN TICKET SOURCE (`imported_from` null/empty: a legacy row from before the
+ *      FG-606 ALTER) is the GUARD direction — attributable, so an aged store with no
+ *      `imported_from` at all reconciles by the bare-id match exactly as the pre-fix
+ *      predicate did rather than silently ceasing to reconcile.
+ *    - An UNPROVEN CAMPAIGN IDENTITY (`campaignCanonical` null/empty) against a PROVEN
+ *      ticket source FAILS CLOSED (RF-1): ownership cannot be proven, and unprovable
+ *      ownership must never clear a live wait. Returning `true` here let a `done` same-id
+ *      ticket owned by ANOTHER project mark the ticket done and suppress an otherwise
+ *      unresolved hard stop. Excluding it keeps the wait visible. */
+function isAttributableToProject(importedFrom: string | null, campaignCanonical: string | null): boolean {
+  if (importedFrom === null || importedFrom === "") return true;
+  if (campaignCanonical === null || campaignCanonical === "") return false;
+  return importedFrom === campaignCanonical;
 }
 
 function campaignStopToOperatorWait(row: CampaignStopRow, placement: "run" | "project" | "host"): OperatorWaitActivity {
