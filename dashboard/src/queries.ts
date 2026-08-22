@@ -1939,17 +1939,17 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
   }>;
 
   // Resolve the durable identity KEY to the same label the CLI renders (project
-  // dimension only). Two distinct keys never collapse here — the SQL already grouped
-  // by key — so the resolved label per bucket is stable.
+  // dimension only). Group by the durable KEY, never the resolved label: labels are
+  // presentation metadata and are not unique, so two independent identities that share
+  // a configured/fallback label must stay SEPARATE buckets (AC3/AC4).
   const registry = usageProjectLabelRegistry(groupBy);
   const label = (bucketKey: string): string =>
     groupBy === "project" ? resolveUsageProjectLabel(bucketKey, registry) : bucketKey;
 
   const map = new Map<string, ModelMixBucket>();
   for (const row of rows) {
-    const bucketLabel = label(row.bucket);
-    if (!map.has(bucketLabel)) map.set(bucketLabel, { bucket: bucketLabel, models: [] });
-    map.get(bucketLabel)!.models.push({
+    if (!map.has(row.bucket)) map.set(row.bucket, { bucket: label(row.bucket), models: [] });
+    map.get(row.bucket)!.models.push({
       model: row.model ?? "(unknown model)",
       weightedTokens: row.weighted ?? 0,
       requests: row.requests ?? 0,

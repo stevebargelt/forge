@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -89,6 +89,27 @@ seedRun(forgeClone, 4);
 seedRun(forgeWorktree, 5);
 seedRun(otherProject, 2);
 
+// RF-1 (AC3): two GENUINELY INDEPENDENT repositories configured with the SAME display
+// label. Labels are presentation metadata and are not unique; model-mix must group on
+// durable IDENTITY, so these must stay two separate buckets even though both render
+// "Shared Label".
+const DUP_LABEL = "Shared Label";
+function labeledCheckout(name: string, remote: string): string {
+  const dir = checkout(name, remote);
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  writeFileSync(join(dir, ".forge", "project.json"), JSON.stringify({ name: DUP_LABEL }));
+  return dir;
+}
+const dupA = labeledCheckout("dup-a", "git@github.com:stevebargelt/dup-a.git");
+const dupB = labeledCheckout("dup-b", "git@github.com:stevebargelt/dup-b.git");
+assert.notEqual(
+  repositoryCheckoutIdentity(dupA).key,
+  repositoryCheckoutIdentity(dupB).key,
+  "fixture: two independent identities that only share a display label",
+);
+seedRun(dupA, 8);
+seedRun(dupB, 9);
+
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));
 
 // Fixture check: the writer captured pk-forge for the Forge checkouts (registry precedence).
@@ -113,6 +134,13 @@ test("AC1: three Forge checkouts roll up to one 'Forge' bucket in rollup, model-
 
   const cli = byBucket(cliAggregate({ by: "project", sinceClause: "", projectFilter: undefined, limit: 50 }));
   assert.equal(cli.get("Forge")?.requests, 12, "CLI agrees: one Forge bucket");
+});
+
+test("RF-1/AC3: two independent identities sharing a display label are NOT merged in model-mix", () => {
+  const shared = usageModelMix("project", "all").filter((b) => b.bucket === DUP_LABEL);
+  assert.equal(shared.length, 2, "two independent identities -> two buckets, not one, despite the shared label");
+  const requestSums = shared.map((b) => b.models.reduce((s, m) => s + m.requests, 0)).sort((a, b) => a - b);
+  assert.deepEqual(requestSums, [8, 9], "each identity keeps its own usage; the label collision never merged them");
 });
 
 test("AC5: scoping by the Forge project includes exactly the Forge usage and no other's", () => {
