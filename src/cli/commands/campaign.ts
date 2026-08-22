@@ -5,7 +5,7 @@ import { planCampaign, resolvePlan, sourceInputToPlannerInput } from "../../camp
 import type { PlannerInput, PlanMode, ItemModeOverride, ExecutionLane } from "../../campaign/planner.js";
 import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
-import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
+import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign, tryOperatorPauseCampaign } from "../../store/campaigns.js";
 import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem, driveOneCampaignItem, launchDriveItemUnderForge, driveRemainingItems, prepareCampaignItemDispatch, DEFAULT_CONTROLLER_LEASE_MS } from "../../campaign/executor.js";
 import { recoverCampaign, type CampaignDispatchDeps } from "../../campaign/continuation-adapter.js";
 import { invoke } from "../../v2/invoke.js";
@@ -693,7 +693,10 @@ export function registerCampaign(program: Command): void {
       // FG-516: no pause notification here — this is the operator's OWN pause
       // action, not an unattended wedge. Only the executor's automatic
       // running→paused parks (drive errors, blockers, gates) notify.
-      if (!tryTransitionCampaign(campaignId, "running", "paused")) {
+      // FG-750 (RF-2): pause via the operator-scoped CAS, which durably marks the
+      // campaign operatorPaused in the SAME transaction — so a cross-process
+      // item-scoped-park continuation cannot resume over this campaign-wide pause.
+      if (!tryOperatorPauseCampaign(campaignId)) {
         const current = getCampaign(campaignId);
         process.stderr.write(
           `Error: campaign is ${current?.status ?? "unknown"}; only a running campaign can be paused\n`

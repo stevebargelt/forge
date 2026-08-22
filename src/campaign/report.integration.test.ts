@@ -1018,7 +1018,7 @@ test("CONSISTENCY: planned+dry_run+approved → dry_run re-plan message, NOT sta
 
 // ── Known instance 4 (MEDIUM): running + anomalous in-flight → safety AND actions both recovery ──
 
-test("CONSISTENCY: running campaign with anomalous in-flight item (awaiting_gate) → safety AND actions both recovery", () => {
+test("CONSISTENCY: running campaign with a genuinely wedged in-flight item (awaiting_gate + campaign_system) → safety AND actions both recovery", () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101", "FG-102"] },
     { projectDir, mode: "sequential" }
@@ -1026,9 +1026,12 @@ test("CONSISTENCY: running campaign with anomalous in-flight item (awaiting_gate
   approveCampaign(campaign.id, { rationale: "LGTM" });
   tryTransitionCampaignToRunning(campaign.id);
 
-  // Force item into anomalous state (awaiting_gate) while campaign is running
+  // FG-750: a bare awaiting_gate during a running campaign is a LEGITIMATE item-scoped
+  // park now, not a wedge. The genuinely anomalous shape that still needs recovery is the
+  // fail-closed recovery shape (awaiting_gate carrying a campaign_system blocker — see
+  // isRecoveryShape) — so force THAT to keep testing the recovery consistency guarantee.
   const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
-  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', run_id = 'run-anomalous-123' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = 'campaign_system', run_id = 'run-anomalous-123' WHERE id = ?").run(items[0]!.id);
 
   const show = assembleCampaignShow(campaign.id)!;
   assert.ok(
@@ -1048,6 +1051,36 @@ test("CONSISTENCY: running campaign with anomalous in-flight item (awaiting_gate
   );
   // Verify they AGREE — both say recovery, not a disagreement like safety=running, action=recovery
   assert.notEqual(report.safetyToContinue, "running", "safety must NOT say 'running' when action says recovery");
+});
+
+test("FG-750 CONSISTENCY: running campaign with an item-scoped park (awaiting_gate) + a running item → safety AND action both 'running', not recovery", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+
+  // FG-750: item 1 is parked awaiting an operator decision (a bare human gate — no
+  // blockerKind) while item 2 runs. This is the whole point of item-scoped continuation:
+  // the campaign stays running and BOTH items are visible simultaneously, so neither
+  // show nor report may read the parked item as recovery-needed.
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', run_id = 'run-parked-1' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-active-2' WHERE id = ?").run(items[1]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.status, "running", "campaign stays running while independent work proceeds");
+  assert.equal(show.nextAction, "running", `show must not read the item-scoped park as recovery, got: ${show.nextAction}`);
+  // BOTH items surface simultaneously with their own durable states.
+  const parkedRow = show.items.find((i) => i.ticketId === "FG-101")!;
+  const runningRow = show.items.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(parkedRow.lifecycleStatus, "awaiting_gate", "the parked item is shown waiting-on-operator");
+  assert.equal(runningRow.lifecycleStatus, "running", "the later independent item is shown running, at the same time");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "running", "safety stays 'running' — an item-scoped park is not a wedge");
+  assert.equal(report.nextOperatorAction, "campaign is running — monitor progress");
 });
 
 // ── Matrix: general consistency across status × condition ────────────────────

@@ -250,8 +250,11 @@ test(
       dispatch: dispatchMustNotBeCalled,
       runNextFn: makeCappedRunNext(10),
     });
-    assert.equal(setupResult.stopReason, "paused", "setup: campaign must park at the architect human gate");
-    assert.equal(setupResult.itemRecords.length, 1, "setup: only FG-925 dispatched so far — FG-914/FG-930 untouched");
+    assert.equal(setupResult.stopReason, "paused", "setup: campaign parks — FG-925 waits on the architect gate and FG-930 (its dependent) is held, so no eligible work remains");
+    // FG-750: an item-scoped gate park no longer halts the campaign. FG-925 parks at the
+    // architect human gate, but the independent FG-914 advances in the SAME start call and
+    // only FG-925's true dependent (FG-930, via the related edge) is held.
+    assert.equal(setupResult.itemRecords.length, 3, "FG-750: all three items are evaluated in the initial start — the gate park does not stop independent work");
     assert.equal(setupResult.itemRecords[0]!.lifecycleStatus, "awaiting_gate");
 
     const itemsBefore = listCampaignItems(campaign.id);
@@ -259,8 +262,10 @@ test(
     const item914Before = itemsBefore.find((i) => i.ticketId === "FG-914")!;
     const item930Before = itemsBefore.find((i) => i.ticketId === "FG-930")!;
     assert.equal(item925Before.lifecycleStatus, "awaiting_gate", "setup: FG-925 parked at awaiting_gate — matches evidence exactly");
-    assert.equal(item914Before.lifecycleStatus, "pending");
-    assert.equal(item930Before.lifecycleStatus, "pending");
+    assert.equal(item914Before.lifecycleStatus, "complete", "FG-750: the independent item advances during the initial start, without waiting on FG-925's gate");
+    assert.equal(item914Before.outcome, "skipped");
+    assert.equal(item930Before.lifecycleStatus, "pending", "FG-750: FG-930 depends on FG-925 (related edge) — held, never dispatched");
+    assert.equal(item930Before.outcome, "held");
 
     const runId = item925Before.runId!;
     assert.ok(runId, "setup: FG-925 must have a run attached");
@@ -283,7 +288,13 @@ test(
     // (1) terminates — reaching this line without the safety guard firing
     // already proves no hang; assert the shape explicitly too.
     assert.ok(resumeResult, "resume must return normally, not hang");
-    assert.equal(resumeResult.itemRecords.length, 3, "all three items must be evaluated within this single resume call");
+    // FG-750: FG-914 already advanced (skipped/terminal) during the start, so the resume
+    // re-evaluates the two non-terminal items — the wedged FG-925 (reconciled) and the
+    // held FG-930. The wedged item MUST be reconciled within this single call.
+    assert.ok(
+      resumeResult.itemRecords.some((r) => r.ticketId === "FG-925"),
+      "resume must reconcile the wedged FG-925 within this single call"
+    );
 
     // (2) FG-925's run reached a terminal status and the item is reconciled to
     // a scoped LOCAL blocker — not left at awaiting_gate, not campaign_system.
@@ -304,13 +315,13 @@ test(
       "FG-475: gate_rejected must classify as scope (LOCAL) via classifyFailureKind, never default to campaign_system (SHARED)"
     );
 
-    // (3) the campaign is NOT paused by FG-925's LOCAL blocker alone — proven
-    // by FG-914 actually advancing past pending in this SAME resume call.
+    // (3) the campaign is NOT paused by FG-925's LOCAL blocker alone — proven by FG-914
+    // having advanced independently (FG-750: at start, then unchanged across the resume).
     const item914After = getCampaignItem(item914Before.id)!;
     assert.equal(
       item914After.lifecycleStatus,
       "complete",
-      "FG-475: the independent item must advance past 'pending' in the same resume call — a LOCAL blocker only holds dependents"
+      "FG-475/FG-750: the independent item advances regardless of FG-925's park/block — a LOCAL blocker only holds dependents"
     );
     assert.equal(item914After.outcome, "skipped");
 

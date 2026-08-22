@@ -299,6 +299,23 @@
     "src/v2/release.integration.test.ts": 53624,
     "src/v2/runNext.integration.test.ts": 4093,
     "src/v2/seed-drift-remedy.integration.test.ts": 1880,
-    "src/v2/task-manifest.integration.test.ts": 1653
+    "src/v2/task-manifest.integration.test.ts": 1653,
+    "src/campaign/fg737-detached-resume-fence.integration.test.ts": 1681,
+    "src/campaign/fg750-item-scoped-continuation.integration.test.ts": 16263,
+    "src/campaign/fg750-rf-continuation-safety.integration.test.ts": 1400,
+    "src/cli/commands/fg590-cleanup-orchestrator.integration.test.ts": 2058,
+    "src/cli/commands/fg625-review-loop-evidence-repro.integration.test.ts": 4332,
+    "src/cli/commands/fg677-cleanup-orchestrator.integration.test.ts": 10714,
+    "src/cli/commands/fg682-review-amend-cli.integration.test.ts": 3842,
+    "src/cli/commands/fg734-status-operator-waits.integration.test.ts": 4493,
+    "src/cli/commands/fg744-rf1-post-run-workspace.integration.test.ts": 4673,
+    "src/cli/commands/orient-snapshot.integration.test.ts": 15313,
+    "src/v2/fg543-image-staleness-digest.integration.test.ts": 1626,
+    "src/v2/fg590-cleanup-lifecycle.integration.test.ts": 5692,
+    "src/v2/fg590-cleanup-scale.integration.test.ts": 24829,
+    "src/v2/fg629-red-retry-refusal.integration.test.ts": 2588,
+    "src/v2/fg682-late-docs-amendment.integration.test.ts": 25300,
+    "src/v2/fg731-ci-wait-command.integration.test.ts": 3258,
+    "src/v2/fg744-trusted-tier-execution.integration.test.ts": 3665
   }
 }

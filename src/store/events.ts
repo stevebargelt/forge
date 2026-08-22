@@ -265,6 +265,19 @@ export type EventType =
   // caller — the only audit trail of the raw error under a cron/service
   // invocation where stderr may not be captured.
   | "campaign_item.drive_error"
+  // FG-750 (RF-3): the controller reopened an item-scoped park to dispatch the next
+  // item, but the item-boundary continuation write THREW. The controller fails closed —
+  // it does NOT flip the campaign back to running (that would leave it 'running' with
+  // nothing in flight and nothing to adopt after a crash) and leaves it PAUSED with the
+  // park intact for resume/recover to re-drive. Durable counterpart to the console.error,
+  // since under a cron/service invocation stderr may not be captured.
+  | "campaign_item.item_boundary_continuation_failed"
+  // FG-750 (RF-1, revision): the controller reopened an item-scoped park to dispatch the
+  // next item, but the item-boundary continuation write was SKIPPED (no durable launch
+  // linkage to bind — nothing to record). Like the throw case above, no continuation backs
+  // a "running" flip, so the controller fails closed and leaves the campaign PAUSED with
+  // the park intact for resume/recover to re-drive. Durable counterpart to the console.error.
+  | "campaign_item.item_boundary_continuation_skipped"
   // FG-487: durable phase-boundary markers around host-side verification work
   // that previously had no dashboard trace — `forge review-loop`'s per-round
   // verification (the FG-501 CI-wait poll, or the local typecheck+test

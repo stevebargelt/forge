@@ -374,6 +374,62 @@ export function tryTransitionCampaignToRunning(id: string): boolean {
   return tryTransitionCampaign(id, "planned", "running");
 }
 
+// FG-750 (RF-2): an operator `forge campaign pause` is a CAMPAIGN-scoped stop and must
+// carry a durable named reason (the AC3 invariant) so a cross-process item-scoped-park
+// continuation can never mistake it for the controller's own item-park pause and resume
+// over it. The CAS running→paused and the durable `operatorPaused` marker are set in ONE
+// transaction, so an operator pause that wins the CAS is ALWAYS accompanied by its marker
+// — there is no window where the campaign is paused-by-operator without the flag. Returns
+// the CAS commit result (false when a concurrent item-park already paused the campaign; in
+// that ordering the operator's command reports the campaign is not running, as before).
+export function tryOperatorPauseCampaign(id: string): boolean {
+  return writeTransaction((): boolean => {
+    const db = getDb();
+    const iso = nowIso();
+    const row = db.prepare(`SELECT metadata FROM campaigns WHERE id = ? AND status = 'running'`).get(id) as
+      | { metadata: string | null }
+      | undefined;
+    if (!row) return false;
+    const metadata = row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : {};
+    metadata.operatorPaused = true;
+    db.prepare(`UPDATE campaigns SET status = 'paused', metadata = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
+      .run(JSON.stringify(metadata), iso, id);
+    return true;
+  });
+}
+
+// FG-750 (RF-2): clear the operator-pause marker as part of an operator-driven resume, so
+// the NEXT item-scoped park is free to continue normally. The controller's own item-park
+// resume never touches this — it only continues when the marker is ABSENT.
+export function clearOperatorPauseMarker(id: string): void {
+  writeTransaction((): void => {
+    const db = getDb();
+    const row = db.prepare(`SELECT metadata FROM campaigns WHERE id = ?`).get(id) as
+      | { metadata: string | null }
+      | undefined;
+    if (!row?.metadata) return;
+    const metadata = JSON.parse(row.metadata) as Record<string, unknown>;
+    if (!("operatorPaused" in metadata)) return;
+    delete metadata.operatorPaused;
+    db.prepare(`UPDATE campaigns SET metadata = ?, updated_at = ? WHERE id = ?`).run(
+      JSON.stringify(metadata),
+      nowIso(),
+      id,
+    );
+  });
+}
+
+// FG-750 (RF-2): does a durable operator-pause marker hold this campaign? The dispatch
+// decision point reads this before an item-scoped-park continuation resumes the campaign —
+// a set marker means an operator PAUSED the whole campaign and dispatch must NOT continue.
+export function isCampaignOperatorPaused(id: string): boolean {
+  const row = getDb().prepare(`SELECT metadata FROM campaigns WHERE id = ?`).get(id) as
+    | { metadata: string | null }
+    | undefined;
+  if (!row?.metadata) return false;
+  return (JSON.parse(row.metadata) as Record<string, unknown>).operatorPaused === true;
+}
+
 // FG-428: guarded write for `campaign reconcile` — the campaign-status check and
 // the item mutation must be a single atomic operation, or a concurrent
 // resume/start could flip the campaign out of 'paused' between a plain read and
