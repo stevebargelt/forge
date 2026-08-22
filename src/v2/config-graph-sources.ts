@@ -313,19 +313,36 @@ function routingRow(projectDir: string): ConfigRow {
 
 function constraintsRow(forgeHome: string): ConfigRow {
   const dir = join(forgeHome, "constraints");
-  const all = loadAllConstraints(dir);
-  const force = all.filter((c) => c.level === "force").length;
-  const suggest = all.filter((c) => c.level === "suggest").length;
-  return project({ dir, count: all.length, force, suggest }, {
-    key: "constraints",
-    label: "Constraints",
-    truth: "SOURCE" as const,
-    status: (all.length > 0 ? "active" : "absent") as ConfigRow["status"],
-    sourcePaths: [clean(dir)],
-    effectivePath: clean(dir),
-    overrideSemantics: "merge" as const,
-    detail: clean(`${all.length} constraint(s): ${force} force, ${suggest} suggest (merge semantics — all apply)`),
-  });
+  // A malformed/unparseable constraint file makes loadAllConstraints throw. That
+  // is a partial parse failure of ONE surface — isolate it into a warning row so
+  // the rest of the graph still builds, never let it collapse the whole graph
+  // into a false missing-project result.
+  try {
+    const all = loadAllConstraints(dir);
+    const force = all.filter((c) => c.level === "force").length;
+    const suggest = all.filter((c) => c.level === "suggest").length;
+    return project({ dir, count: all.length, force, suggest }, {
+      key: "constraints",
+      label: "Constraints",
+      truth: "SOURCE" as const,
+      status: (all.length > 0 ? "active" : "absent") as ConfigRow["status"],
+      sourcePaths: [clean(dir)],
+      effectivePath: clean(dir),
+      overrideSemantics: "merge" as const,
+      detail: clean(`${all.length} constraint(s): ${force} force, ${suggest} suggest (merge semantics — all apply)`),
+    });
+  } catch (e) {
+    return project({ dir, error: (e as Error).message }, {
+      key: "constraints",
+      label: "Constraints",
+      truth: "SOURCE" as const,
+      status: "warning" as const,
+      sourcePaths: [clean(dir)],
+      effectivePath: clean(dir),
+      overrideSemantics: "merge" as const,
+      warning: clean((e as Error).message),
+    });
+  }
 }
 
 function agentsRow(forgeHome: string): ConfigRow {

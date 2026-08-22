@@ -43,7 +43,7 @@ import { runInReadOnlyDbScope } from "@forge/store-db";
 import type { Campaign } from "@forge/types";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
-import { finishUnhandledRequest } from "./http-error.js";
+import { finishUnhandledRequest, degradedGraphErrorPayload } from "./http-error.js";
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 import {
   guardBindAddress,
@@ -238,9 +238,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     try {
       payload = JSON.stringify(effectiveConfigGraph(projectDir));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
       console.error("/api/config-graph: building the config graph failed:", err);
-      payload = JSON.stringify({ error: message });
+      // Route the degraded-response error string through the same redaction
+      // boundary the config-graph object uses — an exception message is a surfaced
+      // string and must not leak a secret outside the redaction guarantee.
+      payload = degradedGraphErrorPayload(err);
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;

@@ -140,12 +140,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // disposition (retained-for-investigation vs expired/eligible vs leaked) rendered into
   // the page via the shared rule, and the running-launch/legacy no-claim case.
   "fg590-retention-disposition.test.ts": 2,
-  // FG-349 RF-2 adds `fg349-control-plane-scope` (2 tests): the Control Plane
+  // FG-349 RF-2 adds `fg349-control-plane-scope` (3 tests): the Control Plane
   // config-graph read is scope-guarded like every other project-scoped panel —
   // switching checkout scope drops the graph to loading rather than showing the
-  // previous checkout's graph under the new scope's label, and a slow leaving-scope
-  // response landing after the switch cannot repaint the abandoned checkout (seq guard).
-  "fg349-control-plane-scope.test.ts": 2,
+  // previous checkout's graph under the new scope's label; a slow leaving-scope
+  // response landing after the switch cannot repaint the abandoned checkout (seq
+  // guard); and a scope change during the response BODY decode (`await res.json()`)
+  // cannot render the retired checkout's graph either (the post-decode seq check).
+  "fg349-control-plane-scope.test.ts": 3,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,

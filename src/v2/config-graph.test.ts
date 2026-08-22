@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -36,6 +36,27 @@ test("a nonexistent/unreadable projectDir returns a missing graph without throwi
   });
   assert.equal(g.version, CONFIG_GRAPH_VERSION);
   assert.equal(g.project.status, "missing");
+});
+
+test("a malformed constraint isolates to a warning row, never collapses the graph to missing", () => {
+  // RF-1: a constraints/bad.md missing required `level` frontmatter makes
+  // loadAllConstraints throw. That partial parse failure of ONE surface must not
+  // become a false project.status=missing with zero rows.
+  const home = mkdtempSync(join(tmpdir(), "forge-cg-badconstraint-home-"));
+  mkdirSync(join(home, "constraints"), { recursive: true });
+  writeFileSync(join(home, "constraints", "bad.md"), "---\nid: bad\n---\nno level frontmatter\n");
+  const dir = mkdtempSync(join(tmpdir(), "forge-cg-badconstraint-proj-"));
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+
+  let g!: ReturnType<typeof buildConfigGraph>;
+  assert.doesNotThrow(() => {
+    g = buildConfigGraph({ projectDir: dir, forgeHome: home });
+  });
+  assert.equal(g.project.status, "active");
+  assert.ok(g.sections.sources.rows.length > 0, "graph must still carry its otherwise-valid rows");
+  const constraints = g.sections.sources.rows.find((r) => r.key === "constraints")!;
+  assert.equal(constraints.status, "warning");
+  assert.match(constraints.warning ?? "", /missing required frontmatter/);
 });
 
 test("the aggregator reads NO recorded task manifest / dispatch dir", () => {

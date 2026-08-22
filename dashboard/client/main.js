@@ -388,7 +388,13 @@ function App() {
       const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/config-graph${q}`);
       if (seq !== controlPlaneSeq.current) return;
-      if (res.ok) setControlPlane(await res.json());
+      if (res.ok) {
+        // Decode the body BEFORE the scope re-check: a scope change during the
+        // await res.json() body decode must not render the retired checkout's graph.
+        const graph = await res.json();
+        if (seq !== controlPlaneSeq.current) return;
+        setControlPlane(graph);
+      }
       setNow(Date.now());
     } catch (e) {
       if (seq !== controlPlaneSeq.current) return;

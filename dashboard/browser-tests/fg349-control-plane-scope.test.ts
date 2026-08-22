@@ -77,6 +77,10 @@ function scopeKey(url: URL): string {
 // Per-scope response delay, so one checkout can be made to hang while another
 // answers instantly — the setup a scope-invalidation / late-response proof needs.
 const delayByScope = new Map<string, number>();
+// Per-scope BODY delay: headers flush immediately, the body is held. This is the
+// window RF-2 targets — the client passes its post-headers seq check and then
+// blocks inside `await res.json()` while a scope change retires the read.
+const bodyDelayByScope = new Map<string, number>();
 
 let server: Server;
 let browser: Browser;
@@ -167,6 +171,44 @@ test("A slow leaving-scope config-graph response that lands after the switch can
   await page.close();
 });
 
+test("A scope change during config-graph BODY decode cannot render the retired checkout's graph (RF-2 post-decode guard)", async () => {
+  delayByScope.clear();
+  bodyDelayByScope.clear();
+  const page = await newPage({ width: 1440, height: 1200 });
+
+  // Main answers headers immediately but HOLDS its body: the client passes the
+  // first (post-headers) seq check and then blocks inside `await res.json()` —
+  // exactly the window RF-2 describes, which the whole-response delay above never
+  // reaches (that one is caught by the first check).
+  bodyDelayByScope.set(`dir:${CHECKOUT_MAIN}`, 3_000);
+
+  const mainResp = page.waitForResponse(
+    (res) => res.url().includes("/api/config-graph") && res.url().includes(`projectDir=${encodeURIComponent(CHECKOUT_MAIN)}`),
+  );
+
+  await page.goto(`${baseUrl}/#projects`);
+  await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
+  await controlPlaneTab(page).click();
+
+  // Headers are in, but the body is still held: the panel is genuinely pending.
+  await page.getByText("loading control plane…").waitFor();
+  const leaving = await mainResp; // resolves on headers (immediate)
+
+  // Narrow to the fast feature checkout while main's BODY decode is still pending.
+  await checkoutScopeButton(page, "feature").click();
+  await page.locator(".cp-view").waitFor();
+  assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_FEATURE, "the new scope's own graph is shown");
+
+  // Main's body finally lands and `await res.json()` resolves. The post-decode seq
+  // check must drop it — it must not repaint the abandoned main checkout.
+  await leaving.finished();
+  await page.waitForTimeout(100);
+  assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_FEATURE,
+    "a scope change during body decode cannot render the retired checkout's graph");
+  assert.equal(await checkoutScopeButton(page, "feature").getAttribute("aria-pressed"), "true");
+  await page.close();
+});
+
 async function newPage(viewport: { width: number; height: number }): Promise<Page> {
   const page = await browser.newPage({ viewport, reducedMotion: "reduce", timezoneId: "UTC" });
   const errors: string[] = [];
@@ -201,10 +243,20 @@ function createFixtureServer(): Server {
     }
     if (url.pathname === "/api/config-graph") {
       const scope = scopeKey(url);
+      const dir = scope.startsWith("dir:") ? scope.slice("dir:".length) : CHECKOUT_MAIN;
+      const body = JSON.stringify(graphFor(dir));
       const delay = delayByScope.get(scope) ?? 0;
       if (delay) await new Promise((wait) => setTimeout(wait, delay));
-      const dir = scope.startsWith("dir:") ? scope.slice("dir:".length) : CHECKOUT_MAIN;
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(graphFor(dir)));
+      const bodyDelay = bodyDelayByScope.get(scope) ?? 0;
+      if (bodyDelay) {
+        // Headers immediately; the body held. The client resolves its first seq
+        // check on headers and then hangs inside `await res.json()` on the body.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.flushHeaders();
+        setTimeout(() => res.end(body), bodyDelay);
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" }).end(body);
       return;
     }
     res.writeHead(200, { "Content-Type": "application/json" }).end("[]");
