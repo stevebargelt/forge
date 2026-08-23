@@ -169,7 +169,28 @@ export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
   // Dialog keyboard semantics (FG-348 RF-2): dismissable via Escape, focus moved into
   // the panel on open and restored to the invoking control (the run-map node) on close —
   // the backlog/campaign detail-overlay precedent.
-  const onKeyDown = (e) => { if (e.key === "Escape") onClose(); };
+  // FG-692 RF-3: this dialog is aria-modal, so Tab and Shift+Tab are CONTAINED — focus
+  // cycles within the open panel and cannot land on a background control. Same lightweight
+  // trap as the campaigns overlay (FG-727), over the panel's own focusables.
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") { onClose(); return; }
+    if (e.key !== "Tab") return;
+    const node = overlayRef.current;
+    if (!node) return;
+    const focusables = node.querySelectorAll(
+      'a[href], button:not([disabled]), input, textarea, select, [tabindex]:not([tabindex="-1"])',
+    );
+    if (focusables.length === 0) { e.preventDefault(); return; }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !node.contains(active)) { e.preventDefault(); last.focus(); }
+    } else if (active === last || !node.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
   const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
 
   useEffect(() => {

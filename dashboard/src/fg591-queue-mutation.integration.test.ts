@@ -426,6 +426,32 @@ test("FG-692 (RF-11): a non-default loopback bind pins its OWN origin, so it acc
   assert.match(String(foreign?.error), /Host: attacker\.example:8024/, "the refusal names the bind mismatch");
 });
 
+test("FG-692 (RF-1/RF-4): a public DNS host that merely SPELLS like loopback is refused, not trusted", () => {
+  // The pre-fix `^127\.` prefix test admitted any name beginning `127.` — including a
+  // public DNS name that resolves off-loopback — widening same-origin trust to a foreign
+  // origin. Every one of these is NOT a loopback bind.
+  for (const host of ["127.evil.test", "127.0.0.1.evil.example", "127x0x0x1", "127.0.0.256", "127.0.0"]) {
+    assert.equal(guardBindAddress({ HOST: host })?.status, 403, `${host} must not be admitted as a loopback bind`);
+    assert.equal(dashboardOrigins({ HOST: host, PORT: "8024" }), null, `${host} must derive no pinned origin`);
+  }
+
+  // The concrete demonstrated attack: HOST=127.evil.test, PORT=8024. The origin set is
+  // null (no derivable origin), so a request that names 127.evil.test as its own Host is
+  // no longer accepted as same-origin against a pinned loopback set.
+  const pinned = dashboardOrigins({ HOST: "127.evil.test", PORT: "8024" });
+  assert.equal(pinned, null, "no origin is pinned for a non-loopback public hostname");
+  const req = { contentType: "application/json", host: "127.evil.test:8024", origin: "http://127.evil.test:8024", secFetchSite: "same-origin" };
+  // With a genuine loopback pin, that foreign host is refused outright.
+  const loopbackPin = dashboardOrigins({ HOST: "127.0.0.1", PORT: "8024" });
+  assert.equal(guardMutationRequest(req, loopbackPin)?.status, 403, "a 127.<dns> host is not this loopback server");
+
+  // Genuine loopback binds still pass, including a non-default one in 127.0.0.0/8.
+  for (const host of ["127.0.0.1", "127.0.0.5", "127.255.255.254", "::1", "[::1]", "localhost"]) {
+    assert.equal(guardBindAddress({ HOST: host }), null, `${host} is a genuine loopback bind`);
+    assert.ok(dashboardOrigins({ HOST: host, PORT: "8024" }), `${host} derives a pinned origin`);
+  }
+});
+
 // ─── 2. exactly the named verb, exactly this argv ────────────────────────────
 
 test("integ FG-591: each route spawns EXACTLY ONE named `forge queue` verb with the expected argv and nothing else", async () => {

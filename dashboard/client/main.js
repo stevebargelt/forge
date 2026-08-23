@@ -2117,7 +2117,13 @@ function OrchestratorRow({ entry, onTaskClick }) {
   // and announces itself as a button; a row with no taskId stays inert markup (FG-576 RF-2).
   const onClick = entry.taskId ? () => onTaskClick(entry.taskId) : undefined;
   const onKeyDown = onClick
-    ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }
+    // Only the row itself activates on Enter/Space. A keydown that bubbled up from a
+    // nested control (the remote-control link) is that control's own activation to
+    // handle (FG-692 RF-2); the row must not steal it and open the task detail instead.
+    ? (e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
+      }
     : undefined;
   return html`
     <div

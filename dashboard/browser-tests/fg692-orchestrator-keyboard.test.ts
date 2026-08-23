@@ -53,7 +53,9 @@ const orchestratorsFixture = {
     interaction: "interactive",
     limitations: [],
     startedAt: "2026-08-22T00:00:00.000Z",
-    remoteControlUrl: null,
+    // A same-origin href so activating the nested link opens a harmless popup this
+    // test can close, rather than a real outbound navigation (FG-692 RF-2).
+    remoteControlUrl: "/remote-control-fixture",
   }],
 };
 
@@ -103,6 +105,40 @@ test("FG-692: interactive orchestrator rows announce button semantics and open t
     // returned task ID rather than asserting the transient loading overlay.
     await page.locator(".detail-overlay").getByText(TASK_ID, { exact: true }).waitFor();
     assert.match(await page.locator(".detail-overlay").innerText(), new RegExp(TASK_ID));
+    await page.close();
+    assert.deepEqual(errors, [], `browser errors after ${JSON.stringify(key)}: ${errors.join("; ")}`);
+  }
+});
+
+test("FG-692 (RF-2): Enter/Space on the nested remote-control link does NOT steal the link's activation to open the task", async () => {
+  for (const key of ["Enter", " "]) {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    // Activating the link opens a same-origin popup; close it so it never blocks.
+    page.on("popup", (popup) => { popup.close().catch(() => {}); });
+    // The row's stolen activation is a fetch to the task's detail endpoint — record it.
+    let taskFetched = false;
+    page.on("request", (req) => { if (req.url().endsWith(`/api/task/${TASK_ID}`)) taskFetched = true; });
+
+    await page.goto(`${baseUrl}/#projects`);
+    const project = page.getByRole("button", { name: "Open all Keyboard fixture checkouts" });
+    await project.waitFor();
+    await project.click();
+    const diagnostics = page.locator("details.activity-diagnostics");
+    await diagnostics.waitFor();
+    await diagnostics.locator("summary").click();
+
+    const link = page.getByRole("link", { name: /remote control/ });
+    await link.waitFor();
+    await link.focus();
+    assert.equal(await link.evaluate((el) => el === document.activeElement), true, `${JSON.stringify(key)} focuses the nested link`);
+
+    await page.keyboard.press(key);
+    // Give the (buggy) row handler its chance to fire and open the detail overlay.
+    await page.waitForTimeout(400);
+    assert.equal(taskFetched, false, `${JSON.stringify(key)} on the link must not fetch the task detail`);
+    assert.equal(await page.locator(".detail-overlay").count(), 0, `${JSON.stringify(key)} on the link must not open the task detail overlay`);
     await page.close();
     assert.deepEqual(errors, [], `browser errors after ${JSON.stringify(key)}: ${errors.join("; ")}`);
   }

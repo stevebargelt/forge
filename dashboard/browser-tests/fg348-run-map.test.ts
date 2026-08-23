@@ -207,6 +207,35 @@ test("FG-692 RF-2: the Explain panel opens by keyboard, dismisses on Escape, and
   await page.close();
 });
 
+test("FG-692 RF-3: the aria-modal Explain panel contains Tab focus — it cannot escape to a background control", async () => {
+  delayByScope.clear();
+  const page = await newPage({ width: 1440, height: 1200 });
+
+  await page.goto(`${baseUrl}/#run-map/${RUN_ID}`);
+  await page.locator(".rm-view").waitFor();
+  assert.ok((await page.locator(".rm-node").count()) >= 2, "background run-map nodes exist to escape TO");
+
+  const node = page.locator(".rm-node").first();
+  await node.focus();
+  await node.press("Enter");
+  await page.locator(".rx-panel").waitFor();
+  await page.waitForFunction(() => document.activeElement?.classList.contains("close"));
+
+  // Tab and Shift+Tab from within the modal must keep focus inside the panel; a
+  // pre-fix panel (Escape-only, no containment) let Tab land on a background .rm-node.
+  const inPanel = () => page.evaluate(() => !!document.activeElement?.closest(".detail-overlay"));
+  for (const combo of ["Tab", "Shift+Tab", "Tab"]) {
+    await page.keyboard.press(combo);
+    assert.equal(await inPanel(), true, `after ${combo}, focus is still contained within the Explain panel`);
+    assert.equal(
+      await page.evaluate(() => !!document.activeElement?.classList.contains("rm-node")),
+      false,
+      `after ${combo}, focus has NOT escaped to a background run-map node`,
+    );
+  }
+  await page.close();
+});
+
 test("Switching checkout scope invalidates the run map and a late leaving-scope response cannot repaint it (seq guard)", async () => {
   delayByScope.clear();
   const page = await newPage({ width: 1440, height: 1200 });
