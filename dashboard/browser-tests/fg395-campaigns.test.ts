@@ -46,6 +46,12 @@ updateCampaignItem(item.id, {
   reason: "blocked evidence is visible to the operator", requestedHumanAction: "approve the launch window",
   branch: "forge/FG-395-BROWSER", worktreePath: "/tmp/fg395-browser-worktree",
 });
+// FG-746 (C6): a recorded reconcile-gate host verification for this item's ticket, in the
+// campaign's own project — the contextual evidence CampaignDetail now surfaces per item.
+seed.prepare(
+  `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+   VALUES (?,?,?,?,?,?,?,?,?,?)`,
+).run("FG-395-BROWSER", projectDir, "recon5ha012345", "npm run test:all", "npm run test:all", 0, null, "2026-08-22T09:00:00Z", "host", null);
 closeDb();
 
 let browser: Browser;
@@ -89,6 +95,30 @@ test("Campaigns renders a real campaign row and its blocked git/action evidence"
   assert.equal(await blocked.getByTestId("campaign-pr-state").innerText(), "no PR");
   await page.close();
   assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`);
+});
+
+test("FG-746 (AC7/C6): campaign detail renders per-item reconcile-gate evidence (commit, gate/command, source, result, timestamp)", async () => {
+  const page: Page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+  await page.goto(`${BASE}/#campaigns`);
+  const card = page.getByTestId("campaign-card").filter({ hasText: "browser-visible campaign" });
+  await card.waitFor();
+  const detailResponse = page.waitForResponse((r) => r.url().endsWith(`/api/campaign/${campaign.id}`) && r.status() === 200);
+  await card.click();
+  await detailResponse;
+  const blocked = page.getByTestId("campaign-item").filter({ has: page.getByText("FG-395-BROWSER") });
+  await blocked.waitFor();
+
+  const evidence = blocked.getByTestId("campaign-item-reconcile-evidence");
+  await evidence.waitFor({ timeout: 5000 });
+  const row = evidence.getByTestId("reconcile-evidence-row");
+  await row.waitFor();
+  const text = await evidence.innerText();
+  assert.match(text, /npm run test:all/, "the gate/command renders");
+  assert.match(text, /host/, "the source renders");
+  assert.match(text, /pass/, "the result renders");
+  assert.match(text, /recon5ha/, "the commit renders");
+  assert.match(text, /2026-08-22/, "the recorded timestamp renders");
+  await page.close();
 });
 
 test("Campaigns card and its detail close are keyboard-operable (RF-2, RF-3)", async () => {

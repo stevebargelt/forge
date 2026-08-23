@@ -138,6 +138,29 @@ function ArtifactsBlock({ artifacts }) {
   </${Block}>`;
 }
 
+// FG-746 (C5/AC6): the candidate-bound host/CI verification evidence for this task's
+// run, served as a sidecar alongside the (unmodified) TaskExplain. Degrades to nothing
+// when the payload has no evidence (older tasks, out-of-scope, or none recorded),
+// matching ArtifactsBlock's absent-data convention.
+function VerificationEvidenceBlock({ evidence }) {
+  if (!evidence || evidence.length === 0) return null;
+  return html`<${Block} title="Verification evidence">
+    <div class="rx-verif" data-testid="rx-verification-evidence">
+      ${evidence.map((e) => html`
+        <div class="rx-verif-row" data-testid="rx-verif-row" key=${e.id ?? `${e.commitSha}-${e.gateName}`}>
+          <span class=${"badge " + (e.exitCode === 0 ? "status-complete" : "status-failed")}>${e.exitCode === 0 ? "pass" : `exit ${e.exitCode}`}</span>
+          <span>${e.gateName}</span>
+          <span class="rx-verif-source">${e.source}</span>
+          ${e.command ? html`<code class="mono faint">${e.command}</code>` : null}
+          ${e.ciUrl
+            ? html`<a class="mono" href=${e.ciUrl} target="_blank" rel="noreferrer noopener">${e.commitSha ? e.commitSha.slice(0, 10) : "—"}</a>`
+            : html`<span class="mono faint">${e.commitSha ? e.commitSha.slice(0, 10) : "—"}</span>`}
+          <span class="muted mono rx-verif-time">${e.recordedAt ?? "—"}</span>
+        </div>`)}
+    </div>
+  </${Block}>`;
+}
+
 export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
   const [explain, setExplain] = useState(null);
   const [err, setErr] = useState(null);
@@ -193,6 +216,7 @@ export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
               <${RedsBlock} block=${explain.reds} />
               <${UpstreamBlock} block=${explain.upstream} />
               <${ArtifactsBlock} artifacts=${explain.artifacts} />
+              <${VerificationEvidenceBlock} evidence=${explain.verificationEvidence} />
             `
           : null}
       </div>

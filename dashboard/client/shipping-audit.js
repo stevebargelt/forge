@@ -47,6 +47,7 @@ function MechanicalBlock({ readiness, checks }) {
                 ? html`<a class="mono" href=${c.ciUrl} target="_blank" rel="noreferrer noopener">${shortSha(c.commitSha)}</a>`
                 : html`<span class="audit-axis-label mono">${shortSha(c.commitSha)}</span>`}
               ${c.ciUrl ? html`<a class="audit-check-ci" href=${c.ciUrl} target="_blank" rel="noreferrer noopener">CI ↗</a>` : null}
+              ${c.recordedAt ? html`<span class="audit-axis-label mono" data-testid="audit-check-recorded" title="recorded at">${c.recordedAt}</span>` : null}
               ${c.status === "failed"
                 ? html`<div class="audit-check-message" data-testid="audit-check-message">${auditCheckFailureMessage(c)}</div>`
                 : null}

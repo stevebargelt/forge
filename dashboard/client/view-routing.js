@@ -1,4 +1,4 @@
-const VIEWS = new Set(["activity", "projects", "verify", "usage", "ops", "governance", "backlog", "reviews", "queue", "shipping", "campaigns", "control-plane", "run-map"]);
+const VIEWS = new Set(["activity", "projects", "usage", "ops", "governance", "backlog", "reviews", "queue", "shipping", "campaigns", "control-plane", "run-map"]);
 
 // FG-348: the run-map view is PARAMETERIZED by runId — `#run-map/<runId>` — so a
 // run is deep-linkable and reachable from the activity feed. Everything else is a

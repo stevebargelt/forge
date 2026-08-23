@@ -116,8 +116,8 @@ const auditFixture = {
         acceptedDeferrals: [{ findingRef: "RF-2", summary: "broader lifecycle cleanup", followupTicketId: "FG-999", decidedBy: "orchestrator" }],
       },
       shippingChecks: [
-        { gateName: "test:all", status: "passed", source: "ci", commitSha: "sha100candidate", command: "npm run test:all", recordedAt: "t", ciUrl: null },
-        { gateName: "typecheck", status: "passed", source: "host", commitSha: "sha100candidate", command: "tsc", recordedAt: "t", ciUrl: null },
+        { gateName: "test:all", status: "passed", source: "ci", commitSha: "sha100candidate", command: "npm run test:all", recordedAt: "2026-08-22T09:00:00Z", ciUrl: null },
+        { gateName: "typecheck", status: "passed", source: "host", commitSha: "sha100candidate", command: "tsc", recordedAt: "2026-08-22T09:05:00Z", ciUrl: null },
       ],
       campaign: null, runId: "run-100", taskIds: ["task-100"], candidateSha: "sha100candidate",
       links: { ticketId: "FG-100", runId: "run-100", subjectTaskId: "task-100", commit: "sha100candidate" },
@@ -245,6 +245,25 @@ test("FG-386: a failed mechanical check surfaces an actionable failure message (
   assert.match(messageText, /exit 2/, "the message surfaces the non-zero exit code");
   assert.match(messageText, /reproduce with/, "the message tells the operator how to reproduce it");
 
+  await page.close();
+});
+
+test("FG-746 (AC7/C7): each mechanical shipping check surfaces its recorded timestamp, so the closeout evidence is not lost with the retired tab", async () => {
+  const page = await newPage({ width: 1200, height: 1000 });
+  await openShipping(page);
+
+  const row = page.locator('[data-testid="audit-row"][data-status="passed"]').filter({ hasText: "FG-100" });
+  await row.getByRole("button", { name: "details" }).click();
+  const mechanical = row.locator('[data-testid="audit-mechanical"]');
+  await mechanical.waitFor();
+
+  const recorded = mechanical.locator('[data-testid="audit-check-recorded"]');
+  assert.equal(await recorded.count(), 2, "both passing checks surface their recorded timestamp");
+  const text = await mechanical.innerText();
+  assert.match(text, /2026-08-22/, "the check's recorded timestamp renders in the closeout evidence");
+  // commit, gate, source, and result already render (FG-386); the timestamp closes the set.
+  assert.match(text, /test:all/, "gate/command still renders");
+  assert.match(text, /sha100candi/, "commit still renders");
   await page.close();
 });
 

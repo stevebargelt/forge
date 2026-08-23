@@ -186,6 +186,12 @@ const DELETED = join(trees, "deleted-checkout");
     `INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, project_dir)
      VALUES (?,?,?,?,?,?,?,?)`,
   ).run("camp-alpha", "running", "ticket", "FG-693", "auto", AT, AT, join(links, "parent", "alpha"));
+  // FG-746: terminal authority reads the item's lifecycle_status, so a live gate needs a
+  // non-terminal item row (a missing row now fails closed and drops the gate).
+  db.prepare(
+    `INSERT INTO campaign_items (id, campaign_id, item_order, ticket_id, lifecycle_status, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?)`,
+  ).run("item-1", "camp-alpha", 0, "FG-693", "running", AT, AT);
   db.prepare(`INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (NULL,NULL,?,?,?)`)
     .run("campaign_item.host_gate_started", JSON.stringify({ attemptId: "att-camp", campaignId: "camp-alpha", itemId: "item-1", ticketId: "FG-693" }), new Date(NOW - 60_000).toISOString());
   // A review-loop verification in flight, reached through its RUN's project.

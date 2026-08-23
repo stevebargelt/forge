@@ -148,7 +148,7 @@ function CampaignDetail({ campaignId, onClose }) {
           </div>` : null}
 
         <h3 style="margin-top: 16px;">Items (${report.items.length})</h3>
-        ${report.items.map((item) => html`<${ItemCard} key=${item.ticketId} item=${item} />`)}
+        ${report.items.map((item) => html`<${ItemCard} key=${item.ticketId} item=${item} campaignId=${report.campaignId} />`)}
       </div>
     </div>`;
 }
@@ -172,7 +172,55 @@ function GroupingsBlock({ groupings }) {
 // The per-item evidence card. Order: identity + status, run/task/verdict links,
 // blocker + requested action, readiness, done-audit, git/PR evidence, and the
 // reviewer / verification axes (currently null on the contract → "not available").
-function ItemCard({ item }) {
+// FG-746 (C6): per-item reconcile-gate host_verifications evidence, fetched from the
+// scoped route (the campaign's own project decides scope — fail closed). Read-only,
+// degrades to nothing when no evidence is recorded for the item's ticket.
+function ReconcileEvidence({ campaignId, ticketId }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    if (!campaignId || !ticketId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/host-verifications?campaignId=${encodeURIComponent(campaignId)}&ticketId=${encodeURIComponent(ticketId)}`);
+        if (!cancelled && res.ok) setRows(await res.json());
+      } catch { /* leave null — the axis below simply omits the table */ }
+    })();
+    return () => { cancelled = true; };
+  }, [campaignId, ticketId]);
+  if (!rows || rows.length === 0) return null;
+  return html`
+    <div class="campaign-item-axis" data-testid="campaign-item-reconcile-evidence">
+      <span class="audit-axis-label">reconcile-gate evidence</span>
+      <div class="card" style="overflow-x: auto; margin-top: 4px;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
+          <thead>
+            <tr class="muted" style="text-align: left;">
+              <th style="padding: 3px 6px;">gate</th>
+              <th style="padding: 3px 6px;">source</th>
+              <th style="padding: 3px 6px;">result</th>
+              <th style="padding: 3px 6px;">commit</th>
+              <th style="padding: 3px 6px;">recorded</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((r, i) => html`
+              <tr key=${r.id ?? i} style="border-top: 1px solid var(--border);" data-testid="reconcile-evidence-row">
+                <td style="padding: 3px 6px;" title=${r.command ?? ""}>${r.gateName ?? "—"}</td>
+                <td style="padding: 3px 6px;">${r.source ?? "host"}</td>
+                <td style="padding: 3px 6px;"><span class="badge ${r.exitCode === 0 ? "status-complete" : "status-failed"}">${r.exitCode === 0 ? "pass" : `exit ${r.exitCode}`}</span></td>
+                ${r.ciUrl
+                  ? html`<td style="padding: 3px 6px;"><a class="mono" href=${r.ciUrl} target="_blank" rel="noreferrer noopener">${shortSha(r.commitSha)}</a></td>`
+                  : html`<td style="padding: 3px 6px;" class="mono faint">${shortSha(r.commitSha)}</td>`}
+                <td style="padding: 3px 6px;" class="muted mono">${r.recordedAt ?? "—"}</td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function ItemCard({ item, campaignId }) {
   const git = gitEvidence(item);
   const action = itemActionText(item);
   const readiness = item.readiness;
@@ -223,6 +271,8 @@ function ItemCard({ item }) {
         </div>` : null}
 
       <${GitEvidenceBlock} git=${git} />
+
+      <${ReconcileEvidence} campaignId=${campaignId} ticketId=${item.ticketId} />
 
       <div class="campaign-item-axis muted" style="font-size: 11px;">
         <span class="audit-axis-label">verification</span> ${item.verificationState ?? "not available"}
