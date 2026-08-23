@@ -2112,28 +2112,25 @@ const ORCH_BADGE_TITLE = {
 
 function OrchestratorRow({ entry, onTaskClick }) {
   const badgeClass = ORCH_BADGE_CLASS[entry.presentation] || "launch-state-unknown";
-  // The row opens the task's explain surface when it carries a taskId. A row that
-  // does anything on click is a control, so it is keyboard-reachable and activatable
-  // and announces itself as a button; a row with no taskId stays inert markup (FG-576 RF-2).
+  // The row opens the task's explain surface when it carries a taskId. Because the row
+  // can ALSO contain an independently interactive remote-control link, the open action
+  // is a real <button> stretched over the row (orch-row-open) rather than a role=button
+  // ON the row: an interactive control nested inside a button is invalid ARIA and makes
+  // the link presentational to assistive tech (FG-692 RF-1). The button and the link are
+  // DOM siblings; the link paints above the stretched button (orch-remote-control's
+  // z-index) so both stay separately focusable, announced, and operable. A row with no
+  // taskId stays an inert container (FG-576 RF-2).
   const onClick = entry.taskId ? () => onTaskClick(entry.taskId) : undefined;
-  const onKeyDown = onClick
-    // Only the row itself activates on Enter/Space. A keydown that bubbled up from a
-    // nested control (the remote-control link) is that control's own activation to
-    // handle (FG-692 RF-2); the row must not steal it and open the task detail instead.
-    ? (e) => {
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
-      }
-    : undefined;
   return html`
-    <div
-      class=${"item" + (entry.running ? "" : " item-muted")}
-      onClick=${onClick}
-      onKeyDown=${onKeyDown}
-      role=${onClick ? "button" : undefined}
-      tabIndex=${onClick ? 0 : undefined}
-      aria-label=${onClick ? `Open orchestrator task ${entry.taskId}` : undefined}
-    >
+    <div class=${"item" + (entry.running ? "" : " item-muted") + (onClick ? " orch-row" : "")}>
+      ${onClick
+        ? html`<button
+            type="button"
+            class="orch-row-open"
+            aria-label=${`Open orchestrator task ${entry.taskId}`}
+            onClick=${onClick}
+          ></button>`
+        : null}
       <span class=${"badge " + badgeClass} title=${ORCH_BADGE_TITLE[entry.presentation] || ""}>${entry.presentation}</span>
       <div>
         <div>
@@ -2152,7 +2149,6 @@ function OrchestratorRow({ entry, onTaskClick }) {
                 target="_blank"
                 rel="noreferrer noopener"
                 title="Open this session's remote control. Anyone with this link can drive the session."
-                onClick=${(e) => e.stopPropagation()}
               >remote control ↗</a>`
             : null}
         </div>

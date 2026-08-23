@@ -102,8 +102,9 @@ test("FG-692: interactive orchestrator rows announce button semantics and open t
     await page.keyboard.press(key);
     await detail;
     // A response reaching the browser precedes Preact committing it; wait for the
-    // returned task ID rather than asserting the transient loading overlay.
-    await page.locator(".detail-overlay").getByText(TASK_ID, { exact: true }).waitFor();
+    // returned task ID rather than asserting the transient loading overlay. The id is a
+    // bare text node beside the copy-id button, so match it as a substring, not exact.
+    await page.locator(".detail-overlay").getByText(TASK_ID).first().waitFor();
     assert.match(await page.locator(".detail-overlay").innerText(), new RegExp(TASK_ID));
     await page.close();
     assert.deepEqual(errors, [], `browser errors after ${JSON.stringify(key)}: ${errors.join("; ")}`);
@@ -131,6 +132,14 @@ test("FG-692 (RF-2): Enter/Space on the nested remote-control link does NOT stea
 
     const link = page.getByRole("link", { name: /remote control/ });
     await link.waitFor();
+    // FG-692 RF-1: the open-task action is a real <button> stretched over the row, so the
+    // remote-control link is a DOM sibling of it — never a descendant of a button/role=button.
+    // Nested inside a button an interactive control is invalid ARIA and presentational to AT.
+    assert.equal(
+      await link.evaluate((el) => el.closest("button, [role=button]") === null),
+      true,
+      "the remote-control link must not be nested inside a button (FG-692 RF-1)",
+    );
     await link.focus();
     assert.equal(await link.evaluate((el) => el === document.activeElement), true, `${JSON.stringify(key)} focuses the nested link`);
 
@@ -169,9 +178,14 @@ function createFixtureServer(): Server {
       return;
     }
     if (url.pathname === `/api/task/${TASK_ID}`) {
+      // The real /api/task carries gates/events alongside verdicts; TaskDetail reads
+      // detail.gates.length unguarded, so the fixture must supply the full shape or the
+      // overlay throws before it renders the task the row just opened.
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
         task: { taskId: TASK_ID, agentRole: "orchestrator", runTitle: "keyboard fixture", phase: "build", status: "complete", result: {} },
         verdicts: [],
+        gates: [],
+        events: [],
         idle: null,
       }));
       return;

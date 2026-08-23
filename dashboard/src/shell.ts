@@ -169,6 +169,25 @@ section.in-flight .empty { color: var(--fg-faint); font-style: italic; }
 section.in-flight .item.item-muted { opacity: 0.6; }
 section.in-flight .item.item-muted:hover { opacity: 1; }
 
+/* FG-692 RF-1: an orchestrator row's open action is a real <button> stretched over the
+   row rather than a role=button on the row, so the row can hold the remote-control link
+   without nesting an interactive control inside a button. The link paints above the
+   stretched button so it stays independently clickable. */
+.orch-row { position: relative; }
+.orch-row-open {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.orch-row-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.orch-row .orch-remote-control { position: relative; z-index: 1; }
+
 section.feed { margin-top: 24px; }
 .card {
   background: var(--bg-elev);
