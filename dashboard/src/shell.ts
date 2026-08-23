@@ -131,7 +131,7 @@ section.in-flight {
   border-radius: 8px;
   padding: 16px;
 }
-section.in-flight .item, section.verify-view .item {
+section.in-flight .item {
   display: grid;
   grid-template-columns: 140px 1fr auto;
   gap: 12px;
@@ -139,8 +139,8 @@ section.in-flight .item, section.verify-view .item {
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-section.in-flight .item:last-child, section.verify-view .item:last-child { border-bottom: none; }
-section.in-flight .item:hover, section.verify-view .item:hover { background: var(--bg-elev-2); }
+section.in-flight .item:last-child { border-bottom: none; }
+section.in-flight .item:hover { background: var(--bg-elev-2); }
 section.in-flight .empty { color: var(--fg-faint); font-style: italic; }
 
 .orch-group {

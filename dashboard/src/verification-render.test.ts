@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   eventBadgeClass, eventBadgeText, verificationOutcomeClass, reviewLoopVerificationDetail, hostGateDetail,
-  groupVerificationRows, verificationRowBadge, evidenceState,
+  verificationRowBadge,
 } from "../client/verification-render.js";
 
 test("verificationOutcomeClass: a successful review_loop.verification_finished payload (ok: true) gets the success class", () => {
@@ -334,22 +334,9 @@ test("hostGateDetail: a distinct gate label still renders alongside the command"
   assert.match(detail, /npm run test/);
 });
 
-test("groupVerificationRows: splits review-loop verifications and campaign reconcile gates into separate buckets", () => {
-  const rows = [
-    { kind: "review_loop_verification", attemptId: "a1" },
-    { kind: "campaign_reconcile_gate", attemptId: "a2" },
-    { kind: "review_loop_verification", attemptId: "a3" },
-  ];
-  const { loop, gate } = groupVerificationRows(rows);
-  assert.deepEqual(loop.map((r) => r.attemptId), ["a1", "a3"]);
-  assert.deepEqual(gate.map((r) => r.attemptId), ["a2"]);
-});
-
-test("groupVerificationRows: null/undefined input yields two empty buckets, not a throw", () => {
-  assert.deepEqual(groupVerificationRows(null), { loop: [], gate: [] });
-  assert.deepEqual(groupVerificationRows(undefined), { loop: [], gate: [] });
-});
-
+// FG-746: groupVerificationRows and evidenceState were retired with the standalone
+// Verification tab (their only consumer). verificationRowBadge survives — it still
+// styles the live-verification rows Current Activity renders.
 test("verificationRowBadge: a stale row renders the stale label with the failed class", () => {
   const badge = verificationRowBadge({ kind: "review_loop_verification", mode: "local", stale: true });
   assert.equal(badge.class, "status-failed");
@@ -360,16 +347,4 @@ test("verificationRowBadge: a fresh (non-stale) row renders the plain label with
   const badge = verificationRowBadge({ kind: "review_loop_verification", mode: "ci_wait", stale: false });
   assert.equal(badge.class, "status-running");
   assert.equal(badge.text, "waiting-on-ci");
-});
-
-test("evidenceState: null rows (no lookup yet) -> prompt", () => {
-  assert.equal(evidenceState(null), "prompt");
-});
-
-test("evidenceState: an empty rows array -> empty", () => {
-  assert.equal(evidenceState([]), "empty");
-});
-
-test("evidenceState: a non-empty rows array -> rows", () => {
-  assert.equal(evidenceState([{ id: 1 }]), "rows");
 });

@@ -6,11 +6,11 @@
 // - GET /api/projects    project registry: name, color, last activity, live sessions (#154)
 // - GET /api/task/:id    full task detail (result + stdout/stderr logs + verdicts + gates)
 // - GET /api/run/:id/map      read-only Run Map graph: workflow/execution shape, fanout, reds, gates, per-task badges (?projectKey|?projectDir, FG-348)
-// - GET /api/task/:id/explain read-only task-level Explain: recorded control-plane provenance for one task (?projectKey|?projectDir, FG-348)
-// - GET /api/verifications/in-progress   host verification (review-loop / campaign reconcile) currently running (FG-487)
+// - GET /api/task/:id/explain read-only task-level Explain: recorded control-plane provenance for one task, PLUS candidate-bound verificationEvidence sidecar (?projectKey|?projectDir, FG-348/FG-746)
+// - GET /api/verifications/in-progress   host verification (review-loop / campaign reconcile) currently running, terminal-authority corrected (FG-487/FG-746)
 // - GET /api/review-loop/phases          active review-loop runs with a distinguishable phase (?projectDir filter, FG-487)
 // - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
-// - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
+//   (FG-746: the unscoped /api/host-verifications/recent feed was retired with the standalone Verification tab)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
 // - GET /api/shipping-audit               per-ticket readiness + shipping-review + mechanical-check projection for ONE project, read-only (?projectKey|?projectDir, FG-386)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
@@ -33,10 +33,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, operatorProjectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
-  inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
+  inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, hostVerificationsForCampaignTicket,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
-  runMap, taskExplain, attentionInbox,
+  runMap, taskExplain, verificationEvidenceForTask, attentionInbox,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -684,17 +684,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
 
-  if (path === "/api/host-verifications/recent") {
-    const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 500);
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(recentHostVerifications(limit, scopeFromUrl(url))));
-    return;
-  }
+  // FG-746 (C8): the unscoped global recent-host-verifications feed was a
+  // Verification-tab-only surface with no remaining consumer once the tab is
+  // retired — removed. The scoped lookups below (?ticketId / ?itemId) and
+  // /api/verifications/in-progress are retained for CLI/API and the contextual
+  // dashboard consumers. No host_verifications row is deleted — this is a read
+  // route removal only.
 
   if (path === "/api/host-verifications") {
     const itemId = url.searchParams.get("itemId");
     const ticketId = url.searchParams.get("ticketId");
+    const campaignId = url.searchParams.get("campaignId");
     if (itemId) {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaignItem(itemId, scopeFromUrl(url))));
+      return;
+    }
+    // FG-746: campaign-detail evidence scoped through the campaign's own project.
+    if (campaignId && ticketId) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaignTicket(campaignId, ticketId, scopeFromUrl(url))));
       return;
     }
     if (ticketId) {
@@ -741,7 +748,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
     let payload: string;
     try {
-      payload = JSON.stringify(taskExplain(explainMatch[1]!, scopeFromUrl(url)));
+      const scope = scopeFromUrl(url);
+      const explain = taskExplain(explainMatch[1]!, scope);
+      // FG-746 (C4/AC6): the candidate-bound verification evidence rides ALONGSIDE
+      // the UNMODIFIED TaskExplain as a sibling field — the shared TaskExplain type
+      // and RUN_EXPLAIN_VERSION are untouched, so `forge explain` stays byte-identical.
+      // The sidecar degrades to [] on its own failure rather than taking Explain down.
+      let verificationEvidence: unknown[] = [];
+      try {
+        verificationEvidence = verificationEvidenceForTask(explainMatch[1]!, scope);
+      } catch (err) {
+        console.error("/api/task/:id/explain: building verification evidence failed:", err);
+      }
+      payload = JSON.stringify({ ...explain, verificationEvidence });
     } catch (err) {
       console.error("/api/task/:id/explain: building the task explain failed:", err);
       payload = degradedGraphErrorPayload(err);
