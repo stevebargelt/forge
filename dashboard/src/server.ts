@@ -9,7 +9,8 @@
 // - GET /api/task/:id/explain read-only task-level Explain: recorded control-plane provenance for one task, PLUS candidate-bound verificationEvidence sidecar (?projectKey|?projectDir, FG-348/FG-746)
 // - GET /api/verifications/in-progress   host verification (review-loop / campaign reconcile) currently running, terminal-authority corrected (FG-487/FG-746)
 // - GET /api/review-loop/phases          active review-loop runs with a distinguishable phase (?projectDir filter, FG-487)
-// - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
+// - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487);
+//   ?campaignId=&ticketId= for one campaign item, or ?campaignId= alone for ALL of a campaign's items keyed by ticketId (FG-746/RF-2 batch)
 //   (FG-746: the unscoped /api/host-verifications/recent feed was retired with the standalone Verification tab)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
 // - GET /api/shipping-audit               per-ticket readiness + shipping-review + mechanical-check projection for ONE project, read-only (?projectKey|?projectDir, FG-386)
@@ -33,7 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, operatorProjectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
-  inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, hostVerificationsForCampaignTicket,
+  inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, hostVerificationsForCampaignTicket, hostVerificationsForCampaign,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
   runMap, taskExplain, verificationEvidenceForTask, attentionInbox,
@@ -702,6 +703,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // FG-746: campaign-detail evidence scoped through the campaign's own project.
     if (campaignId && ticketId) {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaignTicket(campaignId, ticketId, scopeFromUrl(url))));
+      return;
+    }
+    // FG-746/RF-2: batch — ALL of a campaign's reconcile-gate evidence in ONE
+    // request, keyed by ticketId, so opening a campaign detail no longer fires
+    // one fetch per rendered item.
+    if (campaignId) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaign(campaignId, scopeFromUrl(url))));
       return;
     }
     if (ticketId) {

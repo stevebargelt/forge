@@ -2968,27 +2968,37 @@ export type InProgressVerification =
 const TERMINAL_CAMPAIGN_STATUSES = new Set(["complete", "failed", "abandoned"]);
 const TERMINAL_ITEM_LIFECYCLE_STATUSES = new Set(["complete", "failed", "blocked_by_red"]);
 
-/** True when an unmatched campaign host-gate start must be DROPPED because its
- *  campaign or item has reached terminal state — or because the row it needs to
- *  judge that is MISSING (fail closed). This is a read-time filter only: no
- *  event or host_verifications row is mutated. The item row is authoritative
- *  (itemId is always present on a real gate start) and also yields the campaign
- *  id when the payload omitted it, so the campaign is judged even for a
- *  campaignId-less start. */
-function campaignGateTerminal(itemId: string | null, campaignIdFromPayload: string | null): boolean {
-  if (!itemId) return true; // no item to judge — fail closed
+export type CampaignGateAuthority = { terminal: boolean; campaignId: string | null };
+
+/** Terminal-authority decision for an unmatched campaign host-gate start, plus
+ *  the AUTHORITATIVE campaign id the caller must use for scope resolution.
+ *  `terminal` is true when the start must be DROPPED because its campaign or
+ *  item has reached terminal state — or because the row it needs to judge that
+ *  is MISSING (fail closed). This is a read-time filter only: no event or
+ *  host_verifications row is mutated.
+ *
+ *  FG-746/RF-1/RF-3: the parent campaign is derived SOLELY from the item's
+ *  authoritative `campaign_id` (campaign_items row keyed by the itemId), never
+ *  from the event payload's campaignId. The event is untrusted input: a
+ *  mismatched payload campaignId (naming an active campaign while the item's
+ *  real parent is terminal) must not keep a dead gate live, and — since the
+ *  returned campaignId also drives the caller's project-scope check — must not
+ *  let an item from one project surface in another project's view. */
+function campaignGateTerminal(itemId: string | null): CampaignGateAuthority {
+  if (!itemId) return { terminal: true, campaignId: null }; // no item to judge — fail closed
   const item = db()
     .prepare(`SELECT lifecycle_status, campaign_id FROM campaign_items WHERE id = ?`)
     .get(itemId) as { lifecycle_status: string | null; campaign_id: string | null } | undefined;
-  if (!item) return true; // orphaned start, no item row — fail closed
-  if (item.lifecycle_status !== null && TERMINAL_ITEM_LIFECYCLE_STATUSES.has(item.lifecycle_status)) return true;
-  const campaignId = campaignIdFromPayload ?? item.campaign_id;
-  if (!campaignId) return true; // cannot resolve the parent campaign — fail closed
+  if (!item) return { terminal: true, campaignId: null }; // orphaned start, no item row — fail closed
+  const campaignId = item.campaign_id;
+  if (item.lifecycle_status !== null && TERMINAL_ITEM_LIFECYCLE_STATUSES.has(item.lifecycle_status))
+    return { terminal: true, campaignId };
+  if (!campaignId) return { terminal: true, campaignId: null }; // cannot resolve the parent campaign — fail closed
   const campaign = db().prepare(`SELECT status FROM campaigns WHERE id = ?`).get(campaignId) as
     | { status: string | null }
     | undefined;
-  if (!campaign) return true; // missing campaign — fail closed
-  return campaign.status !== null && TERMINAL_CAMPAIGN_STATUSES.has(campaign.status);
+  if (!campaign) return { terminal: true, campaignId }; // missing campaign — fail closed
+  return { terminal: campaign.status !== null && TERMINAL_CAMPAIGN_STATUSES.has(campaign.status), campaignId };
 }
 
 /** FG-746: the ONE shared predicate the Current Activity live view (C2) and the
@@ -3061,14 +3071,20 @@ export function inProgressVerifications(nowMs: number = Date.now(), scope?: Proj
         stale: ageMs > REVIEW_LOOP_VERIFICATION_STALE_MS,
       });
     } else {
-      const campaignId = typeof payload.campaignId === "string" ? payload.campaignId : null;
       const itemId = typeof payload.itemId === "string" ? payload.itemId : null;
       // FG-746: terminal-authority guard (sibling of FG-594's run-status guard,
       // but keyed on campaign+item state — a terminal run alone must NOT
       // terminate a reconcile gate). The FG-667 repro — an unmatched
       // host_gate_started under a complete campaign and complete/shipped item —
       // is dropped here so it appears as neither live nor stale work.
-      if (campaignGateTerminal(itemId, campaignId)) continue;
+      // FG-746/RF-1/RF-3: the parent campaign is the item's AUTHORITATIVE
+      // campaign_id, not the event payload's campaignId. The same authoritative
+      // id then drives the project-scope check and the surfaced row, so a
+      // mismatched payload campaignId can neither keep a dead gate live nor
+      // leak an item into another project's view.
+      const gate = campaignGateTerminal(itemId);
+      if (gate.terminal) continue;
+      const campaignId = gate.campaignId;
       if (!scopeIncludes(targets, campaignProjectIdentity(campaignId, shape))) continue;
       out.push({
         kind: "campaign_reconcile_gate",
@@ -3321,6 +3337,48 @@ export function hostVerificationsForCampaignTicket(
   if (!campaign) return [];
   if (!scopeIncludes(resolveScope(scope), campaignRowIdentity(campaign))) return [];
   return hostVerificationsForTicket(ticketId, campaign.project_dir ?? undefined);
+}
+
+/** FG-746/RF-2: ALL reconcile-gate evidence for a campaign's items in ONE read,
+ *  keyed by ticketId — the batch sibling of hostVerificationsForCampaignTicket.
+ *  Opening a campaign detail previously fired one /api/host-verifications fetch
+ *  per rendered item (an N-request burst on campaigns with many items); this
+ *  collapses it to a single query. Scoped through the CAMPAIGN's own project_dir
+ *  (fail closed): an unknown or out-of-scope campaign returns {}. Only tickets
+ *  with at least one recorded row appear as keys; a ticket with no evidence is
+ *  simply absent, matching the per-item lookup's empty-list behaviour. */
+export function hostVerificationsForCampaign(
+  campaignId: string,
+  scope?: ProjectScope,
+): Record<string, HostVerificationEvidenceRow[]> {
+  const campaign = db()
+    .prepare(`SELECT project_dir${campaignCanonicalSelect("campaigns")} FROM campaigns WHERE id = ?`)
+    .get(campaignId) as { project_dir: string | null; project_dir_canonical?: string | null } | undefined;
+  if (!campaign) return {};
+  if (!scopeIncludes(resolveScope(scope), campaignRowIdentity(campaign))) return {};
+  const ticketRows = db()
+    .prepare(`SELECT DISTINCT ticket_id FROM campaign_items WHERE campaign_id = ? AND ticket_id IS NOT NULL`)
+    .all(campaignId) as Array<{ ticket_id: string }>;
+  if (ticketRows.length === 0) return {};
+  // Scoped through the campaign's own project (resolved again in scopeSql, so an
+  // aliased campaign spelling still finds evidence recorded under the canonical
+  // one) — the same fail-closed scope hostVerificationsForCampaignTicket applies.
+  const project = scopeSql("host_verifications", "host_verifications", campaign.project_dir ?? undefined);
+  const placeholders = ticketRows.map(() => "?").join(", ");
+  const params: unknown[] = [...ticketRows.map((r) => r.ticket_id), ...project.params];
+  const rows = db()
+    .prepare(
+      `SELECT * FROM host_verifications
+        WHERE ticket_id IN (${placeholders}) ${project.clause}
+        ORDER BY recorded_at DESC`,
+    )
+    .all(...params) as HostVerificationDbRow[];
+  const out: Record<string, HostVerificationEvidenceRow[]> = {};
+  for (const row of rows) {
+    const ev = rowToHostVerification(row);
+    (out[ev.ticketId] ??= []).push(ev);
+  }
+  return out;
 }
 
 /** Unscoped, most-recent-first — the AC5 breadcrumb: a completed

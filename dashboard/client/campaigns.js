@@ -75,6 +75,10 @@ export function CampaignsView({ data, selectedId, onSelect, onCloseDetail }) {
 function CampaignDetail({ campaignId, onClose }) {
   const [report, setReport] = useState(null);
   const [err, setErr] = useState(null);
+  // FG-746/RF-2: one batch read of ALL reconcile-gate evidence for the campaign,
+  // keyed by ticketId, instead of one fetch per rendered item. null while loading,
+  // then an object mapping ticketId → rows (tickets with no evidence are absent).
+  const [reconcileByTicket, setReconcileByTicket] = useState(null);
   const overlayRef = useRef(null);
 
   // Dialog semantics: close on Escape, and move focus into the overlay on open,
@@ -107,6 +111,20 @@ function CampaignDetail({ campaignId, onClose }) {
     };
     load();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [campaignId]);
+
+  // FG-746/RF-2: fetch the campaign's reconcile-gate evidence ONCE, keyed by
+  // ticketId. Each ItemCard reads its slice from this map — no per-item request.
+  useEffect(() => {
+    if (!campaignId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/host-verifications?campaignId=${encodeURIComponent(campaignId)}`);
+        if (!cancelled && res.ok) setReconcileByTicket(await res.json());
+      } catch { /* leave null — each item's evidence axis simply omits the table */ }
+    })();
+    return () => { cancelled = true; };
   }, [campaignId]);
 
   if (!report) {
@@ -148,7 +166,7 @@ function CampaignDetail({ campaignId, onClose }) {
           </div>` : null}
 
         <h3 style="margin-top: 16px;">Items (${report.items.length})</h3>
-        ${report.items.map((item) => html`<${ItemCard} key=${item.ticketId} item=${item} campaignId=${report.campaignId} />`)}
+        ${report.items.map((item) => html`<${ItemCard} key=${item.ticketId} item=${item} reconcileRows=${reconcileByTicket ? reconcileByTicket[item.ticketId] : null} />`)}
       </div>
     </div>`;
 }
@@ -172,22 +190,14 @@ function GroupingsBlock({ groupings }) {
 // The per-item evidence card. Order: identity + status, run/task/verdict links,
 // blocker + requested action, readiness, done-audit, git/PR evidence, and the
 // reviewer / verification axes (currently null on the contract → "not available").
-// FG-746 (C6): per-item reconcile-gate host_verifications evidence, fetched from the
-// scoped route (the campaign's own project decides scope — fail closed). Read-only,
-// degrades to nothing when no evidence is recorded for the item's ticket.
-function ReconcileEvidence({ campaignId, ticketId }) {
-  const [rows, setRows] = useState(null);
-  useEffect(() => {
-    if (!campaignId || !ticketId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`/api/host-verifications?campaignId=${encodeURIComponent(campaignId)}&ticketId=${encodeURIComponent(ticketId)}`);
-        if (!cancelled && res.ok) setRows(await res.json());
-      } catch { /* leave null — the axis below simply omits the table */ }
-    })();
-    return () => { cancelled = true; };
-  }, [campaignId, ticketId]);
+// FG-746 (C6): per-item reconcile-gate host_verifications evidence, scoped through
+// the campaign's own project (fail closed). Read-only, degrades to nothing when no
+// evidence is recorded for the item's ticket.
+// FG-746/RF-2: the evidence is fetched ONCE for the whole campaign (see
+// CampaignDetail) and handed down as `rows`, rather than one fetch per item — an
+// N-request burst on campaigns with many items. `rows` is null while the batch is
+// still loading, [] once loaded with nothing for this ticket.
+function ReconcileEvidence({ rows }) {
   if (!rows || rows.length === 0) return null;
   return html`
     <div class="campaign-item-axis" data-testid="campaign-item-reconcile-evidence">
@@ -220,7 +230,7 @@ function ReconcileEvidence({ campaignId, ticketId }) {
     </div>`;
 }
 
-function ItemCard({ item, campaignId }) {
+function ItemCard({ item, reconcileRows }) {
   const git = gitEvidence(item);
   const action = itemActionText(item);
   const readiness = item.readiness;
@@ -272,7 +282,7 @@ function ItemCard({ item, campaignId }) {
 
       <${GitEvidenceBlock} git=${git} />
 
-      <${ReconcileEvidence} campaignId=${campaignId} ticketId=${item.ticketId} />
+      <${ReconcileEvidence} rows=${reconcileRows} />
 
       <div class="campaign-item-axis muted" style="font-size: 11px;">
         <span class="audit-axis-label">verification</span> ${item.verificationState ?? "not available"}
