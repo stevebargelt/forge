@@ -366,12 +366,12 @@ function QueueCard({
         ? html`<div class=${`queue-wait queue-wait-${badge.tone}`}>
             <span class=${`badge queue-wait-badge queue-wait-badge-${badge.tone}`}>${badge.label}</span>
             <span class="queue-wait-reason">${badge.reason}</span>
-            <div class="faint queue-wait-meta">
+            <div class="queue-wait-meta">
               ${badge.durability === "temporary" ? "temporary — self-clearing" : badge.durability === "durable" ? "durable" : "unknown"}
               ${" · "}${badge.evidence === "per-evaluation" ? "from the last dispatcher evaluation" : "from durable ticket state"}
               ${badge.observedAt ? html` · observed ${badge.observedAt}` : null}
             </div>
-            <div class="faint queue-wait-note">${badge.note}</div>
+            <div class="queue-wait-note">${badge.note}</div>
           </div>`
         : null}
 

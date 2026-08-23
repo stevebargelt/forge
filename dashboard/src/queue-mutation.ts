@@ -100,6 +100,20 @@ function refuse(status: number, error: string): MutationRefusal {
   return { ok: false, status, error };
 }
 
+/** A GENUINE loopback bind, not a hostname that merely SPELLS like one. The prior
+ *  string-prefix test (`^127\.`) trusted any name beginning `127.` — including a public
+ *  DNS name like `127.evil.test` that resolves off-loopback — which widened the
+ *  same-origin trust to a foreign origin (RF-1/RF-4). Accept only `localhost`, the IPv6
+ *  loopback, or a dotted-quad in 127.0.0.0/8 validated by its parsed octets. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+  const octets = h.split(".");
+  if (octets.length !== 4) return false;
+  if (!octets.every((o) => /^(0|[1-9][0-9]{0,2})$/.test(o) && Number(o) <= 255)) return false;
+  return Number(octets[0]) === 127;
+}
+
 // ─── the guards, in the order they run — all of them before any subprocess ───
 
 /** THE BIND-ADDRESS ADMISSION TEST. `HOST` is env-overridable, and the server already
@@ -113,7 +127,7 @@ function refuse(status: number, error: string): MutationRefusal {
 export function guardBindAddress(env: NodeJS.ProcessEnv = process.env): MutationRefusal | null {
   if (env["FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS"] === "1") return null;
   const host = env["HOST"] ?? "127.0.0.1";
-  if (/^(127\.|::1$|\[::1\]$|localhost$)/.test(host)) return null;
+  if (isLoopbackHost(host)) return null;
   return refuse(
     403,
     `queue mutations are refused because this dashboard is bound to ${host}, not loopback: the surface has no ` +
@@ -158,10 +172,18 @@ export function dashboardOrigins(env: NodeJS.ProcessEnv = process.env): string[]
   if (configured !== undefined && configured.trim() !== "") {
     return configured.split(",").map((o) => o.trim().replace(/\/+$/, "")).filter((o) => o !== "");
   }
-  const host = env["HOST"] ?? "127.0.0.1";
-  if (!/^(127\.|::1$|\[::1\]$|localhost$)/.test(host)) return null;
+  const host = (env["HOST"] ?? "127.0.0.1").trim();
+  if (!isLoopbackHost(host)) return null;
   const port = Number(env["PORT"] ?? 8024);
-  return ["127.0.0.1", "localhost", "[::1]"].flatMap((h) => [`http://${h}:${port}`, `https://${h}:${port}`]);
+  // Derived from the ACTUAL configured bind, not a fixed triple: a dashboard bound to
+  // another loopback address (127.0.0.2 is the reported case) is genuinely itself and
+  // must accept its own same-origin mutations. The default aliases stay in the set so a
+  // 127.0.0.1 bind is still reachable as `localhost` and `[::1]`; the configured host is
+  // added to them (a bare `::1` bracketed for a valid origin). A non-loopback host was
+  // already refused above, so nothing foreign enters here.
+  const configuredHost = host === "::1" ? "[::1]" : host;
+  const hosts = new Set(["127.0.0.1", "localhost", "[::1]", configuredHost]);
+  return [...hosts].flatMap((h) => [`http://${h}:${port}`, `https://${h}:${port}`]);
 }
 
 /** PURE over the request's headers, so the cross-origin rule can be exercised

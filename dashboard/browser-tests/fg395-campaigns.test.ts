@@ -176,3 +176,44 @@ test("Campaigns card and its detail close are keyboard-operable (RF-2, RF-3)", a
   await page.close();
   assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`);
 });
+
+test("FG-727: the campaign detail dialog CONTAINS Tab focus — no background control is reachable while aria-modal is active", async () => {
+  const page: Page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${BASE}/#campaigns`);
+
+  const card = page.getByTestId("campaign-card").filter({ hasText: "browser-visible campaign" });
+  await card.waitFor();
+  const detailResponse = page.waitForResponse((response) => response.url().endsWith(`/api/campaign/${campaign.id}`) && response.status() === 200);
+  await card.focus();
+  await page.keyboard.press("Enter");
+  await detailResponse;
+  await page.getByTestId("campaign-item").waitFor();
+
+  const overlay = page.getByRole("dialog", { name: `Campaign detail for ${campaign.id}` });
+  await overlay.waitFor();
+
+  // Tab many more times than the dialog has focusables: focus wraps within the modal
+  // and never lands on a background control (the tab bar, the campaign card behind it).
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Tab");
+    assert.equal(
+      await overlay.evaluate((el) => el.contains(document.activeElement)),
+      true,
+      `Tab #${i + 1} kept focus inside the modal`,
+    );
+  }
+  // Shift+Tab is contained the same way.
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(
+      await overlay.evaluate((el) => el.contains(document.activeElement)),
+      true,
+      `Shift+Tab #${i + 1} kept focus inside the modal`,
+    );
+  }
+
+  await page.close();
+  assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`);
+});

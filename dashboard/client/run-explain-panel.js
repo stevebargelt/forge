@@ -6,7 +6,7 @@
 // this panel presents ONLY the task's RECORDED resolution.
 
 import { h } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
 
 const html = htm.bind(h);
@@ -164,6 +164,41 @@ function VerificationEvidenceBlock({ evidence }) {
 export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
   const [explain, setExplain] = useState(null);
   const [err, setErr] = useState(null);
+  const overlayRef = useRef(null);
+
+  // Dialog keyboard semantics (FG-348 RF-2): dismissable via Escape, focus moved into
+  // the panel on open and restored to the invoking control (the run-map node) on close —
+  // the backlog/campaign detail-overlay precedent.
+  // FG-692 RF-3: this dialog is aria-modal, so Tab and Shift+Tab are CONTAINED — focus
+  // cycles within the open panel and cannot land on a background control. Same lightweight
+  // trap as the campaigns overlay (FG-727), over the panel's own focusables.
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") { onClose(); return; }
+    if (e.key !== "Tab") return;
+    const node = overlayRef.current;
+    if (!node) return;
+    const focusables = node.querySelectorAll(
+      'a[href], button:not([disabled]), input, textarea, select, [tabindex]:not([tabindex="-1"])',
+    );
+    if (focusables.length === 0) { e.preventDefault(); return; }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !node.contains(active)) { e.preventDefault(); last.focus(); }
+    } else if (active === last || !node.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
+
+  useEffect(() => {
+    const opener = document.activeElement;
+    const node = overlayRef.current;
+    if (node) (node.querySelector(".close") ?? node).focus();
+    return () => { if (opener && typeof opener.focus === "function") opener.focus(); };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -190,9 +225,10 @@ export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
   }, [taskId, scopeQuery]);
 
   return html`
-    <div class="detail-overlay" onClick=${onClose}>
+    <div class="detail-overlay" ref=${overlayRef} onClick=${onClose} onKeyDown=${onKeyDown}
+      role="dialog" aria-modal="true" aria-label=${`Why task ${taskId}`}>
       <div class="detail rx-panel" onClick=${(e) => e.stopPropagation()}>
-        <span class="close" onClick=${onClose}>×</span>
+        <span class="close" onClick=${onClose} role="button" tabIndex="0" aria-label="Close explain panel" onKeyDown=${onCloseKey}>×</span>
         <h2 class="rx-heading">Why this task?</h2>
         ${err ? html`<div class="card" style="color: var(--err);">${err}</div>` : null}
         ${!explain && !err ? html`<div class="muted">loading explain…</div>` : null}
