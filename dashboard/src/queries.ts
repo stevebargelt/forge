@@ -3403,9 +3403,11 @@ export function recentHostVerifications(limit = 50, scope?: ProjectScope): HostV
  *  The candidate sha is resolved from the run's review ledger (reviews.candidate_sha,
  *  the authoritative candidate) and, failing that, from the newest run-tagged
  *  host_verifications row's commit. Cross-project scoping is fail-closed via the
- *  same scopeIncludes/scopeSql machinery every other contextual read uses:
- *  the task's run must be in scope, and the evidence query itself is project-scoped,
- *  so evidence from another project can never attach. */
+ *  same scopeIncludes/scopeSql machinery every other contextual read uses: the task's
+ *  run must be in the caller's scope, and the candidate-sha attachment is scoped to
+ *  the TASK's OWN project (not the caller's scope, which is undefined on an unscoped
+ *  Explain) so a commit shared across projects can never attach another project's
+ *  evidence (review-b6bc2e6aa284/RF-1). */
 export function verificationEvidenceForTask(taskId: string, scope?: ProjectScope): HostVerificationEvidenceRow[] {
   const canonical = hasCanonicalColumn("runs") ? ", r.project_dir_canonical" : "";
   const identity = runsProjectIdentitySelect();
@@ -3455,21 +3457,33 @@ export function verificationEvidenceForTask(taskId: string, scope?: ProjectScope
   }
   if (!candidateSha && !runId) return [];
 
-  const project = scopeSql("host_verifications", "host_verifications", scope);
+  // review-b6bc2e6aa284/RF-1: the commit_sha bind can match a host_verifications
+  // row in ANY project that happens to share this candidate commit — two projects
+  // built at the same sha are the ordinary case. The caller's scope does NOT close
+  // this: it is undefined on an unscoped Explain, and even when present it only
+  // gates whether the TASK is visible above, not which project's evidence attaches.
+  // So the sha bind is constrained to the TASK's OWN project, resolved from the run,
+  // via the same fail-closed scope machinery every other contextual read uses. A
+  // coincident sha in another project can no longer attach. The run_id bind needs no
+  // such guard — a run_id names exactly one run, hence one project — and is left
+  // unscoped so a run whose evidence was written under a differently-spelled path
+  // still attaches by its own id.
+  const owning = scopeSql("host_verifications", "host_verifications", taskRow.project_dir || undefined);
   const binds: string[] = [];
   const bindParams: unknown[] = [];
-  if (candidateSha) {
-    binds.push("commit_sha = ?");
-    bindParams.push(candidateSha);
+  if (candidateSha && owning.clause) {
+    binds.push(`(commit_sha = ? ${owning.clause})`);
+    bindParams.push(candidateSha, ...owning.params);
   }
   if (runId) {
     binds.push("run_id = ?");
     bindParams.push(runId);
   }
-  const bindClause = binds.length ? `AND (${binds.join(" OR ")})` : "";
+  if (binds.length === 0) return [];
+  const bindClause = `AND (${binds.join(" OR ")})`;
   const rows = db()
-    .prepare(`SELECT * FROM host_verifications WHERE 1 = 1 ${bindClause} ${project.clause} ORDER BY recorded_at DESC LIMIT 100`)
-    .all(...bindParams, ...project.params) as HostVerificationDbRow[];
+    .prepare(`SELECT * FROM host_verifications WHERE 1 = 1 ${bindClause} ORDER BY recorded_at DESC LIMIT 100`)
+    .all(...bindParams) as HostVerificationDbRow[];
   return rows.map(rowToHostVerification);
 }
 

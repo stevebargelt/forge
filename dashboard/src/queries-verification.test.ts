@@ -462,6 +462,11 @@ db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, 
 // same ticket, DIFFERENT sha, DIFFERENT run — must NOT bleed in.
 db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
   VALUES ('FG-970','/proj/ev','othercand','npm run test:all','npm run test:all',0,'run-other',?, 'host', NULL)`).run(iso(30 * 60_000));
+// review-b6bc2e6aa284/RF-1: ANOTHER project's row sharing the SAME candidate sha.
+// An unscoped Explain must not attach it — a coincident commit across two projects
+// is the ordinary case, and the sha bind must be constrained to the task's own project.
+db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-970','/proj/ev-other','candsha970','npm run test:all','npm run test:all',0,NULL,?, 'host', NULL)`).run(iso(43 * 60_000));
 
 test("verificationEvidenceForTask: binds by candidate sha PRIMARY (run_id-NULL row attaches) with run_id fallback, no cross-run bleed", () => {
   const rows = verificationEvidenceForTask("task-ev");
@@ -469,6 +474,18 @@ test("verificationEvidenceForTask: binds by candidate sha PRIMARY (run_id-NULL r
   assert.deepEqual(shas, ["candsha970", "candsha970"], "both candidate-sha rows attach (incl. the run_id-NULL one); the different-sha/different-run row does NOT bleed in");
   assert.ok(rows.some((r) => r.source === "ci" && r.runId === null), "the run_id-NULL ci row attaches via the primary sha bind");
   assert.ok(rows.some((r) => r.source === "host" && r.runId === "run-ev"), "the run-tagged row attaches too");
+});
+
+test("verificationEvidenceForTask: RF-1 — an UNSCOPED caller cannot attach ANOTHER project's evidence by a shared commit sha", () => {
+  const rows = verificationEvidenceForTask("task-ev");
+  assert.ok(
+    rows.every((r) => r.projectDir === "/proj/ev"),
+    `every attached row must belong to the task's own project /proj/ev; the /proj/ev-other row sharing commit_sha candsha970 must not bleed in on an unscoped Explain, got: ${JSON.stringify(rows.map((r) => r.projectDir))}`,
+  );
+  assert.ok(
+    !rows.some((r) => r.projectDir === "/proj/ev-other"),
+    "a coincident candidate sha in another project must never attach cross-project verification evidence",
+  );
 });
 
 test("verificationEvidenceForTask: cross-project scoping is fail-closed — evidence from /proj/ev is invisible under a different project scope", () => {
