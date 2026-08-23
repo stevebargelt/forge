@@ -158,10 +158,18 @@ export function dashboardOrigins(env: NodeJS.ProcessEnv = process.env): string[]
   if (configured !== undefined && configured.trim() !== "") {
     return configured.split(",").map((o) => o.trim().replace(/\/+$/, "")).filter((o) => o !== "");
   }
-  const host = env["HOST"] ?? "127.0.0.1";
+  const host = (env["HOST"] ?? "127.0.0.1").trim();
   if (!/^(127\.|::1$|\[::1\]$|localhost$)/.test(host)) return null;
   const port = Number(env["PORT"] ?? 8024);
-  return ["127.0.0.1", "localhost", "[::1]"].flatMap((h) => [`http://${h}:${port}`, `https://${h}:${port}`]);
+  // Derived from the ACTUAL configured bind, not a fixed triple: a dashboard bound to
+  // another loopback address (127.0.0.2 is the reported case) is genuinely itself and
+  // must accept its own same-origin mutations. The default aliases stay in the set so a
+  // 127.0.0.1 bind is still reachable as `localhost` and `[::1]`; the configured host is
+  // added to them (a bare `::1` bracketed for a valid origin). A non-loopback host was
+  // already refused above, so nothing foreign enters here.
+  const configuredHost = host === "::1" ? "[::1]" : host;
+  const hosts = new Set(["127.0.0.1", "localhost", "[::1]", configuredHost]);
+  return [...hosts].flatMap((h) => [`http://${h}:${port}`, `https://${h}:${port}`]);
 }
 
 /** PURE over the request's headers, so the cross-origin rule can be exercised

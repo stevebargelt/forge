@@ -219,9 +219,19 @@ function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
   const contribs   = tokenTypes.map(t => t.raw * t.weight);
   const maxContrib = Math.max(...contribs, 1);
 
+  const toggle = () => onToggle(row.key);
+  const onKeyDown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
   return html`
     <div class="usage-row-wrap">
-      <div class="usage-row" onClick=${() => onToggle(row.key)}>
+      <div
+        class="usage-row"
+        onClick=${toggle}
+        onKeyDown=${onKeyDown}
+        role="button"
+        tabIndex="0"
+        aria-expanded=${isExpanded}
+        aria-label=${`${isExpanded ? "Collapse" : "Expand"} ${label} model mix`}
+      >
         <div class="usage-bucket" title=${row.bucket}>
           <span style="margin-right: 4px; font-size: 10px;">${isExpanded ? "▾" : "▸"}</span>${label}
         </div>

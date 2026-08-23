@@ -184,6 +184,29 @@ test("A run is deep-linkable, renders the graph, and clicking a node opens the E
   await page.close();
 });
 
+test("FG-692 RF-2: the Explain panel opens by keyboard, dismisses on Escape, and restores focus to the invoking node", async () => {
+  delayByScope.clear();
+  const page = await newPage({ width: 1440, height: 1200 });
+
+  await page.goto(`${baseUrl}/#run-map/${RUN_ID}`);
+  await page.locator(".rm-view").waitFor();
+
+  // Open the panel from the keyboard: focus a run-map node and activate it.
+  const node = page.locator(".rm-node").first();
+  await node.focus();
+  await node.press("Enter");
+  await page.locator(".rx-panel").waitFor();
+  // Focus moved into the dialog (onto its close control) — waits out the mount effect.
+  await page.waitForFunction(() => document.activeElement?.classList.contains("close"));
+
+  // Escape dismisses it — no mouse needed.
+  await page.keyboard.press("Escape");
+  await page.locator(".rx-panel").waitFor({ state: "detached" });
+  // Focus returns to the run-map node that opened it.
+  await page.waitForFunction(() => document.activeElement?.classList.contains("rm-node"));
+  await page.close();
+});
+
 test("Switching checkout scope invalidates the run map and a late leaving-scope response cannot repaint it (seq guard)", async () => {
   delayByScope.clear();
   const page = await newPage({ width: 1440, height: 1200 });

@@ -83,7 +83,28 @@ function CampaignDetail({ campaignId, onClose }) {
 
   // Dialog semantics: close on Escape, and move focus into the overlay on open,
   // restoring it to the opener on close — the backlog NoteDetail modal precedent.
-  const onKeyDown = (e) => { if (e.key === "Escape") onClose(); };
+  // FG-727: Tab and Shift+Tab are CONTAINED — focus cycles within the open modal and
+  // cannot land on a background control while aria-modal is active. A lightweight trap
+  // over the overlay's own focusables, no focus-trap dependency.
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") { onClose(); return; }
+    if (e.key !== "Tab") return;
+    const node = overlayRef.current;
+    if (!node) return;
+    const focusables = node.querySelectorAll(
+      'a[href], button:not([disabled]), input, textarea, select, [tabindex]:not([tabindex="-1"])',
+    );
+    if (focusables.length === 0) { e.preventDefault(); return; }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !node.contains(active)) { e.preventDefault(); last.focus(); }
+    } else if (active === last || !node.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   useEffect(() => {
     const opener = document.activeElement;

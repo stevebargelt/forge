@@ -682,6 +682,16 @@ function isSamePermutation(a: string[], b: string[]): boolean {
   return sortedA.every((id, i) => id === sortedB[i]);
 }
 
+/** Same ids in the SAME order — an ORDER-SENSITIVE equality, distinct from
+ *  isSamePermutation, which ignores order. A reorder to the order the queue already
+ *  has moves nothing, so it must not append a `reorder` event: that event is the
+ *  queue version (queueVersion = MAX order-affecting event id), and bumping it on a
+ *  no-op refuses a concurrent reorder submitted against a version the queue never
+ *  actually left (RF-6). */
+function isSameOrder(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
 function assertReorderable(projectKey: string, verb: string): string[] {
   const queue = queuedOrder(projectKey);
   const ranked = new Set(rankedOrder(projectKey).map((r) => r.ticketId));
@@ -859,6 +869,12 @@ export function setQueueOrder(
         null,
       );
     }
+    // A reorder to the order already in place moves nothing: skip the event so the
+    // version does not advance and a concurrent reorder against the loaded version
+    // still lands (RF-6).
+    if (isSameOrder(wanted, before)) {
+      return { queue: queuedOrder(projectKey), version: queueVersion(projectKey) };
+    }
     applyQueuePermutation(projectKey, wanted);
     // Attributed to the ticket that ends up at the head — a whole-queue reorder has
     // no single subject, and an event row with an empty ticket_id would be an
@@ -891,6 +907,10 @@ export function moveQueuePosition(
     const without = queue.filter((id) => id !== ticketId);
     const target = Math.max(0, Math.min(without.length, Math.trunc(position) - 1));
     const wanted = [...without.slice(0, target), ticketId, ...without.slice(target)];
+    // Already in that slot: a no-op that must not advance the version (RF-6).
+    if (isSameOrder(wanted, before)) {
+      return { queue: queuedOrder(projectKey), position: target + 1, version: queueVersion(projectKey) };
+    }
     applyQueuePermutation(projectKey, wanted);
     appendQueueEvent(projectKey, ticketId, "reorder", { before, after: wanted, position: target + 1 }, at);
     return { queue: queuedOrder(projectKey), position: target + 1, version: queueVersion(projectKey) };
@@ -956,6 +976,12 @@ function rankRelative(
     const referenceIndex = without.indexOf(referenceId);
     const target = placement === "before" ? referenceIndex : referenceIndex + 1;
     const wanted = [...without.slice(0, target), ticketId, ...without.slice(target)];
+    // A relative rank that lands the ticket exactly where it already sits changes
+    // neither membership nor order: skip the event so the version holds and a
+    // concurrent reorder against the loaded version is not falsely refused (RF-6).
+    if (isSameOrder(wanted, before)) {
+      return { queue: queuedOrder(projectKey), position: target + 1, version: queueVersion(projectKey) };
+    }
     applyQueuePermutation(projectKey, wanted);
     // Recorded as a `reorder` event — the fact IS a reorder, and a second event type
     // for the same fact would be a second vocabulary for it. The operator's INTENT

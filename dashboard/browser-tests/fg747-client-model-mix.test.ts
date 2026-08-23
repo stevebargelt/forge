@@ -88,6 +88,34 @@ test("two independent identities sharing a label keep SEPARATE client model-mix 
   await page.close();
 });
 
+test("FG-692 RF-1: model-mix drill-down rows are keyboard-reachable and activatable (Enter/Space), with button semantics announced", async () => {
+  const page = await newPage({ width: 1440, height: 1000 });
+  await page.goto(`${baseUrl}/#usage`);
+  await page.getByRole("heading", { name: "Token & cache analytics" }).waitFor();
+
+  const rowA = page.locator(".usage-row-wrap").first();
+  const control = rowA.locator(".usage-row");
+  await control.waitFor();
+
+  // Interactive semantics are announced: it's a button and exposes its expanded state.
+  assert.equal(await control.getAttribute("role"), "button", "the drill-down row announces itself as a button");
+  assert.equal(await control.getAttribute("aria-expanded"), "false", "collapsed state is exposed to AT");
+
+  // Reachable and activatable from the keyboard: focus it and press Enter.
+  await control.focus();
+  assert.ok(await control.evaluate((el) => el === document.activeElement), "the row is keyboard-focusable (tabindex)");
+  await page.keyboard.press("Enter");
+  await assertEventually(async () => (await rowA.locator(".usage-detail").evaluate((el) => (el as HTMLElement).style.maxHeight)) !== "0px");
+  assert.equal(await control.getAttribute("aria-expanded"), "true", "Enter expanded the drill-down and updated aria-expanded");
+
+  // Space collapses it again.
+  await page.keyboard.press(" ");
+  await assertEventually(async () => (await rowA.locator(".usage-detail").evaluate((el) => (el as HTMLElement).style.maxHeight)) === "0px");
+  assert.equal(await control.getAttribute("aria-expanded"), "false", "Space collapsed the drill-down again");
+
+  await page.close();
+});
+
 async function newPage(viewport: { width: number; height: number }): Promise<Page> {
   const page = await browser.newPage({ viewport, reducedMotion: "reduce" });
   const errors: string[] = [];

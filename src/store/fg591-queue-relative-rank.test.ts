@@ -163,6 +163,32 @@ test("FG-591: a relative rank is a no-op when the ticket is already in that slot
   assert.deepEqual(ranks(), before, "the committed order is byte-identical");
 });
 
+test("FG-692 RF-6: a no-op relative rank does not advance the version, so a concurrent reorder against the loaded version still lands", () => {
+  seedRankedAndQueued(["FG-1", "FG-2", "FG-3"], ["FG-1", "FG-2", "FG-3"]);
+  const loaded = queueVersion(PK);
+  const events = queueEvents(PK).length;
+
+  // A rank that lands the ticket exactly where it already sits changes neither
+  // membership nor order: it must write no event and leave the version untouched.
+  const noop = rankAfter(PK, "FG-2", "FG-1");
+  assert.deepEqual(noop.queue, ["FG-1", "FG-2", "FG-3"]);
+  assert.equal(noop.version, loaded, "the returned version is unchanged");
+  assert.equal(queueVersion(PK), loaded, "the queue version did not advance");
+  assert.equal(queueEvents(PK).length, events, "no reorder event was appended");
+
+  // A reorder submitted against the version the board loaded BEFORE the no-op still
+  // succeeds — the no-op did not trip the staleness guard.
+  const moved = setQueueOrder(PK, ["FG-2", "FG-1", "FG-3"], { expectedVersion: loaded });
+  assert.deepEqual(moved.queue, ["FG-2", "FG-1", "FG-3"]);
+  assert.ok(moved.version > loaded, "a real reorder still advances the version");
+
+  // And a stale write against the now-superseded version is still refused.
+  assert.throws(
+    () => setQueueOrder(PK, ["FG-3", "FG-2", "FG-1"], { expectedVersion: loaded }),
+    QueueRefusal,
+  );
+});
+
 // ─── non-queued ranked tickets keep the slot they occupied ──────────────────
 
 test("FG-591: rank-before leaves every non-queued ranked ticket in the slot it occupied", () => {

@@ -840,11 +840,19 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
   border-radius: 8px;
 }
 .inbox-row-badges { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.inbox-row-body { min-width: 0; }
 .inbox-row-head { margin-bottom: 2px; }
-.inbox-reason { color: var(--fg); }
-.inbox-action { font-size: 12px; margin: 2px 0; }
+.inbox-reason { color: var(--fg); overflow-wrap: anywhere; }
+.inbox-action { font-size: 12px; margin: 2px 0; overflow-wrap: anywhere; }
 .inbox-meta { font-size: 11px; }
 .inbox-row-aside { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+/* FG-402: on a narrow viewport the three fixed-ish columns overflow, so stack the row
+ * and let the content column shrink (min-width:0 above) instead of forcing a scroll. */
+@media (max-width: 640px) {
+  .inbox-row { grid-template-columns: 1fr; gap: 6px; }
+  .inbox-row-badges { flex-direction: row; flex-wrap: wrap; }
+  .inbox-row-aside { align-items: flex-start; }
+}
 .inbox-age { font-size: 11px; }
 .inbox-link { font-size: 12px; color: var(--accent, var(--info)); text-decoration: none; white-space: nowrap; }
 .inbox-link:hover { text-decoration: underline; }
@@ -1765,8 +1773,11 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .queue-wait-badge-unknown,
 .queue-wait-badge-disarmed { background: rgba(148, 163, 184, 0.14); color: var(--fg-dim); }
 .queue-wait-reason { overflow-wrap: anywhere; }
+/* The blocked-vs-waiting state detail (RF-4): its own color is the AA-contrast
+ * --fg-dim, never the sub-AA --fg-faint (2.74:1 on the card), so the reason a
+ * candidate was passed over stays legible at its 10px size. */
 .queue-wait-meta,
-.queue-wait-note { font-size: 10px; margin-top: 3px; line-height: 1.45; }
+.queue-wait-note { color: var(--fg-dim); font-size: 10px; margin-top: 3px; line-height: 1.45; }
 .queue-reservation { font-size: 10px; margin-top: 6px; overflow-wrap: anywhere; }
 .queue-lease-expired { color: var(--err); }
 .queue-card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }

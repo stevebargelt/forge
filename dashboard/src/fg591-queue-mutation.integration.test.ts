@@ -396,6 +396,36 @@ test("FG-591 (RF-7): a DNS-rebinding origin is refused, because the check is pin
   );
 });
 
+test("FG-692 (RF-11): a non-default loopback bind pins its OWN origin, so it accepts its own same-origin mutations", () => {
+  // 127.0.0.2 is loopback (guardBindAddress admits it) but is not the default
+  // 127.0.0.1 — the pre-fix hardcoded triple excluded it and refused every mutation.
+  const pinned = dashboardOrigins({ HOST: "127.0.0.2", PORT: "8024" });
+  assert.ok(pinned, "a loopback bind derives an origin set");
+  assert.ok(
+    pinned.includes("http://127.0.0.2:8024"),
+    "the ACTUAL configured host is in the pinned set, not just the default triple",
+  );
+
+  // Its own same-origin POST is admitted.
+  assert.equal(
+    guardMutationRequest(
+      { contentType: "application/json", host: "127.0.0.2:8024", origin: "http://127.0.0.2:8024", secFetchSite: "same-origin" },
+      pinned,
+    ),
+    null,
+    "the dashboard accepts a same-origin mutation from its own bind",
+  );
+
+  // A foreign origin is STILL refused — the RF-7 guarantee is intact, and the request
+  // Host header is never trusted as the source of same-origin truth.
+  const foreign = guardMutationRequest(
+    { contentType: "application/json", host: "attacker.example:8024", origin: "http://attacker.example:8024", secFetchSite: "same-origin" },
+    pinned,
+  );
+  assert.equal(foreign?.status, 403, "a rebound foreign origin is still refused");
+  assert.match(String(foreign?.error), /Host: attacker\.example:8024/, "the refusal names the bind mismatch");
+});
+
 // ─── 2. exactly the named verb, exactly this argv ────────────────────────────
 
 test("integ FG-591: each route spawns EXACTLY ONE named `forge queue` verb with the expected argv and nothing else", async () => {

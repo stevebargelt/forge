@@ -47,3 +47,11 @@ test("the chart's caption text is not painted in the sub-AA --fg-faint token", (
     assert.doesNotMatch(body, /color: var\(--fg-faint\)/, `${selector} is 2.74:1 on --bg-elev in --fg-faint`);
   }
 });
+
+test("the queue-state (blocked-vs-waiting) detail text is not painted in the sub-AA --fg-faint token (RF-4)", () => {
+  // The .queue-wait-meta/.queue-wait-note rule shares one declaration block; querying
+  // the second selector (the one immediately before `{`) reads it for both.
+  const body = ruleBody(renderShell(), ".queue-wait-note");
+  assert.match(body, /color: var\(--fg-dim\)/, "queue-state detail must use the AA-contrast token");
+  assert.doesNotMatch(body, /color: var\(--fg-faint\)/, "queue-state detail is 2.74:1 on the card in --fg-faint");
+});

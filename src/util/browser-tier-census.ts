@@ -122,7 +122,8 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // relocated contextually, plus three new suites for the retired Verification tab: the
   // tab/route retirement, the Current Activity live placement, and the Explain evidence block.
   "fg386-shipping-audit.test.ts": 10,
-  "fg395-campaigns.test.ts": 3,
+  // FG-692 (FG-727) adds a focus-containment test to the campaign detail dialog (3 -> 4).
+  "fg395-campaigns.test.ts": 4,
   "fg746-verification-tab-retired.test.ts": 2,
   "fg746-current-activity-verification.test.ts": 2,
   "fg746-explain-evidence.test.ts": 2,
@@ -137,12 +138,17 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg694-home-in-flight.test.ts": 10,
   "fg699-scope-invalidation.test.ts": 6,
   "fg745-projects-classification.test.ts": 6,
+  // FG-692 adds `fg402-attention-inbox-overflow` (2 tests): the Attention Inbox row
+  // grid does not force a horizontal scroll on a 360px viewport, and its responsive
+  // override collapses the row to a single column there (FG-402 RF-3).
+  "fg402-attention-inbox-overflow.test.ts": 2,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,
   // never by the (non-unique) label, so it never re-collapses what RF-1 fixed on the
   // backend.
-  "fg747-client-model-mix.test.ts": 1,
+  // FG-692 (FG-747 RF-1) adds a keyboard-activation test for the drill-down row (1 -> 2).
+  "fg747-client-model-mix.test.ts": 2,
   // FG-590 adds `fg590-retention-disposition` (2 tests): the terminal-launch retention
   // disposition (retained-for-investigation vs expired/eligible vs leaked) rendered into
   // the page via the shared rule, and the running-launch/legacy no-claim case.
@@ -164,7 +170,12 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // late leaving-scope response cannot repaint it (runMapSeq guard), a degraded/legacy
   // run renders inferred labels with its warning and no page error, and the view boots
   // offline under a script-src 'self' CSP with no external/CDN fetch.
-  "fg348-run-map.test.ts": 4,
+  // FG-692 (FG-348 RF-2) adds a keyboard-dismissal/focus test for the Explain panel (4 -> 5).
+  "fg348-run-map.test.ts": 5,
+  // FG-692 adds `fg692-orchestrator-keyboard` (1 test): orchestrator-row keyboard
+  // activation a11y — interactive orchestrator rows announce button semantics and open
+  // their task detail view on both Enter and Space.
+  "fg692-orchestrator-keyboard.test.ts": 1,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,

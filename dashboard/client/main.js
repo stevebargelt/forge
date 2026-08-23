@@ -2112,9 +2112,22 @@ const ORCH_BADGE_TITLE = {
 
 function OrchestratorRow({ entry, onTaskClick }) {
   const badgeClass = ORCH_BADGE_CLASS[entry.presentation] || "launch-state-unknown";
+  // The row opens the task's explain surface when it carries a taskId. A row that
+  // does anything on click is a control, so it is keyboard-reachable and activatable
+  // and announces itself as a button; a row with no taskId stays inert markup (FG-576 RF-2).
   const onClick = entry.taskId ? () => onTaskClick(entry.taskId) : undefined;
+  const onKeyDown = onClick
+    ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }
+    : undefined;
   return html`
-    <div class=${"item" + (entry.running ? "" : " item-muted")} onClick=${onClick}>
+    <div
+      class=${"item" + (entry.running ? "" : " item-muted")}
+      onClick=${onClick}
+      onKeyDown=${onKeyDown}
+      role=${onClick ? "button" : undefined}
+      tabIndex=${onClick ? 0 : undefined}
+      aria-label=${onClick ? `Open orchestrator task ${entry.taskId}` : undefined}
+    >
       <span class=${"badge " + badgeClass} title=${ORCH_BADGE_TITLE[entry.presentation] || ""}>${entry.presentation}</span>
       <div>
         <div>
