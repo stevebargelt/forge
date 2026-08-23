@@ -23,6 +23,11 @@ const { attentionInbox } = await import("./queries.js");
 
 const AT = "2026-08-22T09:00:00Z";
 const OLDER = "2026-08-20T09:00:00Z";
+// FG-746: a fixed evaluation instant so the stale-verification source is deterministic
+// regardless of the container clock. The gate start is placed 15m before it (past the
+// 10m campaign-host-gate staleness cutoff, well within the 24h lookback).
+const VERIF_NOW = Date.parse("2026-08-22T09:00:00Z");
+const VERIF_START = new Date(VERIF_NOW - 15 * 60_000).toISOString();
 
 // A project checkout that carries the `feature` workflow as a PROJECT OVERRIDE, so the
 // human-gate resolver loads it (isProject → no seed-generation manifest check) and
@@ -110,6 +115,39 @@ function seed(): void {
     task.run("task-dup", "run-dup", "build", "engineer", "blocked_by_red", "{}", AT, OLDER);
     review.run("rev-dup", "run-dup", "task-dup", "FG-800", "awaiting_disposition", "evidence_led", AT, AT);
     finding.run("rev-dup/RF-1", "rev-dup", 1, "RF-1", "conflict finding", "fix_now", null, AT, AT);
+
+    // ── FG-746: stale-verification source ──
+    const campaign = db.prepare(
+      `INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, project_dir) VALUES (?,?,?,?,?,?,?,?)`,
+    );
+    const campItem = db.prepare(
+      `INSERT INTO campaign_items (id, campaign_id, item_order, ticket_id, lifecycle_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
+    );
+    const gateEvent = db.prepare(
+      `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?,?,?,?,?)`,
+    );
+    // A STALE unmatched host gate (started 15m before VERIF_NOW, past the 10m cutoff)
+    // under an ACTIVE campaign + non-terminal item → an actionable stale_verification.
+    campaign.run("camp-active", "running", "tickets", "[]", "sequential", VERIF_START, VERIF_START, projectDir);
+    campItem.run("citem-active", "camp-active", 0, "FG-746", "running", VERIF_START, VERIF_START);
+    gateEvent.run(
+      null,
+      null,
+      "campaign_item.host_gate_started",
+      JSON.stringify({ attemptId: "att-stale-verif", campaignId: "camp-active", itemId: "citem-active", ticketId: "FG-746", command: "npm run test:all", testedSha: "deadbeef012" }),
+      VERIF_START,
+    );
+    // FG-667 negative: a terminal (complete) campaign + complete/shipped item — the
+    // unmatched start must be dropped by terminal authority, producing NO attention item.
+    campaign.run("camp-667", "complete", "tickets", "[]", "sequential", VERIF_START, VERIF_START, projectDir);
+    campItem.run("citem-667", "camp-667", 0, "FG-667", "complete", VERIF_START, VERIF_START);
+    gateEvent.run(
+      null,
+      null,
+      "campaign_item.host_gate_started",
+      JSON.stringify({ attemptId: "att-667", campaignId: "camp-667", itemId: "citem-667", ticketId: "FG-667", command: "npm run test:all", testedSha: "beefdead012" }),
+      VERIF_START,
+    );
   });
 }
 
@@ -204,6 +242,27 @@ test("the envelope is well-formed, non-empty, and undegraded", () => {
   assert.equal(inbox.items.length > 0, true);
   assert.deepEqual(inbox.degraded, []);
   assert.deepEqual(inbox.scope, { runId: null, projectDirs: null });
+});
+
+test("FG-746: a stale unmatched verification under an active campaign+item surfaces as a stale_verification item with command/candidate/age and a recovery action", () => {
+  const verifInbox = attentionInbox(undefined, VERIF_NOW);
+  const items = verifInbox.items.filter((i) => i.kind === "stale_verification");
+  assert.equal(items.length, 1, "exactly the active-campaign stale gate surfaces; the FG-667 terminal one does not");
+  const item = items[0]!;
+  assert.equal(item.links.campaignId, "camp-active");
+  assert.equal(item.links.itemId, "citem-active");
+  assert.equal(item.links.ticketId, "FG-746");
+  assert.equal(item.startedAt, VERIF_START, "carries the start time so a client can render the age");
+  assert.match(item.reason, /npm run test:all/, "names the attempted command");
+  assert.match(item.reason, /deadbeef01/, "names the candidate sha");
+  assert.ok(item.requestedAction.length > 0, "carries a supported recovery action");
+  assert.ok(verifInbox.degraded.every((d) => d !== "verification"), "the verification source read cleanly");
+});
+
+test("FG-746: the FG-667 terminal reconcile gate produces NO attention item", () => {
+  const verifInbox = attentionInbox(undefined, VERIF_NOW);
+  const found = verifInbox.items.filter((i) => i.links.ticketId === "FG-667");
+  assert.deepEqual(found, [], "a terminal campaign+item attempt is neither live nor an attention item");
 });
 
 test("attentionInbox performs no mutation", () => {

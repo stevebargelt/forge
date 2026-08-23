@@ -117,8 +117,15 @@ export const BROWSER_TIER_DIR = join(
 // classify focus lands on the status confirmation rather than being stranded on <body>.
 export const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
-  "fg386-shipping-audit.test.ts": 9,
-  "fg395-campaigns.test.ts": 2,
+  // FG-746 adds a shipping-audit check-timestamp assertion (9 -> 10) and a campaign-detail
+  // reconcile-gate evidence assertion (2 -> 3) as the historical verification evidence is
+  // relocated contextually, plus three new suites for the retired Verification tab: the
+  // tab/route retirement, the Current Activity live placement, and the Explain evidence block.
+  "fg386-shipping-audit.test.ts": 10,
+  "fg395-campaigns.test.ts": 3,
+  "fg746-verification-tab-retired.test.ts": 2,
+  "fg746-current-activity-verification.test.ts": 2,
+  "fg746-explain-evidence.test.ts": 2,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
   "completed-runs.test.ts": 8,

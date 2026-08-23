@@ -18,7 +18,7 @@ import { RunExplainPanel } from "./run-explain-panel.js";
 import { initialView, hashForView, runIdFromHash } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
-  groupVerificationRows, verificationRowBadge, evidenceState,
+  verificationRowBadge,
 } from "./verification-render.js";
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
@@ -123,10 +123,6 @@ function App() {
   // so a launched loop is visible before any task row exists for it.
   const [inProgressVerifications, setInProgressVerifications] = useState([]);
   const [reviewLoopPhases, setReviewLoopPhases] = useState([]);
-  const [verifyTicketId, setVerifyTicketId] = useState("");
-  const [verifyItemId, setVerifyItemId] = useState("");
-  const [verifyEvidence, setVerifyEvidence] = useState(null);
-  const [verifyRecent, setVerifyRecent] = useState([]);
   // FG-679: the three-section Current activity projection. Read-only, and read from
   // PERSISTED state only — the server makes no outbound call to answer it.
   // FG-694: the LOAD STATE, not the payload. `loading`, `ready` and `unavailable` are
@@ -618,37 +614,11 @@ function App() {
     return () => clearInterval(id);
   }, [pollQueue, view]);
 
-  const pollVerifyRecent = useCallback(async () => {
-    try {
-      const res = await fetch(appendScope(`/api/host-verifications/recent?limit=50`, projectFilter, checkoutFilter));
-      if (res.ok) setVerifyRecent(await res.json());
-      setNow(Date.now());
-    } catch (e) { setError(String(e)); }
-  }, [projectFilter, checkoutFilter]);
-
-  useEffect(() => {
-    if (view !== "verify") return;
-    pollVerifyRecent();
-    const id = setInterval(pollVerifyRecent, USAGE_POLL_MS);
-    return () => clearInterval(id);
-  }, [pollVerifyRecent, view]);
-
-  // Evidence lookup is user-driven (ticket/campaign-item id), not polled —
-  // triggered by the "look up" button in VerificationsView.
-  const lookupEvidence = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (verifyTicketId.trim()) params.set("ticketId", verifyTicketId.trim());
-    if (verifyItemId.trim()) params.set("itemId", verifyItemId.trim());
-    if (projectFilter) {
-      if (checkoutFilter) params.set("projectDir", checkoutFilter);
-      else params.set("projectKey", projectFilter.key);
-    }
-    if (!params.toString()) { setVerifyEvidence(null); return; }
-    try {
-      const res = await fetch(`/api/host-verifications?${params.toString()}`);
-      setVerifyEvidence(res.ok ? await res.json() : []);
-    } catch (e) { setError(String(e)); }
-  }, [verifyTicketId, verifyItemId, projectFilter, checkoutFilter]);
+  // FG-746: the standalone Verification tab was retired. Its live liveness now rides
+  // Current Activity / In-flight (fed by the shared /api/verifications/in-progress
+  // poll below), its stale/actionable rows go to Human Attention, and its historical
+  // evidence is contextual (run/task Explain, campaign detail, shipping audit). The
+  // tab-only recent-feed poll and manual ticket/item lookup are gone with it.
 
   useEffect(() => {
     const onHash = () => {
@@ -692,7 +662,6 @@ function App() {
             <button class=${"tab " + (view === "home" ? "tab-active" : "")} onClick=${() => switchView("home")}>home</button>
             <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
             <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
-            <button class=${"tab " + (view === "verify" ? "tab-active" : "")} onClick=${() => switchView("verify")}>verification</button>
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>workbench</button>
@@ -787,18 +756,6 @@ function App() {
             selectedId=${selectedCampaignId}
             onSelect=${setSelectedCampaignId}
             onCloseDetail=${() => setSelectedCampaignId(null)}
-          />`
-        : view === "verify"
-        ? html`<${VerificationsView}
-            inProgress=${inProgressVerifications}
-            recent=${verifyRecent}
-            ticketId=${verifyTicketId}
-            itemId=${verifyItemId}
-            onTicketIdChange=${setVerifyTicketId}
-            onItemIdChange=${setVerifyItemId}
-            onLookup=${lookupEvidence}
-            evidence=${verifyEvidence}
-            now=${now}
           />`
         : view === "ops"
         ? html`<${OpsView}
@@ -2229,8 +2186,16 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   // land until verification finishes. Render those as their own liveness
   // rows so the run isn't invisible during that window. Skip an entry once a
   // task row for its run has shown up, so it doesn't duplicate.
+  //
+  // FG-746 (C2): Current Activity shows only genuinely LIVE verification. The
+  // server already drops terminal (FG-667) starts via terminal authority; a
+  // surviving-but-STALE start is actionable human-attention work, not ordinary
+  // in-progress work, so it surfaces in Human Attention instead of here. Keep
+  // only the `live` (non-stale) subset — the same split classifyVerification makes.
   const knownRunIds = new Set(inFlight.map((t) => t.runId));
-  const standalone = (verifications || []).filter((v) => !v.runId || !knownRunIds.has(v.runId));
+  const standalone = (verifications || [])
+    .filter((v) => !v.stale)
+    .filter((v) => !v.runId || !knownRunIds.has(v.runId));
 
   // The waits are live rows too, so `No live tasks.` may not be printed over them.
   const waits = activityLoad ? homeInFlightActivity(activityLoad) : null;
@@ -2555,113 +2520,6 @@ function TaskDetail({ taskId, onClose }) {
           <pre class="log">${tailChars(detail.stderrLog, 8000)}</pre>
         ` : null}
       </div>
-    </div>
-  `;
-}
-
-// FG-487: dedicated tab for host-side verification liveness + host_verifications
-// evidence. Kept as its own view rather than folded into a ticket/campaign
-// detail page because the dashboard client has no such page today and this
-// step's file scope is main.js only — the evidence lookup below is
-// self-service (enter a ticket/item id) rather than embedded in a ticket card.
-function VerificationsView({ inProgress, recent, ticketId, itemId, onTicketIdChange, onItemIdChange, onLookup, evidence, now }) {
-  const { loop: loopVerifications, gate: gateVerifications } = groupVerificationRows(inProgress);
-  const onSubmit = (e) => { e.preventDefault(); onLookup(); };
-  const evidenceLookupState = evidenceState(evidence);
-  const recentState = evidenceState(recent || []);
-
-  return html`
-    <section class="verify-view">
-      <h2>Host verification — in progress</h2>
-      ${(inProgress || []).length === 0
-        ? html`<div class="muted">No review-loop verification, CI-wait, or campaign reconcile gate activity in progress.</div>`
-        : html`
-          ${loopVerifications.length > 0 ? html`
-            <h3 style="font-size: 13px; margin: 8px 0 4px;">Review-loop verification / CI-wait</h3>
-            ${loopVerifications.map((v) => html`<${VerificationRow} key=${v.attemptId} v=${v} now=${now} />`)}
-          ` : null}
-          ${gateVerifications.length > 0 ? html`
-            <h3 style="font-size: 13px; margin: 12px 0 4px;">Campaign reconcile gates</h3>
-            ${gateVerifications.map((v) => html`<${VerificationRow} key=${v.attemptId} v=${v} now=${now} />`)}
-          ` : null}
-        `
-      }
-
-      <h2 style="margin-top: 24px;">Evidence lookup</h2>
-      <form class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center;" onSubmit=${onSubmit}>
-        <label for="verify-ticket-id" class="muted" style="font-size: 12px;">ticket id</label>
-        <input
-          id="verify-ticket-id"
-          type="text"
-          value=${ticketId}
-          onInput=${(e) => onTicketIdChange(e.target.value)}
-          placeholder="e.g. FG-487"
-          style="max-width: 160px;"
-        />
-        <label for="verify-item-id" class="muted" style="font-size: 12px;">campaign item id</label>
-        <input
-          id="verify-item-id"
-          type="text"
-          value=${itemId}
-          onInput=${(e) => onItemIdChange(e.target.value)}
-          placeholder="e.g. citem-..."
-          style="max-width: 220px;"
-        />
-        <button type="submit" class="tab" aria-label="Look up host verification evidence">look up</button>
-      </form>
-      ${ticketId.trim() && itemId.trim()
-        ? html`<div class="muted" style="font-size: 11px; margin: -6px 0 8px;">Both fields are filled in — campaign item id takes precedence and ticket id is ignored.</div>`
-        : null}
-      ${evidenceLookupState === "prompt"
-        ? html`<div class="muted">Enter a ticket id or campaign item id above to view its recorded verification evidence.</div>`
-        : evidenceLookupState === "empty"
-        ? html`<div class="muted">No host_verifications rows found for that ticket/item.</div>`
-        : html`<${EvidenceTable} rows=${evidence} />`
-      }
-
-      <h2 style="margin-top: 24px;">Recent host verifications</h2>
-      <div class="muted" style="font-size: 12px; margin-bottom: 8px;">
-        Discoverable evidence for orchestrator-run bare gates even when their in-flight window was missed.
-      </div>
-      ${recentState === "empty"
-        ? html`<div class="muted">No recorded host_verifications rows yet.</div>`
-        : html`<${EvidenceTable} rows=${recent} showTicket=${true} />`
-      }
-    </section>
-  `;
-}
-
-// Rows follow src/store/host-verifications.ts's HostVerificationRow shape:
-// ticketId, gateName, command, exitCode, commitSha, source (host|ci), recordedAt.
-function EvidenceTable({ rows, showTicket }) {
-  return html`
-    <div class="card" style="overflow-x: auto;">
-      <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
-        <thead>
-          <tr class="muted" style="text-align: left;">
-            ${showTicket ? html`<th style="padding: 4px 8px;">ticket</th>` : null}
-            <th style="padding: 4px 8px;">gate</th>
-            <th style="padding: 4px 8px;">command</th>
-            <th style="padding: 4px 8px;">exit</th>
-            <th style="padding: 4px 8px;">tested sha</th>
-            <th style="padding: 4px 8px;">source</th>
-            <th style="padding: 4px 8px;">recorded</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((r, i) => html`
-            <tr key=${r.id ?? i} style="border-top: 1px solid var(--border);">
-              ${showTicket ? html`<td style="padding: 4px 8px;" class="mono">${r.ticketId ?? "—"}</td>` : null}
-              <td style="padding: 4px 8px;">${r.gateName ?? "—"}</td>
-              <td style="padding: 4px 8px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" class="mono faint" title=${r.command ?? ""}>${r.command ?? "—"}</td>
-              <td style="padding: 4px 8px;"><span class="badge ${r.exitCode === 0 ? "status-complete" : "status-failed"}">${r.exitCode}</span></td>
-              <td style="padding: 4px 8px;" class="mono faint" title=${r.commitSha ?? ""}>${r.commitSha ? r.commitSha.slice(0, 10) : "—"}</td>
-              <td style="padding: 4px 8px;"><span class="badge ${r.source === "ci" ? "status-awaiting_red" : "status-pending"}">${r.source ?? "host"}</span></td>
-              <td class="muted mono" style="padding: 4px 8px; font-size: 11px;">${formatRelativeTime(r.recordedAt)}</td>
-            </tr>
-          `)}
-        </tbody>
-      </table>
     </div>
   `;
 }

@@ -1,6 +1,9 @@
-// Integration tests for the FG-487 host-side verification visibility routes:
+// Integration tests for the host-side verification visibility routes:
 // GET /api/verifications/in-progress, /api/review-loop/phases,
-// /api/host-verifications, /api/host-verifications/recent.
+// /api/host-verifications (?ticketId / ?itemId), and the FG-746 Explain
+// verificationEvidence sidecar on GET /api/task/:id/explain. The unscoped
+// /api/host-verifications/recent feed was RETIRED with the standalone
+// Verification tab (FG-746) and now 404s.
 //
 // Mirrors the harness in routes-backlog.integration.test.ts: boot the real
 // dashboard HTTP server on a dedicated test port against a real forge.db
@@ -27,10 +30,13 @@ process.env.HOST = "127.0.0.1";
 const db = new Database(join(tmpHome, "forge.db"));
 db.exec(`
   CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);
-  CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT);
+  CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_alias TEXT, agent_model TEXT, status TEXT, task_package TEXT, result TEXT, started_at TEXT, created_at TEXT, parent_id TEXT);
+  CREATE TABLE gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, decision TEXT, rationale TEXT, decided_at TEXT, decided_by TEXT);
+  CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, red_task_id TEXT, red_role TEXT, verdict TEXT, authority TEXT, confidence REAL, findings TEXT, created_at TEXT);
   CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
   CREATE TABLE campaigns (id TEXT PRIMARY KEY, status TEXT, source_kind TEXT, source_input TEXT, mode TEXT, created_at TEXT, updated_at TEXT, metadata TEXT, project_dir TEXT);
   CREATE TABLE campaign_items (id TEXT PRIMARY KEY, campaign_id TEXT, item_order INTEGER, ticket_id TEXT, run_id TEXT, lifecycle_status TEXT, created_at TEXT, updated_at TEXT);
+  CREATE TABLE reviews (id TEXT PRIMARY KEY, run_id TEXT, candidate_sha TEXT, updated_at TEXT);
   CREATE TABLE host_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT, project_dir TEXT, commit_sha TEXT, gate_name TEXT, command TEXT, exit_code INTEGER, run_id TEXT, recorded_at TEXT, source TEXT DEFAULT 'host', ci_url TEXT);
 `);
 
@@ -53,7 +59,20 @@ insertEvent("run-fresh", "review_loop.verification_started", { attemptId: "attem
 db.prepare(`INSERT INTO runs VALUES ('run-reviewing','review-loop #FG-920','invoke','/proj/b','active', ?)`).run(nowIso);
 insertEvent("run-reviewing", "review_loop.verification_started", { attemptId: "attempt-rev-1", round: 1, ticketId: "FG-920", sha: "eee4444", mode: "local" }, nowIso);
 insertEvent("run-reviewing", "review_loop.verification_finished", { attemptId: "attempt-rev-1", ok: true }, nowIso);
-db.prepare(`INSERT INTO tasks VALUES ('task-red-1','run-reviewing','red-wide','red-wide','sonnet','running', ?, ?, NULL)`).run(nowIso, nowIso);
+db.prepare(`INSERT INTO tasks (id, run_id, phase, agent_role, agent_alias, agent_model, status, task_package, result, started_at, created_at, parent_id)
+  VALUES ('task-red-1','run-reviewing','red-wide','red-wide',NULL,'sonnet','running','{}',NULL, ?, ?, NULL)`).run(nowIso, nowIso);
+// FG-746 (AC6): the run's review names its candidate sha; two host_verifications rows
+// share it (one run_id-tagged, one run_id-NULL) so the Explain sidecar's sha-primary /
+// run_id-fallback binding is exercised over HTTP.
+db.prepare(`INSERT INTO reviews VALUES ('rev-reviewing','run-reviewing','eee4444', ?)`).run(nowIso);
+db.prepare(`
+  INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-920','/proj/b','eee4444','npm run test:all','npm run test:all',0,'run-reviewing',?, 'host', NULL)
+`).run(nowIso);
+db.prepare(`
+  INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-920','/proj/b','eee4444','test-extended','npm run test:extended',0,NULL,?, 'ci', 'https://ci.example/920')
+`).run(nowIso);
 
 // host_verifications evidence rows, scoped by ticket + campaign item
 db.prepare(`INSERT INTO campaigns VALUES ('camp-2','paused','tickets','[]','auto', ?, ?, NULL, '/proj/c')`).run(nowIso, nowIso);
@@ -137,9 +156,31 @@ test("GET /api/host-verifications: neither ticketId nor itemId → 400", async (
   assert.ok(body.error);
 });
 
-test("GET /api/host-verifications/recent: returns 200 with the recorded row, most-recent-first", async () => {
+test("GET /api/host-verifications/recent: RETIRED with the standalone Verification tab (FG-746) — 404, while the scoped lookups above still serve", async () => {
   const res = await fetch(`${BASE}/api/host-verifications/recent?limit=10`);
+  assert.equal(res.status, 404, "the unscoped global recent feed had no remaining consumer after tab retirement and was removed");
+  // drain the body so the connection is not left half-read
+  await res.text();
+});
+
+test("GET /api/task/:id/explain: returns the untouched TaskExplain PLUS a candidate-bound verificationEvidence sidecar (FG-746 AC6)", async () => {
+  const res = await fetch(`${BASE}/api/task/task-red-1/explain?projectDir=${encodeURIComponent("/proj/b")}`);
   assert.equal(res.status, 200);
-  const rows = (await res.json()) as Array<Record<string, unknown>>;
-  assert.ok(rows.some((r) => r["ticketId"] === "FG-930"));
+  const body = (await res.json()) as { version?: unknown; task?: unknown; verificationEvidence?: Array<Record<string, unknown>> };
+  // The shared TaskExplain shape is intact (version + task present) alongside the sidecar.
+  assert.ok(body.version !== undefined, "the untouched TaskExplain fields ride alongside the sidecar");
+  assert.ok(Array.isArray(body.verificationEvidence), "verificationEvidence is a sibling array");
+  const shas = body.verificationEvidence!.map((r) => r["commitSha"]);
+  assert.deepEqual(shas.sort(), ["eee4444", "eee4444"], "both candidate-sha rows attach, incl. the run_id-NULL one; bound to the run's candidate");
+  assert.ok(
+    body.verificationEvidence!.some((r) => r["source"] === "ci" && r["runId"] === null),
+    "the run_id-NULL ci row attaches by the primary sha bind",
+  );
+});
+
+test("GET /api/task/:id/explain: cross-project scoping is fail-closed — no evidence under a foreign project scope", async () => {
+  const res = await fetch(`${BASE}/api/task/task-red-1/explain?projectDir=${encodeURIComponent("/proj/elsewhere")}`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { verificationEvidence?: Array<Record<string, unknown>> };
+  assert.deepEqual(body.verificationEvidence ?? [], [], "the task's run is out of scope, so the sidecar attaches nothing");
 });

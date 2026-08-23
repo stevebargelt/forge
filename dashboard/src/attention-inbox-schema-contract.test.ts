@@ -27,6 +27,18 @@ function attentionItemKinds(): string[] {
   return [...block![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
 }
 
+/** How many independently-read sources attentionInbox() actually composes, scraped from
+ *  its composeInbox([...]) call so the documented count tracks the source rather than a
+ *  copy that drifts (the exact RF-4 defect: the doc said three after a fourth was added). */
+function composedSourceCount(): number {
+  const src = read("dashboard/src/queries.ts");
+  const call = src.match(/return composeInbox\(\[([\s\S]*?)\],/);
+  assert.ok(call, "attentionInbox must compose its sources via composeInbox([...])");
+  return call![1]!.split(",").map((s) => s.trim()).filter(Boolean).length;
+}
+
+const COUNT_WORDS: Record<number, string> = { 2: "two", 3: "three", 4: "four", 5: "five", 6: "six" };
+
 describe("RF-4: SCHEMA-CONTRACT documents the InboxItem schema, not only the envelope", () => {
   const contract = read("docs/SCHEMA-CONTRACT.md");
 
@@ -47,5 +59,24 @@ describe("RF-4: SCHEMA-CONTRACT documents the InboxItem schema, not only the env
     for (const kind of kinds) {
       assert.match(contract, new RegExp(`\`${kind}\``), `inbox kind \`${kind}\` is undocumented in SCHEMA-CONTRACT.md`);
     }
+  });
+
+  test("RF-4: the documented source count matches attentionInbox's composed sources", () => {
+    const n = composedSourceCount();
+    const word = COUNT_WORDS[n];
+    assert.ok(word, `unexpected composed-source count ${n} — extend COUNT_WORDS`);
+    assert.match(
+      contract,
+      new RegExp(`Composes ${word} independently-read sources`),
+      `SCHEMA-CONTRACT.md must say "Composes ${word} independently-read sources" — attentionInbox composes ${n} (FG-746 added the stale-verification source)`,
+    );
+  });
+
+  test("RF-4: the stale-verification source is enumerated in the inbox composition", () => {
+    assert.match(
+      contract,
+      /stale-verification items \(FG-746/,
+      "the FG-746 stale-verification source must be enumerated alongside the other inbox sources, not only listed as a kind",
+    );
   });
 });

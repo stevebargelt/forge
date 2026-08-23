@@ -14,9 +14,12 @@ process.env.FORGE_HOME = tmpHome;
 
 const {
   inProgressVerifications,
+  classifyVerification,
+  verificationEvidenceForTask,
   reviewLoopRunPhases,
   hostVerificationsForTicket,
   hostVerificationsForCampaignItem,
+  hostVerificationsForCampaign,
   recentHostVerifications,
   taskDetail,
 } = await import("./queries.js");
@@ -30,6 +33,7 @@ db.exec(`
   CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
   CREATE TABLE campaigns (id TEXT PRIMARY KEY, status TEXT, source_kind TEXT, source_input TEXT, mode TEXT, created_at TEXT, updated_at TEXT, metadata TEXT, project_dir TEXT);
   CREATE TABLE campaign_items (id TEXT PRIMARY KEY, campaign_id TEXT, item_order INTEGER, ticket_id TEXT, run_id TEXT, lifecycle_status TEXT, created_at TEXT, updated_at TEXT);
+  CREATE TABLE reviews (id TEXT PRIMARY KEY, run_id TEXT, candidate_sha TEXT, updated_at TEXT);
   CREATE TABLE host_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT, project_dir TEXT, commit_sha TEXT, gate_name TEXT, command TEXT, exit_code INTEGER, run_id TEXT, recorded_at TEXT, source TEXT DEFAULT 'host', ci_url TEXT);
 `);
 
@@ -102,6 +106,13 @@ insertEvent("run-unknownstatus", "review_loop.verification_started", { attemptId
 // ── Scenario 5: a campaign reconcile host-gate exec, unmatched + fresh ─────
 // camp-1 lives in /proj/a — the projectDir filter resolves gate rows via campaigns.project_dir.
 db.prepare(`INSERT INTO campaigns VALUES ('camp-1','running','tickets','[]','sequential', ?, ?, NULL, '/proj/a')`).run(iso(1000), iso(1000));
+// FG-746: terminal authority reads campaign_items.lifecycle_status + campaigns.status,
+// so a live gate needs a non-terminal item row. item-1/2/3 belong to the running camp-1
+// and are themselves non-terminal (running), so only staleness/terminal-authority (not a
+// missing row) governs whether they surface.
+db.prepare(`INSERT INTO campaign_items VALUES ('item-1','camp-1',0,'FG-910',NULL,'running',?,?)`).run(iso(1000), iso(1000));
+db.prepare(`INSERT INTO campaign_items VALUES ('item-2','camp-1',1,'FG-911',NULL,'running',?,?)`).run(iso(1000), iso(1000));
+db.prepare(`INSERT INTO campaign_items VALUES ('item-3','camp-1',2,'FG-946',NULL,'running',?,?)`).run(iso(1000), iso(1000));
 insertEvent(null, "campaign_item.host_gate_started", {
   attemptId: "attempt-gate-1", campaignId: "camp-1", itemId: "item-1", ticketId: "FG-910", command: "npm run test:all", testedSha: "ccc2222",
 }, iso(2 * 60_000));
@@ -370,4 +381,200 @@ test("recentHostVerifications: unscoped, most-recent-first, across tickets/proje
   const idx931 = rows.findIndex((r) => r.ticketId === "FG-931");
   assert.ok(idx930sha2 !== -1 && idx931 !== -1);
   assert.ok(idx931 < idx930sha2, "FG-931's row (recorded more recently) should sort before FG-930/sha2");
+});
+
+// ─── FG-746: terminal-authority guard for campaign reconcile gates ───────────
+//
+// The exact FG-667 reproduction: an unmatched campaign_item.host_gate_started under
+// a COMPLETE campaign and a COMPLETE (shipped) item. Terminal campaign/item state is
+// authoritative over the missing finish event — the gate must appear as NEITHER live
+// NOR stale work.
+db.prepare(`INSERT INTO campaigns VALUES ('camp-667','complete','tickets','[]','sequential', ?, ?, NULL, '/proj/a')`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+db.prepare(`INSERT INTO campaign_items VALUES ('item-667','camp-667',0,'FG-667',NULL,'complete',?,?)`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+// fresh (well within staleness) so ONLY terminal authority can be what drops it.
+insertEvent(null, "campaign_item.host_gate_started", {
+  attemptId: "attempt-667", campaignId: "camp-667", itemId: "item-667", ticketId: "FG-667", command: "npm run test:all", testedSha: "667667667",
+}, iso(2 * 60_000));
+
+// A terminal CAMPAIGN alone (item still non-terminal) also drops the gate.
+db.prepare(`INSERT INTO campaigns VALUES ('camp-abandoned','abandoned','tickets','[]','sequential', ?, ?, NULL, '/proj/a')`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+db.prepare(`INSERT INTO campaign_items VALUES ('item-abn','camp-abandoned',0,'FG-668',NULL,'running',?,?)`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+insertEvent(null, "campaign_item.host_gate_started", {
+  attemptId: "attempt-abn", campaignId: "camp-abandoned", itemId: "item-abn", ticketId: "FG-668", command: "npm run test:all", testedSha: "668668668",
+}, iso(2 * 60_000));
+
+// An unmatched start whose item row is MISSING fails closed (dropped), even under a
+// running campaign — the row it needs to judge liveness is not there.
+insertEvent(null, "campaign_item.host_gate_started", {
+  attemptId: "attempt-orphan", campaignId: "camp-1", itemId: "item-orphan-missing", ticketId: "FG-669", command: "npm run test:all", testedSha: "669669669",
+}, iso(2 * 60_000));
+
+test("inProgressVerifications: FG-667 repro — an unmatched gate under a complete campaign + complete item is NEITHER live nor stale (dropped)", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.equal(
+    rows.find((r) => r.attemptId === "attempt-667"),
+    undefined,
+    "terminal campaign+item state is authoritative over a missing finish event — the FG-667 gate must not appear as running or stale",
+  );
+});
+
+test("inProgressVerifications: FG-746 — a terminal (abandoned) campaign drops its gate even when the item is non-terminal", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.equal(rows.find((r) => r.attemptId === "attempt-abn"), undefined);
+});
+
+test("inProgressVerifications: FG-746 — a gate whose item row is missing fails closed (dropped)", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.equal(rows.find((r) => r.attemptId === "attempt-orphan"), undefined);
+});
+
+test("inProgressVerifications: FG-746 positive case — a non-terminal campaign+item with an unmatched fresh start still yields a live row", () => {
+  const rows = inProgressVerifications(NOW);
+  const row = rows.find((r) => r.attemptId === "attempt-gate-1");
+  assert.ok(row, "camp-1 (running) + item-1 (running) with a fresh unmatched start must remain visible");
+  assert.equal(classifyVerification(row!), "live");
+});
+
+test("classifyVerification: a fresh surviving row is 'live', a stale surviving row is 'actionable'", () => {
+  const rows = inProgressVerifications(NOW);
+  const fresh = rows.find((r) => r.attemptId === "attempt-fresh");
+  const stale = rows.find((r) => r.attemptId === "attempt-stale");
+  assert.ok(fresh && stale);
+  assert.equal(classifyVerification(fresh!), "live");
+  assert.equal(classifyVerification(stale!), "actionable");
+});
+
+// ─── FG-746 (AC6): candidate-bound Explain verification evidence ─────────────
+//
+// A run whose review candidate_sha resolves the primary sha bind; one evidence row
+// carries run_id (fallback bind) and a sibling row is run_id-NULL but shares the
+// candidate sha (attaches via the PRIMARY sha bind). A same-ticket row at a DIFFERENT
+// sha and a different run must NOT bleed in.
+db.prepare(`INSERT INTO runs VALUES ('run-ev','feature #FG-970','feature','/proj/ev','active', ?)`).run(iso(60 * 60_000));
+db.prepare(`INSERT INTO tasks (id, run_id, phase, agent_role, agent_model, status, started_at, created_at, parent_id) VALUES ('task-ev','run-ev','engineer','engineer','opus','complete', ?, ?, NULL)`).run(iso(50 * 60_000), iso(50 * 60_000));
+db.prepare(`INSERT INTO reviews VALUES ('rev-ev','run-ev','candsha970', ?)`).run(iso(40 * 60_000));
+// run_id-tagged row at the candidate sha (fallback + primary both match).
+db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-970','/proj/ev','candsha970','npm run test:all','npm run test:all',0,'run-ev',?, 'host', NULL)`).run(iso(45 * 60_000));
+// run_id-NULL row at the SAME candidate sha — must still attach by the PRIMARY sha bind.
+db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-970','/proj/ev','candsha970','test-extended','npm run test:extended',0,NULL,?, 'ci', 'https://ci.example/970')`).run(iso(44 * 60_000));
+// same ticket, DIFFERENT sha, DIFFERENT run — must NOT bleed in.
+db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-970','/proj/ev','othercand','npm run test:all','npm run test:all',0,'run-other',?, 'host', NULL)`).run(iso(30 * 60_000));
+// review-b6bc2e6aa284/RF-1: ANOTHER project's row sharing the SAME candidate sha.
+// An unscoped Explain must not attach it — a coincident commit across two projects
+// is the ordinary case, and the sha bind must be constrained to the task's own project.
+db.prepare(`INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-970','/proj/ev-other','candsha970','npm run test:all','npm run test:all',0,NULL,?, 'host', NULL)`).run(iso(43 * 60_000));
+
+test("verificationEvidenceForTask: binds by candidate sha PRIMARY (run_id-NULL row attaches) with run_id fallback, no cross-run bleed", () => {
+  const rows = verificationEvidenceForTask("task-ev");
+  const shas = rows.map((r) => r.commitSha).sort();
+  assert.deepEqual(shas, ["candsha970", "candsha970"], "both candidate-sha rows attach (incl. the run_id-NULL one); the different-sha/different-run row does NOT bleed in");
+  assert.ok(rows.some((r) => r.source === "ci" && r.runId === null), "the run_id-NULL ci row attaches via the primary sha bind");
+  assert.ok(rows.some((r) => r.source === "host" && r.runId === "run-ev"), "the run-tagged row attaches too");
+});
+
+test("verificationEvidenceForTask: RF-1 — an UNSCOPED caller cannot attach ANOTHER project's evidence by a shared commit sha", () => {
+  const rows = verificationEvidenceForTask("task-ev");
+  assert.ok(
+    rows.every((r) => r.projectDir === "/proj/ev"),
+    `every attached row must belong to the task's own project /proj/ev; the /proj/ev-other row sharing commit_sha candsha970 must not bleed in on an unscoped Explain, got: ${JSON.stringify(rows.map((r) => r.projectDir))}`,
+  );
+  assert.ok(
+    !rows.some((r) => r.projectDir === "/proj/ev-other"),
+    "a coincident candidate sha in another project must never attach cross-project verification evidence",
+  );
+});
+
+test("verificationEvidenceForTask: cross-project scoping is fail-closed — evidence from /proj/ev is invisible under a different project scope", () => {
+  const rows = verificationEvidenceForTask("task-ev", "/proj/somewhere-else");
+  assert.deepEqual(rows, [], "the task's run is outside /proj/somewhere-else, so no evidence attaches");
+});
+
+test("verificationEvidenceForTask: an unknown task id returns [] rather than throwing", () => {
+  assert.deepEqual(verificationEvidenceForTask("task-does-not-exist"), []);
+});
+
+// ─── RF-1 / RF-3: terminal authority + project scope ride the item's AUTHORITATIVE
+// campaign_id, never the event payload's campaignId ──────────────────────────────
+//
+// The event payload is untrusted input. A host_gate_started whose payload campaignId
+// names a DIFFERENT campaign than the item's real parent must not (RF-1) keep a dead
+// gate alive by pointing at an active campaign, nor (RF-3) leak the item into another
+// project's view by resolving scope through the payload's campaign.
+
+// RF-1: item-rf1's real parent (camp-rf1-term) is COMPLETE, but the payload names an
+// ACTIVE campaign. Terminal authority must read the item's parent — the gate is dropped.
+db.prepare(`INSERT INTO campaigns VALUES ('camp-rf1-term','complete','tickets','[]','sequential', ?, ?, NULL, '/proj/rf1')`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+db.prepare(`INSERT INTO campaigns VALUES ('camp-rf1-active','running','tickets','[]','sequential', ?, ?, NULL, '/proj/rf1')`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+db.prepare(`INSERT INTO campaign_items VALUES ('item-rf1','camp-rf1-term',0,'FG-701',NULL,'running',?,?)`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+insertEvent(null, "campaign_item.host_gate_started", {
+  attemptId: "attempt-rf1", campaignId: "camp-rf1-active", itemId: "item-rf1", ticketId: "FG-701", command: "npm run test:all", testedSha: "701701701",
+}, iso(2 * 60_000));
+
+// RF-3: item-rf3's real parent (camp-rf3-a, /proj/rf3a) is active, but the payload names
+// an active campaign in ANOTHER project (camp-rf3-b, /proj/rf3b). Scope must follow the
+// item's real campaign — the gate appears ONLY in /proj/rf3a, never /proj/rf3b.
+db.prepare(`INSERT INTO campaigns VALUES ('camp-rf3-a','running','tickets','[]','sequential', ?, ?, NULL, '/proj/rf3a')`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+db.prepare(`INSERT INTO campaigns VALUES ('camp-rf3-b','running','tickets','[]','sequential', ?, ?, NULL, '/proj/rf3b')`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+db.prepare(`INSERT INTO campaign_items VALUES ('item-rf3','camp-rf3-a',0,'FG-702',NULL,'running',?,?)`).run(iso(3 * 60 * 60_000), iso(60 * 60_000));
+insertEvent(null, "campaign_item.host_gate_started", {
+  attemptId: "attempt-rf3", campaignId: "camp-rf3-b", itemId: "item-rf3", ticketId: "FG-702", command: "npm run test:all", testedSha: "702702702",
+}, iso(2 * 60_000));
+
+test("inProgressVerifications: RF-1 — a payload campaignId naming an active campaign cannot keep a gate live when the item's REAL parent campaign is terminal", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.equal(
+    rows.find((r) => r.attemptId === "attempt-rf1"),
+    undefined,
+    "terminal authority must read the item's authoritative campaign_id (complete), not the untrusted payload campaignId (active) — a dead gate must not survive",
+  );
+});
+
+test("inProgressVerifications: RF-3 — a mismatched payload campaignId cannot leak an item into ANOTHER project's scope", () => {
+  const leaked = inProgressVerifications(NOW, "/proj/rf3b");
+  assert.equal(
+    leaked.find((r) => r.attemptId === "attempt-rf3"),
+    undefined,
+    "the gate's item belongs to /proj/rf3a; a payload campaignId naming /proj/rf3b's campaign must NOT surface it in /proj/rf3b — cross-project evidence leak",
+  );
+});
+
+test("inProgressVerifications: RF-3 — the gate surfaces in its item's REAL project with the authoritative campaign id", () => {
+  const own = inProgressVerifications(NOW, "/proj/rf3a");
+  const row = own.find((r) => r.attemptId === "attempt-rf3");
+  assert.ok(row, "the gate belongs to /proj/rf3a and must be visible there");
+  assert.equal(row!.kind, "campaign_reconcile_gate");
+  if (row!.kind === "campaign_reconcile_gate") {
+    assert.equal(row!.campaignId, "camp-rf3-a", "the surfaced campaignId must be the item's authoritative parent, not the payload value");
+  }
+});
+
+// ─── RF-2: batch reconcile-gate evidence — ALL of a campaign's items in ONE read ──
+//
+// camp-2 (/proj/c) already has item-ev-1 → FG-930 with two host_verifications rows.
+// Add a second item so the batch proves it groups multiple tickets by ticketId.
+db.prepare(`INSERT INTO campaign_items VALUES ('item-ev-2','camp-2', 1, 'FG-932', NULL, 'awaiting_gate', ?, ?)`).run(iso(1000), iso(1000));
+db.prepare(`
+  INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at, source, ci_url)
+  VALUES ('FG-932','/proj/c','sha4','npm run test:all','npm run test:all',0,NULL,?, 'host', NULL)
+`).run(iso(150));
+
+test("hostVerificationsForCampaign: RF-2 — returns ALL of a campaign's evidence in one read, keyed by ticketId", () => {
+  const byTicket = hostVerificationsForCampaign("camp-2");
+  assert.deepEqual(Object.keys(byTicket).sort(), ["FG-930", "FG-932"]);
+  assert.equal(byTicket["FG-930"]!.length, 2);
+  assert.equal(byTicket["FG-930"]![0]!.commitSha, "sha2", "most-recent-first within a ticket");
+  assert.equal(byTicket["FG-932"]!.length, 1);
+  assert.equal(byTicket["FG-932"]![0]!.commitSha, "sha4");
+});
+
+test("hostVerificationsForCampaign: RF-2 — scoped fail-closed through the campaign's own project", () => {
+  assert.deepEqual(hostVerificationsForCampaign("camp-2", "/proj/wrong-scope"), {}, "an out-of-scope campaign yields no evidence");
+});
+
+test("hostVerificationsForCampaign: RF-2 — an unknown campaign id returns {} rather than throwing", () => {
+  assert.deepEqual(hostVerificationsForCampaign("camp-does-not-exist"), {});
 });

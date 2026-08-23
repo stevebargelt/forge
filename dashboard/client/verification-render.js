@@ -142,29 +142,14 @@ export function hostGateDetail(p) {
   return parts.join(" · ");
 }
 
-// VerificationsView's split of GET /api/verifications/in-progress rows into
-// the two sections it renders under separate headings.
-export function groupVerificationRows(rows) {
-  const list = rows || [];
-  return {
-    loop: list.filter((v) => v.kind === "review_loop_verification"),
-    gate: list.filter((v) => v.kind === "campaign_reconcile_gate"),
-  };
-}
-
 // VerificationRow's badge: `stale` (dashboard/src/queries.ts's inProgressVerifications
 // past-cutoff-but-within-lookback flag) always overrides the plain in-progress
-// label/class, regardless of kind/mode.
+// label/class, regardless of kind/mode. Current Activity renders only the live
+// (non-stale) subset since FG-746, but the badge keeps the stale styling for any
+// other consumer of a stale row.
 export function verificationRowBadge(v) {
   const label = verificationRowLabel(v);
   return v.stale
     ? { class: "status-failed", text: `stale · ${label}` }
     : { class: "status-running", text: label };
-}
-
-// Pure empty-state selector for a rows-or-null evidence result (VerificationsView's
-// lookup panel) and a plain rows list (recent host_verifications / EvidenceTable).
-export function evidenceState(rows) {
-  if (rows === null) return "prompt";
-  return rows.length === 0 ? "empty" : "rows";
 }

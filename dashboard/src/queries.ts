@@ -2956,6 +2956,63 @@ export type InProgressVerification =
       stale: boolean;
     };
 
+// FG-746: campaign-gate terminal authority — the sibling of FG-594's review-loop
+// run-status guard. A reconcile gate's liveness is governed by its campaign+item
+// state, NOT the owning run's status (item.runId is frequently null, and a
+// terminal run alone must not terminate a reconcile gate — AC5). Terminal =
+// nothing left to run: a complete/failed/abandoned campaign, or a complete/
+// failed/blocked_by_red item. `lifecycle_status` is a TaskStatus (src/types),
+// whose terminal members for an item are these three (awaiting_recovery is
+// explicitly NON-terminal). Kept as sets so an unrecognized/future status fails
+// OPEN here (still live) — the fail-CLOSED direction is a MISSING row, below.
+const TERMINAL_CAMPAIGN_STATUSES = new Set(["complete", "failed", "abandoned"]);
+const TERMINAL_ITEM_LIFECYCLE_STATUSES = new Set(["complete", "failed", "blocked_by_red"]);
+
+export type CampaignGateAuthority = { terminal: boolean; campaignId: string | null };
+
+/** Terminal-authority decision for an unmatched campaign host-gate start, plus
+ *  the AUTHORITATIVE campaign id the caller must use for scope resolution.
+ *  `terminal` is true when the start must be DROPPED because its campaign or
+ *  item has reached terminal state — or because the row it needs to judge that
+ *  is MISSING (fail closed). This is a read-time filter only: no event or
+ *  host_verifications row is mutated.
+ *
+ *  FG-746/RF-1/RF-3: the parent campaign is derived SOLELY from the item's
+ *  authoritative `campaign_id` (campaign_items row keyed by the itemId), never
+ *  from the event payload's campaignId. The event is untrusted input: a
+ *  mismatched payload campaignId (naming an active campaign while the item's
+ *  real parent is terminal) must not keep a dead gate live, and — since the
+ *  returned campaignId also drives the caller's project-scope check — must not
+ *  let an item from one project surface in another project's view. */
+function campaignGateTerminal(itemId: string | null): CampaignGateAuthority {
+  if (!itemId) return { terminal: true, campaignId: null }; // no item to judge — fail closed
+  const item = db()
+    .prepare(`SELECT lifecycle_status, campaign_id FROM campaign_items WHERE id = ?`)
+    .get(itemId) as { lifecycle_status: string | null; campaign_id: string | null } | undefined;
+  if (!item) return { terminal: true, campaignId: null }; // orphaned start, no item row — fail closed
+  const campaignId = item.campaign_id;
+  if (item.lifecycle_status !== null && TERMINAL_ITEM_LIFECYCLE_STATUSES.has(item.lifecycle_status))
+    return { terminal: true, campaignId };
+  if (!campaignId) return { terminal: true, campaignId: null }; // cannot resolve the parent campaign — fail closed
+  const campaign = db().prepare(`SELECT status FROM campaigns WHERE id = ?`).get(campaignId) as
+    | { status: string | null }
+    | undefined;
+  if (!campaign) return { terminal: true, campaignId }; // missing campaign — fail closed
+  return { terminal: campaign.status !== null && TERMINAL_CAMPAIGN_STATUSES.has(campaign.status), campaignId };
+}
+
+/** FG-746: the ONE shared predicate the Current Activity live view (C2) and the
+ *  Human Attention source (C3) both consume, so terminal logic is never forked.
+ *  Every row `inProgressVerifications` returns has already survived terminal
+ *  authority (FG-594 run-status for review-loop, campaignGateTerminal for
+ *  reconcile gates), so the only remaining split is freshness: a fresh row is
+ *  genuinely LIVE work; a stale one is an ACTIONABLE human-attention item. An
+ *  FG-667 terminal attempt is neither — it never reaches this classifier. */
+export type VerificationLiveness = "live" | "actionable";
+export function classifyVerification(v: InProgressVerification): VerificationLiveness {
+  return v.stale ? "actionable" : "live";
+}
+
 /** Every start event whose attemptId has no matching finish yet, minus any
  *  past its type's staleness cutoff. Pairing is by attemptId — never "latest
  *  unmatched start by key" — so a same-identity double-start (e.g. two starts
@@ -3014,14 +3071,27 @@ export function inProgressVerifications(nowMs: number = Date.now(), scope?: Proj
         stale: ageMs > REVIEW_LOOP_VERIFICATION_STALE_MS,
       });
     } else {
-      const campaignId = typeof payload.campaignId === "string" ? payload.campaignId : null;
+      const itemId = typeof payload.itemId === "string" ? payload.itemId : null;
+      // FG-746: terminal-authority guard (sibling of FG-594's run-status guard,
+      // but keyed on campaign+item state — a terminal run alone must NOT
+      // terminate a reconcile gate). The FG-667 repro — an unmatched
+      // host_gate_started under a complete campaign and complete/shipped item —
+      // is dropped here so it appears as neither live nor stale work.
+      // FG-746/RF-1/RF-3: the parent campaign is the item's AUTHORITATIVE
+      // campaign_id, not the event payload's campaignId. The same authoritative
+      // id then drives the project-scope check and the surfaced row, so a
+      // mismatched payload campaignId can neither keep a dead gate live nor
+      // leak an item into another project's view.
+      const gate = campaignGateTerminal(itemId);
+      if (gate.terminal) continue;
+      const campaignId = gate.campaignId;
       if (!scopeIncludes(targets, campaignProjectIdentity(campaignId, shape))) continue;
       out.push({
         kind: "campaign_reconcile_gate",
         attemptId,
         runId: row.run_id,
         campaignId,
-        itemId: typeof payload.itemId === "string" ? payload.itemId : null,
+        itemId,
         ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
         command:
           typeof payload.command === "string" ? payload.command : typeof payload.gate === "string" ? payload.gate : null,
@@ -3249,6 +3319,68 @@ export function hostVerificationsForCampaignItem(itemId: string, scope?: Project
   return hostVerificationsForTicket(item.ticket_id, item.project_dir ?? undefined);
 }
 
+/** FG-746 (C6): campaign-detail reconcile-gate evidence, scoped through the
+ *  CAMPAIGN's own project_dir (fail closed), keyed by campaignId + ticketId. The
+ *  dashboard's campaign report carries ticketId but not the campaign_item PK, so
+ *  this is the campaign-scoped sibling of hostVerificationsForCampaignItem: the
+ *  campaign's recorded project identity decides scope, then the ticket-scoped
+ *  lookup runs against that same project. Returns [] for an unknown/out-of-scope
+ *  campaign rather than throwing. */
+export function hostVerificationsForCampaignTicket(
+  campaignId: string,
+  ticketId: string,
+  scope?: ProjectScope,
+): HostVerificationEvidenceRow[] {
+  const campaign = db()
+    .prepare(`SELECT project_dir${campaignCanonicalSelect("campaigns")} FROM campaigns WHERE id = ?`)
+    .get(campaignId) as { project_dir: string | null; project_dir_canonical?: string | null } | undefined;
+  if (!campaign) return [];
+  if (!scopeIncludes(resolveScope(scope), campaignRowIdentity(campaign))) return [];
+  return hostVerificationsForTicket(ticketId, campaign.project_dir ?? undefined);
+}
+
+/** FG-746/RF-2: ALL reconcile-gate evidence for a campaign's items in ONE read,
+ *  keyed by ticketId — the batch sibling of hostVerificationsForCampaignTicket.
+ *  Opening a campaign detail previously fired one /api/host-verifications fetch
+ *  per rendered item (an N-request burst on campaigns with many items); this
+ *  collapses it to a single query. Scoped through the CAMPAIGN's own project_dir
+ *  (fail closed): an unknown or out-of-scope campaign returns {}. Only tickets
+ *  with at least one recorded row appear as keys; a ticket with no evidence is
+ *  simply absent, matching the per-item lookup's empty-list behaviour. */
+export function hostVerificationsForCampaign(
+  campaignId: string,
+  scope?: ProjectScope,
+): Record<string, HostVerificationEvidenceRow[]> {
+  const campaign = db()
+    .prepare(`SELECT project_dir${campaignCanonicalSelect("campaigns")} FROM campaigns WHERE id = ?`)
+    .get(campaignId) as { project_dir: string | null; project_dir_canonical?: string | null } | undefined;
+  if (!campaign) return {};
+  if (!scopeIncludes(resolveScope(scope), campaignRowIdentity(campaign))) return {};
+  const ticketRows = db()
+    .prepare(`SELECT DISTINCT ticket_id FROM campaign_items WHERE campaign_id = ? AND ticket_id IS NOT NULL`)
+    .all(campaignId) as Array<{ ticket_id: string }>;
+  if (ticketRows.length === 0) return {};
+  // Scoped through the campaign's own project (resolved again in scopeSql, so an
+  // aliased campaign spelling still finds evidence recorded under the canonical
+  // one) — the same fail-closed scope hostVerificationsForCampaignTicket applies.
+  const project = scopeSql("host_verifications", "host_verifications", campaign.project_dir ?? undefined);
+  const placeholders = ticketRows.map(() => "?").join(", ");
+  const params: unknown[] = [...ticketRows.map((r) => r.ticket_id), ...project.params];
+  const rows = db()
+    .prepare(
+      `SELECT * FROM host_verifications
+        WHERE ticket_id IN (${placeholders}) ${project.clause}
+        ORDER BY recorded_at DESC`,
+    )
+    .all(...params) as HostVerificationDbRow[];
+  const out: Record<string, HostVerificationEvidenceRow[]> = {};
+  for (const row of rows) {
+    const ev = rowToHostVerification(row);
+    (out[ev.ticketId] ??= []).push(ev);
+  }
+  return out;
+}
+
 /** Unscoped, most-recent-first — the AC5 breadcrumb: a completed
  *  orchestrator-run bare gate (e.g. `npm run test:all` invoked directly, no
  *  review-loop/reconcile wrapper) has no in-flight window to catch, but its
@@ -3257,6 +3389,101 @@ export function recentHostVerifications(limit = 50, scope?: ProjectScope): HostV
   const project = scopeSql("host_verifications", "host_verifications", scope);
   const rows = db().prepare(`SELECT * FROM host_verifications WHERE 1 = 1 ${project.clause} ORDER BY recorded_at DESC LIMIT ?`)
     .all(...project.params, limit) as HostVerificationDbRow[];
+  return rows.map(rowToHostVerification);
+}
+
+/** FG-746 (C4): the candidate-bound verification evidence for ONE task's run, the
+ *  Explain sidecar (AC6). Binds by the run's candidate commit sha PRIMARY (so a
+ *  host_verifications row recorded with run_id NULL — a bare host gate — still
+ *  attaches by sha), with run_id as a FALLBACK (so a row on this exact run
+ *  attaches even when its commit differs from the resolved candidate). Binding
+ *  by sha rather than only ticket is what prevents cross-run bleed: two runs on
+ *  the same ticket at different candidates do not show each other's evidence.
+ *
+ *  The candidate sha is resolved from the run's review ledger (reviews.candidate_sha,
+ *  the authoritative candidate) and, failing that, from the newest run-tagged
+ *  host_verifications row's commit. Cross-project scoping is fail-closed via the
+ *  same scopeIncludes/scopeSql machinery every other contextual read uses: the task's
+ *  run must be in the caller's scope, and the candidate-sha attachment is scoped to
+ *  the TASK's OWN project (not the caller's scope, which is undefined on an unscoped
+ *  Explain) so a commit shared across projects can never attach another project's
+ *  evidence (review-b6bc2e6aa284/RF-1). */
+export function verificationEvidenceForTask(taskId: string, scope?: ProjectScope): HostVerificationEvidenceRow[] {
+  const canonical = hasCanonicalColumn("runs") ? ", r.project_dir_canonical" : "";
+  const identity = runsProjectIdentitySelect();
+  const taskRow = db()
+    .prepare(
+      `SELECT t.run_id, r.project_dir${canonical}${identity}
+       FROM tasks t JOIN runs r ON r.id = t.run_id WHERE t.id = ?`,
+    )
+    .get(taskId) as
+    | { run_id: string | null; project_dir: string | null; project_dir_canonical?: string | null; project_identity?: string | null }
+    | undefined;
+  if (!taskRow) return [];
+  if (
+    !scopeIncludes(resolveScope(scope), {
+      projectDir: taskRow.project_dir,
+      canonical: taskRow.project_dir_canonical ?? null,
+      identity: taskRow.project_identity ?? null,
+    })
+  ) {
+    return [];
+  }
+
+  const runId = taskRow.run_id;
+  // The authoritative candidate: the run's review candidate_sha. `reviews`/its
+  // candidate_sha column may be absent on a store predating the ledger — a
+  // missing table/column is absorbed (the sidecar degrades to the run_id
+  // fallback below rather than taking the Explain payload down).
+  let candidateSha: string | null = null;
+  if (runId) {
+    try {
+      const review = db()
+        .prepare(`SELECT candidate_sha FROM reviews WHERE run_id = ? AND candidate_sha IS NOT NULL ORDER BY updated_at DESC LIMIT 1`)
+        .get(runId) as { candidate_sha: string | null } | undefined;
+      candidateSha = review?.candidate_sha ?? null;
+    } catch {
+      candidateSha = null;
+    }
+  }
+  // Fallback: the newest host_verifications row that DOES carry this run_id names
+  // the run's candidate commit, so the primary sha-bind can still pick up the
+  // run's run_id-NULL sibling rows.
+  if (!candidateSha && runId) {
+    const hv = db()
+      .prepare(`SELECT commit_sha FROM host_verifications WHERE run_id = ? ORDER BY recorded_at DESC LIMIT 1`)
+      .get(runId) as { commit_sha: string | null } | undefined;
+    candidateSha = hv?.commit_sha ?? null;
+  }
+  if (!candidateSha && !runId) return [];
+
+  // review-b6bc2e6aa284/RF-1: the commit_sha bind can match a host_verifications
+  // row in ANY project that happens to share this candidate commit — two projects
+  // built at the same sha are the ordinary case. The caller's scope does NOT close
+  // this: it is undefined on an unscoped Explain, and even when present it only
+  // gates whether the TASK is visible above, not which project's evidence attaches.
+  // So the sha bind is constrained to the TASK's OWN project, resolved from the run,
+  // via the same fail-closed scope machinery every other contextual read uses. A
+  // coincident sha in another project can no longer attach. The run_id bind needs no
+  // such guard — a run_id names exactly one run, hence one project — and is left
+  // unscoped so a run whose evidence was written under a differently-spelled path
+  // still attaches by its own id.
+  const owning = scopeSql("host_verifications", "host_verifications", taskRow.project_dir || undefined);
+  const binds: string[] = [];
+  const bindParams: unknown[] = [];
+  if (candidateSha && owning.clause) {
+    binds.push(`(commit_sha = ? ${owning.clause})`);
+    bindParams.push(candidateSha, ...owning.params);
+  }
+  if (runId) {
+    binds.push("run_id = ?");
+    bindParams.push(runId);
+  }
+  if (binds.length === 0) return [];
+  const bindClause = `AND (${binds.join(" OR ")})`;
+  const rows = db()
+    .prepare(`SELECT * FROM host_verifications WHERE 1 = 1 ${bindClause} ORDER BY recorded_at DESC LIMIT 100`)
+    .all(...bindParams) as HostVerificationDbRow[];
   return rows.map(rowToHostVerification);
 }
 
@@ -3978,6 +4205,80 @@ export function retentionPolicyForDashboard(): RetentionPolicy {
   return resolveRetention(undefined, process.env);
 }
 
+// ── FG-746 (C3): stale-verification attention source ────────────────────────────
+//
+// The Human Attention destination for an unmatched host/CI verification start that
+// has gone STALE under still-active, nonterminal work. It consumes the SAME
+// terminal-authority-corrected `inProgressVerifications` the Current Activity live
+// view reads, split by the SAME `classifyVerification` predicate — so a terminal
+// FG-667 attempt (already dropped upstream) is neither live nor an attention item,
+// with no forked terminal logic (protected_invariant #3). Only the `actionable`
+// (stale) rows become items; the `live` rows stay in Current Activity.
+function verificationLabelForProjectDir(projectDir: string | null): string | null {
+  return projectDir ? basename(projectDir) : null;
+}
+
+/** Resolve the run's project_dir for a review-loop attention item's link. Best-effort:
+ *  a missing run just yields a null projectDir/label (the item still carries its run
+ *  id and ticket). */
+function runProjectDir(runId: string | null): string | null {
+  if (!runId) return null;
+  const row = db().prepare(`SELECT project_dir FROM runs WHERE id = ?`).get(runId) as { project_dir: string | null } | undefined;
+  return row?.project_dir ?? null;
+}
+
+function verificationAttentionItems(scope: ProjectScope, nowMs: number): AttentionItem[] {
+  const rows = inProgressVerifications(nowMs, scope).filter((v) => classifyVerification(v) === "actionable");
+  const items: AttentionItem[] = [];
+  for (const v of rows) {
+    if (v.kind === "review_loop_verification") {
+      const projectDir = runProjectDir(v.runId);
+      const command = v.mode === "ci-wait" ? "CI wait" : `review-loop verification (round ${v.round ?? "?"})`;
+      items.push({
+        id: `verification:${v.attemptId}`,
+        kind: "stale_verification",
+        severity: "medium",
+        startedAt: v.startedAt,
+        reason: `A review-loop ${v.mode === "ci-wait" ? "CI wait" : "host verification"} for ${v.ticketId ?? "an unknown ticket"} (candidate ${v.sha ? v.sha.slice(0, 10) : "unknown"}) started but never reported a result, and is now past its staleness bound — its owning run is still active.`,
+        requestedAction: `Inspect the run and re-run or clear the stalled verification (\`forge show ${v.runId ?? v.ticketId ?? v.attemptId}\`).`,
+        openState: "open",
+        source: "verification",
+        links: {
+          runId: v.runId,
+          taskId: null,
+          ticketId: v.ticketId,
+          campaignId: null,
+          itemId: null,
+          projectDir,
+          projectLabel: verificationLabelForProjectDir(projectDir),
+        },
+      });
+    } else {
+      const projectDir = campaignProjectIdentity(v.campaignId, canonicalShape()).projectDir;
+      items.push({
+        id: `verification:${v.attemptId}`,
+        kind: "stale_verification",
+        severity: "medium",
+        startedAt: v.startedAt,
+        reason: `A campaign reconcile host gate (${v.command ?? "host verification"}) for ${v.ticketId ?? "an unknown ticket"} on candidate ${v.testedSha ? v.testedSha.slice(0, 10) : "unknown"} started but never reported a result, and is now past its staleness bound under active, nonterminal campaign work.`,
+        requestedAction: `Inspect the campaign item and re-run or clear the stalled gate (\`forge campaign show ${v.campaignId ?? "<campaign>"}\`).`,
+        openState: "open",
+        source: "campaign_item",
+        links: {
+          runId: v.runId,
+          taskId: null,
+          ticketId: v.ticketId,
+          campaignId: v.campaignId,
+          itemId: v.itemId,
+          projectDir,
+          projectLabel: verificationLabelForProjectDir(projectDir),
+        },
+      });
+    }
+  }
+  return items;
+}
+
 // ── FG-402: the Human Attention Inbox aggregator ────────────────────────────────
 //
 // A source-agnostic, OPEN-ONLY projection over persisted Forge state. It reuses the
@@ -4027,7 +4328,15 @@ export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now())
     console.error("attentionInbox: reading readiness/review items failed:", err);
   }
 
-  return composeInbox([waitItems, failureItems, readinessItems], {
+  let verificationItems: AttentionItem[] = [];
+  try {
+    verificationItems = verificationAttentionItems(scope, nowMs);
+  } catch (err) {
+    degraded.push("verification");
+    console.error("attentionInbox: reading stale-verification items failed:", err);
+  }
+
+  return composeInbox([waitItems, failureItems, readinessItems, verificationItems], {
     generatedAt: new Date(nowMs).toISOString(),
     scope: inboxScope,
     degraded,

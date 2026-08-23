@@ -19,7 +19,13 @@ export type AttentionItemKind =
   | "missing_acceptance_or_readiness"
   | "auth_setup"
   | "merge_conflict"
-  | "integration_blocked_park";
+  | "integration_blocked_park"
+  // FG-746: a host/CI verification start that has gone STALE under still-active,
+  // nonterminal work — its finish event never arrived and the attempt is past
+  // its staleness bound, so a human must decide whether to re-run or clear it.
+  // A terminal-parent attempt (the FG-667 case) never reaches this kind: it is
+  // dropped by the shared terminal-authority predicate before classification.
+  | "stale_verification";
 
 /** Known priority, or null when the source recorded none. Kept as a small named
  *  vocabulary rather than a raw ordinal so a client renders a label, not a number. */
@@ -110,6 +116,7 @@ const KIND_PRECEDENCE: AttentionItemKind[] = [
   "merge_conflict",
   "integration_blocked_park",
   "auth_setup",
+  "stale_verification",
   "missing_acceptance_or_readiness",
   "campaign_paused",
   "waiting_gate",
