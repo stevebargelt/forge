@@ -170,12 +170,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // late leaving-scope response cannot repaint it (runMapSeq guard), a degraded/legacy
   // run renders inferred labels with its warning and no page error, and the view boots
   // offline under a script-src 'self' CSP with no external/CDN fetch.
-  // FG-692 (FG-348 RF-2) adds a keyboard-dismissal/focus test for the Explain panel (4 -> 5).
-  "fg348-run-map.test.ts": 5,
+  // FG-692 (FG-348 RF-2) adds a keyboard-dismissal/focus test for the Explain panel (4 -> 5),
+  // and (FG-348 RF-3) an aria-modal focus-containment test for the Explain panel (5 -> 6).
+  "fg348-run-map.test.ts": 6,
   // FG-692 adds `fg692-orchestrator-keyboard` (1 test): orchestrator-row keyboard
   // activation a11y — interactive orchestrator rows announce button semantics and open
-  // their task detail view on both Enter and Space.
-  "fg692-orchestrator-keyboard.test.ts": 1,
+  // their task detail view on both Enter and Space. The FG-692 fix batch then added
+  // RF-2 (Enter/Space on a nested remote-control link does not steal its activation) (1 -> 2).
+  "fg692-orchestrator-keyboard.test.ts": 2,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,
