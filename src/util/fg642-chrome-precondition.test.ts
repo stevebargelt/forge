@@ -74,7 +74,7 @@ test("FG-642: every browser-tier suite resolves Chrome through the shared resolv
     const src = tierSource(file);
     assert.match(
       src,
-      /import \{ requireChrome \} from "\.\.\/\.\.\/src\/util\/chrome-bin\.js"/,
+      /import \{[^}]*\brequireChrome\b[^}]*\} from "\.\.\/\.\.\/src\/util\/chrome-bin\.js"/,
       `${file} must resolve Chrome through src/util/chrome-bin.ts — six drifting copies is how this tier went dark`
     );
     assert.match(src, /requireChrome\(/, `${file} imports the resolver but never calls it`);
