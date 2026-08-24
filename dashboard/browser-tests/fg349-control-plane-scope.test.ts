@@ -112,6 +112,7 @@ const cpProjectDir = (page: Page) => page.locator(".cp-header .mono").first();
 // Land on the Control Plane scoped to the `main` checkout, with its graph rendered.
 async function openScopedControlPlane(page: Page): Promise<void> {
   await page.goto(`${baseUrl}/#projects`);
+  await page.locator(".project-dirs-toggle").click();
   await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
   await controlPlaneTab(page).click();
   await page.locator(".cp-view").waitFor();
@@ -144,6 +145,7 @@ test("A slow leaving-scope config-graph response that lands after the switch can
   // across the switch; we then await its late landing deterministically.
   delayByScope.set(`dir:${CHECKOUT_MAIN}`, 3_000);
   await page.goto(`${baseUrl}/#projects`);
+  await page.locator(".project-dirs-toggle").click();
   await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
   await controlPlaneTab(page).click();
 
@@ -187,6 +189,7 @@ test("A scope change during config-graph BODY decode cannot render the retired c
   );
 
   await page.goto(`${baseUrl}/#projects`);
+  await page.locator(".project-dirs-toggle").click();
   await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
   await controlPlaneTab(page).click();
 

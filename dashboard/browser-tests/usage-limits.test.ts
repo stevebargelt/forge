@@ -247,6 +247,7 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   await card.waitFor();
   assert.equal(await card.count(), 1);
   assert.equal(await card.locator(".project-card-head .project-chip").innerText(), "Forge");
+  await card.locator(".project-dirs-toggle").click();
   assert.deepEqual(await card.locator(".checkout-branch").allTextContents(), ["main", "dashboard-home", "fg578-raci-clobber"]);
   assert.match(await card.innerText(), /\/workspace\/forge-dashboard/);
 
