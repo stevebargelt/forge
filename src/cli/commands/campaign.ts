@@ -5,7 +5,8 @@ import { planCampaign, resolvePlan, sourceInputToPlannerInput } from "../../camp
 import type { PlannerInput, PlanMode, ItemModeOverride, ExecutionLane } from "../../campaign/planner.js";
 import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
-import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign, tryOperatorPauseCampaign } from "../../store/campaigns.js";
+import { listCampaignItems, getCampaign, approveCampaign, tryOperatorPauseCampaign, abandonCampaignAndTerminalizeItems, terminalizeAbandonedCampaignItems, listAbandonedReapCandidates, campaignAbandonedItemReason } from "../../store/campaigns.js";
+import { nowIso } from "../../util/ids.js";
 import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem, driveOneCampaignItem, launchDriveItemUnderForge, driveRemainingItems, prepareCampaignItemDispatch, DEFAULT_CONTROLLER_LEASE_MS } from "../../campaign/executor.js";
 import { recoverCampaign, type CampaignDispatchDeps } from "../../campaign/continuation-adapter.js";
 import { invoke } from "../../v2/invoke.js";
@@ -1009,17 +1010,84 @@ export function registerCampaign(program: Command): void {
         );
         process.exit(1);
       }
-      if (!tryTransitionCampaign(campaignId, existing.status, "abandoned")) {
+      // FG-754: transition + item/run terminalize commit atomically — an observer must
+      // never see campaign='abandoned' with a still-live item or run.
+      const outcome = abandonCampaignAndTerminalizeItems(campaignId, existing.status);
+      if (!outcome.transitioned) {
         const current = getCampaign(campaignId);
         process.stderr.write(
           `Error: campaign is ${current?.status ?? "unknown"} — cannot transition to abandoned\n`
         );
         process.exit(1);
       }
+      const runsAbandoned = outcome.terminalizations.filter((t) => t.runAbandoned).length;
       if (opts.json) {
-        console.log(JSON.stringify({ campaignId, status: "abandoned" }, null, 2));
+        console.log(
+          JSON.stringify(
+            { campaignId, status: "abandoned", itemsTerminalized: outcome.terminalizations, runsAbandoned },
+            null,
+            2
+          )
+        );
       } else {
         console.log(`Campaign ${campaignId} abandoned.`);
+        if (outcome.terminalizations.length > 0) {
+          console.log(
+            `Terminalized ${outcome.terminalizations.length} non-terminal item(s); abandoned ${runsAbandoned} linked run(s).`
+          );
+        }
+      }
+    });
+
+  // FG-754: the reaper for items ORPHANED by a pre-fix abandon (a campaign abandoned
+  // before this fix landed, whose non-terminal items still render as live operator
+  // waits). --dry-run lists exact identities and the durable reason it WOULD write,
+  // mutating nothing; the live run applies the SAME atomic item+run terminalize the
+  // abandon path uses, preserves rows, and is idempotent (a re-run finds zero).
+  campaign
+    .command("reap-abandoned")
+    .description(
+      "Terminalize non-terminal items still lingering on abandoned campaigns (the FG-754 orphan cleanup). --dry-run lists what would change without writing."
+    )
+    .option("--dry-run", "list the items that would be terminalized without changing anything")
+    .option("--json", "machine-readable JSON output")
+    .action((opts: { dryRun?: boolean; json?: boolean }) => {
+      const candidates = listAbandonedReapCandidates();
+
+      if (opts.dryRun) {
+        const wouldReap = candidates.map((c) => ({
+          campaignId: c.campaignId,
+          itemId: c.itemId,
+          ticketId: c.ticketId,
+          lifecycleStatus: c.lifecycleStatus,
+          runId: c.runId,
+          reason: campaignAbandonedItemReason(nowIso()),
+        }));
+        if (opts.json) {
+          console.log(JSON.stringify({ dryRun: true, wouldReap }, null, 2));
+        } else if (wouldReap.length === 0) {
+          console.log("Dry run: no lingering items on abandoned campaigns.");
+        } else {
+          console.log(`Dry run: ${wouldReap.length} item(s) would be terminalized:`);
+          for (const w of wouldReap) {
+            console.log(
+              `  ${w.campaignId} / ${w.itemId} (${w.ticketId}): ${w.lifecycleStatus} -> failed` +
+                `${w.runId ? `, run ${w.runId}` : ""} — ${w.reason}`
+            );
+          }
+        }
+        return;
+      }
+
+      const campaignIds = [...new Set(candidates.map((c) => c.campaignId))];
+      const reaped = campaignIds.flatMap((id) => terminalizeAbandonedCampaignItems(id));
+      const runsAbandoned = reaped.filter((t) => t.runAbandoned).length;
+      if (opts.json) {
+        console.log(JSON.stringify({ dryRun: false, reaped, runsAbandoned }, null, 2));
+      } else if (reaped.length === 0) {
+        console.log("No lingering items on abandoned campaigns.");
+      } else {
+        console.log(`Terminalized ${reaped.length} item(s); abandoned ${runsAbandoned} linked run(s).`);
       }
     });
 

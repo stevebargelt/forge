@@ -387,7 +387,7 @@ A **fifth** surface, alongside `agents`, `hostVerification`/`launches`, `require
 
 Two durable sources, and **only** these — never log prose, an agent's own message text, or elapsed time:
 
-- **`human_gate`** — a task in `tasks.status = 'awaiting_gate'` whose *workflow step* gate resolves to `human`, through the same `loadWorkflow` step lookup `forge status`/`forge gate` already use. A step gated `verdict`, `auto`, or `none` is the orchestrator's own call, never an operator wait — the CAS that parks a task at `awaiting_gate` fires for both `human` and `verdict` gates, so the gate kind is resolved per row and only `human` survives. `waitKey` is the task id.
+- **`human_gate`** — a task in `tasks.status = 'awaiting_gate'` whose *workflow step* gate resolves to `human`, through the same `loadWorkflow` step lookup `forge status`/`forge gate` already use. A step gated `verdict`, `auto`, or `none` is the orchestrator's own call, never an operator wait — the CAS that parks a task at `awaiting_gate` fires for both `human` and `verdict` gates, so the gate kind is resolved per row and only `human` survives. `waitKey` is the task id. FG-754 (defense in depth, mirroring the `campaign_hard_stop` veto below and `queries.ts`'s `campaignGateTerminal`): when the task's run is linked to a campaign item, the row is excluded unless the parent campaign is nonterminal — a gate parked on a run whose campaign has since reached `complete`/`failed`/`abandoned` is history, not a live wait, even though the underlying task row is still `awaiting_gate`. A run with no linked campaign item is unaffected.
 - **`campaign_hard_stop`** — a `campaign_items` row that recorded a non-null `requested_human_action`: an autonomous run that stopped itself rather than guessing, carrying the item's `blocker_kind` category, its `reason`, and the specific action it is asking for. `waitKey` is the campaign item id. FG-743 narrows which parked rows count as *live*: the parent campaign must still be nonterminal (`paused`/`running` — `complete`/`failed`/`abandoned` make every parked item under it history, not a wait, even though the row still carries the action), and — when the retained ask was to *close the ticket* — the item's own-project ticket must not already be `done` (a done ticket means the shipped work already satisfies that "close the ticket" instruction, so the wait clears rather than presenting an obsolete ask). Reconciliation is scoped to the campaign item's OWN project: `tickets` is keyed by `(project_key, ticket_id)`, so only the owning project's `done` row clears the wait — a same-id `done` ticket in a *different* project cannot suppress this campaign's live wait. And the suppression applies only to a close-the-ticket ask: an unrelated, still-unresolved operator decision stays visible even when the ticket is coincidentally `done`. Neither exclusion deletes or rewrites the underlying row — `forge campaign show`/`report` still surface it as history.
 
 Both are re-derived live on every call — nothing is cached or polled in the background — so a wait clears the instant its source record leaves the live state: the gate is advanced or rejected, the campaign item's decision is recorded, the underlying work is cancelled, or the run/item goes terminal. There is no separate "resolve" step for the derived row; it simply stops being produced.
@@ -2328,10 +2328,48 @@ Any `planned`, `running`, or `paused` campaign can be abandoned. Abandoning a `r
 
 `complete`, `failed`, and `abandoned` campaigns cannot be abandoned (they are already terminal). The command exits non-zero with the current status.
 
+**Item and run terminalization (FG-754).** Before this fix, abandoning a campaign left every non-terminal item at its existing `lifecycle_status`, so an item parked mid-pipeline on a still-active run kept rendering as a live "Waiting on operator"/in-flight row forever — the leak is run-anchored, not item-lifecycle. The status flip now terminalizes atomically, in one transaction: every non-terminal item (`pending`, `awaiting_gate`, `awaiting_red`, `blocked_by_red`, `awaiting_recovery`) moves to `lifecycleStatus: failed` with a durable `campaign_abandoned at <timestamp>` marker written into its existing `reason` field (no schema migration, no new outcome value, row preserved — an observer can tell this apart from a genuine work failure by the reason prefix); and each terminalized item's still-**PARKED** linked run (`awaiting_gate`/`blocked_by_red`/`awaiting_recovery` — never `pending`, which has no dispatched run, or `awaiting_red`, which may still have a red-review container in flight) is force-flipped from `active` to `abandoned`. A genuinely `running` item is deliberately left untouched — it has a live container, and force-abandoning it here would kill work outside the executor's own drive loop; it's left to the executor's own abandon handling and the container reaper instead. Because the campaign-status CAS and the item/run terminalize commit together, an observer can never see `campaign: abandoned` alongside a still-live item or run.
+
+As defense in depth, `forge status`'s "Waiting on operator" section and the dashboard's **In flight** view also veto any task or wait belonging to a run under a *terminal* campaign (`complete`/`failed`/`abandoned`) — see [Operator waits](#operator-waits-fg-734) and `docs/SCHEMA-CONTRACT.md` → **`/api/current-activity`**. `paused` is never vetoed there, preserving FG-750's item-scoped-park visibility.
+
 With `--json`:
 
 ```json
-{ "campaignId": "camp-abc123", "status": "abandoned" }
+{
+  "campaignId": "camp-abc123",
+  "status": "abandoned",
+  "itemsTerminalized": [
+    { "itemId": "item-1", "ticketId": "FG-1", "runId": "run-1", "previousLifecycle": "awaiting_gate", "reason": "campaign_abandoned at 2026-08-23T23:00:46.000Z", "runAbandoned": true }
+  ],
+  "runsAbandoned": 1
+}
+```
+
+Human output adds a second line only when at least one item was terminalized: `Terminalized N non-terminal item(s); abandoned M linked run(s).`
+
+### Reap-abandoned
+
+`forge campaign reap-abandoned [--dry-run] [--json]` (FG-754) is the operator-invoked cleanup for campaigns that were abandoned **before** the terminalization fix above shipped — an already-`abandoned` campaign whose non-terminal items were never terminalized at the time, and so are still orphaned on the live surface. It is host-wide, not scoped to one campaign: it finds every non-terminal item across every `abandoned` campaign (the `JOIN` to `campaigns` is the entire correctness guarantee — a `planned`/`running`/`paused` campaign's items are structurally unreachable to it) and terminalizes them through the same atomic item-plus-run primitive `forge campaign abandon` itself uses. It is idempotent — a re-run after everything is already terminal finds nothing to reap.
+
+`--dry-run` lists the exact identities it would terminalize — campaign id, item id, ticket id, current lifecycle status, linked run id, and the durable reason it would write — and mutates nothing.
+
+Without `--dry-run`, it applies the terminalize for real and reports how many items were terminalized and how many linked runs were abandoned.
+
+With `--json` (dry run):
+
+```json
+{
+  "dryRun": true,
+  "wouldReap": [
+    { "campaignId": "camp-abc123", "itemId": "item-1", "ticketId": "FG-1", "lifecycleStatus": "awaiting_gate", "runId": "run-1", "reason": "campaign_abandoned at 2026-08-24T00:00:00.000Z" }
+  ]
+}
+```
+
+With `--json` (live run):
+
+```json
+{ "dryRun": false, "reaped": [ /* CampaignAbandonTerminalization[], same shape as `abandon`'s itemsTerminalized */ ], "runsAbandoned": 1 }
 ```
 
 ### Reconcile
