@@ -346,6 +346,7 @@ test("Clearing the project filter drops DURATION data and clears the old scope's
   statusByScope.set(`dir:${CHECKOUT_MAIN}`, 500);
   const errorPage = await newPage({ width: 1440, height: 1200 });
   await errorPage.goto(`${baseUrl}/#projects`);
+  await errorPage.locator(".project-dirs-toggle").click();
   await errorPage.getByRole("button", { name: "Open Atlas checkout main" }).click();
   await errorPage.getByRole("button", { name: "ops" }).click();
   const error = errorPage.locator(".runtime-error");

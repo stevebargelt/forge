@@ -242,6 +242,7 @@ test("Switching checkout scope invalidates the run map and a late leaving-scope 
 
   // Open the project scoped to main, then open the run map from the feed.
   await page.goto(`${baseUrl}/#projects`);
+  await page.locator(".project-dirs-toggle").click();
   await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
   await page.locator(".rm-open-btn").first().waitFor();
 

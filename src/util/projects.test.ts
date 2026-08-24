@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregateProjectSignals, findProject, listProjects, operatorProjects, type RepositoryIdentityResolver, type WorkspacePurposeResolver } from "./projects.js";
+import { aggregateProjectSignals, extractReadmeProse, findProject, listProjects, operatorProjects, type RepositoryIdentityResolver, type WorkspacePurposeResolver } from "./projects.js";
 import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
 import { captureProcessIdentity } from "./process-identity.js";
 
@@ -236,4 +236,94 @@ test("FG-745: operatorProjects drops only records classified as artifacts", () =
   );
   assert.equal(projects[0]?.classification, "artifact");
   assert.equal(operatorProjects(projects).length, 0, "a recorded evidence fixture is suppressed");
+});
+
+// FG-759 (#3a): readmeFirstLine must show a real description, never raw markup. The
+// extractor skips HTML wrappers, headings, and badge/link noise and returns the first
+// prose line — or nothing when the README is markup-only.
+test("extractReadmeProse skips an HTML-opening README and returns the first prose line", () => {
+  const readme = [
+    '<p align="center">',
+    '  <img src="logo.png" alt="logo" />',
+    "</p>",
+    "",
+    "# Forge",
+    "",
+    "Forge is a CLI for orchestrating agent pipelines.",
+  ].join("\n");
+  assert.equal(extractReadmeProse(readme), "Forge is a CLI for orchestrating agent pipelines.");
+});
+
+test("extractReadmeProse skips a badges-first README", () => {
+  const readme = [
+    "# my-project",
+    "",
+    "[![Build](https://img.shields.io/x.svg)](https://ci.example/build) [![Coverage](https://img.shields.io/cov.svg)](https://cov.example)",
+    "",
+    "A tiny library for widget wrangling.",
+  ].join("\n");
+  assert.equal(extractReadmeProse(readme), "A tiny library for widget wrangling.");
+});
+
+test("extractReadmeProse returns the first line of a plain-prose README", () => {
+  const readme = "This project does the thing.\n\nMore details below.\n";
+  assert.equal(extractReadmeProse(readme), "This project does the thing.");
+});
+
+test("extractReadmeProse returns undefined for a markup-only README", () => {
+  const readme = '<p align="left"></p>\n\n---\n';
+  assert.equal(extractReadmeProse(readme), undefined);
+});
+
+test("extractReadmeProse never returns a raw HTML tag as the description", () => {
+  const readme = '<p align="left">\n\nReal description here.\n';
+  const line = extractReadmeProse(readme);
+  assert.ok(line && !line.includes("<"), "the description carries no raw markup");
+  assert.equal(line, "Real description here.");
+});
+
+test("extractReadmeProse skips a multiline HTML comment and returns the following prose", () => {
+  const readme = [
+    "<!-- logo",
+    '  <img src="logo.svg" alt="logo" />',
+    "-->",
+    "",
+    "The real description follows the comment.",
+  ].join("\n");
+  const line = extractReadmeProse(readme);
+  assert.ok(line && !line.includes("<!--"), "a multiline comment never leaks as the description");
+  assert.equal(line, "The real description follows the comment.");
+});
+
+test("extractReadmeProse skips a malformed (unterminated) HTML opening tag", () => {
+  // FG-759 RF-1: `<p align="left"` with no closing '>' is never matched by /<[^>]+>/g,
+  // so without the residual-markup skip it would leak verbatim as the description.
+  const readme = '<p align="left"\nActual prose follows.\n';
+  const line = extractReadmeProse(readme);
+  assert.ok(line && !line.includes("<"), "an unterminated opening tag is not prose");
+  assert.equal(line, "Actual prose follows.");
+});
+
+test("extractReadmeProse skips a malformed (unterminated) HTML comment", () => {
+  const readme = "<!-- logo\nThe real description follows.\n";
+  const line = extractReadmeProse(readme);
+  assert.ok(line && !line.includes("<!--"), "an unterminated comment delimiter is not prose");
+  assert.equal(line, "The real description follows.");
+});
+
+test("extractReadmeProse skips a standalone markdown-link line and returns the following prose", () => {
+  // FG-759 RF-1: a line that is ENTIRELY a link must not have its label promoted as the
+  // description (invariant #3: never return a link).
+  const readme = "[Documentation](https://example.test)\nActual prose.\n";
+  assert.equal(extractReadmeProse(readme), "Actual prose.");
+});
+
+test("extractReadmeProse skips a standalone HTML-link line and returns the following prose", () => {
+  const readme = '<a href="https://example.test">Documentation</a>\nActual prose.\n';
+  assert.equal(extractReadmeProse(readme), "Actual prose.");
+});
+
+test("extractReadmeProse keeps an inline link's label inside genuine prose", () => {
+  const readme = "See the [docs](https://example.test) for details.\n";
+  assert.equal(extractReadmeProse(readme), "See the docs for details.");
 });

@@ -135,12 +135,13 @@ test("the grid renders the visible projects, flags unclassified, and never shows
   await page.close();
 });
 
-// RF-3 regression: the new classify controls must be keyboard-operable INDEPENDENTLY of
-// the project card. The card activates on Enter/Space (role="button"); before the fix its
-// handler also swallowed key events that BUBBLED from a focused descendant — so activating
-// the classify toggle from the keyboard both suppressed the toggle (preventDefault) and
-// navigated the card away (onPick → activity view). The toggle must open its own form and
-// leave the Projects grid mounted.
+// RF-3 regression: the classify controls must be keyboard-operable INDEPENDENTLY of the
+// project card. Historically the card was itself role="button" and its Enter/Space handler
+// swallowed key events bubbling from a focused descendant — so activating the classify
+// toggle from the keyboard both suppressed the toggle and navigated the card away. FG-759
+// RF-2 removed the card-level role=button/keyboard handler entirely (interactive controls
+// nested in a role=button is invalid ARIA); the toggle is a real <button> that activates in
+// place. Either way the invariant holds: the toggle opens its own form and the grid stays.
 test("RF-3: keyboard-activating the classify toggle opens its form and does NOT activate the card", async () => {
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
