@@ -465,6 +465,31 @@ export function advanceCiWait(id: string, disposition: CiWaitTerminalDisposition
   });
 }
 
+/** FG-755: reap a durably-stuck wait to the `abandoned` terminal, recording the DURABLE
+ *  reason that justified it (observed_reason). This is the SAME terminal transition as
+ *  advanceCiWait('abandoned') — the row is PRESERVED, never deleted — but it also persists
+ *  WHY, so the reap is auditable long after the waiter that stranded it is gone. Refuses a
+ *  wait already terminal (the first disposition wins — invariant 1's mirror) and one that
+ *  does not exist. The CALLER owns the reap PREDICATE (dead owner + durable no_runs, in
+ *  v2/ci-wait.ts); this is only the recording transition. */
+export function reapCiWait(id: string, reason: string): boolean {
+  return writeTransaction(() => {
+    const db = getDb();
+    const row = db.prepare(`SELECT lifecycle_state FROM ci_waits WHERE id = ?`).get(id) as
+      | { lifecycle_state: string }
+      | undefined;
+    if (row === undefined) return false;
+    if (isTerminalCiWaitState(row.lifecycle_state)) return false;
+    const res = db.prepare(`
+      UPDATE ci_waits
+         SET lifecycle_state = 'abandoned', terminal = 1, terminal_disposition = 'abandoned',
+             observed_reason = ?
+       WHERE id = ?
+    `).run(reason, id);
+    return res.changes === 1;
+  });
+}
+
 /** Renew (or set) the owner + epoch-ms lease. Observability + adopt-on-recovery ONLY:
  *  the lease is NOT terminal authority, so this NEVER touches lifecycle_state or
  *  terminal. `leaseMs` is added to the STORE's own clock (storeNowMs), the single clock

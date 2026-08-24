@@ -91,6 +91,21 @@ test("forge ci-wait advance on an unknown id is a clean refusal", () => {
   assert.match(JSON.parse(res.stdout).error, /no such ci-wait/);
 });
 
+// FG-755: the reap command exists, parses --dry-run/--json, and emits the well-formed
+// outcome shape. The reap PREDICATE + terminalization are proven in fg755-ci-wait-reap.ts
+// with a stubbed probe (the real command re-probes gh, which agent containers lack); this
+// proves the WIRING and that a dry-run mutates nothing.
+test("forge ci-wait reap --dry-run --json emits a well-formed outcome and mutates nothing", () => {
+  const before = readCiWaits().length;
+  const res = forge(["ci-wait", "reap", "--dry-run", "--json"]);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout) as { dryRun: boolean; count: number; reaped: unknown[] };
+  assert.equal(out.dryRun, true);
+  assert.equal(typeof out.count, "number");
+  assert.ok(Array.isArray(out.reaped));
+  assert.equal(readCiWaits().length, before, "a dry-run reap mutates nothing");
+});
+
 test("a missing --pr for pr_checks is a clean refusal, not a registered half-wait", () => {
   const before = readCiWaits().length;
   const res = forge(["ci-wait", "register", "--kind", "pr_checks", "--repo", "acme/forge", "--json"]);

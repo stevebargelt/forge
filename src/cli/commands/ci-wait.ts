@@ -6,9 +6,11 @@ import { derivePreferredRemoteIdentity } from "../../util/github-url.js";
 import {
   armCiWait,
   runCiWaitLoop,
+  reapStuckCiWaits,
   defaultCiWaitProbe,
   type ArmCiWaitInput,
   type CiWaitOutcome,
+  type CiWaitReapCandidate,
 } from "../../v2/ci-wait.js";
 import { advanceCiWait, getCiWait, type CiWait, type CiWaitKind, type CiWaitRemote } from "../../store/ci-waits.js";
 
@@ -262,4 +264,44 @@ export function registerCiWaitCommand(program: Command): void {
       if (opts.json) process.stdout.write(`${JSON.stringify({ id, advanced: ok, state: (getCiWait(id) ?? before).lifecycleState })}\n`);
       else process.stdout.write(`forge ci-wait: ${ok ? `advanced ${id}` : `${id} was not awaiting advance (${before.lifecycleState}) — left as-is`}\n`);
     });
+
+  // FG-755: reap push_actions waits stranded at no_runs by a dead waiter — the immortal
+  // "CI state unavailable" rows a squash-merge push leaves when its run never matches the
+  // head-sha query and the waiter later dies. An OPERATOR-invoked cleanup (host-wide, unlike
+  // reconcile's scoped sweep); --dry-run lists exact identities and mutates nothing. Rows are
+  // always PRESERVED (reaped to the `abandoned` terminal, never deleted).
+  ciWait
+    .command("reap")
+    .description("Reap push_actions CI-waits stuck at no_runs with a dead owner — terminalize (never delete) the immortal 'CI state unavailable' rows a dead waiter left behind.")
+    .option("--dry-run", "list exactly what WOULD be reaped, mutating nothing")
+    .option("--json", "machine-readable output")
+    .action((opts: { dryRun?: boolean; json?: boolean }) => {
+      ensureForgeDirs();
+      const outcome = reapStuckCiWaits({ dryRun: !!opts.dryRun });
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify({ dryRun: outcome.dryRun, count: outcome.reaped.length, reaped: outcome.reaped })}\n`);
+        return;
+      }
+      const verb = outcome.dryRun ? "WOULD reap" : "reaped";
+      if (outcome.reaped.length === 0) {
+        process.stdout.write(`forge ci-wait reap${outcome.dryRun ? " (dry-run)" : ""}: no stuck push_actions waits to reap.\n`);
+        return;
+      }
+      process.stdout.write(`forge ci-wait reap${outcome.dryRun ? " (dry-run)" : ""}: ${verb} ${outcome.reaped.length} wait(s):\n`);
+      for (const w of outcome.reaped) process.stdout.write(`  ${reapLine(w)}\n`);
+    });
+}
+
+/** Humanize a reap candidate into the single identity line FG-755 AC3 requires:
+ *  id, kind, head_sha, owner, observed_state, age, and the per-row durable reason. */
+function reapLine(w: CiWaitReapCandidate): string {
+  return `${w.id} kind=${w.kind} head_sha=${w.headSha ?? "?"} owner=${w.owner ?? "?"} observed=${w.observedState ?? "?"} age=${humanizeAge(w.ageMs)} — ${w.reason}`;
+}
+
+function humanizeAge(ms: number): string {
+  const totalMinutes = Math.max(0, Math.round(ms / 60000));
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h${minutes}m`;
 }

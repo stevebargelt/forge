@@ -12,6 +12,7 @@ import {
   registerOrAdoptCiWait,
   observeCiWait,
   advanceCiWait,
+  reapCiWait,
   renewCiWaitLease,
   readCiWaits,
   getCiWait,
@@ -537,4 +538,82 @@ export function reconcileCiWaits(
 // store's own storeNowMs discipline.
 function defaultNowMs(): number {
   return storeNowMs();
+}
+
+// ── FG-755: reap push_actions waits stranded at no_runs by a dead waiter ──────
+
+/** The persistence bound behind "DURABLE no_runs". A push-triggered Actions run appears
+ *  within a couple of minutes of the push, so a push_actions wait that has STILL matched
+ *  no run this long after it was registered is the durable-no_runs shape (e.g. a squash-
+ *  merge commit whose push-triggered run the head-sha query never matches), not a run
+ *  still arming. Set well above the minutes a real run takes to surface, so a genuinely
+ *  in-flight wait is never mistaken for stranded. */
+export const PUSH_ACTIONS_NO_RUNS_DURABLE_MS = 30 * 60 * 1000;
+
+/** One wait the reaper identified (dry-run: WOULD reap; real run: DID reap), carrying the
+ *  exact identity FG-755 AC3 requires the dry-run listing to surface before any mutation. */
+export type CiWaitReapCandidate = {
+  id: string;
+  kind: CiWaitKind;
+  headSha: string | null;
+  owner: string | null;
+  observedState: CiWaitObservedState | null;
+  ageMs: number;
+  reason: string;
+};
+
+export type CiWaitReapOutcome = {
+  dryRun: boolean;
+  /** dry-run: the waits that WOULD be reaped; real run: the waits actually reaped. */
+  reaped: CiWaitReapCandidate[];
+};
+
+/** FG-755: reap push_actions CI-waits stranded at `no_runs` by a dead waiter. A wait is
+ *  reaped to the `abandoned` terminal (row PRESERVED, with a durable observed_reason) ONLY
+ *  when ALL of these hold — NEITHER load-bearing gate reaps alone:
+ *    1. kind === push_actions (this ticket's shape; other kinds are untouched);
+ *    2. DEAD OWNER — the lease is expired (leaseExpiresAtMs <= now, or never set). This is
+ *       the SAME dead-waiter proxy reconcileCiWaits uses, not a new liveness probe;
+ *    3. DURABLE no_runs — the last observation is `no_runs` AND the wait has existed past
+ *       PUSH_ACTIONS_NO_RUNS_DURABLE_MS (persistence from the existing started_at). A single
+ *       TRANSIENT no_runs on a young wait is never reaped.
+ *  A fresh probe is then required to STILL report no_runs — a fail-safe so a wait whose run
+ *  actually exists now (a stale no_runs observation) is left for recovery to re-observe
+ *  rather than wrongly abandoned. Unlike reconcileCiWaits' scoped sweep this is deliberately
+ *  operator-invoked and scans host-wide live push_actions waits.
+ *
+ *  Respects the FG-590 boundary: a `completed_awaiting_advance` is a legitimate non-terminal
+ *  state and is NEVER reaped (its observed_state is `completed`, not `no_runs`), and a wait
+ *  with a live lease is never touched (its waiter is still probing it). */
+export function reapStuckCiWaits(
+  opts: { dryRun: boolean },
+  probe: CiWaitProbe = defaultCiWaitProbe,
+  nowMs: () => number = defaultNowMs,
+): CiWaitReapOutcome {
+  const now = nowMs();
+  const boundMinutes = Math.round(PUSH_ACTIONS_NO_RUNS_DURABLE_MS / 60000);
+  const reaped: CiWaitReapCandidate[] = [];
+  for (const wait of readCiWaits({ liveOnly: true })) {
+    if (wait.kind !== "push_actions") continue; // FG-755 scope
+    const lease = wait.leaseExpiresAtMs;
+    const deadOwner = lease === null || lease <= now; // same signal as reconcileCiWaits
+    if (!deadOwner) continue; // AC2: a live-lease wait is never reaped
+    if (wait.observedState !== "no_runs") continue; // only the no_runs shape
+    const ageMs = now - new Date(wait.startedAt).getTime();
+    if (ageMs < PUSH_ACTIONS_NO_RUNS_DURABLE_MS) continue; // AC2: transient no_runs is never reaped
+    // Fail-safe: confirm the run genuinely still does not exist before abandoning it.
+    if (probe(wait).observation.state !== "no_runs") continue;
+    const reason = `no matching CI run found within ${boundMinutes}m of push; waiter dead — reaped by ci-wait reap`;
+    if (!opts.dryRun && !reapCiWait(wait.id, reason)) continue; // lost a race to another terminal
+    reaped.push({
+      id: wait.id,
+      kind: wait.kind,
+      headSha: wait.headSha,
+      owner: wait.owner,
+      observedState: wait.observedState,
+      ageMs,
+      reason,
+    });
+  }
+  return { dryRun: opts.dryRun, reaped };
 }
