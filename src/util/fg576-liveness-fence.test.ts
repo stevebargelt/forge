@@ -110,6 +110,39 @@ test("classifyProcessIdentity: a missing or malformed fence is unknown", () => {
   assert.equal(classifyProcessIdentity({ pid: 0, host: HOST }, probeFor({})), "unknown");
 });
 
+// --- FG-757: darwin boottime usec drifts under NTP; key on the stable sec only
+
+const LEGACY_A = "boottime:{ sec = 1785613094, usec = 406504 } Wed Aug 24 10:00:00 2026";
+const LEGACY_B = "boottime:{ sec = 1785613094, usec = 460361 } Wed Aug 24 10:00:00 2026";
+const NEW_SEC = "boottime-sec:1785613094";
+
+test("classifyProcessIdentity: darwin boot differing ONLY in usec (same sec) is alive (FG-757)", () => {
+  const recorded: ProcessIdentity = { pid: LAUNCHER_PID, host: HOST, boot: LEGACY_A, startToken: "tok-a" };
+  const probe = probeFor({ [LAUNCHER_PID]: "tok-a" }, { boot: LEGACY_B });
+  assert.equal(classifyProcessIdentity(recorded, probe), "alive");
+});
+
+test("classifyProcessIdentity: darwin boot with a DIFFERENT sec is dead (reboot still fences)", () => {
+  const recorded: ProcessIdentity = { pid: LAUNCHER_PID, host: HOST, boot: LEGACY_A, startToken: "tok-a" };
+  const rebooted = "boottime:{ sec = 1785699494, usec = 12000 } Thu Aug 25 10:00:00 2026";
+  const probe = probeFor({ [LAUNCHER_PID]: "tok-a" }, { boot: rebooted });
+  assert.equal(classifyProcessIdentity(recorded, probe), "dead");
+});
+
+test("classifyProcessIdentity: legacy usec token vs NEW sec-only token, same sec, is alive (mixed-format recovery)", () => {
+  const recorded: ProcessIdentity = { pid: LAUNCHER_PID, host: HOST, boot: LEGACY_A, startToken: "tok-a" };
+  const probe = probeFor({ [LAUNCHER_PID]: "tok-a" }, { boot: NEW_SEC });
+  assert.equal(classifyProcessIdentity(recorded, probe), "alive");
+});
+
+test("classifyProcessIdentity: an unparseable boottime token falls through to the start token, never a false dead", () => {
+  const recorded: ProcessIdentity = { pid: LAUNCHER_PID, host: HOST, boot: "boottime:garbage", startToken: "tok-a" };
+  // Same start token: must not be fenced dead on an unreadable boot axis.
+  assert.equal(classifyProcessIdentity(recorded, probeFor({ [LAUNCHER_PID]: "tok-a" }, { boot: NEW_SEC })), "alive");
+  // Different start token: still dead on the start-token axis, as before.
+  assert.equal(classifyProcessIdentity(recorded, probeFor({ [LAUNCHER_PID]: "tok-b" }, { boot: NEW_SEC })), "dead");
+});
+
 test("captureProcessIdentity: fences THIS process against the real probe", () => {
   const identity = captureProcessIdentity(process.pid, systemProcessProbe);
   assert.equal(identity.pid, process.pid);
