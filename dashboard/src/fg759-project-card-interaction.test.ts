@@ -1,5 +1,5 @@
 // FG-759 RF-2: the project card hosts its own interactive controls (the primary
-// "Open <label>" chip, the one-click "This is my project" claim, the classify toggle,
+// "Open all <label> checkouts" chip, the one-click "This is my project" claim, the classify toggle,
 // the working-dirs toggle, the GitHub link). Interactive content nested inside a
 // role=button is invalid ARIA and confuses assistive tech, so the card is a PLAIN
 // container — the focusable primary "open project" control is a real <button> (the label
@@ -44,7 +44,7 @@ test("the primary 'open project' control is a real, focusable <button> labeled '
     "the label chip is rendered as a <button> primary open control (.project-open)",
   );
   const openBtn = card.slice(card.indexOf("project-open"));
-  assert.match(openBtn.slice(0, 400), /aria-label=\$\{`Open \$\{project\.label\}`\}/, "the open control is labeled 'Open <label>'");
+  assert.match(openBtn.slice(0, 400), /aria-label=\$\{`Open all \$\{project\.label\} checkouts`\}/, "the open control is labeled 'Open all <label> checkouts'");
   // It opens the project.
   assert.match(card, /const openProject = \(event\) => \{[^}]*onPick\(project, null\)/s, "the open control activates onPick");
 });

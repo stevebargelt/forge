@@ -1844,7 +1844,7 @@ function ProjectCard({ project, onPick, onReload }) {
           type="button"
           class="project-chip project-open"
           style=${{ background: project.color }}
-          aria-label=${`Open ${project.label}`}
+          aria-label=${`Open all ${project.label} checkouts`}
           onClick=${openProject}
         >${project.label}</button>
         ${unclassified
@@ -2087,7 +2087,7 @@ function checkoutRow(project, checkout, onPick) {
       class="project-checkout-row"
       onClick=${(event) => { event.stopPropagation(); onPick(project, checkout.projectDir); }}
       title=${checkout.projectDir}
-      aria-label=${`Open ${project.label} working dir ${checkoutLabel(checkout)}`}
+      aria-label=${`Open ${project.label} checkout ${checkoutLabel(checkout)}`}
     >
       <span class=${"checkout-branch" + (checkout.exists === false ? " checkout-missing" : "")}>${checkoutLabel(checkout)}</span>
       <span class="project-path mono faint">${checkout.projectDir}</span>
