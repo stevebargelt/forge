@@ -667,6 +667,40 @@ export function listAbandonedReapCandidates(): AbandonedReapCandidate[] {
   }));
 }
 
+// FG-753: guarded write for `campaign reconcile --terminal-recovery` — the
+// terminal analogue of updateCampaignItemIfCampaignPaused/Running. A `complete`
+// campaign has NO paused/running gate holding back a concurrent drive, so unlike
+// those two variants atomicity here rests on a compare-and-set of the item's
+// STILL-RESIDUAL shape (the lifecycleStatus + blockerKind observed at collect
+// time) folded into the same UPDATE as the campaigns.status='complete' subquery.
+// If the item has since been re-derived or concurrently mutated (its shape
+// moved), OR the campaign is no longer 'complete', zero rows change and no
+// optimistic ship occurs — the SAME single-statement guarantee the paused/running
+// variants get from their status subquery. `blocker_kind IS ?` (not `= ?`) so the
+// out-of-band residual shape (NULL blocker) binds correctly rather than matching
+// nothing. Returns true iff the item belonged to campaignId, that campaign was
+// still 'complete', the item still carried the observed residual shape, and the
+// write landed.
+export function updateCampaignItemIfCampaignCompleteAndShape(
+  id: string,
+  campaignId: string,
+  observedShape: { lifecycleStatus: CampaignItemLifecycleStatus; blockerKind: BlockerKind | null },
+  update: CampaignItemUpdate
+): boolean {
+  const { setClause, params } = buildItemUpdateSet(update);
+  const result = getDb()
+    .prepare(
+      `UPDATE campaign_items SET ${setClause}
+       WHERE id = ?
+         AND campaign_id = ?
+         AND (SELECT status FROM campaigns WHERE id = ?) = 'complete'
+         AND lifecycle_status = ?
+         AND blocker_kind IS ?`
+    )
+    .run(...params, id, campaignId, campaignId, observedShape.lifecycleStatus, observedShape.blockerKind);
+  return (result.changes ?? 0) > 0;
+}
+
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {
   const { setClause, params } = buildItemUpdateSet(update);
   getDb()

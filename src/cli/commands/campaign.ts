@@ -1094,12 +1094,24 @@ export function registerCampaign(program: Command): void {
   campaign
     .command("reconcile <campaign-id>")
     .description(
-      "Operator recovery: re-derive outcomes for scope-blocked, out-of-band-delivered, and campaign_system-recoverable items from durable evidence (ticket/git/host-verification/event records) and ship them if all facts hold — no evidence override; only a paused campaign is eligible"
+      "Operator recovery: re-derive outcomes for scope-blocked, out-of-band-delivered, and campaign_system-recoverable items from durable evidence (ticket/git/host-verification/event records) and ship them if all facts hold — no evidence override; only a paused campaign is eligible. With --terminal-recovery, runs instead against a COMPLETE (terminal) campaign: it closes a residual item using the same evidence bar AND backfills done-audit evidence for an ALREADY-shipped item whose gate-list coverage is gapped — recording a source=ci row (never mutating the item) so the campaign verdict re-derives (FG-753 / FG-692 AC4)."
     )
     .option("--by <operator>", "operator identifier (attribution only, not evidence)")
+    .option(
+      "--terminal-recovery",
+      "recover a residual item on a COMPLETE (terminal) campaign — refuses unless the campaign is complete; the default (flagless) mode still refuses any non-paused campaign (FG-753)"
+    )
+    .option(
+      "--repo <path>",
+      "must match the campaign's stored project directory, else the reconcile refuses without mutating anything (INV-6 confused-deputy guard); the campaign always binds to its stored dir regardless"
+    )
     .option("--json", "machine-readable JSON output")
-    .action((campaignId: string, opts: { by?: string; json?: boolean }) => {
-      const result = reconcileCampaign(campaignId, { decidedBy: opts.by });
+    .action((campaignId: string, opts: { by?: string; terminalRecovery?: boolean; repo?: string; json?: boolean }) => {
+      const result = reconcileCampaign(campaignId, {
+        decidedBy: opts.by,
+        terminalRecovery: opts.terminalRecovery,
+        repo: opts.repo,
+      });
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
