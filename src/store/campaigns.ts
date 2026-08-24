@@ -498,28 +498,36 @@ export function campaignAbandonedItemReason(iso: string): string {
   return `${CAMPAIGN_ABANDONED_ITEM_REASON_PREFIX} at ${iso}`;
 }
 
-// FG-754: the item lifecycles this abandonment terminalize acts on. The terminal
-// item set is {complete, failed, blocked_by_red} (queries.ts:2969); these four are
-// its complement EXCEPT 'running', which is deliberately excluded (risk #1): a
-// genuinely-running item has a LIVE container, and force-abandoning it here would
-// kill work the CLI abandon path never routed through the executor drive loop. A
-// running item under an abandoned campaign is left to the executor's own abandon
-// handling + the container reaper; the surface vetoes (current-activity / inFlight)
-// hide it in the meantime.
+// FG-754: the item lifecycles this abandonment terminalize acts on. The genuinely
+// terminal item set is {complete, failed}; every other lifecycle still surfaces as
+// live work (runs.ts NON_TERMINAL_TASK_STATES). blocked_by_red is one of those
+// non-terminal, reviewer-PARKED states — not a live container — so an abandoned
+// campaign that leaves it untouched keeps rendering it forever (RF-1). These five
+// are the non-terminal complement EXCEPT 'running', which is deliberately excluded
+// (risk #1): a genuinely-running item has a LIVE container, and force-abandoning it
+// here would kill work the CLI abandon path never routed through the executor drive
+// loop. A running item under an abandoned campaign is left to the executor's own
+// abandon handling + the container reaper; the surface vetoes (current-activity /
+// inFlight) hide it in the meantime.
 const ABANDON_TERMINALIZABLE_LIFECYCLE: readonly CampaignItemLifecycleStatus[] = [
   "pending",
   "awaiting_gate",
   "awaiting_red",
+  "blocked_by_red",
   "awaiting_recovery",
 ];
 
 // FG-754: among terminalizable items, only a PARKED one — no live container — may
 // have its still-active linked run force-flipped to 'abandoned'. awaiting_red may
 // still have red-review containers in flight, and 'pending' has no dispatched run,
-// so the run-flip is gated strictly to these two states (risk #1). The item's
-// lifecycle_status IS the primary task's status, so this is the parked-task gate.
+// so they are excluded (risk #1). blocked_by_red IS parked — the red review already
+// returned its blocking verdict, so nothing is in flight — and the run-orphan
+// invariant lists it in the parked set alongside awaiting_gate / awaiting_recovery
+// (RF-2). The item's lifecycle_status IS the primary task's status, so this is the
+// parked-task gate.
 const ABANDON_RUN_FLIP_PARKED_LIFECYCLE: readonly CampaignItemLifecycleStatus[] = [
   "awaiting_gate",
+  "blocked_by_red",
   "awaiting_recovery",
 ];
 

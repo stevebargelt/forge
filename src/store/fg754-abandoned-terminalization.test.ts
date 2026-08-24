@@ -149,6 +149,21 @@ test("Step 1: a terminalized item at awaiting_red keeps its (possibly-live) run 
   assert.equal(getRun(runId!)?.status, "active");
 });
 
+test("RF-1/RF-2: a blocked_by_red parked item is terminalized off the live surface and its active run is flipped", () => {
+  const { campaignId, itemId, runId } = seedCampaignWithItem({
+    campaignStatus: "abandoned",
+    lifecycle: "blocked_by_red",
+    runStatus: "active",
+  });
+  const results = terminalizeAbandonedCampaignItems(campaignId);
+  assert.equal(results.length, 1, "blocked_by_red is a parked, non-terminal state — it must be terminalized");
+  assert.equal(results[0]!.previousLifecycle, "blocked_by_red");
+  assert.equal(results[0]!.runAbandoned, true, "blocked_by_red is a run-flip parked state — its linked active run flips");
+  assert.equal(getCampaignItem(itemId)?.lifecycleStatus, "failed", "leaves the live surface");
+  assert.equal(getRun(runId!)?.status, "abandoned");
+  assert.equal(listAbandonedReapCandidates().length, 0, "no blocked_by_red item still surfaces after terminalization");
+});
+
 test("Step 1: batch is a no-op on a non-abandoned campaign", () => {
   const { campaignId, itemId } = seedCampaignWithItem({ campaignStatus: "paused", lifecycle: "awaiting_gate" });
   assert.deepEqual(terminalizeAbandonedCampaignItems(campaignId), []);
