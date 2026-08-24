@@ -310,3 +310,20 @@ test("extractReadmeProse skips a malformed (unterminated) HTML comment", () => {
   assert.ok(line && !line.includes("<!--"), "an unterminated comment delimiter is not prose");
   assert.equal(line, "The real description follows.");
 });
+
+test("extractReadmeProse skips a standalone markdown-link line and returns the following prose", () => {
+  // FG-759 RF-1: a line that is ENTIRELY a link must not have its label promoted as the
+  // description (invariant #3: never return a link).
+  const readme = "[Documentation](https://example.test)\nActual prose.\n";
+  assert.equal(extractReadmeProse(readme), "Actual prose.");
+});
+
+test("extractReadmeProse skips a standalone HTML-link line and returns the following prose", () => {
+  const readme = '<a href="https://example.test">Documentation</a>\nActual prose.\n';
+  assert.equal(extractReadmeProse(readme), "Actual prose.");
+});
+
+test("extractReadmeProse keeps an inline link's label inside genuine prose", () => {
+  const readme = "See the [docs](https://example.test) for details.\n";
+  assert.equal(extractReadmeProse(readme), "See the docs for details.");
+});

@@ -423,6 +423,18 @@ export function extractReadmeProse(content: string): string | undefined {
     const trimmed = rawLine.trim();
     if (!trimmed) continue;
     if (/^#{1,6}(\s|$)/.test(trimmed)) continue; // a markdown heading is the title, not a description
+    // A line that reduces to ONLY link/image/badge markup is framing, not prose — its label
+    // must not be promoted (invariant #3: never return a link). Remove links/images ENTIRELY
+    // here (not to their labels) and skip if nothing of substance remains; genuine prose with
+    // an inline link survives because its surrounding words keep alphanumerics below.
+    const linkless = trimmed
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // markdown images / shield badges
+      .replace(/\[[^\]]*\]\([^)]*\)/g, "") // markdown links removed whole, label and all
+      .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "") // HTML anchors removed whole
+      .replace(/<[^>]+>/g, "")
+      .replace(/[*_`~]/g, "")
+      .trim();
+    if (!/[A-Za-z0-9]/.test(linkless)) continue; // line is entirely link/image/badge markup
     const line = trimmed
       .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // markdown images / shield badges
       .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // markdown links → their text
