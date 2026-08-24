@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
-import { runByDispatchKey } from "./runs.js";
+import { runByDispatchKey, getRun, updateRunStatus } from "./runs.js";
 import { isCampaignTransitionAllowed } from "../types/index.js";
 import type {
   Campaign,
@@ -484,6 +484,179 @@ export function updateCampaignItemIfCampaignRunning(
     )
     .run(...params, id, campaignId, campaignId);
   return (result.changes ?? 0) > 0;
+}
+
+// FG-754: the durable marker that distinguishes an item terminalized BECAUSE its
+// campaign was abandoned from one that reached 'failed' by genuine work failure.
+// Stored in the existing `reason` column (NO schema migration); the `outcome`
+// column carries a valid CampaignItemOutcome ('failed'), so no new item-lifecycle
+// or outcome enum member is introduced and no terminal-set consumer has to change.
+// History (forge campaign show/report) tells the two apart by this prefix.
+export const CAMPAIGN_ABANDONED_ITEM_REASON_PREFIX = "campaign_abandoned";
+
+export function campaignAbandonedItemReason(iso: string): string {
+  return `${CAMPAIGN_ABANDONED_ITEM_REASON_PREFIX} at ${iso}`;
+}
+
+// FG-754: the item lifecycles this abandonment terminalize acts on. The terminal
+// item set is {complete, failed, blocked_by_red} (queries.ts:2969); these four are
+// its complement EXCEPT 'running', which is deliberately excluded (risk #1): a
+// genuinely-running item has a LIVE container, and force-abandoning it here would
+// kill work the CLI abandon path never routed through the executor drive loop. A
+// running item under an abandoned campaign is left to the executor's own abandon
+// handling + the container reaper; the surface vetoes (current-activity / inFlight)
+// hide it in the meantime.
+const ABANDON_TERMINALIZABLE_LIFECYCLE: readonly CampaignItemLifecycleStatus[] = [
+  "pending",
+  "awaiting_gate",
+  "awaiting_red",
+  "awaiting_recovery",
+];
+
+// FG-754: among terminalizable items, only a PARKED one — no live container — may
+// have its still-active linked run force-flipped to 'abandoned'. awaiting_red may
+// still have red-review containers in flight, and 'pending' has no dispatched run,
+// so the run-flip is gated strictly to these two states (risk #1). The item's
+// lifecycle_status IS the primary task's status, so this is the parked-task gate.
+const ABANDON_RUN_FLIP_PARKED_LIFECYCLE: readonly CampaignItemLifecycleStatus[] = [
+  "awaiting_gate",
+  "awaiting_recovery",
+];
+
+// FG-754: guarded item-terminalize CAS, the sibling of updateCampaignItemIfCampaign
+// Paused/Running above. Gated on campaign.status='abandoned' AND the item still being
+// terminalizable, both read inside the same UPDATE so a concurrent transition can
+// never slip a stale snapshot through: if the campaign is not abandoned, or the item
+// already terminal (or a live 'running' container), zero rows change. Sets
+// lifecycle_status -> 'failed', a valid 'failed' outcome, and the durable abandonment
+// marker in `reason`. PRESERVES the row (UPDATE, never DELETE). Returns true iff the
+// terminalize landed.
+export function terminalizeCampaignItemIfCampaignAbandoned(id: string, campaignId: string): boolean {
+  const iso = nowIso();
+  const placeholders = ABANDON_TERMINALIZABLE_LIFECYCLE.map(() => "?").join(", ");
+  const result = getDb()
+    .prepare(
+      `UPDATE campaign_items
+          SET lifecycle_status = 'failed', outcome = 'failed', reason = ?, updated_at = ?
+        WHERE id = ?
+          AND campaign_id = ?
+          AND lifecycle_status IN (${placeholders})
+          AND (SELECT status FROM campaigns WHERE id = ?) = 'abandoned'`
+    )
+    .run(campaignAbandonedItemReason(iso), iso, id, campaignId, ...ABANDON_TERMINALIZABLE_LIFECYCLE, campaignId);
+  return (result.changes ?? 0) > 0;
+}
+
+export type CampaignAbandonTerminalization = {
+  itemId: string;
+  ticketId: string;
+  runId: string | null;
+  previousLifecycle: CampaignItemLifecycleStatus;
+  reason: string;
+  runAbandoned: boolean;
+};
+
+// FG-754: the batch primitive. Inside ONE BEGIN IMMEDIATE transaction (mirroring
+// reserveCampaignDriveDispatch's envelope) terminalizes EVERY non-terminal item of an
+// abandoned campaign via the guarded CAS above, and flips each PARKED item's still-
+// active linked run to 'abandoned'. No-op (returns []) unless the campaign is actually
+// 'abandoned', so an observer can never see campaign='abandoned' with a still-live
+// item/run once this commits. Idempotent: a re-run finds every item already terminal
+// and changes nothing.
+export function terminalizeAbandonedCampaignItems(campaignId: string): CampaignAbandonTerminalization[] {
+  return writeTransaction(() => terminalizeAbandonedCampaignItemsTx(campaignId));
+}
+
+// Assumes it runs INSIDE a write transaction (called directly by the atomic abandon
+// path, or via terminalizeAbandonedCampaignItems' own envelope). Reads the campaign
+// status inside the transaction so the atomic-abandon caller's just-committed flip is
+// visible.
+function terminalizeAbandonedCampaignItemsTx(campaignId: string): CampaignAbandonTerminalization[] {
+  const campaign = getCampaign(campaignId);
+  if (!campaign || campaign.status !== "abandoned") return [];
+  const results: CampaignAbandonTerminalization[] = [];
+  for (const item of listCampaignItems(campaignId)) {
+    if (!ABANDON_TERMINALIZABLE_LIFECYCLE.includes(item.lifecycleStatus)) continue;
+    if (!terminalizeCampaignItemIfCampaignAbandoned(item.id, campaignId)) continue;
+    let runAbandoned = false;
+    if (item.runId && ABANDON_RUN_FLIP_PARKED_LIFECYCLE.includes(item.lifecycleStatus)) {
+      const run = getRun(item.runId);
+      // Flip only a genuinely-active run of a parked item; never cross a run that has
+      // already reached its own terminal truth (updateRunStatus enforces the same).
+      if (run && run.status === "active") {
+        updateRunStatus(item.runId, "abandoned");
+        runAbandoned = true;
+      }
+    }
+    const updated = getCampaignItem(item.id);
+    results.push({
+      itemId: item.id,
+      ticketId: item.ticketId,
+      runId: item.runId ?? null,
+      previousLifecycle: item.lifecycleStatus,
+      reason: updated?.reason ?? campaignAbandonedItemReason(nowIso()),
+      runAbandoned,
+    });
+  }
+  return results;
+}
+
+// FG-754: the atomic abandon primitive for `forge campaign abandon` (step 2). CAS the
+// campaign from→abandoned and, only if that flip wins, terminalize its items + parked
+// runs — ALL in one transaction, so status-flip + item + run terminalize commit
+// together. `transitioned` is false when the CAS lost (someone else moved the campaign
+// off `from` first); no terminalize runs in that case.
+export function abandonCampaignAndTerminalizeItems(
+  campaignId: string,
+  from: CampaignStatus
+): { transitioned: boolean; terminalizations: CampaignAbandonTerminalization[] } {
+  return writeTransaction(() => {
+    const flipped = getDb()
+      .prepare(`UPDATE campaigns SET status = 'abandoned', updated_at = ? WHERE id = ? AND status = ?`)
+      .run(nowIso(), campaignId, from);
+    if ((flipped.changes ?? 0) === 0) return { transitioned: false, terminalizations: [] };
+    return { transitioned: true, terminalizations: terminalizeAbandonedCampaignItemsTx(campaignId) };
+  });
+}
+
+export type AbandonedReapCandidate = {
+  campaignId: string;
+  itemId: string;
+  ticketId: string;
+  lifecycleStatus: CampaignItemLifecycleStatus;
+  runId: string | null;
+};
+
+// FG-754: the reaper's candidate set (step 5) — every terminalizable item of an
+// ALREADY-abandoned campaign. The JOIN to campaigns is the entire AC4 correctness
+// guarantee: a paused/planned/running campaign's items are structurally unreachable,
+// so the reaper can never touch them. Pure read (no transaction); used by --dry-run to
+// list identities and by the live run to know which campaigns to batch.
+export function listAbandonedReapCandidates(): AbandonedReapCandidate[] {
+  const placeholders = ABANDON_TERMINALIZABLE_LIFECYCLE.map(() => "?").join(", ");
+  const rows = getDb()
+    .prepare(
+      `SELECT ci.campaign_id, ci.id, ci.ticket_id, ci.lifecycle_status, ci.run_id
+         FROM campaign_items ci
+         JOIN campaigns c ON c.id = ci.campaign_id
+        WHERE c.status = 'abandoned'
+          AND ci.lifecycle_status IN (${placeholders})
+        ORDER BY ci.campaign_id ASC, ci.item_order ASC`
+    )
+    .all(...ABANDON_TERMINALIZABLE_LIFECYCLE) as Array<{
+    campaign_id: string;
+    id: string;
+    ticket_id: string;
+    lifecycle_status: string;
+    run_id: string | null;
+  }>;
+  return rows.map((r) => ({
+    campaignId: r.campaign_id,
+    itemId: r.id,
+    ticketId: r.ticket_id,
+    lifecycleStatus: r.lifecycle_status as CampaignItemLifecycleStatus,
+    runId: r.run_id ?? null,
+  }));
 }
 
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {
