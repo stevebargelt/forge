@@ -471,8 +471,25 @@ section.projects-grid {
 .project-card.state-idle   { opacity: 0.72; }
 .project-card.state-stale  { opacity: 0.5; }
 
-.project-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* FG-759 (#3b): the head wraps instead of overflowing. Before, a fixed-width row of
+   chip + badge + classify controls + live + GitHub link pushed the right-pinned
+   GitHub pill (white-space:nowrap, margin-left:auto) past the card padding and it
+   clipped outside the card. flex-wrap keeps every control within the card bounds at
+   the normal card width. */
+.project-card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; row-gap: 6px; }
 .project-card-head .project-chip { font-size: 12px; padding: 2px 10px; cursor: default; }
+/* FG-759 RF-2: the label chip IS the card's primary "open project" control — a real,
+   focusable <button> so keyboard users tab to it and activate with Enter, instead of the
+   whole card being an (ARIA-invalid) role=button around its own interactive controls.
+   Strip the button-native chrome so it renders identically to the old label span. */
+.project-card-head button.project-chip {
+  border: none;
+  font-family: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.project-card-head button.project-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* FG-438: GitHub repo link on the project card. margin-left:auto pins it right so
    the chip/live-indicator cluster left; stopPropagation on click keeps card
    selection intact. */
@@ -499,15 +516,46 @@ section.projects-grid {
   animation: pulse 2s ease-in-out infinite;
 }
 
-/* FG-745: an unclassified record — visible fail-safe. The dashed left border and
-   the badge (text, not colour alone) mark a workspace whose purpose was never
-   recorded, so the operator can classify it. It is never hidden. */
-.project-card.project-unclassified-card { border-left: 3px dashed var(--warn); }
+/* FG-745: an unclassified record — visible fail-safe. The workspace's purpose was
+   never recorded, so it is flagged and never hidden. FG-759 (#2) CALMS the treatment:
+   a real, active project should not be alarmed at. The marker is now a quiet dim
+   dashed edge and a muted (not warning-coloured) badge — legible, low-emphasis, and
+   no longer competing with the project's own content for attention. */
+.project-card.project-unclassified-card { border-left: 3px dashed var(--fg-faint); }
 .project-unclassified-badge {
-  color: var(--warn);
-  background: rgba(250, 204, 21, 0.14);
-  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  font-weight: 500;
 }
+/* FG-759 (#2): the inviting one-click operator claim — the primary, low-friction way
+   a real project sheds the unclassified flag. Accent-tinted so it reads as the
+   recommended action next to the quiet "Classify…" escape hatch for artifact kinds. */
+.project-claim {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.project-claim:hover:not(:disabled) { background: rgba(96, 165, 250, 0.2); }
+.project-claim:disabled { opacity: 0.6; cursor: default; }
+.project-claim:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* RF-2: the one-click claim's success confirmation. Rendered in place of the claim
+   button on success and focus-landed so the write is perceivable (and announced via
+   role=status) even before the cached Projects list re-projects the card as classified. */
+.project-claim-done {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ok);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.project-claim-done:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .project-classify-toggle {
   font-size: 11px;
   font-weight: 600;
@@ -621,6 +669,22 @@ section.projects-grid {
 }
 .project-stat-val.stat-warn { color: var(--warn); }
 
+/* FG-759 (#1): the working-dirs disclosure. A logical project can span many working
+   directories (the main checkout + per-ticket disposable clones); that count is a
+   SECONDARY detail, so it collapses behind a low-emphasis toggle and only appears when
+   the project genuinely spans more than one. */
+.project-working-dirs { display: flex; flex-direction: column; gap: 6px; }
+.project-dirs-toggle {
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.project-dirs-toggle:hover { color: var(--fg); }
+.project-dirs-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .project-checkouts {
   display: flex;
   flex-direction: column;

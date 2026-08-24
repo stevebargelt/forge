@@ -402,15 +402,41 @@ function readReadmeFirstLine(projectDir: string): string | undefined {
     const path = join(projectDir, name);
     if (!existsSync(path)) continue;
     try {
-      const content = readFileSync(path, "utf8");
-      // First non-empty, non-heading-marker line.
-      for (const rawLine of content.split("\n")) {
-        const line = rawLine.replace(/^#+\s*/, "").trim();
-        if (line.length > 0) return line.slice(0, 120);
-      }
+      const prose = extractReadmeProse(readFileSync(path, "utf8"));
+      if (prose) return prose;
     } catch {
       // ignore
     }
+  }
+  return undefined;
+}
+
+// FG-759 (#3a): the card description must be a real sentence, never markup. Many
+// READMEs open with an HTML wrapper (`<p align="center">`), a heading, or a wall of
+// CI/coverage badges before the first prose line. Strip that framing per line and
+// return the first line that carries actual prose — or nothing.
+export function extractReadmeProse(content: string): string | undefined {
+  // Strip HTML comments across the whole document first: a comment can span multiple
+  // lines (`<!--\n logo\n-->`), which a per-line strip would miss and then leak as prose.
+  const withoutComments = content.replace(/<!--[\s\S]*?-->/g, "");
+  for (const rawLine of withoutComments.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    if (/^#{1,6}(\s|$)/.test(trimmed)) continue; // a markdown heading is the title, not a description
+    const line = trimmed
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // markdown images / shield badges
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // markdown links → their text
+      .replace(/<[^>]+>/g, "") // HTML/markup tags
+      .replace(/[*_`~]/g, "") // inline emphasis markers
+      .trim();
+    if (!line) continue;
+    // A residual '<' or '>' means the line carried markup the tag/comment strips could not
+    // fully remove — e.g. an unterminated tag (`<p align="left"` with no closing '>') that
+    // /<[^>]+>/g never matches, or a stray comment delimiter. Treat it as markup, not prose.
+    if (/[<>]/.test(line)) continue;
+    if (/^[-=*_]{3,}$/.test(line)) continue; // horizontal rules
+    if (!/[A-Za-z0-9]/.test(line)) continue; // punctuation-only separators
+    return line.slice(0, 120);
   }
   return undefined;
 }

@@ -1785,29 +1785,92 @@ function ProjectCard({ project, onPick, onReload }) {
   // the head reveals it. The badge alone (no body growth) keeps the card's default
   // shape stable — the card's primary click target stays the project body.
   const [showClassify, setShowClassify] = useState(false);
-  const onClick = () => onPick(project, null);
-  const onKey = (event) => {
-    // RF-3: only the card itself activates on Enter/Space. A key event that bubbled up
-    // from a focused descendant (the classify toggle, the classify form's select/submit,
-    // a checkout row, the GitHub link) must reach its OWN native activation — swallowing
-    // it here with preventDefault() would both suppress that control and open the card.
-    if (event.target !== event.currentTarget) return;
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      onClick();
+  // FG-759 (#1): the per-checkout list is a SECONDARY, on-demand detail — collapsed
+  // behind a low-emphasis toggle and shown only when a logical project genuinely spans
+  // more than one working directory. It never leads the card.
+  const [showDirs, setShowDirs] = useState(false);
+  // FG-759 (#2): a one-click operator claim. It is an EXPLICIT operator action (never
+  // an automatic classify — that would regress FG-745's fail-safe); it just reuses the
+  // existing operator classify path so a real project can shed the quiet flag in one tap.
+  const [claiming, setClaiming] = useState(false);
+  const [claimError, setClaimError] = useState(null);
+  // RF-2: a successful claim must be perceivable NOW. The Projects list is served from a
+  // short-lived server-side cache, so the card only re-projects as classified on the next
+  // uncached read (see postClassify / ClassifyControl) — until then it would look unchanged
+  // and the operator can't tell the one-click claim worked. Hold a local success state and
+  // announce it, exactly as the full ClassifyControl form does.
+  const [claimed, setClaimed] = useState(false);
+  const claimedRef = useRef(null);
+  useEffect(() => {
+    if (claimed && claimedRef.current) claimedRef.current.focus();
+  }, [claimed]);
+  const claimAsProject = async (event) => {
+    event.stopPropagation();
+    setClaiming(true);
+    setClaimError(null);
+    try {
+      const result = await postClassify(project.primaryCheckout || project.projectDir, "operator");
+      if (result.ok) {
+        setClaimed(true);
+        if (onReload) onReload();
+      } else {
+        setClaimError(result.error);
+      }
+    } catch (err) {
+      setClaimError(String(err));
+    } finally {
+      setClaiming(false);
     }
   };
+  const checkouts = project.checkouts || [];
+  const openProject = (event) => {
+    if (event) event.stopPropagation();
+    onPick(project, null);
+  };
+  // RF-2: the card is NOT an ARIA button — it hosts its own interactive controls
+  // (the "Open" chip, claim, classify toggle, working-dirs toggle, GitHub link), and
+  // interactive content inside a role=button is invalid ARIA. The card is a plain
+  // container; the focusable primary "open" control is the label chip below. The
+  // whole-card click stays as a mouse convenience: a click that originates inside any
+  // interactive descendant reaches only that control, never opening the card twice.
+  const onClick = (event) => {
+    if (event.target.closest("button, a, input, select, textarea, label")) return;
+    onPick(project, null);
+  };
   return html`
-    <div class=${"project-card state-" + ageState + (unclassified ? " project-unclassified-card" : "")} onClick=${onClick} onKeyDown=${onKey} role="button" tabIndex="0" aria-label=${`Open all ${project.label} checkouts`}>
+    <div class=${"project-card state-" + ageState + (unclassified ? " project-unclassified-card" : "")} onClick=${onClick}>
       <div class="project-card-head">
-        <span class="project-chip" style=${{ background: project.color }}>${project.label}</span>
+        <button
+          type="button"
+          class="project-chip project-open"
+          style=${{ background: project.color }}
+          aria-label=${`Open ${project.label}`}
+          onClick=${openProject}
+        >${project.label}</button>
         ${unclassified
           ? html`<span
               class="badge project-unclassified-badge"
-              title="This workspace has no recorded purpose. Classify it as an operator project or a Forge artifact."
+              title="This workspace has no recorded purpose yet. Tell forge it's your project, or classify it as a Forge artifact."
             >unclassified</span>`
           : null}
-        ${unclassified
+        ${unclassified && claimed
+          ? html`<span
+              class="project-claim-done"
+              role="status"
+              tabindex="-1"
+              ref=${claimedRef}
+            >✓ Recorded as your project</span>`
+          : null}
+        ${unclassified && !claimed
+          ? html`<button
+              type="button"
+              class="project-claim"
+              disabled=${claiming}
+              title="Record this as your operator project"
+              onClick=${claimAsProject}
+            >${claiming ? "Saving…" : "This is my project"}</button>`
+          : null}
+        ${unclassified && !claimed
           ? html`<button
               type="button"
               class="project-classify-toggle"
@@ -1830,6 +1893,7 @@ function ProjectCard({ project, onPick, onReload }) {
             >GitHub ↗</a>`
           : null}
       </div>
+      ${claimError ? html`<div class="project-classify-error" role="alert">${claimError}</div>` : null}
       ${project.description ? html`<div class="project-desc">${project.description}</div>` : null}
       ${!project.description && project.readmeFirstLine ? html`<div class="project-desc faint">${project.readmeFirstLine}</div>` : null}
       ${projectOwnerLine(project)}
@@ -1847,20 +1911,25 @@ function ProjectCard({ project, onPick, onReload }) {
           <div class="project-stat-val ${project.inFlightCount > 0 ? "stat-warn" : ""}">${project.inFlightCount}</div>
         </div>
       </div>
-      <div class="project-checkouts" aria-label=${`${project.label} checkouts`}>
-        ${(project.checkouts || []).map((checkout) => html`
-          <button
-            key=${checkout.projectDir}
-            class="project-checkout-row"
-            onClick=${(event) => { event.stopPropagation(); onPick(project, checkout.projectDir); }}
-            title=${checkout.projectDir}
-            aria-label=${`Open ${project.label} checkout ${checkoutLabel(checkout)}`}
-          >
-            <span class=${"checkout-branch" + (checkout.exists === false ? " checkout-missing" : "")}>${checkoutLabel(checkout)}</span>
-            <span class="project-path mono faint">${checkout.projectDir}</span>
-          </button>
-        `)}
-      </div>
+      ${checkouts.length > 1
+        ? html`
+            <div class="project-working-dirs">
+              <button
+                type="button"
+                class="project-dirs-toggle faint"
+                aria-expanded=${showDirs}
+                title="Working directories this project spans"
+                onClick=${(event) => { event.stopPropagation(); setShowDirs((v) => !v); }}
+              >${checkouts.length} working dirs ${showDirs ? "▾" : "▸"}</button>
+              ${showDirs
+                ? html`<div class="project-checkouts" aria-label=${`${project.label} working directories`}>
+                    ${checkouts.map((checkout) => checkoutRow(project, checkout, onPick))}
+                  </div>`
+                : null}
+            </div>`
+        : html`<div class="project-checkouts" aria-label=${`${project.label} working directory`}>
+            ${checkouts.map((checkout) => checkoutRow(project, checkout, onPick))}
+          </div>`}
       ${unclassified && showClassify ? html`<${ClassifyControl} project=${project} onReload=${onReload} />` : null}
     </div>
   `;
@@ -1894,6 +1963,28 @@ const CLASSIFY_OPTIONS = [
   { value: "evidence_fixture", label: "Evidence fixture (artifact)" },
 ];
 
+// The single classify write path. Both the full ClassifyControl form and the card's
+// one-click "This is my project" operator claim (FG-759 #2) POST through here — the
+// server-side semantics (bounded, atomic, REFUSE-on-conflict) are unchanged; this is
+// only the presentation-side entry point they share.
+async function postClassify(dir, purpose) {
+  const res = await fetch("/api/projects/classify", {
+    method: "POST",
+    // The non-simple content type is load-bearing server-side: it is what makes
+    // this same-origin mutation legal at all (matches the queue-board fetch).
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir, purpose }),
+  });
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  if (res.ok && payload && payload.ok) return { ok: true };
+  return { ok: false, error: (payload && payload.error) || `Classify failed (${res.status}).` };
+}
+
 function ClassifyControl({ project, onReload }) {
   const [purpose, setPurpose] = useState("operator");
   const [pending, setPending] = useState(false);
@@ -1921,24 +2012,12 @@ function ClassifyControl({ project, onReload }) {
       setPending(true);
       setError(null);
       try {
-        const res = await fetch("/api/projects/classify", {
-          method: "POST",
-          // The non-simple content type is load-bearing server-side: it is what makes
-          // this same-origin mutation legal at all (matches the queue-board fetch).
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dir, purpose }),
-        });
-        let payload = null;
-        try {
-          payload = await res.json();
-        } catch {
-          payload = null;
-        }
-        if (res.ok && payload && payload.ok) {
+        const result = await postClassify(dir, purpose);
+        if (result.ok) {
           setDone(purpose);
           if (onReload) onReload();
         } else {
-          setError((payload && payload.error) || `Classify failed (${res.status}).`);
+          setError(result.error);
         }
       } catch (err) {
         setError(String(err));
@@ -1997,6 +2076,23 @@ function checkoutLabel(checkout) {
     return checkout.branch ? `${checkout.branch} (missing)` : "missing / unavailable";
   }
   return checkout.branch || "unknown branch";
+}
+
+// FG-759 (#1): one working-directory row, shared by the single-dir card and the
+// expanded multi-dir disclosure. onPick scopes the activity view to that exact dir.
+function checkoutRow(project, checkout, onPick) {
+  return html`
+    <button
+      key=${checkout.projectDir}
+      class="project-checkout-row"
+      onClick=${(event) => { event.stopPropagation(); onPick(project, checkout.projectDir); }}
+      title=${checkout.projectDir}
+      aria-label=${`Open ${project.label} working dir ${checkoutLabel(checkout)}`}
+    >
+      <span class=${"checkout-branch" + (checkout.exists === false ? " checkout-missing" : "")}>${checkoutLabel(checkout)}</span>
+      <span class="project-path mono faint">${checkout.projectDir}</span>
+    </button>
+  `;
 }
 
 function checkoutScopeLabel(checkout) {
