@@ -15,7 +15,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import type { Server } from "node:http";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 
 const SHOT_DIR = process.env.INACTIVE_SHOT_DIR;
 
@@ -86,7 +86,7 @@ before(async () => {
     }
   }
   if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
-  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {

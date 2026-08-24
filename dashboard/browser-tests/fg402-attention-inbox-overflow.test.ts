@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { renderShell } from "../src/shell.js";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 
 // A row whose reason and requested action are long, unbroken-ish strings — the content
 // that overflowed before the responsive override and the min-width:0 content column.
@@ -46,7 +46,7 @@ before(async () => {
   const address = server.address();
   assert.ok(address && typeof address === "object");
   baseUrl = `http://127.0.0.1:${address.port}`;
-  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {

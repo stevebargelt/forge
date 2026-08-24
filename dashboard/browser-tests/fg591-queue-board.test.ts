@@ -44,7 +44,7 @@ import { join } from "node:path";
 import type { Server } from "node:http";
 import Database from "better-sqlite3";
 import { chromium, type Browser, type Locator, type Page } from "playwright-core";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 
 const TEST_PORT = 18811;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -214,7 +214,7 @@ before(async () => {
   projectLabel = match.label;
 
   if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
-  browser = await chromium.launch({ executablePath: chromeBin, headless: true });
+  browser = await chromium.launch({ executablePath: chromeBin, headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {

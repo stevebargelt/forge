@@ -54,7 +54,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { renderShell } from "../src/shell.js";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 import { makeInMemoryDb } from "../../src/store/db.js";
 import { deriveCurrentActivity } from "../../src/v2/current-activity.js";
 import { statusLine, type CurrentActivity } from "@forge/current-activity";
@@ -246,7 +246,7 @@ before(async () => {
   const address = server.address();
   assert.ok(address && typeof address === "object");
   baseUrl = `http://127.0.0.1:${address.port}`;
-  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {

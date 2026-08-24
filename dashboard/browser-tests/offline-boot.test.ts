@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { findGitRoot } from "../../src/util/git-root.js";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 import { makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "../../src/v2/fg571-harness.js";
 import { thawReleaseTree, type BuildReleaseResult } from "../../src/v2/release.js";
 
@@ -77,7 +77,7 @@ before(async () => {
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  browser = await chromium.launch({ executablePath: chrome, headless: true });
+  browser = await chromium.launch({ executablePath: chrome, headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {
