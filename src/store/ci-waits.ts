@@ -468,18 +468,31 @@ export function advanceCiWait(id: string, disposition: CiWaitTerminalDisposition
 /** FG-755: reap a durably-stuck wait to the `abandoned` terminal, recording the DURABLE
  *  reason that justified it (observed_reason). This is the SAME terminal transition as
  *  advanceCiWait('abandoned') — the row is PRESERVED, never deleted — but it also persists
- *  WHY, so the reap is auditable long after the waiter that stranded it is gone. Refuses a
- *  wait already terminal (the first disposition wins — invariant 1's mirror) and one that
- *  does not exist. The CALLER owns the reap PREDICATE (dead owner + durable no_runs, in
- *  v2/ci-wait.ts); this is only the recording transition. */
-export function reapCiWait(id: string, reason: string): boolean {
+ *  WHY, so the reap is auditable long after the waiter that stranded it is gone.
+ *
+ *  The caller decides a wait is reapable from a snapshot taken BEFORE its external probe, so
+ *  a concurrent waiter can revive the wait (renew the lease, or observe a running/completed
+ *  run) between that snapshot and this write. `precond` re-checks the reap preconditions at
+ *  write time as a compare-and-set: the wait is terminalized ONLY if it is still non-terminal,
+ *  its observed_state still matches, and its lease is still expired (dead owner). A wait
+ *  revived in the TOCTOU window fails the CAS and is left live for its waiter (invariant 1:
+ *  a live/unexpired lease is never reaped). Also refuses a wait that does not exist. */
+export function reapCiWait(
+  id: string,
+  reason: string,
+  precond: { requiredObservedState: CiWaitObservedState; nowMs: number },
+): boolean {
   return writeTransaction(() => {
     const db = getDb();
-    const row = db.prepare(`SELECT lifecycle_state FROM ci_waits WHERE id = ?`).get(id) as
-      | { lifecycle_state: string }
+    const row = db
+      .prepare(`SELECT lifecycle_state, observed_state, lease_expires_at_ms FROM ci_waits WHERE id = ?`)
+      .get(id) as
+      | { lifecycle_state: string; observed_state: string | null; lease_expires_at_ms: number | null }
       | undefined;
     if (row === undefined) return false;
     if (isTerminalCiWaitState(row.lifecycle_state)) return false;
+    if (row.observed_state !== precond.requiredObservedState) return false; // a run was observed in the interim
+    if (row.lease_expires_at_ms !== null && row.lease_expires_at_ms > precond.nowMs) return false; // lease renewed — live again
     const res = db.prepare(`
       UPDATE ci_waits
          SET lifecycle_state = 'abandoned', terminal = 1, terminal_disposition = 'abandoned',

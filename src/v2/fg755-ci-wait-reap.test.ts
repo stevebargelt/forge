@@ -206,9 +206,11 @@ describe("FG-755 reapStuckCiWaits — AC3: dry-run lists identities and mutates 
 });
 
 describe("FG-755 reapCiWait — the store transition", () => {
+  const precond = { requiredObservedState: "no_runs" as const, nowMs: NOW };
+
   test("records the abandoned terminal AND the durable reason, preserving the row", () => {
     seedWait("store-reap");
-    assert.equal(reapCiWait("store-reap", "durable reason here"), true);
+    assert.equal(reapCiWait("store-reap", "durable reason here", precond), true);
     const w = getCiWait("store-reap")!;
     assert.equal(w.lifecycleState, "abandoned");
     assert.equal(w.terminal, true);
@@ -219,8 +221,59 @@ describe("FG-755 reapCiWait — the store transition", () => {
   test("refuses a wait already terminal (first disposition wins) and an unknown id", () => {
     seedWait("store-terminal");
     advanceCiWait("store-terminal", "cancelled");
-    assert.equal(reapCiWait("store-terminal", "x"), false, "a terminal wait is not re-terminalized");
+    assert.equal(reapCiWait("store-terminal", "x", precond), false, "a terminal wait is not re-terminalized");
     assert.equal(getCiWait("store-terminal")!.terminalDisposition, "cancelled");
-    assert.equal(reapCiWait("no-such-id", "x"), false);
+    assert.equal(reapCiWait("no-such-id", "x", precond), false);
+  });
+
+  // RF-1 / RF-2: the reaper decides reapability from a snapshot read BEFORE its external
+  // probe, then writes. reapCiWait is the write-time compare-and-set that keeps a wait
+  // revived in that TOCTOU window from being wrongly abandoned.
+  test("CAS refuses when the lease was renewed after the snapshot (a live waiter revived it)", () => {
+    seedWait("store-released");
+    // A concurrent waiter renews the lease into the future between the snapshot and the write.
+    db.prepare(`UPDATE ci_waits SET lease_expires_at_ms = ? WHERE id = ?`).run(NOW + 60_000, "store-released");
+    assert.equal(reapCiWait("store-released", "x", precond), false, "a re-leased (live) wait is not reaped");
+    assert.equal(getCiWait("store-released")!.terminal, false);
+    assert.equal(getCiWait("store-released")!.lifecycleState, "running");
+  });
+
+  test("CAS refuses when a run was observed after the snapshot (observed_state no longer no_runs)", () => {
+    seedWait("store-nowrunning");
+    observeCiWait("store-nowrunning", { state: "running", m: 1, n: 3 }, isoAt(NOW));
+    assert.equal(reapCiWait("store-nowrunning", "x", precond), false, "a wait with a fresh run is not reaped");
+    assert.equal(getCiWait("store-nowrunning")!.terminal, false);
+    assert.equal(getCiWait("store-nowrunning")!.observedState, "running");
+  });
+});
+
+describe("FG-755 reapStuckCiWaits — TOCTOU: a wait revived during the probe is not reaped", () => {
+  // The reaper snapshots the live surface, then probes each wait OUTSIDE the store
+  // transition. A probe that revives the wait as a side effect stands in for a concurrent
+  // waiter renewing the lease / recording a run in exactly that window (RF-1 supported,
+  // RF-2 demonstrated). The write-time CAS in reapCiWait must leave such a wait live.
+  test("a lease renewed during the probe leaves the wait live (never reaped)", () => {
+    seedWait("race-lease");
+    const revivingProbe = (): CiWaitProbeOutcome => {
+      // storeNowMs()-relative renewal; the reaper's `now` (NOW) is far enough ahead that a
+      // real renewal would still land beyond it, so drive it directly to a future lease.
+      db.prepare(`UPDATE ci_waits SET lease_expires_at_ms = ? WHERE id = ?`).run(NOW + 300_000, "race-lease");
+      return { observation: { state: "no_runs" } };
+    };
+    const out = reapStuckCiWaits({ dryRun: false }, revivingProbe, now);
+    assert.equal(out.reaped.length, 0, "a wait revived by a lease renewal in the probe window is not reaped");
+    assert.equal(getCiWait("race-lease")!.terminal, false);
+  });
+
+  test("a run observed during the probe leaves the wait live (never reaped)", () => {
+    seedWait("race-observe");
+    const revivingProbe = (): CiWaitProbeOutcome => {
+      observeCiWait("race-observe", { state: "running", m: 0, n: 2 }, isoAt(NOW));
+      return { observation: { state: "no_runs" } };
+    };
+    const out = reapStuckCiWaits({ dryRun: false }, revivingProbe, now);
+    assert.equal(out.reaped.length, 0, "a wait that recorded a running run in the probe window is not reaped");
+    assert.equal(getCiWait("race-observe")!.terminal, false);
+    assert.equal(getCiWait("race-observe")!.observedState, "running");
   });
 });

@@ -604,7 +604,10 @@ export function reapStuckCiWaits(
     // Fail-safe: confirm the run genuinely still does not exist before abandoning it.
     if (probe(wait).observation.state !== "no_runs") continue;
     const reason = `no matching CI run found within ${boundMinutes}m of push; waiter dead — reaped by ci-wait reap`;
-    if (!opts.dryRun && !reapCiWait(wait.id, reason)) continue; // lost a race to another terminal
+    // Write-time CAS on the reap preconditions: `now` and the durable-no_runs snapshot were
+    // read BEFORE the probe, so a wait revived (lease renewed / run observed) in the interim
+    // must not be terminalized. reapCiWait re-checks dead-lease + no_runs + non-terminal.
+    if (!opts.dryRun && !reapCiWait(wait.id, reason, { requiredObservedState: "no_runs", nowMs: now })) continue;
     reaped.push({
       id: wait.id,
       kind: wait.kind,
