@@ -760,16 +760,20 @@ export type InFlightEntry = {
  *  tasks. Detection is read-only — the dashboard never calls reconcileRun. */
 export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightEntry[] {
   const project = scopeSql("runs", "r", scope);
-  // FG-754 (AC3): a task whose run belongs to an ABANDONED campaign is history, not
-  // live in-flight work — mirror campaignGateTerminal's campaign-status veto. The LEFT
-  // JOIN leaves every non-campaign run untouched (c.status IS NULL). Scoped STRICTLY to
-  // 'abandoned': a paused campaign's genuinely-active linked work still surfaces (FG-750).
-  // The JOIN is omitted entirely on a store that predates the campaign tables.
+  // FG-754 (AC3): a task whose run belongs to a TERMINAL campaign (complete/failed/
+  // abandoned) is history, not live in-flight work — mirror campaignGateTerminal's veto and
+  // FG-743's hard_stop path, which exclude the full terminal set. A terminal campaign's
+  // awaiting_gate item on a still-active run otherwise leaks here. The LEFT JOIN leaves every
+  // non-campaign run untouched (c.status IS NULL). `paused` is NOT terminal, so a paused
+  // campaign's genuinely-active linked work still surfaces (FG-750). The JOIN is omitted
+  // entirely on a store that predates the campaign tables.
   const campaignAware = hasCampaignTables();
   const campaignJoin = campaignAware
     ? "LEFT JOIN campaign_items ci ON ci.run_id = r.id LEFT JOIN campaigns c ON c.id = ci.campaign_id"
     : "";
-  const campaignVeto = campaignAware ? "AND (c.status IS NULL OR c.status <> 'abandoned')" : "";
+  const campaignVeto = campaignAware
+    ? `AND (c.status IS NULL OR c.status NOT IN (${[...TERMINAL_CAMPAIGN_STATUSES].map((s) => `'${s}'`).join(", ")}))`
+    : "";
   const rows = db().prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at${tasksModelProvenanceSelect()},
            r.title, r.workflow, r.project_dir${runsProjectIdentitySelect()}

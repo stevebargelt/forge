@@ -860,8 +860,10 @@ function readAwaitingGateTasks(db: DatabaseInstance): HumanGateRow[] {
   // `runs` table can predate the metadata column entirely (FG-700's aged-store shape), so
   // it is probed and read as no-ticket rather than naming a column that would throw.
   const ticket = hasColumn(db, "runs", "metadata") ? "json_extract(r.metadata, '$.ticketId')" : "NULL";
-  // FG-754 (AC2, defense in depth): a gate whose run belongs to an ABANDONED campaign is
-  // history, not a live operator wait — mirror queries.ts's campaignGateTerminal veto.
+  // FG-754 (AC2, defense in depth): a gate whose run belongs to a TERMINAL campaign
+  // (complete/failed/abandoned) is history, not a live operator wait — mirror queries.ts's
+  // campaignGateTerminal veto and FG-743's hard_stop path, which exclude the full terminal
+  // set. A terminal campaign's awaiting_gate item on a still-active run otherwise leaks here.
   // The LEFT JOIN keeps every non-campaign run unaffected (c.status IS NULL). An aged
   // read-only store can predate the campaign tables entirely, so their presence is probed:
   // absent tables mean no campaign runs to veto, and the plain query stands.
@@ -869,7 +871,9 @@ function readAwaitingGateTasks(db: DatabaseInstance): HumanGateRow[] {
   const campaignJoin = hasCampaignTables
     ? "LEFT JOIN campaign_items ci ON ci.run_id = r.id LEFT JOIN campaigns c ON c.id = ci.campaign_id"
     : "";
-  const campaignVeto = hasCampaignTables ? "AND (c.status IS NULL OR c.status <> 'abandoned')" : "";
+  const campaignVeto = hasCampaignTables
+    ? `AND (c.status IS NULL OR c.status NOT IN (${TERMINAL_CAMPAIGN_STATUSES.map((s) => `'${s}'`).join(", ")}))`
+    : "";
   return db.prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.started_at,
            r.workflow, r.project_dir, ${ticket} AS ticket_id${canonical}
