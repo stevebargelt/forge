@@ -87,7 +87,13 @@ function systemBoot(): string | undefined {
         timeout: 2_000,
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
-      if (out) value = `boottime:${out}`;
+      // Key on the whole-second boot time only. macOS re-derives kern.boottime as
+      // the wall clock is disciplined (NTP), so the usec field DRIFTS while sec
+      // stays fixed until an actual reboot — comparing the full token false-fences
+      // a live process as dead (FG-757). A missing sec leaves value undefined, so
+      // the boot check is skipped rather than turned into a false dead.
+      const sec = out.match(/\bsec\s*=\s*(\d+)/);
+      if (sec) value = `boottime-sec:${sec[1]}`;
     } catch {
       // ps-lstart is absolute, so darwin tolerates the absence
     }
@@ -132,6 +138,23 @@ export function captureProcessIdentity(
   return { pid, host: probe.host(), ...(boot ? { boot } : {}) };
 }
 
+/**
+ * Reduce a boot token to its stable comparison key. Darwin's boottime usec drifts
+ * under NTP, so its tokens key on the whole-second `sec` only — parsed from either
+ * the new `boottime-sec:N` form or the legacy `boottime:{ sec = N, usec = M } ...`
+ * form, so a fence recorded before this fix still compares against a new reading
+ * (FG-757). A boottime token with no parseable sec returns undefined, which makes
+ * the boot axis fall through rather than register a false dead. Any other token
+ * (e.g. linux `boot-id:...`) is already stable and compared verbatim.
+ */
+function stableBootKey(boot: string): string | undefined {
+  if (boot.startsWith("boottime")) {
+    const sec = boot.match(/\bsec\s*=\s*(\d+)/) ?? boot.match(/^boottime-sec:(\d+)$/);
+    return sec ? `boottime-sec:${sec[1]}` : undefined;
+  }
+  return boot;
+}
+
 export function classifyProcessIdentity(
   recorded: ProcessIdentity | undefined,
   probe: ProcessProbe = systemProcessProbe,
@@ -140,7 +163,11 @@ export function classifyProcessIdentity(
   if (recorded.host && recorded.host !== probe.host()) return "unknown";
 
   const currentBoot = probe.boot();
-  if (recorded.boot && currentBoot && recorded.boot !== currentBoot) return "dead";
+  if (recorded.boot && currentBoot) {
+    const recordedKey = stableBootKey(recorded.boot);
+    const currentKey = stableBootKey(currentBoot);
+    if (recordedKey && currentKey && recordedKey !== currentKey) return "dead";
+  }
 
   const current = probe.identify(recorded.pid);
   if (!current) return "dead";
