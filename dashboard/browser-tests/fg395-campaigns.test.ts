@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 
 const PORT = 18956;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -66,7 +66,7 @@ before(async () => {
       await new Promise((resolve) => setTimeout(resolve, 40));
     }
   }
-  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {

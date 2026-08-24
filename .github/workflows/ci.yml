@@ -9,7 +9,7 @@ name: CI
 # job `test-extended` (FG-495) is the required merge check carrying the
 # integration + worktree tiers moved out of the fast gate — real
 # subprocess/git/DB coverage that's still trust-sensitive. It is now a
-# lightweight FINAL AGGREGATE: the slow work is sharded across THIRTEEN
+# lightweight FINAL AGGREGATE: the slow work is sharded across TWELVE gating
 # concurrent jobs (FG-704) — `integration_1`..`integration_8` (root integration
 # BULK tier, FG-624: partitioned by the BATCHED-execution cost of each file —
 # MEASURED per-file duration discounted by an estimated per-file `node --test`
@@ -22,14 +22,22 @@ name: CI
 # dedicated lane — it is EXCLUDED from the eight bulk shards so its real 30s
 # production window never shares a job with anything else), `worktree` (root
 # worktree tier), `dashboard_integration` (dashboard workspace's own integration
-# tier), and `dashboard_browser` (FG-642: the dashboard's real-Chrome tier, which
-# until then ran in CI nowhere and skipped itself to green everywhere else), and
-# `fg693_alias_identity` (FG-693: the FG-693 identity suite re-run with TMPDIR
-# pointed at a SYMLINK, so this Linux runner carries the filesystem-alias class
-# natively instead of being green on it by accident of platform). `test-extended`
-# `needs` all thirteen (derived fail-closed from `toJSON(needs)`) and, with
+# tier), and `fg693_alias_identity` (FG-693: the FG-693 identity suite re-run
+# with TMPDIR pointed at a SYMLINK, so this Linux runner carries the
+# filesystem-alias class natively instead of being green on it by accident of
+# platform). `test-extended` `needs` all twelve (derived fail-closed from
+# `toJSON(needs)`) and, with
 # `if: always()`, FAILS CLOSED unless every one reports success — so a
-# failed/cancelled/skipped shard cannot yield a green required check. Branch
+# failed/cancelled/skipped shard cannot yield a green required check.
+#
+# `dashboard_browser` (FG-642: the dashboard's real-Chrome tier) is now ADVISORY
+# (FG-760): it still runs on every PR as its own visible check and still FAILS
+# LOUDLY when chromium is broken (FG-642's "Chrome-less run FAILS, never skips
+# green" precondition is intact, and a non-launchable browser now fails FAST via
+# a ~1-minute preflight), but it is NOT in `test-extended`'s `needs`, so a
+# chromium INFRA flake on the runner (install exits 0 but the browser will not
+# LAUNCH — every browser test then times out at 30s, FG-760) can no longer turn
+# the REQUIRED `test-extended` aggregate red and block unrelated merges. Branch
 # protection still carries both contexts ("test" and "test-extended"; the
 # orchestrator applies that host-side, see CLAUDE.md's branch-protection
 # note). It runs on the same triggers as `test`. Since FG-501, review-loop
@@ -346,12 +354,26 @@ jobs:
       - name: Test dashboard integration tier
         run: npm run test:integration -w dashboard
 
-  # Dashboard browser tier (FG-642): 5 Playwright-driven suites, 18 tests against
-  # a real Chrome. It ran in CI nowhere until this job, and off a Chrome-carrying
-  # host it reported green by skipping — which is how it hid a live FG-608 red.
-  # The browser is now provisioned explicitly and named to the tier: a runner
-  # without one FAILS on the resolver's precondition (src/util/chrome-bin.ts)
-  # instead of skipping, so an unprovisioned runner is loud, not silently empty.
+  # Dashboard browser tier (FG-642): Playwright-driven suites against a real
+  # Chrome. It ran in CI nowhere until this job, and off a Chrome-carrying host it
+  # reported green by skipping — which is how it hid a live FG-608 red. The browser
+  # is now provisioned explicitly and named to the tier: a runner without one FAILS
+  # on the resolver's precondition (src/util/chrome-bin.ts) instead of skipping, so
+  # an unprovisioned runner is loud, not silently empty.
+  #
+  # ADVISORY, not a hard merge gate (FG-760). This job is deliberately NOT in
+  # `test-extended`'s `needs`, so its result never fails the required
+  # `test-extended` aggregate. It still runs on every PR as its own visible check
+  # and still fails LOUDLY on a broken browser — FG-642's "Chrome-less run FAILS,
+  # never skips green" precondition is untouched. The reason it is advisory: the
+  # chromium provisioning is INFRA-fragile in a way real test regressions are not.
+  # FG-739 handled the DOWNLOAD (cache + bounded retry); FG-760 saw the LAUNCH mode
+  # — chromium installs (exit 0) but will not START on the runner, so every browser
+  # test times out at 30s across ALL suites (~8m of red that reads like a broad
+  # regression but is pure infra). Gating the required aggregate on that flake
+  # blocked every unrelated merge 3x on 2026-08-24. Advisory + the fast-fail
+  # preflight below means a broken browser is a ~1-minute clear "infra, retriable"
+  # signal on this job alone, never a block on merging unrelated work.
   dashboard_browser:
     runs-on: ubuntu-latest
     # Was 6, raised to 20 (FG-739): the 6-minute ceiling was cancelling this tier
@@ -391,6 +413,13 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}
+          # FG-760: on an exact-key miss (e.g. a Playwright version bump) restore
+          # the most recent prior browser cache for this OS instead of falling all
+          # the way back to a cold Chrome-for-Testing CDN download. The install
+          # step still reconciles the exact chromium revision, so a near-miss
+          # restore is a warm starting point, never a stale browser.
+          restore-keys: |
+            ${{ runner.os }}-playwright-
 
       # Same provisioning the agent image uses (docker/agent-dev-worker.Dockerfile),
       # driven through the pinned playwright-core the tier itself imports — so the
@@ -436,6 +465,40 @@ jobs:
           bin=$(node -p "require('playwright-core').chromium.executablePath()")
           test -x "$bin"
           echo "FORGE_CHROME_BIN=$bin" >> "$GITHUB_ENV"
+
+      # FG-760: fast-fail preflight. FG-739 covers the DOWNLOAD; this covers the
+      # LAUNCH/runner-env mode it does not — a chromium that installs (exit 0) but
+      # cannot LAUNCH on this runner. Without this the failure surfaces only as
+      # every browser test timing out at 30s across all suites (~8 minutes of red
+      # that reads like a broad test regression). Here we launch chromium ONCE with
+      # the SAME flags the tests use (CHROME_LAUNCH_ARGS = ['--no-sandbox']),
+      # navigate about:blank, and exit non-zero within ~60s with a NAMED infra
+      # error if it cannot launch — so a broken browser is a ~1-minute clear
+      # "infra, retriable" red, not 8 minutes of per-test timeouts.
+      - name: Preflight — chromium must actually launch
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          node -e '
+            const { chromium } = require("playwright-core");
+            const bin = process.env.FORGE_CHROME_BIN;
+            const t = setTimeout(() => {
+              console.error("::error::FG-760: chromium did not launch within 60s. This is a LAUNCH/runner-env INFRA failure (the browser installed but will not start on this runner), NOT a browser-test failure — the tier is retriable; re-run this job.");
+              process.exit(1);
+            }, 60000);
+            (async () => {
+              const browser = await chromium.launch({ executablePath: bin, headless: true, args: ["--no-sandbox"] });
+              const page = await browser.newPage();
+              await page.goto("about:blank");
+              await browser.close();
+              clearTimeout(t);
+              console.log("preflight ok: chromium launched at " + bin);
+            })().catch((err) => {
+              clearTimeout(t);
+              console.error("::error::FG-760: chromium failed to launch (" + (err && err.message ? err.message : err) + "). This is a LAUNCH/runner-env INFRA failure, NOT a browser-test failure — the tier is retriable; re-run this job.");
+              process.exit(1);
+            });
+          '
 
       - name: Test dashboard browser tier
         run: npm run test:browser -w dashboard
@@ -512,9 +575,12 @@ jobs:
 
   # Lightweight FINAL AGGREGATE — the required branch-protection context
   # `CI / test-extended`. It does no test work itself; it fails closed unless
-  # every one of the thirteen sharded/tiered jobs above reports success, so a
+  # every one of the twelve sharded/tiered jobs it `needs` reports success, so a
   # failed, cancelled, or skipped dependency cannot yield a green required
-  # check.
+  # check. `dashboard_browser` is intentionally NOT among those twelve (FG-760):
+  # it is ADVISORY — a visible PR check that never gates this required aggregate,
+  # so its INFRA fragility (chromium installs but won't launch on the runner)
+  # cannot block unrelated merges. See the dashboard_browser job comment above.
   #
   # FG-704: the gate is DERIVED from `${{ toJSON(needs) }}`, not a hand-written
   # `results=` list. A job present in `needs` is therefore automatically in the
@@ -524,7 +590,7 @@ jobs:
   # job provisions no second interpreter, cf. FG-647.)
   test-extended:
     runs-on: ubuntu-latest
-    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_7, integration_8, integration_serial, worktree, dashboard_integration, dashboard_browser, fg693_alias_identity]
+    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_7, integration_8, integration_serial, worktree, dashboard_integration, fg693_alias_identity]
     if: always()
     steps:
       - name: Aggregate required extended gate

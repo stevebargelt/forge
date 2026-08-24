@@ -92,3 +92,12 @@ export function requireChrome(purpose: string, opts: ChromeResolveOptions = {}):
   if (!found) throw new Error(chromePreconditionMessage(purpose, opts));
   return found;
 }
+
+// FG-760: the ONE set of chromium launch flags shared by the CI preflight
+// (.github/workflows/ci.yml, dashboard_browser) and every browser-tests/* suite.
+// `--no-sandbox` is required for chromium to launch on the ubuntu-latest runner's
+// unprivileged-namespace-restricted environment; if the preflight and the tests
+// disagreed on args, the ~1-minute preflight would no longer be a faithful
+// predictor of whether the tests can launch the browser. Kept as a bare string
+// array (no playwright import) so this file stays inside the release closure.
+export const CHROME_LAUNCH_ARGS: string[] = ["--no-sandbox"];

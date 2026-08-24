@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import type { Server } from "node:http";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { requireChrome } from "../../src/util/chrome-bin.js";
+import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
 import { authorityTestkitEnv, withAuthorityTestkit } from "../../src/backlog/container-authority.testkit-spawn.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -182,7 +182,7 @@ before(async () => {
   );
 
   if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
-  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true, args: CHROME_LAUNCH_ARGS });
 });
 
 after(async () => {

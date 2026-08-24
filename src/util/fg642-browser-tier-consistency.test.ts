@@ -39,6 +39,7 @@ import {
   tierSuites as tierFiles,
   tierTestTotal,
 } from "./browser-tier-census.js";
+import { CHROME_LAUNCH_ARGS } from "./chrome-bin.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RESOLVER = join("src", "util", "chrome-bin.ts");
@@ -118,6 +119,20 @@ test("FG-642 (launch site): every chromium.launch() in the tier takes executable
         `${file}: executablePath: ${value} — must come from requireChrome() (directly or via a local bound from it), not from an env var, a literal, or a private helper`
       );
     }
+  }
+});
+
+test("FG-760 (launch site): every Chromium launch uses the shared no-sandbox arguments", () => {
+  assert.ok(CHROME_LAUNCH_ARGS.includes("--no-sandbox"), "the shared launch args must retain the CI-required --no-sandbox flag");
+  for (const file of tierFiles()) {
+    const src = tierSource(file);
+    const launches = (src.match(/chromium\.launch\(/g) ?? []).length;
+    const sharedArgs = (src.match(/args:\s*CHROME_LAUNCH_ARGS/g) ?? []).length;
+    assert.equal(
+      sharedArgs,
+      launches,
+      `${file} launches Chromium ${launches} time(s) but uses CHROME_LAUNCH_ARGS ${sharedArgs} time(s) — every launch must match the CI preflight's --no-sandbox contract`
+    );
   }
 });
 

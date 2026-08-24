@@ -138,16 +138,18 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 });
 
 // FG-495 regression guard (updated: sharded extended gate; FG-624: duration-
-// aware; FG-704: 8 bulk shards + a dedicated serial lane): the slow
+// aware; FG-704: 8 bulk shards + a dedicated serial lane; FG-760: browser tier
+// advisory): the slow
 // integration/worktree coverage moved out of the fast `test` gate must still run
 // somewhere routine and visible. It now runs as THIRTEEN concurrent jobs — eight
 // root integration BULK shards (`integration_1`..`integration_8`, partitioned by
 // BATCHED-execution cost via scripts/run-integration-tests.sh over
 // discovered−fg576), the `integration_serial` lane (FG-681/FG-704: fg576 alone
 // under --test-concurrency=1), a `worktree` job, a `dashboard_integration` job,
-// (FG-642) a `dashboard_browser` job, and (FG-693) an `fg693_alias_identity`
-// job — with the required `test-extended` job reduced to a fail-closed aggregate
-// over all thirteen. If a future edit drops a shard, mistargets a shard selector,
+// (FG-693) an `fg693_alias_identity` job — with the required `test-extended` job
+// reduced to a fail-closed aggregate over all twelve. `dashboard_browser` remains
+// a visible, advisory check: it must not become a required dependency again. If a
+// future edit drops a shard, mistargets a shard selector,
 // or lets the aggregate go green on a failed dependency, the trust-sensitive
 // coverage (FG-419/FG-440/FG-474 gate-enforcement tests, among others) would
 // stop gating merges without anyone deciding that on purpose.
@@ -189,7 +191,7 @@ const BROWSER_JOB_TIMEOUT = 20;
 // the suite's own and it has the same headroom problem the shards documented.
 const ALIAS_IDENTITY_JOB = "fg693_alias_identity" as const;
 const TEN_MINUTE_JOBS = [...INTEGRATION_SHARD_JOBS, SERIAL_JOB, ALIAS_IDENTITY_JOB] as const;
-const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS, BROWSER_JOB] as const;
+const EXTENDED_GATE_JOBS = [...TEN_MINUTE_JOBS, ...SMALL_TIER_JOBS] as const;
 
 test("FG-495 (sharded, FG-704 8-way): ci.yml has eight integration BULK shard jobs each running the shard script with its own k/8 selector", () => {
   const wf = loadWorkflow();
@@ -297,7 +299,19 @@ test("FG-642: ci.yml has a dashboard_browser job that provisions a browser and r
   );
 });
 
-test("FG-495 (sharded, FG-704): the test-extended aggregate needs all thirteen extended-gate jobs, derives its gate from toJSON(needs), uses if: always(), and fails closed on any non-success", () => {
+test("FG-760: the advisory browser job preflights a real Chromium launch with the shared no-sandbox contract", () => {
+  const steps = loadWorkflow().jobs?.[BROWSER_JOB]?.steps ?? [];
+  const preflight = steps.find((step) => step.name === "Preflight — chromium must actually launch");
+  assert.ok(preflight, "dashboard_browser must fail fast before the browser suite when Chromium cannot launch");
+  assert.equal(preflight["timeout-minutes"], 2, "the Chromium launch preflight needs its own bounded timeout");
+  const script = preflight.run ?? "";
+  assert.match(script, /chromium\.launch\(/, "the preflight must actually launch Chromium, not merely locate its binary");
+  assert.match(script, /args:\s*\["--no-sandbox"\]/, "the preflight must use the same required --no-sandbox flag as browser tests");
+  assert.match(script, /page\.goto\("about:blank"\)/, "a successful preflight must prove the launched browser can create and navigate a page");
+  assert.match(script, /LAUNCH\/runner-env INFRA failure/, "a failed preflight must identify the failure as retriable runner infrastructure");
+});
+
+test("FG-760: test-extended gates exactly twelve non-browser jobs; dashboard_browser stays an advisory visible check", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
@@ -306,8 +320,11 @@ test("FG-495 (sharded, FG-704): the test-extended aggregate needs all thirteen e
   assert.deepEqual(
     [...needs].sort(),
     [...EXTENDED_GATE_JOBS].sort(),
-    "test-extended must `needs` exactly the thirteen sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
+    "test-extended must `needs` exactly the twelve sharded/tiered non-browser jobs — a shard added to ci.yml but left out of `needs` runs without gating anything, while dashboard_browser remains advisory"
   );
+  assert.equal(needs.length, 12, "the required extended aggregate has twelve gating jobs after dashboard_browser became advisory");
+  assert.ok(wf.jobs?.[BROWSER_JOB], "dashboard_browser must remain a separately visible CI check");
+  assert.ok(!needs.includes(BROWSER_JOB), "dashboard_browser must not re-enter test-extended needs: chromium infra failures are advisory");
 
   assert.equal(
     job!.if,
@@ -443,6 +460,11 @@ test("FG-739: dashboard_browser caches Playwright browsers using the resolved pl
     browserCache.with?.key,
     "${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}",
     "the cache key must vary by runner OS and the version resolved by steps.pw"
+  );
+  assert.equal(
+    browserCache.with?.["restore-keys"],
+    "${{ runner.os }}-playwright-\n",
+    "a Playwright-version cache miss must restore the latest same-OS browser cache before installing Chromium"
   );
 });
 
