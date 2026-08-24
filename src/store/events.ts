@@ -244,6 +244,16 @@ export type EventType =
   // out-of-band via a re-routed lane" apart from "recovered from a campaign-system
   // salvage/gap/fallback failure that turned out to be already-shipped."
   | "campaign_item.campaign_system_reconciled"
+  // FG-753: `campaign reconcile --terminal-recovery` recorded a source='ci'
+  // done-audit evidence row for an ALREADY-shipped item on a complete campaign
+  // whose gate-list coverage was gapped (no covering passing/ci row at its
+  // candidate) — the FG-692 AC4 shape. Distinct from the *_reconciled events
+  // above: none of those apply (the item was never a residual shape — it already
+  // shipped). Nothing about the item's lifecycle or the run graph changes; the
+  // recorded row is the whole point (the campaign verdict re-derives ON READ via
+  // report.ts's doneAuditGapAction/computeVerdict). Payload: { campaignId,
+  // itemId, ticketId, evidence, decidedBy, decidedAt }.
+  | "campaign_item.ci_evidence_backfilled"
   // FG-511: `forge campaign retry` reset a failed/blockerKind='campaign_system'
   // item back to pending after proving, from the underlying run's durable task
   // evidence, that EVERY failed primary task classified transient (auth or

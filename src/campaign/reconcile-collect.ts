@@ -264,6 +264,101 @@ export function collectReconcileEvidence(projectDir: string, item: CampaignItem)
   };
 }
 
+// FG-753 (RF-2/RF-3): the CI-ONLY probe the done-audit backfill uses IN PLACE OF
+// runAndRecordHostVerification — it decides, BEFORE any row is minted, whether an
+// authenticated source='ci' row recorded at the candidate would close the item's
+// done-audit gap. It NEVER runs the local gate list and NEVER mints a row, so the
+// caller can mint the single source='ci' row and its audit event atomically and a
+// refusal is mutation-free by construction (INV-7); a passing local source='host'
+// exec can never masquerade as CI-authenticated coverage (INV-1/INV-4).
+//
+// It derives projectDir's current HEAD (refusing a dirty tree or an unresolvable
+// HEAD exactly as the capture writer does), confirms a row recorded at that HEAD
+// would COVER closedCommit — closedCommit an ancestor of HEAD AND HEAD itself
+// base-reachable, the SAME relation resolveGateCoverage applies on read, so a
+// minted row genuinely closes the gap rather than sitting uncovered — then asks
+// findCoveringGateEvidence (with opts.checkStatusProvider, the same verified
+// provider path) whether the WHOLE required CI workflow is green at that HEAD.
+// "covered" is reported ONLY for authenticated whole-workflow source='ci' evidence
+// (evidence.source === 'ci') whose required checks ALSO share a common immutable
+// provider run identity (RF-3/INV-5 anti-replay — retained as runIdentity for the
+// mint's audit anchor); anything short of that (no evidence, a host-only row, a
+// partially-red/pending workflow, a foreign-sha or unreachable provider, or checks
+// scattered across different runs) is "uncovered", the mutation-free refusal.
+export type CiBackfillProbe =
+  | { status: "covered"; commitSha: string; gate: string; ciUrl: string | null; runIdentity: string; checks: { context: string; url?: string }[] }
+  | { status: "uncovered"; reason: string };
+
+// FG-753 (RF-3, INV-5): the immutable GitHub Actions workflow-RUN id embedded in a
+// check-run URL (…/actions/runs/<runId>[/job/<jobId>]). This is the anti-replay
+// anchor — every required job of ONE workflow run shares ONE run id, so a green
+// scattered across two DIFFERENT runs of the same sha does not read as one coherent
+// whole-workflow pass. Returns null when the URL is absent or is not a recognizable
+// Actions run URL (fail-closed: no anchor, no mint).
+function extractCiRunIdentity(url: string | undefined): string | null {
+  if (!url) return null;
+  const m = /\/actions\/runs\/(\d+)/.exec(url);
+  return m ? m[1]! : null;
+}
+
+export function probeCiEvidenceForBackfill(
+  projectDir: string,
+  ticketId: string,
+  closedCommit: string,
+  checkStatusProvider: CheckStatusProvider | undefined
+): CiBackfillProbe {
+  let statusOutput: string;
+  try {
+    statusOutput = execFileSync("git", ["status", "--porcelain"], { cwd: projectDir, encoding: "utf8", timeout: 10000 });
+  } catch (e) {
+    return { status: "uncovered", reason: `git status --porcelain failed: ${(e as Error).message ?? String(e)}` };
+  }
+  if (statusOutput.trim().length > 0) {
+    return { status: "uncovered", reason: "working tree is not clean — refusing to derive a candidate HEAD from a dirty tree" };
+  }
+
+  let headSha: string;
+  try {
+    headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectDir, encoding: "utf8", timeout: 10000 }).trim();
+  } catch (e) {
+    return { status: "uncovered", reason: `git rev-parse HEAD failed: ${(e as Error).message ?? String(e)}` };
+  }
+  if (!SHA_PATTERN.test(headSha)) {
+    return { status: "uncovered", reason: `HEAD did not resolve to a plausible sha: ${headSha}` };
+  }
+
+  const baseBranch = readConfigString(projectDir, "baseBranch", "main");
+  // A source='ci' row recorded at HEAD closes the gap ONLY if it COVERS closedCommit:
+  // closedCommit an ancestor of HEAD AND HEAD itself base-reachable — the exact
+  // relation resolveGateCoverage/checkClosedCommitCoveredByTestedSha applies on read.
+  if (!checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, headSha, baseBranch)) {
+    return {
+      status: "uncovered",
+      reason: `a row at HEAD (${headSha}) would not cover closedCommit (${closedCommit}) on base '${baseBranch}'`,
+    };
+  }
+
+  const requiredGate = getRequiredHostGate(projectDir);
+  const evidence = findCoveringGateEvidence({ ticketId, projectDir, sha: headSha, command: requiredGate, checkStatusProvider });
+  if (!evidence || evidence.source !== "ci") {
+    return { status: "uncovered", reason: "no authenticated whole-workflow source='ci' evidence for HEAD" };
+  }
+  // RF-3 (INV-5): anchor the mint to a COMMON immutable provider run identity across the
+  // required checks. Every required job of one workflow run shares one run id — require
+  // every required check to carry the SAME parseable run id, or this is not a coherent
+  // single-run pass (a green scattered across two runs of the same sha) and we refuse
+  // mutation-free rather than mint a token bound to no verifiable run.
+  const runIdentities = evidence.checks.map((c) => extractCiRunIdentity(c.url));
+  const runIdentity = runIdentities[0];
+  if (!runIdentity || runIdentities.some((id) => id !== runIdentity)) {
+    return {
+      status: "uncovered",
+      reason: "required CI checks do not share a common immutable run identity — refusing to anchor a source='ci' mint to scattered/absent run identities (INV-5 anti-replay)",
+    };
+  }
+  return { status: "covered", commitSha: evidence.sha, gate: requiredGate, ciUrl: evidence.checkUrl ?? null, runIdentity, checks: evidence.checks };
+}
+
 // ── FG-440: reconcile-time host-verification capture ───────────────────────────
 //
 // A trust-token writer: every field written to host_verifications must be
