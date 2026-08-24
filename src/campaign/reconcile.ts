@@ -131,7 +131,12 @@ function backfillDoneAuditEvidence(
   // unreachable provider) is a mutation-free refusal.
   const probe = probeCiEvidenceForBackfill(projectDir, item.ticketId, collected.ticketClosedCommit!, checkStatusProvider);
   if (probe.status !== "covered") {
-    return { ticketId: item.ticketId, status: "refused", missing: ["lane_evidence_missing"] };
+    // RF-2 (INV-7): surface the probe's CONCRETE uncovered reason (dirty tree /
+    // candidate would not cover / no authenticated CI evidence / scattered run
+    // identity / provider unreachable) rather than laundering every distinct cause
+    // into a generic lane_evidence_missing — the refusal must NAME the missing or
+    // failing evidence so the operator can diagnose WHY the backfill refused.
+    return { ticketId: item.ticketId, status: "refused", missing: [probe.reason] };
   }
 
   // RF-1/RF-3: the source='ci' mint and its ci_evidence_backfilled audit event commit

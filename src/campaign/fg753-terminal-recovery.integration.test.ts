@@ -700,7 +700,8 @@ test("--terminal-recovery: a shipped gapped item with a locally-passing host gat
 
   assert.equal(result.ok, true);
   assert.equal(result.items[0]!.status, "refused");
-  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+  // RF-2 (INV-7): the refusal names the concrete uncovered cause, not a generic marker.
+  assert.deepEqual(result.items[0]!.missing, ["no authenticated whole-workflow source='ci' evidence for HEAD"]);
   assert.equal(countHostVerifications(), beforeRows, "no row minted — the local host-gate fallback was suppressed, not recorded as CI evidence");
   assert.equal(countHostVerificationsBySource("host"), 0, "explicitly: the backfill minted NO source=host row — it never ran the local gate list");
   assert.equal(countHostVerificationsBySource("ci"), 0, "and no source=ci row either — the provider authenticated nothing");
@@ -730,7 +731,9 @@ test("--terminal-recovery: a shipped gapped item whose provider reports green fo
   const result = reconcileCampaign(campaignId, { terminalRecovery: true, checkStatusProvider: p.fn });
 
   assert.equal(result.items[0]!.status, "refused");
-  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+  // RF-2 (INV-7): a foreign-sha green is rejected by the sha-binding, so no source='ci'
+  // evidence covers HEAD — the refusal names THAT concrete cause, not a generic marker.
+  assert.deepEqual(result.items[0]!.missing, ["no authenticated whole-workflow source='ci' evidence for HEAD"]);
   assert.ok(p.calls.length > 0, "the provider WAS consulted — the refusal is the sha-binding rejecting its foreign-sha response");
   assert.equal(countHostVerifications(), beforeRows, "no row minted for a foreign-sha green response");
   assert.equal(countHostVerificationsBySource("host"), 0, "explicitly: no source=host row minted by the backfill");
@@ -855,7 +858,12 @@ test("--terminal-recovery: required CI checks green but on DIFFERENT run identit
   const result = reconcileCampaign(campaignId, { terminalRecovery: true, checkStatusProvider: scatteredProvider });
 
   assert.equal(result.items[0]!.status, "refused");
-  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+  // RF-2 (INV-7): a DISTINCT concrete reason from the no-evidence cases above — the
+  // scattered-run-identity refusal names its own anti-replay cause, proving each
+  // uncovered probe cause surfaces its own reason rather than one generic marker.
+  assert.deepEqual(result.items[0]!.missing, [
+    "required CI checks do not share a common immutable run identity — refusing to anchor a source='ci' mint to scattered/absent run identities (INV-5 anti-replay)",
+  ]);
   assert.equal(countHostVerifications(), beforeRows, "no source=ci row minted for scattered run identities");
   assert.equal(countHostVerificationsBySource("ci"), 0);
   assert.equal(countEvents(), beforeEvents, "no ci_evidence_backfilled event");
@@ -921,7 +929,9 @@ test("--terminal-recovery: a shipped gapped item whose candidate the provider do
 
   assert.equal(result.ok, true);
   assert.equal(result.items[0]!.status, "refused");
-  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+  // RF-2 (INV-7): a partially-red workflow yields no whole-workflow source='ci' evidence —
+  // the refusal names that concrete cause rather than a generic marker.
+  assert.deepEqual(result.items[0]!.missing, ["no authenticated whole-workflow source='ci' evidence for HEAD"]);
   assert.equal(countHostVerifications(), beforeRows, "no row minted for a partially-red workflow");
   assert.deepEqual(getCampaignItem(itemId)!, before);
 });
