@@ -9,8 +9,8 @@ name: CI
 # job `test-extended` (FG-495) is the required merge check carrying the
 # integration + worktree tiers moved out of the fast gate — real
 # subprocess/git/DB coverage that's still trust-sensitive. It is now a
-# lightweight FINAL AGGREGATE: the slow work is sharded across TWELVE gating
-# concurrent jobs (FG-704) — `integration_1`..`integration_8` (root integration
+# lightweight FINAL AGGREGATE: the slow work is sharded across THIRTEEN gating
+# concurrent jobs (FG-704/FG-762) — `integration_1`..`integration_8` (root integration
 # BULK tier, FG-624: partitioned by the BATCHED-execution cost of each file —
 # MEASURED per-file duration discounted by an estimated per-file `node --test`
 # startup, see src/test-shards.ts's packWeight — rather than Node's --test-shard,
@@ -22,23 +22,31 @@ name: CI
 # dedicated lane — it is EXCLUDED from the eight bulk shards so its real 30s
 # production window never shares a job with anything else), `worktree` (root
 # worktree tier), `dashboard_integration` (dashboard workspace's own integration
-# tier), and `fg693_alias_identity` (FG-693: the FG-693 identity suite re-run
+# tier), `fg693_alias_identity` (FG-693: the FG-693 identity suite re-run
 # with TMPDIR pointed at a SYMLINK, so this Linux runner carries the
 # filesystem-alias class natively instead of being green on it by accident of
-# platform). `test-extended` `needs` all twelve (derived fail-closed from
+# platform), and `dashboard_browser` (FG-642/FG-762: see below). `test-extended`
+# `needs` all thirteen (derived fail-closed from
 # `toJSON(needs)`) and, with
 # `if: always()`, FAILS CLOSED unless every one reports success — so a
 # failed/cancelled/skipped shard cannot yield a green required check.
 #
-# `dashboard_browser` (FG-642: the dashboard's real-Chrome tier) is now ADVISORY
-# (FG-760): it still runs on every PR as its own visible check and still FAILS
-# LOUDLY when chromium is broken (FG-642's "Chrome-less run FAILS, never skips
-# green" precondition is intact, and a non-launchable browser now fails FAST via
-# a ~1-minute preflight), but it is NOT in `test-extended`'s `needs`, so a
-# chromium INFRA flake on the runner (install exits 0 but the browser will not
-# LAUNCH — every browser test then times out at 30s, FG-760) can no longer turn
-# the REQUIRED `test-extended` aggregate red and block unrelated merges. Branch
-# protection still carries both contexts ("test" and "test-extended"; the
+# `dashboard_browser` (FG-642: the dashboard's real-Chrome tier) is once again a
+# REQUIRED merge gate (FG-762): it is back in `test-extended`'s `needs`, so a red
+# dashboard_browser makes the required `test-extended` aggregate red. FG-760 had
+# briefly downgraded it to advisory to stop a chromium LAUNCH-mode infra flake
+# (install exits 0 but the browser will not START, so every browser test times
+# out at 30s — ~8m of red that reads like a broad regression but is pure infra)
+# from blocking unrelated merges. That downgrade was the wrong direction: FG-759
+# then showed this tier catches GENUINE regressions the other twelve tiers miss
+# (it is the only real-Chrome gate), and a dashboard-focused release must not
+# weaken its only real-browser gate. The infra fragility is instead handled where
+# it belongs — WITHOUT dropping the gate: the fast-fail LAUNCH preflight (FG-760,
+# a ~1-minute clear "infra, retriable" signal), the cache restore-keys, and the
+# bounded-retry install all remain, so a genuinely broken runner fails fast and
+# loud on this job while a real browser regression still gates merges as it must.
+# FG-642's "Chrome-less run FAILS, never skips green" precondition is intact.
+# Branch protection still carries both contexts ("test" and "test-extended"; the
 # orchestrator applies that host-side, see CLAUDE.md's branch-protection
 # note). It runs on the same triggers as `test`. Since FG-501, review-loop
 # verification no longer re-pays either tier per round in the common case:
@@ -361,19 +369,22 @@ jobs:
   # on the resolver's precondition (src/util/chrome-bin.ts) instead of skipping, so
   # an unprovisioned runner is loud, not silently empty.
   #
-  # ADVISORY, not a hard merge gate (FG-760). This job is deliberately NOT in
-  # `test-extended`'s `needs`, so its result never fails the required
-  # `test-extended` aggregate. It still runs on every PR as its own visible check
-  # and still fails LOUDLY on a broken browser — FG-642's "Chrome-less run FAILS,
-  # never skips green" precondition is untouched. The reason it is advisory: the
-  # chromium provisioning is INFRA-fragile in a way real test regressions are not.
-  # FG-739 handled the DOWNLOAD (cache + bounded retry); FG-760 saw the LAUNCH mode
-  # — chromium installs (exit 0) but will not START on the runner, so every browser
-  # test times out at 30s across ALL suites (~8m of red that reads like a broad
-  # regression but is pure infra). Gating the required aggregate on that flake
-  # blocked every unrelated merge 3x on 2026-08-24. Advisory + the fast-fail
-  # preflight below means a broken browser is a ~1-minute clear "infra, retriable"
-  # signal on this job alone, never a block on merging unrelated work.
+  # A REQUIRED merge gate again (FG-762). This job IS in `test-extended`'s `needs`,
+  # so a red dashboard_browser fails the required `test-extended` aggregate. It
+  # runs on every PR and fails LOUDLY on a broken browser — FG-642's "Chrome-less
+  # run FAILS, never skips green" precondition is untouched. FG-760 had briefly
+  # made it advisory (dropped from `needs`) because chromium provisioning is
+  # INFRA-fragile: FG-739 handled the DOWNLOAD (cache + bounded retry); FG-760 saw
+  # the LAUNCH mode — chromium installs (exit 0) but will not START on the runner,
+  # so every browser test times out at 30s across ALL suites (~8m of red that reads
+  # like a broad regression but is pure infra), which blocked every unrelated merge
+  # 3x on 2026-08-24. But dropping the gate was the wrong fix: FG-759 showed this is
+  # the ONLY real-Chrome tier and it catches genuine regressions the other tiers
+  # miss, so a dashboard release must not ship without it gating. The infra
+  # fragility is handled WITHOUT dropping the gate — the retained bits below: the
+  # fast-fail LAUNCH preflight (a ~1-minute clear "infra, retriable" signal), the
+  # cache restore-keys, and the bounded-retry install all stay, so a genuinely
+  # broken runner fails fast and loud here while a real regression still blocks merge.
   dashboard_browser:
     runs-on: ubuntu-latest
     # Was 6, raised to 20 (FG-739): the 6-minute ceiling was cancelling this tier
@@ -575,12 +586,15 @@ jobs:
 
   # Lightweight FINAL AGGREGATE — the required branch-protection context
   # `CI / test-extended`. It does no test work itself; it fails closed unless
-  # every one of the twelve sharded/tiered jobs it `needs` reports success, so a
+  # every one of the thirteen sharded/tiered jobs it `needs` reports success, so a
   # failed, cancelled, or skipped dependency cannot yield a green required
-  # check. `dashboard_browser` is intentionally NOT among those twelve (FG-760):
-  # it is ADVISORY — a visible PR check that never gates this required aggregate,
-  # so its INFRA fragility (chromium installs but won't launch on the runner)
-  # cannot block unrelated merges. See the dashboard_browser job comment above.
+  # check. `dashboard_browser` is once again among those thirteen (FG-762): it is a
+  # REQUIRED gate — FG-759 proved this only-real-Chrome tier catches genuine
+  # regressions the others miss, so a red browser tier MUST fail this aggregate.
+  # FG-760's brief advisory downgrade is reverted; its INFRA fixes (fast-fail
+  # launch preflight, cache restore-keys, bounded-retry install) are retained on
+  # the job so a chromium infra flake fails fast and loud rather than needing the
+  # gate dropped. See the dashboard_browser job comment above.
   #
   # FG-704: the gate is DERIVED from `${{ toJSON(needs) }}`, not a hand-written
   # `results=` list. A job present in `needs` is therefore automatically in the
@@ -590,7 +604,7 @@ jobs:
   # job provisions no second interpreter, cf. FG-647.)
   test-extended:
     runs-on: ubuntu-latest
-    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_7, integration_8, integration_serial, worktree, dashboard_integration, fg693_alias_identity]
+    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, integration_6, integration_7, integration_8, integration_serial, worktree, dashboard_integration, fg693_alias_identity, dashboard_browser]
     if: always()
     steps:
       - name: Aggregate required extended gate
