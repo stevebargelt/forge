@@ -138,8 +138,8 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 });
 
 // FG-495 regression guard (updated: sharded extended gate; FG-624: duration-
-// aware; FG-704: 8 bulk shards + a dedicated serial lane; FG-760: browser tier
-// advisory): the slow
+// aware; FG-704: 8 bulk shards + a dedicated serial lane; FG-762: browser tier
+// required again): the slow
 // integration/worktree coverage moved out of the fast `test` gate must still run
 // somewhere routine and visible. It now runs as THIRTEEN concurrent jobs — eight
 // root integration BULK shards (`integration_1`..`integration_8`, partitioned by
@@ -147,9 +147,11 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 // discovered−fg576), the `integration_serial` lane (FG-681/FG-704: fg576 alone
 // under --test-concurrency=1), a `worktree` job, a `dashboard_integration` job,
 // (FG-693) an `fg693_alias_identity` job — with the required `test-extended` job
-// reduced to a fail-closed aggregate over all twelve. `dashboard_browser` remains
-// a visible, advisory check: it must not become a required dependency again. If a
-// future edit drops a shard, mistargets a shard selector,
+// reduced to a fail-closed aggregate over all thirteen. FG-762 restores
+// `dashboard_browser` as a required dependency because FG-759 proved this real-
+// browser tier catches regressions the other tiers miss. Its preflight, cache, and
+// bounded-retry protections remain independent runner-infrastructure fixes. If a
+// future edit drops a shard or the browser tier, mistargets a shard selector,
 // or lets the aggregate go green on a failed dependency, the trust-sensitive
 // coverage (FG-419/FG-440/FG-474 gate-enforcement tests, among others) would
 // stop gating merges without anyone deciding that on purpose.
@@ -299,7 +301,7 @@ test("FG-642: ci.yml has a dashboard_browser job that provisions a browser and r
   );
 });
 
-test("FG-760: the advisory browser job preflights a real Chromium launch with the shared no-sandbox contract", () => {
+test("FG-760 infra retained by FG-762: the required browser job preflights a real Chromium launch with the shared no-sandbox contract", () => {
   const steps = loadWorkflow().jobs?.[BROWSER_JOB]?.steps ?? [];
   const preflight = steps.find((step) => step.name === "Preflight — chromium must actually launch");
   assert.ok(preflight, "dashboard_browser must fail fast before the browser suite when Chromium cannot launch");
@@ -311,7 +313,7 @@ test("FG-760: the advisory browser job preflights a real Chromium launch with th
   assert.match(script, /LAUNCH\/runner-env INFRA failure/, "a failed preflight must identify the failure as retriable runner infrastructure");
 });
 
-test("FG-760: test-extended gates exactly twelve non-browser jobs; dashboard_browser stays an advisory visible check", () => {
+test("FG-762: test-extended requires the twelve non-browser tiers AND dashboard_browser (the real-browser gate is required again, not advisory)", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
@@ -319,12 +321,15 @@ test("FG-760: test-extended gates exactly twelve non-browser jobs; dashboard_bro
   const needs = job!.needs ?? [];
   assert.deepEqual(
     [...needs].sort(),
-    [...EXTENDED_GATE_JOBS].sort(),
-    "test-extended must `needs` exactly the twelve sharded/tiered non-browser jobs — a shard added to ci.yml but left out of `needs` runs without gating anything, while dashboard_browser remains advisory"
+    [...EXTENDED_GATE_JOBS, BROWSER_JOB].sort(),
+    "test-extended must `needs` exactly the twelve sharded/tiered non-browser jobs plus dashboard_browser — any tier added to ci.yml but left out of `needs` runs without gating anything"
   );
-  assert.equal(needs.length, 12, "the required extended aggregate has twelve gating jobs after dashboard_browser became advisory");
-  assert.ok(wf.jobs?.[BROWSER_JOB], "dashboard_browser must remain a separately visible CI check");
-  assert.ok(!needs.includes(BROWSER_JOB), "dashboard_browser must not re-enter test-extended needs: chromium infra failures are advisory");
+  assert.equal(needs.length, 13, "the required extended aggregate has twelve non-browser tiers plus the required dashboard_browser gate");
+  assert.ok(wf.jobs?.[BROWSER_JOB], "dashboard_browser must remain a visible required CI check");
+  assert.ok(
+    needs.includes(BROWSER_JOB),
+    "FG-762: dashboard_browser must remain in test-extended needs; dropping it re-downgrades the only real-browser gate"
+  );
 
   assert.equal(
     job!.if,
@@ -356,6 +361,10 @@ test("FG-760: test-extended gates exactly twelve non-browser jobs; dashboard_bro
   assert.ok(
     /!==?\s*["']?success["']?/.test(aggregateBody) && /exit\s+1/.test(aggregateBody),
     "aggregate step must exit non-zero when any dependency result is not 'success' — fail-closed (operator proof #5/#6): a failed/cancelled/skipped dep cannot yield green"
+  );
+  assert.ok(
+    /Object\.entries\(needs\)\.filter\(\s*\(\s*\[\s*,\s*v\s*\]\s*\)\s*=>\s*v\.result\s*!==\s*["']success["']\s*\)/.test(aggregateBody),
+    "the aggregate must filter Object.entries(needs) for every non-success result, so no required dependency can be omitted from the fail-closed decision"
   );
 });
 
@@ -406,9 +415,9 @@ test("extended-gate ceiling: each of the ten-minute jobs (eight bulk shards + th
 test("extended-gate ceiling: the timeout tiers cover exactly every test-extended dependency", () => {
   const needs = loadWorkflow().jobs?.["test-extended"]?.needs ?? [];
   assert.deepEqual(
-    [...EXTENDED_GATE_JOBS].sort(),
+    [...EXTENDED_GATE_JOBS, BROWSER_JOB].sort(),
     [...needs].sort(),
-    "every test-extended dependency must appear in exactly one timeout tier — an extended job without a ceiling must fail this guard"
+    "every test-extended dependency must appear in exactly one timeout tier, including dashboard_browser's own 20-minute tier — an extended job without a ceiling must fail this guard"
   );
 });
 
