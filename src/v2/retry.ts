@@ -474,6 +474,8 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     workflow,
     step,
     seedGeneration: resolveSeedGeneration(),
+    // FG-773: inert override anchor — the project this retry runs against.
+    projectDir,
   });
   if (!composed.ok) refuse(composed.refusal);
   const composedSystemPrompt = composed.prompt;

@@ -240,6 +240,8 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     workflow,
     step,
     seedGeneration,
+    // FG-773: inert override anchor — the project this dispatch runs against.
+    projectDir: args.projectDir,
   });
   const taskPackage: TaskPackage = {
     taskId,

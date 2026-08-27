@@ -673,6 +673,9 @@ async function dispatchSingleStep(args: {
     step,
     runTags: runTagsFromMetadata(args.runMetadata),
     seedGeneration: args.seedGeneration,
+    // FG-773: inert override anchor — args.projectDir is the owning project (the host
+    // mount), which is exactly the project the primary resolves overrides against.
+    projectDir: args.projectDir,
   });
 
   const taskPackage: TaskPackage = {
@@ -950,6 +953,9 @@ async function dispatchSingleStep(args: {
       primaryTaskId: taskId,
       primaryResult: result,
       projectDir: dir,
+      // FG-773: `dir` is the tree the reds REVIEW (the candidate worktree when publishing);
+      // args.projectDir is the OWNING project they resolve overrides against.
+      overrideProjectDir: args.projectDir,
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
@@ -1346,6 +1352,12 @@ async function dispatchReds(args: {
   primaryTaskId: string;
   primaryResult: unknown;
   projectDir: string;
+  /** FG-773 (FG-767 T0): the OWNING project's host mount — the project a red resolves
+   *  `<project>/.forge` overrides against (FG-774/775). Distinct from `projectDir`, which
+   *  in publish mode is the ephemeral integration/candidate WORKTREE the red REVIEWS; a
+   *  red's agent/constraint layer is a property of the project, not of the candidate tree
+   *  under review. Inert today — carried into compose, not yet consulted. */
+  overrideProjectDir: string;
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
@@ -1433,6 +1445,7 @@ async function dispatchReds(args: {
       artifact,
       spec,
       projectDir: args.projectDir,
+      overrideProjectDir: args.overrideProjectDir,
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
@@ -1672,6 +1685,9 @@ async function runOneRed(args: {
   artifact: string;
   spec?: string;
   projectDir: string;
+  /** FG-773: the OWNING project for override resolution — see dispatchReds. Distinct from
+   *  `projectDir` (the review/mount tree). Inert today. */
+  overrideProjectDir: string;
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
@@ -1711,6 +1727,9 @@ async function runOneRed(args: {
     step: args.step,
     runTags: runTagsFromMetadata(args.runMetadata),
     seedGeneration: args.seedGeneration,
+    // FG-773: the red resolves overrides against the OWNING project, NOT args.projectDir —
+    // which in publish mode is the ephemeral integration/candidate worktree it reviews.
+    projectDir: args.overrideProjectDir,
   });
   const taskPackage: TaskPackage = {
     taskId: redTaskId,
@@ -2424,6 +2443,9 @@ async function dispatchFanoutStep(args: {
       primaryTaskId: parentId,
       primaryResult,
       projectDir: dir,
+      // FG-773: `dir` is the reviewed candidate tree; args.projectDir is the OWNING project
+      // the reds resolve overrides against.
+      overrideProjectDir: args.projectDir,
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
@@ -4134,6 +4156,8 @@ async function runFanoutChild(args: {
     step,
     runTags: runTagsFromMetadata(args.runMetadata),
     seedGeneration: args.seedGeneration,
+    // FG-773: inert override anchor — the owning project the fan-out child runs against.
+    projectDir: args.projectDir,
   });
   const taskPackage: TaskPackage = {
     taskId: childTaskId,

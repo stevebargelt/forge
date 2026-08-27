@@ -178,6 +178,34 @@ iOS-specific rule.`
   rmSync(root, { recursive: true, force: true });
 });
 
+test("FG-773: projectDir is inert — the composed prompt is byte-identical with or without it", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect\n\nBody text.");
+  writeFileSync(
+    join(constraintsDir, "no-bluff.md"),
+    `---
+id: no-bluff
+level: suggest
+roles: [architect]
+workflows: [feature]
+---
+Don't bluff.`
+  );
+  const base = {
+    role: "architect",
+    workflow: WORKFLOW,
+    step: { ...WORKFLOW.steps[0]!, workflow_additions: "Do the thing." },
+    agentDir,
+    constraintsDir,
+  } as const;
+  const without = promptOf(base);
+  const withArbitrary = promptOf({ ...base, projectDir: join(root, "some", "project") });
+  const withMissing = promptOf({ ...base, projectDir: "/does/not/exist" });
+  assert.equal(withArbitrary, without, "an arbitrary projectDir must not change resolution");
+  assert.equal(withMissing, without, "a nonexistent projectDir must not change resolution");
+  rmSync(root, { recursive: true, force: true });
+});
+
 // ─── FG-654: the dispatch-time protocol gate lives at THIS read seam ─────────
 
 const PROTOCOL = "## The review protocol\n\ncurrent generation\n";

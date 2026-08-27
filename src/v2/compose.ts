@@ -36,6 +36,14 @@ export type ComposeArgs = {
   // Override defaults for tests.
   agentDir?: string;
   constraintsDir?: string;
+  /** FG-773 (FG-767 T0): the project this dispatch resolves overrides against — where a
+   *  later ticket reads a `<project>/.forge` agent (FG-774) / constraints (FG-775) layer
+   *  on top of the host dirs. INERT here: it is carried through the resolveAgentDir /
+   *  resolveConstraintsDir seam below but never consulted, so the host dirs are read
+   *  exactly as before whether or not it is passed. Threaded distinct from the container's
+   *  review/mount tree because a red must resolve against the OWNING project, not the
+   *  ephemeral integration worktree it reviews (see runOneRed). */
+  projectDir?: string;
   /** FG-654: the seed generation this invocation is anchored to, mirroring
    *  LoadContext — `undefined` resolves the live seed pointer, `null` means none
    *  anchored (and a covered role then refuses). */
@@ -65,10 +73,22 @@ function defaultConstraintsDir(): string {
   return join(root, "constraints");
 }
 
+// FG-773 (FG-767 T0): the ONE resolution seam projectDir threads into. Today each is
+// byte-identical to the inline `override ?? default` it replaced — projectDir is accepted
+// and ignored. FG-774 (agents) / FG-775 (constraints) plug the `<project>/.forge` override
+// layer in HERE, so the resolution has a single named site rather than five call sites.
+function resolveAgentDir(role: string, _projectDir: string | undefined, override: string | undefined): string {
+  return override ?? defaultAgentDir(role);
+}
+
+function resolveConstraintsDir(_projectDir: string | undefined, override: string | undefined): string {
+  return override ?? defaultConstraintsDir();
+}
+
 export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
   const sections: string[] = [];
 
-  const agentDir = args.agentDir ?? defaultAgentDir(args.role);
+  const agentDir = resolveAgentDir(args.role, args.projectDir, args.agentDir);
   const baseFile = join(agentDir, "CLAUDE.md");
   // READ, never written. The operator's file is theirs under exactly the FG-578 rules.
   const installedSeedText = existsSync(baseFile) ? readFileSync(baseFile, "utf8") : null;
@@ -108,7 +128,7 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
     sections.push(`# Workflow additions (step: ${args.step.id})\n\n${wa}`);
   }
 
-  const all = loadAllConstraints(args.constraintsDir ?? defaultConstraintsDir());
+  const all = loadAllConstraints(resolveConstraintsDir(args.projectDir, args.constraintsDir));
   const suggest = filterConstraints(all, {
     role: args.role,
     workflow: args.workflow.name,
