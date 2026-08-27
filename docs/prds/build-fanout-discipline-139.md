@@ -7,6 +7,12 @@
 > no-op** if `~/.forge/agents/tech-lead/` already exists — remove that copy first to re-test the edit.
 > Forge-owned seeds (`workflows/`, `runtimes/`, skills) still refresh normally under `FORCE=1`, so the
 > `feature.yml` reinstall steps below are unaffected. **The build-fanout discipline this PRD specifies is unchanged.**
+>
+> ⚠️ **FURTHER STATUS (2026-08-27): the FG-578 note above is itself superseded by FG-777.** `seeds/agents/` is no
+> longer authored-exempt — it is forge-owned and ALWAYS upgraded, gated only on a one-time host-edit backup
+> (FG-776). Re-running the installer now propagates a `tech-lead/CLAUDE.md` edit directly (no more silent no-op,
+> no need to remove the copy first) once that one-time backup has run on the host. See
+> `docs/how-to-upgrade.md#host-authored-seeds-are-forge-owned-and-always-upgraded-fg-777`.
 
 
 > ⚠️ **STATUS (2026-07-16): the `forge dashboard start` regression check below is SUPERSEDED by FG-571.**

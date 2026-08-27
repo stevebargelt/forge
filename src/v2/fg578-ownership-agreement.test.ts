@@ -4,12 +4,13 @@
 // The write policy lives in scripts/install-seeds.sh (the writer — FORCE is a
 // published operator-facing contract that four documented entry points invoke
 // directly, so a guard in the `forge upgrade` caller would protect one of them).
-// The read policy lives in seed-drift.ts's SEED_SPECS, which has classified
-// agents/constraints/raci as operator-authored + prose — "may carry local
-// edits → warn, never auto-overwrite" — since FG-335. Those are the same fact
-// stated in two languages, and the shell/TS boundary makes literal sharing
-// impractical. So the agreement is a GATE, not a comment asking someone to
-// remember.
+// The read policy lives in seed-drift.ts's SEED_SPECS. FG-777 FLIPPED
+// agents/constraints/raci from operator-authored to forge-owned (always-upgraded,
+// gated on FG-776's host-edit backup latch), so BOTH the installer's
+// AUTHORED_EXEMPT and the detector's operator-authored set are now EMPTY. They are
+// still the same fact stated in two languages, and the shell/TS boundary makes
+// literal sharing impractical. So the agreement is a GATE, not a comment asking
+// someone to remember — and it now pins that the two agree the set is empty.
 //
 // This is not hypothetical bookkeeping. Hand-maintained parallel lists drift,
 // and the two ownership sets MUST stay identical; this gate catches any
@@ -47,22 +48,28 @@ export function parseAuthoredExempt(script: string): string[] {
   return m[1]!.trim().split(/\s+/).filter((s) => s.length > 0).sort();
 }
 
-test("FG-578: the installer's AUTHORED_EXEMPT is exactly seed-drift's non-auto-refreshable set", () => {
+test("FG-777: the installer's AUTHORED_EXEMPT is exactly seed-drift's (now empty) operator-authored set", () => {
   const exempt = parseAuthoredExempt(readFileSync(INSTALL_SCRIPT, "utf8"));
 
-  // The whole gate, in one line. Perturb EITHER side — drop `constraints` from
-  // AUTHORED_EXEMPT in the shell, or reclassify `agents` as forge-owned in
-  // SEED_SPECS — and this fails naming both sets.
+  // The gate still holds, in one line: perturb EITHER side and it fails naming
+  // both. FG-777 flipped agents/constraints/raci to forge-owned, so both sides are
+  // now EMPTY — no category is permanently operator-authored any more.
   assert.deepEqual(
     exempt,
     authoredCategories(),
-    "the installer's exempt set and the detector's warn-never-overwrite set are the same fact; they must be the same set",
+    "the installer's exempt set and the detector's never-overwrite set are the same fact; they must be the same set",
   );
+  assert.deepEqual(exempt, [], "FG-777 emptied the permanent operator-authored tier — the flip made the three always-upgraded");
 
-  // Guard against the vacuous pass: an empty declaration on both sides would
-  // satisfy deepEqual while meaning "forge owns everything" — the pre-FG-578
-  // behaviour, agreeing with itself.
-  assert.deepEqual(exempt, ["agents", "constraints", "raci"], "the decided set (audit HIGH-2), pinned literally so silently emptying both sides fails");
+  // Guard against a vacuous pass that would HIDE the flip: an empty exempt set is
+  // only correct because the three moved to the forge-owned (always-upgraded) tier.
+  // If someone emptied AUTHORED_EXEMPT WITHOUT flipping SEED_SPECS, this fails.
+  for (const c of ["agents", "constraints", "raci"]) {
+    assert.ok(
+      autoRefreshableCategories().includes(c),
+      `${c} must be forge-owned (always-upgraded) after the FG-777 flip — an empty exempt set with ${c} unclassified is the bug`,
+    );
+  }
 });
 
 test("FG-578: no category is both operator-authored and forge-refreshable", () => {

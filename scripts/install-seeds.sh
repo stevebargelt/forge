@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
 # Copy seed agent, constraint, runtime, and workflow files into ~/.forge/.
-# Idempotent — skips files that already exist by default. FORCE=1 overwrites
-# forge-owned files, but NEVER operator-authored ones (agents, constraints,
-# raci): those are created once and then left alone, FORCE or not — see below.
+# Idempotent — skips files that already exist by default.
 #
-# FG-578: FORCE=1 does NOT mean "overwrite everything". It means "overwrite every
-# file FORGE owns". The categories in AUTHORED_EXEMPT below are the operator's;
-# forge seeds them once and never writes over them again. See that declaration.
+# FG-777 — THE FORCE CONTRACT (verbatim; the same text is carried by
+# src/v2/seed-drift.ts and, via the documentation-maintainer, by
+# docs/how-to-upgrade.md + README):
+#
+#   FORCE overwrites forge-owned files. Host authored seeds — agents (per-role
+#   CLAUDE.md), constraints, and forge-raci.md — are forge-owned and ALWAYS
+#   upgraded. Customization lives in <project>/.forge, which upgrade never
+#   touches: an agent gets a project ADDENDUM (<project>/.forge/agents/<role>/
+#   CLAUDE.md, appended to the always-current host base), constraints are an
+#   additive UNION (host always applies; a project can only add/tighten), and
+#   raci is a full-replacement project override (<project>/.forge/forge-raci.md).
+#   Before the FIRST always-upgrade, forge backs up any host authored file you
+#   had edited to $FORGE_HOME/pre-upgrade-backup/<timestamp>/ and prints how to
+#   re-express it as a project override; the flip refuses to run until that
+#   backup pass has completed. A genuine operator edit is never destroyed.
+#
+# The "refuses to run until that backup pass has completed" clause is THE GATE
+# (below): the always-upgrade of agents/constraints/raci is withheld until
+# FG-776's one-time host-edit backup has written its completion latch. Absent the
+# latch, those three fall back to the pre-flip create-only + retain behavior and
+# the operator is told the migration must run first.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,64 +31,92 @@ CLAUDE_SKILLS_DEST="${CLAUDE_SKILLS_DEST:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sk
 
 mkdir -p "$DEST/agents" "$DEST/constraints" "$DEST/runs" "$DEST/runtimes" "$DEST/workflows" "$DEST/codex"
 
-# FG-578 — THE OWNERSHIP DECLARATION. Categories the OPERATOR authors. forge may
-# CREATE these (a host with no RACI has nothing to route with), but may never
-# re-install over them — not under FORCE=1, not from any of the four documented
-# entry points. The policy lives HERE, in the writer, because FORCE is a
-# published operator-facing contract (docs/how-to-upgrade.md, README.md,
-# how-to-new-workflow.md and seed-drift.ts all tell operators to run this script
-# directly); a guard in the `forge upgrade` caller would protect one caller and
-# leave the other three clobbering.
+# FG-777 — THE OWNERSHIP DECLARATION, NOW EMPTY. Before FG-777 agents, constraints
+# and forge-raci.md were AUTHORED_EXEMPT — forge seeded them once and never wrote
+# over them (FG-578). FG-777 FLIPS them to forge-owned and always-upgraded: FORCE
+# overwrites them exactly as it overwrites runtimes/workflows/codex, and a bare
+# install refreshes them like any forge-owned file. So NO category is permanently
+# operator-authored any more, and this set collapses to empty.
 #
-# Why these three:
-#   raci        — ~/.forge/forge-raci.md is "the installed host RACI source
-#                 (authoring view)" (util/paths.ts). Operators change it through
-#                 `forge raci apply`, the gated confirm-before-write channel that
-#                 exists precisely so routing changes are reviewable, and every
-#                 such change is audited to raci-audit.log. A surface the
-#                 operator is INVITED to edit cannot be legally re-installed.
-#   agents      — no project-level override exists (util/paths.ts), so ~/.forge
-#   constraints   IS the only place an operator can edit them. That makes them
-#                 authored surfaces by construction, not by convention.
+# It stays declared (empty) rather than deleted for two reasons: it remains the
+# single greppable "categories forge will NEVER overwrite" tier — currently none —
+# and src/v2/fg578-ownership-agreement.test.ts gates it against seed-drift.ts's
+# operator-authored SEED_SPECS, which is now likewise empty. Perturb either side
+# and that test fails naming both.
 #
-# This is not a new policy: seed-drift.ts already classifies exactly these three
-# as operator-authored + prose — "may carry local edits → warn, never
-# auto-overwrite" — and runtimes as forge-owned + executable, "safe to overwrite".
-# FG-335 decided it and shipped only the detector.
-# This is its unbuilt half. The two sets MUST stay identical;
-# src/v2/fg578-ownership-agreement.test.ts fails if they ever disagree.
-#
-# Deliberately NOT here: routing-policy.yml (lives beside forge-raci.md in
-# $FORGE_HOME but is DERIVED — its correctness depends on being overwritten;
-# ownership is not location) and the skills dir (unchanged on purpose — see the
-# skills block below).
-AUTHORED_EXEMPT=(agents constraints raci)
+# The always-upgrade of the three flipped categories is not unconditional: it is
+# GATED on the host-edit backup latch (see below). AUTHORED_EXEMPT is the PERMANENT
+# never-overwrite tier; the latch gate is the TRANSITIONAL one that withholds the
+# overwrite only until FG-776's one-time backup has run.
+AUTHORED_EXEMPT=()
 
 is_authored_exempt() {
   local candidate="$1" category
-  for category in "${AUTHORED_EXEMPT[@]}"; do
+  # `${a[@]+"${a[@]}"}`: an EMPTY array expanded as `"${a[@]}"` under `set -u`
+  # aborts on bash 3.2 (macOS's default) with "unbound variable". AUTHORED_EXEMPT
+  # is empty since FG-777, so guard the expansion or a bare install breaks there.
+  for category in ${AUTHORED_EXEMPT[@]+"${AUTHORED_EXEMPT[@]}"}; do
     [[ "$category" == "$candidate" ]] && return 0
   done
   return 1
 }
+
+# FG-777 — THE GATE (load-bearing safety, from FG-776). The three flipped
+# categories are forge-owned, but their FORCE-overwrite MUST NOT fire until
+# FG-776's one-time host-edit backup has run and written its completion latch —
+# otherwise the very first always-upgrade could destroy an operator edit with no
+# backup taken. This lives HERE, in the writer, for the same reason the ownership
+# policy does: FORCE is a published operator-facing contract that four documented
+# entry points invoke this script directly, and a guard in the `forge upgrade`
+# caller alone would leave the bash overwrite able to fire unlatched on the other
+# three. Absent the latch, the three fall back to the pre-flip create-only +
+# retain behavior and the operator is told the migration must run first.
+#
+# `forge upgrade` runs the FG-776 backup ahead of this installer (upgrade.ts step
+# 3-pre), so on the normal upgrade path the latch is already present and the flip
+# takes effect; a bare `FORCE=1 scripts/install-seeds.sh` on a host that never ran
+# the migration keeps retaining, safely.
+LATCH_GATED_CATEGORIES=(agents constraints raci)
+HOST_EDIT_MIGRATION_LATCH="$DEST/pre-upgrade-backup/.host-edit-migration-complete"
+
+host_edit_migration_complete() {
+  [[ -e "$HOST_EDIT_MIGRATION_LATCH" ]]
+}
+
+is_latch_gated() {
+  local candidate="$1" category
+  for category in "${LATCH_GATED_CATEGORIES[@]}"; do
+    [[ "$category" == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+# Whether the gate WITHHELD an always-upgrade this run — i.e. a latch-gated file
+# existed, diverged, and was retained because the migration has not run. Drives
+# the "migration must run first" note in the final report.
+GATE_WITHHELD=0
 
 # Files forge declined to write because the operator owns them and their copy has
 # diverged from this release's seed. Reported at the end, and parsed out of this
 # script's stdout by `forge upgrade` — informational, never a failure.
 RETAINED=()
 
-# Installs ONE seed file. Three outcomes, because neither of the two the old
-# single predicate offered was correct for an authored file — FORCE clobbered
-# authored work, and a bare run skipped existing files, making a plain re-install
-# a no-op against drift by construction:
+# Installs ONE seed file. Outcomes:
 #
-#   absent                    -> create. The seed's authority is CREATION; the
-#                                exemption limits it, it does not disable it.
-#   present, authored-exempt  -> RETAIN, whatever FORCE says. Report it if it
-#                                differs from the seed, so the operator is told
-#                                what forge did NOT do rather than silently
-#                                no-op'd.
-#   present, forge-owned      -> FORCE overwrites, bare skips. Unchanged.
+#   absent                       -> create. The seed's authority is CREATION, and
+#                                   neither the exemption nor the gate disables it.
+#   present, permanently exempt  -> RETAIN, whatever FORCE says (AUTHORED_EXEMPT —
+#                                   empty since FG-777, so unreachable today).
+#   present, latch-gated + the   -> RETAIN (the FG-777 gate withholds the flip
+#     migration has NOT run          until FG-776's backup latch exists). Reported
+#                                     so the operator is told what forge did NOT do
+#                                     and that the migration must run first.
+#   present, forge-owned         -> FORCE overwrites, bare skips. The three flipped
+#     (incl. latch-gated once        categories join this tier once the latch is
+#      the migration has run)        present.
+#
+# A retained file that DIFFERS from the seed is recorded in RETAINED so the caller
+# reports what forge did NOT do rather than silently no-op'ing.
 #
 # Sets COPIED=1 only when bytes were actually written. The caller prints its
 # "Installing …" header from that and nothing else: `forge upgrade` counts those
@@ -86,9 +130,13 @@ seed_install_file() {
     COPIED=1
     return 0
   fi
-  if is_authored_exempt "$category"; then
+  # Retain when the category is permanently operator-owned (AUTHORED_EXEMPT — none
+  # today) OR it is one of the flipped categories and the FG-776 host-edit backup
+  # has not yet run (THE GATE). Either way forge does not overwrite it here.
+  if is_authored_exempt "$category" || { is_latch_gated "$category" && ! host_edit_migration_complete; }; then
     if ! cmp -s "$src" "$dstfile"; then
       RETAINED+=("${dstfile#"$DEST"/}")
+      if is_latch_gated "$category"; then GATE_WITHHELD=1; fi
     fi
     return 0
   fi
@@ -226,11 +274,12 @@ fi
 # RACI seed (v2). The orchestrator references this at
 # `~/.forge/forge-raci.md` to classify prompts and route work.
 #
-# FG-578: the `raci` category is AUTHORED_EXEMPT, so this SEEDS the file and
-# never re-installs over it. That is the same discipline model-policy.example.yml
-# above already follows — install the example under a non-active name so
-# installing it can never flip behavior, leaving the operator's active copy
-# untouchable. The RACI is the surface that escaped it, not an innovation.
+# FG-777: the `raci` category is now forge-owned and always-upgraded (latch-gated),
+# so once FG-776's host-edit backup has run this SEEDS the file and then FORCE
+# refreshes it on every upgrade — the operator's routing customization moves to a
+# full-replacement project override at <project>/.forge/forge-raci.md, which
+# upgrade never touches. Absent the latch, seed_install_file retains the host copy
+# (the gate) exactly as the pre-flip behavior did.
 if [[ -f "$HERE/seeds/forge-raci.md" ]]; then
   seed_install_file "$HERE/seeds/forge-raci.md" "$DEST/forge-raci.md" raci
   if (( COPIED > 0 )); then
@@ -238,24 +287,30 @@ if [[ -f "$HERE/seeds/forge-raci.md" ]]; then
   fi
 fi
 
-# FG-578 — say what forge did NOT do, and why. A silent no-op and a silent
+# FG-777 — say what forge did NOT do, and why. A silent no-op and a silent
 # clobber are the same defect wearing different clothes: in both, the operator
 # cannot tell what state their host is in.
 #
-# NAME THE FAILURE THIS EXEMPTION INTRODUCES: an operator whose authored file is
-# now never refreshed runs old prose against new forge code. The exemption is
-# still right — losing an audited routing change is worse — but the drift is real
-# and is reported here informationally. It is NOT an error and NOT a refresh:
-# these files are out of forge's control path, and only the operator can decide
-# whether their edits still want this release's defaults merged in.
+# On the flipped host, the only way a file is retained is THE GATE: a latch-gated
+# host authored seed (agents/constraints/raci) diverged, and the FG-776 one-time
+# backup has not run, so forge withheld the always-upgrade rather than overwrite an
+# edit it had not yet backed up. This is transitional, not a standing exemption —
+# once the migration runs, these become forge-owned and are always upgraded.
 if [[ ${#RETAINED[@]} -gt 0 ]]; then
   echo ""
-  echo "Retained (operator-authored — forge did not overwrite these, and did not refresh them):"
+  echo "Retained (host authored seeds — forge did not overwrite these, and did not refresh them):"
   for r in "${RETAINED[@]}"; do
     echo "Retained: $r (differs from this release's seed at $HERE/seeds/$r)"
   done
-  echo "These files are yours: forge seeds them once, then leaves them alone (FORCE=1 included)."
-  echo "To take this release's defaults, diff and merge them in by hand."
+  if (( GATE_WITHHELD )); then
+    echo "These are forge-owned and ALWAYS upgraded once the one-time pre-upgrade backup has run — the"
+    echo "flip is GATED on it and has NOT run on this host. Run 'forge upgrade' (it backs up any edited"
+    echo "host authored file first, then refreshes these). Re-express local customization as a project"
+    echo "override under <project>/.forge, which upgrade never touches."
+  else
+    echo "These files are yours: forge seeds them once, then leaves them alone (FORCE=1 included)."
+    echo "To take this release's defaults, diff and merge them in by hand."
+  fi
 fi
 
 # Orphan-warning for pre-rename seed dirs. After the v2 agent rename

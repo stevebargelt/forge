@@ -619,13 +619,17 @@ test("integ FG-654: no marker survives in seeds/agents, and upgrade prints only 
   assert.deepEqual(denominators, ["4"], "upgrade prints only [n/4]");
 });
 
-test("integ FG-654: scripts/install-seeds.sh is textually untouched by this ticket", () => {
+test("integ FG-654: scripts/install-seeds.sh carries no protocol knowledge", () => {
   const script = readFileSync(join(repoRoot, "scripts", "install-seeds.sh"), "utf8");
   assert.ok(!script.includes("FG-654"), "the installer must carry no FG-654 framing");
   assert.ok(!script.includes("agent-protocol"), "the installer must not know about the protocol at all");
+  // FG-777 flipped agents/constraints/raci to forge-owned, so AUTHORED_EXEMPT is
+  // now empty. (FG-654 left the installer untouched; FG-777 is what changed this
+  // line — the protocol still lives outside the installer, which is what this test
+  // is really about.)
   assert.match(
     script,
-    /AUTHORED_EXEMPT=\(agents constraints raci\)/,
-    "agents is once again wholly operator-authored, whole-file",
+    /AUTHORED_EXEMPT=\(\)/,
+    "FG-777: no category is permanently operator-authored — the exempt set is empty",
   );
 });

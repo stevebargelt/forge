@@ -27,7 +27,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assetRoot, executionModeFrom } from "./asset-root.js";
@@ -122,7 +122,20 @@ function baselineOf(release: string): string {
   return join(release, "seeds");
 }
 
-test("FG-577: on a release host, the remedy the detector NAMES actually converges the detector", () => {
+/** The bytes FG-776 backed `rel` up to under `$FORGE_HOME/pre-upgrade-backup`.
+ *  Walks the (one per run) timestamped dir, skipping the `.host-edit-migration-
+ *  complete` latch dotfile. Null when no backup was taken. */
+function backedUpBytes(backupRoot: string, rel: string): string | null {
+  if (!existsSync(backupRoot)) return null;
+  for (const stamp of readdirSync(backupRoot)) {
+    if (stamp.startsWith(".")) continue;
+    const candidate = join(backupRoot, stamp, rel);
+    if (existsSync(candidate)) return readFileSync(candidate, "utf8");
+  }
+  return null;
+}
+
+test("FG-577/FG-777: on a release host, the remedy the detector NAMES converges the WHOLE report — including the flipped prose seeds, whose edits FG-776 backs up before overwriting", () => {
   const release = assetTree("fg577-loop-rel-", "RELEASE");
   const devCheckout = assetTree("fg577-loop-dev-", "DEV", { manifest: false });
   const repoBefore = process.env.FORGE_REPO_DIR;
@@ -134,16 +147,14 @@ test("FG-577: on a release host, the remedy the detector NAMES actually converge
     process.env.FORGE_REPO_DIR = devCheckout;
 
     withDisposableHome((home) => {
-      // ── 1. A ~/.forge that has drifted, in BOTH taxonomies — the fixture used
-      //       to plant drift only in runtimes/pi-apikey.yml, which is why it
-      //       could not see the prose half of this property and would have gone
-      //       green on it forever (FG-578).
+      // ── 1. A ~/.forge drifted in BOTH taxonomies:
       //       (a) the stale runtime seed of #265, the failure this detector was
-      //           built for: forge-owned, and forge WILL refresh it.
+      //           built for: forge-owned + executable, and forge WILL refresh it.
       mkdirSync(join(home, "runtimes"), { recursive: true });
       writeFileSync(join(home, "runtimes", "pi-apikey.yml"), "# STALE\nprovider: stale-and-wrong\n");
-      //       (b) an operator-authored prose seed carrying a local edit: forge
-      //           will NOT refresh it, and (FG-578) must not claim it will.
+      //       (b) a PROSE seed carrying a local edit. FG-777 flipped agents to
+      //           forge-owned, so forge now converges this too — but only AFTER
+      //           FG-776 backs the edit up, so it is never silently destroyed.
       mkdirSync(join(home, "agents"), { recursive: true });
       writeFileSync(join(home, "agents", "note.md"), "LOCALLY EDITED — the operator's own words\n");
 
@@ -155,22 +166,17 @@ test("FG-577: on a release host, the remedy the detector NAMES actually converge
         "the detector must see the planted drift before we try to repair it",
       );
       assert.ok(
-        before.stale.some((e) => e.path === join("agents", "note.md") && e.status === "drifted" && e.ownership === "operator-authored"),
-        "…and must see the PROSE drift too, or the convergence claim below is untested",
+        before.stale.some((e) => e.path === join("agents", "note.md") && e.status === "drifted" && e.ownership === "forge-owned"),
+        "…and must see the PROSE drift too, now classified forge-owned (the flip)",
       );
 
-      // ── 3. …and names `forge upgrade` as the remedy (seed-drift.ts). The loop
-      //       under test is defined by what this string says, so read it from the
-      //       renderer rather than hardcoding the assumption.
+      // ── 3. …and names `forge upgrade` as the remedy for the WHOLE report. The
+      //       old FG-578 "forge upgrade will NOT refresh this / merge by hand" half
+      //       is GONE: upgrade converges the flipped prose now.
       const remedy = renderSeedDrift(before);
       assert.match(remedy, /Fix: forge upgrade/);
-      // FG-578 — THE NARROWED CLAIM. `forge upgrade` converges the forge-owned
-      // half and, by design, retains the authored half. So the renderer may name
-      // upgrade as the remedy for runtimes and must NOT name it as the remedy for
-      // prose: that would be a promise that converges nothing — run it forever,
-      // stay drifted — which is the same defect class as a false refresh claim.
-      assert.match(remedy, /forge upgrade will NOT/, "the prose half must say plainly that upgrade does not refresh it");
-      assert.ok(!/Refresh with forge upgrade if unintended/.test(remedy), "the old non-converging promise must be gone");
+      assert.ok(!/forge upgrade will NOT/.test(remedy), "the non-converging promise is gone — upgrade converges the prose now");
+      assert.ok(!/merge by hand/.test(remedy), "…and so is 'merge by hand'");
 
       // ── 4. Run that remedy — the REAL action, driven as the release.
       const exitCode = captureExit(() => silently(() => runUpgrade(
@@ -178,44 +184,35 @@ test("FG-577: on a release host, the remedy the detector NAMES actually converge
         { mode: "release", assetsDir: release, devDir: devCheckout },
       )));
 
-      // ── 5. The loop terminates. This is the assertion the whole ticket is for.
-      //       Pre-fix (assets resolved from devDir) the install lands DEV bytes
-      //       and this stays drifted forever: run the named remedy, still
-      //       drifted, run it again, still drifted.
+      // ── 5. The loop terminates for EVERYTHING forge owns — which is now the whole
+      //       report. Every category upgrade CLAIMS to converge, it converges.
       const after = detectSeedDrift(baselineOf(release), home);
       assert.equal(after.ok, true, "the remedy the detector names must converge the detector — a remedy that leaves drift in place is the defect");
-      // FG-578 narrows this from "nothing is stale" to "nothing forge OWNS is
-      // stale". The two used to be the same claim only because the installer
-      // clobbered the authored files — the defect this ticket removes. Every
-      // category upgrade CLAIMS to converge, it converges; the categories it now
-      // retains stay stale, which is the honest outcome and is why the renderer no
-      // longer promises otherwise.
-      assert.deepEqual(
-        after.stale.filter((e) => e.ownership === "forge-owned"),
-        [],
-        "no forge-OWNED seed may remain stale against the executing release's own seeds",
-      );
+      assert.deepEqual(after.stale, [], "no seed remains stale — the flipped prose converged along with the runtime");
 
-      // ── 6. …and it converged by installing RELEASE bytes, not by any other
-      //       route. Without this, a remedy that converged by corrupting the
-      //       baseline would pass step 5.
-      const installed = readFileSync(join(home, "runtimes", "pi-apikey.yml"), "utf8");
-      assert.match(installed, /provider: RELEASE/);
-      assert.ok(!installed.includes("DEV"), "converging onto DEV bytes is the named defect, not a fix");
-      assert.ok(!installed.includes("stale-and-wrong"), "FORCE=1 must actually overwrite the drifted runtime seed");
-
-      // FG-578: the other half of the same run, and the reason the two halves
-      // belong in ONE test — the remedy converged the forge-owned seed WITHOUT
-      // touching the operator's prose. A fix that converged everything would pass
-      // every assertion above and silently destroy the local edit.
+      // ── 6. …and it converged by installing RELEASE bytes, not by corrupting the
+      //       baseline. BOTH the runtime and the flipped prose are refreshed.
+      const installedRuntime = readFileSync(join(home, "runtimes", "pi-apikey.yml"), "utf8");
+      assert.match(installedRuntime, /provider: RELEASE/);
+      assert.ok(!installedRuntime.includes("DEV"), "converging onto DEV bytes is the named defect, not a fix");
+      assert.ok(!installedRuntime.includes("stale-and-wrong"), "FORCE=1 must actually overwrite the drifted runtime seed");
       assert.equal(
         readFileSync(join(home, "agents", "note.md"), "utf8"),
-        "LOCALLY EDITED — the operator's own words\n",
-        "the operator's prose survives the very remedy that refreshed the runtime beside it",
+        "RELEASE agent\n",
+        "the flipped prose seed is force-refreshed to the release bytes — always-upgraded now",
       );
-      const proseAfter = renderSeedDrift(after);
-      assert.match(proseAfter, /agents\/note\.md/, "…and the surviving drift is still REPORTED — retained is not hidden");
-      assert.ok(!/Fix: forge upgrade/.test(proseAfter), "with only prose left stale, upgrade is no longer named as a remedy: it would not converge it");
+
+      // ── 7. FG-776/FG-777 SAFETY: overwriting the operator's edit is allowed ONLY
+      //       because it was backed up first. The edit is not destroyed — it is under
+      //       the pre-upgrade backup, exact bytes, for the operator to re-express as
+      //       a <project>/.forge override. A fix that converged everything WITHOUT the
+      //       backup would pass steps 5–6 and silently destroy the local edit.
+      const backedUp = backedUpBytes(join(home, "pre-upgrade-backup"), join("agents", "note.md"));
+      assert.equal(
+        backedUp,
+        "LOCALLY EDITED — the operator's own words\n",
+        "the operator's pre-upgrade prose is preserved verbatim in the FG-776 backup",
+      );
 
       // The advancement half still refused, and that is still a failed request —
       // but it did not cost us the repair. Both facts hold at once.

@@ -1,15 +1,23 @@
-// FG-578: `forge upgrade` must not silently destroy the operator's authored host
-// RACI — and the derived routing policy must be recompiled from what SURVIVED.
+// FG-578 → FG-777: this file used to pin that `forge upgrade` must NEVER overwrite
+// the operator's authored host RACI. FG-777 FLIPS that contract: agents,
+// constraints and forge-raci.md are now forge-owned and ALWAYS upgraded — but the
+// overwrite is GATED on FG-776's one-time host-edit backup, so a genuine edit is
+// backed up before it is ever overwritten. This file now pins BOTH halves:
 //
-// THE DEFECT THIS FILE REPRODUCES: upgrade.ts runs install-seeds.sh with FORCE=1;
-// the installer's generic predicate `[[ "${FORCE:-0}" == "1" || ! -e ... ]]` then
-// cp -f'd over EVERYTHING, forge-raci.md included — the operator-authored routing
-// source that `forge raci apply` audits every change to. upgrade then recompiled
-// routing-policy.yml FROM the clobbered source, propagating the loss into the
-// derivative. An operator applies an audited routing change through the gated,
-// confirm-before-write channel that exists precisely so routing changes are
-// reviewable, runs the ordinary supported `forge upgrade`, and their approved
-// controls are silently reverted.
+//   - the ALWAYS-UPGRADE (FG-777 tests): `forge upgrade` runs the FG-776 backup
+//     first (writing the migration latch), then force-refreshes the authored RACI
+//     and recompiles the policy from the SEED bytes. The operator's customization
+//     is expected to have moved to a <project>/.forge override.
+//   - the GATE-ABSENT retain (the surviving FG-578 direct-install tests): a bare
+//     `FORCE=1 scripts/install-seeds.sh` on a host that never ran the migration
+//     still RETAINS the authored files — the overwrite cannot fire without the
+//     latch — so an operator who skips the migration is never silently clobbered.
+//
+// THE ORIGINAL DEFECT, for the record: upgrade.ts ran install-seeds.sh with
+// FORCE=1 and the installer's generic predicate cp -f'd over EVERYTHING,
+// forge-raci.md included, then recompiled routing-policy.yml FROM the clobbered
+// source — with no backup. FG-578 stopped that by retaining; FG-777 re-enables the
+// overwrite but only AFTER FG-776 has backed the edit up.
 //
 // WHY THIS FILE DRIVES THE INSTALLER DIRECTLY AND NOT ONLY runUpgrade: a
 // runUpgrade-only test CANNOT distinguish a writer-side policy from a guard in
@@ -104,10 +112,14 @@ function assertDisposableHome(): string {
 }
 
 /** A home wiped back to "never installed" between tests, so each test's premise
- *  is the one it states rather than whatever ran before it. */
+ *  is the one it states rather than whatever ran before it. FG-777: the
+ *  `pre-upgrade-backup` dir is cleared too — it holds the FG-776 migration latch,
+ *  and a latch leaked from a prior `upgradeAsRelease` test would flip a later
+ *  DIRECT-install test's gate from retain to overwrite. Install STATE is what this
+ *  resets, and the latch is install state. */
 function freshHome(): string {
   const home = assertDisposableHome();
-  for (const entry of ["forge-raci.md", "routing-policy.yml", "agents", "constraints", "runtimes", "workflows", "model-policy.example.yml"]) {
+  for (const entry of ["forge-raci.md", "routing-policy.yml", "agents", "constraints", "runtimes", "workflows", "model-policy.example.yml", "pre-upgrade-backup"]) {
     rmSync(join(home, entry), { recursive: true, force: true });
   }
   return home;
@@ -184,10 +196,13 @@ afterEach(() => {
 
 // ─────────────────────────── 1. THE CORE PROPERTY ───────────────────────────
 
-test("FG-578 (CORE): FORCE=1 install-seeds.sh does not overwrite a divergent operator RACI", () => {
-  // The writer, driven the way the docs tell operators to drive it. This is the
-  // assertion a runUpgrade-only test cannot make: it fails on a caller-side guard,
-  // which is what makes it evidence that the policy lives in the writer.
+test("FG-777 (GATE, direct): FORCE=1 install-seeds.sh WITHOUT the migration latch does not overwrite a divergent operator RACI", () => {
+  // THE GATE, exercised the way the docs tell operators to drive the writer. This
+  // host never ran the FG-776 backup, so the latch is absent and the always-upgrade
+  // is withheld: a bare `FORCE=1 scripts/install-seeds.sh` cannot fire the overwrite
+  // without the latch. This is the assertion a runUpgrade-only test cannot make —
+  // runUpgrade always writes the latch first — which is why the writer is driven
+  // directly.
   assert.equal(executionModeFrom(join(release, "src", "v2")), "release", "the fixture really is a release, by the one mode oracle");
   const home = assertDisposableHome();
 
@@ -199,35 +214,37 @@ test("FG-578 (CORE): FORCE=1 install-seeds.sh does not overwrite a divergent ope
   assert.equal(
     readFileSync(join(home, "forge-raci.md"), "utf8"),
     raciDoc(OPERATOR_RESPONSIBLE),
-    "PRE-FIX THIS CLOBBERS: FORCE=1 cp -f'd the seed over the operator's audited routing change",
+    "no migration latch → the gate withholds the flip → the operator's audited routing change survives FORCE=1",
   );
 });
 
-test("FG-578 (CORE): forge upgrade retains the operator RACI AND recompiles routing-policy.yml from the RETAINED bytes", () => {
+test("FG-777 (CORE): forge upgrade ALWAYS-UPGRADES the host RACI — it backs the operator's edit up (FG-776) then overwrites it, and recompiles routing-policy.yml from the SEED bytes", () => {
+  // The FG-777 inversion of the old FG-578 retain contract. forge upgrade now runs
+  // the FG-776 host-edit backup FIRST (writing the migration latch), then
+  // install-seeds sees the latch and force-refreshes the authored RACI. The
+  // operator's routing customization is expected to have moved to a
+  // <project>/.forge/forge-raci.md full-replacement override — the host RACI is
+  // forge's again.
   const home = assertDisposableHome();
   installDirectly();
   writeFileSync(join(home, "forge-raci.md"), raciDoc(OPERATOR_RESPONSIBLE));
 
-  const { out } = upgradeAsRelease();
+  const { out } = upgradeAsRelease({ json: true });
+  const result = JSON.parse(out);
 
-  // Half one: the source survived.
-  assert.equal(readFileSync(join(home, "forge-raci.md"), "utf8"), raciDoc(OPERATOR_RESPONSIBLE), "the authored source survives the upgrade");
+  // The host RACI is refreshed to this release's seed — the always-upgrade.
+  assert.equal(readFileSync(join(home, "forge-raci.md"), "utf8"), raciDoc(SEED_RESPONSIBLE), "the host RACI is force-refreshed to the seed");
+  // …and the derived policy follows it, compiled from the seed bytes now.
+  assert.equal(responsibleInCompiledPolicy(home), SEED_RESPONSIBLE, "routing-policy.yml is recompiled from the refreshed seed RACI");
+  assert.notEqual(responsibleInCompiledPolicy(home), OPERATOR_RESPONSIBLE, "the operator's host-RACI routing no longer stands — it moved to the project override");
 
-  // Half two — the one that actually matters, and the one "forge-raci.md still
-  // exists" cannot prove. upgrade recompiles the DERIVED policy right after the
-  // install; if the derivative inherited the seed's bytes, the operator's routing
-  // is reverted in the artifact the orchestrator actually consumes and the
-  // surviving source is a decoy. Retention that stops at the source is not
-  // retention.
-  assert.equal(
-    responsibleInCompiledPolicy(home),
-    OPERATOR_RESPONSIBLE,
-    "routing-policy.yml must be compiled from the RETAINED operator RACI — the derivative does not inherit the exemption, it inherits the retained SOURCE",
-  );
-  assert.notEqual(responsibleInCompiledPolicy(home), SEED_RESPONSIBLE, "compiling the seed's routing into the live policy IS the defect");
-  // FG-583: the flat routing-policy.yml is recompiled but marked non-authoritative
-  // (drift/doctor only); the effective policy is published in the seed generation.
-  assert.match(out, /routing-policy\.yml.*recompiled/, "the derived artifact is still kept in lockstep — the exemption is scoped to the SOURCE, not to $FORGE_HOME");
+  // The safety half, and the reason the overwrite is allowed at all: FG-776 backed
+  // the operator's edit up BEFORE the overwrite, so a genuine edit is never
+  // destroyed. The backup is on the machine surface.
+  assert.equal(result.hostEditMigration, "backed-up", "the FG-776 backup ran before the overwrite");
+  assert.ok(result.hostEditBackedUp.includes("forge-raci.md"), "the operator's RACI was backed up");
+  const backedUp = readFileSync(join(result.hostEditBackupDir, "forge-raci.md"), "utf8");
+  assert.equal(backedUp, raciDoc(OPERATOR_RESPONSIBLE), "the backup holds the operator's exact pre-upgrade bytes");
 });
 
 test("FG-578 (direct-path): recreating forge-raci.md via the installer does NOT recompile routing-policy.yml — it stays stale until `forge route compile`", () => {
@@ -263,7 +280,7 @@ test("FG-578 (direct-path): recreating forge-raci.md via the installer does NOT 
   assert.equal(responsibleInCompiledPolicy(home), SEED_RESPONSIBLE, "`forge route compile` recompiles the policy from the recreated RACI");
 });
 
-// ──────────────────── 2. THE EXEMPTION LIMITS, NOT DISABLES ────────────────────
+// ──────────── 2. THE GATE LIMITS, NOT DISABLES (create + forge-owned) ────────────
 
 test("FG-578: first install still CREATES forge-raci.md from the seed", () => {
   // The seed's authority is CREATION. An exemption that also disabled that would
@@ -310,16 +327,14 @@ test("FG-578: a BARE (non-FORCE) reinstall leaves every existing file byte-ident
   }
 });
 
-// ─────────── 3. AUDIT HIGH-2: agents/ and constraints/, DECIDED AND TESTED ───────────
+// ─────────── 3. THE GATE, ABSENT: agents/ and constraints/ retained + operator told ───────────
 
-test("FG-578 (audit HIGH-2): divergent agents/ and constraints/ files survive FORCE=1", () => {
-  // Decided, not defaulted. seed-drift.ts has classified these two
-  // operator-authored + prose — "may carry local edits → warn, never
-  // auto-overwrite" — since FG-335, which shipped only the detector and named the
-  // deferred half in as many words. util/paths.ts gives neither a project-level
-  // override, so ~/.forge IS the only place an operator can edit them: authored
-  // surfaces by construction. Leaving them to the generic FORCE branch by
-  // omission would be a decision too — the silent one.
+test("FG-777 (GATE): without the migration latch, divergent agents/ and constraints/ survive FORCE=1, and the operator is told the migration must run first", () => {
+  // FG-777 flipped agents/constraints to forge-owned (always-upgraded), but the
+  // flip is GATED on FG-776's host-edit backup. This host never ran it — no latch —
+  // so the overwrite is withheld and the divergent files survive, exactly as they
+  // did under the old FG-578 exemption. The operator is told WHY (the migration
+  // must run first), which is what turns a silent no-op into an actionable state.
   const home = assertDisposableHome();
   installDirectly();
   writeFileSync(join(home, "agents", "engineer", "CLAUDE.md"), "OPERATOR agent prose\n");
@@ -331,6 +346,7 @@ test("FG-578 (audit HIGH-2): divergent agents/ and constraints/ files survive FO
   assert.equal(readFileSync(join(home, "constraints", "house-style.md"), "utf8"), "OPERATOR constraint prose\n");
   assert.match(out, /^Retained: agents\/engineer\/CLAUDE\.md /m, "and the operator is TOLD, per file");
   assert.match(out, /^Retained: constraints\/house-style\.md /m);
+  assert.match(out, /GATED|migration|pre-upgrade backup/i, "the operator is told the flip is gated and the migration must run first");
 });
 
 test("FG-578: a NEW seed file inside an exempt category is still installed alongside the operator's edits", () => {
@@ -371,45 +387,39 @@ test("FG-578: a retained file is NOT echoed as 'Installing …' and NOT counted 
   }
 });
 
-test("FG-578: upgrade's human output names WHAT was skipped and WHY, and claims no refresh that did not happen", () => {
+test("FG-777: upgrade's human output announces the host-edit backup and REFRESHES the authored RACI — no false 'retained' claim", () => {
   const home = assertDisposableHome();
   installDirectly();
   writeFileSync(join(home, "forge-raci.md"), raciDoc(OPERATOR_RESPONSIBLE));
 
   const { out } = upgradeAsRelease();
 
-  assert.match(out, /NOT refreshed/, "says plainly that a refresh did NOT happen");
-  assert.match(out, /operator-authored/, "names WHY — ownership, not an error");
-  assert.match(out, /out of forge's control path/, "…and that this is a standing property, not this run's accident");
+  // The FG-776 backup is announced BEFORE the refresh, naming the file it backed up.
+  assert.match(out, /pre-upgrade host-edit backup/, "the backup step is announced");
+  assert.match(out, /backed up/, "…and says it backed the edit up");
   assert.match(out, /forge-raci\.md/, "names WHICH file");
-  // The new failure this fix introduces, named rather than buried: an operator
-  // whose RACI is never refreshed runs old prose against new forge code. The
-  // exemption is still right — losing an audited routing change is worse — but
-  // silence about the trade would be the same dishonesty in the other direction.
-  assert.match(out, /newer forge code/, "names the failure the exemption INTRODUCES");
-  assert.ok(!/Installing forge-raci\.md/.test(out), "and never claims it installed it");
+  // And the always-upgrade actually refreshes it: forge-raci.md IS installed now.
+  assert.match(out, /Installing forge-raci\.md into|forge-raci\.md into/, "the authored RACI is refreshed, not retained");
+  // The old FG-578 'NOT refreshed / these are yours' claim must be GONE — on the
+  // upgrade path the latch is present, so nothing is retained.
+  assert.ok(!/NOT refreshed/.test(out), "the flip means the authored seeds ARE refreshed — no stale 'not refreshed' claim");
 });
 
-test("FG-578: --json exposes the retained set machine-readably, and the run is RESOLVED (exit 0)", () => {
+test("FG-777: --json shows the authored RACI was refreshed (authoredRetention none), with the FG-776 backup recorded", () => {
   const home = assertDisposableHome();
   installDirectly();
   writeFileSync(join(home, "forge-raci.md"), raciDoc(OPERATOR_RESPONSIBLE));
 
-  const { out, exitCode } = upgradeAsRelease({ json: true });
+  const { out } = upgradeAsRelease({ json: true });
   const result = JSON.parse(out);
 
-  assert.equal(result.authoredRetention, "retained", "the typed outcome variant is on the machine surface");
-  assert.deepEqual(result.authoredRetentions, ["forge-raci.md"], "…with the named set, exactly as slashCommandOverrides is");
-
-  // Classified RESOLVED, and the exit code is the assertion — not the table.
-  // `retained` fires on EVERY host whose operator has ever run `forge raci apply`,
-  // so classifying it unresolved would make exit 1 permanent for the supported,
-  // audited workflow: forge declining to clobber a file it does not own is the
-  // command working, not a failed request. (SLASH_COMMANDS' user-override is the
-  // settled precedent for exactly this shape.)
-  assert.equal(exitCode, undefined, "retention must not set a non-zero exit code");
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.unresolved, [], "retention contributes no unresolved reason");
+  // Nothing is retained on the upgrade path: the migration latch is present, so the
+  // authored RACI is force-refreshed like any forge-owned seed.
+  assert.equal(result.authoredRetention, "none", "on the flipped upgrade path the authored seed is refreshed, not retained");
+  assert.deepEqual(result.authoredRetentions, [], "…so there is no retained set");
+  // The safety trail is what carries the operator's edit now: FG-776 backed it up.
+  assert.equal(result.hostEditMigration, "backed-up");
+  assert.deepEqual(result.hostEditBackedUp, ["forge-raci.md"], "the operator's edit is recorded as backed up before the overwrite");
 });
 
 test("FG-578: a clean host reports retention as 'none' — the signal fires on the state, not on every run", () => {

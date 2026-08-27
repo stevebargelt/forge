@@ -8,6 +8,13 @@
 > project `CLAUDE.md` orchestrator block from the template — a render, not a seed copy — so that still works
 > exactly as written. Forge-owned seeds (`workflows/`, `runtimes/`, skills) also still refresh normally under
 > `FORCE=1`. **The cross-project workspace-scoping outcome this PRD specifies is unaffected.**
+>
+> ⚠️ **FURTHER STATUS (2026-08-27): the FG-578 note above is itself superseded by FG-777.** `agents/`,
+> `constraints/`, and `forge-raci.md` are no longer a retained-forever category at all — they are forge-owned
+> and ALWAYS upgraded, gated only on a one-time host-edit backup (FG-776). Re-testing an authored-seed edit no
+> longer requires removing the `~/.forge/…` copy first: `FORCE=1 ./scripts/install-seeds.sh` (or `forge upgrade`)
+> now overwrites it directly, once that one-time backup has run on the host. Customization moves to
+> `<project>/.forge`. See `docs/how-to-upgrade.md#host-authored-seeds-are-forge-owned-and-always-upgraded-fg-777`.
 
 
 > ⚠️ **STATUS (2026-07-16): this accepted PRD's `npm link` install path is SUPERSEDED by FG-571.**

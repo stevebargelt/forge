@@ -18,21 +18,20 @@
 // binding with no signal at all. This module is the missing signal.
 //
 // Read-only detector, surfaced by `forge doctor`. Runtimes are forge-owned
-// execution artifacts (safe to overwrite); agents/constraints/raci are prose that
-// may carry local edits, so they are reported as a warning rather than treated as
-// a hard readiness fail.
+// execution artifacts (safe to overwrite); agents/constraints/raci are forge-owned
+// PROSE, so a stale one is reported as a warning rather than treated as a hard
+// readiness fail — but the remedy is `forge upgrade`, which converges it.
 //
-// FG-578: that split is no longer only this module's opinion — it is the
-// installer's WRITE policy. `FORCE=1 scripts/install-seeds.sh` (and so
-// `forge upgrade`) refreshes the auto-refreshable categories and RETAINS the
-// authored ones, which changes what this detector may honestly name as a remedy:
-// pointing an operator at `forge upgrade` for prose drift would name a remedy
-// that converges nothing — run it forever, stay drifted. That is the same defect
-// class as a false refresh claim, so renderSeedDrift() now states a remedy only
-// for the categories it actually converges, and says plainly that the rest are
-// the operator's to merge. `authoredCategories()` below is the shared face of
-// this taxonomy; fg578-ownership-agreement.test.ts fails if the installer's
-// AUTHORED_EXEMPT ever disagrees with it.
+// FG-777: agents/constraints/raci are FLIPPED from operator-authored to
+// forge-owned. Before FG-777 the installer RETAINED them (seeded once, never
+// overwrote — FG-578), so renderSeedDrift() could not name `forge upgrade` as
+// their remedy without promising a convergence that never happened. Now the
+// installer always-upgrades them — FORCE overwrites, gated on FG-776's host-edit
+// backup latch — so `forge upgrade` IS the converging remedy for every category,
+// and the "these are YOURS, merge by hand" half is gone. `authoredCategories()`
+// below is the shared face of this taxonomy — now EMPTY;
+// fg578-ownership-agreement.test.ts fails if the installer's AUTHORED_EXEMPT ever
+// disagrees with it.
 
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { basename, join, relative } from "node:path";
@@ -54,9 +53,14 @@ export type SeedStatus = "current" | "drifted" | "missing";
 
 /** WHO may edit a seed. FG-579 splits this from COUPLING: they are orthogonal.
  *  `forge-owned`   — the installer overwrites it under FORCE; a stale one is
- *                    forge's to converge (runtimes, workflows, skills).
- *  `operator-authored` — forge seeds it once and never writes over it; a stale
- *                    one is the operator's to merge (agents, constraints, raci). */
+ *                    forge's to converge (runtimes, workflows, skills, and since
+ *                    FG-777 agents, constraints, raci — always-upgraded, gated on
+ *                    FG-776's host-edit backup latch).
+ *  `operator-authored` — forge seeds it once and never writes over it; a stale one
+ *                    is the operator's to merge. No SEED category is this any more
+ *                    (FG-777 emptied it); the value stays for the project-scoped
+ *                    adapter surfaces below, where an unmarked file IS the
+ *                    operator's. */
 export type SeedOwnership = "forge-owned" | "operator-authored";
 
 /** WHAT breaks when a seed is stale. FG-579 splits this from OWNERSHIP.
@@ -114,17 +118,27 @@ const SEED_SPECS: SeedSpec[] = [
   { category: "workflows", rel: "workflows", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
   { category: "codex", rel: "codex", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
   { category: "skills", rel: "skills", root: "claude-skills", ownership: "forge-owned", coupling: "prose" },
-  { category: "agents", rel: "agents", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
-  { category: "constraints", rel: "constraints", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
-  { category: "raci", rel: "forge-raci.md", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
+  // FG-777: agents, constraints and raci are FLIPPED to forge-owned. They were
+  // operator-authored (forge seeded them once, never overwrote them — FG-578);
+  // now they are always-upgraded, FORCE overwrites them, and the operator's
+  // customization moves to a <project>/.forge override upgrade never touches.
+  // Their coupling stays PROSE, so their drift is still a [warn] (a stale agent
+  // seed misleads a session, it does not silently mis-run one) — but the remedy is
+  // now `forge upgrade`, which converges them, not "merge by hand". The FORCE
+  // overwrite is GATED on FG-776's host-edit backup latch (see install-seeds.sh);
+  // the detector reports drift the same either way.
+  { category: "agents", rel: "agents", root: "forge-home", ownership: "forge-owned", coupling: "prose" },
+  { category: "constraints", rel: "constraints", root: "forge-home", ownership: "forge-owned", coupling: "prose" },
+  { category: "raci", rel: "forge-raci.md", root: "forge-home", ownership: "forge-owned", coupling: "prose" },
 ];
 
-/** FG-578: the categories the OPERATOR authors — forge seeds them, then never
- *  writes over them. Derived from SEED_SPECS rather than restated, so this cannot
+/** The seed categories forge seeds once and never writes over — the permanent
+ *  operator-authored tier. FG-777 flipped agents/constraints/raci to forge-owned,
+ *  so this is now EMPTY. Derived from SEED_SPECS rather than restated, so it cannot
  *  drift from the taxonomy the detector itself uses. install-seeds.sh's
- *  AUTHORED_EXEMPT must name exactly this set; the shell/TS boundary makes
- *  literal sharing impractical, so fg578-ownership-agreement.test.ts gates the
- *  agreement instead of a comment asking someone to remember. */
+ *  AUTHORED_EXEMPT must name exactly this set (now `()`); the shell/TS boundary
+ *  makes literal sharing impractical, so fg578-ownership-agreement.test.ts gates
+ *  the agreement instead of a comment asking someone to remember. */
 export function authoredCategories(): string[] {
   return SEED_SPECS.filter((s) => s.ownership === "operator-authored").map((s) => s.category).sort();
 }
@@ -253,27 +267,28 @@ export function renderSeedDrift(report: SeedDriftReport): string {
     const mark = e.coupling === "executable" ? "FAIL" : "warn";
     lines.push(`  [${mark}] ${e.status.padEnd(7)} ${e.path}`);
   }
-  // FG-578: each half of the report names ONLY the remedy that converges IT, and
-  // both are printed when both are stale. The old text was an either/or that, on
-  // a mixed report, named the runtime remedy and let it stand for the prose too —
-  // and on a prose-only report promised `forge upgrade` would refresh files the
-  // installer is now required to retain. A remedy that cannot converge the
-  // detector that names it is the defect FG-577 fixed for assets; the same
-  // promise made about prose is the same defect wearing prose.
-  // The remedy branch keys on OWNERSHIP, not coupling: `forge upgrade` converges
-  // exactly the forge-owned categories (the installer force-writes them), whatever
-  // their coupling — runtimes/workflows (executable) AND skills (prose) alike. The
-  // [FAIL]/[warn] mark above still derives from coupling, so a stale skill reads as
-  // a warning that upgrade nonetheless fixes.
+  // FG-777: every seed category is now forge-owned, so `forge upgrade` converges
+  // the whole report — there is no longer a "these are YOURS, merge by hand" half.
+  // The remedy keys on OWNERSHIP, not coupling: upgrade force-writes forge-owned
+  // categories whatever their coupling — runtimes/workflows (executable) AND
+  // agents/constraints/raci/skills (prose) alike. The [FAIL]/[warn] mark above
+  // still derives from coupling, so a stale agent seed reads as a warning that
+  // upgrade nonetheless fixes.
+  //
+  // The always-upgrade of agents/constraints/raci is GATED on FG-776's host-edit
+  // backup latch (install-seeds.sh): `forge upgrade` runs that backup first, so on
+  // the upgrade path the flip takes effect and converges them; a bare
+  // `FORCE=1 scripts/install-seeds.sh` on a host that never ran the migration keeps
+  // retaining them until it has. Either way `forge upgrade` is the converging
+  // remedy — it is the entry point that runs the backup AND the refresh — so it is
+  // what the report names.
   const staleForgeOwned = [...new Set(report.stale.filter((e) => e.ownership === "forge-owned").map((e) => e.category))].sort();
   if (staleForgeOwned.length > 0) {
-    lines.push(`  Forge-owned seeds (${staleForgeOwned.join(", ")}) are stale — agent execution or orchestration may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh).`);
-  }
-  if (report.stale.some((e) => e.ownership === "operator-authored")) {
-    lines.push(`  Prose seeds (${authoredCategories().join(", ")}) differ from this release's defaults — these are YOURS.`);
-    lines.push("  forge seeds them once and never overwrites them, FORCE=1 included, so forge upgrade will NOT");
-    lines.push("  refresh them and this warning will persist while your edits stand. If the drift is unintended,");
-    lines.push(`  diff against ${defaultRepoSeedsDir()} and merge by hand.`);
+    lines.push(`  Forge-owned seeds (${staleForgeOwned.join(", ")}) are stale — agent execution or orchestration may not match the code. Fix: forge upgrade.`);
+    lines.push("  Host authored seeds (agents, constraints, forge-raci.md) are forge-owned and ALWAYS upgraded;");
+    lines.push("  upgrade backs up any edit you had made first (FG-776), then refreshes them. Customization lives");
+    lines.push("  in <project>/.forge, which upgrade never touches — an agent addendum, an additive constraints");
+    lines.push("  union, or a full-replacement forge-raci.md override. A genuine operator edit is never destroyed.");
   }
   return lines.join("\n");
 }
