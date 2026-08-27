@@ -42,7 +42,7 @@ import {
 // with the real run's provisioning decision.
 import { classifyDocsSurfaces, type DocsSurfacesVerdict } from "../../v2/contract.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
-import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
+import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../../v2/release-doctor.js";
 import { gatherReleaseInputs } from "./doctor.js";
 import { assetRoot, devCheckoutDir, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
@@ -1010,6 +1010,15 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         }
       }
 
+      // FG-777: the FG-776 backup must protect exactly the $FORGE_HOME
+      // install-seeds is about to overwrite, and its completion latch is what the
+      // installer's gate reads — so BOTH seams resolve the SAME home from the live
+      // env. In normal operation process.env.FORGE_HOME is stable, so this equals
+      // the import-time FORGE_HOME; resolving it once and threading it to both keeps
+      // the migration (which writes the latch) and the installer (which reads it)
+      // aligned even if the env was re-pointed after import.
+      const seedInstallForgeHome = process.env.FORGE_HOME ?? FORGE_HOME;
+
       // Step 3 (pre): FG-776 — the ONE-TIME host-edit backup. Runs BEFORE
       // install-seeds so that once FG-777 flips the operator-authored categories
       // (agents / constraints / raci) to always-FORCE, every operator-edited host
@@ -1018,7 +1027,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // overwrites. Non-blocking (AC5): a failure is surfaced and marks the run
       // unresolved, but never aborts the rest of the upgrade. Sourced strictly from
       // the executing release's seeds, the SAME root install-seeds writes from.
-      const hostEdit = runHostEditMigration({ seedsDir: join(assetsDir, "seeds"), dryRun });
+      const hostEdit = runHostEditMigration({ seedsDir: join(assetsDir, "seeds"), forgeHome: seedInstallForgeHome, dryRun });
       const hostEditMigration: HostEditMigrationOutcome = hostEdit.outcome;
       say(`[3/4] pre-upgrade host-edit backup: ${hostEditMigrationStatusLine(hostEdit)}`);
       // REPORT (loud): the two-case reinstate guidance is narrated on stdout — it is
@@ -1047,7 +1056,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       } else {
         try {
           const out = execFileSync("bash", [installScript], {
-            env: { ...process.env, FORCE: "1" },
+            env: { ...process.env, FORCE: "1", FORGE_HOME: seedInstallForgeHome },
             encoding: "utf8",
           });
           // Emit a compact summary, not the full output

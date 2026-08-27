@@ -728,7 +728,7 @@ test("FG-578: a retained line is NOT an 'Installing' line, and vice versa — th
   assert.equal(parseRetainedLine(installing), null, "an actual install is not a retention");
   // The human header of the retention block carries no path, so it must not parse
   // as a retained entry and inflate the machine-readable list.
-  assert.equal(parseRetainedLine("Retained (operator-authored — forge did not overwrite these, and did not refresh them):"), null);
+  assert.equal(parseRetainedLine("Retained (host authored seeds — forge did not overwrite these, and did not refresh them):"), null);
   assert.equal(parseRetainedLine("Done."), null);
 });
 

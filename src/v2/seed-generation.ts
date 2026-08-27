@@ -21,10 +21,11 @@
 // current before the upgrade, or the complete one the upgrade publishes, never a
 // torn or mixed surface.
 //
-// MEMBERSHIP is only the forge-owned overwrite-on-upgrade surfaces. agents,
-// constraints and raci are AUTHORED_EXEMPT (seed-drift.ts SeedOwnership) — forge
-// seeds them once and never writes over them — so they stay create-only OUTSIDE the
-// generation, on the flat $FORGE_HOME layout the installer already writes.
+// MEMBERSHIP is the dispatch-coupled forge-owned surfaces (workflows, runtimes,
+// derived routing policy). agents, constraints and raci are forge-owned too since
+// FG-777 (always-upgraded, gated on FG-776's host-edit backup latch), but they are
+// NOT dispatch-coupled: they stay on the flat $FORGE_HOME layout the installer
+// writes directly, OUTSIDE the atomic generation.
 //
 // SOURCE TRUST — the generation is sourced through FG-577's assetRoot executing-
 // release provenance (the caller passes assetRoot()); a caller-selected

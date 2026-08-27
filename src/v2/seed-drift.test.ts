@@ -142,7 +142,10 @@ test("detectSeedDrift: drifted PROSE seed warns but keeps ok=true", () => {
     const r = detectSeedDrift(repo, home);
     assert.equal(r.ok, true); // prose drift alone is a warning, not a fail
     assert.equal(r.stale.length, 1);
-    assert.equal(r.stale[0]?.ownership, "operator-authored");
+    // FG-777: constraints flipped to forge-owned (always-upgraded). Coupling stays
+    // PROSE, so drift is still a warning — but the ownership, and thus the remedy
+    // (forge upgrade converges it), is now forge's.
+    assert.equal(r.stale[0]?.ownership, "forge-owned");
     assert.equal(r.stale[0]?.coupling, "prose");
   } finally {
     cleanup();
