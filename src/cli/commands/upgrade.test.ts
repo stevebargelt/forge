@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
   classifyStep, unresolvedReasons, classifyAdapterEntries, classifyAdapterOutcomes,
+  aggregateModelPolicyOutcome, type ModelPolicyFileReport, type ModelPolicyFileAction,
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
   type AuthoredRetentionOutcome, type UpgradeStepOutcomes, type SeedGenerationOutcome,
@@ -709,4 +710,51 @@ test("FG-578: a retained line is NOT an 'Installing' line, and vice versa — th
   // as a retained entry and inflate the machine-readable list.
   assert.equal(parseRetainedLine("Retained (operator-authored — forge did not overwrite these, and did not refresh them):"), null);
   assert.equal(parseRetainedLine("Done."), null);
+});
+
+// FG-766: an UNREACHABLE (dead) checkout — a recorded dir that no longer exists —
+// carries no policy to migrate and nothing an operator can act on. Discovery is
+// historical/best-effort, never a completeness claim, so an unreachable file must
+// NOT force the fleet outcome to action-required (and thus NOT force INCOMPLETE).
+// needs-human-decision / newer-unsupported / failed remain action-required / non-complete.
+function policyFile(action: ModelPolicyFileAction): ModelPolicyFileReport {
+  return {
+    scope: "project",
+    projectDir: "/some/dir",
+    policyPath: action === "unreachable" ? null : "/some/dir/.forge/model-policy.yml",
+    discoveryState: action === "unreachable" ? "unreachable-deleted" : "has-policy",
+    verdict: null,
+    action,
+    detail: null,
+  };
+}
+
+test("FG-766: a fleet whose only non-benign action is unreachable is NOT action-required", () => {
+  // unreachable alongside reachable current/no-policy files → keys off the reachable ones.
+  assert.equal(aggregateModelPolicyOutcome([policyFile("current"), policyFile("unreachable")]), "all-current");
+  assert.equal(aggregateModelPolicyOutcome([policyFile("migrated"), policyFile("unreachable")]), "migrated");
+  assert.equal(aggregateModelPolicyOutcome([policyFile("would-migrate"), policyFile("unreachable")]), "would-migrate");
+  assert.equal(aggregateModelPolicyOutcome([policyFile("no-policy"), policyFile("unreachable")]), "none");
+  // unreachable entirely alone is likewise not action-required.
+  assert.equal(aggregateModelPolicyOutcome([policyFile("unreachable")]), "none");
+});
+
+test("FG-766: unreachable + needs-human-decision is STILL action-required", () => {
+  assert.equal(
+    aggregateModelPolicyOutcome([policyFile("unreachable"), policyFile("needs-human-decision")]),
+    "action-required",
+  );
+});
+
+test("FG-766: unreachable + newer-unsupported is action-required; any failed is failed", () => {
+  assert.equal(
+    aggregateModelPolicyOutcome([policyFile("unreachable"), policyFile("newer-unsupported")]),
+    "action-required",
+  );
+  // failed dominates everything, unreachable included.
+  assert.equal(aggregateModelPolicyOutcome([policyFile("unreachable"), policyFile("failed")]), "failed");
+  assert.equal(
+    aggregateModelPolicyOutcome([policyFile("unreachable"), policyFile("needs-human-decision"), policyFile("failed")]),
+    "failed",
+  );
 });
