@@ -1,12 +1,13 @@
 import type { Command } from "commander";
 import { dirname, join, resolve } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { stringify as yamlStringify } from "yaml";
+import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import { RACI_PATH, AGENTS_DIR, WORKFLOWS_DIR } from "../../util/paths.js";
 import { validateRaci, type RaciValidation } from "../../raci/validate.js";
 import { proposeRaciChange, type RaciProposal } from "../../raci/propose.js";
 import { compileRaciDocument } from "../../raci/compile.js";
-import { projectRaciPath, projectPolicyPath, projectRaciAuditPath } from "../../raci/project.js";
+import { projectRaciPath, projectPolicyPath, projectRaciAuditPath, resolvePolicyPath } from "../../raci/project.js";
+import { RoutingPolicySchema, type RoutingPolicy } from "../../raci/policy-schema.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
 // `forge raci` — the RACI authoring surface.
@@ -28,10 +29,24 @@ import type { HostEnv } from "../../raci/route-validate.js";
 // is present. apply re-runs the gate immediately before writing — it never trusts
 // an earlier propose (closes the stale-candidate gap).
 
+/** FG-778: the effective COMPILED host routing policy — the one dispatch reads
+ *  (the seed generation's policy, NOT the flat ~/.forge/routing-policy.yml). The
+ *  authoring gate compares a project override against it to refuse a candidate that
+ *  weakens a host force rule. `undefined` when no complete generation is published
+ *  (noGeneration / tampered) or the policy fails schema — nothing to be a superset
+ *  of, so the gate's superset check is a no-op. */
+function resolveHostPolicy(): RoutingPolicy | undefined {
+  const resolved = resolvePolicyPath();
+  if (!resolved.exists) return undefined;
+  const parsed = RoutingPolicySchema.safeParse(yamlParse(readFileSync(resolved.path, "utf8")));
+  return parsed.success ? parsed.data : undefined;
+}
+
 /** Real host lookups against ~/.forge (mirrors route.ts). */
 const realHost: HostEnv = {
   agentInstalled: (role) => existsSync(join(AGENTS_DIR, role)),
   workflowKnown: (name) => existsSync(join(WORKFLOWS_DIR, `${name}.yml`)),
+  hostPolicy: resolveHostPolicy,
 };
 
 /** Read + lint a RACI file. A missing/unreadable file becomes a finding rather

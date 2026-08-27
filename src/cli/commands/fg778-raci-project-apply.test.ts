@@ -132,18 +132,45 @@ test("negative: the gate validates against the REAL host — a candidate the hos
   }
 });
 
-test("negative: the force-rule superset guarantee refuses a project override that DROPS a host force rule", () => {
-  // Structurally enforced (dormant today: no route carries force_rules). A project
-  // that omits a host force rule on a SHARED route is refused.
+test("negative: the APPLY GATE refuses a project override that DROPS a host force rule, nothing written", () => {
+  // Genuinely exercises the gate (not checkForceRuleWeakening in isolation): the
+  // host policy is injected via HostEnv.hostPolicy and carries a force rule on a
+  // route the candidate SHARES but drops (the compiled seed carries no force_rules
+  // today). This test FAILS if proposeRaciChange stops calling the superset check.
+  const dir = project();
+  try {
+    const targets = applyTargets(dir);
+    const candidate = seed(); // compiles; its implementation_quick route carries force_rules: []
+    const hostPolicy = {
+      version: 1,
+      routes: { implementation_quick: { force_rules: ["human_accountable"] } },
+    } as unknown as RoutingPolicy;
+    const host: HostEnv = {
+      agentInstalled: () => true,
+      workflowKnown: () => true,
+      hostPolicy: () => hostPolicy,
+    };
+
+    const r = applyRaciChange("", candidate, { confirm: true, candidateLabel: "cand.md", host, targets });
+
+    assert.equal(r.written, false);
+    assert.equal(r.reason, "validation_failed");
+    const weakened = r.proposal.validation.route.findings.filter((f) => f.code === "force_rule_weakened");
+    assert.equal(weakened.length, 1, JSON.stringify(r.proposal.validation.route.findings));
+    assert.equal(weakened[0]!.route, "implementation_quick");
+    assert.equal(existsSync(projectRaciPath(dir)), false, "no project raci written on a weakening candidate");
+    assert.equal(existsSync(projectPolicyPath(dir)), false, "no project policy written on a weakening candidate");
+    assert.equal(existsSync(projectRaciAuditPath(dir)), false, "no audit entry on a weakening candidate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("positive: the apply gate ALLOWS a project override whose shared route keeps (supersets) the host force rule", () => {
+  // A candidate whose injected host policy has NO force rule on the shared route
+  // (the dormant reality today) passes the superset check — the gate is not a blanket
+  // refusal, and the check itself allows a superset.
   const host = { version: 1, routes: { implementation_quick: { force_rules: ["human_accountable"] } } } as unknown as RoutingPolicy;
-  const weakened = { version: 1, routes: { implementation_quick: { force_rules: [] } } } as unknown as RoutingPolicy;
-
-  const findings = checkForceRuleWeakening(host, weakened);
-  assert.equal(findings.length, 1);
-  assert.equal(findings[0]!.code, "force_rule_weakened");
-  assert.equal(findings[0]!.route, "implementation_quick");
-
-  // A superset (keeps the host rule + adds one) is allowed.
   const specialized = { version: 1, routes: { implementation_quick: { force_rules: ["human_accountable", "extra"] } } } as unknown as RoutingPolicy;
   assert.deepEqual(checkForceRuleWeakening(host, specialized), []);
 });

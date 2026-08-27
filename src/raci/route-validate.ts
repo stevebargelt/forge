@@ -30,6 +30,13 @@ export type HostEnv = {
   agentInstalled: (role: string) => boolean;
   /** Is a workflow known on this host? (~/.forge/workflows/<name>.yml or seeded) */
   workflowKnown: (name: string) => boolean;
+  /** FG-778: the effective COMPILED host routing policy, resolved lazily. The
+   *  authoring gate (proposeRaciChange) compares a candidate project override
+   *  against it to enforce the force-rule superset boundary. Injected (like the
+   *  lookups above) so the gate core stays pure + testable; the CLI wires the real
+   *  resolvePolicyPath() read. `undefined` when no effective host policy exists
+   *  (no seed generation) — nothing to be a superset of, so the check is skipped. */
+  hostPolicy?: () => RoutingPolicy | undefined;
 };
 
 /** Validate a parsed-but-untyped policy object against the schema + host. When
