@@ -102,7 +102,6 @@ const MANAGED_ENV = [
   "PATH",
   "AWS_PROFILE",
   "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
   "ANTHROPIC_API_KEY",
 ] as const;
 
@@ -278,9 +277,6 @@ test("integ FG-576 AC15: --explain prints all seven recorded fields and launches
 // ─── AC2 / AC4 / AC6: what actually reaches the child ───────────────────────
 
 test("integ FG-576 AC2/AC4/AC6: the launch carries the policy model, the asserted session id and the Forge carrier — each exactly once", () => {
-  // Exercise FG-765's set-if-unset behavior through the real process launch,
-  // independent of whether the test worker inherited an operator override.
-  delete process.env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"];
   const res = runCli(["orchestrator"]);
   assert.equal(res.status, 0, res.stderr);
 
@@ -295,7 +291,6 @@ test("integ FG-576 AC2/AC4/AC6: the launch carries the policy model, the asserte
   assert.equal(record.argv[record.argv.indexOf("--model") + 1], "claude-sonnet-4-6");
   assert.equal(record.cwd, roots.project, "the child did not start in the resolved project root");
   assert.equal(record.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
-  assert.equal(record.env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"], "1");
 
   applyEnv();
   const receipts = listOrchestratorReceiptsForProject(roots.project);

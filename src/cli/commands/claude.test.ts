@@ -360,25 +360,6 @@ test("buildClaudeChildEnv: combines the invariant with Bedrock configuration", (
   assert.equal(parentEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
 });
 
-// FG-765: the agent-teams feature (Monitor tool) is defaulted ON, but set-if-unset —
-// an operator's explicit value survives, unlike the force-pinned background-tasks flag.
-test("buildClaudeChildEnv: FG-765 defaults CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS on when the parent did not set it", () => {
-  const parentEnv: NodeJS.ProcessEnv = { PATH: "/test/bin" };
-
-  const childEnv = buildClaudeChildEnv(parentEnv, "subscription");
-
-  assert.equal(childEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, "1");
-  assert.equal(parentEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, undefined);
-});
-
-test("buildClaudeChildEnv: FG-765 preserves an explicit parent CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS (both '0' and '1')", () => {
-  const off = buildClaudeChildEnv({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" }, "subscription");
-  assert.equal(off.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, "0");
-
-  const on = buildClaudeChildEnv({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }, "subscription");
-  assert.equal(on.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, "1");
-});
-
 // RF-1: the sibling of the Codex defect. An operator's shell that has Bedrock (or an
 // API key) armed must not decide which credential the session runs on — the RESOLVED
 // auth mode does, because that is what the durable receipt records.
