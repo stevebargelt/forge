@@ -18,6 +18,7 @@ import {
   type AdapterSurfacesOutcome, type DocsSurfacesOutcome, type ModelPolicyMigrationOutcome,
   parseRetainedLine,
 } from "./upgrade.js";
+import type { HostEditMigrationOutcome } from "../../v2/host-edit-migration.js";
 import type { AdapterDecision, AdapterOutcome } from "./init.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
@@ -438,6 +439,17 @@ const RELEASE_CHECK: Record<ReleaseCheckOutcome, Verdict> = {
   failed: "unresolved",
 };
 
+// FG-776: only a failed backup is unresolved; backed-up/nothing-to-back-up/the two
+// dry-run forecasts/not-run are all the command working.
+const HOST_EDIT_MIGRATION: Record<HostEditMigrationOutcome, Verdict> = {
+  "backed-up": "resolved",
+  "nothing-to-back-up": "resolved",
+  "would-back-up": "resolved",
+  "would-note": "resolved",
+  "not-run": "resolved",
+  failed: "unresolved",
+};
+
 // FG-583: only a failed atomic publication is unresolved; not-run/would-publish/
 // published are all resolved.
 const SEED_GENERATION: Record<SeedGenerationOutcome, Verdict> = {
@@ -463,6 +475,7 @@ const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K
   gitPull: GIT_PULL,
   npmInstall: NPM_INSTALL,
   assetInstall: ASSET_INSTALL,
+  hostEditMigration: HOST_EDIT_MIGRATION,
   seedGeneration: SEED_GENERATION,
   modelPolicy: MODEL_POLICY,
   authoredRetention: AUTHORED_RETENTION,
@@ -495,7 +508,9 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
   // would-migrate/requires-operator-repair/seed-missing/not-run).
   // FG-560: + 7 for MODEL_POLICY (none/all-current/migrated/would-migrate/
   // action-required/failed/not-run).
-  assert.equal(checked, 8 + 7 + 4 + 4 + 7 + 3 + 5 + 8 + 8 + 5 + 5 + 5 + 4);
+  // FG-776: + 6 for HOST_EDIT_MIGRATION (backed-up/nothing-to-back-up/would-back-up/
+  // would-note/not-run/failed).
+  assert.equal(checked, 8 + 7 + 4 + 4 + 7 + 3 + 5 + 8 + 8 + 5 + 5 + 5 + 4 + 6);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -503,6 +518,7 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   // newly added step is classified by construction rather than by memory.
   const allClean: UpgradeStepOutcomes = {
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
+    hostEditMigration: "backed-up",
     seedGeneration: "published", modelPolicy: "migrated",
     authoredRetention: "none", routingPolicy: "recompiled", projectInit: "refreshed",
     docsSurfaces: "created",
@@ -517,6 +533,7 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   // Every unresolved step contributes — none masks another.
   const allBroken: UpgradeStepOutcomes = {
     gitPull: "failed", npmInstall: "failed", assetInstall: "failed",
+    hostEditMigration: "failed",
     seedGeneration: "failed", modelPolicy: "action-required",
     // FG-578: `retained` sits in the all-broken row deliberately — even here it
     // must not contribute a reason. The count below is the assertion.
@@ -532,7 +549,8 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     imageRebuild: "failed", releaseCheck: "failed",
   };
   // FG-560: model-policy action-required adds the 9th unresolved reason.
-  assert.equal(unresolvedReasons(allBroken).length, 9);
+  // FG-776: the failed host-edit backup adds the 10th.
+  assert.equal(unresolvedReasons(allBroken).length, 10);
 });
 
 // ─────────── FG-253 step 5: adapters as their own step ───────────
@@ -547,6 +565,7 @@ test("FG-253 step 5: an adapter `user-override` is RESOLVED, and contributes no 
   // broken project, and a red light that fires forever on it is noise.
   const withOverride: UpgradeStepOutcomes = {
     gitPull: "skipped", npmInstall: "skipped", assetInstall: "installed",
+    hostEditMigration: "nothing-to-back-up",
     seedGeneration: "published", modelPolicy: "all-current", authoredRetention: "none", routingPolicy: "no-raci",
     projectInit: "already-current", docsSurfaces: "preserved", slashCommands: "user-override",
     adapterSurfaces: "user-override", imageRebuild: "skipped", releaseCheck: "ran",
@@ -640,6 +659,7 @@ test("FG-546: a customized-invalid docs-surfaces file does not, by itself, make 
   // preserved it and warned. Exit 0, ok:true.
   const withRepair: UpgradeStepOutcomes = {
     gitPull: "skipped", npmInstall: "skipped", assetInstall: "installed",
+    hostEditMigration: "nothing-to-back-up",
     seedGeneration: "published", modelPolicy: "all-current", authoredRetention: "none", routingPolicy: "no-raci",
     projectInit: "already-current", docsSurfaces: "requires-operator-repair",
     slashCommands: "already-current", adapterSurfaces: "already-current",
