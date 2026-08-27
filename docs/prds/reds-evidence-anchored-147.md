@@ -7,6 +7,13 @@
 > propagate an edit to `seeds/agents/red-*/CLAUDE.md` is a **silent no-op** if `~/.forge/agents/red-*/` already
 > exists — remove those copies first to re-test the edit. Forge-owned seeds (`workflows/`, `runtimes/`, skills)
 > still refresh normally under `FORCE=1`. **The evidence-anchoring validator this PRD specifies is unchanged.**
+>
+> ⚠️ **FURTHER STATUS (2026-08-27): the FG-578 note above is itself superseded by FG-777.** `seeds/agents/` is no
+> longer authored-exempt — it is forge-owned and ALWAYS upgraded, gated only on a one-time host-edit backup
+> (FG-776). `FORCE=1 ./scripts/install-seeds.sh` (or `forge upgrade`) now overwrites an existing
+> `~/.forge/agents/red-*/` directly; there is no more silent no-op and no need to remove the copy first once that
+> one-time backup has run on the host. See
+> `docs/how-to-upgrade.md#host-authored-seeds-are-forge-owned-and-always-upgraded-fg-777`.
 
 **Status:** shipped in `2cbcc05`; original specification preserved below.
 **Backlog linkage:** #147 closed. Composite with #148 (red-narrow investigation).
