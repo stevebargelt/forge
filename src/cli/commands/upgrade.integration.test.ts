@@ -656,6 +656,40 @@ test("FG-581 (success preserved): a VALID host RACI still recompiles routing-pol
   }
 });
 
+// FG-777 (RF-1): install-seeds, the FG-776 backup, and the routing-policy recompile all
+// resolve the host from the LIVE FORGE_HOME (seedInstallForgeHome). A FORGE_HOME
+// re-pointed AFTER module load must therefore recompile the derived policy INTO the
+// re-pointed host — never the import-time RACI_PATH/ROUTING_POLICY_PATH constants, which
+// would leave the just-upgraded host without its matching derived policy.
+test("FG-777: a FORGE_HOME re-pointed after import recompiles the routing policy into the RE-POINTED host, not the import-time one", () => {
+  const assets = assetTree("fg777-repoint-", "CLEAN", { manifest: false });
+  const repointHome = mkdtempSync(join(tmpdir(), "fg777-home-"));
+  const importTimeHome = process.env.FORGE_HOME!;
+  try {
+    // The import-time host has NO RACI, so a recompile aimed there (the pre-fix
+    // behavior) reports `no-raci` and writes nothing. The re-pointed host carries a
+    // valid RACI — the one the fixed recompile must compile.
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    cpSync(SEED_RACI_PATH, join(repointHome, "forge-raci.md"));
+
+    process.env.FORGE_HOME = repointHome; // re-point AFTER module load — the finding's premise
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    // The derived policy is compiled from, and written into, the re-pointed host…
+    assert.equal(r.result.routingPolicy, "recompiled", "the re-pointed host's RACI is the one compiled");
+    assert.equal(existsSync(join(repointHome, "routing-policy.yml")), true, "the derived policy lands in the re-pointed host");
+    // …and the import-time host, which had no RACI, is never the recompile target.
+    assert.equal(existsSync(ROUTING_POLICY_PATH), false, "the import-time host must not receive the recompile");
+  } finally {
+    process.env.FORGE_HOME = importTimeHome;
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(repointHome, { recursive: true, force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 test("FG-581 (fail-closed): a quarantine rename FAILURE falls back to REMOVING the stale policy — it does not stay authoritative, and the command does not crash", () => {
   const assets = assetTree("fg581-quarantine-fail-", "CLEAN", { manifest: false });
   const quarantinePath = `${ROUTING_POLICY_PATH}.quarantined`;

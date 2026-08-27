@@ -1018,6 +1018,15 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // the migration (which writes the latch) and the installer (which reads it)
       // aligned even if the env was re-pointed after import.
       const seedInstallForgeHome = process.env.FORGE_HOME ?? FORGE_HOME;
+      // The RACI and derived routing-policy paths the recompile below targets MUST be
+      // the SAME host install-seeds and the FG-776 backup just wrote to — not the
+      // import-time RACI_PATH / ROUTING_POLICY_PATH constants, which freeze whatever
+      // FORGE_HOME was at module load. A FORGE_HOME re-pointed after import would
+      // otherwise refresh <new home>/forge-raci.md while recompiling the import-time
+      // host's policy, leaving the host that was just upgraded without its matching
+      // derived policy. Derive both from the one home every seam here resolved.
+      const seedInstallRaciPath = join(seedInstallForgeHome, "forge-raci.md");
+      const seedInstallRoutingPolicyPath = join(seedInstallForgeHome, "routing-policy.yml");
 
       // Step 3 (pre): FG-776 — the ONE-TIME host-edit backup. Runs BEFORE
       // install-seeds so that once FG-777 flips the operator-authored categories
@@ -1109,13 +1118,13 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // threaded onto the --json surface so a script sees the exact same named
       // refusal the human warning prints. Null on every non-failure path.
       let routingPolicyError: string | null = null;
-      if (!existsSync(RACI_PATH)) {
+      if (!existsSync(seedInstallRaciPath)) {
         // No host RACI is not a compile failure: there is no derived artifact to
         // keep in lockstep. A RACI that exists and won't compile IS one.
         routingPolicy = "no-raci";
-        say(`        → routing-policy.yml: nothing to recompile (no host RACI at ${RACI_PATH})`);
+        say(`        → routing-policy.yml: nothing to recompile (no host RACI at ${seedInstallRaciPath})`);
       } else {
-        const res = compilePolicyFile(RACI_PATH, ROUTING_POLICY_PATH, { write: !dryRun });
+        const res = compilePolicyFile(seedInstallRaciPath, seedInstallRoutingPolicyPath, { write: !dryRun });
         if (res.ok) {
           routingPolicy = dryRun ? "would-recompile" : "recompiled";
           // FG-583: the FLAT routing-policy.yml is NON-AUTHORITATIVE for dispatch —
@@ -1138,8 +1147,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           routingPolicy = "failed";
           routingPolicyError = res.error;
           warn(`        ⚠ routing-policy.yml NOT recompiled — ${res.error}`);
-          if (existsSync(ROUTING_POLICY_PATH)) {
-            const quarantinePath = `${ROUTING_POLICY_PATH}.quarantined`;
+          if (existsSync(seedInstallRoutingPolicyPath)) {
+            const quarantinePath = `${seedInstallRoutingPolicyPath}.quarantined`;
             if (dryRun) {
               // Forecast only — mirror the would-* pattern, touch no disk state, so
               // --json `ok` and the exit code still agree with a real run.
@@ -1158,11 +1167,11 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
               // disk — then say so LOUDLY (it is STILL authoritative, remove it by
               // hand) and keep the refusal; never imply a quarantine that did not happen.
               try {
-                renameSync(ROUTING_POLICY_PATH, quarantinePath);
+                renameSync(seedInstallRoutingPolicyPath, quarantinePath);
                 warn(`          invalidated the stale routing-policy.yml — quarantined to ${quarantinePath}; routing is now fail-closed until the RACI compiles`);
               } catch (quarantineErr) {
                 try {
-                  unlinkSync(ROUTING_POLICY_PATH);
+                  unlinkSync(seedInstallRoutingPolicyPath);
                   warn(`          could not quarantine the stale routing-policy.yml (${(quarantineErr as Error).message}) — REMOVED it instead; routing is now fail-closed until the RACI compiles`);
                 } catch (removeErr) {
                   // Neither rename nor unlink took it off disk: the stale policy is
@@ -1170,14 +1179,14 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
                   // `unresolved` reason stops claiming a fail-closed quarantine that
                   // did not happen — the routing outcome is the opposite here.
                   routingPolicy = "failed-not-neutralized";
-                  const stuck = `the stale routing-policy.yml could NOT be neutralized (quarantine: ${(quarantineErr as Error).message}; remove: ${(removeErr as Error).message}) — it is STILL on disk at ${ROUTING_POLICY_PATH} and authoritative under the promoted runtime; remove it by hand: rm ${ROUTING_POLICY_PATH}`;
+                  const stuck = `the stale routing-policy.yml could NOT be neutralized (quarantine: ${(quarantineErr as Error).message}; remove: ${(removeErr as Error).message}) — it is STILL on disk at ${seedInstallRoutingPolicyPath} and authoritative under the promoted runtime; remove it by hand: rm ${seedInstallRoutingPolicyPath}`;
                   warn(`          ⚠ ${stuck}`);
                   routingPolicyError = `${res.error} — ${stuck}`;
                 }
               }
             }
           }
-          warn(`          fix ${RACI_PATH}, then run: forge route compile`);
+          warn(`          fix ${seedInstallRaciPath}, then run: forge route compile`);
         }
       }
 
@@ -1201,6 +1210,10 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       } else {
         try {
           const pub = publishSeedGeneration({
+            // Publish into — and compile the EFFECTIVE routing policy from — the SAME
+            // host every seam above targeted, so a re-pointed FORGE_HOME cannot split
+            // the authoritative generation from the flat recompile.
+            home: seedInstallForgeHome,
             assetsDir,
             // FG-583 source trust: the executing-release provenance is `env.assetsDir`
             // — the SAME root the whole command resolved its assets from (assetRoot()
@@ -1208,7 +1221,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
             // validates the source against this, so the divergent dev checkout (devDir)
             // can never be the seed source.
             trustedAssetRoot: () => assetsDir,
-            raciPath: existsSync(RACI_PATH) ? RACI_PATH : undefined,
+            raciPath: existsSync(seedInstallRaciPath) ? seedInstallRaciPath : undefined,
           });
           seedGeneration = "published";
           say(`        → seed generation: published ${pub.files} file(s) atomically${pub.routingPolicyCompiled ? " (with derived routing policy)" : ""}`);
