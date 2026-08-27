@@ -229,6 +229,14 @@ export function buildClaudeChildEnv(
   // Claude's background-task registry is vulnerable to harness-wide reaping.
   child["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1";
 
+  // Enable the experimental agent-teams feature so the Monitor tool (and the
+  // completion-driven Monitor wake in the orchestrator wait pattern) is available.
+  // It is experimental, so it is set-if-unset — an operator can override it off
+  // (including "0"); deliberately unlike DISABLE_BACKGROUND_TASKS, which force-pins.
+  // The wait pattern itself stays Monitor-INDEPENDENT (FG-763), so nothing breaks
+  // if the feature changes.
+  if (!("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in child)) child["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1";
+
   if (bedrockProfile) {
     child["CLAUDE_CODE_USE_BEDROCK"] = "1";
     child["AWS_PROFILE"] = bedrockProfile;
