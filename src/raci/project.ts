@@ -54,6 +54,13 @@ export function projectPolicyPath(projectDir: string): string {
   return join(projectDir, ".forge", "routing-policy.yml");
 }
 
+/** FG-778: the per-project RACI audit log. `forge raci apply` targets the PROJECT
+ *  (the host raci is forge-owned/upgradeable since FG-777), so each apply appends
+ *  its JSONL audit entry here, not to the host RACI_AUDIT_LOG_PATH. */
+export function projectRaciAuditPath(projectDir: string): string {
+  return join(projectDir, ".forge", "raci-audit.log");
+}
+
 /** Effective RACI source: the project override if it exists, else the host. */
 export function resolveRaciPath(projectDir?: string): ResolvedRouting {
   if (projectDir !== undefined) {

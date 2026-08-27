@@ -14,7 +14,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { validateRaci, type RaciValidation } from "./validate.js";
 import { compileRaciDocument } from "./compile.js";
-import { validateRoutePolicy, type RouteValidation, type HostEnv } from "./route-validate.js";
+import { validateRoutePolicy, checkForceRuleWeakening, type RouteValidation, type HostEnv } from "./route-validate.js";
 import type { RoutingPolicy, PolicyRoute } from "./policy-schema.js";
 
 // Executable fields surfaced for a modified route (advisory classification_hints
@@ -75,6 +75,21 @@ export function proposeRaciChange(current: string, candidate: string, host: Host
       mode: "with-raci",
       findings: [{ code: "candidate_compile_error", message: e instanceof Error ? e.message : String(e) }],
     };
+  }
+
+  // FG-778 force-rule superset boundary: a project override may specialize/add
+  // routes but must never WEAKEN or DROP a host force rule. Compare the compiled
+  // candidate against the effective compiled host policy (injected via
+  // host.hostPolicy so this core stays pure — no filesystem here). A weakening is
+  // a gate failure: apply then writes nothing.
+  if (candidatePolicy !== undefined && host.hostPolicy !== undefined) {
+    const hostPolicy = host.hostPolicy();
+    if (hostPolicy !== undefined) {
+      const weakened = checkForceRuleWeakening(hostPolicy, candidatePolicy);
+      if (weakened.length > 0) {
+        route = { ...route, ok: false, findings: [...route.findings, ...weakened] };
+      }
+    }
   }
 
   return {
