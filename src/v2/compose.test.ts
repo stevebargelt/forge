@@ -206,6 +206,108 @@ Don't bluff.`
   rmSync(root, { recursive: true, force: true });
 });
 
+// ─── FG-774: the tier-1 project override is an APPENDED ADDENDUM, not a replacement ─────
+
+function withProjectAddendum(root: string, role: string, body: string): string {
+  const projectDir = join(root, "owning-project");
+  const addendumDir = join(projectDir, ".forge", "agents", role);
+  mkdirSync(addendumDir, { recursive: true });
+  writeFileSync(join(addendumDir, "CLAUDE.md"), body);
+  return projectDir;
+}
+
+test("FG-774: a project addendum is appended as a labeled section AFTER the host base", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect\n\nHOST BASE BODY.");
+  const projectDir = withProjectAddendum(root, "architect", "Prefer tabs in this project.");
+  const step = { ...WORKFLOW.steps[0]!, workflow_additions: "Do the thing." };
+  writeFileSync(
+    join(constraintsDir, "no-bluff.md"),
+    `---
+id: no-bluff
+level: suggest
+roles: [architect]
+workflows: [feature]
+---
+Don't bluff.`
+  );
+  const out = promptOf({
+    role: "architect",
+    workflow: WORKFLOW,
+    step,
+    agentDir,
+    constraintsDir,
+    projectDir,
+  });
+  const iBase = out.indexOf("HOST BASE BODY.");
+  const iAddendum = out.indexOf("## Project-specific instructions (owning-project)");
+  const iAddendumBody = out.indexOf("Prefer tabs in this project.");
+  const iWorkflow = out.indexOf("# Workflow additions (step: architect)");
+  const iConstraints = out.indexOf("# Constraints");
+  assert.ok(iBase >= 0, "the host base is present");
+  assert.ok(iAddendum >= 0, "the labeled addendum section is present");
+  assert.ok(iAddendumBody > iAddendum, "the addendum body follows its header");
+  assert.ok(iBase < iAddendum, "the addendum comes AFTER the host base");
+  assert.ok(iAddendum < iWorkflow, "the addendum comes BEFORE workflow_additions");
+  assert.ok(iAddendum < iConstraints, "the addendum comes BEFORE constraints");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("FG-774: with NO project addendum, output is byte-identical to today", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect\n\nHOST BASE BODY.");
+  const step = { ...WORKFLOW.steps[0]!, workflow_additions: "Do the thing." };
+  const base = {
+    role: "architect",
+    workflow: WORKFLOW,
+    step,
+    agentDir,
+    constraintsDir,
+  } as const;
+  const without = promptOf(base);
+  // A projectDir whose .forge/agents/<role>/CLAUDE.md does not exist is a clean no-op.
+  const withEmptyProject = promptOf({ ...base, projectDir: join(root, "no-forge-here") });
+  assert.equal(withEmptyProject, without, "a project with no addendum file changes nothing");
+  assert.ok(!without.includes("## Project-specific instructions"), "no addendum header leaks in");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("FG-774: the tier-0 protocol is unchanged whether or not an addendum is present", () => {
+  const fxNoAddendum = protocolFixture("engineer");
+  writeFileSync(join(fxNoAddendum.agentDir, "CLAUDE.md"), "# engineer\n\nHOST BASE.\n");
+  const outNo = composeFor("engineer", fxNoAddendum, fxNoAddendum.gen);
+  assert.ok(outNo.ok, outNo.ok ? "" : outNo.refusal);
+
+  const fxWith = protocolFixture("engineer");
+  writeFileSync(join(fxWith.agentDir, "CLAUDE.md"), "# engineer\n\nHOST BASE.\n");
+  const projectDir = withProjectAddendum(fxWith.root, "engineer", "Project delta.");
+  const outWith = composeSystemPrompt({
+    role: "engineer",
+    workflow: WORKFLOW,
+    step: { ...WORKFLOW.steps[0]!, agent: "engineer" },
+    agentDir: fxWith.agentDir,
+    constraintsDir: fxWith.constraintsDir,
+    projectDir,
+    seedGeneration: fxWith.gen,
+    releaseSeedsDir: fixtureReleaseSeeds(fxWith.gen),
+  });
+  assert.ok(outWith.ok, outWith.ok ? "" : outWith.refusal);
+
+  if (outNo.ok && outWith.ok) {
+    // The tier-0 protocol block is byte-identical, and the addendum did not displace it
+    // ahead of the protocol.
+    assert.ok(outNo.prompt.includes(PROTOCOL), "protocol present without addendum");
+    assert.ok(outWith.prompt.includes(PROTOCOL), "protocol present WITH addendum");
+    assert.equal(outWith.protocol?.sha256, outNo.protocol?.sha256, "the protocol stamp is unchanged");
+    const iProtocol = outWith.prompt.indexOf("## The review protocol");
+    const iAddendum = outWith.prompt.indexOf("## Project-specific instructions");
+    assert.ok(iProtocol >= 0 && iAddendum >= 0);
+    assert.ok(iProtocol < iAddendum, "tier-0 protocol still leads the addendum");
+  }
+  rmSync(fxNoAddendum.root, { recursive: true, force: true });
+  rmSync(fxWith.root, { recursive: true, force: true });
+});
+
 // ─── FG-654: the dispatch-time protocol gate lives at THIS read seam ─────────
 
 const PROTOCOL = "## The review protocol\n\ncurrent generation\n";

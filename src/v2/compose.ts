@@ -5,6 +5,8 @@
 //      generation — FIRST, so the contract the output is judged by is read before the
 //      operator's customization of the role rather than after it
 //   1. Agent base CLAUDE.md from ~/.forge/agents/<role>/CLAUDE.md
+//   1b. FG-774: PROJECT ADDENDUM from <project>/.forge/agents/<role>/CLAUDE.md (if present),
+//      APPENDED as a labeled section — never a replacement of the host base
 //   2. step.workflow_additions (if present)
 //   3. suggest-level constraints filtered by role + workflow + step
 //      (force-level constraints feed reds via anti-prompts; out of scope here)
@@ -16,7 +18,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { assertAgentProtocolCurrent, type AgentProtocolStamp } from "./agent-protocol.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
@@ -81,6 +83,17 @@ function resolveAgentDir(role: string, _projectDir: string | undefined, override
   return override ?? defaultAgentDir(role);
 }
 
+// FG-774 (FG-767 T1): the sibling to resolveAgentDir for the PROJECT ADDENDUM. The host
+// base under resolveAgentDir is ALWAYS the identity; if this file exists it is APPENDED as
+// a labeled section — never a replacement, and there is deliberately no full-rewrite escape
+// hatch (that would be a separate explicit story). A red resolves this against the OWNING
+// project (projectDir carries overrideProjectDir per FG-773), not the review/mount worktree.
+// Returns undefined when no project is anchored, so the host-only prompt is byte-identical.
+function resolveProjectAddendumFile(role: string, projectDir: string | undefined): string | undefined {
+  if (projectDir === undefined) return undefined;
+  return join(projectDir, ".forge", "agents", role, "CLAUDE.md");
+}
+
 function resolveConstraintsDir(_projectDir: string | undefined, override: string | undefined): string {
   return override ?? defaultConstraintsDir();
 }
@@ -121,6 +134,22 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
     sections.push(installedSeedText.trim());
   } else {
     sections.push(`# ${args.role}\n\n(Agent base CLAUDE.md not found at ${baseFile})`);
+  }
+
+  // FG-774: tier-1b PROJECT ADDENDUM. Sits IMMEDIATELY AFTER the host base (base+delta read
+  // as one identity block) and BEFORE workflow_additions/constraints (those stay the more
+  // specific, authoritative later layers). A labeled section, so the agent reads it as
+  // authoritative project-specific context specializing — never replacing — the role base;
+  // its later prose can countermand a ROLE-BASE default, never tier-0 or a force constraint.
+  // A missing file is a clean no-op: the prompt is byte-identical to the host-only output.
+  const addendumFile = resolveProjectAddendumFile(args.role, args.projectDir);
+  const addendumText =
+    addendumFile !== undefined && existsSync(addendumFile)
+      ? readFileSync(addendumFile, "utf8").trim()
+      : null;
+  if (addendumText !== null && addendumText.length > 0) {
+    const label = basename(args.projectDir!);
+    sections.push(`## Project-specific instructions (${label})\n\n${addendumText}`);
   }
 
   const wa = args.step.workflow_additions?.trim();
