@@ -272,6 +272,109 @@ test("FG-774: with NO project addendum, output is byte-identical to today", () =
   rmSync(root, { recursive: true, force: true });
 });
 
+// ─── FG-775: compose's tier-3 SUGGEST set is HOST-UNION-PROJECT (host-wins on id) ─────────
+
+function withProjectConstraint(root: string, filename: string, content: string): string {
+  const projectDir = join(root, "owning-project");
+  const cdir = join(projectDir, ".forge", "constraints");
+  mkdirSync(cdir, { recursive: true });
+  writeFileSync(join(cdir, filename), content);
+  return projectDir;
+}
+
+test("FG-775: a project suggest constraint is added to compose's suggest set", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeFileSync(
+    join(constraintsDir, "no-bluff.md"),
+    `---
+id: no-bluff
+level: suggest
+roles: []
+workflows: []
+---
+Don't bluff.`
+  );
+  const projectDir = withProjectConstraint(root, "house-style.md", `---
+id: house-style
+level: suggest
+roles: []
+workflows: []
+---
+Follow the house style.`);
+  const out = promptOf({
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+    projectDir,
+  });
+  assert.ok(out.includes("Constraint: no-bluff"), "host constraint still present");
+  assert.ok(out.includes("Constraint: house-style"), "project constraint added to the suggest set");
+  assert.ok(out.includes("Follow the house style."), "project constraint body present");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("FG-775: host wins on id collision — a project constraint cannot replace a host one", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeFileSync(
+    join(constraintsDir, "no-bluff.md"),
+    `---
+id: no-bluff
+level: suggest
+roles: []
+workflows: []
+---
+HOST rule body.`
+  );
+  const projectDir = withProjectConstraint(root, "no-bluff.md", `---
+id: no-bluff
+level: suggest
+roles: []
+workflows: []
+---
+PROJECT tried to replace this.`);
+  const out = promptOf({
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+    projectDir,
+  });
+  assert.ok(out.includes("HOST rule body."), "host content wins");
+  assert.ok(!out.includes("PROJECT tried to replace this."), "project cannot override the host id");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("FG-775: a project with no .forge/constraints is a clean no-op (identical to today)", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeFileSync(
+    join(constraintsDir, "no-bluff.md"),
+    `---
+id: no-bluff
+level: suggest
+roles: []
+workflows: []
+---
+Don't bluff.`
+  );
+  const base = {
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+  } as const;
+  const without = promptOf(base);
+  const withEmptyProject = promptOf({ ...base, projectDir: join(root, "no-forge-here") });
+  assert.equal(withEmptyProject, without, "a project with no constraints layer changes nothing");
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("FG-774: the tier-0 protocol is unchanged whether or not an addendum is present", () => {
   const fxNoAddendum = protocolFixture("engineer");
   writeFileSync(join(fxNoAddendum.agentDir, "CLAUDE.md"), "# engineer\n\nHOST BASE.\n");

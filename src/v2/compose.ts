@@ -19,7 +19,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { filterConstraints, loadAllConstraints } from "./constraints.js";
+import { filterConstraints, loadEffectiveConstraints } from "./constraints.js";
 import { assertAgentProtocolCurrent, type AgentProtocolStamp } from "./agent-protocol.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import type { Workflow, Step } from "./schema.js";
@@ -94,7 +94,10 @@ function resolveProjectAddendumFile(role: string, projectDir: string | undefined
   return join(projectDir, ".forge", "agents", role, "CLAUDE.md");
 }
 
-function resolveConstraintsDir(_projectDir: string | undefined, override: string | undefined): string {
+// Resolves the HOST constraints dir (an operator override wins for tests). The PROJECT layer
+// is no longer threaded here: FG-775 unions it in via loadEffectiveConstraints, which takes
+// the owning-project projectDir directly, so this seam resolves the host dir only.
+function resolveConstraintsDir(override: string | undefined): string {
   return override ?? defaultConstraintsDir();
 }
 
@@ -157,7 +160,12 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
     sections.push(`# Workflow additions (step: ${args.step.id})\n\n${wa}`);
   }
 
-  const all = loadAllConstraints(resolveConstraintsDir(args.projectDir, args.constraintsDir));
+  // FG-775: tier-3 SUGGEST set draws from the HOST-UNION-PROJECT effective set. The host
+  // suggest constraints always apply; <project>/.forge/constraints adds more (host-wins on id).
+  const all = loadEffectiveConstraints({
+    hostDir: resolveConstraintsDir(args.constraintsDir),
+    projectDir: args.projectDir,
+  });
   const suggest = filterConstraints(all, {
     role: args.role,
     workflow: args.workflow.name,

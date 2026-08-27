@@ -31,6 +31,33 @@ export function loadAllConstraints(dir: string = CONSTRAINTS_DIR): Constraint[] 
   return files.map((f) => parseConstraintFile(join(dir, f)));
 }
 
+// FG-775 (FG-767 T2): the project's additive constraint layer lives here.
+export function projectConstraintsDir(projectDir: string): string {
+  return join(projectDir, ".forge", "constraints");
+}
+
+// FG-775 (FG-767 T2): THE ONE resolver for the effective constraint set, consumed by BOTH
+// compose's suggest set and the reds' force anti-prompt set — do not fork this logic.
+//
+// Effective set = HOST set UNION PROJECT set (<projectDir>/.forge/constraints). The host set
+// is ALWAYS fully included; the project set is ADDITIVE-ONLY — a project can make guardrails
+// MORE restrictive but can NEVER drop or weaken a host constraint. On an id collision the HOST
+// constraint WINS (never last-writer-wins): a project constraint sharing a host id is dropped,
+// so its content/level cannot replace the host's — the force-level ones especially.
+//
+// A missing project layer (no projectDir, or no <projectDir>/.forge/constraints) is a clean
+// no-op: the host set alone, byte-identical to before this change. A malformed file in EITHER
+// layer throws from parseConstraintFile (loud/safe) — never a silent skip, which would be an
+// invisible guardrail gap.
+export function loadEffectiveConstraints(opts: { hostDir: string; projectDir?: string }): Constraint[] {
+  const host = loadAllConstraints(opts.hostDir);
+  if (opts.projectDir === undefined) return host;
+  const hostIds = new Set(host.map((c) => c.id));
+  const project = loadAllConstraints(projectConstraintsDir(opts.projectDir));
+  const additive = project.filter((c) => !hostIds.has(c.id));
+  return [...host, ...additive];
+}
+
 export function parseConstraintFile(path: string): Constraint {
   const raw = readFileSync(path, "utf8");
   const parsed = matter(raw);

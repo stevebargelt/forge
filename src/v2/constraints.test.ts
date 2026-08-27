@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseConstraintFile, filterConstraints, type Constraint } from "./constraints.js";
+import {
+  parseConstraintFile,
+  filterConstraints,
+  loadEffectiveConstraints,
+  projectConstraintsDir,
+  type Constraint,
+} from "./constraints.js";
 
 function setup(): string {
   const root = mkdtempSync(join(tmpdir(), "forge-constraints-test-"));
@@ -149,4 +155,137 @@ tags: [alpha, beta]
 Body.`);
   assert.deepEqual(c.tags, ["alpha", "beta"]);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ── FG-775 (FG-767 T2): loadEffectiveConstraints — HOST-UNION-PROJECT, host-wins ──
+
+function writeRaw(dir: string, filename: string, content: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, filename), content);
+}
+
+function effectiveSetup(): { root: string; hostDir: string; projectDir: string; projConstraintsDir: string } {
+  const root = mkdtempSync(join(tmpdir(), "forge-effective-constraints-"));
+  const hostDir = join(root, "host", "constraints");
+  const projectDir = join(root, "project");
+  mkdirSync(hostDir, { recursive: true });
+  return { root, hostDir, projectDir, projConstraintsDir: projectConstraintsDir(projectDir) };
+}
+
+// no project layer → byte-identical to loading the host dir alone.
+test("loadEffectiveConstraints: no project layer is identical to host-only", () => {
+  const { root, hostDir, projectDir } = effectiveSetup();
+  writeRaw(hostDir, "h.md", `---
+id: host-one
+level: force
+roles: []
+workflows: []
+antiPrompt: host says no
+---
+Host body.`);
+
+  const noProjectArg = loadEffectiveConstraints({ hostDir });
+  const missingProjectDir = loadEffectiveConstraints({ hostDir, projectDir });
+  assert.equal(noProjectArg.length, 1);
+  assert.deepEqual(noProjectArg, missingProjectDir, "absent projectDir and a project with no .forge/constraints both yield host-only");
+  assert.equal(noProjectArg[0]!.id, "host-one");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// Invariant 1: HOST-WINS on id collision — a project constraint sharing a host id
+// cannot change the host constraint's content or level.
+test("loadEffectiveConstraints: host wins on id collision (project cannot override/weaken)", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  writeRaw(hostDir, "shared.md", `---
+id: shared-id
+level: force
+roles: []
+workflows: []
+antiPrompt: HOST anti-prompt
+---
+HOST body.`);
+  // project tries to redefine the same id as a weaker (suggest) constraint.
+  writeRaw(projConstraintsDir, "shared.md", `---
+id: shared-id
+level: suggest
+roles: []
+workflows: []
+antiPrompt: PROJECT anti-prompt
+---
+PROJECT body.`);
+
+  const effective = loadEffectiveConstraints({ hostDir, projectDir });
+  const shared = effective.filter((c) => c.id === "shared-id");
+  assert.equal(shared.length, 1, "collision resolves to exactly one constraint — never both, never last-writer");
+  assert.equal(shared[0]!.level, "force", "host level preserved — project cannot weaken force → suggest");
+  assert.equal(shared[0]!.body, "HOST body.", "host content preserved");
+  assert.equal(shared[0]!.antiPrompt, "HOST anti-prompt", "host anti-prompt preserved");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// Invariant 3: every HOST force constraint always fires regardless of project constraints;
+// and a NON-colliding project constraint is added (additive-only).
+test("loadEffectiveConstraints: host force always present + non-colliding project constraint added", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  writeRaw(hostDir, "hforce.md", `---
+id: host-force
+level: force
+roles: []
+workflows: []
+antiPrompt: host force
+---
+Host force body.`);
+  writeRaw(projConstraintsDir, "pforce.md", `---
+id: project-force
+level: force
+roles: []
+workflows: []
+antiPrompt: project force
+---
+Project force body.`);
+
+  const effective = loadEffectiveConstraints({ hostDir, projectDir });
+  const ids = effective.map((c) => c.id).sort();
+  assert.deepEqual(ids, ["host-force", "project-force"], "host force always in the union; project force added");
+  assert.ok(effective.find((c) => c.id === "host-force")!.level === "force");
+  assert.ok(effective.find((c) => c.id === "project-force")!.level === "force");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// Invariant 4: a malformed project constraint file fails LOUD — surfaced, not silently skipped.
+test("loadEffectiveConstraints: malformed project constraint throws (loud/safe, no silent skip)", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  writeRaw(hostDir, "ok.md", `---
+id: host-ok
+level: force
+roles: []
+workflows: []
+---
+Host body.`);
+  // missing `id` / `level` — parseConstraintFile must throw.
+  writeRaw(projConstraintsDir, "bad.md", `---
+roles: []
+---
+No id, no level.`);
+
+  assert.throws(
+    () => loadEffectiveConstraints({ hostDir, projectDir }),
+    /missing required frontmatter/,
+    "a malformed project constraint is surfaced as an error, never silently dropped",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+// A malformed HOST constraint is equally loud (symmetry — neither layer is silently skipped).
+test("loadEffectiveConstraints: malformed host constraint throws (loud/safe)", () => {
+  const { root, hostDir, projectDir } = effectiveSetup();
+  writeRaw(hostDir, "bad.md", `---
+level: suggest
+---
+No id.`);
+  assert.throws(
+    () => loadEffectiveConstraints({ hostDir, projectDir }),
+    /missing required frontmatter/,
+  );
+  rmSync(root, { recursive: true, force: true });
 });
