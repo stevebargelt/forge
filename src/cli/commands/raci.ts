@@ -1,11 +1,12 @@
 import type { Command } from "commander";
-import { join, resolve } from "node:path";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { stringify as yamlStringify } from "yaml";
-import { RACI_PATH, RACI_AUDIT_LOG_PATH, ROUTING_POLICY_PATH, AGENTS_DIR, WORKFLOWS_DIR, ensureForgeDirs } from "../../util/paths.js";
+import { RACI_PATH, AGENTS_DIR, WORKFLOWS_DIR } from "../../util/paths.js";
 import { validateRaci, type RaciValidation } from "../../raci/validate.js";
 import { proposeRaciChange, type RaciProposal } from "../../raci/propose.js";
 import { compileRaciDocument } from "../../raci/compile.js";
+import { projectRaciPath, projectPolicyPath, projectRaciAuditPath } from "../../raci/project.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
 // `forge raci` — the RACI authoring surface.
@@ -13,6 +14,13 @@ import type { HostEnv } from "../../raci/route-validate.js";
 //   propose   — run the full gate on a candidate and render the diff; never writes (#279).
 //   apply     — re-run the gate and, with --confirm, write the candidate + recompile
 //               the policy + append a JSONL audit entry (#279).
+//
+// FG-778: propose/apply target the PROJECT raci (<project>/.forge/forge-raci.md),
+// NOT the host ~/.forge/forge-raci.md — since FG-777 the host raci is forge-owned and
+// always-upgraded, so operator routing customization lives at the project. The gate
+// still validates against the REAL host (a project may specialize/add routes but never
+// weaken a host force rule), and a compiled project policy is read directly by dispatch,
+// so a project apply is immediately effective (no `forge upgrade` republish).
 //
 // `propose`/`apply` are the PRIMARY (orchestrator-mediated) edit channel. The
 // guardrail is structural: a candidate that fails either validator produces no
@@ -63,8 +71,9 @@ export function renderHuman(path: string, v: RaciValidation): string {
 
 export type ApplyTargets = { raciPath: string; policyPath: string; auditLogPath: string };
 
-/** One append-only JSONL line per applied change. Host-global, repo-independent
- *  (#279 decision: an audit log, not a git commit — works for non-git hosts). */
+/** One append-only JSONL line per applied change. Per-project since FG-778
+ *  (<project>/.forge/raci-audit.log) — an audit log, not a git commit (#279),
+ *  so it works for non-git projects too. */
 export type RaciAuditEntry = {
   timestamp: string;
   action: "apply";
@@ -81,23 +90,23 @@ export type ApplyResult = {
   written: boolean;
   reason?: "validation_failed" | "not_confirmed";
   audit?: RaciAuditEntry;
-  /** FG-583 (finding 1a): apply installs the operator-authored RACI SOURCE + audit
-   *  log and refreshes the flat (drift-registry) routing-policy.yml — but the DERIVED
-   *  policy is NEVER effective for dispatch from apply. The effective host policy is
-   *  compiled INTO the seed generation, published exclusively by `forge upgrade`.
-   *  Always false, so JSON/script consumers can never read a written apply as an
-   *  effective routing change. */
-  effectiveForDispatch: false;
-  /** FG-583 (finding 1a): the directive to make the routing change effective. Set on
-   *  a WRITTEN apply (the RACI source landed but the generation is unchanged). */
-  publishDirective?: string;
+  /** FG-778: apply targets the PROJECT raci, and a compiled <project>/.forge/routing-policy.yml
+   *  is read DIRECTLY by dispatch (resolvePolicyPath) — no seed generation, no provenance
+   *  manifest, no `forge upgrade` republish (that machinery is host-only). So a WRITTEN
+   *  project apply is IMMEDIATELY effective for dispatch; a dry-run/failed apply is not.
+   *  There is NO publish directive: directing the operator to run `forge upgrade` would not
+   *  help a project policy. */
+  effectiveForDispatch: boolean;
 };
 
-const PUBLISH_DIRECTIVE =
-  "run `forge upgrade` to republish the seed generation with the recompiled routing policy — until then this routing change is NOT effective for dispatch";
-
-function defaultTargets(): ApplyTargets {
-  return { raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, auditLogPath: RACI_AUDIT_LOG_PATH };
+/** FG-778: PROJECT apply targets. The host raci (RACI_PATH) is forge-owned/upgradeable
+ *  since FG-777 and is NEVER written by apply. */
+export function applyTargets(projectDir: string): ApplyTargets {
+  return {
+    raciPath: projectRaciPath(projectDir),
+    policyPath: projectPolicyPath(projectDir),
+    auditLogPath: projectRaciAuditPath(projectDir),
+  };
 }
 
 /** Read the current installed RACI; absent => "" (every candidate route is new). */
@@ -120,12 +129,12 @@ export function applyRaciChange(
     confirm: boolean;
     candidateLabel: string;
     host?: HostEnv;
-    targets?: ApplyTargets;
+    targets: ApplyTargets;
     now?: () => Date;
   },
 ): ApplyResult {
   const host = opts.host ?? realHost;
-  const targets = opts.targets ?? defaultTargets();
+  const targets = opts.targets;
   const now = opts.now ?? (() => new Date());
 
   // Always re-run the gate immediately before writing — never trust an earlier propose.
@@ -150,13 +159,18 @@ export function applyRaciChange(
     validation: { raci: proposal.validation.raci.ok, route: proposal.validation.route.ok },
   };
 
+  // FG-778: ensure <project>/.forge/ exists before any write (mkdir -p). A fresh
+  // project override is created on first apply.
+  mkdirSync(dirname(targets.raciPath), { recursive: true });
+
   // Audit-first: an unwritable audit target throws HERE, before the source or
   // policy is written — apply never lands a change it cannot record.
   appendFileSync(targets.auditLogPath, JSON.stringify(audit) + "\n");
   writeFileSync(targets.raciPath, candidate);
   writeFileSync(targets.policyPath, policyYaml);
 
-  return { proposal, written: true, audit, effectiveForDispatch: false, publishDirective: PUBLISH_DIRECTIVE };
+  // FG-778: a written project policy is read directly by dispatch — immediately effective.
+  return { proposal, written: true, audit, effectiveForDispatch: true };
 }
 
 function renderFindings(label: string, findings: { code: string; message: string; route?: string }[]): string[] {
@@ -222,23 +236,29 @@ export function registerRaci(program: Command): void {
 
   raci
     .command("propose")
-    .argument("<candidate>", "candidate RACI file to gate against the installed source")
+    .argument("<candidate>", "candidate RACI file to gate against the project source")
+    .option("--project <dir>", "project whose RACI override to gate against (default: cwd)")
     .option("--json", "emit the structured proposal as JSON")
     .description(
-      "Run the full authoring gate on a candidate RACI (raci validate -> compile -> route validate) and render the diff + route-change summary. Never writes.",
+      "Run the full authoring gate on a candidate RACI (raci validate -> compile -> route validate) against the PROJECT raci (<project>/.forge/forge-raci.md) and render the diff + route-change summary. Never writes.",
     )
-    .action((candidateArg: string, opts: { json?: boolean }) => {
+    .action((candidateArg: string, opts: { project?: string; json?: boolean }) => {
       const candidatePath = resolve(candidateArg);
       if (!existsSync(candidatePath)) {
         process.stderr.write(`forge raci propose: candidate not found: ${candidatePath}\n`);
         process.exit(1);
       }
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const projectRaci = projectRaciPath(projectDir);
       const candidate = readFileSync(candidatePath, "utf8");
-      const current = readCurrentRaci(RACI_PATH);
+      // Current is the PROJECT raci; absent => "" (a fresh project override is being created).
+      const current = readCurrentRaci(projectRaci);
+      // The gate STILL validates against the REAL host — a project override may
+      // specialize/add routes but never weaken a host force rule.
       const proposal = proposeRaciChange(current, candidate, realHost);
 
       if (opts.json) {
-        console.log(JSON.stringify({ candidate: candidatePath, current: RACI_PATH, ...proposal }, null, 2));
+        console.log(JSON.stringify({ candidate: candidatePath, current: projectRaci, ...proposal }, null, 2));
       } else {
         console.log(renderProposal(proposal));
       }
@@ -247,43 +267,45 @@ export function registerRaci(program: Command): void {
 
   raci
     .command("apply")
-    .argument("<candidate>", "candidate RACI file to write as the installed source")
+    .argument("<candidate>", "candidate RACI file to write as the project source")
+    .option("--project <dir>", "project whose RACI override to write (default: cwd)")
     .option("--confirm", "actually write the change (without it, behaves like propose)")
     .option("--json", "emit the structured apply result as JSON")
     .description(
-      "Re-run the full gate and, with --confirm, install the candidate RACI, recompile the routing policy, and append a JSONL audit entry. The gate is re-run immediately before writing.",
+      "Re-run the full gate and, with --confirm, install the candidate RACI as the PROJECT override (<project>/.forge/forge-raci.md), recompile the project routing policy, and append a per-project JSONL audit entry. The gate is re-run immediately before writing.",
     )
-    .action((candidateArg: string, opts: { confirm?: boolean; json?: boolean }) => {
+    .action((candidateArg: string, opts: { project?: string; confirm?: boolean; json?: boolean }) => {
       const candidatePath = resolve(candidateArg);
       if (!existsSync(candidatePath)) {
         process.stderr.write(`forge raci apply: candidate not found: ${candidatePath}\n`);
         process.exit(1);
       }
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const targets = applyTargets(projectDir);
       const candidate = readFileSync(candidatePath, "utf8");
-      const current = readCurrentRaci(RACI_PATH);
-      ensureForgeDirs();
+      // Current is the PROJECT raci; absent => "" (a fresh project override is being created).
+      const current = readCurrentRaci(targets.raciPath);
       let result: ApplyResult;
       try {
-        result = applyRaciChange(current, candidate, { confirm: opts.confirm ?? false, candidateLabel: candidatePath });
+        result = applyRaciChange(current, candidate, { confirm: opts.confirm ?? false, candidateLabel: candidatePath, targets });
       } catch (e) {
         process.stderr.write(`forge raci apply: failed to write change (nothing applied): ${(e as Error).message}\n`);
         process.exit(1);
       }
 
       if (opts.json) {
-        console.log(JSON.stringify({ candidate: candidatePath, ...result }, null, 2));
+        console.log(JSON.stringify({ candidate: candidatePath, project: projectDir, ...result }, null, 2));
       } else {
         console.log(renderProposal(result.proposal));
         console.log("");
         if (result.written) {
-          // FG-583: apply installs the operator-authored RACI source + audit log, and
-          // refreshes the flat (non-authoritative) routing-policy.yml — but the DERIVED
-          // policy is NOT yet effective for dispatch. The effective host policy is
-          // compiled INTO the seed generation, published exclusively by `forge upgrade`.
-          // apply does NOT publish a generation, so direct the operator explicitly and
-          // do not claim the routing change is live.
-          console.log(`Applied RACI source -> ${RACI_PATH} (change audited to ${RACI_AUDIT_LOG_PATH}).`);
-          console.log(`The routing change is NOT yet effective for dispatch — run \`forge upgrade\` to republish the seed generation with the recompiled policy.`);
+          // FG-778: apply installs the PROJECT RACI override + a per-project audit log and
+          // compiles the project routing-policy.yml, which dispatch reads DIRECTLY — so the
+          // routing change is immediately effective in this project. Do NOT direct the
+          // operator to `forge upgrade` (that republishes the host seed generation and would
+          // not help a project override).
+          console.log(`Applied RACI source -> ${targets.raciPath} (change audited to ${targets.auditLogPath}).`);
+          console.log(`The routing change is now effective for dispatch in ${projectDir}.`);
         } else if (result.reason === "not_confirmed") {
           console.log("Not applied — gate passed. Re-run with --confirm to write.");
         } else {
