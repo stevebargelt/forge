@@ -397,9 +397,9 @@ test("FG-654 RF-2: the durable operator docs name the generation-backed protocol
     assert.match(doc, /agent-protocols\/<role>\.md/, `${name} must name the forge-owned seed category`);
   }
 
-  // The two that make an ownership claim must make the whole one: forge does not write the
-  // operator's file at all.
-  assert.match(docs["README.md"]!, /forge never writes that file/i);
+  // Since FG-777 the host agent seed is forge-owned and force-overwritten, so the ownership
+  // claim inverted: the embedded copy now clears on upgrade — forge DOES write that file.
+  assert.match(docs["README.md"]!, /since FG-777 `forge upgrade` clears it too/);
   assert.match(docs["docs/quick-start.md"]!, /not inside your agent seed/);
   // And the field reference must describe the identity the stamp actually carries.
   assert.match(docs["docs/SCHEMA-CONTRACT.md"]!, /WHOLE protocol file's bytes/);
@@ -416,11 +416,13 @@ test("FG-654 RF-5: invariant 4 states generation ownership, with no trace of the
   ]) {
     assert.doesNotMatch(doc, gone, `invariants.md still describes the deleted in-place writer: ${gone}`);
   }
-  assert.match(doc, /it does not live in the operator's file at all/, "…and states where the protocol DOES live");
+  assert.match(doc, /it does not live in the host agent file at all/, "…and states where the protocol DOES live");
   assert.match(doc, /seeds\/agent-protocols\/<role>\.md/, "…naming the forge-owned seed category");
   assert.match(doc, /STALE \(manifest-consistent, but not the executing release's bytes/, "…and the stale refusal");
-  // Forge writing an operator-owned file is the invariant itself, so it is stated whole.
-  assert.match(doc, /Forge NEVER writes an operator-owned `~\/\.forge\/agents\/<role>\/CLAUDE\.md`/);
+  // Since FG-777 forge DOES own and overwrite that file; the surviving invariant is that a
+  // genuine operator edit is never destroyed — the one-time host-edit backup captures it first.
+  assert.match(doc, /A genuine operator edit is never destroyed/);
+  assert.match(doc, /FORCE overwrites them exactly as it overwrites a runtime/);
 });
 
 test("FG-654 RF-8: invariant 6 describes the receipt the manifest actually carries", () => {
@@ -441,15 +443,15 @@ test("FG-654 RF-8: invariant 6 describes the receipt the manifest actually carri
 test("FG-654 RF-7: the upgrade doc documents the embedded-legacy refusal most hosts will hit", () => {
   const doc = upgradeDoc();
   assert.match(doc, /### The embedded-legacy-protocol refusal/, "the state gets its own operator-facing section");
-  assert.match(doc, /`forge upgrade` will not fix this for you/, "…and says plainly that upgrade does not repair it");
-  assert.match(doc, /delete the marker-fenced region \(markers included\)/, "…with the manual repair spelled out");
+  assert.match(doc, /Since FG-777, `forge upgrade` clears this for you/, "…and says plainly that upgrade NOW repairs it since FG-777");
+  assert.match(doc, /still delete the section by hand instead/, "…with the still-available manual repair spelled out");
   // The doctor paragraph must not enumerate generation states alone: protocol state exits
   // non-zero too, and a reader who stops at "only a complete generation is healthy" is
   // told the opposite of what a legacy-carrying host will see.
   const doctorPara = doc.split("\n").find((l) => l.includes("Only a **complete published generation** is healthy"));
   assert.ok(doctorPara, "the doctor paragraph must still exist");
   assert.match(doctorPara!, /Forge-owned agent protocol/, "…and must say protocol state is part of the verdict");
-  assert.match(doctorPara!, /still embedded in your own agent seed/, "…naming the state upgrade does not repair");
+  assert.match(doctorPara!, /still embedded in your own agent seed/, "…naming a protocol-drift state doctor reports (now upgrade-repairable since FG-777)");
 });
 
 test("FG-654 RF-14: the documented refusal-state count matches the table, which matches the code", () => {
@@ -503,7 +505,7 @@ test("FG-654 RF-16: the concepts glossary names all six stale_protocol states an
     "the falsified universal remedy is back — release_protocol_missing does not clear on an upgrade",
   );
   assert.match(para!, /no `seeds\/agent-protocols\/<role>\.md`/, "…the sixth state is named");
-  assert.match(para!, /the last two do not/, "…and the two upgrade cannot repair are called out together");
+  assert.match(para!, /only the last does not/, "…and the single upgrade-cannot-repair state is called out (embedded-copy clears on upgrade since FG-777)");
   assert.match(para!, /reinstalling the release/, "…with the remedy the refusal actually states");
   // The remedy paragraph below it made the same universal claim in its own words.
   const remedy = doc.split("\n").find((l) => l.includes("the one absence an acceptance cannot clear"));
@@ -512,20 +514,20 @@ test("FG-654 RF-16: the concepts glossary names all six stale_protocol states an
   assert.doesNotMatch(remedy!, /republish the region/, "…and there is no region to republish since FG-654");
 });
 
-test("FG-654 RF-17: the autonomous-run prompt names BOTH refusals upgrade will not fix", () => {
+test("FG-654 RF-17: the autonomous-run prompt names the single refusal upgrade will not fix (embedded clears since FG-777)", () => {
   assertReleaseMissingArmExists();
   const doc = readFileSync(join(repoRoot, "docs", "autonomous-run-prompt.md"), "utf8");
   const step = doc.split("\n").find((l) => l.includes("One absence is outside all three (FG-654)"));
   assert.ok(step, "step 10 must still carry the stale_protocol exception");
-  assert.doesNotMatch(step!, /One shape of this refusal is the exception/, "there are two, and undercounting loops the orchestrator");
-  assert.match(step!, /TWO shapes are exceptions upgrade will not fix/, "…both are stated as exceptions");
+  assert.doesNotMatch(step!, /TWO shapes are exceptions upgrade will not fix/, "since FG-777 only ONE shape is upgrade-unrepairable — overcounting sends the orchestrator to a needless hand edit");
+  assert.match(step!, /ONE shape is an exception/, "…the single release-missing exception is stated");
   assert.match(step!, /reinstall the release/, "…naming the remedy for the release-missing one");
   // The two orchestrator-facing copies of the same step already had it; they stay in agreement.
   for (const rel of [["CLAUDE.md"], ["seeds", "orchestrator-template.md"]]) {
     const sibling = readFileSync(join(repoRoot, ...rel), "utf8");
     assert.match(
       sibling,
-      /a release carrying no protocol for a covered role is the executing tree's problem rather than this host's/,
+      /a release carrying no protocol for a covered role, which is the executing tree's problem rather than this host's/,
       `${rel.join("/")} must still name the release-missing exception`,
     );
   }
@@ -534,16 +536,16 @@ test("FG-654 RF-17: the autonomous-run prompt names BOTH refusals upgrade will n
 // RF-18: the same falsified exclusivity claim, in the front-door document. RF-2 already reads
 // README.md but asserts only that the removed in-place region is gone, so nothing here spoke
 // for the refusal set.
-test("FG-654 RF-18: the README's upgrade paragraph names both refusals upgrade cannot repair", () => {
+test("FG-654 RF-18: the README's upgrade paragraph names the single refusal upgrade cannot repair (embedded clears since FG-777)", () => {
   assertReleaseMissingArmExists();
   const doc = readFileSync(join(repoRoot, "README.md"), "utf8");
-  const para = doc.split("\n").find((l) => l.includes("The Forge-owned agent protocols are repaired rather than retained"));
+  const para = doc.split("\n").find((l) => l.includes("The Forge-owned agent protocols are always repaired rather than retained"));
   assert.ok(para, "the upgrade paragraph must still describe how the protocols are repaired");
   assert.doesNotMatch(
     para!,
-    /The one protocol state upgrade cannot repair/,
-    "the falsified exclusivity claim is back — release_protocol_missing is a second one",
+    /Two protocol states upgrade cannot repair/,
+    "the pre-FG-777 two-exception claim is back — the embedded copy now clears on upgrade",
   );
-  assert.match(para!, /Two protocol states upgrade cannot repair/, "…both are stated as exceptions");
+  assert.match(para!, /One protocol state upgrade cannot repair/, "…the single release-missing exception is stated");
   assert.match(para!, /reinstall the release/, "…naming the remedy for the release-missing one");
 });
