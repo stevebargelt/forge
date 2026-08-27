@@ -56,7 +56,7 @@ import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
-import { filterConstraints, loadAllConstraints } from "./constraints.js";
+import { filterConstraints, loadAllConstraints, loadEffectiveConstraints } from "./constraints.js";
 import { buildDockerArgs, prepareDependencyEnvironmentForDispatch, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
@@ -1712,13 +1712,24 @@ async function runOneRed(args: {
   // own role — a constraint like atlas-stack-rn lists roles [architecture-advisor,
   // engineer]. red-narrow requires these as a `failureModes` input; without them it
   // reports "missing required failureModes input" (forge-site bug).
-  const failureModes = filterConstraints(loadAllConstraints(join(homeForge(), "constraints")), {
-    role: args.step.agent ?? "",
-    workflow: args.workflow.name,
-    phase: args.step.id,
-    level: "force",
-    runTags: runTagsFromMetadata(args.runMetadata),
-  })
+  // FG-775: the reds' FORCE anti-prompt set draws from the HOST-UNION-PROJECT effective set,
+  // resolved against the OWNING project (overrideProjectDir, FG-773) — NOT args.projectDir,
+  // which in publish mode is the ephemeral worktree under review. A <project>/.forge/constraints
+  // force-level constraint therefore actually reaches the red; a host force constraint always
+  // fires regardless of any project layer (host-wins on id).
+  const failureModes = filterConstraints(
+    loadEffectiveConstraints({
+      hostDir: join(homeForge(), "constraints"),
+      projectDir: args.overrideProjectDir,
+    }),
+    {
+      role: args.step.agent ?? "",
+      workflow: args.workflow.name,
+      phase: args.step.id,
+      level: "force",
+      runTags: runTagsFromMetadata(args.runMetadata),
+    },
+  )
     .map((c) => c.antiPrompt)
     .filter((p): p is string => typeof p === "string" && p.length > 0);
   const composedRed = composeSystemPrompt({

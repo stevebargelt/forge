@@ -2516,6 +2516,45 @@ test("runNext: reds receive force-level anti-prompts as failureModes (forge-site
   }
 });
 
+// FG-775 invariant 2: a <project>/.forge/constraints FORCE constraint reaches the red as a
+// failureMode. Without threading the owning projectDir to the failureModes seam, a project
+// force constraint would silently never reach a red — an invisible guardrail gap.
+test("FG-775: a project force constraint reaches the red as a failureMode", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg775-project-"));
+  const projConstraints = join(projectDir, ".forge", "constraints");
+  mkdirSync(projConstraints, { recursive: true });
+  writeFileSync(
+    join(projConstraints, "project-force.md"),
+    ["---", "id: project-force-guardrail", "level: force", "roles: []", "workflows: []", 'antiPrompt: "Prove the project-specific invariant is violated"', "---", "", "body", ""].join("\n"),
+  );
+  // Also assert host force constraints still ALWAYS fire alongside the project one (invariant 3).
+  const cdir = join(process.env.FORGE_HOME as string, "constraints");
+  mkdirSync(cdir, { recursive: true });
+  const hostFile = join(cdir, "zz-fg775-host-force.md");
+  writeFileSync(
+    hostFile,
+    ["---", "id: zz-fg775-host-force", "level: force", "roles: []", "workflows: []", 'antiPrompt: "Host force always fires"', "---", "", "body", ""].join("\n"),
+  );
+  try {
+    const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "fg775 project force", inputs: {}, projectDir });
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "x" } },
+      { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+    ]);
+    await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+    const tasks = tasksForRun(runId);
+    const primary = tasks.find((t) => t.parentId === undefined)!;
+    const red = tasks.find((t) => t.parentId === primary.id)!;
+    const fm = (red.taskPackage.inputs as Record<string, unknown>).failureModes as string[];
+    assert.ok(fm.includes("Prove the project-specific invariant is violated"), "project force constraint reached the red");
+    assert.ok(fm.includes("Host force always fires"), "host force constraint still fires alongside the project one");
+  } finally {
+    rmSync(hostFile, { force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
 // ── #264: pi attribution on the WORKFLOW/runNext path (mirrors invoke.integration.test.ts) ─
 const PI_ATTR_WORKFLOW: Workflow = {
   name: "test-pi-attr",
