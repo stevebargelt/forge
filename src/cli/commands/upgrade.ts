@@ -706,9 +706,9 @@ function modelPolicyDetail(
 
 /** Aggregate the per-file reports into ONE fleet outcome, in priority order:
  *  failed > action-required > migrated > would-migrate > all-current > none. */
-function aggregateModelPolicyOutcome(files: ModelPolicyFileReport[]): ModelPolicyMigrationOutcome {
+export function aggregateModelPolicyOutcome(files: ModelPolicyFileReport[]): ModelPolicyMigrationOutcome {
   if (files.some((f) => f.action === "failed")) return "failed";
-  if (files.some((f) => f.action === "needs-human-decision" || f.action === "newer-unsupported" || f.action === "unreachable")) {
+  if (files.some((f) => f.action === "needs-human-decision" || f.action === "newer-unsupported")) {
     return "action-required";
   }
   if (files.some((f) => f.action === "migrated")) return "migrated";
