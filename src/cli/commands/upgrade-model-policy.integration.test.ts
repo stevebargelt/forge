@@ -256,6 +256,7 @@ function baseOutcomes(over: Partial<UpgradeStepOutcomes>): UpgradeStepOutcomes {
     gitPull: "skipped",
     npmInstall: "skipped",
     assetInstall: "installed",
+    hostEditMigration: "nothing-to-back-up",
     seedGeneration: "not-run",
     modelPolicy: "none",
     authoredRetention: "none",

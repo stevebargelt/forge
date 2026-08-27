@@ -65,6 +65,16 @@ import {
   type MigrateIO,
   type MigrationVerdict,
 } from "../../v2/model-policy-migration.js";
+// FG-776 (FG-767 T3): the ONE-TIME pre-upgrade host-edit backup + completion latch.
+// Runs BEFORE install-seeds (step 3) so that once FG-777 flips the operator-authored
+// categories to always-FORCE, every operator-edited host seed is already copied to a
+// timestamped backup dir before any overwrite is possible. This ticket only backs up
+// + reports + latches; the overwrite (and the latch gate) is FG-777.
+import {
+  runHostEditMigration,
+  hostEditMigrationStatusLine,
+  type HostEditMigrationOutcome,
+} from "../../v2/host-edit-migration.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -367,6 +377,7 @@ export type UpgradeStepOutcomes = {
   gitPull: GitPullOutcome;
   npmInstall: NpmInstallOutcome;
   assetInstall: AssetInstallOutcome;
+  hostEditMigration: HostEditMigrationOutcome;
   seedGeneration: SeedGenerationOutcome;
   modelPolicy: ModelPolicyMigrationOutcome;
   authoredRetention: AuthoredRetentionOutcome;
@@ -424,6 +435,24 @@ const ASSET_INSTALL: Record<AssetInstallOutcome, Resolution> = {
   "would-install": resolved,
   "not-found": unresolvedBecause("install-seeds.sh NOT FOUND — host seeds were not refreshed"),
   failed: unresolvedBecause("install-seeds.sh FAILED"),
+};
+
+// FG-776: the pre-upgrade host-edit backup. Every terminal state EXCEPT `failed`
+// is the step working — a real run that backed up (or found nothing to back up),
+// a dry-run forecast, or `not-run` when there are no release seeds to compare
+// against (the asset-install not-found outcome already makes THAT run unresolved).
+// `failed` is unresolved: operator-edited host seeds were NOT backed up, so the
+// exit code / --json / closing line all say so and a forced seed refresh must not
+// proceed until it succeeds. It never hard-blocks the rest of the upgrade (AC5).
+const HOST_EDIT_MIGRATION: Record<HostEditMigrationOutcome, Resolution> = {
+  "backed-up": resolved,
+  "nothing-to-back-up": resolved,
+  "would-back-up": resolved,
+  "would-note": resolved,
+  "not-run": resolved,
+  failed: unresolvedBecause(
+    "pre-upgrade host-edit backup FAILED — operator-edited host seeds were NOT backed up; a forced seed refresh (FG-777) must not proceed until this succeeds (re-run forge upgrade)",
+  ),
 };
 
 // FG-583: a failed atomic publication is a NAMED, repairable partial-install state —
@@ -574,6 +603,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "gitPull": return GIT_PULL[step.outcome];
     case "npmInstall": return NPM_INSTALL[step.outcome];
     case "assetInstall": return ASSET_INSTALL[step.outcome];
+    case "hostEditMigration": return HOST_EDIT_MIGRATION[step.outcome];
     case "seedGeneration": return SEED_GENERATION[step.outcome];
     case "modelPolicy": return MODEL_POLICY[step.outcome];
     case "authoredRetention": return AUTHORED_RETENTION[step.outcome];
@@ -775,6 +805,21 @@ export type UpgradeResult = {
     npmInstall: NpmInstallOutcome;
   };
   assetInstall: AssetInstallOutcome;
+  /** FG-776: the ONE-TIME pre-upgrade host-edit backup outcome — flows into
+   *  `unresolved` only on `failed`. */
+  hostEditMigration: HostEditMigrationOutcome;
+  /** FG-776: the timestamped dir this run wrote every divergent host file to
+   *  (null when nothing diverged, on dry-run, or when the step did not run). */
+  hostEditBackupDir: string | null;
+  /** FG-776: the host files (paths relative to $FORGE_HOME) backed up this run. */
+  hostEditBackedUp: string[];
+  /** FG-776: the loud two-case reinstate report (added vs edited) — the SAME lines
+   *  the human warning prints, so a --json consumer reads the same guidance. */
+  hostEditReport: string[];
+  /** FG-776: the completion-latch path FG-777 gates on — written whenever this
+   *  step runs (even with nothing to back up), so FG-777's always-upgrade may
+   *  proceed only after this migration has had its chance to back edits up. */
+  hostEditLatchPath: string;
   /** FG-583: the atomic seed-generation publication outcome. On `failed` the
    *  `seedGenerationError` names the exact reason; a partial install is never
    *  reported healthy — this outcome flows into `unresolved`, the exit code, and
@@ -963,6 +1008,27 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
               break;
           }
         }
+      }
+
+      // Step 3 (pre): FG-776 — the ONE-TIME host-edit backup. Runs BEFORE
+      // install-seeds so that once FG-777 flips the operator-authored categories
+      // (agents / constraints / raci) to always-FORCE, every operator-edited host
+      // seed is already copied to a timestamped backup dir before any overwrite is
+      // possible (AC1). This ticket only backs up + reports + latches — it never
+      // overwrites. Non-blocking (AC5): a failure is surfaced and marks the run
+      // unresolved, but never aborts the rest of the upgrade. Sourced strictly from
+      // the executing release's seeds, the SAME root install-seeds writes from.
+      const hostEdit = runHostEditMigration({ seedsDir: join(assetsDir, "seeds"), dryRun });
+      const hostEditMigration: HostEditMigrationOutcome = hostEdit.outcome;
+      say(`[3/4] pre-upgrade host-edit backup: ${hostEditMigrationStatusLine(hostEdit)}`);
+      // REPORT (loud): the two-case reinstate guidance is narrated on stdout — it is
+      // operator guidance about a successful backup, not a refusal, so it rides the
+      // main narration (the warn stream is reserved for refusals/failures, which the
+      // `warnings===""` acceptance tests assert against).
+      for (const line of hostEdit.report) say(`        ${line}`);
+      if (hostEdit.outcome === "failed") {
+        warn(`        ⚠ pre-upgrade host-edit backup FAILED — ${hostEdit.error}`);
+        warn(`          operator-edited host seeds were NOT backed up. Do NOT force a seed refresh until this succeeds.`);
       }
 
       // Step 3: install-seeds.sh FORCE=1 — the ASSET half. Reads from the
@@ -1405,6 +1471,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         gitPull,
         npmInstall,
         assetInstall,
+        hostEditMigration,
         seedGeneration,
         modelPolicy,
         authoredRetention,
@@ -1450,6 +1517,11 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           npmInstall,
         },
         assetInstall,
+        hostEditMigration,
+        hostEditBackupDir: hostEdit.backupDir,
+        hostEditBackedUp: hostEdit.backedUp,
+        hostEditReport: hostEdit.report,
+        hostEditLatchPath: hostEdit.latchPath,
         seedGeneration,
         seedGenerationError,
         modelPolicy,
