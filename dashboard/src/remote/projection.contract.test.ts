@@ -34,6 +34,7 @@ import {
   toRemoteInbox,
   toRemoteInboxItem,
   toRemoteActivitySummary,
+  redactRemoteFreeText,
   unauthorizedRemoteBoard,
   hostUnavailableRemoteBoard,
   unsupportedRemoteBoard,
@@ -415,6 +416,47 @@ describe("FG-781 AC4: source drift — the allowlist tracks the source, not a co
       !forbiddenOutputKeys.test(returnObjects),
       "a mapper assigns a forbidden output key (body/command/commandLine/projectDir/worktreePath)",
     );
+  });
+});
+
+describe("FG-781 AC4 / RF-1: attention free text cannot carry a filesystem path or a credential", () => {
+  // The one unbounded surface that crosses the boundary: AttentionItem.reason /
+  // requestedAction. The allowlist keeps UNNAMED fields out; RF-1 seals the NAMED ones so a
+  // path or secret cannot ride inside them. Seed both a real host path and a credential-like
+  // token into an attention message and assert NEITHER reaches the mapped DTO.
+  const SEEDED_PATH = "/home/steve/.forge/secrets/private.key";
+  const SEEDED_TOKEN = "ghp_ABCDEF0123456789abcdef0123456789ABCD";
+  const SEEDED_KV = "password=hunter2SuperS3cret";
+
+  test("the redactor strips paths, prefixed tokens, high-entropy tokens, and key=value secrets", () => {
+    assert.ok(!redactRemoteFreeText(`see ${SEEDED_PATH} now`).includes(SEEDED_PATH), "a POSIX path is redacted");
+    assert.ok(!redactRemoteFreeText(`token ${SEEDED_TOKEN}`).includes(SEEDED_TOKEN), "a GitHub-style token is redacted");
+    assert.ok(!redactRemoteFreeText(`use ${SEEDED_KV}`).includes("hunter2SuperS3cret"), "a key=value secret value is redacted");
+    assert.ok(!redactRemoteFreeText("C:\\Users\\steve\\creds.txt").includes("creds.txt"), "a Windows path is redacted");
+    // Non-vacuous: ordinary operator prose and short ticket refs survive untouched.
+    assert.equal(redactRemoteFreeText("A run is awaiting a human gate — review FG-781"), "A run is awaiting a human gate — review FG-781");
+  });
+
+  test("the mapped inbox item carries neither the seeded path nor the seeded credential", () => {
+    const out = toRemoteInboxItem(
+      pollute({
+        id: "att-leak",
+        kind: "waiting_gate",
+        severity: "high",
+        startedAt: "2026-09-08T11:00:00.000Z",
+        reason: `Investigate ${SEEDED_PATH} before advancing`,
+        requestedAction: `Re-authenticate with ${SEEDED_TOKEN} (${SEEDED_KV})`,
+        source: "gate",
+        links: { runId: null, taskId: null, ticketId: "FG-781", campaignId: null, itemId: null },
+      }),
+    );
+    const serialized = JSON.stringify(out);
+    assert.ok(!serialized.includes(SEEDED_PATH), "the host path must not reach the remote DTO");
+    assert.ok(!serialized.includes(SEEDED_TOKEN), "the credential token must not reach the remote DTO");
+    assert.ok(!serialized.includes("hunter2SuperS3cret"), "the key=value secret must not reach the remote DTO");
+    // The bounded, safe context around the redactions still survives, so the row stays useful.
+    assert.match(out.reason, /Investigate .* before advancing/);
+    assert.equal(out.links.ticketId, "FG-781");
   });
 });
 

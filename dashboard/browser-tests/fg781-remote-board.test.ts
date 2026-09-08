@@ -111,6 +111,11 @@ const STATUS_FOR: Record<RemoteBoardState, number> = {
 // The response the stub /api/board returns, mutated per test before navigating/refreshing.
 let boardEnvelope: RemoteBoardEnvelope = envelope("live", true);
 
+// RF-3 overlapping-refresh support: a scripted queue of responses, each with its own server
+// delay, consumed one per /api/board request in order. Empty → every request falls back to
+// `boardEnvelope` immediately (the default all other tests rely on).
+let responsePlan: Array<{ env: RemoteBoardEnvelope; delayMs: number }> = [];
+
 let server: Server;
 let browser: Browser;
 let baseUrl = "";
@@ -164,6 +169,35 @@ test("renders the STALE state as explicitly NOT live — cached data is never pa
   assert.equal(await page.locator('[data-state="live"]').count(), 0, "the live marker must not persist once the read is stale");
   assert.equal(await page.locator(".rb-state--live").count(), 0, "no residual live styling after a stale read");
   await assert.doesNotReject(page.getByRole("heading", { level: 2, name: "Project" }).waitFor());
+  await page.close();
+});
+
+test("RF-3: overlapping refreshes — a slow LIVE response never overwrites a newer STALE render", async () => {
+  // Baseline live read (consumed by the boot load), then two overlapping refreshes: refresh A
+  // is issued first but the server holds its LIVE response; refresh B is issued right after and
+  // its STALE response returns immediately. Without a request generation, A's older live would
+  // land last and repaint the newer stale as live — exactly the stale-never-live violation.
+  responsePlan = [{ env: envelope("live", true), delayMs: 0 }];
+  const page = await open({ width: 1280, height: 1000 });
+  await page.locator('[data-state="live"]').waitFor();
+
+  responsePlan = [
+    { env: envelope("live", true), delayMs: 600 }, // A — issued first, resolves LAST
+    { env: envelope("stale", true), delayMs: 0 }, // B — issued second, resolves FIRST
+  ];
+  const refresh = page.getByRole("button", { name: "Refresh the board" });
+  await refresh.click(); // issues A (slow live)
+  await refresh.click(); // issues B (fast stale)
+
+  // B renders stale first; then A's older live arrives and MUST be discarded, not painted.
+  await page.locator('[data-state="stale"]').waitFor();
+  await page.waitForTimeout(900); // past A's 600ms delay: its superseded response has arrived
+
+  assert.equal(await page.locator('[data-state="live"]').count(), 0, "a superseded slow live response must not resurrect the live marker");
+  assert.equal(await page.locator('[data-state="stale"]').count(), 1, "the newer stale render stands");
+  assert.match((await page.locator('[data-state="stale"]').innerText()).toLowerCase(), /not live/, "the board still declares itself not live");
+
+  responsePlan = [];
   await page.close();
 });
 
@@ -321,11 +355,17 @@ function createFixtureServer(): Server {
       res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" }).end(readFileSync(filePath));
       return;
     }
-    // The stubbed projection endpoint: whichever envelope the current test selected.
+    // The stubbed projection endpoint: the next scripted response (with its delay) if the plan
+    // has one, else the current `boardEnvelope` immediately.
     if (url.pathname === REMOTE_BOARD_ENDPOINT) {
-      res
-        .writeHead(STATUS_FOR[boardEnvelope.state], { "Content-Type": "application/json", "Cache-Control": "no-store" })
-        .end(JSON.stringify(boardEnvelope));
+      const planned = responsePlan.shift();
+      const env = planned ? planned.env : boardEnvelope;
+      const respond = () =>
+        res
+          .writeHead(STATUS_FOR[env.state], { "Content-Type": "application/json", "Cache-Control": "no-store" })
+          .end(JSON.stringify(env));
+      if (planned && planned.delayMs > 0) setTimeout(respond, planned.delayMs);
+      else respond();
       return;
     }
     res.writeHead(404).end();

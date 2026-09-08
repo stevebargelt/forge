@@ -322,15 +322,25 @@ function injectStyle() {
   document.head.appendChild(style);
 }
 
+// RF-3: overlapping refreshes must never let an OLDER in-flight read overwrite a newer render
+// (an older `live` landing after a newer `stale` would repaint stale data as live — the one
+// rule the contract forbids). Each load takes a monotonically increasing generation; only the
+// LATEST generation is allowed to render. A superseded response is discarded, not painted.
+let requestGeneration = 0;
+
 async function load(mount, endpoint) {
+  const generation = ++requestGeneration;
+  const isCurrent = () => generation === requestGeneration;
   mount.setAttribute("aria-busy", "true");
   const onRefresh = () => load(mount, endpoint);
   try {
     const res = await fetch(endpoint, { headers: { Accept: "application/json" }, cache: "no-store" });
     const envelope = await res.json();
+    if (!isCurrent()) return; // a newer refresh already superseded this read — never repaint over it
     const state = envelope && typeof envelope.state === "string" ? envelope.state : "host-unavailable";
     render(mount, state, envelope, onRefresh);
   } catch {
+    if (!isCurrent()) return; // a superseded read's failure must not clobber the newer render either
     // A transport/parse failure is a host-unavailable read — never a blank page, and never a
     // fabricated "live".
     render(mount, "host-unavailable", null, onRefresh);

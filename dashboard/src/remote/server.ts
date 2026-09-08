@@ -71,6 +71,19 @@ export interface RemoteBoardDeps {
   readonly clientDir?: string;
 }
 
+/** RF-4: is the adapter's CLAIMED member-dir set consistent with the granted project's OWN
+ *  dirs? A claim is authorized only when it is non-empty AND every dir it names is one of the
+ *  project's own dirs. The actual projection scope is taken from the project, not the claim —
+ *  this predicate is the gate that refuses a cross-project claim before any data is assembled. */
+export function claimedDirsWithinProject(
+  claimedDirs: readonly string[],
+  projectDirs: readonly string[],
+): boolean {
+  if (claimedDirs.length === 0) return false;
+  const own = new Set(projectDirs);
+  return claimedDirs.every((dir) => own.has(dir));
+}
+
 /** HTTP status for each envelope state. The five-state discriminator lives in the BODY
  *  (the client switches on it); the status is defense-in-depth so an intermediary or cache
  *  never reads a refusal as a cacheable success. */
@@ -168,8 +181,18 @@ export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: Inco
       sendEnvelope(res, hostUnavailableRemoteBoard(now()));
       return;
     }
+    // RF-4: the projection scope is SERVER-AUTHORITATIVE — the granted project's OWN member
+    // dirs, resolved from the registry, NEVER the dirs the adapter handed us. The adapter's
+    // claimed dirs are only trusted as far as they are consistent with the project (non-empty
+    // AND a subset of its own dirs); an absent, empty, or out-of-scope claim is a scope-
+    // confusion attempt (e.g. project A's key carrying project B's dir) and refuses with no
+    // data rather than widening the projection past the granted project.
+    if (!claimedDirsWithinProject(resolution.identity.projectScope.memberDirs, project.projectDirs)) {
+      sendEnvelope(res, unauthorizedRemoteBoard(now()));
+      return;
+    }
     try {
-      const grant: RemoteProjectGrant = { project, memberDirs: resolution.identity.projectScope.memberDirs };
+      const grant: RemoteProjectGrant = { project, memberDirs: project.projectDirs };
       sendEnvelope(res, assembleRemoteBoard(grant, { nowMs: now() }));
     } catch {
       // A degraded/unreadable host store must never take the surface down, and never leak
@@ -219,6 +242,15 @@ export function createRemoteBoardServer(deps: RemoteBoardDeps = {}): Server {
 /** Create AND listen. Binds the loopback host/port from `config`. */
 export function startRemoteBoardServer(config: RemoteBoardConfig, deps: RemoteBoardDeps = {}): Server {
   const srv = createRemoteBoardServer(deps);
+  // RF-2: a bind failure (EADDRINUSE, EACCES, …) is emitted ASYNCHRONOUSLY on `srv` AFTER this
+  // function returns, so the caller's synchronous try/catch cannot catch it — an unhandled
+  // 'error' event would crash the SHARED local dashboard process. Contain it here: log, tear
+  // the half-open remote listener down, and leave the local dashboard untouched (AC1). The
+  // remote board simply stays unavailable; it never takes the local surface down with it.
+  srv.on("error", (err) => {
+    console.error("forge remote board: listener error; remote mode disabled, local dashboard unaffected:", err);
+    srv.close();
+  });
   srv.listen(config.port, config.host, () => {
     console.log(`forge remote board (read-only) listening at http://${config.host}:${config.port}`);
   });

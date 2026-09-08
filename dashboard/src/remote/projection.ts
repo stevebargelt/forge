@@ -299,14 +299,41 @@ export type RemoteInbox = {
   degraded: string[];
 };
 
+/** RF-1 (FG-781 AC4): `reason`/`requestedAction` are operator-authored free text on the
+ *  attention source — the only unbounded strings that cross the remote boundary. Invariant #6
+ *  forbids the DTO from carrying arbitrary filesystem paths or credentials/auth metadata, so
+ *  every free-text field is passed through this redactor first: a defense-in-depth denylist
+ *  layered UNDER the positive field allowlist (the allowlist keeps unnamed fields out; this
+ *  keeps a path or secret from riding inside a named one). It is deliberately conservative —
+ *  on a read-only remote surface an over-redacted word is strictly safer than a leaked path. */
+const REMOTE_REDACTED = "[redacted]";
+const REMOTE_FREE_TEXT_REDACTIONS: readonly RegExp[] = [
+  // key=value / key: value credential pairs (token, secret, password, api_key, bearer, …).
+  /\b(?:tokens?|secrets?|passwords?|passwd|pwd|api[_-]?keys?|access[_-]?keys?|secret[_-]?keys?|auth(?:orization)?|bearer|credentials?)\b\s*[:=]\s*\S+/gi,
+  // Known credential token shapes (GitHub/OpenAI/Slack/AWS prefixes).
+  /\b(?:ghp|gho|ghs|ghr|ghu|sk|xox[baprs]|AKIA|ASIA)[A-Za-z0-9_-]{8,}\b/g,
+  // Windows absolute path.
+  /[A-Za-z]:\\[^\s"']+/g,
+  // POSIX absolute path (two or more segments), so a lone "/" or a fraction like "9/8" is left.
+  /\/(?:[\w.@~%+-]+\/)+[\w.@~%+-]*/g,
+  // Generic high-entropy token: 24+ chars mixing letters and digits (catches opaque secrets).
+  /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g,
+];
+
+export function redactRemoteFreeText(text: string): string {
+  let out = text;
+  for (const pattern of REMOTE_FREE_TEXT_REDACTIONS) out = out.replace(pattern, REMOTE_REDACTED);
+  return out;
+}
+
 export function toRemoteInboxItem(item: AttentionItem): RemoteInboxItem {
   return {
     id: item.id,
     kind: item.kind,
     severity: item.severity,
     startedAt: item.startedAt,
-    reason: item.reason,
-    requestedAction: item.requestedAction,
+    reason: redactRemoteFreeText(item.reason),
+    requestedAction: redactRemoteFreeText(item.requestedAction),
     source: item.source,
     links: {
       runId: item.links.runId,
