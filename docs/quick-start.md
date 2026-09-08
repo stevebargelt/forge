@@ -263,7 +263,7 @@ cd ~/code/forge
 
 Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Always cross-project: the dashboard intentionally shows runs across every project on the host (the cross-project survey surface), independent of `forge status`'s workspace filter. Schema contract: `docs/SCHEMA-CONTRACT.md`.
 
-`forge dashboard start --remote` boots an additional, off-by-default, read-only, project-scoped **Remote Board** on its own loopback port (`:8025`, see `dashboard/README.md`). FG-781 ships no transport adapter, so it refuses every request until a later ticket fronts it with one — enabling the flag does not, by itself, make anything reachable off the host.
+`forge dashboard start --remote` boots an additional, off-by-default, read-only, project-scoped **Remote Board** on its own loopback port (`:8025`, see `dashboard/README.md`). It refuses every request until a transport adapter is selected — enabling the flag does not, by itself, make anything reachable off the host. FG-782 ships the first one: `FORGE_DASHBOARD_REMOTE_TRANSPORT=tailscale` fronts it with a tailnet-private Tailscale Serve proxy (`docs/how-to-remote-board-tailscale.md`).
 
 ## 13. Long-running commands under an interactive session (`forge launch`)
 
