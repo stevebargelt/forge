@@ -153,6 +153,32 @@ is not routed through redaction — the readiness/review reason text is built fr
 stored ticket/finding data and the wait reason/requested-action text is FG-734's own
 already-safe copy, neither of which is free-form command output.
 
+## Remote Board free text (FG-781)
+
+The Remote Board's `/api/board` projection (`docs/SCHEMA-CONTRACT.md` → [Remote
+Board](SCHEMA-CONTRACT.md#remote-board-fg-781)) allowlists its five DTOs field by
+field, but several of those named fields still carry operator-authored free text:
+the `inbox` item's `reason`/`requestedAction`, `projectSummary.description`, the
+`backlog` ticket `title`, the `queue` row `title`, a campaign's `goal`/
+`currentItem.title`, and the `activity` agent's `runTitle`. Every one of them
+(unconditionally — the inbox fields are not gated to the `auth_setup` kind the way
+the local Attention inbox above is) is passed through `redactRemoteFreeText` — or
+its null-preserving `redactRemoteFreeTextOrNull` wrapper for the nullable fields —
+in `dashboard/src/remote/projection.ts` before the envelope leaves the process. It
+is a **separate** denylist from `redactSecrets` — not reused — layered *underneath*
+the DTO's positive field allowlist as defense-in-depth (the allowlist keeps unnamed
+fields off the wire; this keeps a secret, path, or URL from riding inside a named
+one): key=value credential pairs (`token`/`secret`/`password`/`api_key`/`bearer`/…),
+known credential token shapes (GitHub/OpenAI/Slack/AWS prefixes), any
+`scheme://host[:port][/path]` URL regardless of path depth (a bare `scheme://host`
+with no path included, e.g. a remote-control `https://control.invalid`), a bare
+`host:port` authority with no scheme, absolute POSIX and Windows filesystem paths,
+and — unlike `redactSecrets`, which by policy leaves a bare token alone — any
+generic 24+ character run mixing letters and digits. It is deliberately
+conservative: on a read-only surface a later trusted proxy (FG-782/FG-784) can
+front off the host, an over-redacted word is strictly safer than a leaked path,
+token, or remote-control URL.
+
 ## `forge backup`
 
 Unlike every artifact above, `forge backup create` (FG-669) is **not** redacted, by

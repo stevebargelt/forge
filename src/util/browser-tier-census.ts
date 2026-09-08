@@ -138,6 +138,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   "fg694-home-in-flight.test.ts": 10,
   "fg699-scope-invalidation.test.ts": 6,
   "fg745-projects-classification.test.ts": 6,
+  // FG-781 adds `fg781-remote-board` (9 tests): the focused Remote Board client renders the
+  // five projection states honestly in a real browser — the live board, a stale board marked
+  // explicitly NOT live (including the RF-3 overlapping-refresh stale-never-live case),
+  // and the three refusal states (host-unavailable/unauthorized/unsupported) each carrying no
+  // project card. Plus screen-reader landmarks/heading-hierarchy/status region, a
+  // keyboard-reachable Refresh that re-reads on Enter, single-column no-overflow on a phone
+  // and a multi-column grid on a desktop, and a full render with no active agent session (AC5).
+  "fg781-remote-board.test.ts": 9,
   // FG-692 adds `fg402-attention-inbox-overflow` (2 tests): the Attention Inbox row
   // grid does not force a horizontal scroll on a 360px viewport, and its responsive
   // override collapses the row to a single column there (FG-402 RF-3).

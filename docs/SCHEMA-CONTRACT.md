@@ -782,6 +782,8 @@ The dashboard server exposes JSON endpoints. Default base URL: `http://127.0.0.1
 
 **Every `GET` is a read.** The only non-`GET` routes on the whole surface are the four `POST /api/queue/*` queue-planning routes (FG-591, below), and they do not write the DB either — each shells exactly one named `forge queue` verb, which is the path [FORGE-DEC-015](#cli-surface-for-mutations) chose. Everything else, including a CORS preflight for those four paths, is a `405`, and **no `Access-Control-Allow-*` header is emitted anywhere on this surface** — that absence is what makes a cross-origin preflight fail closed.
 
+This section describes the **local** dashboard on `:8024`. The opt-in, read-only, project-scoped **Remote Board** is a separate loopback listener with its own contract — see [Remote Board (FG-781)](#remote-board-fg-781) below.
+
 ### Core endpoints
 
 | Endpoint | Query params | Description |
@@ -1049,6 +1051,65 @@ Read-only (FG-348). Same `?projectDir=<path>` / `?projectKey=` `409` restriction
   - `upstream` — `{ inputs: UpstreamInput[], status }`. Each input is `{ key, summary }` — `summary` is a compact, redaction-safe SHAPE description (type + length/count) of the input value, **never** the raw value's content, which may carry secrets a structural redactor can't catch.
   - `artifacts` — `ArtifactRef[]`, `{ kind, name, available }` for `result` (`result.json`), `stdout`/`stderr` (`container.stdout.log`/`container.stderr.log`), and `manifest` (`manifest.json`) — the same four the CLI's `forge explain task` probes, so the two surfaces never diverge on what's available.
 - `verificationEvidence` — `HostVerificationEvidenceRow[]` (FG-746). NOT part of `TaskExplain` proper and not shared with `forge explain task --json`: the route builds the byte-identical `TaskExplain` body via `buildTaskExplain()` and then splices this array on as a SIBLING (`{...explain, verificationEvidence}`), so `RUN_EXPLAIN_VERSION` and the CLI's own output are unaffected. Built by `verificationEvidenceForTask()`: the candidate-bound `host_verifications` rows for the task's run, matched primarily by the run's candidate commit sha (from `reviews.candidate_sha`, falling back to the newest run-tagged row's commit) — the sha bind is constrained to the task's OWN project, so a commit sha two projects coincidentally share can never attach the other project's evidence — and secondarily by `run_id` (left unscoped, since a run_id names exactly one run and hence one project), so a bare host gate recorded with no `run_id` still attaches by sha while a row on this exact run still attaches even at a differing commit. Empty when the task's run carries no evidence, predates the ledger, or is out of scope.
+
+## Remote Board (FG-781)
+
+The **Remote Board** is an explicit, opt-in, **read-only**, project-scoped remote surface — distinct from the local dashboard above. It is the foundation a later trusted local proxy (Tailscale Serve, FG-782; Cloudflare Tunnel+Access, FG-784) can front, so its projection contract and configuration are **public API**: FG-785 consumes the projection; FG-782/FG-784 plug transport adapters into the identity interface; FG-783 adds a planning-mutation capability. This section is the stable, provider-neutral definition those tickets build against.
+
+**It is a second, dedicated listener — not a route prefix on `:8024`.** Enabling remote mode starts its own `http.Server` (`dashboard/src/remote/server.ts`) on its own loopback port. The local dashboard's route table, headers, and listener are untouched; with remote mode **off** (the default) no remote route or asset is served at all and the local dashboard is byte-for-byte unchanged (AC1). The remote handler has **no non-`GET` branch** and imports nothing from the queue-mutation / classify / any DB-lifecycle writer, so "no remote mutation" (AC7) is a structural property of the module graph, not a guard.
+
+### Operator configuration (operator-facing)
+
+Remote mode is a **boot-time operator decision**, resolved once from the process environment by `dashboard/src/remote/config.ts` and **never** from anything a request carries.
+
+| Surface | Value | Meaning |
+|---|---|---|
+| `forge dashboard start --remote` | — | Opt in. Threads `FORGE_DASHBOARD_REMOTE=1` into the spawned server's env, exactly as `--port`/`--host` thread `PORT`/`HOST`. |
+| `forge dashboard start --remote-port <n>` | port | Optional. Threads `FORGE_DASHBOARD_REMOTE_PORT=<n>`. Requires `--remote` — passing it without `--remote` refuses before the dashboard starts (`assertRemotePortRequiresRemote`, `src/cli/commands/dashboard.ts`) rather than threading an env var nothing reads. |
+| `FORGE_DASHBOARD_REMOTE` env | `1` \| `true` (case-insensitive, trimmed) | Opt in to remote mode. Absent / empty / `0` / `false` / any unrecognized value ⇒ **off** (fail closed). |
+| `FORGE_DASHBOARD_REMOTE_PORT` env | TCP port `0`–`65535` | Remote board loopback port. Default **`8025`** (one above the local `8024`). `0` requests an OS-assigned ephemeral port. A non-integer or out-of-range value falls back to the default rather than binding something unintended. |
+
+A remote port equal to the local dashboard port (`PORT` env, default `8024`) is refused at config-resolution time, before either listener binds (`RemotePortCollisionError`, `dashboard/src/remote/config.ts`) — the remote board is a separate loopback listener started before the local dashboard's own `server.listen`, so an unnoticed collision would let the remote listener win the bind and take the local dashboard down with `EADDRINUSE`, silently breaking the AC1 guarantee that enabling remote mode leaves the local dashboard unchanged. The error names both ports. `maybeStartRemoteBoardFromEnv` (`dashboard/src/remote/server.ts`) catches the refusal, logs it, and leaves remote mode off; the local dashboard's `server.listen` runs regardless and is unaffected either way. Port `0` (OS-assigned ephemeral) never collides.
+
+There is **deliberately no `--remote-host` flag and no `FORGE_DASHBOARD_REMOTE_HOST` env.** The remote bind host is the constant `127.0.0.1` in `config.ts` — the single line that guarantees **enabling remote mode never opens a non-loopback listener by itself**. A later transport adapter fronts this loopback endpoint; it does not change what the backend binds. `docs_impact` for FG-781: `operator_behavior_changed` (a new mode and flags) + `public_api_changed` (the projection contract below).
+
+### Verified-identity + capability interface
+
+Authorization is **transport-neutral** (`dashboard/src/remote/identity.ts`). It consumes a **verified identity** and **explicit capabilities** supplied by a transport adapter — never raw inbound headers. FG-781 ships **no adapter**, so the bound resolver refuses every request and the surface **fails closed**: no identity ⇒ no project data (AC2).
+
+- **Raw request headers never establish identity.** `X-Forwarded-*`, `Tailscale-User-Login`, `Cf-Access-Authenticated-User-Email` and the like are actively ignored — scanned only to be recorded as ignored, then discarded (AC6). A spoofed proxy/identity header on a direct request changes nothing.
+- **Capabilities are a closed set.** In FG-781 the only member is `read`; the type cannot express any mutation capability (FG-783 will add one as an addition). A verified identity that lacks `read` is refused.
+- **Project scope is server-authoritative.** The granted `projectKey` comes from the identity, never from a client `projectKey`/`projectDir` param, and selects the project record; the projection's `memberDirs` are always that project's **own dirs from the registry**, never the identity's claimed dirs — pinned **strictly** to the granted project, a deliberate, documented divergence from `resolveProjectScope`'s FG-745 owner-convergence widening. The identity's claimed `memberDirs` is trusted only as a consistency check on the way in: it must be non-empty and every dir it names must be one of the project's own, or the request refuses `unauthorized` (`claimedDirsWithinProject`, `dashboard/src/remote/server.ts`) — a claim naming another project's dir, or no dir at all, reads as scope confusion, not as a widened grant. A grant that is absent, ambiguous, or names no registered project refuses/degrades; it never widens.
+
+### HTTP surface (remote listener only)
+
+Every route is `GET`. Any other method is a flat `405` with `Allow: GET` and **no `Access-Control-Allow-*` header anywhere**, so a cross-origin caller fails closed. Assets are served from `dashboard/remote-client/` by runtime path — never the local `CLIENT_DIR` bundle — under the remote shell's own `script-src 'self' 'nonce-…'` CSP.
+
+| Endpoint | Description |
+|---|---|
+| `GET /` | The remote board HTML shell (its own nonce CSP; focused asset set, not `CLIENT_DIR`). |
+| `GET /api/board` | The projection envelope below. With no adapter wired, always the `unauthorized` refusal envelope (`board: null`). |
+| `GET /remote-client/*` | The focused board assets, path-traversal-contained under `dashboard/remote-client/`. |
+
+### `GET /api/board` response shape (`RemoteBoardEnvelope`)
+
+A discriminated envelope (`dashboard/src/remote/projection.ts`) that makes cached data impossible to render as live (AC5):
+
+- `state` — one of exactly **five** honest states: `live` | `stale` | `host-unavailable` | `unauthorized` | `unsupported`. Data is present **only** for `live` and `stale`. HTTP status mirrors it as defense-in-depth (`200` live/stale, `401` unauthorized, `503` host-unavailable, `501` unsupported); the body is served `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
+- `generatedAt` — ISO timestamp of the read that produced `board` (or of the refusal itself); never fabricated from "now" when `board` is null.
+- `generation` — monotonic freshness stamp (epoch ms of the generating read). A client compares successive generations to know whether a payload advanced — the explicit half of "never present cached data as live".
+- `board` — the project-scoped board, present **only** for `live`/`stale`; `null` for every refusal/degradation.
+
+The `board` carries exactly **five positive-allowlist DTOs**. Each field is copied explicitly from its source, one named property at a time — no mapper spreads or returns a source object, so when a reused internal query grows a new field it simply never reaches a DTO. `projection.contract.test.ts` enforces this (runtime injection + source-drift scrape). What each DTO **excludes** is the contract's point (AC4):
+
+- **`projectSummary`** (`RemoteProjectSummary`) — `projectKey`, `label`, `color`, `description`, `lastRunAt`, `runCount`, `inFlightCount`, `liveSessions`. `description` is operator-authored free text, so it is passed through `redactRemoteFreeTextOrNull` (below) before it reaches the DTO. **Excludes** every host path (`projectDir`, checkouts), the GitHub URL, README content, and owner/purpose/classification identity fields.
+- **`backlog`** (`RemoteBacklogProjection`) — `projectKey`, `storageMode`, and `tickets[]` of `{ id, type, status, title, epic, created, closed, related }`. `title` is passed through `redactRemoteFreeText`. **Excludes** the ticket `body` (free content) and `closedCommit` (a git SHA).
+- **`queue`** (`RemoteQueueProjection`) — `projectKey`, `storageMode`, `queueAvailable`, `unavailableReason`, `version`, `rows[]`, and `views` (a partition of ticket ids into columns). Each row carries only board-level facts plus the closed `waitKind` vocabulary; a row's `title` is passed through `redactRemoteFreeText`. **Excludes** `reservation` (claim owner / launch / run ids), free-text blocker/readiness detail, `enqueuedBy`/`note`, scan detail, the free-text `wait.reason`, the whole `dispatcher` control-plane panel, and `capacity` (which carries **cross-project** holder rows).
+- **`campaigns`** (`RemoteCampaignSummary[]`) — per campaign: `campaignId`, `goal`, `mode`, `status`, `verdict`, `createdAt`, `updatedAt`, `counts`, and a minimal `currentItem`. `goal` and `currentItem.title` are passed through `redactRemoteFreeTextOrNull`. **Excludes** `projectDir` (a host path). Counts are this project's own, never a cross-project aggregate.
+- **`inbox`** (`RemoteInbox`) — `generatedAt`, `items[]`, `empty`, `degraded[]`. Each item carries id-only `links` (`runId`/`taskId`/`ticketId`/`campaignId`/`itemId`); its `reason`/`requestedAction` is passed through a denylist redactor (`redactRemoteFreeText`, `dashboard/src/remote/projection.ts`) that blanks credential-shaped tokens, remote-control URLs, and absolute filesystem paths before the envelope leaves the process; see [Remote Board free text](redaction.md#remote-board-free-text-fg-781). **Excludes** the envelope `scope` (projectDirs paths) and the item `links.projectDir`/`projectLabel`.
+- **`activity`** (`RemoteActivitySummary`) — a **summary**: `generatedAt`, minimal `agents[]` (id/label set, no `projectDir`, no argv), `counts` for the launch/verification/wait buckets, the closed `requiredCiState` vocabulary, and `hasLiveWork`. Each agent's `runTitle` is passed through `redactRemoteFreeText`. **Excludes** every launch/CI **row** — they carry host argv (`command`/`commandLine`), host paths, and CI/remote-control URLs — surfacing only their counts.
+
+Across all five: **no** raw logs/transcripts, environment values, credentials/auth metadata, arbitrary filesystem paths/content, review artifacts, remote-control URLs, or cross-project aggregates ever cross the remote boundary — enforced structurally by the allowlist, which keeps every *unnamed* field off the wire. Every free-text field a DTO still carries by name — the `inbox` item's `reason`/`requestedAction`, `projectSummary.description`, the `backlog` ticket `title`, the `queue` row `title`, a campaign's `goal`/`currentItem.title`, and the `activity` agent's `runTitle` — is additionally swept by `redactRemoteFreeText` (or its null-preserving `redactRemoteFreeTextOrNull` wrapper for the nullable ones) described above, so a credential, absolute path, or remote-control URL riding inside a named field can't slip through on the allowlist alone.
 
 ## CLI surface (for mutations)
 

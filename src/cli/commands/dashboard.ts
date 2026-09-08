@@ -26,6 +26,21 @@ function resolveDashboard(): { dashboardDir: string; serverEntry: string } {
   return { dashboardDir, serverEntry };
 }
 
+/**
+ * RF-6: `--remote-port` is documented (docs/SCHEMA-CONTRACT.md) as REQUIRING `--remote`.
+ * Enforce that prerequisite rather than silently accepting a remote port and then ignoring
+ * it — with no `--remote` the ordinary dashboard starts and `FORGE_DASHBOARD_REMOTE_PORT`
+ * would be threaded into an env nothing reads. Refuse the combination up front, by name.
+ */
+export function assertRemotePortRequiresRemote(opts: { remote?: boolean; remotePort?: string }): void {
+  if (opts.remotePort !== undefined && !opts.remote) {
+    throw new Error(
+      "--remote-port requires --remote. The Remote Board is off by default; pass --remote to enable it, " +
+        "or drop --remote-port.",
+    );
+  }
+}
+
 export function registerDashboard(program: Command): void {
   const dashboard = program
     .command("dashboard")
@@ -46,12 +61,31 @@ export function registerDashboard(program: Command): void {
     .description("Boot the dashboard HTTP server (default: http://127.0.0.1:8024)")
     .option("--port <n>", "TCP port (default: 8024)")
     .option("--host <h>", "bind host (default: 127.0.0.1)")
-    .action((opts: { port?: string; host?: string }) => {
+    // FG-781: opt in to the Remote Board — a SECOND, dedicated read-only loopback listener
+    // (default http://127.0.0.1:8025), distinct from the local dashboard above and OFF unless
+    // this flag is passed. It is a boot-time operator decision only: like --port/--host it is
+    // threaded into the spawned server's env and is never request-reachable. Enabling remote
+    // mode never opens a non-loopback listener by itself — the remote board stays
+    // loopback-bound and a later trusted local proxy (Tailscale Serve FG-782 / Cloudflare
+    // Tunnel+Access FG-784) fronts that loopback endpoint. See docs/SCHEMA-CONTRACT.md →
+    // "Remote Board (FG-781)".
+    .option("--remote", "also start the read-only Remote Board on a dedicated loopback listener (default: off)")
+    .option("--remote-port <n>", "Remote Board loopback port (default: 8025); requires --remote")
+    .action((opts: { port?: string; host?: string; remote?: boolean; remotePort?: string }) => {
+      assertRemotePortRequiresRemote(opts);
       const { dashboardDir, serverEntry } = resolveDashboard();
 
       const env = { ...process.env };
       if (opts.port) env["PORT"] = opts.port;
       if (opts.host) env["HOST"] = opts.host;
+      // Thread remote mode with the SAME provenance pattern as --port/--host above. The env
+      // var names are the public contract dashboard/src/remote/config.ts resolves at boot
+      // (FORGE_DASHBOARD_REMOTE / FORGE_DASHBOARD_REMOTE_PORT); the opt-in value "1" is one of
+      // the two truthy tokens its resolver accepts. There is deliberately NO --remote-host
+      // flag and no FORGE_DASHBOARD_REMOTE_HOST: the remote bind host is a loopback constant
+      // in config.ts, so no flag or env value can widen it to a public address.
+      if (opts.remote) env["FORGE_DASHBOARD_REMOTE"] = "1";
+      if (opts.remotePort) env["FORGE_DASHBOARD_REMOTE_PORT"] = opts.remotePort;
 
       // FG-580: run the server under THIS process's interpreter (process.execPath) — under
       // a release that IS the release's pinned interpreter, so the dashboard boots with NO

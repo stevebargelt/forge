@@ -92,6 +92,21 @@ The FG-679 endpoints (`/api/current-activity`, `/api/launches/:id`, `/api/launch
 
 Project-aware read endpoints accept either `?projectKey=<canonical-key>` to include every observed member path or `?projectDir=/exact/path` for an exact operational checkout. If both are present, the exact path wins. Unknown canonical keys match nothing. Metrics endpoints also accept `?since=30d` — except `/api/agent-runtime` and `/api/completed-runs`, which take a fixed `?window=` instead. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md`.
 
+## Remote Board (FG-781)
+
+An explicit, opt-in, **read-only**, project-scoped surface — a second, dedicated loopback listener (default `:8025`), not a route on the `:8024` server above. It is the foundation a later trusted local proxy (Tailscale Serve, FG-782; Cloudflare Tunnel+Access, FG-784) can front to reach one project's board from off the host; this story ships no such proxy.
+
+```bash
+forge dashboard start --remote                       # also boots http://127.0.0.1:8025 (read-only)
+forge dashboard start --remote --remote-port 9000     # custom remote port; requires --remote
+```
+
+Off by default (`--remote` / `FORGE_DASHBOARD_REMOTE=1` opts in). Enabling it never opens a non-loopback listener — the bind host is a constant in `dashboard/src/remote/config.ts`, not a flag or env var, so nothing can widen it to a public address. The ordinary `:8024` dashboard is byte-for-byte unaffected either way — including when `--remote-port` collides with it: that configuration is refused, by name, before either listener binds, and `--remote-port` without `--remote` is refused too. Full detail: [Remote Board operator configuration](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781).
+
+**Today it refuses every request.** FG-781 ships the mode, the projection contract, and the fail-closed identity interface, but no transport adapter — the piece that turns a proxied request into a verified identity. Every remote route (`GET /`, `GET /api/board`, `GET /remote-client/*`) is served, but `GET /api/board` always answers with the `unauthorized` envelope (`board: null`) until Tailscale Serve (FG-782) or Cloudflare Tunnel+Access (FG-784) wires an adapter in. That is the intended state, not a bug: a spoofed `X-Forwarded-*` / `Tailscale-User-Login` / `Cf-Access-*` header on a direct request is scanned only to be recorded as ignored, never trusted, so there is no way to "turn it on" from the client side.
+
+Once an adapter exists, a granted identity still only ever sees the read-only projection of its **own** scoped project: project summary, backlog/queue, campaign summaries, the attention inbox, and current-activity — never raw logs, transcripts, env values, credentials, filesystem paths, review artifacts, or another project's data, and never a mutation (this story adds none; FG-783 is a separate later ticket). Full route and DTO reference: [Remote Board (FG-781)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781) in the schema contract.
+
 ## Validation
 
 ```bash
