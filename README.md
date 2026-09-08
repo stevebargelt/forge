@@ -104,6 +104,8 @@ cd ~/code/forge
 
 Shows agent outputs across every project on the host, live-polling every 2s. Reads `~/.forge/forge.db` directly (read-only); mutating actions shell to `forge` so the CLI's auth + validation stay the single entrypoint for state changes. Schema coupling between forge and the dashboard is enforced via TypeScript imports (`dashboard/src/queries.ts` re-exports forge's `Run`/`Task` types from `@forge/types`); see `docs/SCHEMA-CONTRACT.md` for the full contract.
 
+`forge dashboard start --remote` opts in to the **Remote Board** (FG-781): an off-by-default, read-only, project-scoped second listener on its own loopback port (`:8025`). It ships no transport adapter, so it refuses every request until a later ticket (Tailscale Serve / Cloudflare Tunnel+Access) wires one in. See `dashboard/README.md` → "Remote Board".
+
 ## Where things live
 
 | Path | Purpose |
