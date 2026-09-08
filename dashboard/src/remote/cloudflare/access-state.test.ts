@@ -8,7 +8,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, existsSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   ACCESS_STATE_VERSION,
@@ -162,6 +162,24 @@ test("writeOwnedIngressFile lays down the owned config 0600", () => {
 
 test("writeOwnedIngressFile refuses an empty path", () => {
   assert.throws(() => writeOwnedIngressFile("", "x"), /empty path/);
+});
+
+test("FG-790: writeOwnedIngressFile does NOT overwrite a pre-existing foreign .<name>.tmp sibling", () => {
+  const configPath = resolveOwnedIngressPath(env);
+  // The deterministic temp path the old writer would have used — an operator's own scratch file.
+  const foreignTmp = join(forgeHome, `.${basename(configPath)}.tmp`);
+  const foreignBody = "operator's own scratch file — must not be clobbered\n";
+  writeFileSync(foreignTmp, foreignBody, { mode: 0o600 });
+
+  const body = "ingress:\n  - service: http://127.0.0.1:8025\n";
+  writeOwnedIngressFile(configPath, body);
+
+  assert.equal(readFileSync(configPath, "utf8"), body, "owned ingress file written correctly");
+  assert.equal(
+    readFileSync(foreignTmp, "utf8"),
+    foreignBody,
+    "foreign .<name>.tmp sibling must survive byte-identical",
+  );
 });
 
 // ── ownership stamp validation (RF-1) ──────────────────────────────────────────────────────

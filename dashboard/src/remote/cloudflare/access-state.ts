@@ -36,7 +36,7 @@
 // reads/writes/removes them. No cross-boundary import.
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -194,15 +194,36 @@ function tryReadFileText(path: string): string | null {
   }
 }
 
+/** A temp sibling path with a UNIQUE random suffix, so no two writers (and no pre-existing file)
+ *  ever collide on a deterministic name. */
+function tempSiblingPath(dir: string, path: string): string {
+  return join(dir, `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
+}
+
 /** Write `contents` to `path` owner-only (dir 0700, file 0600) via a temp file + atomic rename, so
- *  a crash or a failing write never leaves a half-written file at `path`. */
+ *  a crash or a failing write never leaves a half-written file at `path`. The temp sibling is
+ *  created EXCLUSIVELY (O_EXCL via the "wx" flag) with a random suffix (FG-790): a deterministic
+ *  temp path would let `writeFileSync` clobber a pre-existing foreign file sitting there — bypassing
+ *  the RF-1 ownership check, which only inspects the target path. On an EEXIST collision we retry
+ *  once with a fresh name and never overwrite; on any failure after creation we unlink the temp. */
 function writeFileAtomicOwnerOnly(path: string, contents: string): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = join(dir, `.${basename(path)}.tmp`);
-  writeFileSync(tmp, contents, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  let tmp = tempSiblingPath(dir, path);
+  try {
+    writeFileSync(tmp, contents, { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    tmp = tempSiblingPath(dir, path);
+    writeFileSync(tmp, contents, { mode: 0o600, flag: "wx" });
+  }
+  try {
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 /**

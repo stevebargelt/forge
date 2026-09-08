@@ -46,6 +46,15 @@ function b64url(value: object): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
+/** Tamper a signature so its DECODED bytes are guaranteed to differ. Flip a char in the MIDDLE of
+ *  the segment, never the last: a 256-byte RS256 signature is 342 base64url chars whose final char
+ *  carries only 2 significant bits (the other 4 are padding), so flipping the last char can change
+ *  padding-only and decode to IDENTICAL bytes — a non-forgery the verifier legitimately accepts. */
+function tamperSignature(sig: string): string {
+  const i = Math.floor(sig.length / 2);
+  return sig.slice(0, i) + (sig[i] === "A" ? "B" : "A") + sig.slice(i + 1);
+}
+
 /** Build and RS256-sign a JWT from a header + payload against a private key. */
 function signRs256(
   payload: Record<string, unknown>,
@@ -222,8 +231,7 @@ test("AC3: a token issued in the future (iat ahead of now) is refused", () => {
 test("AC3: a tampered signature is refused (signature-invalid, NOT ok)", () => {
   const token = signRs256(validClaims());
   const [h, p, sig] = token.split(".") as [string, string, string];
-  // Flip the last base64url char of the signature to a different valid char.
-  const mutated = sig.slice(0, -1) + (sig.endsWith("A") ? "B" : "A");
+  const mutated = tamperSignature(sig);
   const result = verifyAccessJwt(`${h}.${p}.${mutated}`, RSA_JWKS, OPTS);
   assert.equal(result.status, "invalid");
   if (result.status === "invalid") assert.equal(result.reason, "signature-invalid");
@@ -250,7 +258,7 @@ test("AC3: an unknown kid is reported DISTINCTLY from invalid — enabling one J
 test("unknown-kid is distinct from a real forgery: a bad signature under a KNOWN kid stays invalid", () => {
   const token = signRs256(validClaims());
   const [h, p, sig] = token.split(".") as [string, string, string];
-  const mutated = sig.slice(0, -1) + (sig.endsWith("A") ? "B" : "A");
+  const mutated = tamperSignature(sig);
   const result = verifyAccessJwt(`${h}.${p}.${mutated}`, RSA_JWKS, OPTS);
   assert.equal(result.status, "invalid"); // NOT unknown-kid — no pointless refresh on a forgery
 });
