@@ -1784,6 +1784,72 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_state
   ON orchestrator_receipts(state, created_at);
 CREATE INDEX IF NOT EXISTS idx_orchestrator_receipts_session
   ON orchestrator_receipts(session_key);
+
+-- FG-785 (external kanban projection, OUTBOUND-ONLY): two brand-new tables arriving
+-- WHOLE via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same additive-only
+-- BD-15 / FG-568 forward-gate contract as every table above. user_version is NOT bumped,
+-- so an older forge binary sharing the machine-wide ~/.forge/forge.db keeps opening the
+-- store unharmed. NEITHER table is a lifecycle table and NO provider concept leaks into
+-- runs/tasks/gates/campaigns/tickets — the provider is a plain string column here, nothing
+-- more (AC1). NO CHECK on any vocabulary these own (enum-as-convention, FG-585): an old/new
+-- binary must never fight a constraint the other side does not share.
+
+-- The durable Forge->external-card IDENTITY map. This is what makes an outbound sync
+-- idempotent and incremental: the card's identity is the OPAQUE Forge (project, ticket)
+-- pair plus the provider, NEVER the card's name/labels/column position (AC1). The row
+-- records the external card id the projection landed on, the content HASH of the last
+-- projected card DTO (the incremental-sync signal — a differing hash is the only thing
+-- that triggers a re-push), and write PROVENANCE (who/what produced the write, and when).
+--
+-- The composite (project_identity, ticket_identity, provider) is the PRIMARY KEY: exactly
+-- one card per Forge ticket per provider, so a repeated sync UPSERTs the same row instead
+-- of minting a duplicate card. projection_state is 'active' | 'archived' (enum-as-convention):
+-- an archived card keeps its identity row so a later sync never re-creates it. Every column
+-- is NOT NULL — a map row exists only once a durable external identity has been established,
+-- so none of them is a legitimately-absent value.
+CREATE TABLE IF NOT EXISTS kanban_projection_map (
+  project_identity     TEXT NOT NULL,
+  ticket_identity      TEXT NOT NULL,
+  provider             TEXT NOT NULL,
+  external_card_id     TEXT NOT NULL,
+  projection_state     TEXT NOT NULL,
+  last_projected_hash  TEXT NOT NULL,
+  projected_by         TEXT NOT NULL,
+  projected_at         TEXT NOT NULL,
+  created_at           TEXT NOT NULL,
+  PRIMARY KEY (project_identity, ticket_identity, provider)
+);
+
+-- The CONFLICT record — the resolution AUTHORITY. When the provider reports a card was
+-- moved/deleted/edited externally, a bounded, actionable row is recorded here carrying
+-- BOTH versions (Forge's canonical projection JSON + the observed external state JSON).
+-- The external change is NEVER applied to any Forge state (AC4); this row is all that
+-- happens. A conflict persists (state 'open') until an AUTHORIZED resolution writes it to
+-- 'resolved' — last-writer-wins is explicitly NOT the default (AC5). The attention inbox
+-- (FG-746 source pattern, step 5) is an OPEN-ONLY PROJECTION of these rows and holds no
+-- resolution state of its own: this table is the single authority.
+--
+-- id is an opaque conflict id (PK). kind is the external-change class ('moved' | 'deleted'
+-- | 'edited', enum-as-convention). forge_version / external_version are JSON strings (the
+-- both-versions payload). state is 'open' | 'resolved'. detected_* is detection provenance;
+-- resolved_* / resolution are NULL while open and written once by an authorized resolution.
+CREATE TABLE IF NOT EXISTS kanban_conflicts (
+  id                TEXT PRIMARY KEY,
+  project_identity  TEXT NOT NULL,
+  ticket_identity   TEXT NOT NULL,
+  provider          TEXT NOT NULL,
+  external_card_id  TEXT NOT NULL,
+  kind              TEXT NOT NULL,
+  forge_version     TEXT NOT NULL,
+  external_version  TEXT NOT NULL,
+  state             TEXT NOT NULL,
+  detected_by       TEXT NOT NULL,
+  detected_at       TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  resolved_by       TEXT,
+  resolved_at       TEXT,
+  resolution        TEXT
+);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -2004,6 +2070,17 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // covered by list-completeness and re-created only by the CREATE.
   { table: "usage_legacy_repair_events", column: "prior_identity", ddl: "ALTER TABLE usage_legacy_repair_events ADD COLUMN prior_identity TEXT" },
   { table: "usage_legacy_repair_events", column: "actor", ddl: "ALTER TABLE usage_legacy_repair_events ADD COLUMN actor TEXT" },
+
+  // FG-785: kanban_conflicts arrives WHOLE via CREATE TABLE IF NOT EXISTS, but the
+  // fresh-vs-migrated parity guard strips EVERY restorable column off EVERY table and
+  // relies on this list to restore it. Only its three NULLABLE columns are restorable
+  // (resolved_by / resolved_at / resolution — all NULL while a conflict is open, written
+  // once by an authorized resolution); every other column is NOT NULL and undroppable,
+  // covered by list-completeness and re-created only by the CREATE. kanban_projection_map
+  // has NO restorable column — every column there is NOT NULL — so it needs no entry.
+  { table: "kanban_conflicts", column: "resolved_by", ddl: "ALTER TABLE kanban_conflicts ADD COLUMN resolved_by TEXT" },
+  { table: "kanban_conflicts", column: "resolved_at", ddl: "ALTER TABLE kanban_conflicts ADD COLUMN resolved_at TEXT" },
+  { table: "kanban_conflicts", column: "resolution", ddl: "ALTER TABLE kanban_conflicts ADD COLUMN resolution TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

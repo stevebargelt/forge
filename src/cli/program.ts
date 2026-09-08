@@ -59,6 +59,7 @@ import { registerStore } from "./commands/store.js";
 import { registerBackup } from "./commands/backup.js";
 import { registerRelease } from "./commands/release.js";
 import { registerRemote } from "./commands/remote.js";
+import { registerKanban } from "./commands/kanban.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // FG-552: the full command registry lives here, imported LAZILY by src/cli/index.ts
@@ -141,6 +142,7 @@ export function buildProgram(): Command {
   registerBackup(program);
   registerRelease(program);
   registerRemote(program);
+  registerKanban(program);
 
   return program;
 }

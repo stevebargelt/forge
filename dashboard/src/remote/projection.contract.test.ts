@@ -484,6 +484,42 @@ describe("FG-781 AC4 / RF-5: a bare scheme://host URL (no path segment) is redac
   });
 });
 
+describe("FG-789 / RF-5: an Authorization/Bearer scheme word AND its credential token are redacted", () => {
+  // The credential-pair rule previously consumed only the FIRST non-space token after the key,
+  // so it redacted the scheme word (Bearer/Basic/…) and left the secret behind. Seed the standard
+  // echoes and a bare header value and assert NO fragment of the secret survives.
+  test("keyed Authorization: Bearer <short token> — the short secret does not survive", () => {
+    const out = redactRemoteFreeText("Authorization: Bearer shortSecret1");
+    assert.ok(!out.includes("shortSecret1"), `the short bearer token must be redacted, got: ${out}`);
+    assert.ok(!/Secret/.test(out), "no fragment of the secret survives");
+  });
+
+  test("authorization=Basic <base64> — the base64 credential does not survive", () => {
+    const out = redactRemoteFreeText("authorization=Basic dXNlcjpwdw==");
+    assert.ok(!out.includes("dXNlcjpwdw"), `the Basic base64 credential must be redacted, got: ${out}`);
+    assert.ok(!out.includes("dXNl"), "no fragment of the base64 credential survives");
+  });
+
+  test("Proxy-Authorization: Bearer <dotted token> — the token does not survive", () => {
+    const out = redactRemoteFreeText("Proxy-Authorization: Bearer x.y.z");
+    assert.ok(!out.includes("x.y.z"), `the proxy bearer token must be redacted, got: ${out}`);
+    assert.ok(!/\bx\.y\b/.test(out), "no fragment of the token survives");
+  });
+
+  test("a bare Bearer <token> with no key — the token does not survive", () => {
+    const out = redactRemoteFreeText("Bearer abc123def456");
+    assert.ok(!out.includes("abc123def456"), `the bare bearer token must be redacted, got: ${out}`);
+    assert.ok(!/abc123/.test(out), "no fragment of the bare token survives");
+  });
+
+  test("non-vacuous control: ordinary prose with none of these constructs survives untouched", () => {
+    assert.equal(
+      redactRemoteFreeText("A run is awaiting a human gate — review FG-781"),
+      "A run is awaiting a human gate — review FG-781",
+    );
+  });
+});
+
 describe("FG-781 AC4 / RF-4: EVERY free-text field the DTO emits is routed through the redactor", () => {
   // Seed a host path, a credential token, and a remote-control URL into each free-text display
   // string the projection copies, and assert NONE reaches the mapped DTO.

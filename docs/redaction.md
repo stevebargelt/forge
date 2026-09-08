@@ -148,10 +148,16 @@ credential-adjacent — it is emitted for a task whose recorded `failure_kind` i
 (`src/v2/host-readiness.ts`) used by **Host-readiness records / events** above,
 before the envelope leaves the process. The call is unconditional rather than keyed
 on whether a given curated string is known to carry a secret; `redactSecrets` is
-idempotent, so a clean string passes through unchanged. Every other item kind's text
-is not routed through redaction — the readiness/review reason text is built from
-stored ticket/finding data and the wait reason/requested-action text is FG-734's own
-already-safe copy, neither of which is free-form command output.
+idempotent, so a clean string passes through unchanged. The readiness/review reason
+text is built from stored ticket/finding data and the wait reason/requested-action
+text is FG-734's own already-safe copy, neither of which is free-form command output,
+so neither is routed through redaction. The `kanban_conflict` kind (FG-785) is the
+exception: its `reason` embeds a bounded digest of both the Forge and external
+versions of a drifted card, and the external side is untrusted provider content, so
+`kanbanConflictsToAttentionItems` (`dashboard/src/queries.ts`) passes it through the
+SAME `redactRemoteFreeText` denylist the Remote Board free text below uses — not
+`redactSecrets` — before the item reaches the envelope. `requestedAction` for this
+kind carries only the opaque conflict id and static text, so it needs no redaction.
 
 ## Remote Board free text (FG-781)
 

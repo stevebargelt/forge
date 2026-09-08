@@ -25,7 +25,14 @@ export type AttentionItemKind =
   // its staleness bound, so a human must decide whether to re-run or clear it.
   // A terminal-parent attempt (the FG-667 case) never reaches this kind: it is
   // dropped by the shared terminal-authority predicate before classification.
-  | "stale_verification";
+  | "stale_verification"
+  // FG-785: an external kanban card was moved/deleted/edited on the provider board
+  // outside Forge, so the external state and Forge's one-way projection have diverged.
+  // The divergence is NEVER applied to Forge (outbound-only): it is recorded as an OPEN
+  // `kanban_conflicts` store row and surfaced here until an authorized host-operator
+  // resolution closes that row. The inbox holds no resolution state of its own — a
+  // resolved row simply stops producing this item on the next projection.
+  | "kanban_conflict";
 
 /** Known priority, or null when the source recorded none. Kept as a small named
  *  vocabulary rather than a raw ordinal so a client renders a label, not a number. */
@@ -117,6 +124,10 @@ const KIND_PRECEDENCE: AttentionItemKind[] = [
   "integration_blocked_park",
   "auth_setup",
   "stale_verification",
+  // FG-785: an external-board divergence needing an authorized resolution. It never blocks
+  // a Forge lifecycle gate, so it ranks below the hard blocks and the stale-verification
+  // recovery, but above the softer readiness/decision waits.
+  "kanban_conflict",
   "missing_acceptance_or_readiness",
   "campaign_paused",
   "waiting_gate",
