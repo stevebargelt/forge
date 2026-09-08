@@ -98,7 +98,9 @@ import {
 // FG-402: the Human Attention Inbox. The aggregator (`attentionInbox`) below composes
 // FG-734's already-derived operator/CI waits with the failure/park and readiness/review
 // mappers into the ONE stable external envelope.
-import { composeInbox, type AttentionItem, type InboxEnvelope, type InboxScope } from "./attention-inbox.js";
+import { composeInbox, type AttentionItem, type AttentionSeverity, type InboxEnvelope, type InboxScope } from "./attention-inbox.js";
+import { listOpenConflicts, type KanbanConflict, type KanbanConflictKind } from "@forge/kanban-projection";
+import { redactRemoteFreeText } from "./remote/projection.js";
 import { waitAttentionItems } from "./attention-inbox-waits.js";
 import { failureAttentionItems } from "./attention-inbox-failures.js";
 import { readinessAttentionItems } from "./attention-inbox-readiness.js";
@@ -4309,6 +4311,110 @@ function verificationAttentionItems(scope: ProjectScope, nowMs: number): Attenti
   return items;
 }
 
+// ── FG-785: kanban-conflict attention source ─────────────────────────────────────
+//
+// The Human Attention destination for an external-board divergence recorded by the
+// outbound kanban sync (step 4). It is a PURE, OPEN-ONLY projection of the store's
+// `kanban_conflicts` rows: a conflict item exists exactly while its row is `open`, and
+// resolution is a store write (the `forge kanban conflicts-resolve` CLI, step 6), NEVER
+// an inbox mutation — the inbox holds no resolution state of its own (AC5). The mapper
+// writes nothing; it only reads the open rows via the @forge store accessor.
+//
+// The both-versions payload is arbitrary JSON the store keeps verbatim, and the EXTERNAL
+// side is untrusted provider content. Each embedded version is passed through
+// redactRemoteFreeText (the FG-781 free-text denylist) before it enters the operator-
+// facing `reason`, so a path/secret pasted onto an external card cannot ride the seal
+// out through this item. The `requestedAction` carries only the opaque Forge conflict id
+// and static text, so it is left intact for host copy-paste (the remote projection
+// redacts it again at the boundary, like every other source).
+
+/** Per-kind severity: an externally DELETED card is the most consequential divergence
+ *  (the projected card is gone), a move/edit is medium. An unknown future kind a newer
+ *  binary wrote falls back to medium rather than throwing. */
+const KANBAN_CONFLICT_SEVERITY: Record<KanbanConflictKind, AttentionSeverity> = {
+  deleted: "high",
+  moved: "medium",
+  edited: "medium",
+};
+
+/** A bounded, single-line digest of one side of a conflict's both-versions payload, so the
+ *  operator sees WHAT diverged without the inbox item growing unbounded. The value is
+ *  arbitrary (the store keeps it verbatim); it is stringified and clamped here, then
+ *  redacted by the caller before it enters the item text. */
+function summarizeConflictVersion(value: unknown): string {
+  if (value === null || value === undefined) return "none";
+  const raw = typeof value === "string" ? value : safeJson(value);
+  // RF-3: redact on the FULL text BEFORE clamping. A credential-shaped token straddling the clamp
+  // cutoff would otherwise lose the shape the redactor keys on, so its prefix would survive the
+  // slice and ride into the browser-facing inbox reason. Redacting first, then clamping the
+  // already-scrubbed result, keeps no fragment of an untrusted external secret intact.
+  const redacted = redactRemoteFreeText(raw);
+  const CLAMP = 240;
+  return redacted.length > CLAMP ? `${redacted.slice(0, CLAMP)}…` : redacted;
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** PURE mapper (unit-testable, no store access): project OPEN kanban conflicts into
+ *  attention items of the `kanban_conflict` kind, carrying both-version context and the
+ *  ticket/project links. Callers pass only open rows (see kanbanConflictAttentionItems);
+ *  a resolved row simply never reaches here, so it disappears from the inbox. */
+export function kanbanConflictsToAttentionItems(conflicts: readonly KanbanConflict[]): AttentionItem[] {
+  return conflicts.map((c) => {
+    const verb = c.kind === "deleted" ? "deleted" : c.kind === "moved" ? "moved" : "edited";
+    const forgeSide = summarizeConflictVersion(c.forgeVersion);
+    const externalSide = summarizeConflictVersion(c.externalVersion);
+    // Redact the whole reason: it embeds untrusted external card content, and it carries
+    // no host command (the id lives only in requestedAction), so redaction can't harm a
+    // copy-pasteable action here.
+    const reason = redactRemoteFreeText(
+      `An external kanban card for ticket ${c.ticketIdentity} on the "${c.provider}" board was ${verb} outside Forge; ` +
+        `Forge's one-way projection and the external state have diverged and the change was NOT applied to any Forge state. ` +
+        `Forge version: ${forgeSide} · External version: ${externalSide}.`,
+    );
+    const requestedAction =
+      `Review the divergence and record an authorized resolution — \`forge kanban conflicts-resolve ${c.id}\`. ` +
+      `Resolution is host-operator only; no inbound planning change is applied to Forge this release.`;
+    return {
+      id: `kanban_conflict:${c.id}`,
+      kind: "kanban_conflict",
+      severity: KANBAN_CONFLICT_SEVERITY[c.kind] ?? "medium",
+      // The conflict's detection time is when this attention condition began — never "now".
+      startedAt: c.detectedAt,
+      reason,
+      requestedAction,
+      openState: "open",
+      source: "kanban_conflict",
+      links: {
+        runId: null,
+        taskId: null,
+        // Opaque Forge identity (AC1): the ticket the projected card maps to, and the
+        // project key as a display label. No provider concept, no filesystem path.
+        ticketId: c.ticketIdentity,
+        campaignId: null,
+        itemId: c.id,
+        projectDir: null,
+        projectLabel: c.projectIdentity,
+      },
+    };
+  });
+}
+
+/** The store-reading wrapper the aggregator composes. Reads ONLY the currently-open
+ *  conflicts through the @forge accessor (no lifecycle-table read, no write) and hands
+ *  them to the pure mapper. Conflict rows are keyed on the opaque (project, provider)
+ *  identity rather than a filesystem dir, so this is a host-wide open-only projection —
+ *  not scoped by projectDir like the run/campaign-derived sources. */
+function kanbanConflictAttentionItems(): AttentionItem[] {
+  return kanbanConflictsToAttentionItems(listOpenConflicts());
+}
+
 // ── FG-402: the Human Attention Inbox aggregator ────────────────────────────────
 //
 // A source-agnostic, OPEN-ONLY projection over persisted Forge state. It reuses the
@@ -4366,7 +4472,18 @@ export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now())
     console.error("attentionInbox: reading stale-verification items failed:", err);
   }
 
-  return composeInbox([waitItems, failureItems, readinessItems, verificationItems], {
+  // FG-785: open external-kanban conflicts. A store predating the kanban_conflicts table
+  // (or any other read failure) names itself in `degraded` rather than taking the inbox
+  // down — a partial read never renders as a calm empty inbox.
+  let kanbanConflictItems: AttentionItem[] = [];
+  try {
+    kanbanConflictItems = kanbanConflictAttentionItems();
+  } catch (err) {
+    degraded.push("kanban_conflicts");
+    console.error("attentionInbox: reading kanban-conflict items failed:", err);
+  }
+
+  return composeInbox([waitItems, failureItems, readinessItems, verificationItems, kanbanConflictItems], {
     generatedAt: new Date(nowMs).toISOString(),
     scope: inboxScope,
     degraded,

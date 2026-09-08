@@ -32,6 +32,8 @@ but they do not override current behavior or backlog state.
 - [Use project-provided test authentication](how-to-project-auth.md)
 - [Configure iTerm project tinting](how-to-iterm-tint.md)
 - [Configure a work laptop](work-laptop-setup.md)
+- [Project a backlog onto an external kanban board](how-to-external-kanban.md) —
+  one-way outbound sync, conflict handling, and the reference provider.
 
 ## Extend Forge
 
