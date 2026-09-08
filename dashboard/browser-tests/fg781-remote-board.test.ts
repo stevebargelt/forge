@@ -204,10 +204,8 @@ test("is screen-reader navigable: landmark, heading hierarchy, and a status live
 });
 
 test("is keyboard-navigable: the Refresh control is reachable, focusable, and activates by keyboard", async () => {
-  let fetches = 0;
   boardEnvelope = envelope("live", true);
   const page = await open({ width: 1280, height: 1000 });
-  page.on("requestfinished", (req) => { if (req.url().endsWith(REMOTE_BOARD_ENDPOINT)) fetches += 1; });
   await page.locator('[data-state="live"]').waitFor();
 
   // Tab to the Refresh button and confirm it is a real, focusable button element.
@@ -216,11 +214,24 @@ test("is keyboard-navigable: the Refresh control is reachable, focusable, and ac
   assert.equal(await page.evaluate(() => document.activeElement?.tagName), "BUTTON", "focus lands on the Refresh button");
 
   // Activating it by keyboard triggers a fresh board read (proving it is a working control).
-  const before = fetches;
+  // The re-read ARRIVING is the oracle: arm the waiter (only responses after this point count),
+  // press Enter, and require it to resolve — no request COUNTER, which would race the response
+  // event it is compared against.
   const nextRead = page.waitForResponse((r) => r.url().endsWith(REMOTE_BOARD_ENDPOINT));
   await page.keyboard.press("Enter");
-  await nextRead;
-  assert.ok(fetches > before, "Enter on the focused Refresh control re-fetches the board");
+  await assert.doesNotReject(nextRead, "Enter on the focused Refresh control re-fetches the board");
+
+  // The refresh rebuilds the whole board subtree; focus must NOT be stranded on <body> — it
+  // returns to the rebuilt Refresh control so a keyboard operator keeps their place (no trap,
+  // no lost focus).
+  await assert.doesNotReject(
+    page.waitForFunction(
+      () =>
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement.classList.contains("rb-refresh"),
+    ),
+    "focus returns to the Refresh control after a keyboard-triggered refresh",
+  );
   await page.close();
 });
 

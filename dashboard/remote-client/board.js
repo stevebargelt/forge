@@ -265,6 +265,12 @@ function render(mount, state, envelope, onRefresh) {
   const known = STATES[state] ? state : "unsupported";
   const meta = STATES[known];
 
+  // A refresh replaces the whole subtree, which would drop keyboard focus to <body> and strand
+  // a keyboard user. If the Refresh control held focus going in, restore it to the rebuilt one
+  // so activating Refresh does not cost the operator their place.
+  const active = document.activeElement;
+  const refocusRefresh = active instanceof HTMLElement && mount.contains(active) && active.classList.contains("rb-refresh");
+
   mount.setAttribute("aria-busy", "false");
   mount.replaceChildren();
 
@@ -279,8 +285,10 @@ function render(mount, state, envelope, onRefresh) {
       "Refresh",
     ),
   );
-  header.querySelector(".rb-refresh").addEventListener("click", onRefresh);
+  const refreshButton = header.querySelector(".rb-refresh");
+  refreshButton.addEventListener("click", onRefresh);
   mount.appendChild(header);
+  if (refocusRefresh) refreshButton.focus();
 
   const board = envelope && envelope.board;
   if (meta.hasData && board) {
@@ -335,12 +343,6 @@ function start() {
   injectStyle();
   const endpoint = (window.__REMOTE_BOARD__ && window.__REMOTE_BOARD__.endpoint) || "/api/board";
   void load(mount, endpoint);
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", start);
-} else {
-  start();
 }
 
 // ─── styles (inline <style>; style-src is unconstrained by the shell CSP) ─────────
@@ -408,3 +410,14 @@ const STYLE = String.raw`
   .rb-refresh { transition: background 120ms ease; }
 }
 `;
+
+// ─── boot ───────────────────────────────────────────────────────────────────────
+// Kept at the very end so `STYLE` (a `const` declared above) is initialized before this
+// module-eval-time boot runs. A `type="module"` script is deferred, so by the time it
+// executes the document is already parsed (readyState "interactive"/"complete") and start()
+// runs synchronously — referencing STYLE any earlier would hit its temporal dead zone.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", start);
+} else {
+  start();
+}
