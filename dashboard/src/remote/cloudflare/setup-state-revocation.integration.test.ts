@@ -20,7 +20,9 @@ import { resolveIdentityMappingPath } from "../mapping.js";
 import { writeAccessState } from "./access-state.js";
 import type { JwksCache, JwksKey } from "./jwks.js";
 
-const TEAM = "operator.cloudflareaccess.com";
+const TEAM = "operator";
+const ISS = "https://operator.cloudflareaccess.com";
+const CERTS_URL = "https://operator.cloudflareaccess.com/cdn-cgi/access/certs";
 const AUD = "a".repeat(64);
 const EMAIL = "operator@example.com";
 const NOW_MS = Date.UTC(2026, 0, 1);
@@ -41,7 +43,7 @@ after(() => {
 function signAccessJwt(): string {
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: key.kid })).toString("base64url");
   const claims = Buffer.from(JSON.stringify({
-    iss: `https://${TEAM}`,
+    iss: ISS,
     aud: AUD,
     exp: NOW_S + 3600,
     nbf: NOW_S - 60,
@@ -60,7 +62,7 @@ function cache(): JwksCache {
   return {
     getKeys: async () => [key],
     refreshForUnknownKid: async () => [key],
-    certsUrl: `https://${TEAM}/cdn-cgi/access/certs`,
+    certsUrl: CERTS_URL,
   };
 }
 
