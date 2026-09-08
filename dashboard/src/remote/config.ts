@@ -27,6 +27,18 @@ export const REMOTE_PORT_ENV = "FORGE_DASHBOARD_REMOTE_PORT";
 /** The remote board's default loopback port — one above the local dashboard's 8024. */
 export const DEFAULT_REMOTE_PORT = 8025;
 
+/** FG-782: env var naming the boot-time transport adapter that fronts the loopback board.
+ *  ABSENT/empty/unrecognised = NO adapter = the FG-781 fail-closed default (every request is
+ *  refused). Only an explicit, recognised value selects an adapter — this is the single
+ *  operator switch that turns identity verification on, and it is read ONCE at boot exactly
+ *  like the mode/port env, never from a request. */
+export const REMOTE_TRANSPORT_ENV = "FORGE_DASHBOARD_REMOTE_TRANSPORT";
+
+/** The recognised transport tokens. A closed vocabulary: anything not here resolves to null
+ *  (no adapter → refuse), so a typo or an attacker-supplied value can never select something
+ *  the operator did not intend. FG-784's Cloudflare variant slots in here additively. */
+const RECOGNISED_TRANSPORTS = new Set<string>(["tailscale"]);
+
 /** The local dashboard's default port — mirrors `Number(process.env.PORT ?? 8024)` in
  *  ../server.ts. Held here so the remote/local collision guard (RF-1) compares against the
  *  same default the local listener will bind. */
@@ -69,6 +81,10 @@ export interface RemoteBoardConfig {
   readonly host: string;
   /** The loopback port to bind. */
   readonly port: number;
+  /** FG-782: the selected transport adapter token, or null when no adapter is selected (the
+   *  FG-781 fail-closed default). Optional in the type so hand-built FG-781 config literals
+   *  keep compiling; `resolveRemoteConfig` always populates it. */
+  readonly transport?: string | null;
 }
 
 /** Is `value` an opt-in truthy flag? Only the explicit `1`/`true` (case-insensitive,
@@ -91,6 +107,21 @@ function resolvePort(value: string | undefined): number {
 }
 
 /**
+ * FG-782: resolve the boot-time transport selector from the env map. Fail-closed by
+ * construction — absent, empty, or an unrecognised token all resolve to `null` (no adapter,
+ * so every request is refused, preserving FG-781's default). A recognised value resolves to
+ * its canonical token (trimmed, lower-cased) so the boot registry can match it exactly. Pure:
+ * a function of the env value alone, never of anything a request carries.
+ */
+export function resolveRemoteTransport(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env[REMOTE_TRANSPORT_ENV];
+  if (raw === undefined) return null;
+  const token = raw.trim().toLowerCase();
+  if (token === "") return null;
+  return RECOGNISED_TRANSPORTS.has(token) ? token : null;
+}
+
+/**
  * Resolve the remote-board configuration from an env map (defaults to `process.env`). Pure:
  * the same env in always yields the same config out, and the bind host is invariably the
  * loopback constant regardless of what the env contains.
@@ -109,6 +140,7 @@ export function resolveRemoteConfig(env: NodeJS.ProcessEnv = process.env): Remot
     enabled,
     host: REMOTE_LOOPBACK_HOST,
     port,
+    transport: resolveRemoteTransport(env),
   };
 }
 

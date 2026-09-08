@@ -61,10 +61,13 @@ function identityClaiming(dir: string): VerifiedIdentity {
 }
 
 function serverWith(claimedDir: string): { srv: Server; url: () => string } {
-  const resolveIdentity: BoundRemoteIdentityResolver = () => ({
+  // BoundRemoteIdentityResolver is uniformly async (FG-782 step 1); a synchronous stub value
+  // flows through the same awaited path in the handler.
+  const resolveIdentity: BoundRemoteIdentityResolver = async () => ({
     ok: true,
     identity: identityClaiming(claimedDir),
     ignoredIdentityHeaders: [],
+    confirmedIdentityHeaders: [],
   });
   const srv = createRemoteBoardServer({
     resolveIdentity,

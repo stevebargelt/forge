@@ -45,6 +45,16 @@ function fakeAdapter(
   return { kind, verifyIdentity: () => candidate };
 }
 
+/** A fake adapter whose verifyIdentity returns a Promise — the FG-782 shape (an adapter that
+ *  confirms the peer out-of-band before naming a principal). Used to prove a sync-returning
+ *  and an async-returning adapter flow through the SAME single async resolution path. */
+function asyncFakeAdapter(
+  candidate: AdapterCandidateIdentity | null,
+  kind = "fake-async",
+): TransportAdapter {
+  return { kind, verifyIdentity: async () => candidate };
+}
+
 const spoofedHeaders = {
   "X-Forwarded-For": "10.0.0.9",
   "X-Forwarded-User": "attacker@example.com",
@@ -53,37 +63,37 @@ const spoofedHeaders = {
 };
 
 describe("FG-781 identity resolver — fail closed with no adapter (AC2)", () => {
-  test("(a) resolveRemoteIdentity() with no adapter yields no identity", () => {
-    const result = resolveRemoteIdentity({ headers: {} });
+  test("(a) resolveRemoteIdentity() with no adapter yields no identity", async () => {
+    const result = await resolveRemoteIdentity({ headers: {} });
     assert.equal(result.ok, false);
     assert.equal(result.ok === false && result.reason, "no-adapter");
     // A refusal exposes no identity field to narrow into — structurally no project data.
     assert.equal("identity" in result, false);
   });
 
-  test("(a) the boot-bound resolver constructed with no adapter also refuses", () => {
+  test("(a) the boot-bound resolver constructed with no adapter also refuses", async () => {
     const resolve = createRemoteIdentityResolver(); // FG-781: no adapter at boot
-    const result = resolve({ headers: {} });
+    const result = await resolve({ headers: {} });
     assert.equal(result.ok, false);
     assert.equal(result.ok === false && result.reason, "no-adapter");
   });
 
-  test("(a) an explicitly null adapter is treated as no adapter, not as trust", () => {
-    const result = resolveRemoteIdentity({ headers: {} }, null);
+  test("(a) an explicitly null adapter is treated as no adapter, not as trust", async () => {
+    const result = await resolveRemoteIdentity({ headers: {} }, null);
     assert.equal(result.ok, false);
     assert.equal(result.ok === false && result.reason, "no-adapter");
   });
 });
 
 describe("FG-781 identity resolver — raw headers never establish identity (AC6)", () => {
-  test("(b) spoofed proxy/identity headers still yield no identity", () => {
-    const result = resolveRemoteIdentity({ headers: spoofedHeaders });
+  test("(b) spoofed proxy/identity headers still yield no identity", async () => {
+    const result = await resolveRemoteIdentity({ headers: spoofedHeaders });
     assert.equal(result.ok, false);
     assert.equal(result.ok === false && result.reason, "no-adapter");
   });
 
-  test("(b) the spoofed headers are ACTIVELY discarded, not merely unused", () => {
-    const result = resolveRemoteIdentity({ headers: spoofedHeaders });
+  test("(b) the spoofed headers are ACTIVELY discarded, not merely unused", async () => {
+    const result = await resolveRemoteIdentity({ headers: spoofedHeaders });
     // Each spoofed header is recorded (lower-cased) as ignored — an asserted action.
     assert.deepEqual(
       [...result.ignoredIdentityHeaders].sort(),
@@ -111,7 +121,7 @@ describe("FG-781 identity resolver — raw headers never establish identity (AC6
     }
   });
 
-  test("(b) even a wired adapter's identity does not come from a header value", () => {
+  test("(b) even a wired adapter's identity does not come from a header value", async () => {
     // The adapter returns a fixed principal REGARDLESS of the spoofed headers present.
     const adapter = fakeAdapter({
       subject: "verified-op", // NOT any spoofed header value
@@ -119,7 +129,7 @@ describe("FG-781 identity resolver — raw headers never establish identity (AC6
       projectScope: goodGrant,
       provenance: goodProvenance,
     });
-    const result = resolveRemoteIdentity({ headers: spoofedHeaders }, adapter);
+    const result = await resolveRemoteIdentity({ headers: spoofedHeaders }, adapter);
     assert.equal(result.ok, true);
     if (result.ok) {
       assert.equal(result.identity.subject, "verified-op");
@@ -255,9 +265,95 @@ describe("FG-781 project-scope grant — absent or ambiguous fails closed (AC3 b
     }
   });
 
-  test("(d) an adapter that declines verification fails closed (no-identity)", () => {
-    const result = resolveRemoteIdentity({ headers: {} }, fakeAdapter(null));
+  test("(d) an adapter that declines verification fails closed (no-identity)", async () => {
+    const result = await resolveRemoteIdentity({ headers: {} }, fakeAdapter(null));
     assert.equal(result.ok, false);
     assert.equal(result.ok === false && result.reason, "no-identity");
+  });
+});
+
+describe("FG-782 resolver seam — one async path, sync & async adapters converge", () => {
+  const candidate: AdapterCandidateIdentity = {
+    subject: "verified-op",
+    capabilities: ["read"],
+    projectScope: goodGrant,
+    provenance: goodProvenance,
+  };
+
+  test("a sync-returning and a Promise-returning adapter reach the SAME validated result", async () => {
+    const fromSync = await resolveRemoteIdentity({ headers: {} }, fakeAdapter(candidate));
+    const fromAsync = await resolveRemoteIdentity(
+      { headers: {} },
+      asyncFakeAdapter(candidate),
+    );
+    assert.equal(fromSync.ok, true);
+    assert.equal(fromAsync.ok, true);
+    // Byte-for-byte identical resolution regardless of the adapter's sync/async shape:
+    // there is no parallel sync branch that could bypass validation.
+    assert.deepEqual(fromSync, fromAsync);
+  });
+
+  test("an async adapter that declines still fails closed (no-identity)", async () => {
+    const result = await resolveRemoteIdentity({ headers: {} }, asyncFakeAdapter(null));
+    assert.equal(result.ok, false);
+    assert.equal(result.ok === false && result.reason, "no-identity");
+  });
+
+  test("no-adapter refusal is reached through the async path regardless of headers", async () => {
+    // The absent-adapter default is still awaited on the one path — it cannot be sidestepped.
+    const result = await resolveRemoteIdentity({ headers: spoofedHeaders });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok === false && result.reason, "no-adapter");
+  });
+
+  test("the boot-bound async resolver validates an async adapter's candidate", async () => {
+    const resolve = createRemoteIdentityResolver(asyncFakeAdapter(candidate));
+    const result = await resolve({ headers: {} });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.identity.projectScope.projectKey, "proj-a");
+  });
+});
+
+describe("FG-782 request context — connection peer is optional and absent-safe", () => {
+  const candidate: AdapterCandidateIdentity = {
+    subject: "verified-op",
+    capabilities: ["read"],
+    projectScope: goodGrant,
+    provenance: goodProvenance,
+  };
+
+  test("a request with no peer resolves exactly as before (absent-safe)", async () => {
+    // FG-781 callers pass only { headers } — the resolver must not require a peer.
+    const result = await resolveRemoteIdentity({ headers: {} }, fakeAdapter(candidate));
+    assert.equal(result.ok, true);
+  });
+
+  test("no-adapter default still refuses even when a peer is present", async () => {
+    // A connection fact alone never establishes identity: with no adapter, still refused.
+    const result = await resolveRemoteIdentity({
+      headers: spoofedHeaders,
+      peer: { address: "100.64.0.7", port: 41234 },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok === false && result.reason, "no-adapter");
+  });
+
+  test("an adapter may read the peer off the request context", async () => {
+    // Prove the peer is threaded to the adapter (FG-782 anchors whois on it) without any
+    // header value participating in identity. The adapter echoes the peer address it saw.
+    let seenPeer: string | undefined;
+    const peerAwareAdapter: TransportAdapter = {
+      kind: "peer-aware",
+      verifyIdentity: (request) => {
+        seenPeer = request.peer?.address;
+        return candidate;
+      },
+    };
+    const result = await resolveRemoteIdentity(
+      { headers: {}, peer: { address: "100.64.0.7", port: 41234 } },
+      peerAwareAdapter,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(seenPeer, "100.64.0.7");
   });
 });
