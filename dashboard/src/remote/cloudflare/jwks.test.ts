@@ -253,14 +253,22 @@ test("the fetch WINDOW bounds attempts even when the cache is empty and the endp
 test("concurrent getKeys on an empty cache collapse to a single in-flight fetch", async () => {
   const clock = fakeClock();
   let calls = 0;
+  let releaseFetch!: () => void;
+  const fetchGate = new Promise<void>((resolve) => {
+    releaseFetch = resolve;
+  });
   const fetcher: JwksFetcher = async () => {
     calls += 1;
-    await new Promise((r) => setTimeout(r, 5));
+    await fetchGate;
     return keySet("k1");
   };
   const cache = createJwksCache({ teamDomain: "acme", fetcher, now: clock.now });
 
-  const [a, b, c] = await Promise.all([cache.getKeys(), cache.getKeys(), cache.getKeys()]);
+  const keys = Promise.all([cache.getKeys(), cache.getKeys(), cache.getKeys()]);
+  assert.equal(calls, 1); // one request is in flight
+  releaseFetch();
+
+  const [a, b, c] = await keys;
   assert.deepEqual(a.map((k) => k.kid), ["k1"]);
   assert.deepEqual(b.map((k) => k.kid), ["k1"]);
   assert.deepEqual(c.map((k) => k.kid), ["k1"]);
