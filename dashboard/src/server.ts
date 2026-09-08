@@ -57,6 +57,7 @@ import {
   resolveForgeBinary,
   runForgeVerb,
 } from "./queue-mutation.js";
+import { maybeStartRemoteBoardFromEnv } from "./remote/server.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -994,6 +995,15 @@ async function handleProjectsClassify(req: IncomingMessage, res: ServerResponse)
   }
   sendJson(res, 200, { ok: true, result: cliResult });
 }
+
+// FG-781: the mode-GATED remote-board boot hook. This is the ONLY line the remote board
+// adds to the local dashboard, and it is additive and inert by default: with remote mode
+// disabled (the default — no FORGE_DASHBOARD_REMOTE), it returns null and binds nothing, so
+// the local server object, its route table, its headers, and its listener above are
+// byte-for-byte unchanged (AC1). When enabled it starts a DEDICATED, loopback-bound remote
+// board on its OWN port (remote/server.ts) — never a route on this server, and never a
+// non-loopback bind by itself. Exported so tests can assert it is null when disabled.
+export const remoteBoardServer = maybeStartRemoteBoardFromEnv();
 
 server.listen(PORT, HOST, () => {
   console.log(`forge-dashboard listening at http://${HOST}:${PORT}`);
