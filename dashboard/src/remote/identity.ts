@@ -100,11 +100,24 @@ export interface VerifiedIdentity {
   readonly provenance: TrustProvenance;
 }
 
+/** The connection-level facts about an inbound request: the peer socket's address/port as
+ *  observed by the origin, NOT a header. An adapter (FG-782 Tailscale) may anchor an
+ *  out-of-band whois confirmation on this connection fact; unlike a header VALUE it is not
+ *  attacker-settable from the request body. Optional and absent-safe: FG-781 callers and any
+ *  resolver path tolerate its absence, and its presence never by itself establishes identity. */
+export interface RemoteRequestPeer {
+  readonly address?: string;
+  readonly port?: number;
+}
+
 /** The inbound request as seen by the resolver. Header values are attacker-controlled and
  *  are NEVER read to establish identity — only header names are scanned, to record what was
- *  ignored. Kept intentionally minimal so no accidental identity source leaks in. */
+ *  ignored. Kept intentionally minimal so no accidental identity source leaks in. The
+ *  optional `peer` is a connection fact (socket address/port), not a header, added additively
+ *  for FG-782 so an adapter can anchor its out-of-band verification on the connection. */
 export interface RemoteRequestContext {
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
+  readonly peer?: RemoteRequestPeer;
 }
 
 /**
@@ -135,10 +148,19 @@ export interface AdapterCandidateIdentity {
  * {@link RemoteRequestContext}. Those are attacker-controlled at a loopback endpoint. A
  * proxy adapter reads the proxy's verified assertion from its own authenticated channel,
  * not from a header a direct caller can also set.
+ *
+ * `verifyIdentity` MAY be asynchronous: a real adapter (FG-782 Tailscale) confirms the
+ * connection peer out-of-band against a local daemon (`tailscale whois`) before it can name
+ * a principal, which is inherently async. The resolver awaits the return uniformly, so a
+ * synchronous adapter (returning a plain value) and an async one (returning a Promise) flow
+ * through the SAME single resolution path — there is no parallel sync branch that could
+ * bypass validation and fail open.
  */
 export interface TransportAdapter {
   readonly kind: string;
-  verifyIdentity(request: RemoteRequestContext): AdapterCandidateIdentity | null;
+  verifyIdentity(
+    request: RemoteRequestContext,
+  ): AdapterCandidateIdentity | null | Promise<AdapterCandidateIdentity | null>;
 }
 
 /** Why a resolution refused. Every value denies all project data (fail closed). */
@@ -241,16 +263,22 @@ export function validateAdapterIdentity(
  *
  * Whatever the outcome, the resolver records which identity-bearing headers it saw and
  * discarded, so callers and tests can prove no identity was ever derived from them.
+ *
+ * The resolution is uniformly async: the (possibly synchronous) adapter return is awaited on
+ * ONE path, so there is never a parallel sync branch that could skip validation. The
+ * `no-adapter` refusal is still reached through this same awaited path.
  */
-export function resolveRemoteIdentity(
+export async function resolveRemoteIdentity(
   request: RemoteRequestContext,
   adapter?: TransportAdapter | null,
-): RemoteIdentityResolution {
+): Promise<RemoteIdentityResolution> {
   const ignoredIdentityHeaders = presentIgnoredHeaders(request.headers);
   if (!adapter) {
     return { ok: false, reason: "no-adapter", ignoredIdentityHeaders };
   }
-  const candidate = adapter.verifyIdentity(request);
+  // `await` accepts both a plain value and a Promise, collapsing sync and async adapters
+  // onto one resolution path — the fail-closed default cannot be sidestepped.
+  const candidate = await adapter.verifyIdentity(request);
   if (!candidate) {
     return { ok: false, reason: "no-identity", ignoredIdentityHeaders };
   }
@@ -258,12 +286,13 @@ export function resolveRemoteIdentity(
 }
 
 /** A boot-bound resolver: capture the (possibly absent) adapter once, at server start, and
- *  hand the rest of the server a header-only resolution function. FG-781 constructs this
- *  with no adapter; FG-782/FG-784 pass theirs. Keeping the binding here means the wiring
- *  lands as one argument, not a rewrite. */
+ *  hand the rest of the server a resolution function. FG-781 constructs this with no adapter;
+ *  FG-782/FG-784 pass theirs. Keeping the binding here means the wiring lands as one argument,
+ *  not a rewrite. Async, mirroring {@link resolveRemoteIdentity}: the server awaits it, so a
+ *  rejected/refused resolution lands in the server's fail-closed path, never an open one. */
 export type BoundRemoteIdentityResolver = (
   request: RemoteRequestContext,
-) => RemoteIdentityResolution;
+) => Promise<RemoteIdentityResolution>;
 
 export function createRemoteIdentityResolver(
   adapter?: TransportAdapter | null,
