@@ -24,7 +24,7 @@ import {
 
 test("resolveRemoteTransport returns null for absent / empty / unrecognised tokens (fail closed)", () => {
   assert.equal(resolveRemoteTransport({}), null, "absent → no adapter");
-  for (const value of ["", "   ", "0", "false", "funnel", "cloudflare", "tailscale-serve", "TAILSCALE!", "garbage"]) {
+  for (const value of ["", "   ", "0", "false", "funnel", "cloudflare-access", "tailscale-serve", "TAILSCALE!", "garbage"]) {
     assert.equal(
       resolveRemoteTransport({ [REMOTE_TRANSPORT_ENV]: value }),
       null,
@@ -43,6 +43,16 @@ test("resolveRemoteTransport canonicalises a recognised token (trim + lower-case
   }
 });
 
+test("resolveRemoteTransport canonicalises the FG-784 'cloudflare' token (trim + lower-case)", () => {
+  for (const value of ["cloudflare", "CLOUDFLARE", "  cloudflare  ", "Cloudflare"]) {
+    assert.equal(
+      resolveRemoteTransport({ [REMOTE_TRANSPORT_ENV]: value }),
+      "cloudflare",
+      `${JSON.stringify(value)} must select the canonical 'cloudflare' token`,
+    );
+  }
+});
+
 test("resolveRemoteTransport reads FORGE_DASHBOARD_REMOTE_TRANSPORT and nothing a request carries", () => {
   // The selector is a function of the one env value alone — an unrelated env key never leaks in.
   assert.equal(resolveRemoteTransport({ TAILSCALE: "tailscale", "X-Forwarded-For": "tailscale" }), null);
@@ -56,6 +66,11 @@ test("resolveRemoteConfig always populates transport and keeps it null by defaul
     resolveRemoteConfig({ [REMOTE_TRANSPORT_ENV]: "tailscale" }).transport,
     "tailscale",
     "recognised token flows through to the config",
+  );
+  assert.equal(
+    resolveRemoteConfig({ [REMOTE_TRANSPORT_ENV]: "cloudflare" }).transport,
+    "cloudflare",
+    "the FG-784 cloudflare token flows through to the config",
   );
   assert.equal(
     resolveRemoteConfig({ [REMOTE_TRANSPORT_ENV]: "funnel" }).transport,
