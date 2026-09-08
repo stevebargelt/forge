@@ -152,17 +152,26 @@ function serveRemoteAsset(res: ServerResponse, clientDir: string, path: string):
 }
 
 /** Build the remote board request handler. */
-export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: IncomingMessage, res: ServerResponse) => void {
+export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const resolveIdentity = deps.resolveIdentity ?? createRemoteIdentityResolver(deps.adapter ?? null);
   const lookupProject = deps.lookupProject ?? ((key: string) => projectsForDashboard().find((p) => p.key === key));
   const now = deps.now ?? (() => Date.now());
   const clientDir = deps.clientDir ?? REMOTE_CLIENT_DIR;
 
-  function handleBoard(req: IncomingMessage, res: ServerResponse): void {
+  async function handleBoard(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Identity comes ONLY from the bound resolver, which consults the (absent) transport
     // adapter — NEVER from req.headers. Any X-Forwarded-*/Tailscale/Cloudflare header on
-    // this request is scanned only to be recorded as ignored, then discarded.
-    const resolution = resolveIdentity({ headers: req.headers });
+    // this request is scanned only to be recorded as ignored, then discarded. The resolver
+    // is uniformly async (FG-782 step 1), so its return is awaited on ONE path; a rejected
+    // resolution propagates up to createRemoteBoardServer's fail-closed try/catch.
+    //
+    // `peer` carries the connection-level socket address/port — a connection FACT, not a
+    // header — so an out-of-band adapter (FG-782 Tailscale whois) can anchor its confirmation
+    // on the peer the origin actually observed rather than any attacker-settable header value.
+    const resolution = await resolveIdentity({
+      headers: req.headers,
+      peer: { address: req.socket.remoteAddress, port: req.socket.remotePort },
+    });
     if (!resolution.ok) {
       sendEnvelope(res, unauthorizedRemoteBoard(now()));
       return;
@@ -201,7 +210,7 @@ export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: Inco
     }
   }
 
-  return (req: IncomingMessage, res: ServerResponse): void => {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // STRUCTURAL AC7: the ONLY method this surface answers is GET. There is no POST/PUT/
     // PATCH/DELETE branch anywhere below, so no request can reach a mutation — a preflight
     // or a mutation attempt gets a flat 405, and no Access-Control-Allow-* header is ever
@@ -216,7 +225,9 @@ export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: Inco
       return;
     }
     if (path === REMOTE_BOARD_ENDPOINT) {
-      handleBoard(req, res);
+      // Await the async board handler so a rejected identity resolution surfaces to the
+      // createRemoteBoardServer try/catch and fails closed — never an unhandled rejection.
+      await handleBoard(req, res);
       return;
     }
     if (path.startsWith(REMOTE_CLIENT_URL_PREFIX)) {
@@ -231,11 +242,13 @@ export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: Inco
 export function createRemoteBoardServer(deps: RemoteBoardDeps = {}): Server {
   const handler = createRemoteBoardHandler(deps);
   return createServer((req, res) => {
-    try {
-      handler(req, res);
-    } catch {
-      finishUnhandledRequest(res);
-    }
+    // The handler is async (the identity resolver awaits an out-of-band adapter). Await it
+    // via the returned promise so BOTH a synchronous throw and an async rejection land in the
+    // same fail-closed finalizer — a rejected identity resolution can never escape as an
+    // unhandled rejection or leave the request hanging.
+    void Promise.resolve()
+      .then(() => handler(req, res))
+      .catch(() => finishUnhandledRequest(res));
   });
 }
 
