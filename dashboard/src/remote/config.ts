@@ -37,7 +37,7 @@ export const REMOTE_TRANSPORT_ENV = "FORGE_DASHBOARD_REMOTE_TRANSPORT";
 /** The recognised transport tokens. A closed vocabulary: anything not here resolves to null
  *  (no adapter → refuse), so a typo or an attacker-supplied value can never select something
  *  the operator did not intend. FG-784's Cloudflare variant slots in here additively. */
-const RECOGNISED_TRANSPORTS = new Set<string>(["tailscale"]);
+const RECOGNISED_TRANSPORTS = new Set<string>(["tailscale", "cloudflare"]);
 
 /** The local dashboard's default port — mirrors `Number(process.env.PORT ?? 8024)` in
  *  ../server.ts. Held here so the remote/local collision guard (RF-1) compares against the

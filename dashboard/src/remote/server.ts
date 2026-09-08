@@ -48,8 +48,7 @@ import {
   renderRemoteShell,
 } from "./shell.js";
 import { isLoopbackHost, resolveRemoteConfig, type RemoteBoardConfig } from "./config.js";
-import { selectRemoteAdapter } from "./transport.js";
-import type { TailscaleServeAdapterDeps } from "./tailscale/adapter.js";
+import { selectRemoteAdapter, type RemoteTransportDeps } from "./transport.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // dashboard/src/remote → dashboard/remote-client. The focused board asset set (FG-781 step
@@ -71,14 +70,15 @@ export interface RemoteBoardDeps {
   readonly now?: () => number;
   /** The on-disk directory the remote asset prefix maps to. Overridable for tests. */
   readonly clientDir?: string;
-  /** FG-782: injectable seams for the boot-SELECTED transport adapter — the daemon
-   *  (`confirmPeer`/`runner`) and mapping (`loadMapping`) overrides passed to
+  /** FG-782/FG-784: injectable seams for the boot-SELECTED transport adapter — the union over
+   *  every transport (Tailscale's `confirmPeer`/`runner`, Cloudflare's `jwksCache`/
+   *  `loadAccessState`/`now`/…) plus the shared `loadMapping`/`env` — passed to
    *  {@link selectRemoteAdapter} alongside the resolved `lookupProject`. Production leaves this
-   *  undefined (the adapter defaults to the real tailscaled + on-disk mapping); tests inject a
-   *  fake daemon through the SAME selection path. Consulted ONLY by
+   *  undefined (each adapter defaults to its real backend + on-disk mapping); tests inject a
+   *  fake daemon or a fake JWKS/access-state through the SAME selection path. Consulted ONLY by
    *  {@link maybeStartRemoteBoardFromEnv}, and only when neither `resolveIdentity` nor
    *  `adapter` was supplied — an explicit resolver/adapter is respected as-is. */
-  readonly transportDeps?: Omit<TailscaleServeAdapterDeps, "lookupProject">;
+  readonly transportDeps?: Omit<RemoteTransportDeps, "lookupProject">;
 }
 
 /** RF-4: is the adapter's CLAIMED member-dir set consistent with the granted project's OWN
