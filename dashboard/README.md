@@ -107,6 +107,20 @@ Off by default (`--remote` / `FORGE_DASHBOARD_REMOTE=1` opts in). Enabling it ne
 
 Once an adapter exists, a granted identity still only ever sees the read-only projection of its **own** scoped project: project summary, backlog/queue, campaign summaries, the attention inbox, and current-activity — never raw logs, transcripts, env values, credentials, filesystem paths, review artifacts, or another project's data, and never a mutation (this story adds none; FG-783 is a separate later ticket). Full route and DTO reference: [Remote Board (FG-781)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781) in the schema contract.
 
+### Tailscale Serve transport (FG-782)
+
+FG-782 is the first transport adapter. It fronts the loopback board with a **tailnet-private** Tailscale Serve proxy (`https://<host>.<tailnet>.ts.net → http://127.0.0.1:8025`) and verifies identity through Tailscale's own trusted channel — never from inbound headers.
+
+```bash
+FORGE_DASHBOARD_REMOTE_TRANSPORT=tailscale forge dashboard start --remote   # select the adapter
+forge remote tailscale doctor      # report prerequisites, proposed target, identity mode, Funnel status (read-only)
+forge remote tailscale setup --dry-run   # inspect only — makes NO host/tailnet change
+forge remote tailscale setup --confirm   # apply the Serve mapping (never enables Funnel)
+forge remote tailscale disable     # remove ONLY the Forge-created Serve mapping (never `serve reset`)
+```
+
+The transport is a boot-time selector (`FORGE_DASHBOARD_REMOTE_TRANSPORT`, `dashboard/src/remote/config.ts`): absent or unrecognized ⇒ **no adapter ⇒ refuse** (the FG-781 default is unchanged). Selecting it never touches the bind — the remote backend stays on loopback `127.0.0.1:8025` and the local dashboard on `127.0.0.1:8024`; nothing widens either. Identity comes from confirming the connection's real tailnet peer against the local `tailscaled` (`tailscale whois`), so a forged `Tailscale-User-Login`/`X-Forwarded-*` header with no whois-confirmed peer — and any Tailscale Funnel/public request — gets no data. Authorization is an operator-authored, per-request-reloaded file (`~/.forge/remote-board-identity.yml`) mapping a whois-confirmed login to one project's `read` grant, so revocation is honored live with no restart. **Tailscale Funnel / public exposure is unsupported** — `doctor`/`setup` detect and refuse it. Full operator guide: [Remote Board over Tailscale Serve](../docs/how-to-remote-board-tailscale.md); contract detail: [Remote Board (FG-781/FG-782)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781).
+
 ## Validation
 
 ```bash
