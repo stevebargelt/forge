@@ -1081,6 +1081,56 @@ Authorization is **transport-neutral** (`dashboard/src/remote/identity.ts`). It 
 - **Capabilities are a closed set.** In FG-781 the only member is `read`; the type cannot express any mutation capability (FG-783 will add one as an addition). A verified identity that lacks `read` is refused.
 - **Project scope is server-authoritative.** The granted `projectKey` comes from the identity, never from a client `projectKey`/`projectDir` param, and selects the project record; the projection's `memberDirs` are always that project's **own dirs from the registry**, never the identity's claimed dirs — pinned **strictly** to the granted project, a deliberate, documented divergence from `resolveProjectScope`'s FG-745 owner-convergence widening. The identity's claimed `memberDirs` is trusted only as a consistency check on the way in: it must be non-empty and every dir it names must be one of the project's own, or the request refuses `unauthorized` (`claimedDirsWithinProject`, `dashboard/src/remote/server.ts`) — a claim naming another project's dir, or no dir at all, reads as scope confusion, not as a widened grant. A grant that is absent, ambiguous, or names no registered project refuses/degrades; it never widens.
 
+### Transport selection + adapter contract (FG-782)
+
+A transport adapter is what turns a proxied request into a verified identity. It is selected **once at boot** by an explicit operator env var, resolved by `resolveRemoteTransport` (`dashboard/src/remote/config.ts`) and surfaced as `RemoteBoardConfig.transport`.
+
+| Surface | Value | Meaning |
+|---|---|---|
+| `FORGE_DASHBOARD_REMOTE_TRANSPORT` env | `tailscale` (trimmed, case-insensitive) | Selects the Tailscale Serve adapter (FG-782). |
+| `FORGE_DASHBOARD_REMOTE_TRANSPORT` absent / empty / any other token | — | **No adapter ⇒ refuse every request** — the FG-781 fail-closed default, unchanged. The recognized-token set is a closed vocabulary, so a typo or attacker-supplied value can never select an adapter the operator did not intend. FG-784's Cloudflare variant slots in here additively. |
+
+Selecting a transport **never changes the bind**. `maybeStartRemoteBoardFromEnv` (`dashboard/src/remote/server.ts`) reads `config.transport`, calls `selectRemoteAdapter` (`dashboard/src/remote/transport.ts`), and passes the result as `deps.adapter` — the bind host stays the `REMOTE_LOOPBACK_HOST` constant. **Ports `8024` (local dashboard) and `8025` (remote backend) stay loopback-only even with a transport wired**; the adapter is a proxy in front of the loopback endpoint, not a change to what Forge binds.
+
+The identity resolver seam is a **single async path** (`verifyIdentity` may return a value or a Promise; `resolveRemoteIdentity` awaits it). There is no parallel sync branch that could fail open, and the no-adapter refusal (`no-adapter`) flows through the same path.
+
+**Identity is established out-of-band, never from headers.** The Tailscale Serve adapter (`dashboard/src/remote/tailscale/adapter.ts`, kind `tailscale-serve`) anchors on the connection **peer** (`RemoteRequestContext.peer` — the socket `remoteAddress`/`remotePort`, a connection fact, added additively; not a header) and confirms it via `tailscale whois --json <peer>` against the **local** `tailscaled` (`dashboard/src/remote/tailscale/cli.ts`). Inbound `Tailscale-*`/`X-Forwarded-*` header *values* are read by nothing. A request with a forged `Tailscale-User-Login` and no whois-confirmed tailnet peer resolves to `null` — no data (AC3). A Tailscale **Funnel**/public request presents no whois-confirmable tailnet peer and is refused structurally (AC5).
+
+#### Identity → authorization mapping file (operator config)
+
+Authorization is an operator-authored file — deliberately separate from the identity channel and **not** the DB — read by `loadIdentityMapping` (`dashboard/src/remote/mapping.ts`).
+
+- **Path:** `$FORGE_HOME/remote-board-identity.yml` (default `~/.forge/remote-board-identity.yml`), resolved at call time.
+- **Re-read on EVERY request — no identity cache.** The adapter loads it per request, so deleting/editing a `login` entry (or removing the tailnet node) revokes access on the **next request without restarting Forge** (AC4).
+- **Schema (YAML, version `1`):**
+
+  ```yaml
+  version: 1
+  identities:
+    - login: user@example.com   # whois-confirmed tailnet login (trimmed, lower-cased both sides)
+      project: pk-...           # Forge project key; scope dirs resolved server-side from it
+      capabilities: [read]      # closed vocabulary (REMOTE_CAPABILITIES) — only `read` today
+  ```
+
+- **Fail-closed rules** (every malformed case grants *less*, never more): a version other than `1` rejects the file whole (empty mapping); an unparseable file → empty mapping; a missing file and an unmapped login are indistinguishable (both → no grant, no default-allow); an unknown capability *taints and drops* the whole entry (never partial); a `login` declared more than once is *poisoned* (no grant — ambiguous intent is never merged into a wider grant); a missing `project` or blank `login` drops that entry. The `login` selector is additive by design — a future tailnet/tag/grant selector is a sibling key, not a rewrite.
+
+#### Serve-mapping state file (Forge-owned)
+
+`setup` records the **exact** Serve mapping it created, so `disable` is surgical (`dashboard/src/remote/tailscale/serve-state.ts`).
+
+- **Path:** `$FORGE_HOME/remote-board-serve-state.json` (owner-only `0600`/dir `0700`). Machine-authored/read — inspected, not hand-edited.
+- **Records** the tailnet host, the HTTPS port (443), the loopback port, the loopback `target` (validated to be `http://127.0.0.1:<port>`), the tailnet-private `url`, and the exact create + inverse-disable argv. A missing/corrupt/version-mismatched file reads as `null` — "nothing Forge owns to remove", so `disable` makes no change rather than a blanket removal.
+
+#### CLI surface: `forge remote tailscale …` (`src/cli/commands/remote.ts`)
+
+A single shared `remote` command group (FG-784's Cloudflare variant slots in as a sibling of `tailscale`), with an **injectable** command runner (argv array, never a shell string). All host/tailnet access goes through it.
+
+- `doctor` — read-only. Reports prerequisites (CLI on PATH, `tailscaled` reachable, logged in, MagicDNS name, HTTPS-capable), the proposed Serve target (`https://<host>.<tailnet>.ts.net → http://127.0.0.1:<remote port>`), identity mode (transport env + mapping-file path), required tailnet grants, and Funnel status. Exit `0` when ready, `1` when setup would refuse.
+- `setup --dry-run` — inspects only; performs **zero** host/tailnet mutations (AC1), enforced both by an empty planned mutation set and a guard runner that throws on any mutating command. Without `--confirm`, `setup` previews only. `setup --confirm` applies the one create command (`tailscale serve --bg --https=443 http://127.0.0.1:<port>`), **never** enabling Funnel, then writes the serve-state record. Refuses while Funnel is enabled or a prerequisite is missing (AC5).
+- `disable` — removes **only** the recorded Serve handler by replaying its inverse argv (`tailscale serve --https=443 off`); never `tailscale serve reset`, never touching Forge data or the local dashboard (AC6). No record ⇒ no-op.
+
+`docs_impact` for FG-782: `operator_behavior_changed` (new env var, new CLI group, new operator config files) + `setup_changed` (the Serve setup/doctor/disable workflow). Full operator guide: [Remote Board over Tailscale Serve](how-to-remote-board-tailscale.md).
+
 ### HTTP surface (remote listener only)
 
 Every route is `GET`. Any other method is a flat `405` with `Allow: GET` and **no `Access-Control-Allow-*` header anywhere**, so a cross-origin caller fails closed. Assets are served from `dashboard/remote-client/` by runtime path — never the local `CLIENT_DIR` bundle — under the remote shell's own `script-src 'self' 'nonce-…'` CSP.
