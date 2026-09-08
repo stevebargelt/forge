@@ -48,6 +48,8 @@ import {
   renderRemoteShell,
 } from "./shell.js";
 import { isLoopbackHost, resolveRemoteConfig, type RemoteBoardConfig } from "./config.js";
+import { selectRemoteAdapter } from "./transport.js";
+import type { TailscaleServeAdapterDeps } from "./tailscale/adapter.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // dashboard/src/remote → dashboard/remote-client. The focused board asset set (FG-781 step
@@ -69,6 +71,14 @@ export interface RemoteBoardDeps {
   readonly now?: () => number;
   /** The on-disk directory the remote asset prefix maps to. Overridable for tests. */
   readonly clientDir?: string;
+  /** FG-782: injectable seams for the boot-SELECTED transport adapter — the daemon
+   *  (`confirmPeer`/`runner`) and mapping (`loadMapping`) overrides passed to
+   *  {@link selectRemoteAdapter} alongside the resolved `lookupProject`. Production leaves this
+   *  undefined (the adapter defaults to the real tailscaled + on-disk mapping); tests inject a
+   *  fake daemon through the SAME selection path. Consulted ONLY by
+   *  {@link maybeStartRemoteBoardFromEnv}, and only when neither `resolveIdentity` nor
+   *  `adapter` was supplied — an explicit resolver/adapter is respected as-is. */
+  readonly transportDeps?: Omit<TailscaleServeAdapterDeps, "lookupProject">;
 }
 
 /** RF-4: is the adapter's CLAIMED member-dir set consistent with the granted project's OWN
@@ -302,8 +312,24 @@ export function maybeStartRemoteBoardFromEnv(
     );
     return null;
   }
+  // FG-782: select the transport adapter named by the boot-time env selector (config.transport,
+  // resolved in config.ts). Absent/unknown transport → selectRemoteAdapter returns null → no
+  // adapter → the FG-781 fail-closed default (every request refused) is UNCHANGED. This
+  // selection builds an identity adapter only; it NEVER touches config.host, so the bind stays
+  // the loopback constant regardless of which transport is chosen (AC2). A caller that supplied
+  // its own resolver/adapter (tests) is respected as-is and the selection is skipped.
+  let bootDeps = deps;
+  if (deps.resolveIdentity === undefined && deps.adapter === undefined) {
+    const lookupProject =
+      deps.lookupProject ?? ((key: string) => projectsForDashboard().find((p) => p.key === key));
+    const adapter = selectRemoteAdapter(config.transport, { lookupProject, env, ...deps.transportDeps });
+    // Thread the SAME lookupProject into the handler so the adapter's server-authoritative scope
+    // (the granted project's own dirs) and the handler's claimedDirsWithinProject re-check
+    // resolve against one registry view.
+    bootDeps = { ...deps, lookupProject, adapter };
+  }
   try {
-    return startRemoteBoardServer(config, deps);
+    return startRemoteBoardServer(config, bootDeps);
   } catch (err) {
     console.error("forge remote board: failed to start; the local dashboard is unaffected:", err);
     return null;
