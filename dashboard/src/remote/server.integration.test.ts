@@ -22,6 +22,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
+import type { Server } from "node:http";
+import { createRemoteBoardServer } from "./server.js";
+import type { BoundRemoteIdentityResolver } from "./identity.js";
 
 const LOCAL_PORT = 18783;
 const REMOTE_PORT = 18782;
@@ -138,4 +141,40 @@ test("AC7 (structural): the remote server module imports no mutation code path",
 test("an unknown path is a 404, not a fallthrough to any data route", async () => {
   const res = await fetch(`${BASE}/api/queue`);
   assert.equal(res.status, 404, "the local dashboard's data routes are not reachable on the remote surface");
+});
+
+// FG-782 step 2: the identity resolver is now uniformly async, and the board handler awaits
+// it. Prove the async wiring stays fail-closed end to end — a resolver whose promise REJECTS
+// (an adapter's out-of-band whois blowing up, say) must land in the server's fail-closed
+// finalizer over a real loopback listener: a closed response with NO project data and NO
+// Access-Control header, never a crash, a hang, or an unhandled rejection.
+test("async handler: a rejected identity resolution fails closed with no data and no CORS", async () => {
+  const rejectingResolver: BoundRemoteIdentityResolver = async () => {
+    throw new Error("adapter whois exploded");
+  };
+  let handlerError: unknown;
+  const srv: Server = createRemoteBoardServer({ resolveIdentity: rejectingResolver });
+  // If the rejection escaped as an unhandled rejection instead of the finalizer, this catches
+  // it and fails the test rather than letting the process warn and continue.
+  const onUnhandled = (err: unknown) => {
+    handlerError = err;
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const addr = srv.address() as AddressInfo;
+    assert.match(addr.address, /^(127\.|::1$)/, "the ad-hoc server still binds loopback only");
+    const res = await fetch(`http://127.0.0.1:${addr.port}/api/board`);
+    assert.ok(res.status >= 400, "a rejected resolution is a closed (>=400) response, never a 2xx success");
+    assert.equal(res.headers.get("access-control-allow-origin"), null, "no CORS header is opened on the failure path");
+    const raw = await res.text();
+    assert.ok(!/projectKey|projectDir|"board":\{/.test(raw), "the closed response carries NO project data");
+    // Let any stray microtask settle so an escaped rejection would have surfaced.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(handlerError, undefined, "the rejection landed in the server finalizer, not an unhandled rejection");
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
 });
