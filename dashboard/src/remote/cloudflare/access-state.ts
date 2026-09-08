@@ -35,9 +35,10 @@
 // contents and hands a fully built record + ingress body here to persist; this module only
 // reads/writes/removes them. No cross-boundary import.
 
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /** The Forge-owned access-state file, under FORGE_HOME. A `.json` (not `.yml`) because it is
  *  MACHINE-authored by `setup` and machine-read by `disable`/boot — an operator inspects it but
@@ -80,6 +81,12 @@ export interface AccessStateRecord {
   /** Absolute path of the dedicated cloudflared ingress config file Forge WHOLLY owns. `disable`
    *  deletes exactly this file — whole-file ownership, never a within-file diff. */
   readonly cloudflaredConfigPath: string;
+  /** SHA-256 (hex) of the EXACT ingress file body Forge wrote — the whole-file ownership STAMP
+   *  (RF-1). `setup` refuses to overwrite a file whose bytes this does not match, and `disable`
+   *  deletes the recorded path ONLY when the file's current hash still equals this (otherwise the
+   *  file was tampered with or is not the one Forge authored, and disable refuses). A record
+   *  Forge writes always carries it; a legacy/foreign record without it cannot prove ownership. */
+  readonly cloudflaredConfigSha256?: string;
   /** ISO timestamp the deployment was created. Audit only; never gates removal. */
   readonly createdAt?: string;
 }
@@ -126,6 +133,14 @@ export function validateAccessStateRecord(value: unknown): AccessStateRecord | n
   // target is not 127.0.0.1 is not one this code could have written; refuse to act on it. This is
   // the structural guarantee that the tunnel can only ever front the loopback board.
   if (!/^http:\/\/127\.0\.0\.1:\d+/.test(target)) return null;
+  // The ownership stamp is OPTIONAL for backward/forward tolerance, but when present it must be a
+  // well-formed sha256 hex digest — a malformed stamp rejects the whole record (fail closed).
+  const rawSha = r["cloudflaredConfigSha256"];
+  let cloudflaredConfigSha256: string | undefined;
+  if (rawSha !== undefined) {
+    if (typeof rawSha !== "string" || !/^[0-9a-f]{64}$/i.test(rawSha)) return null;
+    cloudflaredConfigSha256 = rawSha.toLowerCase();
+  }
   const createdAt = typeof r["createdAt"] === "string" ? (r["createdAt"] as string) : undefined;
   return Object.freeze({
     version: ACCESS_STATE_VERSION,
@@ -136,6 +151,7 @@ export function validateAccessStateRecord(value: unknown): AccessStateRecord | n
     target,
     url,
     cloudflaredConfigPath,
+    ...(cloudflaredConfigSha256 ? { cloudflaredConfigSha256 } : {}),
     ...(createdAt ? { createdAt } : {}),
   });
 }
@@ -164,8 +180,33 @@ export function readAccessState(env: NodeJS.ProcessEnv = process.env): AccessSta
   return validateAccessStateRecord(parsed);
 }
 
+/** SHA-256 (hex) of a UTF-8 string — the whole-file ownership stamp for the owned ingress file. */
+export function ingressContentSha256(contents: string): string {
+  return createHash("sha256").update(contents, "utf8").digest("hex");
+}
+
+/** Read a file's text, or `null` if it does not exist / cannot be read. Never throws. */
+function tryReadFileText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Write `contents` to `path` owner-only (dir 0700, file 0600) via a temp file + atomic rename, so
+ *  a crash or a failing write never leaves a half-written file at `path`. */
+function writeFileAtomicOwnerOnly(path: string, contents: string): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = join(dir, `.${basename(path)}.tmp`);
+  writeFileSync(tmp, contents, { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+}
+
 /**
- * Persist the access-state record owner-only (dir 0700, file 0600). Creates FORGE_HOME if absent.
+ * Persist the access-state record owner-only (dir 0700, file 0600) via a temp file + atomic rename.
  * The record is validated before write, so a caller cannot persist a malformed record — or one
  * with a non-loopback target — that would later fail to read back or, worse, front a public host.
  */
@@ -174,45 +215,128 @@ export function writeAccessState(record: AccessStateRecord, env: NodeJS.ProcessE
   if (validated === null) {
     throw new Error("refusing to persist an invalid remote-board cloudflare access-state record");
   }
-  const path = resolveAccessStatePath(env);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600 });
-  // Enforce 0600 even if the file pre-existed with looser perms (writeFileSync's mode only
-  // applies on CREATE).
-  chmodSync(path, 0o600);
+  writeFileAtomicOwnerOnly(resolveAccessStatePath(env), `${JSON.stringify(validated, null, 2)}\n`);
 }
 
 /**
- * Write the cloudflared ingress config file Forge WHOLLY owns, owner-only (dir 0700, file 0600).
- * Forge authors the ENTIRE file, so a later `disable` removes it wholesale. This holds NO secret —
- * cloudflared's tunnel credentials live in a separate file cloudflared manages, which Forge never
- * writes and never deletes. The CLI computes the YAML body (ingress → http://127.0.0.1:<port>);
- * this function only lays it down with the right ownership.
+ * Write the cloudflared ingress config file Forge WHOLLY owns, owner-only (dir 0700, file 0600) via
+ * a temp file + atomic rename. Forge authors the ENTIRE file, so a later `disable` removes it
+ * wholesale. This holds NO secret — cloudflared's tunnel credentials live in a separate file
+ * cloudflared manages, which Forge never writes and never deletes. The CLI computes the YAML body
+ * (ingress → http://127.0.0.1:<port>); this function only lays it down with the right ownership.
  */
 export function writeOwnedIngressFile(configPath: string, contents: string): void {
   if (typeof configPath !== "string" || configPath.trim() === "") {
     throw new Error("refusing to write an owned cloudflared config with an empty path");
   }
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  writeFileSync(configPath, contents, { mode: 0o600 });
-  chmodSync(configPath, 0o600);
+  writeFileAtomicOwnerOnly(configPath, contents);
 }
+
+/** Whether a candidate ingress path is safe for `setup` to write. `absent` — no file there yet.
+ *  `forge-owned` — a file exists and its bytes match what the CURRENT record says Forge wrote (a
+ *  re-run overwriting Forge's own file). `foreign` — a file exists that Forge did NOT author (or
+ *  was edited since), which setup must never overwrite. */
+export type IngressOwnership = "absent" | "forge-owned" | "foreign";
+
+/**
+ * Classify the file (if any) at `configPath` against the CURRENT access-state record. Used by
+ * `setup` to refuse overwriting a cloudflared config Forge did not create (RF-1): only `absent` or
+ * `forge-owned` are safe to write.
+ */
+export function classifyIngressPath(configPath: string, env: NodeJS.ProcessEnv = process.env): IngressOwnership {
+  const existing = tryReadFileText(configPath);
+  if (existing === null) return "absent";
+  const record = readAccessState(env);
+  if (
+    record !== null &&
+    record.cloudflaredConfigPath === configPath &&
+    record.cloudflaredConfigSha256 !== undefined &&
+    record.cloudflaredConfigSha256 === ingressContentSha256(existing)
+  ) {
+    return "forge-owned";
+  }
+  return "foreign";
+}
+
+/** The outcome of {@link applyCloudflareSetup}. `refused-foreign-config` names the path Forge would
+ *  have had to overwrite but does not own — zero mutation happened. */
+export type SetupApplyResult =
+  | { readonly status: "applied" }
+  | { readonly status: "refused-foreign-config"; readonly path: string };
+
+/**
+ * Apply a Cloudflare setup atomically and ownership-safely (RF-1 + RF-2).
+ *
+ *  - RF-1: if a file already sits at the ingress path that Forge does NOT own (no matching record +
+ *    hash), REFUSE — return `refused-foreign-config` with zero mutation, so an operator's own
+ *    cloudflared config is never overwritten (and thus never later deleted by `disable`).
+ *  - RF-2: persist the state record FIRST (so `disable` can always find what setup wrote), THEN the
+ *    ingress file — both via atomic temp+rename. If the ingress write fails, ROLL the record back
+ *    (restore the prior record, or remove it if there was none) so a failed setup never orphans a
+ *    record pointing at a file that was never written, nor leaves an ingress file with no record.
+ *
+ * `record.cloudflaredConfigSha256` MUST already be the hash of `ingressContents` (the caller
+ * computes it when building the record); this is asserted so the on-disk stamp always matches the
+ * bytes written.
+ */
+export function applyCloudflareSetup(
+  record: AccessStateRecord,
+  ingressContents: string,
+  env: NodeJS.ProcessEnv = process.env,
+): SetupApplyResult {
+  if (record.cloudflaredConfigSha256 !== ingressContentSha256(ingressContents)) {
+    throw new Error("refusing to apply setup: the record's ownership hash does not match the ingress body");
+  }
+  const configPath = record.cloudflaredConfigPath;
+  if (classifyIngressPath(configPath, env) === "foreign") {
+    return { status: "refused-foreign-config", path: configPath };
+  }
+  const prior = readAccessState(env);
+  // Record FIRST — disable must never be unable to find a config setup wrote.
+  writeAccessState(record, env);
+  try {
+    writeOwnedIngressFile(configPath, ingressContents);
+  } catch (err) {
+    // Ingress write failed AFTER the record landed — roll the record back so nothing is orphaned.
+    if (prior !== null) writeAccessState(prior, env);
+    else rmSync(resolveAccessStatePath(env), { force: true });
+    throw err;
+  }
+  return { status: "applied" };
+}
+
+/** The outcome of {@link disableCloudflareSetup}. `refused-tampered` names the recorded ingress
+ *  path whose on-disk bytes no longer match the ownership stamp — disable leaves it untouched. */
+export type DisableResult =
+  | { readonly status: "nothing" }
+  | { readonly status: "removed"; readonly path: string }
+  | { readonly status: "refused-tampered"; readonly path: string };
 
 /**
  * Remove the Forge-owned Cloudflare state — the ingress config file AND the state record — and
- * NOTHING else. Idempotent: a missing record or a missing ingress file is a no-op (disable after a
- * manual cleanup must not error). Reads the VALIDATED record to learn the exact ingress path Forge
- * authored, deletes exactly that file, then removes the record. A corrupt/foreign record reads as
- * `null`, so its (untrusted) config path is NOT followed — only the record file itself is removed,
- * never an unknown path. NEVER touches the Access application, cloudflared credentials, or Forge
- * data.
+ * NOTHING else (RF-1). Ownership-checked and idempotent:
+ *   - no valid record            → `nothing` (a corrupt/foreign/absent record is never acted on).
+ *   - file present, hash MATCHES → delete exactly that file, remove the record → `removed`.
+ *   - file present, hash DIFFERS → REFUSE: the file was tampered with or is not the one Forge
+ *                                  authored; leave both file and record untouched → `refused-tampered`.
+ *   - file absent                → remove the record (the owned file is already gone) → `removed`.
+ * NEVER touches the Access application, cloudflared credentials, or Forge data.
  */
-export function clearAccessState(env: NodeJS.ProcessEnv = process.env): void {
+export function disableCloudflareSetup(env: NodeJS.ProcessEnv = process.env): DisableResult {
   const record = readAccessState(env);
-  if (record !== null) {
-    // Whole-file ownership: delete exactly the ingress file Forge authored, force so a
-    // hand-removed file is not an error.
-    rmSync(record.cloudflaredConfigPath, { force: true });
+  if (record === null) return { status: "nothing" };
+  const configPath = record.cloudflaredConfigPath;
+  const existing = tryReadFileText(configPath);
+  if (existing !== null) {
+    if (
+      record.cloudflaredConfigSha256 === undefined ||
+      record.cloudflaredConfigSha256 !== ingressContentSha256(existing)
+    ) {
+      // Fail closed: the file at the recorded path is not provably the one Forge wrote.
+      return { status: "refused-tampered", path: configPath };
+    }
+    rmSync(configPath, { force: true });
   }
   rmSync(resolveAccessStatePath(env), { force: true });
+  return { status: "removed", path: configPath };
 }

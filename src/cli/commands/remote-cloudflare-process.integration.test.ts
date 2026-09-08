@@ -104,7 +104,7 @@ test("FG-784 AC1/AC4/AC6: built forge CLI refuses a bare tunnel, dry-runs, appli
   await startCertsServer();
 
   // doctor accepts identity flags; setup additionally accepts --tunnel.
-  const doctorFlags = ["--hostname", "board.example.com", "--team", "acme.cloudflareaccess.com", "--aud", AUD];
+  const doctorFlags = ["--hostname", "board.example.com", "--team", "acme", "--aud", AUD];
   const setupFlags = [...doctorFlags, "--tunnel", "forge-remote-board"];
 
   // AC4: a bare tunnel (no team/AUD) is refused, non-zero, nothing written.

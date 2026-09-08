@@ -74,7 +74,7 @@ function config(home: string, over: Partial<{ hostname: string; team: string; au
   return resolveCloudflareConfig(
     {
       hostname: over.hostname ?? "board.example.com",
-      team: over.team ?? "acme.cloudflareaccess.com",
+      team: over.team ?? "acme",
       aud: over.aud ?? AUD,
       tunnel: over.tunnel ?? "forge-remote-board",
       credentialsFile: over.credentialsFile,
@@ -202,6 +202,57 @@ test("AC4/AC6: `disable` removes only the owned ingress + record; leaves creds +
   assert.ok(existsSync(creds), "disable must not touch cloudflared credentials");
   assert.ok(existsSync(mapping), "disable must not touch the identity mapping");
   assert.equal(readFileSync(mapping, "utf8"), "version: 1\nidentities: []\n");
+});
+
+// --- RF-1: setup never overwrites a config Forge did not create -------------------------------
+
+test("RF-1: `setup --confirm` REFUSES when --config names a foreign existing file (byte-identical, no record)", async () => {
+  const home = tempHome();
+  const foreign = join(home, "operator-cloudflared.yml");
+  const original = "tunnel: theirs\ningress:\n  - service: http://127.0.0.1:1\n";
+  writeFileSync(foreign, original);
+  const { runner, calls } = recordingRunner();
+  const out: string[] = [];
+  const code = await runCloudflareSetup(
+    { runner, env: { FORGE_HOME: home }, probeCerts: OK_PROBE, out: (l) => out.push(l), now: NOW },
+    {
+      dryRun: false,
+      confirm: true,
+      json: false,
+      config: resolveCloudflareConfig(
+        { hostname: "board.example.com", team: "acme", aud: AUD, config: foreign },
+        { FORGE_HOME: home },
+      ),
+    },
+  );
+  assert.equal(code, 1);
+  assert.deepEqual(mutations(calls), []);
+  assert.equal(readFileSync(foreign, "utf8"), original, "operator's file must be byte-identical after refusal");
+  assert.ok(!existsSync(join(home, STATE_FILE)), "no state record written on refusal");
+  assert.match(out.join("\n"), /REFUSED/);
+  assert.match(out.join("\n"), /not created by Forge/i);
+});
+
+test("RF-1: `disable` REFUSES to delete a tampered ingress file — leaves the file AND record intact", async () => {
+  const home = tempHome();
+  const { runner } = recordingRunner();
+  await runCloudflareSetup(
+    { runner, env: { FORGE_HOME: home }, probeCerts: OK_PROBE, out: () => {}, now: NOW },
+    { dryRun: false, confirm: true, json: false, config: config(home) },
+  );
+  const ingressPath = join(home, INGRESS_FILE);
+  // Someone edits the owned config after setup — its bytes no longer match the recorded stamp.
+  writeFileSync(ingressPath, `${readFileSync(ingressPath, "utf8")}# tampered\n`);
+
+  const out: string[] = [];
+  const code = await runCloudflareDisable(
+    { runner, env: { FORGE_HOME: home }, probeCerts: OK_PROBE, out: (l) => out.push(l) },
+    false,
+  );
+  assert.equal(code, 1);
+  assert.ok(existsSync(ingressPath), "a tampered file must not be deleted");
+  assert.ok(existsSync(join(home, STATE_FILE)), "the state record survives a refusal");
+  assert.match(out.join("\n"), /REFUSED/);
 });
 
 test("`disable` with no recorded deployment is a no-op", async () => {

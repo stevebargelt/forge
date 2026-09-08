@@ -11,12 +11,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import {
   buildCloudflareDoctorReport,
   buildCertsUrl,
   buildIngressConfig,
   cloudflareBoundaryNotes,
+  isBareTeamSlug,
   isMutatingCloudflaredCommand,
   isPlausibleHostname,
   isWellFormedAud,
@@ -34,7 +36,7 @@ import {
 const AUD = "a".repeat(64); // a well-formed (64-hex) Access AUD tag
 const GOOD_CONFIG: CloudflareConfigInput = {
   publicHostname: "board.example.com",
-  accessTeamDomain: "acme.cloudflareaccess.com",
+  accessTeamDomain: "acme", // RF-5: a bare team slug; issuer/JWKS are derived from it
   accessAud: AUD,
   tunnelName: "forge-remote-board",
   credentialsFile: null,
@@ -80,13 +82,16 @@ test("isWellFormedAud: only a 64-hex tag is well-formed", () => {
   assert.equal(isWellFormedAud(""), false);
 });
 
-test("buildCertsUrl: derives the certs endpoint from a full or bare team domain", () => {
-  assert.equal(buildCertsUrl("acme.cloudflareaccess.com"), "https://acme.cloudflareaccess.com/cdn-cgi/access/certs");
+test("RF-5: buildCertsUrl derives the endpoint from a bare slug; a dotted/host-shaped team yields null", () => {
   assert.equal(buildCertsUrl("acme"), "https://acme.cloudflareaccess.com/cdn-cgi/access/certs");
-  assert.equal(buildCertsUrl("acme.cloudflareaccess.com/"), "https://acme.cloudflareaccess.com/cdn-cgi/access/certs");
+  assert.equal(buildCertsUrl("my-team-1"), "https://my-team-1.cloudflareaccess.com/cdn-cgi/access/certs");
+  // A configured hostname must never become the JWKS authority.
+  assert.equal(buildCertsUrl("acme.cloudflareaccess.com"), null);
+  assert.equal(buildCertsUrl("evil.example.com"), null);
+  assert.equal(buildCertsUrl("https://acme.cloudflareaccess.com"), null);
 });
 
-test("resolveCertsUrl: env override wins; else derived from a plausible team; else null", () => {
+test("resolveCertsUrl: env override wins; else derived from a bare-slug team; else null", () => {
   assert.equal(
     resolveCertsUrl(GOOD_CONFIG, { FORGE_REMOTE_CLOUDFLARE_CERTS_URL: "http://127.0.0.1:9/certs" }),
     "http://127.0.0.1:9/certs",
@@ -94,6 +99,17 @@ test("resolveCertsUrl: env override wins; else derived from a plausible team; el
   assert.equal(resolveCertsUrl(GOOD_CONFIG, {}), "https://acme.cloudflareaccess.com/cdn-cgi/access/certs");
   assert.equal(resolveCertsUrl({ ...GOOD_CONFIG, accessTeamDomain: null }, {}), null);
   assert.equal(resolveCertsUrl({ ...GOOD_CONFIG, accessTeamDomain: "not a host" }, {}), null);
+  assert.equal(resolveCertsUrl({ ...GOOD_CONFIG, accessTeamDomain: "acme.cloudflareaccess.com" }, {}), null);
+});
+
+test("RF-5: isBareTeamSlug accepts a single DNS label, rejects dotted/host-shaped/scheme values", () => {
+  assert.equal(isBareTeamSlug("acme"), true);
+  assert.equal(isBareTeamSlug("my-team-1"), true);
+  assert.equal(isBareTeamSlug("acme.cloudflareaccess.com"), false);
+  assert.equal(isBareTeamSlug("evil.example.com"), false);
+  assert.equal(isBareTeamSlug("https://acme.cloudflareaccess.com"), false);
+  assert.equal(isBareTeamSlug("-bad"), false);
+  assert.equal(isBareTeamSlug(""), false);
 });
 
 // ---- config resolution ----------------------------------------------------------------------
@@ -101,10 +117,10 @@ test("resolveCertsUrl: env override wins; else derived from a plausible team; el
 test("resolveCloudflareConfig: flags win over env; blanks fall through; owned path defaults under FORGE_HOME", () => {
   const cfg = resolveCloudflareConfig(
     { hostname: "board.example.com", aud: AUD },
-    { FORGE_HOME: "/x/.forge", FORGE_REMOTE_CLOUDFLARE_TEAM: "acme.cloudflareaccess.com", FORGE_REMOTE_CLOUDFLARE_AUD: "ignored" },
+    { FORGE_HOME: "/x/.forge", FORGE_REMOTE_CLOUDFLARE_TEAM: "acme", FORGE_REMOTE_CLOUDFLARE_AUD: "ignored" },
   );
   assert.equal(cfg.publicHostname, "board.example.com");
-  assert.equal(cfg.accessTeamDomain, "acme.cloudflareaccess.com"); // from env
+  assert.equal(cfg.accessTeamDomain, "acme"); // from env
   assert.equal(cfg.accessAud, AUD); // flag beats env
   assert.equal(cfg.configPath, "/x/.forge/remote-board-cloudflared.yml");
   // Blank/whitespace flags are treated as absent.
@@ -168,6 +184,16 @@ test("buildCloudflareDoctorReport: no Access team → REFUSED (AC4 — a bare tu
   const r = buildCloudflareDoctorReport(healthyInput({ config: { ...GOOD_CONFIG, accessTeamDomain: null }, certsUrl: null, jwksReachable: null }));
   assert.equal(r.ok, false);
   assert.ok(r.refusals.some((x) => /no Access policy/i.test(x) && /REFUSED/i.test(x)));
+});
+
+test("RF-5: buildCloudflareDoctorReport: a dotted/host-shaped team → REFUSED (must be a bare slug)", () => {
+  for (const team of ["acme.cloudflareaccess.com", "evil.example.com", "https://acme.cloudflareaccess.com"]) {
+    const r = buildCloudflareDoctorReport(
+      healthyInput({ config: { ...GOOD_CONFIG, accessTeamDomain: team }, certsUrl: null, jwksReachable: null }),
+    );
+    assert.equal(r.ok, false, `team ${team} must refuse`);
+    assert.ok(r.refusals.some((x) => /bare team SLUG/i.test(x)), `team ${team} names the slug requirement`);
+  }
 });
 
 test("buildCloudflareDoctorReport: no AUD → REFUSED (AC4)", () => {
@@ -245,12 +271,18 @@ test("planCloudflareSetup: confirmed + ready plans the two writes and a loopback
   assert.equal(plan.willApply, true);
   assert.equal(plan.stateWrites.length, 2);
   assert.equal(plan.record?.publicHostname, "board.example.com");
-  assert.equal(plan.record?.accessTeamDomain, "acme.cloudflareaccess.com");
+  assert.equal(plan.record?.accessTeamDomain, "acme");
   assert.equal(plan.record?.accessAud, AUD);
   assert.equal(plan.record?.target, "http://127.0.0.1:8025");
   assert.equal(plan.record?.cloudflaredConfigPath, "/tmp/forge/remote-board-cloudflared.yml");
   assert.equal(plan.record?.createdAt, "2026-09-08T00:00:00Z");
   assert.match(plan.ingressContents ?? "", /service: http:\/\/127\.0\.0\.1:8025/);
+  // RF-1: the record carries a sha256 ownership stamp of the exact ingress body.
+  assert.match(plan.record?.cloudflaredConfigSha256 ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(
+    plan.record?.cloudflaredConfigSha256,
+    createHash("sha256").update(plan.ingressContents ?? "", "utf8").digest("hex"),
+  );
 });
 
 test("planCloudflareSetup: any refusal plans ZERO writes even when confirmed (AC4)", () => {
@@ -267,7 +299,7 @@ test("planCloudflareSetup: any refusal plans ZERO writes even when confirmed (AC
 const RECORD: AccessStateRecord = {
   version: 1,
   publicHostname: "board.example.com",
-  accessTeamDomain: "acme.cloudflareaccess.com",
+  accessTeamDomain: "acme",
   accessAud: AUD,
   loopbackPort: 8025,
   target: "http://127.0.0.1:8025",

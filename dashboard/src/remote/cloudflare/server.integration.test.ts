@@ -29,7 +29,7 @@ import type { JwksCache, JwksKey } from "./jwks.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────────
 
-const TEAM_DOMAIN = "team.cloudflareaccess.com";
+const TEAM_DOMAIN = "team";
 const ISS = "https://team.cloudflareaccess.com";
 const AUD = "aud-tag-deadbeef";
 const EMAIL = "operator@example.com";

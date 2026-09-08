@@ -275,13 +275,30 @@ test("an empty expected-audience refuses every token (never accept-any-audience)
   if (result.status === "invalid") assert.equal(result.reason, "audience-mismatch");
 });
 
-test("clock tolerance lets a token just past exp through, but not far past", () => {
-  // exp 30s in the past, default 60s tolerance -> still valid.
-  const nearlyExpired = signRs256(validClaims({ exp: NOW_S - 30 }));
-  assert.equal(verifyAccessJwt(nearlyExpired, RSA_JWKS, OPTS).status, "ok");
-  // exp 120s in the past, default tolerance -> refused.
-  const wellExpired = signRs256(validClaims({ exp: NOW_S - 120 }));
-  assert.equal(verifyAccessJwt(wellExpired, RSA_JWKS, OPTS).status, "invalid");
+test("RF-3: clock tolerance is <=5s — a token 30s past exp is REFUSED, a 2s-past one is inside tolerance", () => {
+  // exp 2s in the past, default (5s) tolerance -> still valid (ordinary NTP drift).
+  const barelyExpired = signRs256(validClaims({ exp: NOW_S - 2 }));
+  assert.equal(verifyAccessJwt(barelyExpired, RSA_JWKS, OPTS).status, "ok");
+  // exp 30s in the past -> refused. The old 60s default would have accepted this; 5s does not.
+  const expired30s = signRs256(validClaims({ exp: NOW_S - 30 }));
+  const r = verifyAccessJwt(expired30s, RSA_JWKS, OPTS);
+  assert.equal(r.status, "invalid");
+  if (r.status === "invalid") assert.equal(r.reason, "expired");
+});
+
+test("RF-3: clock tolerance is configurable only DOWNWARD — a caller cannot widen exp acceptance", () => {
+  // A caller asking for 120s is clamped to the 5s bound, so a token 30s past exp is STILL refused.
+  const expired30s = signRs256(validClaims({ exp: NOW_S - 30 }));
+  assert.equal(
+    verifyAccessJwt(expired30s, RSA_JWKS, { ...OPTS, clockToleranceSeconds: 120 }).status,
+    "invalid",
+  );
+  // Downward is honoured: 0s tolerance refuses a token even 1s past exp.
+  const expired1s = signRs256(validClaims({ exp: NOW_S - 1 }));
+  assert.equal(
+    verifyAccessJwt(expired1s, RSA_JWKS, { ...OPTS, clockToleranceSeconds: 0 }).status,
+    "invalid",
+  );
 });
 
 test("DEFAULT_ALLOWED_ALGORITHMS is RS256-only (ES256 is opt-in)", () => {

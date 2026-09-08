@@ -41,7 +41,7 @@ import {
 
 // ── fixtures ────────────────────────────────────────────────────────────────────────────────────
 
-const TEAM_DOMAIN = "team.cloudflareaccess.com";
+const TEAM_DOMAIN = "team"; // RF-5: the team is a bare slug; the issuer is DERIVED from it.
 const ISS = "https://team.cloudflareaccess.com";
 const AUD = "aud-tag-deadbeef";
 const EMAIL = "operator@example.com";
@@ -170,21 +170,24 @@ function tunnelRequest(
 
 // ── deriveExpectedIssuer (pure) ─────────────────────────────────────────────────────────────────
 
-describe("deriveExpectedIssuer — team domain → the exact expected JWT issuer origin", () => {
-  test("a bare team name expands to the canonical cloudflareaccess.com origin", () => {
+describe("deriveExpectedIssuer — a bare team SLUG → the exact expected JWT issuer origin (RF-5)", () => {
+  test("a bare team slug expands to the canonical cloudflareaccess.com origin", () => {
     assert.equal(deriveExpectedIssuer("acme"), "https://acme.cloudflareaccess.com");
+    assert.equal(deriveExpectedIssuer("my-team-1"), "https://my-team-1.cloudflareaccess.com");
   });
-  test("a full team host and a full https URL both reduce to the origin (no path/slash)", () => {
-    assert.equal(deriveExpectedIssuer("acme.cloudflareaccess.com"), "https://acme.cloudflareaccess.com");
-    assert.equal(
-      deriveExpectedIssuer("https://acme.cloudflareaccess.com/cdn-cgi/access/certs"),
-      "https://acme.cloudflareaccess.com",
-    );
+  test("RF-5: a dotted/host-shaped/scheme-bearing team value is REFUSED (never a configured issuer)", () => {
+    // The whole point: a host an attacker controls must never become the trusted issuer/JWKS root.
+    assert.equal(deriveExpectedIssuer("acme.cloudflareaccess.com"), null);
+    assert.equal(deriveExpectedIssuer("evil.example.com"), null);
+    assert.equal(deriveExpectedIssuer("https://acme.cloudflareaccess.com"), null);
+    assert.equal(deriveExpectedIssuer("http://acme.cloudflareaccess.com"), null);
+    assert.equal(deriveExpectedIssuer("acme.evil.com/cdn-cgi/access/certs"), null);
   });
-  test("an empty domain, or a non-https explicit scheme, yields null (adapter then refuses)", () => {
+  test("an empty/whitespace or otherwise non-label team value yields null (adapter then refuses)", () => {
     assert.equal(deriveExpectedIssuer(""), null);
     assert.equal(deriveExpectedIssuer("   "), null);
-    assert.equal(deriveExpectedIssuer("http://acme.cloudflareaccess.com"), null);
+    assert.equal(deriveExpectedIssuer("-bad"), null);
+    assert.equal(deriveExpectedIssuer("bad_underscore"), null);
   });
 });
 
@@ -342,6 +345,17 @@ describe("createCloudflareAccessAdapter — preconditions and boot config fail c
   test("a MALFORMED team domain in access-state (no derivable issuer) → null", async () => {
     const bad: AccessStateRecord = { ...ACCESS_STATE, accessTeamDomain: "http://plaintext.example" };
     assert.equal(await adapterWith({ loadAccessState: () => bad }).verifyIdentity(tunnelRequest(signRs256())), null);
+  });
+
+  test("RF-5: a dotted/host-shaped team in access-state → null at boot (a configured host is never trusted)", async () => {
+    for (const team of ["acme.cloudflareaccess.com", "evil.example.com", "https://evil.example.com"]) {
+      const bad: AccessStateRecord = { ...ACCESS_STATE, accessTeamDomain: team };
+      assert.equal(
+        await adapterWith({ loadAccessState: () => bad }).verifyIdentity(tunnelRequest(signRs256())),
+        null,
+        `team ${team} must be refused at boot`,
+      );
+    }
   });
 
   test("an EMPTY AUD in access-state → null (never accept-any-audience)", async () => {

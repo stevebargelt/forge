@@ -48,28 +48,23 @@ function fakeClock(start = 1_000_000): { now: () => number; advance: (ms: number
 }
 
 // ── buildCertsUrl ───────────────────────────────────────────────────────────────────────
-test("buildCertsUrl expands a bare team name to the canonical certs endpoint", () => {
+test("buildCertsUrl expands a bare team slug to the canonical certs endpoint", () => {
   assert.equal(
     buildCertsUrl("acme"),
     "https://acme.cloudflareaccess.com/cdn-cgi/access/certs",
   );
 });
 
-test("buildCertsUrl accepts a full team host and a full https base URL", () => {
-  assert.equal(
-    buildCertsUrl("acme.cloudflareaccess.com"),
-    "https://acme.cloudflareaccess.com/cdn-cgi/access/certs",
-  );
-  assert.equal(
-    buildCertsUrl("https://acme.cloudflareaccess.com"),
-    "https://acme.cloudflareaccess.com/cdn-cgi/access/certs",
-  );
+test("RF-5: buildCertsUrl REJECTS a dotted/host-shaped or scheme-bearing team (JWKS root is derived, never configured)", () => {
+  assert.throws(() => buildCertsUrl("acme.cloudflareaccess.com"), /bare team slug/);
+  assert.throws(() => buildCertsUrl("evil.example.com"), /bare team slug/);
+  assert.throws(() => buildCertsUrl("https://acme.cloudflareaccess.com"), /bare team slug/);
+  assert.throws(() => buildCertsUrl("http://acme.cloudflareaccess.com"), /bare team slug/);
 });
 
-test("buildCertsUrl rejects an empty domain and a non-https scheme (never fetch keys over plaintext)", () => {
+test("buildCertsUrl rejects an empty team (never fetch keys from an underived endpoint)", () => {
   assert.throws(() => buildCertsUrl(""), /required/);
   assert.throws(() => buildCertsUrl("   "), /required/);
-  assert.throws(() => buildCertsUrl("http://acme.cloudflareaccess.com"), /https/);
 });
 
 // ── extractJwks ─────────────────────────────────────────────────────────────────────────

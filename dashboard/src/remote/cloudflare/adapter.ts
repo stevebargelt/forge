@@ -93,28 +93,30 @@ function headerValue(v: string | string[] | undefined): string | undefined {
   return undefined;
 }
 
+/** A bare Cloudflare Access team SLUG: a single RFC-1123 label — lowercase alphanumerics and
+ *  hyphens, no dots, no scheme, 1–63 chars, not hyphen-bordered. This is the ONLY accepted team
+ *  form (RF-5): the issuer and JWKS authority are DERIVED from it as `<slug>.cloudflareaccess.com`,
+ *  never taken from an operator-supplied hostname, so a configured attacker-controlled HTTPS host
+ *  can never become the trusted issuer/JWKS root. */
+const TEAM_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** True iff `team` is a bare Access team slug (see {@link TEAM_SLUG_RE}). Anything dotted,
+ *  host-shaped, scheme-bearing, or otherwise not a single DNS label is rejected. */
+export function isBareTeamSlug(team: string): boolean {
+  return TEAM_SLUG_RE.test((team ?? "").trim());
+}
+
 /**
- * Derive the exact JWT issuer the token must carry from the Access team domain. Cloudflare
- * Access issues tokens with `iss = https://<team>.cloudflareaccess.com` — the team ORIGIN, no
- * path, no trailing slash. Accepts the same domain forms the JWKS builder does (a bare team name,
- * a full team host, or a full URL) and reduces them to that origin. Returns `null` for an empty
- * domain or a non-`https:` explicit scheme (the issuer must be https), so the adapter refuses
- * rather than trusting a malformed team config.
+ * Derive the exact JWT issuer the token must carry from the recorded Access team SLUG. Cloudflare
+ * Access issues tokens with `iss = https://<slug>.cloudflareaccess.com` — the team ORIGIN, no path,
+ * no trailing slash. The team MUST be a bare slug (RF-5): a dotted/host-shaped/scheme-bearing value
+ * yields `null` so the adapter refuses (fail closed) rather than letting a configured hostname
+ * become the trusted issuer. The issuer is ALWAYS the derived cloudflareaccess.com origin.
  */
 export function deriveExpectedIssuer(teamDomain: string): string | null {
   const raw = (teamDomain ?? "").trim();
-  if (raw === "") return null;
-  try {
-    if (raw.includes("://")) {
-      const url = new URL(raw);
-      if (url.protocol !== "https:") return null;
-      return url.origin;
-    }
-    const host = raw.includes(".") ? raw : `${raw}.cloudflareaccess.com`;
-    return new URL(`https://${host}`).origin;
-  } catch {
-    return null;
-  }
+  if (!isBareTeamSlug(raw)) return null;
+  return `https://${raw}.cloudflareaccess.com`;
 }
 
 /**
@@ -157,8 +159,9 @@ export interface CloudflareAccessAdapterDeps {
   /** The signature algorithms to accept. Defaults to the verifier's RS256-only allowlist; ES256
    *  must be opted in explicitly. Never widens past the asymmetric allowlist. */
   readonly allowedAlgorithms?: readonly SupportedJwtAlgorithm[];
-  /** Clock-skew tolerance in SECONDS applied to exp/nbf/iat by the verifier. Default (60s) is the
-   *  verifier's own default when omitted. */
+  /** Clock-skew tolerance in SECONDS applied to exp/nbf/iat by the verifier. Omitted here, so the
+   *  verifier's own small default (5s, bounded — see DEFAULT/MAX_CLOCK_TOLERANCE_SECONDS) governs;
+   *  a caller may only narrow it, never widen exp acceptance past the verifier's hard bound. */
   readonly clockToleranceSeconds?: number;
 }
 

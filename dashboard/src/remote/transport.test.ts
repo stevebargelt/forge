@@ -89,7 +89,7 @@ test("the selected adapter fails closed for an unconfirmable forwarded address (
 // UNIT tier — node:crypto generates a local RS256 keypair (pure; no spawn, no network) and a fake
 // JWKS cache / access-state / mapping drive the SAME selectRemoteAdapter path production uses.
 
-const CF_TEAM = "team.cloudflareaccess.com";
+const CF_TEAM = "team"; // RF-5: a bare team slug; the issuer is DERIVED as <slug>.cloudflareaccess.com
 const CF_ISS = "https://team.cloudflareaccess.com";
 const CF_AUD = "aud-tag-1234";
 const CF_EMAIL = "cf-operator@example.com";

@@ -63,10 +63,9 @@ export type JwksFetcher = (certsUrl: string) => Promise<JwksKey[]>;
 export type JwksKey = JsonWebKey & { readonly kid?: string };
 
 export interface JwksCacheOptions {
-  /** The Access team domain: a bare team name (`acme`), a full team host
-   *  (`acme.cloudflareaccess.com`), or a full base/cert URL. Resolved to the certs endpoint via
-   *  {@link buildCertsUrl}. Comes from the Forge-owned access-state at boot (step 3), NOT
-   *  config.ts. */
+  /** The Access team SLUG — a bare RFC-1123 label (`acme`), never a host or URL (RF-5). Resolved to
+   *  the certs endpoint `https://<slug>.cloudflareaccess.com/cdn-cgi/access/certs` via
+   *  {@link buildCertsUrl}. Comes from the Forge-owned access-state at boot (step 3), NOT config.ts. */
   readonly teamDomain: string;
   /** Outbound-fetch seam. Defaults to {@link createDefaultJwksFetcher} (real HTTPS). */
   readonly fetcher?: JwksFetcher;
@@ -96,30 +95,29 @@ export interface JwksCache {
 }
 
 /**
- * Resolve an Access team domain to its JWKS certs endpoint. Accepts a bare team name, a team
- * host, or a full URL, and ALWAYS yields an `https:` URL ending in the Access certs path.
- * Throws on an empty domain or a non-`https:` explicit scheme (the endpoint is security-critical
- * and must never be fetched over plaintext).
+ * Resolve an Access team SLUG to its JWKS certs endpoint. The team MUST be a bare slug (a single
+ * RFC-1123 label — no dots, no scheme): the JWKS authority is ALWAYS DERIVED as
+ * `https://<slug>.cloudflareaccess.com/cdn-cgi/access/certs`, never taken from an operator-supplied
+ * hostname (RF-5), so a configured attacker-controlled HTTPS host can never become the trusted key
+ * source. Throws on an empty or non-slug team value.
  */
 export function buildCertsUrl(teamDomain: string): string {
   const raw = (teamDomain ?? "").trim();
-  if (raw === "") throw new Error("cloudflare access team domain is required to build the JWKS URL");
-  const CERTS_PATH = "/cdn-cgi/access/certs";
-
-  if (raw.includes("://")) {
-    const url = new URL(raw);
-    if (url.protocol !== "https:") {
-      throw new Error(`cloudflare access JWKS endpoint must be https, got ${url.protocol}`);
-    }
-    // Preserve an explicit certs path; otherwise append it to the given base.
-    if (url.pathname === "/" || url.pathname === "") url.pathname = CERTS_PATH;
-    return url.toString();
+  if (raw === "") throw new Error("cloudflare access team is required to build the JWKS URL");
+  if (!isBareTeamSlug(raw)) {
+    throw new Error(
+      `cloudflare access team must be a bare team slug (a single DNS label, no dots/scheme), got: ${raw}`,
+    );
   }
+  return `https://${raw}.cloudflareaccess.com/cdn-cgi/access/certs`;
+}
 
-  // A bare team name (no dot) expands to the canonical cloudflareaccess.com host; anything with a
-  // dot is treated as a full host the operator supplied.
-  const host = raw.includes(".") ? raw : `${raw}.cloudflareaccess.com`;
-  return new URL(`https://${host}${CERTS_PATH}`).toString();
+/** A bare Cloudflare Access team SLUG — a single RFC-1123 label (lowercase alphanumerics + hyphens,
+ *  no dots, 1–63 chars, not hyphen-bordered). The ONLY accepted team form (RF-5); see adapter.ts's
+ *  matching `isBareTeamSlug` — kept local here to avoid coupling the JWKS cache to the adapter. */
+const TEAM_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function isBareTeamSlug(team: string): boolean {
+  return TEAM_SLUG_RE.test((team ?? "").trim());
 }
 
 /**

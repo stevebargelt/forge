@@ -83,10 +83,22 @@ export interface VerifyAccessJwtOptions {
   /** The algorithms to accept. Defaults to {@link DEFAULT_ALLOWED_ALGORITHMS} (RS256 only). Any
    *  value outside {@link SUPPORTED_JWT_ALGORITHMS} is ignored (cannot widen past asymmetric). */
   readonly allowedAlgorithms?: readonly SupportedJwtAlgorithm[];
-  /** Clock-skew tolerance in SECONDS applied to exp/nbf/iat. Defaults to 60s — real edge clocks
-   *  drift. Bounded and non-negative; a negative value is clamped to 0. */
+  /** Clock-skew tolerance in SECONDS applied to nbf/iat skew and — capped at the same bound — to
+   *  exp. Defaults to {@link DEFAULT_CLOCK_TOLERANCE_SECONDS}. Configurable only DOWNWARD: a value
+   *  above {@link MAX_CLOCK_TOLERANCE_SECONDS} is clamped to it and a negative value to 0, so an
+   *  expired token is never accepted more than {@link MAX_CLOCK_TOLERANCE_SECONDS} past its exp. */
   readonly clockToleranceSeconds?: number;
 }
+
+/** The default clock-skew tolerance (seconds) applied to exp/nbf/iat. Deliberately SMALL: real edge
+ *  clocks drift by a few seconds, but a large window means an expired token keeps working long past
+ *  its exp. 5s covers ordinary NTP drift without meaningfully widening the replay window. */
+export const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
+
+/** The HARD upper bound on clock-skew tolerance. Tolerance is configurable only downward from here;
+ *  a caller cannot widen exp acceptance beyond this. An expired token is refused once it is more
+ *  than this many seconds past exp, regardless of the configured value. */
+export const MAX_CLOCK_TOLERANCE_SECONDS = 5;
 
 /** Why an `invalid` result refused. Internal/diagnostic only — the adapter must NEVER log the
  *  token itself, but this coarse reason (which carries no token bytes) is safe to record. */
@@ -307,7 +319,11 @@ export function verifyAccessJwt(
     return { status: "invalid", reason: "audience-mismatch" };
   }
 
-  const toleranceMs = Math.max(0, options.clockToleranceSeconds ?? 60) * 1000;
+  // Tolerance is bounded to [0, MAX_CLOCK_TOLERANCE_SECONDS] — configurable only downward. This is
+  // what keeps exp acceptance STRICT beyond the bound: a token >5s past exp is refused even if a
+  // caller passed a larger value.
+  const requestedTolerance = options.clockToleranceSeconds ?? DEFAULT_CLOCK_TOLERANCE_SECONDS;
+  const toleranceMs = Math.min(MAX_CLOCK_TOLERANCE_SECONDS, Math.max(0, requestedTolerance)) * 1000;
   const now = options.now;
 
   // exp is REQUIRED — a token with no (or non-numeric) expiry is refused, so nothing rides forever.
