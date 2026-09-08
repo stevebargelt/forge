@@ -460,6 +460,100 @@ describe("FG-781 AC4 / RF-1: attention free text cannot carry a filesystem path 
   });
 });
 
+describe("FG-781 AC4 / RF-5: a bare scheme://host URL (no path segment) is redacted", () => {
+  // The path rule only catches URLs with two or more path segments; a bare scheme://host with
+  // NO path (e.g. https://control.invalid) previously slipped, disclosing a remote-control URL.
+  test("scheme://host URLs are redacted regardless of scheme or path depth", () => {
+    for (const url of [
+      "https://control.invalid",
+      "http://control.invalid",
+      "ws://control.invalid",
+      "wss://control.invalid",
+    ]) {
+      assert.ok(!redactRemoteFreeText(`connect to ${url} now`).includes("control.invalid"), `${url} must be redacted`);
+    }
+    // scheme://host:port/path still redacts the whole URL, not just its trailing path.
+    assert.ok(!redactRemoteFreeText("dial wss://relay.example:9443/x").includes("relay.example"), "scheme://host:port/path is redacted");
+    // A bare host:port authority with no scheme is redacted too.
+    assert.ok(!redactRemoteFreeText("reach control.invalid:8443 for the tunnel").includes("control.invalid"), "a bare host:port authority is redacted");
+  });
+
+  test("ordinary prose, ticket refs, and a lone slash still survive (non-vacuous)", () => {
+    assert.equal(redactRemoteFreeText("review FG-781 and advance"), "review FG-781 and advance");
+    assert.equal(redactRemoteFreeText("blocked 9/8, retry ratio 3/4"), "blocked 9/8, retry ratio 3/4");
+  });
+});
+
+describe("FG-781 AC4 / RF-4: EVERY free-text field the DTO emits is routed through the redactor", () => {
+  // Seed a host path, a credential token, and a remote-control URL into each free-text display
+  // string the projection copies, and assert NONE reaches the mapped DTO.
+  const SEED_PATH = "/home/steve/.forge/secrets/id_rsa";
+  const SEED_TOKEN = "ghp_ABCDEF0123456789abcdef0123456789ABCD";
+  const SEED_URL = "https://control.invalid";
+  const SEEDS = [SEED_PATH, SEED_TOKEN, "control.invalid"];
+  const seeded = (base: string): string => `${base} ${SEED_PATH} ${SEED_TOKEN} ${SEED_URL}`;
+  function assertNoLeak(label: string, output: unknown): void {
+    const s = JSON.stringify(output);
+    for (const leak of SEEDS) assert.ok(!s.includes(leak), `${label}: "${leak}" crossed the remote boundary`);
+  }
+
+  test("project description", () => {
+    const out = toRemoteProjectSummary(
+      pollute({ key: "pk", label: "L", color: "#fff", description: seeded("desc"), lastRunAt: null, runCount: 0, inFlightCount: 0, liveSessions: 0 }),
+    );
+    assertNoLeak("projectSummary.description", out);
+  });
+
+  test("backlog ticket title", () => {
+    const out = toRemoteBacklogTicket(pollute({ id: "FG-1", type: "story", status: "active", title: seeded("Ticket"), related: [] }));
+    assertNoLeak("backlogTicket.title", out);
+    assert.match(out.title, /Ticket/, "the bounded prefix survives so the row stays useful");
+  });
+
+  test("queue row title", () => {
+    const out = toRemoteQueueRow(
+      pollute({ ticketId: "FG-1", title: seeded("Row"), type: "story", status: "active", rank: null, queued: false, blocked: false, inProgress: false, executionState: "idle", view: "backlog", wait: null }),
+    );
+    assertNoLeak("queueRow.title", out);
+  });
+
+  test("campaign goal and current-item title", () => {
+    const out = toRemoteCampaignSummary(
+      pollute({
+        campaignId: "c1",
+        goal: seeded("Goal"),
+        mode: "serial",
+        status: "running",
+        verdict: "not_complete",
+        createdAt: "2026-09-01T00:00:00Z",
+        updatedAt: "2026-09-01T00:00:00Z",
+        counts: { shipped: 0, blocked: 0, held: 0, skipped: 0, failed: 0, total: 0 },
+        currentItem: { ticketId: "FG-1", title: seeded("Item") },
+      }),
+    );
+    assertNoLeak("campaignSummary.goal+currentItem.title", out);
+  });
+
+  test("activity run title", () => {
+    const out = toRemoteActivitySummary(
+      pollute({
+        generatedAt: "2026-09-01T00:00:00Z",
+        agents: [
+          pollute({ runId: "r", taskId: "t", runTitle: seeded("Run"), workflow: "feature", agentRole: "engineer", phase: "build", status: "running", startedAt: null }),
+        ],
+        hostVerification: [],
+        launches: [],
+        ciWaits: [],
+        operatorWaits: [],
+        requiredCi: { state: "idle", label: "", observations: [] },
+        unassociated: [],
+      }),
+    );
+    assertNoLeak("activity.agent.runTitle", out);
+    assert.match(out.agents[0]!.runTitle, /Run/, "the bounded prefix survives");
+  });
+});
+
 describe("FG-781 AC5: the envelope carries a five-state discriminator and a freshness stamp", () => {
   test("the state vocabulary is exactly the five states", () => {
     assert.deepEqual(

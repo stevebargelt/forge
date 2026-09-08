@@ -27,6 +27,33 @@ export const REMOTE_PORT_ENV = "FORGE_DASHBOARD_REMOTE_PORT";
 /** The remote board's default loopback port — one above the local dashboard's 8024. */
 export const DEFAULT_REMOTE_PORT = 8025;
 
+/** The local dashboard's default port — mirrors `Number(process.env.PORT ?? 8024)` in
+ *  ../server.ts. Held here so the remote/local collision guard (RF-1) compares against the
+ *  same default the local listener will bind. */
+export const DEFAULT_LOCAL_DASHBOARD_PORT = 8024;
+
+/**
+ * RF-1: the remote board binds a SEPARATE loopback listener, started BEFORE the local
+ * dashboard's `server.listen(PORT, HOST)`. If the two ports are equal the remote listener
+ * wins the bind and the local dashboard then fails with EADDRINUSE — silently breaking the
+ * protected invariant that enabling remote mode leaves the local dashboard unchanged (AC1).
+ * The configuration is refused at resolution time, before either listener starts, and the
+ * error names BOTH ports so the operator can see the collision.
+ */
+export class RemotePortCollisionError extends Error {
+  constructor(
+    readonly localPort: number,
+    readonly remotePort: number,
+  ) {
+    super(
+      `forge remote board: the remote port (${REMOTE_PORT_ENV}=${remotePort}) collides with the local dashboard ` +
+        `port (${localPort}). The remote board is a SEPARATE loopback listener and must bind a different port — ` +
+        `set ${REMOTE_PORT_ENV} to a value other than ${localPort}.`,
+    );
+    this.name = "RemotePortCollisionError";
+  }
+}
+
 /**
  * The remote board's bind host. A CONSTANT, and intentionally not env-derived: it is the
  * single line that guarantees enabling remote mode cannot open a non-loopback listener by
@@ -69,10 +96,19 @@ function resolvePort(value: string | undefined): number {
  * loopback constant regardless of what the env contains.
  */
 export function resolveRemoteConfig(env: NodeJS.ProcessEnv = process.env): RemoteBoardConfig {
+  const enabled = isEnabled(env[REMOTE_MODE_ENV]);
+  const port = resolvePort(env[REMOTE_PORT_ENV]);
+  // RF-1: refuse a remote port that collides with the local dashboard port BEFORE either
+  // listener starts. Only meaningful when remote mode is on (a disabled board binds nothing),
+  // and port 0 is the OS-assigned ephemeral request, which never collides with a fixed port.
+  if (enabled && port !== 0) {
+    const localPort = Number(env["PORT"] ?? DEFAULT_LOCAL_DASHBOARD_PORT);
+    if (port === localPort) throw new RemotePortCollisionError(localPort, port);
+  }
   return {
-    enabled: isEnabled(env[REMOTE_MODE_ENV]),
+    enabled,
     host: REMOTE_LOOPBACK_HOST,
-    port: resolvePort(env[REMOTE_PORT_ENV]),
+    port,
   };
 }
 

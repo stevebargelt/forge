@@ -26,6 +26,21 @@ function resolveDashboard(): { dashboardDir: string; serverEntry: string } {
   return { dashboardDir, serverEntry };
 }
 
+/**
+ * RF-6: `--remote-port` is documented (docs/SCHEMA-CONTRACT.md) as REQUIRING `--remote`.
+ * Enforce that prerequisite rather than silently accepting a remote port and then ignoring
+ * it — with no `--remote` the ordinary dashboard starts and `FORGE_DASHBOARD_REMOTE_PORT`
+ * would be threaded into an env nothing reads. Refuse the combination up front, by name.
+ */
+export function assertRemotePortRequiresRemote(opts: { remote?: boolean; remotePort?: string }): void {
+  if (opts.remotePort !== undefined && !opts.remote) {
+    throw new Error(
+      "--remote-port requires --remote. The Remote Board is off by default; pass --remote to enable it, " +
+        "or drop --remote-port.",
+    );
+  }
+}
+
 export function registerDashboard(program: Command): void {
   const dashboard = program
     .command("dashboard")
@@ -57,6 +72,7 @@ export function registerDashboard(program: Command): void {
     .option("--remote", "also start the read-only Remote Board on a dedicated loopback listener (default: off)")
     .option("--remote-port <n>", "Remote Board loopback port (default: 8025); requires --remote")
     .action((opts: { port?: string; host?: string; remote?: boolean; remotePort?: string }) => {
+      assertRemotePortRequiresRemote(opts);
       const { dashboardDir, serverEntry } = resolveDashboard();
 
       const env = { ...process.env };

@@ -25,6 +25,7 @@ import {
   REMOTE_LOOPBACK_HOST,
   REMOTE_MODE_ENV,
   REMOTE_PORT_ENV,
+  RemotePortCollisionError,
   isLoopbackHost,
   resolveRemoteConfig,
 } from "./config.js";
@@ -66,6 +67,14 @@ test("the shell serves NO CLIENT_DIR asset — it references only its own /remot
   assert.ok(!html.includes("/vendor/") && !html.includes("preact") && !html.includes("marked"), "the remote shell must not pull the local client's vendored module graph");
   assert.ok(html.includes(REMOTE_BOARD_ENTRY), "the shell must load its own board entry module");
   assert.ok(REMOTE_BOARD_ENTRY.startsWith(REMOTE_CLIENT_URL_PREFIX), "the board entry lives under the remote asset prefix");
+});
+
+test("RF-3: the board container is NOT a live region — state is announced by the scoped role=status banner", () => {
+  const html = renderRemoteShell("n");
+  const mainTag = html.match(/<main id="remote-board"[^>]*>/)?.[0] ?? "";
+  assert.ok(mainTag, "the shell renders the board container");
+  assert.ok(!/aria-live/.test(mainTag), "the board container must not carry aria-live (it re-announces every card on refresh)");
+  assert.match(mainTag, /aria-busy="true"/, "the container still declares its pre-hydration busy state");
 });
 
 test("the shell is responsive and carries no project data in the document itself", () => {
@@ -114,6 +123,44 @@ test("the port resolves from env, falling back to the default for absent/garbage
   for (const bad of ["abc", "-1", "70000", "12.5", ""]) {
     assert.equal(resolveRemoteConfig({ [REMOTE_PORT_ENV]: bad }).port, DEFAULT_REMOTE_PORT, `${JSON.stringify(bad)} must fall back to the default port`);
   }
+});
+
+// ─── config: RF-1 — a remote/local port collision is refused before either listener binds ──
+
+test("resolveRemoteConfig REFUSES a remote port equal to the local dashboard port (RF-1)", () => {
+  // Default local port (8024) with the remote pinned to it → the remote listener would win the
+  // bind and the local dashboard would then fail EADDRINUSE. Refuse at resolution, naming both.
+  assert.throws(
+    () => resolveRemoteConfig({ [REMOTE_MODE_ENV]: "1", [REMOTE_PORT_ENV]: "8024" }),
+    (err: unknown) => {
+      assert.ok(err instanceof RemotePortCollisionError, "the refusal is the named collision error");
+      assert.equal(err.localPort, 8024);
+      assert.equal(err.remotePort, 8024);
+      assert.match(err.message, /8024/, "the message names the colliding port");
+      return true;
+    },
+  );
+
+  // Collision via an explicit local PORT too (both set to the same non-default value).
+  assert.throws(
+    () => resolveRemoteConfig({ [REMOTE_MODE_ENV]: "1", PORT: "9100", [REMOTE_PORT_ENV]: "9100" }),
+    /9100/,
+  );
+
+  // The default remote port (8025) collides when the LOCAL port is moved onto it.
+  assert.throws(
+    () => resolveRemoteConfig({ [REMOTE_MODE_ENV]: "1", PORT: "8025" }),
+    /8025/,
+  );
+});
+
+test("resolveRemoteConfig allows distinct ports, and never collides when remote is disabled or ephemeral (RF-1)", () => {
+  // Distinct ports are fine — the common case.
+  assert.equal(resolveRemoteConfig({ [REMOTE_MODE_ENV]: "1", PORT: "8024", [REMOTE_PORT_ENV]: "8025" }).port, 8025);
+  // A disabled remote board binds nothing, so an equal port is not a collision.
+  assert.doesNotThrow(() => resolveRemoteConfig({ PORT: "8024", [REMOTE_PORT_ENV]: "8024" }));
+  // Port 0 is the OS-assigned ephemeral request; it never "collides" with a fixed local port.
+  assert.equal(resolveRemoteConfig({ [REMOTE_MODE_ENV]: "1", PORT: "0", [REMOTE_PORT_ENV]: "0" }).port, 0);
 });
 
 test("isLoopbackHost accepts loopback forms and rejects public addresses", () => {

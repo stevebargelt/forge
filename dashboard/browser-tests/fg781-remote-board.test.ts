@@ -222,8 +222,10 @@ test("is screen-reader navigable: landmark, heading hierarchy, and a status live
   const page = await open({ width: 1280, height: 1000 });
   await page.locator('[data-state="live"]').waitFor();
 
-  // One main landmark that is a polite live region, and it is no longer busy once rendered.
-  assert.equal(await page.locator("main#remote-board[aria-live]").count(), 1, "the board is a polite live region");
+  // One main landmark that is no longer busy once rendered. RF-3: the board container is NOT a
+  // live region — an aria-live here would re-announce every card on each refresh, so the live
+  // region is scoped to the role=status banner below. The container only carries aria-busy.
+  assert.equal(await page.locator("main#remote-board[aria-live]").count(), 0, "the board container must NOT be a live region (state is announced by role=status)");
   assert.equal(await page.locator("main#remote-board").getAttribute("aria-busy"), "false", "aria-busy clears after render");
 
   // Exactly one h1, and several h2 sections — a sane, non-skipping hierarchy.

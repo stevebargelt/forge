@@ -64,7 +64,11 @@ export function renderRemoteShell(nonce: string): string {
 <style>${CSS}</style>
 </head>
 <body>
-<main id="remote-board" aria-live="polite" aria-busy="true">
+<!-- RF-3: the board container is deliberately NOT a live region. board.js replaces this whole
+     subtree on every refresh, so an aria-live here would make a screen reader re-announce every
+     card and row each read. State changes are announced by the scoped role="status" banner the
+     board renders instead; the container only carries aria-busy. -->
+<main id="remote-board" aria-busy="true">
 <p class="rb-loading">Loading the board…</p>
 </main>
 <script nonce="${nonce}">${bootstrap}</script>

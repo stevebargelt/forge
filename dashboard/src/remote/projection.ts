@@ -105,7 +105,7 @@ export function toRemoteProjectSummary(project: ProjectRecord): RemoteProjectSum
     projectKey: project.key,
     label: project.label,
     color: project.color,
-    description: project.description ?? null,
+    description: redactRemoteFreeTextOrNull(project.description),
     lastRunAt: project.lastRunAt ?? null,
     runCount: project.runCount,
     inFlightCount: project.inFlightCount,
@@ -141,7 +141,7 @@ export function toRemoteBacklogTicket(ticket: BacklogTicket): RemoteBacklogTicke
     id: ticket.id,
     type: ticket.type,
     status: ticket.status,
-    title: ticket.title,
+    title: redactRemoteFreeText(ticket.title),
     epic: ticket.epic ?? null,
     created: ticket.created ?? null,
     closed: ticket.closed ?? null,
@@ -196,7 +196,7 @@ export type RemoteQueueProjection = {
 export function toRemoteQueueRow(row: QueueBoardRow): RemoteQueueRow {
   return {
     ticketId: row.ticketId,
-    title: row.title,
+    title: redactRemoteFreeText(row.title),
     type: row.type,
     status: row.status,
     rank: row.rank,
@@ -247,7 +247,7 @@ export type RemoteCampaignSummary = {
 export function toRemoteCampaignSummary(summary: CampaignSummary): RemoteCampaignSummary {
   return {
     campaignId: summary.campaignId,
-    goal: summary.goal,
+    goal: redactRemoteFreeTextOrNull(summary.goal),
     mode: summary.mode,
     status: summary.status,
     verdict: summary.verdict,
@@ -262,7 +262,7 @@ export function toRemoteCampaignSummary(summary: CampaignSummary): RemoteCampaig
       total: summary.counts.total,
     },
     currentItem: summary.currentItem
-      ? { ticketId: summary.currentItem.ticketId, title: summary.currentItem.title }
+      ? { ticketId: summary.currentItem.ticketId, title: redactRemoteFreeTextOrNull(summary.currentItem.title) }
       : null,
   };
 }
@@ -312,6 +312,15 @@ const REMOTE_FREE_TEXT_REDACTIONS: readonly RegExp[] = [
   /\b(?:tokens?|secrets?|passwords?|passwd|pwd|api[_-]?keys?|access[_-]?keys?|secret[_-]?keys?|auth(?:orization)?|bearer|credentials?)\b\s*[:=]\s*\S+/gi,
   // Known credential token shapes (GitHub/OpenAI/Slack/AWS prefixes).
   /\b(?:ghp|gho|ghs|ghr|ghu|sk|xox[baprs]|AKIA|ASIA)[A-Za-z0-9_-]{8,}\b/g,
+  // RF-5: any scheme://host[:port][/path] URL, REGARDLESS of path depth. The POSIX-path rule
+  // below only catches URLs with two or more path segments; a bare scheme://host with no path
+  // (e.g. https://control.invalid, ws://relay:9000) would otherwise slip. Runs before the path
+  // rule so the whole URL is redacted in one shot, not just its trailing path.
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi,
+  // RF-5: a bare host:port authority with no scheme — a dotted hostname followed by a numeric
+  // port (e.g. control.invalid:8443). Requires the dotted domain + colon + digits so ordinary
+  // prose, a "key: value" pair, or a fraction like "9/8" is left untouched.
+  /\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}\b/gi,
   // Windows absolute path.
   /[A-Za-z]:\\[^\s"']+/g,
   // POSIX absolute path (two or more segments), so a lone "/" or a fraction like "9/8" is left.
@@ -324,6 +333,13 @@ export function redactRemoteFreeText(text: string): string {
   let out = text;
   for (const pattern of REMOTE_FREE_TEXT_REDACTIONS) out = out.replace(pattern, REMOTE_REDACTED);
   return out;
+}
+
+/** RF-4: null-preserving wrapper so the nullable free-text fields (ticket/queue/campaign
+ *  titles, project description, campaign goal) can be routed through the redactor without each
+ *  mapper open-coding the null guard. A null stays null; a string is redacted. */
+export function redactRemoteFreeTextOrNull(text: string | null | undefined): string | null {
+  return text === null || text === undefined ? null : redactRemoteFreeText(text);
 }
 
 export function toRemoteInboxItem(item: AttentionItem): RemoteInboxItem {
@@ -391,7 +407,7 @@ export function toRemoteActivitySummary(activity: CurrentActivityWithRetention):
   const agents: RemoteActivityAgent[] = activity.agents.map((agent) => ({
     runId: agent.runId,
     taskId: agent.taskId,
-    runTitle: agent.runTitle,
+    runTitle: redactRemoteFreeText(agent.runTitle),
     workflow: agent.workflow,
     agentRole: agent.agentRole,
     phase: agent.phase,

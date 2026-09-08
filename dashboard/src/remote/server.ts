@@ -271,7 +271,16 @@ export function maybeStartRemoteBoardFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   deps: RemoteBoardDeps = {},
 ): Server | null {
-  const config = resolveRemoteConfig(env);
+  let config: RemoteBoardConfig;
+  try {
+    config = resolveRemoteConfig(env);
+  } catch (err) {
+    // RF-1: a refused remote configuration (e.g. remote port == local dashboard port) must
+    // NOT take the local dashboard down with it. Log the named refusal and stay off — the
+    // local listener binds untouched (AC1).
+    console.error("forge remote board: refusing to start:", err instanceof Error ? err.message : err);
+    return null;
+  }
   if (!config.enabled) return null;
   if (!isLoopbackHost(config.host)) {
     console.error(
