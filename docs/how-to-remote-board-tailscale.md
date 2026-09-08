@@ -26,12 +26,23 @@ Two properties hold no matter what a request carries:
   dashboard binds `127.0.0.1:8024`; neither is ever widened. Tailscale Serve is a proxy *in
   front of* the loopback endpoint — it does not change what Forge binds. There is no
   `--remote-host` flag and no `FORGE_DASHBOARD_REMOTE_HOST` env var, by design.
-- **Identity is proven out-of-band, never from headers.** A local `curl` and a Serve proxy
-  both arrive on `127.0.0.1` carrying attacker-settable `Tailscale-User-Login` /
-  `X-Forwarded-*` headers. Forge reads **none** of those values to decide who you are.
-  Instead the adapter confirms the connection's real tailnet peer against the *local
-  tailscaled* (`tailscale whois`). A request whose peer cannot be whois-confirmed — including
-  a forged-header request and any Funnel/public request — gets **no data**.
+- **Identity is proven out-of-band, never trusted from a header on its face.** Tailscale Serve
+  terminates TLS on this host and proxies to `http://127.0.0.1:8025`, so at Forge's backend
+  socket the connection peer is the *local Serve proxy* (loopback), not the tailnet caller —
+  whois'ing that socket peer could never name the remote user. Instead the adapter:
+  1. requires the backend socket peer to be **loopback** — a request that did not arrive
+     through the local Serve proxy is refused;
+  2. takes the Serve-set `X-Forwarded-For` as the tailnet caller's address (a *hint*) and
+     confirms **that** address against the *local tailscaled* (`tailscale whois`); and
+  3. requires the Serve-set `Tailscale-User-Login` to **equal** the login whois returns for
+     that address.
+
+  A header value never establishes identity by itself: the forwarded address is whois-confirmed
+  and the login claim must match that confirmation. A request that does not arrive on loopback,
+  carries no whois-confirmable `X-Forwarded-For`, or presents a `Tailscale-User-Login` the local
+  tailscaled contradicts — including any forged-header or Funnel/public request — gets **no
+  data**. Because these two Serve headers are confirmed against whois (not ignored), the
+  resolution records them as *confirmed identity headers* in its audit trail.
 
 ## Prerequisite: this is a single-operator host
 
@@ -196,8 +207,9 @@ hand-edit it (unlike the identity mapping). It exists so `disable` can be surgic
 3. Confirm the boundary holds:
    - A tailnet user **not** in the mapping file gets the `unauthorized` board (no project
      data).
-   - A direct request to `http://127.0.0.1:8025` with a forged `Tailscale-User-Login` header
-     (no whois-confirmed tailnet peer) gets **no** project data.
+   - A direct request to `http://127.0.0.1:8025` with a `Tailscale-User-Login` the local
+     tailscaled does **not** confirm — a forged login, or an `X-Forwarded-For` that is not a
+     whois-confirmable tailnet peer — gets **no** project data.
    - Ports `8024` and `8025` are loopback-only: `curl http://<lan-or-tailnet-ip>:8024` and
      `:8025` do not connect. Only the Serve URL reaches the board.
 

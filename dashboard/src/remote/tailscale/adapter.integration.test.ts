@@ -77,9 +77,16 @@ identities:
     capabilities: [read]
 `;
 
+// A Serve-shaped request: the backend socket peer is the LOOPBACK Serve proxy; Serve set
+// X-Forwarded-For to steve's tailnet address (whois-confirmed below) and Tailscale-User-Login to
+// the login it authed. The forwarded address is confirmed against the fake daemon and the login
+// claim must equal that whois answer.
 const REQUEST = {
-  headers: { "tailscale-user-login": "attacker@evil.example" }, // forged; must be ignored
-  peer: { address: "100.101.102.103", port: 40000 },
+  headers: {
+    "x-forwarded-for": "100.101.102.103",
+    "tailscale-user-login": "steve@example.com",
+  },
+  peer: { address: "127.0.0.1", port: 40000 },
 };
 
 test("end-to-end: fake-daemon whois-confirmed + mapped identity → a single read grant for ONLY its project (AC3)", async () => {

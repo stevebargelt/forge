@@ -214,11 +214,19 @@ function projectAlpha(): ProjectRecord {
   } as unknown as ProjectRecord;
 }
 
-/** A fake daemon that confirms ANY non-empty connection peer as one tailnet login — the
- *  injected stand-in for `tailscale whois`. Reads NO header; anchors only on the peer address
- *  the origin observed. */
+/** A fake daemon that confirms ANY non-empty address as one tailnet login — the injected
+ *  stand-in for `tailscale whois`. The adapter hands it the Serve-set X-Forwarded-For address
+ *  (the tailnet caller), never the loopback socket peer. */
 const fakeConfirmPeer = (peerAddr: string) =>
   typeof peerAddr === "string" && peerAddr.trim() !== "" ? { login: "steve@example.com" } : null;
+
+/** The Serve-shaped headers a real Tailscale Serve proxy sets in front of the loopback backend:
+ *  the tailnet caller's address and the login Serve authed. The adapter whois-confirms the
+ *  address and requires the login to equal that whois answer. */
+const SERVE_HEADERS = {
+  "x-forwarded-for": "100.101.102.103",
+  "tailscale-user-login": "steve@example.com",
+};
 
 /** A fake operator mapping authorizing exactly that login for exactly one project, read-only. */
 const STEVE_GRANT: IdentityGrant = { login: "steve@example.com", projectKey: "repo-alpha", capabilities: ["read"] };
@@ -262,14 +270,28 @@ test("FG-782 AC2/AC3: transport='tailscale' + fake daemon → an authorized iden
   // (b) AC2: a wired transport must NOT widen the bind — still loopback only.
   assert.match(addr.address, /^(127\.|::1$)/, "even with the tailscale transport selected, the bind stays loopback-only (AC2)");
 
-  // (a) AC2/AC3: the whois-confirmed + mapped identity passes the identity + scope gate.
-  const res = await fetch(`http://127.0.0.1:${addr.port}/api/board`);
+  // (a) AC2/AC3: the whois-confirmed + mapped identity passes the identity + scope gate. The
+  // request arrives on the loopback backend (fetch → 127.0.0.1) carrying the Serve-set headers,
+  // exactly as the real Serve proxy fronts it.
+  const res = await fetch(`http://127.0.0.1:${addr.port}/api/board`, { headers: SERVE_HEADERS });
   assert.notEqual(res.status, 401, "the confirmed, mapped identity is NOT the no-adapter refusal — the transport adapter resolved it");
   const body = await res.json();
   assert.notEqual(body.state, "unauthorized", "an authorized transport identity is not refused");
   if (body.state === "live" || body.state === "stale") {
     assert.equal(body.board.projectSummary.projectKey, "repo-alpha", "and it gets ONLY its granted project, server-authoritatively");
   }
+
+  // RF-1 end to end: the SAME listener refuses when the Serve-set identity headers are absent or
+  // forged. A bare request (no X-Forwarded-For / Tailscale-User-Login) has no tailnet address to
+  // confirm → 401; a forged login the fake daemon contradicts (whois says steve, header claims
+  // the attacker) → 401. Neither is authorized as the local proxy/host.
+  const bare = await fetch(`http://127.0.0.1:${addr.port}/api/board`);
+  assert.equal(bare.status, 401, "no Serve headers → no whois-confirmable tailnet caller → refused");
+  const forged = await fetch(`http://127.0.0.1:${addr.port}/api/board`, {
+    headers: { "x-forwarded-for": "100.101.102.103", "tailscale-user-login": "attacker@evil.example" },
+  });
+  assert.equal(forged.status, 401, "a Tailscale-User-Login whois contradicts is refused, no data");
+  assert.equal((await forged.json()).board, null, "the forged-login refusal carries NO project data");
 });
 
 test("FG-782: absent FORGE_DASHBOARD_REMOTE_TRANSPORT, no adapter is wired and every request is the FG-781 401 refusal", async () => {

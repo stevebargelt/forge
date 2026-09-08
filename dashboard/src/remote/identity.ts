@@ -137,6 +137,19 @@ export interface AdapterCandidateIdentity {
     | null
     | undefined;
   readonly provenance: TrustProvenance;
+  /**
+   * Header NAMES (lower-cased) the adapter READ and CONFIRMED against its own out-of-band
+   * channel — e.g. the Serve-set `X-Forwarded-For` it whois-confirmed and the
+   * `Tailscale-User-Login` it required to equal that whois result. The resolver moves these
+   * OUT of `ignoredIdentityHeaders` and records them as `confirmedIdentityHeaders`, so the
+   * audit trail says truthfully that they were verified inputs — not silently discarded.
+   *
+   * This does NOT relax the contract: a confirmed header is one whose VALUE was cross-checked
+   * against a trusted out-of-band assertion (whois), never one trusted on its face. An adapter
+   * that reads no header value (FG-781's absent adapter, a header-blind adapter) leaves this
+   * empty and every present identity header stays recorded as ignored, exactly as before.
+   */
+  readonly confirmedIdentityHeaders?: readonly string[];
 }
 
 /**
@@ -184,6 +197,12 @@ export interface RemoteIdentityGrant {
   /** Identity-bearing headers that were present on the request and DISCARDED — recorded
    *  even on success to prove the verified identity did not come from them. */
   readonly ignoredIdentityHeaders: readonly string[];
+  /** Identity-bearing headers the adapter READ and CONFIRMED against its out-of-band channel
+   *  (e.g. an `X-Forwarded-For` whois-confirmed and a `Tailscale-User-Login` matched against
+   *  that whois). Recorded separately from `ignoredIdentityHeaders` so the audit trail is
+   *  truthful: these values WERE consulted, and only after they survived out-of-band
+   *  confirmation. Empty for a header-blind adapter (nothing was confirmed). */
+  readonly confirmedIdentityHeaders: readonly string[];
 }
 
 /** The result of resolving a remote request to an identity. Fail-closed by construction:
@@ -250,7 +269,11 @@ export function validateAdapterIdentity(
     projectScope: normalized.grant,
     provenance: candidate.provenance,
   };
-  return { ok: true, identity, ignoredIdentityHeaders };
+  // A header the adapter CONFIRMED out-of-band is no longer "ignored": move it from the ignored
+  // set into the confirmed set so the audit trail records how identity was actually established.
+  const confirmedIdentityHeaders = candidate.confirmedIdentityHeaders ?? [];
+  const ignored = ignoredIdentityHeaders.filter((h) => !confirmedIdentityHeaders.includes(h));
+  return { ok: true, identity, ignoredIdentityHeaders: ignored, confirmedIdentityHeaders };
 }
 
 /**

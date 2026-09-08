@@ -97,7 +97,7 @@ export interface TailscaleServeStatus {
 /** A peer address is a CONNECTION FACT (socket.remoteAddress), not a header — but we still
  *  refuse anything that is not IP-shaped before handing it to the CLI, so a stray value could
  *  never be read by the CLI as a flag (e.g. a leading `-`) or otherwise steer the command. */
-function isPlausiblePeerAddress(peerAddr: string): boolean {
+export function isPlausiblePeerAddress(peerAddr: string): boolean {
   const v = peerAddr.trim();
   if (v === "" || v.startsWith("-")) return false;
   // Whitelist the character set an IPv4/IPv6/zoned-IPv6 socket peer can legitimately take

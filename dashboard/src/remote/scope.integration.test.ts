@@ -67,6 +67,7 @@ function serverWith(claimedDir: string): { srv: Server; url: () => string } {
     ok: true,
     identity: identityClaiming(claimedDir),
     ignoredIdentityHeaders: [],
+    confirmedIdentityHeaders: [],
   });
   const srv = createRemoteBoardServer({
     resolveIdentity,

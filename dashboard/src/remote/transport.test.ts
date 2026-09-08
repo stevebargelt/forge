@@ -57,22 +57,25 @@ test("every non-recognised token fails closed to null (the FG-781 no-adapter def
 test("the selected adapter is wired to the injected deps: confirmed+mapped peer → candidate", async () => {
   const adapter = selectRemoteAdapter(TAILSCALE_TRANSPORT, pureDeps());
   assert.ok(adapter);
+  // A Serve-shaped request: loopback socket, X-Forwarded-For = alice's tailnet address (the fake
+  // daemon confirms it), Tailscale-User-Login = the login it authed (equals the whois answer).
   const candidate = await adapter!.verifyIdentity({
-    headers: { "tailscale-user-login": "attacker@evil.example" }, // forged; must be ignored
-    peer: { address: "100.64.0.1", port: 41000 },
+    headers: { "x-forwarded-for": "100.64.0.1", "tailscale-user-login": "alice@example.com" },
+    peer: { address: "127.0.0.1", port: 41000 },
   });
   assert.ok(candidate, "a whois-confirmed, mapped peer yields a candidate");
-  assert.equal(candidate!.subject, "alice@example.com", "identity is the whois login, NOT the forged header");
+  assert.equal(candidate!.subject, "alice@example.com", "identity is the whois login for the forwarded address");
   assert.deepEqual(candidate!.projectScope, { projectKey: "repo-alpha", memberDirs: ["/work/alpha"] });
 });
 
-test("the selected adapter fails closed for an unconfirmable peer (forged headers, no whois)", async () => {
+test("the selected adapter fails closed for an unconfirmable forwarded address (no whois)", async () => {
   const adapter = selectRemoteAdapter(TAILSCALE_TRANSPORT, pureDeps());
   assert.ok(adapter);
-  // A peer the fake daemon does not confirm — the forged header is never read.
+  // Loopback socket + a Serve-set X-Forwarded-For the fake daemon does NOT confirm; the login
+  // header is never trusted on its face.
   const candidate = await adapter!.verifyIdentity({
-    headers: { "tailscale-user-login": "alice@example.com" },
-    peer: { address: "203.0.113.9", port: 41000 },
+    headers: { "x-forwarded-for": "203.0.113.9", "tailscale-user-login": "alice@example.com" },
+    peer: { address: "127.0.0.1", port: 41000 },
   });
-  assert.equal(candidate, null, "no whois-confirmed peer → no candidate, no data (AC3)");
+  assert.equal(candidate, null, "no whois-confirmed forwarded address → no candidate, no data (AC3)");
 });
