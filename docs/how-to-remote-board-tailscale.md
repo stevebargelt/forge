@@ -273,12 +273,16 @@ Tailscale **Funnel** exposes a service to the public internet. The Remote Board 
   whois-confirmable tailnet peer, so the identity adapter refuses it and it gets no data.
 
 If you need access from outside your tailnet, add the device to your tailnet — do not use
-Funnel.
+Funnel. If a tailnet invite isn't an option for your remote operators, see
+[Remote Board over Cloudflare Tunnel + Access](how-to-remote-board-cloudflare.md) — the
+public-hostname transport that fronts the same board behind a Cloudflare Access policy instead.
 
 ## Related
 
 - [Remote Board contract (FG-781/FG-782)](SCHEMA-CONTRACT.md#remote-board-fg-781) — env vars,
   identity-mapping and serve-state file contracts, projection DTOs, loopback-only ports.
+- [Remote Board over Cloudflare Tunnel + Access](how-to-remote-board-cloudflare.md) — the
+  public-hostname transport that shares the same identity-mapping file and loopback boundary.
 - [Remote Board section in the dashboard README](../dashboard/README.md#remote-board-fg-781).
 - [Secret hygiene and redaction](redaction.md#remote-board-free-text-fg-781) — how free-text
   fields are swept before they cross the remote boundary.

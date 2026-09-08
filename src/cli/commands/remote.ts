@@ -30,6 +30,7 @@
 
 import type { Command } from "commander";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -108,12 +109,14 @@ export function resolveRemotePort(env: NodeJS.ProcessEnv): number {
 }
 
 /** Resolve the selected transport token for the identity report (fail-closed: unknown → null,
- *  matching config.ts). */
+ *  matching config.ts). Recognises the two canonical transports Forge fronts the board with —
+ *  `tailscale` (FG-782) and `cloudflare` (FG-784); anything else is `null` (the board refuses
+ *  every request). Widened additively for FG-784; still fail-closed on an unknown token. */
 export function resolveTransport(env: NodeJS.ProcessEnv): string | null {
   const raw = env[REMOTE_TRANSPORT_ENV];
   if (raw === undefined) return null;
   const token = raw.trim().toLowerCase();
-  return token === "tailscale" ? token : null;
+  return token === "tailscale" || token === "cloudflare" ? token : null;
 }
 
 function resolveMappingPath(env: NodeJS.ProcessEnv): string {
@@ -676,6 +679,827 @@ export async function runDisable(partial: Partial<RemoteTailscaleDeps>, json: bo
   return 0;
 }
 
+// =============================================================================================
+// FG-784 (step 6): `forge remote cloudflare setup|doctor|disable` — the operator surface that
+// fronts the SAME loopback-only Remote Board with a Cloudflare Tunnel gated by Cloudflare Access.
+//
+// THREAT MODEL. Unlike Tailscale Serve (a tailnet-private daemon mapping), a Cloudflare Tunnel
+// terminates on the PUBLIC internet. Its safety rests entirely on a Cloudflare Access policy in
+// front of it: the origin (dashboard/src/remote/cloudflare/adapter.ts) trusts NOTHING but a
+// cryptographically valid Cf-Access-Jwt-Assertion. This command's job is to make that boundary
+// impossible to misconfigure into a public, unauthenticated service. Its adversary set:
+//   (C1) accidental host mutation — `setup --dry-run` and an unconfirmed preview MUST change
+//        nothing on disk (no ingress file, no state record) (AC1). Enforced two ways: the plan
+//        for a dry-run/preview carries an EMPTY state-write set, and the cloudflared runner it is
+//        handed under --dry-run THROWS on any mutating cloudflared command (belt + suspenders).
+//   (C2) public, UNAUTHENTICATED exposure — a public hostname fronted by a bare tunnel with NO
+//        Access policy is the whole disaster this story exists to prevent (AC4). Forge cannot read
+//        the operator's Access policy without API credentials it refuses to require, so it enforces
+//        the boundary STRUCTURALLY: setup REFUSES unless a well-formed Access team domain AND
+//        Access application AUD are supplied AND the team's JWKS certs endpoint is reachable. No
+//        team/AUD ⇒ no Access ⇒ refuse. This is the "tunnel-without-Access is refused" invariant.
+//   (C3) blast-radius on teardown — `disable` removes ONLY the ingress config file Forge WHOLLY
+//        authored plus its own state record (via the step-3 access-state store's clear), NEVER the
+//        Access application, the cloudflared tunnel, or cloudflared's credentials (AC4/AC6).
+//   (C4) bind widening — the tunnel target is ALWAYS http://127.0.0.1:<remote port>. This command
+//        proposes a proxy IN FRONT of the loopback board; it cannot change what the board binds.
+//   (C5) credential leakage — setup NEVER requires, prints, or persists a Cloudflare API token or
+//        cloudflared tunnel credentials. The team domain, AUD tag, and hostname are PUBLIC
+//        identifiers (a valid Access JWT — mintable only by the Access edge — is the actual gate),
+//        so they are shown; a credentials-file PATH, if supplied, is written into the owned config
+//        but never echoed to output.
+//
+// PACKAGE BOUNDARY. Same pattern as the tailscale group above: the ONLY cross-package dependency
+// is the step-3 access-state store, loaded through a VARIABLE-specifier dynamic import so `tsc`
+// (rootDir: src) cannot pull dashboard/ into the program (no TS6059). Everything else is
+// src-local and fully type-checked. This module never imports the JWT verifier or JWKS cache —
+// setup's only network touch is a reachability PROBE of the certs endpoint via an injected fetch
+// seam, so unit tests stay network-free.
+// =============================================================================================
+
+/** The non-secret Access boot config + owned-file record — mirrors dashboard access-state.ts's
+ *  AccessStateRecord (see PACKAGE BOUNDARY). Holds NO credential: a public hostname, the Access
+ *  team domain, the (public) Access AUD tag, a loopback target, and the path of the owned ingress
+ *  file. */
+export interface AccessStateRecord {
+  readonly version: number;
+  readonly publicHostname: string;
+  readonly accessTeamDomain: string;
+  readonly accessAud: string;
+  readonly loopbackPort: number;
+  readonly target: string;
+  readonly url: string;
+  readonly cloudflaredConfigPath: string;
+  /** SHA-256 (hex) of the owned ingress file body — the whole-file ownership stamp (RF-1). */
+  readonly cloudflaredConfigSha256?: string;
+  readonly createdAt?: string;
+}
+
+/** Outcome of an atomic, ownership-checked setup apply (mirrors access-state.ts's SetupApplyResult). */
+export type SetupApplyResult =
+  | { readonly status: "applied" }
+  | { readonly status: "refused-foreign-config"; readonly path: string };
+
+/** Outcome of an ownership-checked disable (mirrors access-state.ts's DisableResult). */
+export type DisableResult =
+  | { readonly status: "nothing" }
+  | { readonly status: "removed"; readonly path: string }
+  | { readonly status: "refused-tampered"; readonly path: string };
+
+/** The access-state store — mirrors dashboard access-state.ts's public functions plus the owned
+ *  ingress-file lifecycle. `apply` and `disable` are the ownership-safe, atomic write paths
+ *  (RF-1/RF-2); `read`/`path`/`ingressPath` are read-only helpers. */
+export interface AccessStateStore {
+  read(env: NodeJS.ProcessEnv): AccessStateRecord | null;
+  path(env: NodeJS.ProcessEnv): string;
+  ingressPath(env: NodeJS.ProcessEnv): string;
+  apply(record: AccessStateRecord, ingressContents: string, env: NodeJS.ProcessEnv): SetupApplyResult;
+  disable(env: NodeJS.ProcessEnv): DisableResult;
+}
+
+/** The injected reachability probe for the Access team's JWKS certs endpoint. Returns true iff the
+ *  endpoint answered OK. Tests inject a fake; production uses {@link createCertsProbe}. Never
+ *  throws into the caller — a thrown/timeouted probe is a `false` (unreachable ⇒ refuse). */
+export type CertsProbe = (certsUrl: string) => Promise<boolean>;
+
+// The env-var NAMES are the public boot contract, restated here (as the tailscale group restates
+// FORGE_DASHBOARD_REMOTE_PORT) rather than imported across the boundary. Kept in lockstep by name.
+const CF_HOSTNAME_ENV = "FORGE_REMOTE_CLOUDFLARE_HOSTNAME";
+const CF_TEAM_ENV = "FORGE_REMOTE_CLOUDFLARE_TEAM";
+const CF_AUD_ENV = "FORGE_REMOTE_CLOUDFLARE_AUD";
+const CF_TUNNEL_ENV = "FORGE_REMOTE_CLOUDFLARE_TUNNEL";
+/** Advanced/testing override for the reachability PROBE endpoint only. Does NOT affect the origin
+ *  adapter's JWT verification (that derives issuer + certs from the recorded team domain) — it
+ *  only redirects setup's pre-flight reachability check, so tests can point it at a local fake
+ *  certs server. Absent ⇒ derived from the team domain. */
+const CF_CERTS_URL_ENV = "FORGE_REMOTE_CLOUDFLARE_CERTS_URL";
+/** The owned cloudflared ingress filename under FORGE_HOME — mirrors access-state.ts's
+ *  OWNED_INGRESS_FILENAME by name (no cross-boundary import for the default-path computation). */
+const OWNED_INGRESS_FILENAME = "remote-board-cloudflared.yml";
+/** The only access-state format version this CLI authors — mirrors ACCESS_STATE_VERSION. */
+const ACCESS_STATE_VERSION = 1;
+
+/** The default owned-ingress path under FORGE_HOME, computed src-locally (mirrors access-state.ts's
+ *  resolveOwnedIngressPath) so config resolution needs no dynamic import. */
+function resolveOwnedIngressPathLocal(env: NodeJS.ProcessEnv): string {
+  const forgeHome = env["FORGE_HOME"] ?? join(homedir(), ".forge");
+  return join(forgeHome, OWNED_INGRESS_FILENAME);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deployment inputs + validators (pure, type-checked, unit-tested).
+// ---------------------------------------------------------------------------------------------
+
+/** The deployment facts an operator supplies (via flags or env). All optional at parse time; the
+ *  doctor decides which absences are refusals (AC4). credentialsFile is a PATH, never a secret. */
+export interface CloudflareConfigInput {
+  readonly publicHostname: string | null;
+  readonly accessTeamDomain: string | null;
+  readonly accessAud: string | null;
+  readonly tunnelName: string | null;
+  readonly credentialsFile: string | null;
+  /** The owned ingress config path (default under FORGE_HOME, or an operator override). */
+  readonly configPath: string;
+}
+
+function trimToNull(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+/** A plausible public DNS hostname (labels of a-z0-9/hyphen, at least two, total ≤ 253). Rejects
+ *  schemes, ports, paths, whitespace — anything that is not a bare hostname. Not a full RFC check;
+ *  enough to reject the obviously-malformed before it reaches a public tunnel. */
+export function isPlausibleHostname(h: string): boolean {
+  if (h.length === 0 || h.length > 253) return false;
+  return /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(h);
+}
+
+/** A well-formed Cloudflare Access application AUD tag — a 64-char lowercase hex string. A public
+ *  identifier (not a credential); malformed ⇒ refuse (we would otherwise pin the adapter to an
+ *  audience that can never match, i.e. a silent lockout, or worse a typo'd wrong app). */
+export function isWellFormedAud(a: string): boolean {
+  return /^[0-9a-f]{64}$/i.test(a);
+}
+
+/** A bare Cloudflare Access team SLUG — a single RFC-1123 label (lowercase alphanumerics + hyphens,
+ *  no dots, 1–63 chars, not hyphen-bordered). The ONLY accepted team form (RF-5): the issuer and
+ *  JWKS authority are DERIVED as `<slug>.cloudflareaccess.com`, never taken from a configured
+ *  hostname, so an attacker-controlled HTTPS host can never become the trusted issuer/JWKS root.
+ *  Mirrors dashboard adapter.ts/jwks.ts's `isBareTeamSlug` by contract; kept src-local. */
+export function isBareTeamSlug(team: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test((team ?? "").trim());
+}
+
+/** Derive the Access team's JWKS certs endpoint from a bare team SLUG (`acme` →
+ *  `https://acme.cloudflareaccess.com/cdn-cgi/access/certs`). The team MUST be a bare slug (RF-5);
+ *  a dotted/host-shaped value has no derivable endpoint. Mirrors dashboard jwks.ts's buildCertsUrl
+ *  by contract; kept src-local for the probe. Returns null for a non-slug team. */
+export function buildCertsUrl(teamDomain: string): string | null {
+  const raw = (teamDomain ?? "").trim();
+  if (!isBareTeamSlug(raw)) return null;
+  return `https://${raw}.cloudflareaccess.com/cdn-cgi/access/certs`;
+}
+
+/** Resolve the certs URL to PROBE: the explicit override env (testing/self-hosted) wins; otherwise
+ *  derive from a bare team SLUG; otherwise null (nothing to probe — the missing/non-slug team is
+ *  itself a refusal). */
+export function resolveCertsUrl(config: CloudflareConfigInput, env: NodeJS.ProcessEnv): string | null {
+  const override = trimToNull(env[CF_CERTS_URL_ENV]);
+  if (override) return override;
+  if (config.accessTeamDomain) return buildCertsUrl(config.accessTeamDomain);
+  return null;
+}
+
+/** The tunnel/ingress YAML Forge WHOLLY owns. Forge authors the ENTIRE file so `disable` removes it
+ *  wholesale. The service is ALWAYS the loopback board (AC2/C4). A credentials-file path, if given,
+ *  is written here but never echoed. Pure. */
+export function buildIngressConfig(input: {
+  readonly publicHostname: string;
+  readonly loopbackPort: number;
+  readonly tunnelName: string | null;
+  readonly credentialsFile: string | null;
+}): string {
+  const target = `http://${REMOTE_LOOPBACK_HOST}:${input.loopbackPort}`;
+  const lines: string[] = [];
+  lines.push("# Managed by Forge — `forge remote cloudflare`. Do NOT edit by hand.");
+  lines.push("# `forge remote cloudflare disable` deletes this whole file. It fronts the");
+  lines.push("# loopback-only Remote Board; Cloudflare Access is the authentication boundary.");
+  if (input.tunnelName) lines.push(`tunnel: ${input.tunnelName}`);
+  if (input.credentialsFile) lines.push(`credentials-file: ${input.credentialsFile}`);
+  lines.push("ingress:");
+  lines.push(`  - hostname: ${input.publicHostname}`);
+  lines.push(`    service: ${target}`);
+  lines.push("  - service: http_status:404");
+  return `${lines.join("\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// cloudflared command classification + a src-local `tunnel list` parser (pure).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Is this `cloudflared` argv a MUTATING command rather than a pure read? Fail-safe by construction:
+ * the READ set is a CLOSED allowlist — `--version`, `tunnel list`, and `tunnel ingress …`
+ * (validate/rule are inspections). ANYTHING else — `tunnel run`, `tunnel create/delete`, `access`,
+ * config writes — is treated as mutating. Guards the --dry-run path (a mutation there THROWS) and
+ * lets tests assert a zero-mutation stream (AC1). Note: setup's real state changes are FILE writes
+ * via the owned store, not cloudflared execs — this guard is the belt against a stray exec.
+ */
+export function isMutatingCloudflaredCommand(args: readonly string[]): boolean {
+  const [cmd, sub] = args;
+  if (cmd === "--version" || cmd === "version") return false;
+  if (cmd === "tunnel" && sub === "list") return false;
+  if (cmd === "tunnel" && sub === "ingress") return false; // `tunnel ingress validate|rule` — reads
+  return true;
+}
+
+/** PURE parser: `cloudflared tunnel list --output json` stdout → the tunnel names, or null on
+ *  unparseable/empty output (fail closed — informational only). */
+export function parseTunnelList(raw: string): readonly string[] | null {
+  const text = raw.trim();
+  if (text === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const names: string[] = [];
+  for (const t of parsed) {
+    if (typeof t === "object" && t !== null) {
+      const name = (t as Record<string, unknown>)["name"];
+      if (typeof name === "string" && name.trim() !== "") names.push(name.trim());
+    }
+  }
+  return Object.freeze(names);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The doctor report + setup/disable plans (pure decision logic — the unit-tested core).
+// ---------------------------------------------------------------------------------------------
+
+export interface CloudflareDoctorInput {
+  readonly cliPresent: boolean;
+  readonly config: CloudflareConfigInput;
+  readonly loopbackPort: number;
+  readonly transport: string | null;
+  readonly mappingPath: string;
+  /** true = certs endpoint answered OK; false = unreachable/errored; null = not probed (no team). */
+  readonly jwksReachable: boolean | null;
+  readonly certsUrl: string | null;
+  readonly accessState: AccessStateRecord | null;
+  readonly existingTunnels: readonly string[] | null;
+}
+
+export interface CloudflareDoctorReport {
+  readonly prerequisites: {
+    readonly cliPresent: boolean;
+    readonly hostnameSupplied: boolean;
+    readonly teamSupplied: boolean;
+    readonly audSupplied: boolean;
+    /** null = not probed (no team to derive/override). */
+    readonly jwksReachable: boolean | null;
+  };
+  readonly proposedTarget: { readonly url: string | null; readonly loopback: string };
+  readonly access: {
+    readonly publicHostname: string | null;
+    readonly teamDomain: string | null;
+    /** The (public) AUD tag — safe to display; it is not a credential. */
+    readonly aud: string | null;
+    readonly certsUrl: string | null;
+    readonly ownedConfigPath: string;
+  };
+  readonly identity: {
+    readonly transport: string | null;
+    readonly transportSelected: boolean;
+    readonly mappingPath: string;
+  };
+  /** The direct-origin boundary explanation (AC4/AC7) — always stated so an operator cannot miss
+   *  that a bare tunnel without Access is refused and never trusted. */
+  readonly boundary: readonly string[];
+  readonly requiredGrants: readonly string[];
+  readonly activeDeployment: AccessStateRecord | null;
+  readonly refusals: readonly string[];
+  readonly ok: boolean;
+}
+
+/** The Cloudflare-side prerequisites an operator must arrange (Forge does NOT administer the
+ *  Cloudflare account). Includes the explicit "Access policy required" statement (AC4/AC7). */
+export function requiredCloudflareGrants(mappingPath: string): readonly string[] {
+  return Object.freeze([
+    "A Cloudflare Tunnel whose ingress points ONLY at this host's loopback board (Forge writes " +
+      "that ingress file for you; you run `cloudflared tunnel run`).",
+    "A Cloudflare Access application PROTECTING the public hostname with an identity policy — " +
+      "WITHOUT it the hostname is a public, unauthenticated service and Forge refuses to set it up.",
+    "The Access application's Application Audience (AUD) tag supplied to `setup --aud` (a public " +
+      "identifier, not a secret).",
+    `Each remote operator's verified Access email mapped to exactly one project (read-only) in ${mappingPath}.`,
+  ]);
+}
+
+/** The direct-origin boundary statement (AC4/AC7). Pure. */
+export function cloudflareBoundaryNotes(): readonly string[] {
+  return Object.freeze([
+    "The board binds 127.0.0.1 only — the tunnel is the ONLY way in, and Cloudflare Access is the " +
+      "gate on that tunnel.",
+    "The origin trusts NOTHING but a cryptographically valid Cf-Access-Jwt-Assertion (signature, " +
+      "issuer, audience, exp/nbf verified against the team JWKS). A raw/forged header fails closed.",
+    "A public hostname fronted by a bare cloudflared tunnel with NO Access policy is refused by " +
+      "setup and never trusted by the origin — presence of the tunnel is not authentication.",
+  ]);
+}
+
+/** Build the doctor report. Pure. Every absent/malformed Access fact and an unreachable JWKS
+ *  endpoint is a NAMED refusal (AC4) — setup will not proceed while any refusal stands. */
+export function buildCloudflareDoctorReport(input: CloudflareDoctorInput): CloudflareDoctorReport {
+  const c = input.config;
+  const hostnameSupplied = c.publicHostname !== null;
+  const teamSupplied = c.accessTeamDomain !== null;
+  const audSupplied = c.accessAud !== null;
+
+  const url = c.publicHostname ? `https://${c.publicHostname}` : null;
+  const loopback = `http://${REMOTE_LOOPBACK_HOST}:${input.loopbackPort}`;
+
+  const refusals: string[] = [];
+  if (!input.cliPresent) {
+    refusals.push("The `cloudflared` CLI is not on PATH — install cloudflared first.");
+  }
+  // Hostname.
+  if (!hostnameSupplied) {
+    refusals.push("No public hostname supplied (--hostname) — nothing for the tunnel to front.");
+  } else if (!isPlausibleHostname(c.publicHostname as string)) {
+    refusals.push(`Public hostname \`${c.publicHostname}\` is malformed — expected a bare DNS hostname.`);
+  }
+  // Access team — the load-bearing AC4 refusal: no team ⇒ no Access ⇒ a public, unauthenticated service.
+  if (!teamSupplied) {
+    refusals.push(
+      "No Cloudflare Access team domain supplied (--team) — a public hostname fronted by a tunnel " +
+        "with NO Access policy is REFUSED (that is a public, unauthenticated service). (AC4)",
+    );
+  } else if (!isBareTeamSlug(c.accessTeamDomain as string)) {
+    refusals.push(
+      `Access team \`${c.accessTeamDomain}\` is malformed — expected a bare team SLUG (a single ` +
+        "DNS label, no dots or scheme), e.g. `acme`. The issuer and JWKS are derived as " +
+        "`<slug>.cloudflareaccess.com`; a configured hostname is never trusted. (RF-5)",
+    );
+  }
+  // Access AUD — the second half of the AC4 boundary.
+  if (!audSupplied) {
+    refusals.push(
+      "No Access application AUD supplied (--aud) — without a specific Access application the " +
+        "origin cannot pin an audience, so setup is REFUSED. (AC4)",
+    );
+  } else if (!isWellFormedAud(c.accessAud as string)) {
+    refusals.push("Access application AUD is malformed — expected the 64-hex Application Audience tag.");
+  }
+  // JWKS reachability — only meaningful once a well-formed team domain exists. Fail closed on
+  // unreachable AND on undetermined (never assume the Access team is real).
+  if (teamSupplied && isBareTeamSlug(c.accessTeamDomain as string)) {
+    if (input.jwksReachable === false) {
+      refusals.push(
+        `The Access team JWKS certs endpoint (${input.certsUrl ?? "?"}) is unreachable — cannot ` +
+          "confirm the Access team; REFUSED.",
+      );
+    } else if (input.jwksReachable === null) {
+      refusals.push("Could not determine JWKS reachability — refusing rather than assuming the Access team is valid.");
+    }
+  }
+
+  return {
+    prerequisites: {
+      cliPresent: input.cliPresent,
+      hostnameSupplied,
+      teamSupplied,
+      audSupplied,
+      jwksReachable: input.jwksReachable,
+    },
+    proposedTarget: { url, loopback },
+    access: {
+      publicHostname: c.publicHostname,
+      teamDomain: c.accessTeamDomain,
+      aud: c.accessAud,
+      certsUrl: input.certsUrl,
+      ownedConfigPath: c.configPath,
+    },
+    identity: {
+      transport: input.transport,
+      transportSelected: input.transport === "cloudflare",
+      mappingPath: input.mappingPath,
+    },
+    boundary: cloudflareBoundaryNotes(),
+    requiredGrants: requiredCloudflareGrants(input.mappingPath),
+    activeDeployment: input.accessState,
+    refusals: Object.freeze(refusals),
+    ok: refusals.length === 0,
+  };
+}
+
+export interface CloudflareSetupPlanInput {
+  readonly report: CloudflareDoctorReport;
+  readonly config: CloudflareConfigInput;
+  readonly loopbackPort: number;
+  readonly dryRun: boolean;
+  readonly confirmed: boolean;
+  readonly now?: string;
+}
+
+export interface CloudflareSetupPlan {
+  /** The state-write operations that WILL execute. Empty on dry-run, preview, and refusal (AC1). */
+  readonly stateWrites: readonly string[];
+  /** What a confirmed apply WOULD write — for display, never executed under dry-run/preview. */
+  readonly proposedWrites: readonly string[];
+  readonly willApply: boolean;
+  readonly refusals: readonly string[];
+  /** The record to persist IF applied — also shown as the proposal under dry-run/preview. */
+  readonly record: AccessStateRecord | null;
+  /** The owned-ingress body to lay down IF applied. */
+  readonly ingressContents: string | null;
+}
+
+/**
+ * Decide what `setup` does. Pure. The state-write set is EMPTY unless the run is a confirmed,
+ * non-dry-run apply with no refusals — so --dry-run (AC1), an unconfirmed preview, and any refusal
+ * (AC4) all write NOTHING to disk.
+ */
+export function planCloudflareSetup(input: CloudflareSetupPlanInput): CloudflareSetupPlan {
+  const refusals = input.report.refusals;
+  const c = input.config;
+  if (refusals.length > 0 || c.publicHostname === null || c.accessTeamDomain === null || c.accessAud === null) {
+    return {
+      stateWrites: [],
+      proposedWrites: [],
+      willApply: false,
+      refusals: refusals.length > 0 ? refusals : ["Missing Access deployment facts — cannot build a plan."],
+      record: null,
+      ingressContents: null,
+    };
+  }
+
+  const target = `http://${REMOTE_LOOPBACK_HOST}:${input.loopbackPort}`;
+  const ingressContents = buildIngressConfig({
+    publicHostname: c.publicHostname,
+    loopbackPort: input.loopbackPort,
+    tunnelName: c.tunnelName,
+    credentialsFile: c.credentialsFile,
+  });
+  const record: AccessStateRecord = {
+    version: ACCESS_STATE_VERSION,
+    publicHostname: c.publicHostname,
+    accessTeamDomain: c.accessTeamDomain,
+    accessAud: c.accessAud,
+    loopbackPort: input.loopbackPort,
+    target,
+    url: `https://${c.publicHostname}`,
+    cloudflaredConfigPath: c.configPath,
+    // Whole-file ownership stamp (RF-1): the hash of the EXACT ingress body we will write.
+    cloudflaredConfigSha256: createHash("sha256").update(ingressContents, "utf8").digest("hex"),
+    ...(input.now ? { createdAt: input.now } : {}),
+  };
+
+  const willApply = !input.dryRun && input.confirmed;
+  const writes = [`write owned ingress config ${c.configPath}`, `record access-state`];
+  return {
+    stateWrites: willApply ? writes : [],
+    proposedWrites: writes,
+    willApply,
+    refusals: [],
+    record,
+    ingressContents,
+  };
+}
+
+export interface CloudflareDisablePlan {
+  /** The Forge-owned paths disable will remove (the ingress file + the state record), or empty. */
+  readonly removes: readonly string[];
+  readonly hadRecord: boolean;
+  readonly note: string;
+}
+
+/**
+ * Decide what `disable` does. Pure. Removes ONLY the ingress file Forge authored plus its own
+ * state record — NEVER the Access application, the tunnel, or cloudflared credentials (AC4/AC6).
+ * A missing record ⇒ nothing to remove.
+ */
+export function planCloudflareDisable(record: AccessStateRecord | null): CloudflareDisablePlan {
+  if (record === null) {
+    return {
+      removes: [],
+      hadRecord: false,
+      note: "No Forge-created Cloudflare deployment recorded — nothing to remove.",
+    };
+  }
+  return {
+    removes: [record.cloudflaredConfigPath, "access-state record"],
+    hadRecord: true,
+    note: `Will delete the Forge-owned ingress config ${record.cloudflaredConfigPath} and the state record for ${record.url}.`,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendering (human). Pure functions of the report/plan.
+// ---------------------------------------------------------------------------------------------
+
+export function renderCloudflareDoctor(r: CloudflareDoctorReport): string {
+  const yn = (b: boolean): string => (b ? "OK" : "MISSING");
+  const lines: string[] = [];
+  lines.push("forge remote cloudflare doctor");
+  lines.push("");
+  lines.push("Prerequisites:");
+  lines.push(`  cloudflared CLI on PATH ....... ${yn(r.prerequisites.cliPresent)}`);
+  lines.push(`  public hostname ............... ${r.access.publicHostname ?? "(not supplied)"}`);
+  lines.push(`  Access team slug .............. ${r.access.teamDomain ?? "(not supplied)"}`);
+  lines.push(`  Access application AUD ........ ${r.access.aud ?? "(not supplied)"}`);
+  lines.push(
+    `  team JWKS reachable ........... ${
+      r.prerequisites.jwksReachable === null ? "(not probed)" : yn(r.prerequisites.jwksReachable)
+    }`,
+  );
+  lines.push("");
+  lines.push("Proposed tunnel target (Access-gated public hostname → loopback board):");
+  lines.push(`  ${r.proposedTarget.url ?? "https://<your-hostname>"} → ${r.proposedTarget.loopback}`);
+  lines.push(`  owned ingress config: ${r.access.ownedConfigPath}`);
+  lines.push("");
+  lines.push("Direct-origin boundary:");
+  for (const b of r.boundary) lines.push(`  - ${b}`);
+  lines.push("");
+  lines.push("Identity:");
+  lines.push(
+    `  transport (${REMOTE_TRANSPORT_ENV}) ... ${r.identity.transport ?? "(unset — remote board refuses every request)"}`,
+  );
+  lines.push(`  identity mapping file ......... ${r.identity.mappingPath}`);
+  lines.push("");
+  lines.push("Required Cloudflare configuration (you arrange these — Forge does not):");
+  for (const g of r.requiredGrants) lines.push(`  - ${g}`);
+  if (r.activeDeployment) {
+    lines.push("");
+    lines.push(`Active Forge Cloudflare deployment: ${r.activeDeployment.url} → ${r.activeDeployment.target}`);
+  }
+  if (r.refusals.length > 0) {
+    lines.push("");
+    lines.push("NOT READY — setup would refuse:");
+    for (const x of r.refusals) lines.push(`  ✗ ${x}`);
+  } else {
+    lines.push("");
+    lines.push("READY — run `forge remote cloudflare setup --confirm` to apply.");
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cross-boundary loader + production seams (see PACKAGE BOUNDARY).
+// ---------------------------------------------------------------------------------------------
+
+/** The production `cloudflared` runner: execFileSync with an ARGV array (never a shell string),
+ *  fail-closed on spawn error / non-zero exit / timeout. Mirrors createTailscaleRunner. */
+export function createCloudflaredRunner(bin = "cloudflared"): CliRunner {
+  return (args) => {
+    try {
+      const stdout = execFileSync(bin, [...args], {
+        timeout: 5000,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return { ok: true, code: 0, stdout };
+    } catch (err) {
+      const code = (err as { status?: number | null }).status ?? -1;
+      return { ok: false, code: typeof code === "number" ? code : -1, stdout: "" };
+    }
+  };
+}
+
+/** The production certs-reachability probe: a GET with a short timeout; any non-OK / thrown /
+ *  timeouted result is `false` (unreachable ⇒ refuse). Never persists or logs the response body. */
+export function createCertsProbe(): CertsProbe {
+  return async (certsUrl) => {
+    try {
+      const res = await fetch(certsUrl, { method: "GET", signal: AbortSignal.timeout(5000) });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+}
+
+/** Load the access-state store from the dashboard package at runtime (variable-specifier dynamic
+ *  import — see PACKAGE BOUNDARY). */
+export async function loadAccessStore(): Promise<AccessStateStore> {
+  const spec = "../../../dashboard/src/remote/cloudflare/access-state.js";
+  const mod = (await import(spec)) as {
+    readAccessState: (env: NodeJS.ProcessEnv) => AccessStateRecord | null;
+    resolveAccessStatePath: (env: NodeJS.ProcessEnv) => string;
+    resolveOwnedIngressPath: (env: NodeJS.ProcessEnv) => string;
+    applyCloudflareSetup: (
+      record: AccessStateRecord,
+      ingressContents: string,
+      env: NodeJS.ProcessEnv,
+    ) => SetupApplyResult;
+    disableCloudflareSetup: (env: NodeJS.ProcessEnv) => DisableResult;
+  };
+  return {
+    read: (env) => mod.readAccessState(env),
+    path: (env) => mod.resolveAccessStatePath(env),
+    ingressPath: (env) => mod.resolveOwnedIngressPath(env),
+    apply: (record, ingressContents, env) => mod.applyCloudflareSetup(record, ingressContents, env),
+    disable: (env) => mod.disableCloudflareSetup(env),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deps + gathering. Everything injectable so tests drive a fake cloudflared, a fake certs probe,
+// and a temp FORGE_HOME without a real Cloudflare account.
+// ---------------------------------------------------------------------------------------------
+
+export interface RemoteCloudflareDeps {
+  runner: CliRunner;
+  env: NodeJS.ProcessEnv;
+  store: AccessStateStore;
+  probeCerts: CertsProbe;
+  out: (line: string) => void;
+  now: () => string;
+}
+
+async function resolveCloudflareDeps(partial?: Partial<RemoteCloudflareDeps>): Promise<RemoteCloudflareDeps> {
+  return {
+    runner: partial?.runner ?? createCloudflaredRunner(),
+    env: partial?.env ?? process.env,
+    store: partial?.store ?? (await loadAccessStore()),
+    probeCerts: partial?.probeCerts ?? createCertsProbe(),
+    out: partial?.out ?? ((line: string) => console.log(line)),
+    now: partial?.now ?? (() => new Date().toISOString()),
+  };
+}
+
+/** Resolve the deployment facts from flags (falling back to env). Pure. */
+export function resolveCloudflareConfig(
+  opts: {
+    hostname?: string;
+    team?: string;
+    aud?: string;
+    tunnel?: string;
+    credentialsFile?: string;
+    config?: string;
+  },
+  env: NodeJS.ProcessEnv,
+): CloudflareConfigInput {
+  return {
+    publicHostname: trimToNull(opts.hostname) ?? trimToNull(env[CF_HOSTNAME_ENV]),
+    accessTeamDomain: trimToNull(opts.team) ?? trimToNull(env[CF_TEAM_ENV]),
+    accessAud: trimToNull(opts.aud) ?? trimToNull(env[CF_AUD_ENV]),
+    tunnelName: trimToNull(opts.tunnel) ?? trimToNull(env[CF_TUNNEL_ENV]),
+    credentialsFile: trimToNull(opts.credentialsFile),
+    configPath: trimToNull(opts.config) ?? resolveOwnedIngressPathLocal(env),
+  };
+}
+
+/** Gather the host facts the report/plans consume, using the injected runner + certs probe.
+ *  Read-only: it runs only cloudflared READS and a certs-endpoint GET. */
+async function gatherCloudflare(
+  deps: RemoteCloudflareDeps,
+  config: CloudflareConfigInput,
+): Promise<CloudflareDoctorInput> {
+  const cliPresent = deps.runner(["--version"]).ok;
+  const listRes = cliPresent ? deps.runner(["tunnel", "list", "--output", "json"]) : { ok: false, code: -1, stdout: "" };
+  const existingTunnels = listRes.ok ? parseTunnelList(listRes.stdout) : null;
+  const certsUrl = resolveCertsUrl(config, deps.env);
+  let jwksReachable: boolean | null = null;
+  if (certsUrl) {
+    try {
+      jwksReachable = await deps.probeCerts(certsUrl);
+    } catch {
+      jwksReachable = false;
+    }
+  }
+  return {
+    cliPresent,
+    config,
+    loopbackPort: resolveRemotePort(deps.env),
+    transport: resolveTransport(deps.env),
+    mappingPath: resolveMappingPath(deps.env),
+    jwksReachable,
+    certsUrl,
+    accessState: deps.store.read(deps.env),
+    existingTunnels,
+  };
+}
+
+/** Wrap a runner so any MUTATING cloudflared command throws — the belt on the --dry-run path so a
+ *  bug (or a future edit) can never mutate under an inspection-only run (AC1). */
+function cloudflaredReadOnlyGuardRunner(runner: CliRunner): CliRunner {
+  return (args) => {
+    if (isMutatingCloudflaredCommand(args)) {
+      throw new Error(`dry-run refused to run a mutating cloudflared command: ${args.join(" ")}`);
+    }
+    return runner(args);
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Actions.
+// ---------------------------------------------------------------------------------------------
+
+export async function runCloudflareDoctor(
+  partial: Partial<RemoteCloudflareDeps>,
+  opts: { json: boolean; config: CloudflareConfigInput },
+): Promise<number> {
+  const deps = await resolveCloudflareDeps(partial);
+  const report = buildCloudflareDoctorReport(await gatherCloudflare(deps, opts.config));
+  deps.out(opts.json ? JSON.stringify(report, null, 2) : renderCloudflareDoctor(report));
+  return report.ok ? 0 : 1;
+}
+
+export async function runCloudflareSetup(
+  partial: Partial<RemoteCloudflareDeps>,
+  opts: { dryRun: boolean; confirm: boolean; json: boolean; config: CloudflareConfigInput },
+): Promise<number> {
+  const deps = await resolveCloudflareDeps(partial);
+  // AC1 belt: on a dry-run, route EVERY cloudflared call through a guard that throws on a mutation.
+  const runDeps: RemoteCloudflareDeps = opts.dryRun
+    ? { ...deps, runner: cloudflaredReadOnlyGuardRunner(deps.runner) }
+    : deps;
+  const input = await gatherCloudflare(runDeps, opts.config);
+  const report = buildCloudflareDoctorReport(input);
+  const plan = planCloudflareSetup({
+    report,
+    config: opts.config,
+    loopbackPort: input.loopbackPort,
+    dryRun: opts.dryRun,
+    confirmed: opts.confirm,
+    now: deps.now(),
+  });
+
+  if (opts.json) {
+    deps.out(JSON.stringify({ report, plan, dryRun: opts.dryRun, confirmed: opts.confirm }, null, 2));
+  }
+
+  // Refusal (AC4, missing prereqs) — write nothing, non-zero exit.
+  if (plan.refusals.length > 0) {
+    if (!opts.json) {
+      deps.out("forge remote cloudflare setup: REFUSED — the deployment is not safe to create:");
+      for (const x of plan.refusals) deps.out(`  ✗ ${x}`);
+    }
+    return 1;
+  }
+
+  // Dry-run (AC1): inspect only. The runner is already guarded; write nothing.
+  if (opts.dryRun) {
+    if (!opts.json) {
+      deps.out("forge remote cloudflare setup --dry-run: NO changes made.");
+      deps.out(`  Would front: ${plan.record?.url} → ${plan.record?.target}`);
+      for (const w of plan.proposedWrites) deps.out(`  Would ${w}.`);
+    }
+    return 0;
+  }
+
+  // Preview (no --confirm): show the plan, write nothing.
+  if (!opts.confirm) {
+    if (!opts.json) {
+      deps.out("forge remote cloudflare setup (preview — no --confirm):");
+      deps.out(`  Would front: ${plan.record?.url} → ${plan.record?.target} (Cloudflare Access required).`);
+      for (const w of plan.proposedWrites) deps.out(`  Would ${w}.`);
+      deps.out("  Re-run with --confirm to apply.");
+    }
+    return 0;
+  }
+
+  // Apply: persist the record and lay down the owned ingress file ATOMICALLY and ownership-safely
+  // (RF-1/RF-2 — record-first with rollback, and a refusal if the config path holds a file Forge
+  // does not own). No cloudflared mutation is run — the operator runs `cloudflared tunnel run`.
+  if (plan.record && plan.ingressContents !== null) {
+    const applied = deps.store.apply(plan.record, plan.ingressContents, deps.env);
+    if (applied.status === "refused-foreign-config") {
+      // RF-1: a file Forge did not create sits at the target path — refuse, zero mutation.
+      if (!opts.json) {
+        deps.out("forge remote cloudflare setup: REFUSED — the ingress config path is not Forge-owned:");
+        deps.out(`  ✗ ${applied.path} already exists and was not created by Forge.`);
+        deps.out("  Forge will not overwrite (and later delete) a cloudflared config it did not author.");
+        deps.out("  Move that file aside, or point --config at a new path Forge can own.");
+      }
+      return 1;
+    }
+    if (!opts.json) {
+      deps.out("forge remote cloudflare setup: deployment recorded (Cloudflare Access required to reach the board).");
+      deps.out(`  ${plan.record.url} → ${plan.record.target}`);
+      deps.out(`  Owned ingress config: ${plan.record.cloudflaredConfigPath}`);
+      deps.out(`  Recorded in ${deps.store.path(deps.env)} — remove it with \`forge remote cloudflare disable\`.`);
+      deps.out("  Next: run `cloudflared tunnel run` against that config. Forge holds NO Cloudflare credentials.");
+    }
+  }
+  return 0;
+}
+
+export async function runCloudflareDisable(partial: Partial<RemoteCloudflareDeps>, json: boolean): Promise<number> {
+  const deps = await resolveCloudflareDeps(partial);
+  const record = deps.store.read(deps.env);
+  const plan = planCloudflareDisable(record);
+
+  if (json) deps.out(JSON.stringify({ plan }, null, 2));
+
+  if (!plan.hadRecord) {
+    if (!json) deps.out(`forge remote cloudflare disable: ${plan.note}`);
+    return 0;
+  }
+
+  // Remove ONLY the Forge-owned ingress file + state record, and ONLY when the file's bytes still
+  // match the recorded ownership stamp (RF-1). A tampered/foreign file at the recorded path is
+  // REFUSED, not deleted. NEVER the Access application, the tunnel, or cloudflared credentials.
+  const result = deps.store.disable(deps.env);
+  if (result.status === "refused-tampered") {
+    if (!json) {
+      deps.out("forge remote cloudflare disable: REFUSED — the recorded ingress config is not the file Forge wrote:");
+      deps.out(`  ✗ ${result.path} no longer matches the recorded ownership hash (edited or replaced).`);
+      deps.out("  Forge will not delete a file it cannot prove it authored. Remove it by hand if you intend to.");
+    }
+    return 1;
+  }
+  if (!json) {
+    deps.out("forge remote cloudflare disable: removed the Forge-owned ingress config and state record.");
+    deps.out("  The Cloudflare Access application, the tunnel, and cloudflared credentials were NOT touched.");
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Registration. One shared `remote` group so FG-784's Cloudflare variant slots in as a sibling
 // of `tailscale`.
@@ -727,5 +1551,90 @@ export function registerRemote(program: Command, deps?: Partial<RemoteTailscaleD
     .option("--json", "emit the structured plan as JSON")
     .action(async (opts: { json?: boolean }) => {
       process.exitCode = await runDisable(deps ?? {}, opts.json ?? false);
+    });
+
+  // FG-784: the Cloudflare Access sibling. Production uses default seams (real cloudflared runner,
+  // real certs probe, real access-state store); its actions are unit/integration-tested directly
+  // with injected fakes (like the tailscale actions above), so registration wires no test deps.
+  const cloudflare = remote
+    .command("cloudflare")
+    .description(
+      "Front the Remote Board with a Cloudflare Tunnel GATED BY Cloudflare Access (https://<hostname> → " +
+        "http://127.0.0.1:<remote port>). Refuses a public hostname with no Access policy; never persists " +
+        "Cloudflare credentials.",
+    );
+
+  const cfConfig = (opts: {
+    hostname?: string;
+    team?: string;
+    aud?: string;
+    tunnel?: string;
+    credentialsFile?: string;
+    config?: string;
+  }): CloudflareConfigInput => resolveCloudflareConfig(opts, process.env);
+
+  cloudflare
+    .command("doctor")
+    .description(
+      "Report prerequisites, the proposed Access-gated target, the direct-origin boundary, identity mode, and " +
+        "required Cloudflare config. Read-only.",
+    )
+    .option("--hostname <host>", "the public hostname the tunnel will front")
+    .option("--team <slug>", "the Cloudflare Access team SLUG, a single label with no dots (e.g. acme)")
+    .option("--aud <tag>", "the Access application Audience (AUD) tag")
+    .option("--json", "emit the structured report as JSON")
+    .action(async (opts: { hostname?: string; team?: string; aud?: string; json?: boolean }) => {
+      process.exitCode = await runCloudflareDoctor({}, { json: opts.json ?? false, config: cfConfig(opts) });
+    });
+
+  cloudflare
+    .command("setup")
+    .description(
+      "Propose (and, with --confirm, apply) the Cloudflare Access + Tunnel deployment in front of the Remote " +
+        "Board. REFUSES a public hostname without an Access policy (team + AUD). Writes only a Forge-owned " +
+        "ingress config; never Cloudflare credentials. Without --confirm, only previews.",
+    )
+    .option("--hostname <host>", "the public hostname the tunnel will front")
+    .option("--team <slug>", "the Cloudflare Access team SLUG, a single label with no dots (e.g. acme)")
+    .option("--aud <tag>", "the Access application Audience (AUD) tag")
+    .option("--tunnel <name>", "the cloudflared tunnel name to reference in the owned ingress config")
+    .option("--credentials-file <path>", "path to cloudflared tunnel credentials (written to the owned config, never persisted here)")
+    .option("--config <path>", "override the owned ingress config path (default: under FORGE_HOME)")
+    .option("--dry-run", "inspect only — write NOTHING to disk")
+    .option("--confirm", "apply the deployment (required to write the owned ingress config + state record)")
+    .option("--json", "emit the structured report/plan as JSON")
+    .action(
+      async (opts: {
+        hostname?: string;
+        team?: string;
+        aud?: string;
+        tunnel?: string;
+        credentialsFile?: string;
+        config?: string;
+        dryRun?: boolean;
+        confirm?: boolean;
+        json?: boolean;
+      }) => {
+        process.exitCode = await runCloudflareSetup(
+          {},
+          {
+            dryRun: opts.dryRun ?? false,
+            confirm: opts.confirm ?? false,
+            json: opts.json ?? false,
+            config: cfConfig(opts),
+          },
+        );
+      },
+    );
+
+  cloudflare
+    .command("disable")
+    .description(
+      "Remove ONLY the Forge-owned ingress config and state record (never the Access application, the tunnel, or " +
+        "cloudflared credentials).",
+    )
+    .option("--json", "emit the structured plan as JSON")
+    .action(async (opts: { json?: boolean }) => {
+      process.exitCode = await runCloudflareDisable({}, opts.json ?? false);
     });
 }

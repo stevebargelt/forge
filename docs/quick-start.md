@@ -263,7 +263,7 @@ cd ~/code/forge
 
 Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Always cross-project: the dashboard intentionally shows runs across every project on the host (the cross-project survey surface), independent of `forge status`'s workspace filter. Schema contract: `docs/SCHEMA-CONTRACT.md`.
 
-`forge dashboard start --remote` boots an additional, off-by-default, read-only, project-scoped **Remote Board** on its own loopback port (`:8025`, see `dashboard/README.md`). It refuses every request until a transport adapter is selected — enabling the flag does not, by itself, make anything reachable off the host. FG-782 ships the first one: `FORGE_DASHBOARD_REMOTE_TRANSPORT=tailscale` fronts it with a tailnet-private Tailscale Serve proxy (`docs/how-to-remote-board-tailscale.md`).
+`forge dashboard start --remote` boots an additional, off-by-default, read-only, project-scoped **Remote Board** on its own loopback port (`:8025`, see `dashboard/README.md`). It refuses every request until a transport adapter is selected — enabling the flag does not, by itself, make anything reachable off the host. Two adapters ship: `FORGE_DASHBOARD_REMOTE_TRANSPORT=tailscale` fronts it with a tailnet-private Tailscale Serve proxy (FG-782, `docs/how-to-remote-board-tailscale.md`), and `FORGE_DASHBOARD_REMOTE_TRANSPORT=cloudflare` fronts it with a public-hostname Cloudflare Tunnel gated by Cloudflare Access (FG-784, `docs/how-to-remote-board-cloudflare.md`).
 
 ## 13. Long-running commands under an interactive session (`forge launch`)
 

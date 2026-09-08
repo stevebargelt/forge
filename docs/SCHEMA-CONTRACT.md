@@ -1110,7 +1110,8 @@ A transport adapter is what turns a proxied request into a verified identity. It
 | Surface | Value | Meaning |
 |---|---|---|
 | `FORGE_DASHBOARD_REMOTE_TRANSPORT` env | `tailscale` (trimmed, case-insensitive) | Selects the Tailscale Serve adapter (FG-782). |
-| `FORGE_DASHBOARD_REMOTE_TRANSPORT` absent / empty / any other token | — | **No adapter ⇒ refuse every request** — the FG-781 fail-closed default, unchanged. The recognized-token set is a closed vocabulary, so a typo or attacker-supplied value can never select an adapter the operator did not intend. FG-784's Cloudflare variant slots in here additively. |
+| `FORGE_DASHBOARD_REMOTE_TRANSPORT` env | `cloudflare` (trimmed, case-insensitive) | Selects the Cloudflare Access adapter (FG-784). |
+| `FORGE_DASHBOARD_REMOTE_TRANSPORT` absent / empty / any other token | — | **No adapter ⇒ refuse every request** — the FG-781 fail-closed default, unchanged. The recognized-token set (`tailscale`, `cloudflare`) is a closed vocabulary, so a typo or attacker-supplied value can never select an adapter the operator did not intend. |
 
 Selecting a transport **never changes the bind**. `maybeStartRemoteBoardFromEnv` (`dashboard/src/remote/server.ts`) reads `config.transport`, calls `selectRemoteAdapter` (`dashboard/src/remote/transport.ts`), and passes the result as `deps.adapter` — the bind host stays the `REMOTE_LOOPBACK_HOST` constant. **Ports `8024` (local dashboard) and `8025` (remote backend) stay loopback-only even with a transport wired**; the adapter is a proxy in front of the loopback endpoint, not a change to what Forge binds.
 
@@ -1152,6 +1153,49 @@ A single shared `remote` command group (FG-784's Cloudflare variant slots in as 
 - `disable` — removes **only** the recorded Serve handler by replaying its inverse argv (`tailscale serve --https=443 off`); never `tailscale serve reset`, never touching Forge data or the local dashboard (AC6). No record ⇒ no-op.
 
 `docs_impact` for FG-782: `operator_behavior_changed` (new env var, new CLI group, new operator config files) + `setup_changed` (the Serve setup/doctor/disable workflow). Full operator guide: [Remote Board over Tailscale Serve](how-to-remote-board-tailscale.md).
+
+### Cloudflare Access transport (FG-784)
+
+The Cloudflare Access adapter (`dashboard/src/remote/cloudflare/adapter.ts`, kind `cloudflare-access`, selected by `FORGE_DASHBOARD_REMOTE_TRANSPORT=cloudflare`) fronts the **same** loopback board with a **public hostname** gated by **Cloudflare Access**. Unlike Tailscale (tailnet-private, identity anchored on a whois-confirmed connection peer), Cloudflare terminates on the public internet and identity rides a self-contained, cryptographically verified token — so the adapter's entire safety is that verification, never a header on its face.
+
+**Identity is a cryptographically validated Access JWT, never a header value.** `cloudflared` runs on the host, terminates the Access edge, and proxies to `http://127.0.0.1:8025`, forwarding the Access-minted `Cf-Access-Jwt-Assertion` token. On every request the adapter, each step failing **closed** to `null` (no data) before the next:
+
+1. requires the backend socket **peer to be loopback** (defense in depth — a request that did not arrive through the local `cloudflared` proxy is refused before any token is read);
+2. reads the `Cf-Access-Jwt-Assertion` value as a **candidate to be confirmed**, never trusted on its face (a raw/forged header reaches verification and fails there — AC3 spoofed header);
+3. resolves the expected **issuer** (`https://<team>.cloudflareaccess.com`, derived from the recorded team domain) and expected **audience** (the Access application **AUD** tag) from the Forge-owned state file, re-read per request — **absent team/AUD ⇒ refuse every request**, never accept-any-issuer/audience;
+4. **verifies** the token with a pure `node:crypto` verifier (`dashboard/src/remote/cloudflare/jwt.ts`) against the team JWKS: signature, `iss`, `aud` (string or array), and `exp`/`nbf`/`iat` (5s default clock-skew tolerance, hard-capped at 5s). `alg` is a **pinned allowlist** — RS256 default, ES256 opt-in only; `alg:none` and all HS\* are rejected **structurally before any key lookup**, closing alg-confusion, and the matched key's `kty` must match the alg family. An `unknown-kid` result triggers exactly **one** rate-bounded JWKS refresh + re-verify;
+5. maps the verified **email** through the **same** operator mapping file (`remote-board-identity.yml`, `login` selector — no Cloudflare-specific vocabulary, AC5), re-read per request (live mapping-edit revocation, AC6);
+6. resolves the granted project's own dirs server-side and flows the candidate through the existing `validateAdapterIdentity` path.
+
+Replay is **`exp`/`nbf`-bound by design** — a captured token replays only within its own validity window; there is **no jti ledger**. The adapter mints **no Forge session and sets no cookie** — the browser already carries the Access `CF_Authorization` cookie, and Forge holds no state that outlives the token, so **revocation is bounded by the Access token lifetime** (set short Access sessions; force-logout via `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`). The JWT and `CF_Authorization` cookie are **never logged**. The one confirmed header (`cf-access-jwt-assertion`) is reported as a **confirmed** identity header — it is normally one of identity.ts's ignored headers, moved out of the ignored set once verified.
+
+#### JWKS cache (`dashboard/src/remote/cloudflare/jwks.ts`)
+
+The team's signing keys are fetched from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` through an **injected** fetcher behind a bounded cache:
+
+- **Positive TTL** — default 10 min; within it, keys are served with no outbound fetch.
+- **Refresh-on-unknown-kid, rate-bounded** — an unknown kid triggers at most **one** fetch per 30s window regardless of how many unknown-kid tokens arrive, and a kid still absent after a real refresh is **negative-cached**, so a random-kid token storm cannot become an outbound-fetch storm.
+- **Fail closed** — an empty-and-unreachable cache, and stale keys during an unreachable rotation, yield **no usable key** (the verifier then refuses), never "accept any".
+
+#### Cloudflare state file (Forge-owned)
+
+`setup` records the **exact** deployment it created, so `disable` is surgical and the adapter has its non-secret boot config (`dashboard/src/remote/cloudflare/access-state.ts`).
+
+- **Path:** `$FORGE_HOME/remote-board-cloudflare-state.json` (owner-only `0600`/dir `0700`). Machine-authored/read — inspected, not hand-edited. Deliberately **not** in `config.ts`.
+- **Records** the public hostname, the Access team domain, the Access application AUD tag, the loopback port, the loopback `target` (validated to be `http://127.0.0.1:<port>` on both write and read), the `url`, and the absolute path of the `cloudflared` **ingress config file Forge WHOLLY owns** (`$FORGE_HOME/remote-board-cloudflared.yml` by default). It holds **no secret** — the team domain, AUD, and hostname are public identifiers; it **never** holds a Cloudflare API token, `cloudflared` tunnel credentials, or any JWT/cookie.
+- **Fail closed:** a missing/corrupt/foreign/version-mismatched record, or a record whose target is not loopback, reads as `null` — "nothing Forge owns to remove" for `disable`, and "no trusted team/AUD" for the adapter (refuse every request).
+
+#### CLI surface: `forge remote cloudflare …` (`src/cli/commands/remote.ts`)
+
+A sibling of `tailscale` under the shared `remote` group, with an **injectable** `cloudflared` command runner (argv array, never a shell string) and an injectable certs-reachability probe.
+
+- `doctor` — read-only. Reports prerequisites (`cloudflared` on PATH, public hostname, team domain, well-formed AUD, JWKS certs endpoint reachable), the proposed Access-gated target (`https://<hostname> → http://127.0.0.1:<remote port>`) and owned ingress path, the direct-origin boundary, identity mode (transport env + mapping path), and required Cloudflare config. Exit `0` when ready, `1` when setup would refuse.
+- `setup --dry-run` — inspects only; performs **zero** disk mutations (AC1), enforced both by an empty planned write set and a guard runner that throws on any mutating `cloudflared` command. Without `--confirm`, `setup` previews only. `setup --confirm` writes the Forge-owned ingress config (pointing the tunnel at loopback) and the state record, then tells the operator to run `cloudflared tunnel run`. **Refuses** a public hostname with no Access policy / a tunnel-without-Access configuration, a missing/malformed AUD, or an unreachable JWKS endpoint (AC4). **Never** requires, prints, or persists a Cloudflare API token or `cloudflared` credentials.
+- `disable` — removes **only** the Forge-authored ingress config file and the state record; never the Access application, the tunnel, or `cloudflared` credentials (AC4/AC6). No record ⇒ no-op.
+
+Flags fall back to env (`FORGE_REMOTE_CLOUDFLARE_HOSTNAME` / `_TEAM` / `_AUD` / `_TUNNEL`).
+
+`docs_impact` for FG-784: `operator_behavior_changed` (new transport token + `forge remote cloudflare` CLI group) + `setup_changed` (the Cloudflare setup/doctor/disable workflow + new Forge-owned state/ingress files). Full operator guide: [Remote Board over Cloudflare Tunnel + Access](how-to-remote-board-cloudflare.md).
 
 ### HTTP surface (remote listener only)
 

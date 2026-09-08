@@ -121,6 +121,20 @@ forge remote tailscale disable     # remove ONLY the Forge-created Serve mapping
 
 The transport is a boot-time selector (`FORGE_DASHBOARD_REMOTE_TRANSPORT`, `dashboard/src/remote/config.ts`): absent or unrecognized ⇒ **no adapter ⇒ refuse** (the FG-781 default is unchanged). Selecting it never touches the bind — the remote backend stays on loopback `127.0.0.1:8025` and the local dashboard on `127.0.0.1:8024`; nothing widens either. Identity comes from confirming the connection's real tailnet peer against the local `tailscaled` (`tailscale whois`), so a forged `Tailscale-User-Login`/`X-Forwarded-*` header with no whois-confirmed peer — and any Tailscale Funnel/public request — gets no data. Authorization is an operator-authored, per-request-reloaded file (`~/.forge/remote-board-identity.yml`) mapping a whois-confirmed login to one project's `read` grant, so revocation is honored live with no restart. **Tailscale Funnel / public exposure is unsupported** — `doctor`/`setup` detect and refuse it. Full operator guide: [Remote Board over Tailscale Serve](../docs/how-to-remote-board-tailscale.md); contract detail: [Remote Board (FG-781/FG-782)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781).
 
+### Cloudflare Access transport (FG-784)
+
+FG-784 is the **public-hostname** transport. It fronts the same loopback board with a **Cloudflare Tunnel gated by Cloudflare Access** (`https://<your-hostname> → http://127.0.0.1:8025`) and verifies identity by **cryptographically validating** the Access-minted `Cf-Access-Jwt-Assertion` token — never from a header on its face.
+
+```bash
+FORGE_DASHBOARD_REMOTE_TRANSPORT=cloudflare forge dashboard start --remote   # select the adapter
+forge remote cloudflare doctor --hostname board.example.com --team myteam.cloudflareaccess.com --aud <aud>   # prerequisites, target, boundary (read-only)
+forge remote cloudflare setup ... --dry-run   # inspect only — writes NOTHING to disk
+forge remote cloudflare setup ... --confirm   # write the Forge-owned ingress config + state record
+forge remote cloudflare disable    # remove ONLY the Forge-owned ingress config + state record
+```
+
+Selecting it never touches the bind — the remote backend stays on loopback `127.0.0.1:8025` and the local dashboard on `127.0.0.1:8024`. On every request the adapter (`dashboard/src/remote/cloudflare/adapter.ts`, kind `cloudflare-access`) requires a loopback socket peer, then **verifies** the token against the team JWKS: signature (RS256 default / ES256 opt-in — `alg:none` and all HS\* rejected structurally), issuer (`https://<team>.cloudflareaccess.com`), audience (the Access application **AUD** tag), and `exp`/`nbf`/`iat`. The expected team/AUD come from a Forge-owned state file (`~/.forge/remote-board-cloudflare-state.json`) re-read per request — **absent team/AUD ⇒ refuse every request** (never accept-any-issuer/audience); an empty-and-unreachable JWKS cache also fails closed. Authorization reuses the **same** per-request-reloaded mapping file (`~/.forge/remote-board-identity.yml`), keyed on the verified email — Cloudflare gains no separate vocabulary. Forge mints **no session/cookie**, so revocation is instant on a mapping edit but bounded by the **Access token lifetime** for an Access-policy change (use short Access sessions; force-logout at `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`). Replay is `exp`/`nbf`-bound (no jti ledger); the JWT and `CF_Authorization` cookie are never logged. **A public hostname with no Access policy is refused** by `doctor`/`setup` and never trusted — an authenticated public hostname, not a public unauthenticated service. Full operator guide: [Remote Board over Cloudflare Tunnel + Access](../docs/how-to-remote-board-cloudflare.md); contract detail: [Remote Board (FG-781/FG-784)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781).
+
 ## Validation
 
 ```bash
