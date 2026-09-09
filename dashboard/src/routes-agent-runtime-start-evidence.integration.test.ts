@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
 const PORT = 18802;
@@ -59,6 +60,7 @@ const completedToday = (msBeforeNow: number) => new Date(Math.max(TODAY_START, N
 {
   const database = new Database(join(forgeHome, "forge.db"));
   database.exec(SCHEMA_SQL);
+  applyMigrations(database);
   const run = database.prepare(
     "INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?,?,?,?,?,?)",
   );

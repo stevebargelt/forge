@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { listTickets } from "@forge/backlog";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.js";
 
@@ -59,6 +60,7 @@ const PROJECT_KEY = "pk-backlog-fx";
 {
   const database = new Database(join(tmpHome, "forge.db"));
   database.exec(SCHEMA_SQL);
+  applyMigrations(database);
   database
     .prepare("INSERT INTO runs (id,workflow,title,status,created_at,project_dir) VALUES (?,?,?,?,?,?)")
     .run("run-backlog-fx", "feature", "Backlog fixture", "complete", "2026-07-15T10:00:00Z", fixtureDir);

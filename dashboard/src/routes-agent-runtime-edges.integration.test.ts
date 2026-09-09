@@ -31,6 +31,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
 const TEST_PORT = 18793;
@@ -56,6 +57,7 @@ const OTHER_EARLIEST_MS = SEEDED_AT - 200 * DAY;
 {
   const database = new Database(join(forgeHome, "forge.db"));
   database.exec(SCHEMA_SQL);
+  applyMigrations(database);
   const insertRun = database.prepare(
     "INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?,?,?,?,?,?)",
   );

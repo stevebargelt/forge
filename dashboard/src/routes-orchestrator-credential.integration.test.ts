@@ -31,6 +31,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { captureProcessIdentity } from "../../src/util/process-identity.js";
 
@@ -132,6 +133,7 @@ writeCredential(BETA_LIVE.session, BETA_LIVE.receipt, BETA, BETA_LIVE.url);
 
 const database = new Database(join(forgeHome, "forge.db"));
 database.exec(SCHEMA_SQL);
+applyMigrations(database);
 {
   const insertRun = database.prepare("INSERT INTO runs (id,workflow,title,status,created_at,project_dir) VALUES (?,?,?,?,?,?)");
   const insertTask = database.prepare(
