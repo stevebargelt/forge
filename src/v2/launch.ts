@@ -1228,11 +1228,22 @@ function enumerateTmuxPids(tmux: TmuxRunner): { pids: Array<{ pid: number; descr
     }
   }
 
-  // Every pane's process pid across every session.
+  // Every pane's process pid across every session — EXCEPT dead panes. A pane left
+  // by remain-on-exit (`#{pane_dead}`==1) has NO live process: its pid is gone (ps
+  // fails, lsof exits 1), so probing it would return undefined and poison the whole
+  // result to `unprobed`. But a dead pane is a PROVEN negative — no live process can
+  // hold a cwd on its behalf — in the same honesty category as the "no server" arm.
+  // (FG-786: the host carried 1306 dead panes vs 2 live; one dead pane made every
+  // workspace gate unprobed and retention never converged.) The `#{pane_dead}` field
+  // is emitted between the pid and the session, mirroring tmuxSessionCost's filter.
+  // We exclude ONLY panes we PROVE dead (dead=="1"); any other/legacy value keeps the
+  // pid a candidate, so a live pane is still probed and a malformed line degrades to
+  // the existing unprobed-vs-proven-negative rules rather than being silently dropped.
   try {
-    const out = tmux(["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]);
+    const out = tmux(["list-panes", "-a", "-F", "#{pane_pid} #{pane_dead} #{session_name}"]);
     for (const line of String(out ?? "").split("\n").map((l) => l.trim()).filter((l) => l !== "")) {
-      const [pidRaw, ...rest] = line.split(" ");
+      const [pidRaw, deadRaw, ...rest] = line.split(" ");
+      if (deadRaw === "1") continue; // dead pane: proven negative, never a candidate, never unprobed
       const pid = Number(pidRaw);
       if (Number.isInteger(pid) && pid > 0) {
         const session = rest.join(" ").trim();
@@ -1255,21 +1266,32 @@ function enumerateTmuxPids(tmux: TmuxRunner): { pids: Array<{ pid: number; descr
  *  `extraPids` lets a caller add live launch/container pids it knows about (their cwd is
  *  read the same way). `extraCwds` lets a caller add already-known holder cwds (e.g. the
  *  recorded cwd of an OPEN launch observation) compared by path identity directly — no
- *  pid needed. Both are additive; the tmux panes + server are always enumerated. */
+ *  pid needed. Both are additive; the tmux panes + server are always enumerated.
+ *
+ *  `enumerate` and `readCwd` are injection seams (FG-786 AC2): by default the panes+server
+ *  are enumerated fresh (enumerateTmuxPids) and each candidate pid's cwd is read fresh
+ *  (readProcCwd), so the single-call behavior is byte-for-byte identical to before. A
+ *  per-pass guard (createPassCwdGuard) overrides them with a ONE-TIME enumeration and a
+ *  per-pid memo so a closeout pass probes each pid at most once across every workspace
+ *  gate — the compare loop, extraPids and extraCwds handling stay single-sourced here. */
 export function findProcessesHoldingCwd(
   candidatePath: string,
   opts: {
     tmux?: TmuxRunner;
     extraPids?: Array<{ pid: number; description: string }>;
     extraCwds?: Array<{ cwd: string; description: string }>;
+    enumerate?: () => { pids: Array<{ pid: number; description: string }>; unprobed: boolean };
+    readCwd?: (pid: number) => string | undefined;
   } = {},
 ): CwdHolderResult {
   const tmux = opts.tmux ?? defaultTmux;
+  const enumerate = opts.enumerate ?? (() => enumerateTmuxPids(tmux));
+  const readCwd = opts.readCwd ?? readProcCwd;
   const holders: CwdHolder[] = [];
   let anyUnprobed = false;
   let unprobedReason = "";
 
-  const tmuxPids = enumerateTmuxPids(tmux);
+  const tmuxPids = enumerate();
   if (tmuxPids.unprobed) {
     anyUnprobed = true;
     unprobedReason = "tmux could not enumerate its panes/server";
@@ -1277,7 +1299,7 @@ export function findProcessesHoldingCwd(
 
   const candidates = [...tmuxPids.pids, ...(opts.extraPids ?? [])];
   for (const c of candidates) {
-    const cwd = readProcCwd(c.pid);
+    const cwd = readCwd(c.pid);
     if (cwd === undefined || cwd === "") {
       // Could not read this process's cwd — cannot prove it does NOT hold the path.
       anyUnprobed = true;
@@ -1300,6 +1322,82 @@ export function findProcessesHoldingCwd(
   if (holders.length > 0) return { held: true, holders };
   if (anyUnprobed) return { held: "unprobed", reason: unprobedReason || "a candidate process cwd could not be read" };
   return { held: false };
+}
+
+/** Build a cwd-holder guard that is valid for the lifetime of ONE cleanup pass
+ *  (FG-786 AC2). A closeout pass (performRunCloseout / performAutomaticCleanup) gates
+ *  many workspaces in a row; each gate used to re-enumerate every tmux pane and spawn
+ *  one lsof per pid, turning an O(pids) question into O(pids × workspaces) — the
+ *  hours-long closeout holding the run lock. This factory enumerates panes+server ONCE
+ *  (via the dead-pane-excluding enumerateTmuxPids) and memoizes each pid's cwd read, so
+ *  across every workspace the guard answers, each candidate pid's cwd is read at most
+ *  once. The returned closure has findProcessesHoldingCwd's exact verdict semantics —
+ *  held:true / "unprobed" (fail closed → retain) / held:false — and folds the caller's
+ *  extraPids/extraCwds through on every call.
+ *
+ *  The guard owns its snapshot for its lifetime ONLY: it is built at pass scope and
+ *  discarded when the pass ends, never a module-level global (a recycled pid across two
+ *  forge-next waves must never return a stale cwd). It stays store-free (FG-679) —
+ *  extraCwds arrive as data; launch.ts imports no store. */
+export function createPassCwdGuard(
+  opts: {
+    tmux?: TmuxRunner;
+    extraPids?: Array<{ pid: number; description: string }>;
+    extraCwds?: Array<{ cwd: string; description: string }>;
+    readCwd?: (pid: number) => string | undefined;
+    // FG-786 RF-2: make the returned guard DESTROY-SAFE. The pass-wide snapshot is
+    // correct for the O(pids) NEGATIVE enumeration, but a destroy decision must not act
+    // on a stale snapshot: a process that chdir'd into a workspace — or a pane that
+    // appeared — AFTER the snapshot is absent from the memoized reads and would let a
+    // now-held workspace be reaped. When true, a `held:false` verdict (the ONLY verdict
+    // that authorizes a destroy) is re-proven with ONE fresh probe of THAT path — a
+    // fresh pane enumeration and fresh, un-memoized cwd reads — before the caller acts.
+    // A retain (held:true / "unprobed") is returned from the snapshot unchanged; it never
+    // needs a second probe. The destroyed set is small, so this preserves the scale fix.
+    freshProbeAtDestroy?: boolean;
+  } = {},
+): (candidatePath: string) => CwdHolderResult {
+  const tmux = opts.tmux ?? defaultTmux;
+  const baseReadCwd = opts.readCwd ?? readProcCwd;
+
+  // One enumeration for the whole pass — panes (dead excluded) + server pid.
+  const enumerated = enumerateTmuxPids(tmux);
+
+  // Per-pid memo: each candidate pid's cwd is read at most once for the guard's
+  // lifetime. `has` (not a truthy check) so a proven-undefined read is cached too and
+  // never re-spawns lsof; undefined stays undefined → the gate stays honestly unprobed.
+  const cwdMemo = new Map<number, string | undefined>();
+  const memoRead = (pid: number): string | undefined => {
+    if (cwdMemo.has(pid)) return cwdMemo.get(pid);
+    const v = baseReadCwd(pid);
+    cwdMemo.set(pid, v);
+    return v;
+  };
+
+  const snapshotGuard = (candidatePath: string): CwdHolderResult =>
+    findProcessesHoldingCwd(candidatePath, {
+      tmux,
+      enumerate: () => enumerated,
+      readCwd: memoRead,
+      ...(opts.extraPids ? { extraPids: opts.extraPids } : {}),
+      ...(opts.extraCwds ? { extraCwds: opts.extraCwds } : {}),
+    });
+
+  if (!opts.freshProbeAtDestroy) return snapshotGuard;
+
+  return (candidatePath: string): CwdHolderResult => {
+    const cached = snapshotGuard(candidatePath);
+    // Only a snapshot held:false authorizes a destroy; re-prove it against FRESH state
+    // (fresh enumeration + fresh cwd reads) so a chdir/new pane after the snapshot cannot
+    // let a live-held workspace be reaped. A held:true/"unprobed" already retains.
+    if (cached.held !== false) return cached;
+    return findProcessesHoldingCwd(candidatePath, {
+      tmux,
+      readCwd: baseReadCwd,
+      ...(opts.extraPids ? { extraPids: opts.extraPids } : {}),
+      ...(opts.extraCwds ? { extraCwds: opts.extraCwds } : {}),
+    });
+  };
 }
 
 /** Render a CwdHolderResult's holders for a report/log line. */
