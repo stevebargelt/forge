@@ -33,9 +33,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { getPublicationAttempt } from "../store/publications.js";
+import { getPublicationAttempt, activeLaneForProject } from "../store/publications.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, setTaskWorkspace } from "../store/tasks.js";
+import { projectIdentity } from "./project-identity.js";
 import { insertReview, setReviewState } from "../store/reviews.js";
 import { eventsForRun } from "../store/events.js";
 import type { Task } from "../types/index.js";
@@ -122,6 +123,28 @@ function laterPhaseTask(runId: string, taskId: string, baseSha: string): void {
   // base_sha is written with the workspace handle in production (setTaskWorkspace);
   // do the same here so getTask(taskId).baseSha is the recorded phase base.
   setTaskWorkspace(taskId, `/tmp/forge-worktrees/${taskId}`, baseSha);
+}
+
+/** A later-phase task carrying NO recorded base_sha — the RF-2 shape: getTask(taskId)
+ *  returns a row whose baseSha is undefined (setTaskWorkspace was never called). */
+function laterPhaseTaskNoBase(runId: string, taskId: string): void {
+  const task: Task = {
+    id: taskId,
+    runId,
+    phase: "verify",
+    agentRole: "test-engineer",
+    status: "running",
+    taskPackage: {
+      taskId,
+      runId,
+      phase: "verify",
+      role: "test-engineer",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: new Date().toISOString(),
+  };
+  insertTask(task);
 }
 
 /** Settle an evidence-led review at `candidateSha` — the reviewed tip the run's
@@ -280,5 +303,168 @@ test("FG-791 (AC3): a later phase whose base IS an ancestor of the reviewed cand
     eventsForRun(runId).some((e) => e.eventType === "publication.refused"),
     false,
     "the orthogonal guard raised no refusal on a legitimately-based phase",
+  );
+});
+
+// ── RF-1: a stale-base refusal must NOT leave its enqueued lane entry live ───────
+//
+// recordPublicationIntent atomically enqueues a `queued` publication_lane row before
+// the preflight runs. The refusal used to return before the try/finally that calls
+// leaveLane, so the row stayed live and every later publication for the run queued
+// behind a phantom. The refusal now returns through that finally: the lane is empty
+// after the refusal, and a subsequent valid publication proceeds.
+
+test("FG-791 (RF-1): a stale-base refusal releases its lane entry — the lane is empty afterward and a subsequent valid publication proceeds", async () => {
+  const runId = "run-rf1";
+  const dir = initRepo("rf1");
+  const key = projectIdentity(dir).key;
+
+  // S → C2 on main; C2 is the reviewed tip the target sits at.
+  commit(dir, "seed.txt", "seed\n");
+  git(dir, ["checkout", "-q", "-b", "prebuild"]);
+  const c0 = commit(dir, "build.txt", "pre-review integration head\n");
+  git(dir, ["checkout", "-q", "-b", "reviewed", "main"]);
+  const c2 = commit(dir, "fix.txt", "review fix\n");
+  git(dir, ["checkout", "-q", "main"]);
+  git(dir, ["reset", "-q", "--hard", c2]);
+  assert.equal(isAncestor(dir, c0, c2), false, "precondition: the stale base C0 is not in the reviewed candidate's history");
+
+  // The stale phase, wrongly based on C0.
+  git(dir, ["checkout", "-q", "-b", "stale-phase", c0]);
+  commit(dir, "stale-test.txt", "a test authored against pre-fix semantics\n");
+  git(dir, ["checkout", "-q", "main"]);
+
+  seedRun(runId, dir);
+  settleReviewAt(runId, "rev-1", c2);
+  laterPhaseTask(runId, "task-stale", c0);
+
+  assert.equal(activeLaneForProject(key).length, 0, "precondition: the lane starts empty");
+
+  const refused = await publishIntegration({
+    runId,
+    taskId: "task-stale",
+    projectDir: dir,
+    sources: [{ branch: "stale-phase", label: "verify" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: () => assert.fail("validation must never run on a refused stale-based phase"),
+  });
+  assert.equal(refused.kind, "refused", `expected a refusal; got ${refused.kind}`);
+
+  // THE RF-1 ASSERTION: the refusal released the lane entry it enqueued.
+  assert.equal(
+    activeLaneForProject(key).length,
+    0,
+    "the stale-base refusal must leave NO active lane entry — a phantom would queue every later publication behind it",
+  );
+
+  // And a subsequent VALID publication proceeds rather than blocking on the phantom. A
+  // docs phase correctly based on the reviewed tip C2 fast-forwards the target.
+  git(dir, ["checkout", "-q", "-b", "docs-phase", c2]);
+  const docsTip = commit(dir, "docs.txt", "docs for the reviewed candidate\n");
+  git(dir, ["checkout", "-q", "main"]);
+  laterPhaseTask(runId, "task-docs", c2);
+
+  const published = await publishIntegration({
+    runId,
+    taskId: "task-docs",
+    projectDir: dir,
+    sources: [{ branch: "docs-phase", label: "docs" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: () => ({ ok: true }),
+  });
+  assert.equal(published.kind, "published", `the subsequent valid publication must proceed; got ${published.kind}`);
+  assert.equal(readTargetSha(localTargetFor(dir)), docsTip, "the valid phase fast-forwarded the reviewed branch");
+  assert.equal(activeLaneForProject(key).length, 0, "the successful publication also left the lane clean");
+});
+
+// ── RF-2: a settled candidate with an UNRECORDED phase base must REFUSE, not fail open ─
+//
+// The guard used to require a truthy phaseBase before it could refuse, so a task with
+// no recorded base_sha under a settled candidate published unchecked — the exact
+// unknown-provenance case the guard exists for. It now refuses with its own reason.
+
+test("FG-791 (RF-2): a missing phase base under a SETTLED candidate is refused — no ref written, its own named reason", async () => {
+  const runId = "run-rf2-refuse";
+  const dir = initRepo("rf2-refuse");
+
+  commit(dir, "seed.txt", "seed\n");
+  const c2 = commit(dir, "fix.txt", "review fix\n");
+  git(dir, ["checkout", "-q", "-b", "verify-phase", c2]);
+  commit(dir, "verify.txt", "a later-phase artifact whose base was never recorded\n");
+  git(dir, ["checkout", "-q", "main"]);
+
+  seedRun(runId, dir);
+  settleReviewAt(runId, "rev-1", c2);
+  laterPhaseTaskNoBase(runId, "task-nobase"); // NO base_sha recorded
+
+  const before = readTargetSha(localTargetFor(dir));
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-nobase",
+    projectDir: dir,
+    sources: [{ branch: "verify-phase", label: "verify" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: () => assert.fail("validation must never run — the fail-open path is closed"),
+  });
+
+  assert.equal(out.kind, "refused", `a missing base under a settled candidate must refuse; got ${out.kind}`);
+  if (out.kind !== "refused") return;
+  assert.match(out.error, /NO recorded base/);
+  assert.match(out.error, new RegExp(c2.slice(0, 12)), "names the settled candidate");
+
+  assert.equal(readTargetSha(localTargetFor(dir)), before, "refused before any ref write — the target is unchanged");
+  assert.equal(getPublicationAttempt(out.attemptId)?.state, "failed");
+  assert.equal(activeLaneForProject(projectIdentity(dir).key).length, 0, "the refusal released its lane entry (RF-1 applies here too)");
+
+  const refused = eventsForRun(runId).filter((e) => e.eventType === "publication.refused");
+  assert.equal(refused.length, 1, "exactly one publication.refused event");
+  assert.equal(
+    (refused[0]!.payload as Record<string, unknown>)["reason"],
+    "base_unrecorded_under_settled_candidate",
+    "the reason is distinct from stale_base_not_ancestor",
+  );
+});
+
+// ── RF-2 no-op control: a missing base with NO current candidate still proceeds ──
+//
+// The pre-settlement / legacy path (first mutating task, verdict-mode run) has no
+// candidate to be stale against, so an unrecorded base there is a clean no-op, not a
+// refusal — only a REAL current candidate turns a missing base into an unknown-provenance
+// refusal.
+
+test("FG-791 (RF-2): a missing phase base with NO current candidate proceeds — the guard stays a no-op on the legacy path", async () => {
+  const runId = "run-rf2-noop";
+  const dir = initRepo("rf2-noop");
+
+  const base = commit(dir, "seed.txt", "seed\n");
+  git(dir, ["checkout", "-q", "-b", "build-phase"]);
+  const buildTip = commit(dir, "build.txt", "first mutating task, no review settled yet\n");
+  git(dir, ["checkout", "-q", "main"]);
+
+  seedRun(runId, dir); // NO settled review, and no prior publication → no current candidate
+  laterPhaseTaskNoBase(runId, "task-build"); // NO base_sha recorded
+
+  assert.equal(base, readTargetSha(localTargetFor(dir)), "precondition: the target sits at the shared root");
+
+  let validated = false;
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build",
+    projectDir: dir,
+    sources: [{ branch: "build-phase", label: "build" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: () => {
+      validated = true;
+      return { ok: true };
+    },
+  });
+
+  assert.equal(out.kind, "published", `a missing base with no candidate must proceed as before; got ${out.kind}`);
+  assert.equal(validated, true, "validation ran — the guard did not refuse the legacy path");
+  assert.equal(readTargetSha(localTargetFor(dir)), buildTip, "the build phase published onto the target");
+  assert.equal(
+    eventsForRun(runId).some((e) => e.eventType === "publication.refused"),
+    false,
+    "no refusal on the no-candidate path",
   );
 });

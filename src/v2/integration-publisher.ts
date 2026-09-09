@@ -49,7 +49,7 @@ import {
 } from "../store/publications.js";
 import { latestSettledReviewCandidateForRun } from "../store/reviews.js";
 import { getTask } from "../store/tasks.js";
-import { projectIdentity, describeRefusal, describeStaleBaseRefusal, describeWait } from "./project-identity.js";
+import { projectIdentity, describeRefusal, describeStaleBaseRefusal, describeUnrecordedBaseRefusal, describeWait } from "./project-identity.js";
 import { provenSameOnly } from "../util/path-identity.js";
 // FG-677 (FG-631 absorbed): the retention timing authority, the report vocabulary, and the
 // active-process cwd guard applied at the publication-worktree destroy chokepoint.
@@ -550,33 +550,66 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
   // request-changes re-run, whose base already resolves to the candidate), is an
   // ancestor and passes. Only a base that is NOT an ancestor of a REAL current
   // candidate — the stale-base defect itself — is refused.
+  //
+  // The missing-base refusal (RF-2) is gated on the SETTLED review candidate
+  // specifically, not on `currentCandidate` — which also resolves to a mere
+  // publication receipt (the plan phase's receipt exists before the build fan-out,
+  // whose parent task carries no recorded base and legitimately publishes). Only once
+  // a review has SETTLED does an unrecorded base become the unknown-provenance case:
+  // we cannot prove the phase's validated tree descends from the reviewed tip, so we
+  // refuse rather than fail open (base_unrecorded_under_settled_candidate).
   const phaseBase = getTask(req.taskId)?.baseSha;
+  const settledCandidate = latestSettledReviewCandidateForRun(req.runId);
   const currentCandidate = currentCandidateSha(req.runId, descriptor);
-  if (
-    phaseBase &&
-    currentCandidate &&
-    phaseBase !== currentCandidate &&
-    !isAncestor(req.projectDir, phaseBase, currentCandidate)
-  ) {
-    updatePublicationAttempt(attemptId, { state: "failed" });
-    logEvent("publication.refused", {
-      runId: req.runId,
-      taskId: req.taskId,
-      payload: { attemptId, reason: "stale_base_not_ancestor", phaseBase, currentCandidate, target: descriptor },
-    });
-    return {
-      kind: "refused",
-      attemptId,
-      error: describeStaleBaseRefusal({
-        canonicalDir: identity.canonicalDir,
-        taskId: req.taskId,
-        phaseBase,
-        currentCandidate,
-      }),
-    };
-  }
 
   try {
+    // The preflight lives INSIDE the try so a refusal returns through the same
+    // `finally` that releases the lane. recordPublicationIntent already enqueued a
+    // `queued` lane row above; a refusal that returned before leaveLane would leave
+    // that row live and queue every later publication for the run behind a phantom.
+    // It still fires BEFORE awaitLaneTurn / the worktree / the mutex / any ref write,
+    // so a refused later phase has claimed and mutated nothing on the target.
+    if (settledCandidate && !phaseBase) {
+      updatePublicationAttempt(attemptId, { state: "failed" });
+      logEvent("publication.refused", {
+        runId: req.runId,
+        taskId: req.taskId,
+        payload: { attemptId, reason: "base_unrecorded_under_settled_candidate", currentCandidate: settledCandidate, target: descriptor },
+      });
+      return {
+        kind: "refused",
+        attemptId,
+        error: describeUnrecordedBaseRefusal({
+          canonicalDir: identity.canonicalDir,
+          taskId: req.taskId,
+          currentCandidate: settledCandidate,
+        }),
+      };
+    }
+    if (
+      phaseBase &&
+      currentCandidate &&
+      phaseBase !== currentCandidate &&
+      !isAncestor(req.projectDir, phaseBase, currentCandidate)
+    ) {
+      updatePublicationAttempt(attemptId, { state: "failed" });
+      logEvent("publication.refused", {
+        runId: req.runId,
+        taskId: req.taskId,
+        payload: { attemptId, reason: "stale_base_not_ancestor", phaseBase, currentCandidate, target: descriptor },
+      });
+      return {
+        kind: "refused",
+        attemptId,
+        error: describeStaleBaseRefusal({
+          canonicalDir: identity.canonicalDir,
+          taskId: req.taskId,
+          phaseBase,
+          currentCandidate,
+        }),
+      };
+    }
+
     await awaitLaneTurn(attemptId, identity.canonicalDir, req.lane);
 
     for (let rebuild = 0; ; rebuild++) {
