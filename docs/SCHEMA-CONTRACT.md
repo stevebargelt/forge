@@ -379,6 +379,19 @@ The coordinator's own audit half. Ordinary `events` rows, no schema change.
 
 - `review.docs_amended` — payload `{ reviewId, fromSha, toSha, paths, rationale, discoveredBy, at }`. Emitted inside the same write transaction as the amendment ledger record it mirrors, and only once per `(fromSha, toSha)` pair — a crash-replay that re-states an already-recorded amendment (the idempotent no-clobber path) emits no second event. `event_type` is TEXT NOT NULL with no CHECK constraint, so this is additive to the TS `EventType` union alone: no `SCHEMA_SQL` / `ADDITIVE_COLUMNS` change and no migration against the shared host DB.
 
+#### FG-791: post-review phase base-selection event
+
+Ordinary `events` rows, no schema change (additive to the TS `EventType` union alone). These make the base a later pipeline phase (verify, docs) was cut from durable and auditable, so the phase record names both the base sha AND why it was chosen. See [Post-review phase base](concepts.md#post-review-phase-base) and [FORGE-DEC-036](../learnings/decisions/fg791-post-review-phase-base.md).
+
+- `phase.base_resolved` — payload `{ runId, taskId, baseSha, source }`, emitted by `resolveTaskBaseSha` (`src/v2/runNext.ts`) at the moment a mutating task (sequential step, fanout wave base, or request-changes re-run) is given the commit its workspace is cut from. `source` is one of:
+  - `reviewed_candidate` — the settled evidence-led review's `candidate_sha`. Once a run's build gate is settled by an evidence-led review, a post-review phase bases on the REVIEWED tip, not the pre-review integration head.
+  - `publication_receipt` — the run's last accepted publication for the target (`latestPublishedShaForRun`). This is the legacy / no-review base — the ONLY base a `legacy_verdict` / `legacy_review_loop` run ever gets, since it has no settled evidence-led review.
+  - `head` — the run's first mutating task, no publication receipt yet.
+
+  No dashboard consumer reads this today; it is append-only provenance for `forge show` and post-hoc audit ("what commit did this phase's workspace derive from, and why?"). Sets both `run_id` and `task_id`, so it surfaces on the per-task Timeline through a strict `task_id` match.
+
+- `publication.refused` gains a distinct `reason: 'stale_base_not_ancestor'` (FG-791 AC3), alongside its existing reasons. Emitted by `publishIntegration` when a later phase's recorded base is NOT an ancestor of the run's current candidate — the stale-base defect — BEFORE any lane/worktree/mutex/ref work, so a refused later phase has mutated nothing on the target. Payload: `{ attemptId, reason, phaseBase, currentCandidate, target }`. This refusal is DISTINCT from the fast-forward ancestry proof (a stale-based phase can pass that proof and still need refusing); see [Integration publisher](concepts.md#integration-publisher).
+
 ### `shippingAudit` — the shipping-audit dashboard read path (FG-386)
 
 Not a new table — a read-only **projection** over four already-persisted evidence tables (`readiness_assessments`, `reviews`/`review_findings`, `host_verifications`, `campaign_items`), keyed by ticket, computed fresh on every read by `shippingAudit()` (`dashboard/src/queries.ts`) and served by `GET /api/shipping-audit` (see [response shape](#get-apishipping-audit-response-shape-shippingaudit) below). No new state machine, ledger, editor, recompute, or outbound provider/CI call while serving — it reads what FG-382/383/384 already wrote.
