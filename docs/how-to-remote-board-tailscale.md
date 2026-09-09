@@ -44,6 +44,34 @@ Two properties hold no matter what a request carries:
   data**. Because these two Serve headers are confirmed against whois (not ignored), the
   resolution records them as *confirmed identity headers* in its audit trail.
 
+## What remains impossible remotely
+
+Even a login granted the `plan` capability (FG-783, [below](#granting-the-plan-capability-bounded-remote-planning--fg-783))
+can do **only** the four planning actions listed there — re-rank, enqueue/dequeue, reorder the
+queue, and append a planning annotation, all scoped to its own project. The remote surface is a
+**closed command registry**: it dispatches only those four store actions and *cannot name* any
+other verb, proven by a source-guard test, not by a runtime check. There is no arbitrary-CLI
+endpoint behind it.
+
+The following stay impossible from the Remote Board, for **any** remote identity, regardless of
+capability:
+
+- **Shipping control** — gate decisions/overrides, merge, publish, review disposition.
+- **Execution** — running or dispatching agents, campaigns, or workflows; terminal/process
+  control; cleanup.
+- **Completion / closure** of tickets or runs.
+- **Credentials, RACI/routing policy, and model-policy** changes.
+- **Anything not in the four-action registry** — the surface has no generic remote CLI and no
+  way to reach one; a client that fabricates an excluded action's request shape is refused.
+- **Reading anything outside the project's own redacted board** — no raw logs, transcripts, env
+  values, credentials, filesystem paths, review artifacts, or another project's data (the FG-781
+  read boundary is unchanged).
+
+The board also **never widens its bind**: enabling planning opens no non-loopback listener and
+does not change `config.host`. Remote mutation is only ever reachable through the whois-confirmed
+Tailscale identity, the operator-authored `plan` grant, and the same-origin/CSRF pin to the Serve
+hostname — all three must hold.
+
 ## Prerequisite: this is a single-operator host
 
 The Remote Board's threat model assumes the Forge host has **one** operator. Any local
@@ -151,6 +179,58 @@ no default-allow.
 
 You can find a project's key with `forge projects list` (or the project's `.forge/config.yml`
 `project_key`).
+
+### Granting the `plan` capability (bounded remote planning — FG-783)
+
+By default an authorized login can only **read** its project's board. FG-783 adds one further
+capability, `plan`, that grants a **bounded** set of remote *planning* mutations — and nothing
+else. Add it to a login's `capabilities` list:
+
+```yaml
+version: 1
+identities:
+  - login: steve@example.com
+    project: pk-forge
+    capabilities: [read, plan]    # read the board AND run the four planning actions
+  - login: teammate@example.com
+    project: pk-otherproject
+    capabilities: [read]          # read-only, unchanged
+```
+
+- `capabilities` is drawn from the **closed** `REMOTE_CAPABILITIES` vocabulary — today `read`
+  and `plan`, nothing else. A typo (`plann`, `write`, `mutate`) *taints and drops the whole
+  entry*: it fails closed to **no** grant, never silently to `read`.
+- **`read` and `plan` are independent grants, not a ladder.** `[read]` is read-only (the
+  default); `[read, plan]` reads *and* plans; `[plan]` alone grants planning without read. A
+  `read` grant never implies `plan`. If you want someone to see the board and adjust the plan,
+  grant both.
+- **Granting `plan` in this file is the *only* way to enable remote mutation.** There is no
+  flag, env var, or default that turns it on. Removing `plan` from a login's list (or removing
+  the login) revokes it live on the next request, exactly like read revocation above.
+
+An identity granted `plan` may run **exactly four** planning actions against its own project,
+each delegating to the same authority a local operator uses and each guarded by a precondition
+that refuses (with zero change) if the board moved under them:
+
+| Action | What it does | Precondition |
+|---|---|---|
+| Change stack rank | Re-rank a ticket in the canonical stack | queue version compare-and-set |
+| Enqueue / dequeue | Add or remove a ticket through the readiness gates | enqueue re-checks readiness; dequeue retains rank |
+| Reorder the queue | Reorder the explicit operator queue | queue version compare-and-set |
+| Append a planning annotation | Append a bounded operator note to a ticket | ticket revision |
+
+Every command is idempotent and replay-resistant (a durable, per-project request-id ledger
+returns the recorded outcome on redelivery — including after a Forge restart — without
+re-applying, and never across projects), and every action is recorded to a same-project audit
+trail (actor, transport, request id, precondition, outcome, timestamp) readable back over
+`GET /api/plan/audit` — gated on the `read` capability, so a `read`-only login can see its
+project's planning history even without `plan`. A stale precondition — the queue or ticket
+moved since the board you are looking at loaded — refuses and hands back the current state to
+re-read, rather than clobbering someone else's change.
+
+The board's planning UI (the confirm → submit → result flow) never shows an optimistic success:
+after a recorded outcome it re-reads the board so you only ever see what the host actually
+committed.
 
 ## Step 3 — Inspect with `doctor` (no changes made)
 

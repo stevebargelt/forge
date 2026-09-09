@@ -1078,7 +1078,9 @@ Read-only (FG-348). Same `?projectDir=<path>` / `?projectKey=` `409` restriction
 
 The **Remote Board** is an explicit, opt-in, **read-only**, project-scoped remote surface — distinct from the local dashboard above. It is the foundation a later trusted local proxy (Tailscale Serve, FG-782; Cloudflare Tunnel+Access, FG-784) can front, so its projection contract and configuration are **public API**: FG-785 consumes the projection; FG-782/FG-784 plug transport adapters into the identity interface; FG-783 adds a planning-mutation capability. This section is the stable, provider-neutral definition those tickets build against.
 
-**It is a second, dedicated listener — not a route prefix on `:8024`.** Enabling remote mode starts its own `http.Server` (`dashboard/src/remote/server.ts`) on its own loopback port. The local dashboard's route table, headers, and listener are untouched; with remote mode **off** (the default) no remote route or asset is served at all and the local dashboard is byte-for-byte unchanged (AC1). The remote handler has **no non-`GET` branch** and imports nothing from the queue-mutation / classify / any DB-lifecycle writer, so "no remote mutation" (AC7) is a structural property of the module graph, not a guard.
+**It is a second, dedicated listener — not a route prefix on `:8024`.** Enabling remote mode starts its own `http.Server` (`dashboard/src/remote/server.ts`) on its own loopback port. The local dashboard's route table, headers, and listener are untouched; with remote mode **off** (the default) no remote route or asset is served at all and the local dashboard is byte-for-byte unchanged (AC1).
+
+**Remote mutation is bounded by construction (FG-783 re-anchors AC7).** Through FG-781/FG-782 the remote handler had **no non-`GET` branch** at all, and "no remote mutation" was the absence of a POST route. FG-783 adds exactly **one** POST route (`POST /api/plan`) and re-states the same guarantee in a stronger form: the surface answers `GET` on its read routes and `POST` on that **single** planning endpoint, which dispatches only through a **closed command registry of exactly four planning actions** ([below](#planning-command-surface-fg-783)). There is no other POST branch and no `PUT`/`PATCH`/`DELETE` branch anywhere; the handler still imports nothing from the queue-mutation/classify path, and never writes a Forge table itself — it delegates to an in-process store authority. So "no remote mutation beyond the four planning actions" (AC7) remains a structural property of the module graph, proven by a source guard, not a runtime check.
 
 ### Operator configuration (operator-facing)
 
@@ -1100,7 +1102,7 @@ There is **deliberately no `--remote-host` flag and no `FORGE_DASHBOARD_REMOTE_H
 Authorization is **transport-neutral** (`dashboard/src/remote/identity.ts`). It consumes a **verified identity** and **explicit capabilities** supplied by a transport adapter — never raw inbound headers. FG-781 ships **no adapter**, so the bound resolver refuses every request and the surface **fails closed**: no identity ⇒ no project data (AC2).
 
 - **Raw request headers never establish identity.** `X-Forwarded-*`, `Tailscale-User-Login`, `Cf-Access-Authenticated-User-Email` and the like are actively ignored — scanned only to be recorded as ignored, then discarded (AC6). A spoofed proxy/identity header on a direct request changes nothing.
-- **Capabilities are a closed set.** In FG-781 the only member is `read`; the type cannot express any mutation capability (FG-783 will add one as an addition). A verified identity that lacks `read` is refused.
+- **Capabilities are a closed set** (`REMOTE_CAPABILITIES`, `dashboard/src/remote/identity.ts`). FG-781 shipped one member, `read`; **FG-783 adds `plan`** — the bounded authenticated planning grant ([below](#planning-command-surface-fg-783)). The vocabulary is `["read", "plan"]` and nothing else: the type still cannot express a general `mutate`/`write` capability, and a typo or attacker-supplied token is not a member. **The two grants are independent, not a ladder:** a `read` grant never implies `plan`, and a `plan` grant never implies `read` (`hasCapability` tests explicit membership). A verified identity that lacks `read` is refused the read surface; one that lacks `plan` is refused every planning mutation, and the FG-781/FG-782 read path is byte-for-byte unchanged for any identity without `plan`.
 - **Project scope is server-authoritative.** The granted `projectKey` comes from the identity, never from a client `projectKey`/`projectDir` param, and selects the project record; the projection's `memberDirs` are always that project's **own dirs from the registry**, never the identity's claimed dirs — pinned **strictly** to the granted project, a deliberate, documented divergence from `resolveProjectScope`'s FG-745 owner-convergence widening. The identity's claimed `memberDirs` is trusted only as a consistency check on the way in: it must be non-empty and every dir it names must be one of the project's own, or the request refuses `unauthorized` (`claimedDirsWithinProject`, `dashboard/src/remote/server.ts`) — a claim naming another project's dir, or no dir at all, reads as scope confusion, not as a widened grant. A grant that is absent, ambiguous, or names no registered project refuses/degrades; it never widens.
 
 ### Transport selection + adapter contract (FG-782)
@@ -1132,10 +1134,11 @@ Authorization is an operator-authored file — deliberately separate from the id
   identities:
     - login: user@example.com   # whois-confirmed tailnet login (trimmed, lower-cased both sides)
       project: pk-...           # Forge project key; scope dirs resolved server-side from it
-      capabilities: [read]      # closed vocabulary (REMOTE_CAPABILITIES) — only `read` today
+      capabilities: [read]      # closed vocabulary (REMOTE_CAPABILITIES): `read` and/or `plan`
   ```
 
 - **Fail-closed rules** (every malformed case grants *less*, never more): a version other than `1` rejects the file whole (empty mapping); an unparseable file → empty mapping; a missing file and an unmapped login are indistinguishable (both → no grant, no default-allow); an unknown capability *taints and drops* the whole entry (never partial); a `login` declared more than once is *poisoned* (no grant — ambiguous intent is never merged into a wider grant); a missing `project` or blank `login` drops that entry. The `login` selector is additive by design — a future tailnet/tag/grant selector is a sibling key, not a rewrite.
+- **`capabilities` are drawn from the closed `REMOTE_CAPABILITIES` vocabulary** — `read` and, since FG-783, `plan`. `capabilities: [read]` is read-only (the FG-781/FG-782 default); `capabilities: [read, plan]` also grants the bounded planning surface; `capabilities: [plan]` grants planning **without** read (the two are independent). Granting `plan` is the *only* way an identity can mutate remotely, and it flows purely through this file — there is no flag, env var, or default that turns planning on. An entry naming any token outside the vocabulary (a `write`, a `mutate`, a typo) still taints and drops the whole entry, so a fat-fingered capability fails closed rather than silently granting `read`.
 
 #### Serve-mapping state file (Forge-owned)
 
@@ -1199,13 +1202,15 @@ Flags fall back to env (`FORGE_REMOTE_CLOUDFLARE_HOSTNAME` / `_TEAM` / `_AUD` / 
 
 ### HTTP surface (remote listener only)
 
-Every route is `GET`. Any other method is a flat `405` with `Allow: GET` and **no `Access-Control-Allow-*` header anywhere**, so a cross-origin caller fails closed. Assets are served from `dashboard/remote-client/` by runtime path — never the local `CLIENT_DIR` bundle — under the remote shell's own `script-src 'self' 'nonce-…'` CSP.
+Through FG-781/FG-782 every route was `GET`. FG-783 adds exactly two more — one write (`POST /api/plan`, [below](#planning-command-surface-fg-783)) and one read (`GET /api/plan/audit`, same section). Any method not named for a given path is a flat `405` with `Allow:` naming only the methods that path actually answers, and **no `Access-Control-Allow-*` header anywhere**, so a cross-origin caller fails closed. Assets are served from `dashboard/remote-client/` by runtime path — never the local `CLIENT_DIR` bundle — under the remote shell's own `script-src 'self' 'nonce-…'` CSP.
 
 | Endpoint | Description |
 |---|---|
 | `GET /` | The remote board HTML shell (its own nonce CSP; focused asset set, not `CLIENT_DIR`). |
 | `GET /api/board` | The projection envelope below. With no adapter wired, always the `unauthorized` refusal envelope (`board: null`). |
 | `GET /remote-client/*` | The focused board assets, path-traversal-contained under `dashboard/remote-client/`. |
+| `POST /api/plan` | The bounded planning-mutation surface (FG-783) — gated on the `plan` capability. [Planning command surface](#planning-command-surface-fg-783) below. |
+| `GET /api/plan/audit` | The same-project planning audit read (FG-783) — gated on the `read` capability. [Planning command surface](#planning-command-surface-fg-783) below. |
 
 ### `GET /api/board` response shape (`RemoteBoardEnvelope`)
 
@@ -1215,12 +1220,13 @@ A discriminated envelope (`dashboard/src/remote/projection.ts`) that makes cache
 - `generatedAt` — ISO timestamp of the read that produced `board` (or of the refusal itself); never fabricated from "now" when `board` is null.
 - `generation` — monotonic freshness stamp (epoch ms of the generating read). A client compares successive generations to know whether a payload advanced — the explicit half of "never present cached data as live".
 - `board` — the project-scoped board, present **only** for `live`/`stale`; `null` for every refusal/degradation.
+- `capabilities` — the verified identity's granted capabilities from the closed `REMOTE_CAPABILITIES` vocabulary (FG-783). The client renders planning affordances only when it includes `plan`, so a `read`-only identity is never shown a mutation control the server would refuse. Empty on every refusal/degradation (no verified identity).
 
 The `board` carries exactly **five positive-allowlist DTOs**. Each field is copied explicitly from its source, one named property at a time — no mapper spreads or returns a source object, so when a reused internal query grows a new field it simply never reaches a DTO. `projection.contract.test.ts` enforces this (runtime injection + source-drift scrape). What each DTO **excludes** is the contract's point (AC4):
 
 - **`projectSummary`** (`RemoteProjectSummary`) — `projectKey`, `label`, `color`, `description`, `lastRunAt`, `runCount`, `inFlightCount`, `liveSessions`. `description` is operator-authored free text, so it is passed through `redactRemoteFreeTextOrNull` (below) before it reaches the DTO. **Excludes** every host path (`projectDir`, checkouts), the GitHub URL, README content, and owner/purpose/classification identity fields.
-- **`backlog`** (`RemoteBacklogProjection`) — `projectKey`, `storageMode`, and `tickets[]` of `{ id, type, status, title, epic, created, closed, related }`. `title` is passed through `redactRemoteFreeText`. **Excludes** the ticket `body` (free content) and `closedCommit` (a git SHA).
-- **`queue`** (`RemoteQueueProjection`) — `projectKey`, `storageMode`, `queueAvailable`, `unavailableReason`, `version`, `rows[]`, and `views` (a partition of ticket ids into columns). Each row carries only board-level facts plus the closed `waitKind` vocabulary; a row's `title` is passed through `redactRemoteFreeText`. **Excludes** `reservation` (claim owner / launch / run ids), free-text blocker/readiness detail, `enqueuedBy`/`note`, scan detail, the free-text `wait.reason`, the whole `dispatcher` control-plane panel, and `capacity` (which carries **cross-project** holder rows).
+- **`backlog`** (`RemoteBacklogProjection`) — `projectKey`, `storageMode`, and `tickets[]` of `{ id, type, status, title, revision, epic, created, closed, related }`. `title` is passed through `redactRemoteFreeText`. `revision` (FG-783) is the ticket's monotonic revision — the annotation precondition the UI supplies so a stale annotation refuses instead of clobbering; null on a row with no revision. **Excludes** the ticket `body` (free content) and `closedCommit` (a git SHA).
+- **`queue`** (`RemoteQueueProjection`) — `projectKey`, `storageMode`, `queueAvailable`, `unavailableReason`, `version`, `rows[]`, and `views` (a partition of ticket ids into columns). Each row carries only board-level facts plus the closed `waitKind` vocabulary and, since FG-783, `revision` (same meaning as the backlog ticket's, null when absent); a row's `title` is passed through `redactRemoteFreeText`. **Excludes** `reservation` (claim owner / launch / run ids), free-text blocker/readiness detail, `enqueuedBy`/`note`, scan detail, the free-text `wait.reason`, the whole `dispatcher` control-plane panel, and `capacity` (which carries **cross-project** holder rows).
 - **`campaigns`** (`RemoteCampaignSummary[]`) — per campaign: `campaignId`, `goal`, `mode`, `status`, `verdict`, `createdAt`, `updatedAt`, `counts`, and a minimal `currentItem`. `goal` and `currentItem.title` are passed through `redactRemoteFreeTextOrNull`. **Excludes** `projectDir` (a host path). Counts are this project's own, never a cross-project aggregate.
 - **`inbox`** (`RemoteInbox`) — `generatedAt`, `items[]`, `empty`, `degraded[]`. Each item carries id-only `links` (`runId`/`taskId`/`ticketId`/`campaignId`/`itemId`); its `reason`/`requestedAction` is passed through a denylist redactor (`redactRemoteFreeText`, `dashboard/src/remote/projection.ts`) that blanks credential-shaped tokens, remote-control URLs, and absolute filesystem paths before the envelope leaves the process; see [Remote Board free text](redaction.md#remote-board-free-text-fg-781). **Excludes** the envelope `scope` (projectDirs paths) and the item `links.projectDir`/`projectLabel`.
 - **`activity`** (`RemoteActivitySummary`) — a **summary**: `generatedAt`, minimal `agents[]` (id/label set, no `projectDir`, no argv), `counts` for the launch/verification/wait buckets, the closed `requiredCiState` vocabulary, and `hasLiveWork`. Each agent's `runTitle` is passed through `redactRemoteFreeText`. **Excludes** every launch/CI **row** — they carry host argv (`command`/`commandLine`), host paths, and CI/remote-control URLs — surfacing only their counts.
@@ -1265,6 +1271,73 @@ A provider states what it does **not** support, rather than silently pretending.
 ### The sync engine reuses this contract
 
 The host-side sync engine (`dashboard/src/kanban/sync.ts`) is pure: it takes an already-assembled FG-781 `RemoteBoard` as its **only** card-data source, a `KanbanProvider` to push to, and an injected store port naming exactly the four `kanban_projection_map` / `kanban_conflicts` accessors. It performs no raw store query and writes nothing but those two tables through the port, so by construction a sync can never reorder or mutate a Forge lifecycle row (AC3). Retryable outcomes are handled by a bounded, injectable exponential backoff that honors a `rate-limited` result's `retryAfterMs` floor (clamped to a policy ceiling). The engine's entrypoint (`dashboard/src/kanban/cli-entry.ts`) is the one place that reads the provider credential from the host environment and calls `assembleRemoteBoard`; the credential is dropped at that edge and never reaches a row, log, or the printed summary (AC6).
+### Planning command surface (FG-783)
+
+FG-783 turns the read-only board into a **bounded** authenticated *write* surface: an identity granted the `plan` capability may run exactly **four** planning actions — nothing else is reachable, by construction. This is `public_api_changed` (a new POST route, a new GET audit route, a command envelope, and an audit primitive) + `operator_behavior_changed` (a new grantable capability and its operator docs) + `architecture_changed` (two additive store tables → [ADR 2026-09-08](../learnings/decisions/2026-09-08_remote-board-planning-mutations.md)).
+
+#### The closed command registry
+
+`REMOTE_PLANNING_ACTIONS` (`dashboard/src/remote/planning/registry.ts`) is a closed map, asserted **over data** (the FG-591 `QUEUE_MUTATION_FORGE_VERBS` precedent), of exactly the four planning actions to the in-process store authority each delegates to. A source guard (`registry.source-guard.test.ts`) proves the action set equals exactly these and that no excluded verb — `completion`, `closure`, `gate`, `override`, `run`, `campaign`, `merge`, `publish`, `review`, `disposition`, `terminal`, `cleanup`, `credential`, `raci`, `model-policy`, or any arbitrary CLI verb — is a key, an authority, or reachable anywhere in the registry (AC5/AC6). There is **no CLI dispatch at all**: the registry names store-authority calls, not shelled verbs.
+
+| Wire action | Store authority delegated to | Precondition |
+|---|---|---|
+| `change-rank` | `queue.rankBefore` / `queue.rankAfter` | queue `expectedVersion` CAS |
+| `enqueue` | `queue.enqueueTicket` (through the readiness gates) | readiness re-checked at the current ticket revision |
+| `dequeue` | `queue.dequeueTicket` | none (retains rank; no version to clobber) |
+| `reorder-queue` | `queue.setQueueOrder` / `queue.moveQueuePosition` | queue `expectedVersion` CAS |
+| `append-annotation` | `appendPlanningAnnotation` (new) | ticket `revision` |
+
+The requested actions are "change canonical stack rank, enqueue/dequeue through the readiness gates, reorder the operator queue, append a bounded planning annotation"; `enqueue` and `dequeue` are distinct store operations, so they surface as two of the five concrete wire actions above (four requested capabilities → five wire actions). A precondition **never keys off a rank *value*** (renumbered on every move) — only `queueVersion` / order fingerprint / ticket revision.
+
+#### The command envelope
+
+`POST /api/plan` accepts a JSON body validated into a `PlanningEnvelope` (`dashboard/src/remote/planning/envelope.ts`). The wire body carries only the caller-derived half of a command:
+
+- `action` — one of the closed registry actions; any other shape refuses `400`.
+- `requestId` — the idempotency key (`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`, no leading `-`), the durable ledger's `request_id`.
+- `ticketId` — strict `TICKET_ID` (`^[A-Za-z][A-Za-z0-9]{0,23}-[0-9]{1,9}$`; cannot express `..`, a path separator, a shell metacharacter, or a leading `-`).
+- Per-action operands: `reference` + `placement` + `expectVersion` (change-rank); optional bounded `note` (enqueue); `order[]` **or** `ticketId`+`to` + `expectVersion` (reorder-queue, mutually exclusive forms); `body` + `ticketRevision` (append-annotation).
+- **Bounds:** `MAX_BODY_BYTES` = 64 KiB (the request body cap), `MAX_NOTE_CHARS` = 500, `MAX_ANNOTATION_CHARS` = 2000, `MAX_ORDER_IDS` = 1000. Integers are parsed *strictly* (never `parseInt`, under which `"2x"→2`). Every caller string passes `assertOperand` (non-empty, no leading `-`).
+
+**`actor`, `subject`, `transport`, `projectKey`, `projectDir`, and `timestamp` are server-authoritative and unrepresentable in the envelope type.** They are in the `FORBIDDEN_BODY_KEYS` denylist: a body that names any of them is a *refusal*, not a silent drop. The server attaches them from the bound resolver (the verified identity's subject, its adapter, and its server-resolved project scope) — never from the body. This is the AC3 "authenticated actor / transport / project key never from the body" guarantee at the type level.
+
+#### CSRF / same-origin guard
+
+Before any envelope is read, `guardRemotePlanningRequest` (`dashboard/src/remote/planning/csrf.ts`) fails closed unless **all** hold:
+
+1. **Non-simple content type** — `Content-Type: application/json` is required. A simple content type (form / `<img>` / `text/plain`) that a cross-site page can send without a preflight is refused.
+2. **`Sec-Fetch-Site`** — only `same-origin` or `none` (the browser's own unspoofable provenance statement) pass; `cross-site`/`same-site` refuse `403`.
+3. **Origin/Host pinned to the Serve hostname** — the allowed host/origin set comes **only** from Forge-owned serve-state (`readServeState().serveHost` / `.url`, `dashboard/src/remote/tailscale/serve-state.ts`), **never** from the request `Host`, `X-Forwarded-Host`, or the loopback bind. A `Host`/`Origin` the serve-state was not configured for is a rebound name and is refused. `Origin: null` (sandboxed iframe / `file://`) is never in the pinned set. **Absent serve-state fails closed** — with nothing to pin to, planning is refused entirely (run `forge remote tailscale setup` first).
+
+A CORS preflight (`OPTIONS`) — like any non-`GET`/non-`POST` method — is a flat `405` with **no `Access-Control-Allow-*` header**, so a cross-origin caller's preflight fails before the real request is sent.
+
+#### Request pipeline (`POST /api/plan`)
+
+The handler (`dashboard/src/remote/server.ts`) runs every guard **in order, before any write**: resolve identity via the same bound resolver (actor/transport/project scope server-authoritative) → require `hasCapability(identity, "plan")` (a read-only identity is refused with no mutation) → `guardRemotePlanningRequest` (CSRF) → read the body under the cap and validate the envelope → resolve the server-authoritative project scope exactly as the read path does (`claimedDirsWithinProject`; a cross-project claim refuses) → enforce `MAX_CONCURRENT_PLANNING` (4) in-flight → delegate to `applyRemotePlanningCommand`. Every AC4 negative — cross-project, unauthorized/no-adapter, CSRF, spoofed `Origin`/forged `X-Forwarded-Host`, malformed, oversized — fails closed with zero mutation.
+
+The response is **non-optimistic**: it carries exactly what committed — `outcome` (`applied`→`200`; a precondition/readiness refusal→`409` with the current safe summary so the client re-reads and resubmits), `replayed`, `requestId`, `action`, `targetId`, `precondition`, `summary`, `createdAt`. It never synthesizes a success.
+
+#### The store authority — atomic ledger + precondition + mutation + audit
+
+`applyRemotePlanningCommand` (`src/store/remote-planning.ts`) is the **only** writer of the two new tables and the single atomic owner of the whole operation. In **one** `writeTransaction` (`BEGIN IMMEDIATE`) it: (a) **replay short-circuit** — looks up `(projectKey, requestId)` in `remote_planning_commands` and, if present and the stored row's actor/action/target/precondition match the incoming command, returns the *recorded* outcome without re-invoking any primitive (so a redelivery — including after a server restart / reopened DB handle — never re-applies and never re-runs enqueue readiness). The lookup is scoped to the committing project because a request id is unique only within the identity that minted it — keying on `requestId` alone would let one project's collision read or suppress another project's recorded outcome. If the same `(projectKey, requestId)` is reused for a *different* command (mismatched actor/action/target/precondition), the request refuses with zero mutation and no ledger row rather than replaying the unrelated outcome; (b) **precondition check** — per the table above, refusing with zero mutation and a current safe summary on a stale/failed precondition; (c) **delegate** to the same domain authority local ops use (`src/store/queue.ts` accessors for the queue actions, `appendPlanningAnnotation` for the annotation); (d) **write** the ledger+audit row (and, for annotate, the annotation row) in the same commit. A refusal also commits its ledger row (`outcome='refused'`), so a genuine retry after re-reading is a **new** `requestId`, not a re-send of the refused one. Because ledger + precondition + mutation + audit share one transaction, there is no cross-process double-apply window — the reason these writes go through the in-process store authority rather than the CLI shell (see the [CLI-surface reconciliation](#cli-surface-for-mutations) below).
+
+#### The two additive store tables
+
+Both are `CREATE TABLE IF NOT EXISTS`, appended inside `SCHEMA_SQL` (`src/store/schema.ts`) with `PRAGMA user_version` / `SCHEMA_VERSION` **untouched** (the FG-568/BD-15 forward-gate contract; a new table needs no additive-column-list entry). Fresh-DB and aged/migrated PRAGMA parity is proven in `fg608-migration-parity.test.ts`.
+
+- **`remote_planning_commands`** — the durable request-id ledger **and** the audit row in one. Columns: `request_id`, `actor`, `transport`, `project_key`, `action`, `target_id`, `precondition` (queue expectedVersion / ticket revision / order fingerprint, as text), `outcome` (`applied`|`refused`, enum-as-convention, no `CHECK`), `result_summary` (the safe summary replayed verbatim on redelivery), `created_at`, with **`PRIMARY KEY (project_key, request_id)`** — a composite key, not `request_id` alone, because a request id is unique only within the identity that minted it and a global key would let one project's id collision read or suppress another project's outcome. No FK to tickets/queue (the `queue_events`/`queue_claims` precedent — the audit row must survive its subject through FG-608 removal reconciliation). **No secrets or filesystem paths are ever stored.**
+- **`ticket_planning_annotations`** — the authoritative operator planning-annotation primitive that did not exist before (FG-703's `ops.adjudicated` is an *event*; queue/backlog `--note` annotates a *membership*, not a free-standing ticket annotation). Columns: `id` (PK), `project_key`, `ticket_id`, `ticket_revision` (the precondition it was appended against), `actor`, `body` (bounded at the envelope layer), `created_at`, `request_id` (NULLABLE — links to the ledger; a local, non-remote annotation could append without one). No FK to tickets, same reconciliation reason.
+
+#### Audit / annotation read DTOs (same-project, redacted)
+
+The store authority exposes two same-project-scoped, redactable read accessors:
+
+- `remotePlanningAudit(projectKey)` → `RemotePlanningAuditRow[]` (newest last) — `requestId`, `actor`, `transport`, `projectKey`, `action`, `targetId`, `precondition`, `outcome`, `summary` (`SafeSummary`), `createdAt`. Scoped by `project_key` so a remote reader can never see another project's planning history.
+- `planningAnnotations(projectKey, ticketId)` → `PlanningAnnotation[]`.
+
+`SafeSummary` carries only a `message` plus ids/versions/revisions (`queueVersion`, `queue[]`, `ticketRevision`, `position`, `annotationId`) — no secrets and no filesystem paths, by construction (the columns store none). The audit DTO is the primitive a same-project remote read consumes, redacted through the existing remote redactor before it crosses the boundary; it never includes secrets, paths, or another project's rows.
+
+`GET /api/plan/audit` (`dashboard/src/remote/server.ts`) puts `remotePlanningAudit` on the wire, gated on the **`read`** capability — the same grant the board read requires, not `plan` — so a read-only identity can see its own project's planning history even with no mutation rights. It reuses the read path's identity resolution and `claimedDirsWithinProject` scope check verbatim, so it can never return another project's rows: `401` with no verified identity or a cross-project claim, `403` lacking `read`, `404` if the granted project is not registered, `503` if the audit table can't be read. On success (`200`): `{ ok: true, projectKey, rows: [{ requestId, actor, transport, action, targetId, precondition, outcome, message, createdAt }] }`, where `message` is `summary.message` swept through `redactRemoteFreeText` (empty string when the summary carries none).
 
 ## CLI surface (for mutations)
 
@@ -1286,6 +1359,8 @@ Mutating commands the dashboard might invoke in future:
 - `forge new <workflow> "<title>" [...flags]`
 
 This boundary is FORGE-DEC-015 carried forward from v1: dashboards don't bypass the CLI; the CLI's auth/validation/event-emission logic stays the single entrypoint for state changes.
+
+**Reconciliation with the Remote Board planning surface (FG-783).** The four remote planning actions ([above](#planning-command-surface-fg-783)) do **not** shell the `forge` CLI — they delegate to an **in-process store authority** (`applyRemotePlanningCommand`, `src/store/remote-planning.ts`) that reuses the exact `src/store/queue.ts` accessors local operations use. This is a deliberate, narrow departure from the CLI-shell path above, and it does **not** weaken FORGE-DEC-015's intent: the store authority *is* a single authoritative entrypoint that runs the same validation/precondition/event logic, and the remote HTTP handler still never writes a Forge table itself — it only delegates. The reason it cannot go through the CLI is atomicity. FG-783's replay ledger, precondition check, mutation, and audit row must all commit in **one** `writeTransaction` (`BEGIN IMMEDIATE`); shelling a separate `forge` process (whose own DB handle is a distinct connection) would put a crash window between the CLI's commit and the handler recording the ledger/audit row, allowing a redelivery to double-apply. The in-process authority closes that window. See [ADR 2026-09-08](../learnings/decisions/2026-09-08_remote-board-planning-mutations.md) for the full decision. The queue-write *authority* is shared with the CLI; only the *transport* to it differs.
 
 ## Versioning
 

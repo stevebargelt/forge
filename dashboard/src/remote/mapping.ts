@@ -47,9 +47,11 @@ export const IDENTITY_MAPPING_FILENAME = "remote-board-identity.yml";
 export const IDENTITY_MAPPING_VERSION = 1;
 
 /**
- * One resolved grant: a whois-confirmed tailnet login may read exactly ONE project at the
- * given capabilities. `capabilities` is always a non-empty subset of the closed
- * {@link REMOTE_CAPABILITIES} vocabulary (today: `["read"]`).
+ * One resolved grant: a whois-confirmed tailnet login is authorized on exactly ONE project at
+ * the given capabilities. `capabilities` is always a non-empty subset of the closed
+ * {@link REMOTE_CAPABILITIES} vocabulary (`read`, `plan` — FG-783). An entry grants each
+ * capability only by naming it: `[read]` is read-only, `[plan]` is plan-only, `[read, plan]`
+ * grants both. There is no implicit widening — a forged `mutate`/`write` still taints and drops.
  */
 export interface IdentityGrant {
   /** The normalized (trimmed, lower-cased) tailnet login this grant is keyed on. */

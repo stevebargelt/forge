@@ -1850,6 +1850,95 @@ CREATE TABLE IF NOT EXISTS kanban_conflicts (
   resolved_at       TEXT,
   resolution        TEXT
 );
+-- FG-783 (Remote Board bounded planning mutations): TWO brand-new tables arriving
+-- WHOLE via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same
+-- additive-only BD-15 contract as every table above (continuations / queue_claims /
+-- launch_observations / ci_waits). SCHEMA_SQL is exec'd on EVERY writable open, so
+-- these CREATEs are themselves the additive migration that brings an aged
+-- ~/.forge/forge.db forward; a whole new table needs no ADDITIVE_COLUMNS entry for
+-- its NOT-NULL-no-default columns (that list restores COLUMNS a CREATE-IF-NOT-EXISTS
+-- would no-op over, and the fresh-vs-migrated parity guard strips only RESTORABLE
+-- columns). SCHEMA_VERSION is NOT bumped and user_version is NOT touched (FG-568
+-- forward-gate contract), so an older forge binary sharing the DB is never broken.
+
+-- Table A — the durable REQUEST-ID LEDGER and the AUDIT ROW in one. A remote
+-- planning command writes exactly one row here, INSIDE the same writeTransaction as
+-- the mutation it records (src/store/remote-planning.ts, FG-783 step 3), so the
+-- idempotency receipt and the audit fact commit together or not at all.
+--
+-- request_id is the PRIMARY KEY — the idempotency key. A redelivery (including after
+-- a server restart / reopened DB) looks up this row and returns the RECORDED outcome
+-- without re-invoking any primitive, so a command never applies twice. PRIMARY KEY
+-- gives it the UNIQUE-NOT-NULL constraint that replay-resistance depends on.
+--
+-- actor / transport / project_key are SERVER-AUTHORITATIVE facts stamped from the
+-- resolver, NEVER from the request body (FG-781/FG-782 identity boundary). action and
+-- target_id name the closed-registry action and its subject. precondition records the
+-- per-action guard AS TEXT (queue expectedVersion / ticket revision / order
+-- fingerprint) so the audit shows what the command was checked against; it is NULL for
+-- an action that carries no version (dequeue). outcome is 'applied' | 'refused'
+-- (enum-as-convention, FG-585 — NO CHECK, so an old/new binary never fights a
+-- constraint the other lacks); result_summary is the recorded safe summary replayed
+-- verbatim on redelivery. No FK to tickets/queue, deliberately — the queue_events /
+-- queue_claims precedent: this audit/ledger row must survive its subject through
+-- FG-608 removal reconciliation. No secrets or filesystem paths are ever stored here.
+-- RF-1 (FG-783): the replay ledger is keyed on (project_key, request_id), NOT
+-- request_id alone. A request id is unique only within the identity that minted it,
+-- so a global request_id key let one authorized project read another project's
+-- recorded outcome (or suppress its own command) on an id collision — a trust-
+-- boundary defect. The composite primary key scopes every ledger lookup to the
+-- committing project; findLedgerRow reads WHERE project_key = ? AND request_id = ?.
+CREATE TABLE IF NOT EXISTS remote_planning_commands (
+  request_id     TEXT NOT NULL,
+  actor          TEXT NOT NULL,
+  transport      TEXT NOT NULL,
+  project_key    TEXT NOT NULL,
+  action         TEXT NOT NULL,
+  target_id      TEXT NOT NULL,
+  precondition   TEXT,
+  outcome        TEXT NOT NULL,
+  result_summary TEXT,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (project_key, request_id)
+);
+-- Same-project audit reads (remotePlanningAudit(projectKey)) scan by project then
+-- recency. On a brand-new table born whole from the CREATE above, so indexing it
+-- cannot pin any ALTER-restorable column undroppable; project_key/created_at are both
+-- NOT NULL with no default (already non-restorable), so the parity guard's UNDROPPABLE
+-- set is untouched.
+CREATE INDEX IF NOT EXISTS idx_remote_planning_commands_project
+  ON remote_planning_commands(project_key, created_at);
+
+-- Table B — the authoritative operator PLANNING-ANNOTATION primitive, which does not
+-- exist today (FG-703's ops.adjudicated is an EVENT, and queue/backlog --note
+-- annotates a MEMBERSHIP row, not a free-standing ticket annotation). One row per
+-- appended annotation, written by appendPlanningAnnotation inside the same
+-- writeTransaction as its ledger row (FG-783 step 3).
+--
+-- ticket_revision is the PRECONDITION the annotation was appended against (the
+-- tickets.revision at apply time), symmetric with the queue actions' expectedVersion:
+-- an annotation targeting a superseded revision refuses with zero mutation. body is
+-- bounded at the envelope layer (MAX_BODY_BYTES / MAX_NOTE_CHARS, FG-783 step 4) — no
+-- CHECK here, matching the enum/bound-as-convention discipline. request_id links back
+-- to remote_planning_commands; it is NULLABLE so a non-remote (local) annotation could
+-- append without a remote command ledger row. No FK to tickets, deliberately — the
+-- queue_events / queue_claims precedent again: the planning-annotation history must
+-- remain auditable after FG-608 removal reconciliation removes the ticket.
+CREATE TABLE IF NOT EXISTS ticket_planning_annotations (
+  id              TEXT PRIMARY KEY,
+  project_key     TEXT NOT NULL,
+  ticket_id       TEXT NOT NULL,
+  ticket_revision INTEGER NOT NULL,
+  actor           TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  request_id      TEXT
+);
+-- planningAnnotations(projectKey, ticketId) reads by ticket then recency. Brand-new
+-- table, born whole from the CREATE; every indexed column is NOT NULL with no default
+-- (non-restorable already), so no new UNDROPPABLE entry is introduced.
+CREATE INDEX IF NOT EXISTS idx_ticket_planning_annotations_ticket
+  ON ticket_planning_annotations(project_key, ticket_id, created_at);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -2438,6 +2527,27 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // fallback means some of those rows' recorded values are guesses, which is precisely
   // what a NULL here refuses to inherit.
   { table: "orchestrator_receipts", column: "project_dir_canonical", ddl: "ALTER TABLE orchestrator_receipts ADD COLUMN project_dir_canonical TEXT" },
+
+  // FG-783: the two Remote Board planning tables. Both are brand-new, so a real old
+  // DB gets each of them WHOLE from CREATE TABLE IF NOT EXISTS and none of these
+  // ALTERs ever fires there. They are declared anyway for the SAME reason FG-609's,
+  // FG-610's, FG-655's, FG-679's, FG-591's and FG-576's brand-new tables are: the
+  // additive-only invariant is only CHECKABLE if this list is EXHAUSTIVE, and
+  // fg608-migration-parity.test.ts enforces that by stripping a fresh DB to the oldest
+  // shape SQLite permits and demanding the migration path restore it. A restorable
+  // column with no entry here fails that test.
+  //
+  // Only the RESTORABLE columns appear. On remote_planning_commands, (project_key,
+  // request_id) is the composite primary key (RF-1) and actor, transport, action,
+  // target_id, outcome and created_at are NOT NULL with NO DEFAULT — ADD COLUMN could
+  // never put any of them back, so listing them would be a lie; only precondition and
+  // result_summary are nullable. On ticket_planning_annotations, id is the primary key and project_key,
+  // ticket_id, ticket_revision, actor, body and created_at are NOT NULL with NO
+  // DEFAULT; only request_id is nullable.
+  { table: "remote_planning_commands", column: "precondition", ddl: "ALTER TABLE remote_planning_commands ADD COLUMN precondition TEXT" },
+  { table: "remote_planning_commands", column: "result_summary", ddl: "ALTER TABLE remote_planning_commands ADD COLUMN result_summary TEXT" },
+
+  { table: "ticket_planning_annotations", column: "request_id", ddl: "ALTER TABLE ticket_planning_annotations ADD COLUMN request_id TEXT" },
 ];
 
 // FG-693 — THE LOOKUP INDEXES THE CANONICAL COLUMNS NEED, declared as DATA for the

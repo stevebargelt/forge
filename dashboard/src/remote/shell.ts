@@ -26,17 +26,28 @@ export const REMOTE_CLIENT_URL_PREFIX = "/remote-client/";
 /** The remote projection endpoint the board script polls. A GET-only, read-only route. */
 export const REMOTE_BOARD_ENDPOINT = "/api/board";
 
+/** The remote planning POST route (FG-783) the board submits bounded planning commands to. The
+ *  server (server.ts) owns the route as `REMOTE_PLAN_ENDPOINT`; this mirror lets the shell hand
+ *  the board its planning endpoint in the same bootstrap as the read endpoint, so board.js
+ *  carries no hardcoded route. Both are the stable literal `/api/plan`; a shell.test.ts
+ *  assertion pins this value so the two copies cannot silently drift. */
+export const REMOTE_PLAN_ENDPOINT = "/api/plan";
+
 /** The board's entry module under the remote asset prefix (FG-781 step 5 owns the file). */
 export const REMOTE_BOARD_ENTRY = `${REMOTE_CLIENT_URL_PREFIX}board.js`;
 
 /**
  * The remote board's Content-Security-Policy. `script-src 'self'` admits the same-origin
- * board module; the per-response `'nonce-…'` admits the one inline bootstrap script. Only
- * script-src is constrained (no default-src), so inline <style> and the shell's own layout
- * are unaffected — the same shape the local dashboard's CSP uses, scoped to this surface.
+ * board module; the per-response `'nonce-…'` admits the one inline bootstrap script.
+ * `connect-src 'self'` (FG-783) pins the board's own fetches — the GET projection read and the
+ * bounded planning POST — to this same origin: with no `default-src`, connect would otherwise
+ * be unrestricted, so this is the network-egress half of the same-origin story the CSRF guard
+ * enforces server-side. style-src stays unconstrained (no default-src) so inline <style> and
+ * the shell's own layout are unaffected. Nothing here loosens script execution: no unsafe-inline,
+ * no eval, no remote origin — a foreign or inline script is still refused at runtime.
  */
 export function remoteContentSecurityPolicy(nonce: string): string {
-  return `script-src 'self' 'nonce-${nonce}'`;
+  return `script-src 'self' 'nonce-${nonce}'; connect-src 'self'`;
 }
 
 /** A fresh per-response CSP nonce — base64 of 16 random bytes — matched verbatim between the
@@ -53,7 +64,10 @@ export function remoteCspNonce(): string {
  * The bootstrap carries ONLY the endpoint path — no project data, no identity, no secret.
  */
 export function renderRemoteShell(nonce: string): string {
-  const bootstrap = `window.__REMOTE_BOARD__=${JSON.stringify({ endpoint: REMOTE_BOARD_ENDPOINT })};`;
+  const bootstrap = `window.__REMOTE_BOARD__=${JSON.stringify({
+    endpoint: REMOTE_BOARD_ENDPOINT,
+    planEndpoint: REMOTE_PLAN_ENDPOINT,
+  })};`;
   return `<!doctype html>
 <html lang="en">
 <head>

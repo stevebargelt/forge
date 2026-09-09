@@ -49,6 +49,7 @@ import {
 } from "../queries.js";
 import type { InboxEnvelope, AttentionItem } from "../attention-inbox.js";
 import type { CurrentActivityWithRetention } from "@forge/current-activity";
+import type { RemoteCapability } from "./identity.js";
 
 // ─── envelope + state discriminator (FG-781 AC5, contract half) ─────────────────
 
@@ -70,6 +71,11 @@ export type RemoteBoardEnvelope = {
   generation: number;
   /** The project-scoped board — present ONLY for `live`/`stale`, null for every refusal. */
   board: RemoteBoard | null;
+  /** RF-2: the authenticated identity's granted capabilities, from the closed remote
+   *  vocabulary (`read` | `plan`). The client renders planning affordances ONLY when
+   *  `plan` is present, so a read-only identity is never shown mutation controls the
+   *  server would refuse. Empty on every refusal/degradation (no verified identity). */
+  capabilities: readonly RemoteCapability[];
 };
 
 /** The five allowlist DTOs the remote board carries. `projectSummary`, plus the combined
@@ -123,6 +129,10 @@ export type RemoteBacklogTicket = {
   type: string;
   status: string;
   title: string;
+  /** RF-2: the ticket's monotonic revision — the annotation precondition the UI must
+   *  supply so an annotation on a revisioned ticket is not refused as stale. Null on a
+   *  row that carries no revision. */
+  revision: number | null;
   epic: string | null;
   created: string | null;
   closed: string | null;
@@ -142,6 +152,7 @@ export function toRemoteBacklogTicket(ticket: BacklogTicket): RemoteBacklogTicke
     type: ticket.type,
     status: ticket.status,
     title: redactRemoteFreeText(ticket.title),
+    revision: ticket.revision,
     epic: ticket.epic ?? null,
     created: ticket.created ?? null,
     closed: ticket.closed ?? null,
@@ -174,6 +185,9 @@ export type RemoteQueueRow = {
   type: string;
   status: string;
   rank: number | null;
+  /** RF-2: the ticket's monotonic revision — the annotation precondition (see
+   *  RemoteBacklogTicket.revision). Null on a row that carries no revision. */
+  revision: number | null;
   queued: boolean;
   blocked: boolean;
   inProgress: boolean;
@@ -200,6 +214,7 @@ export function toRemoteQueueRow(row: QueueBoardRow): RemoteQueueRow {
     type: row.type,
     status: row.status,
     rank: row.rank,
+    revision: row.revision,
     queued: row.queued,
     blocked: row.blocked,
     inProgress: row.inProgress,
@@ -458,6 +473,9 @@ export type AssembleRemoteBoardOptions = {
   /** When the caller knows the read is served from a degraded/behind host, it downgrades the
    *  envelope to `stale` so the client never renders it as live. Defaults to a live read. */
   stale?: boolean;
+  /** RF-2: the authenticated identity's granted capabilities, carried onto the envelope
+   *  so the client can gate planning affordances on `plan`. Defaults to empty. */
+  capabilities?: readonly RemoteCapability[];
 };
 
 /** Recent-campaign clamp — the same default the local /api/campaigns route uses. */
@@ -507,6 +525,7 @@ export function assembleRemoteBoard(
     generatedAt: new Date(nowMs).toISOString(),
     generation: nowMs,
     board,
+    capabilities: options.capabilities ? [...options.capabilities] : [],
   };
 }
 
@@ -517,7 +536,7 @@ export function assembleRemoteBoard(
 // on every request in FG-781 (no transport adapter is wired, so identity is always absent).
 
 function closedEnvelope(state: RemoteBoardState, nowMs: number): RemoteBoardEnvelope {
-  return { state, generatedAt: new Date(nowMs).toISOString(), generation: nowMs, board: null };
+  return { state, generatedAt: new Date(nowMs).toISOString(), generation: nowMs, board: null, capabilities: [] };
 }
 
 /** No verified identity / project-scope grant / capability — refuse without project data. */

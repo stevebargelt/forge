@@ -41,8 +41,8 @@ describe("buildIdentityMapping — the happy path grants exactly one project, re
     assert.equal(m.size, 1);
   });
 
-  test("the only capability a grant can carry is the closed read-only vocabulary", () => {
-    assert.deepEqual([...REMOTE_CAPABILITIES], ["read"], "guard: FG-782 is read-only");
+  test("the only capabilities a grant can carry are the closed vocabulary (read, plan)", () => {
+    assert.deepEqual([...REMOTE_CAPABILITIES], ["read", "plan"], "guard: closed vocabulary");
     const grant = buildIdentityMapping(oneIdentity()).lookup("alice@example.ts.net");
     assert.ok(grant);
     for (const cap of grant.capabilities) assert.ok(REMOTE_CAPABILITIES.includes(cap));
@@ -52,6 +52,59 @@ describe("buildIdentityMapping — the happy path grants exactly one project, re
     const m = buildIdentityMapping(oneIdentity());
     assert.ok(m.lookup("  ALICE@EXAMPLE.TS.NET  "), "a stray-case/space lookup still resolves");
     assert.equal(m.lookup("alice@example.ts.net")?.projectKey, "repo-alpha");
+  });
+});
+
+describe("buildIdentityMapping — the 'plan' capability grants purely through the vocabulary (FG-783)", () => {
+  test("an entry granting [plan] validates and is looked up — no new mechanism", () => {
+    const m = buildIdentityMapping({
+      identities: [{ login: "pat@example.ts.net", project: "repo-alpha", capabilities: ["plan"] }],
+    });
+    const grant = m.lookup("pat@example.ts.net");
+    assert.ok(grant, "a plan-only grant validates");
+    assert.equal(grant.projectKey, "repo-alpha");
+    assert.deepEqual([...grant.capabilities], ["plan"]);
+    // A plan grant does NOT silently carry read — the entry holds only what it named.
+    assert.equal(grant.capabilities.includes("read" as never), false);
+  });
+
+  test("an entry granting [read, plan] validates and carries both, in order", () => {
+    const m = buildIdentityMapping({
+      identities: [
+        { login: "quinn@example.ts.net", project: "repo-alpha", capabilities: ["read", "plan"] },
+      ],
+    });
+    const grant = m.lookup("quinn@example.ts.net");
+    assert.ok(grant);
+    assert.deepEqual([...grant.capabilities], ["read", "plan"]);
+  });
+
+  test("a read-only entry does NOT gain plan — additive-capability invariant at the mapping layer", () => {
+    const grant = buildIdentityMapping(oneIdentity()).lookup("alice@example.ts.net");
+    assert.ok(grant);
+    assert.deepEqual([...grant.capabilities], ["read"]);
+    assert.equal(grant.capabilities.includes("plan" as never), false);
+  });
+
+  test("plan alongside a forged capability still taints and drops the WHOLE entry", () => {
+    const m = buildIdentityMapping({
+      identities: [
+        { login: "eve@example.ts.net", project: "repo-alpha", capabilities: ["plan", "mutate"] },
+      ],
+    });
+    assert.equal(m.lookup("eve@example.ts.net"), null, "plan+mutate → dropped, no plan grant survives");
+    assert.equal(m.size, 0);
+  });
+
+  test("a duplicate login is still poisoned even when granting plan", () => {
+    const m = buildIdentityMapping({
+      identities: [
+        { login: "dup@example.ts.net", project: "repo-alpha", capabilities: ["plan"] },
+        { login: "dup@example.ts.net", project: "repo-bravo", capabilities: ["read", "plan"] },
+      ],
+    });
+    assert.equal(m.lookup("dup@example.ts.net"), null, "ambiguous duplicate resolves to nothing");
+    assert.equal(m.size, 0);
   });
 });
 

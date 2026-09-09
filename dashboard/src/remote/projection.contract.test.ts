@@ -124,21 +124,24 @@ describe("FG-781 AC4: runtime — forbidden fields cannot enter a remote DTO", (
     assert.equal(out.projectKey, "pk-a");
   });
 
-  test("backlog ticket allowlist — body and closedCommit are dropped", () => {
+  test("backlog ticket allowlist — body and closedCommit are dropped; revision carried (RF-2)", () => {
     const out = toRemoteBacklogTicket(
       pollute({
         id: "FG-1",
         type: "story",
         status: "active",
         title: "Ticket title",
+        revision: 4,
         epic: "FG-0",
         created: "2026-09-01T00:00:00Z",
         closed: null,
         related: ["FG-2"],
       }),
     );
-    assertSealed("backlogTicket", out, ["id", "type", "status", "title", "epic", "created", "closed", "related"]);
+    assertSealed("backlogTicket", out, ["id", "type", "status", "title", "revision", "epic", "created", "closed", "related"]);
     assert.deepEqual(out.related, ["FG-2"]);
+    // RF-2 SCHEMA-CONTRACT: the annotation precondition rides on the DTO so the UI supplies it.
+    assert.equal(out.revision, 4, "the ticket revision is carried as the annotation precondition");
   });
 
   test("backlog projection wraps allowlisted tickets", () => {
@@ -153,7 +156,7 @@ describe("FG-781 AC4: runtime — forbidden fields cannot enter a remote DTO", (
     assert.equal(out.tickets.length, 1);
   });
 
-  test("queue row allowlist — reservation/blockers/scan/note and free-text wait.reason dropped", () => {
+  test("queue row allowlist — reservation/blockers/scan/note dropped; revision carried (RF-2)", () => {
     const out = toRemoteQueueRow(
       pollute({
         ticketId: "FG-1",
@@ -161,6 +164,7 @@ describe("FG-781 AC4: runtime — forbidden fields cannot enter a remote DTO", (
         type: "story",
         status: "active",
         rank: 2,
+        revision: 9,
         queued: true,
         blocked: false,
         inProgress: true,
@@ -175,6 +179,7 @@ describe("FG-781 AC4: runtime — forbidden fields cannot enter a remote DTO", (
       "type",
       "status",
       "rank",
+      "revision",
       "queued",
       "blocked",
       "inProgress",
@@ -183,6 +188,8 @@ describe("FG-781 AC4: runtime — forbidden fields cannot enter a remote DTO", (
       "waitKind",
     ]);
     assert.equal(out.waitKind, "blocker", "the closed wait-KIND survives");
+    // RF-2 SCHEMA-CONTRACT: the queued row carries the annotation precondition too.
+    assert.equal(out.revision, 9, "the ticket revision is carried on the queue row");
   });
 
   test("queue projection allowlist — dispatcher and capacity panels dropped", () => {
@@ -608,6 +615,8 @@ describe("FG-781 AC5: the envelope carries a five-state discriminator and a fres
       assert.equal(env.generation, 1000, `${label}: the freshness stamp is present`);
       assert.equal(env.generatedAt, new Date(1000).toISOString());
       assert.ok(REMOTE_BOARD_STATES.includes(env.state));
+      // RF-2: a refusal grants no capabilities — the client never renders planning controls.
+      assert.deepEqual(env.capabilities, [], `${label}: a refusal carries no granted capabilities`);
     }
   });
 });

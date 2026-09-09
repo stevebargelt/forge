@@ -71,7 +71,18 @@ class MemStore implements KanbanSyncStore {
 const PK = "pk-test";
 
 function ticket(id: string, over: Partial<RemoteBacklogTicket> = {}): RemoteBacklogTicket {
-  return { id, type: "story", status: "active", title: `Title ${id}`, epic: null, created: null, closed: null, related: [], ...over };
+  return {
+    id,
+    type: "story",
+    status: "active",
+    title: `Title ${id}`,
+    epic: null,
+    created: null,
+    closed: null,
+    related: [],
+    ...over,
+    revision: over.revision === undefined ? 1 : over.revision,
+  };
 }
 
 function queueRow(ticketId: string, view: RemoteQueueRow["view"]): RemoteQueueRow {
@@ -81,6 +92,7 @@ function queueRow(ticketId: string, view: RemoteQueueRow["view"]): RemoteQueueRo
     type: "story",
     status: "active",
     rank: null,
+    revision: 1,
     queued: false,
     blocked: false,
     inProgress: false,

@@ -154,6 +154,81 @@ test("EDITING an entry (project + capability) is honored on the next load", () =
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("a login granted [read, plan] loads both capabilities from the real file (FG-783)", () => {
+  const { env, path, dir } = tempForgeHome();
+  writeMapping(
+    path,
+    [
+      "version: 1",
+      "identities:",
+      "  - login: planner@example.ts.net",
+      "    project: repo-alpha",
+      "    capabilities: [read, plan]",
+      "  - login: reader@example.ts.net",
+      "    project: repo-alpha",
+      "    capabilities: [read]",
+    ].join("\n"),
+  );
+  const loaded = loadIdentityMapping(env);
+  const planner = loaded.lookup("planner@example.ts.net");
+  assert.ok(planner, "the plan-granted login is authorized");
+  assert.deepEqual([...planner.capabilities], ["read", "plan"]);
+  // The read-only sibling does not gain plan from the vocabulary change — additive invariant.
+  const reader = loaded.lookup("reader@example.ts.net");
+  assert.ok(reader);
+  assert.deepEqual([...reader.capabilities], ["read"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("editing an entry to add 'plan' is honored on the next load; removing it revokes plan", () => {
+  const { env, path, dir } = tempForgeHome();
+  writeMapping(
+    path,
+    [
+      "identities:",
+      "  - login: planner@example.ts.net",
+      "    project: repo-alpha",
+      "    capabilities: [read]",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    [...(loadIdentityMapping(env).lookup("planner@example.ts.net")?.capabilities ?? [])],
+    ["read"],
+    "starts read-only",
+  );
+
+  // Operator grants plan — honored on the next request, no restart.
+  writeMapping(
+    path,
+    [
+      "identities:",
+      "  - login: planner@example.ts.net",
+      "    project: repo-alpha",
+      "    capabilities: [read, plan]",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    [...(loadIdentityMapping(env).lookup("planner@example.ts.net")?.capabilities ?? [])],
+    ["read", "plan"],
+    "plan grant honored on the next load",
+  );
+
+  // Operator revokes plan back to read-only — the plan capability disappears on the next load.
+  writeMapping(
+    path,
+    [
+      "identities:",
+      "  - login: planner@example.ts.net",
+      "    project: repo-alpha",
+      "    capabilities: [read]",
+    ].join("\n"),
+  );
+  const after = loadIdentityMapping(env).lookup("planner@example.ts.net");
+  assert.ok(after);
+  assert.equal(after.capabilities.includes("plan" as never), false, "plan revoked on the next request");
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("a file emptied to nothing fails closed on the next load", () => {
   const { env, path, dir } = tempForgeHome();
   writeMapping(
