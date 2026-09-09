@@ -171,6 +171,16 @@ export type EventType =
   // target BEFORE it was validated — the defect FG-425 removes. The payload
   // carries the durable {target, baseSha, candidateSha, publishedSha} record.
   | "integration.published"
+  // FG-791: the base-SHA authority decision for a mutating task's workspace. Emitted
+  // by resolveTaskBaseSha at the moment a task (sequential step, fanout wave, or
+  // request-changes re-run) is given the commit its clone is cut from, so the phase
+  // record names both the base sha AND why it was chosen. Payload:
+  // { runId, taskId, baseSha, source } where source is one of
+  // 'reviewed_candidate' (the settled evidence-led review's candidate_sha — a post-
+  // review verify/docs phase basing on the reviewed tip), 'publication_receipt'
+  // (the run's last accepted publication for the target — the legacy / no-review
+  // base), or 'head' (the run's first mutating task, no receipt yet).
+  | "phase.base_resolved"
   // ── FG-584: the ordered fan-out's durable record. These exist because
   // readiness must be recomputable by ANY process, before and after a crash — an
   // in-memory accumulator owned by one dispatchFanoutStep invocation cannot be

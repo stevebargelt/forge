@@ -46,6 +46,7 @@ import { gradeFindings } from "./review-quality.js";
 import { REVIEW_DISPATCH_ROLES, selectRedsForContract } from "./review-contract.js";
 import { approvedReviewContract } from "./review-gate.js";
 import { logEvent, eventsForTask } from "../store/events.js";
+import { latestSettledReviewCandidateForRun } from "../store/reviews.js";
 import { taskDir, integrationWorktreeDir, cloneDir } from "../util/paths.js";
 import { computeReadyQueue, isRunSettled, classifyRunTerminalState, type RunTerminalClassification } from "./ready-queue.js";
 import { classifyTaskLineage, isWorkflowPrimaryRow, resolveCompletedPhasePrimary } from "./lifecycle-evaluator.js";
@@ -510,31 +511,72 @@ function publishTargetDescriptor(projectDir: string): string | undefined {
   }
 }
 
-/** AC 4: the base a task's private clone is created at.
+/** The base a task's private clone is created at — the SINGLE authority every
+ *  mutating task resolves through: sequential dispatch, the fanout wave base, and
+ *  request-changes re-runs all call here, so ordered/unordered waves and re-drives
+ *  agree on the commit a workspace is cut from.
  *
- *  The authority is the RECORDED publication receipt of the run's last accepted
- *  candidate — not a re-read of HEAD. A sequential task therefore starts from the
- *  exact accepted predecessor candidate even when the publish target is a remote
- *  that never advances local HEAD, and the value is a fact Forge wrote rather than
- *  one inferred from where the checkout happened to be at dispatch time.
+ *  AUTHORITY ORDER (FG-791):
  *
- *  SCOPED BY TARGET, and ordered by PUBLISH time. A run may publish to more than
- *  one target, and a receipt for another target is not this target's last
- *  accepted candidate. Ordering by intent time is wrong for the same class of
- *  reason: an attempt that parked and rebuilt is RECORDED earlier than one that
- *  published before it but LANDS later, so intent order can hand the next task a
- *  base that is not the last thing actually published (AC 4).
+ *   1. latestSettledReviewCandidateForRun(runId) — the REVIEWED tip. Once a run's
+ *      build gate is settled by an evidence-led review, a post-review phase (verify,
+ *      docs) MUST base on the review's post-fix candidate, not the frozen pre-review
+ *      integration head. Basing on the head let a later phase test STALE code and
+ *      publish a stale artifact onto the reviewed branch — a test authored against
+ *      pre-fix semantics passed in-container against the frozen head and failed
+ *      deterministically once merged onto the reviewed tip (FG-791). A settled review
+ *      is the freeze point (a lifecycle transition, not a lock); only settled
+ *      evidence-led reviews are read, so a mid-flight review never repoints a phase.
  *
- *  With no receipt yet (the run's first mutating task), projectDir HEAD is the
- *  base — and the SHA it RESOLVES to is what gets recorded. */
-function resolveTaskBaseSha(projectDir: string, runId: string): string {
+ *   2. latestPublishedShaForRun(runId, target) — the RECORDED publication receipt of
+ *      the run's last accepted candidate. This is the pre-FG-791 behavior verbatim,
+ *      and the ONLY base a legacy verdict-mode / no-review run ever gets: with no
+ *      settled evidence-led review the review authority returns undefined and the run
+ *      degrades exactly to today (no new base source, no reachable new refusal path).
+ *
+ *      This receipt is the authority — not a re-read of HEAD — so a sequential task
+ *      starts from the exact accepted predecessor candidate even when the publish
+ *      target is a remote that never advances local HEAD. It is SCOPED BY TARGET and
+ *      ordered by PUBLISH time: a receipt for another target is not this target's last
+ *      accepted candidate, and intent order can hand the next task a base that is not
+ *      the last thing actually published (an attempt that parked and rebuilt is
+ *      recorded earlier than one that published before it but lands later).
+ *
+ *   3. projectDir HEAD — the run's first mutating task, no receipt yet. The SHA it
+ *      RESOLVES to is what gets recorded.
+ *
+ *  Emits phase.base_resolved{runId, taskId, baseSha, source} at the resolution point
+ *  so the phase record names both the base sha AND why it was chosen (AC1). */
+function resolveTaskBaseSha(projectDir: string, runId: string, taskId: string): string {
+  const reviewed = latestSettledReviewCandidateForRun(runId);
+  if (reviewed) {
+    logEvent("phase.base_resolved", {
+      runId,
+      taskId,
+      payload: { runId, taskId, baseSha: reviewed, source: "reviewed_candidate" },
+    });
+    return reviewed;
+  }
   const published = latestPublishedShaForRun(runId, publishTargetDescriptor(projectDir));
-  if (published) return published;
-  return execFileSync("git", ["rev-parse", "HEAD^{commit}"], {
+  if (published) {
+    logEvent("phase.base_resolved", {
+      runId,
+      taskId,
+      payload: { runId, taskId, baseSha: published, source: "publication_receipt" },
+    });
+    return published;
+  }
+  const head = execFileSync("git", ["rev-parse", "HEAD^{commit}"], {
     cwd: projectDir,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+  logEvent("phase.base_resolved", {
+    runId,
+    taskId,
+    payload: { runId, taskId, baseSha: head, source: "head" },
+  });
+  return head;
 }
 
 /** Record {workspace path, base SHA} DURABLY BEFORE any on-disk or ref state
@@ -796,7 +838,7 @@ async function dispatchSingleStep(args: {
   if (isWorktreeModeEnabled()) {
     try {
       preflightWorktreeGate(args.projectDir);
-      const baseSha = resolveTaskBaseSha(args.projectDir, args.runId);
+      const baseSha = resolveTaskBaseSha(args.projectDir, args.runId, taskId);
       const clone = provisionTaskClone(args.projectDir, args.runId, taskId, baseSha);
       primaryWorktreePath = clone.clonePath;
       // Operator diagnostic: untracked/ignored host files are NOT in the clone.
@@ -2733,7 +2775,7 @@ async function dispatchFanoutStep(args: {
   let waveBaseSha = "";
   if (isWorktreeModeEnabled()) {
     try {
-      waveBaseSha = resolveTaskBaseSha(args.projectDir, args.runId);
+      waveBaseSha = resolveTaskBaseSha(args.projectDir, args.runId, parentId);
     } catch (e) {
       // The parent row exists by now (inserted or marked running above), so this
       // is a plain failTask rather than the create-and-fail helper.
