@@ -54,8 +54,9 @@ const RUNTIME = "fg791-reviewed-base-test";
 // ─── Workflow fixture: plan → build (fan-out) → verify (a post-review phase) ────
 
 type ReviewMode = Workflow["review_mode"];
+type PostReviewPhase = "verify" | "docs";
 
-function pipelineWorkflow(name: string, reviewMode: ReviewMode): Workflow {
+function pipelineWorkflow(name: string, reviewMode: ReviewMode, postReviewPhase: PostReviewPhase = "verify"): Workflow {
   return {
     name,
     description: "FG-791 reviewed-candidate base fixture",
@@ -80,7 +81,15 @@ function pipelineWorkflow(name: string, reviewMode: ReviewMode): Workflow {
       // verify is a sequential POST-BUILD phase — the position the incident's stale-based
       // verify occupied. gate: human parks it at awaiting_gate (base recorded at dispatch,
       // nothing published) and gives request-changes a gate to act on for guard (ii).
-      { id: "verify", agent: "test-engineer", gate: "human", manual: false, depends_on: ["build"], runtime: RUNTIME, reds: [] },
+      {
+        id: postReviewPhase,
+        agent: postReviewPhase === "docs" ? "documentation-maintainer" : "test-engineer",
+        gate: "human",
+        manual: false,
+        depends_on: ["build"],
+        runtime: RUNTIME,
+        reds: [],
+      },
     ],
   };
 }
@@ -88,6 +97,7 @@ function pipelineWorkflow(name: string, reviewMode: ReviewMode): Workflow {
 /** `gate()` re-loads the workflow from FORGE_HOME BY NAME, so a test that drives a real
  *  request-changes has to publish the same shape as YAML. */
 function publishWorkflowYaml(wf: Workflow): void {
+  const postReview = wf.steps.find((step) => step.id === "verify" || step.id === "docs")!;
   const path = join(process.env.FORGE_HOME!, "workflows", `${wf.name}.yml`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(
@@ -118,8 +128,8 @@ steps:
         input_key: step
       max_concurrency: 4
       failure_mode: fail-phase
-  - id: verify
-    agent: test-engineer
+  - id: ${postReview.id}
+    agent: ${postReview.agent}
     gate: human
     manual: false
     depends_on: [build]
@@ -307,8 +317,12 @@ function buildChildren(runId: string): Task[] {
 }
 
 function verifyTasks(runId: string): Task[] {
+  return phaseTasks(runId, "verify");
+}
+
+function phaseTasks(runId: string, phase: PostReviewPhase): Task[] {
   return tasksForRun(runId)
-    .filter((t) => t.phase === "verify" && !t.agentRole.startsWith("red-"))
+    .filter((t) => t.phase === phase && !t.agentRole.startsWith("red-"))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
 }
 
@@ -454,6 +468,34 @@ test("fg791 (AC2): verify bases on the REVIEWED candidate C2 and its worktree co
   const settled = getReview("review-fg791")!;
   assert.equal(settled.state, "settled", "the review is still settled");
   assert.equal(settled.candidateSha, c2, "and its candidate_sha never moved after settlement");
+});
+
+test("fg791 (AC1): docs bases on the settled reviewed candidate and records its reviewed_candidate source", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = pipelineWorkflow("fg791-reviewed-docs-base", "evidence_led", "docs");
+  publishWorkflowYaml(wf);
+  const { runId } = startRun({ workflow: wf, title: "fg791 reviewed docs base", inputs: {}, projectDir: repo });
+  const exec = makeExec();
+
+  await runNext({ runId, workflow: wf, dockerExec: exec }); // plan
+  await runNext({ runId, workflow: wf, dockerExec: exec }); // build → C0
+  const c0 = publishedBuildHead(runId);
+  const c2 = settleReviewAtFixCommit(repo, runId, c0);
+
+  await runNext({ runId, workflow: wf, dockerExec: exec }); // docs
+
+  const docs = phaseTasks(runId, "docs");
+  assert.equal(docs.length, 1, "the post-review docs phase dispatched exactly once");
+  const d = docs[0]!;
+  assert.equal(d.baseSha, c2, "docs is cut from the reviewed candidate, not the build integration head");
+  assert.notEqual(d.baseSha, c0, "docs must not use the stale pre-review integration head");
+  assert.deepEqual(
+    baseResolvedFor(d.id).map((e) => ({ source: e.source, baseSha: e.baseSha })),
+    [{ source: "reviewed_candidate", baseSha: c2 }],
+    "the docs task record names the reviewed candidate base and its authority",
+  );
+  assert.ok(baseTreeHas(repo, d.baseSha, "src/rf5-fix.ts"), "the docs worktree includes the review fix");
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
