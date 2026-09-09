@@ -39,6 +39,20 @@ set -euo pipefail
 # job-clock kill still shows partial progress (AC8). The per-run capture is set
 # up out-of-band via `exec` (start_capture/end_capture_and_report) so the runner
 # lines stay unwrapped.
+#
+# FG-792 tree-purity guard: the integration tier must leave the real checkout
+# byte-identical. A test that stages a transient file under $REPO_ROOT (fg543 once
+# staged docker/corp-root.pem) races the tree-purity snapshot another integration
+# test takes of the SAME checkout in the SAME shard, so the tier flakes on unrelated
+# PRs. This script snapshots `git status --porcelain` (untracked included) before the
+# tier runs and again at exit; any difference is a hard, named failure ("integration
+# tier dirtied the real checkout") so the class cannot recur silently. It wraps every
+# run path — a bulk shard, the serial lane, and the unsharded dev run (bulk + serial
+# tail). Bypass ONLY for local debugging by exporting FORGE_SKIP_TREE_PURITY_GUARD=1
+# — never silently. The guard exports FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1 so a
+# NESTED runner (the fg704 runner test, forge-test's reproduced --integration runner)
+# does not install a second guard whose before/after window would straddle the
+# parent's concurrent siblings and false-positive on their transient files.
 
 ARG="${1:-}"
 
@@ -56,6 +70,36 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# ---- FG-792 tree-purity guard ----------------------------------------------
+# See the header note. Installed once, at the OUTERMOST run only; covers the serial
+# lane, a bulk shard, and the unsharded dev run since every one of them exits through
+# this trap. LIST_ONLY runs no tests, so it needs no guard.
+PURITY_BEFORE=""
+check_tree_purity() {
+  local orig_exit=$?
+  local after
+  after="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
+  if [ "$after" != "$PURITY_BEFORE" ]; then
+    {
+      echo ""
+      echo "error: integration tier dirtied the real checkout (FG-792 tree-purity guard)"
+      echo "  a test wrote into or removed a path under $REPO_ROOT instead of a temp dir."
+      echo "  git status --porcelain (before -> after):"
+      diff <(printf '%s\n' "$PURITY_BEFORE") <(printf '%s\n' "$after") | sed 's/^/    /' || true
+      echo "  bypass for local debugging with FORGE_SKIP_TREE_PURITY_GUARD=1."
+    } >&2
+    exit 1
+  fi
+  exit "$orig_exit"
+}
+if [ "${FORGE_INTEGRATION_TREE_GUARD_ACTIVE:-}" != "1" ] \
+  && [ "${FORGE_SKIP_TREE_PURITY_GUARD:-}" != "1" ] \
+  && [ "${FORGE_INTEGRATION_LIST_ONLY:-}" != "1" ]; then
+  export FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1
+  PURITY_BEFORE="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
+  trap check_tree_purity EXIT
+fi
 
 ALL=()
 while IFS= read -r f; do
