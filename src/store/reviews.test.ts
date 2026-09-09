@@ -38,6 +38,8 @@ import {
   recordResolution,
   recordStageEvidence,
   retireDocsDispatch,
+  setReviewState,
+  latestSettledReviewCandidateForRun,
   stageCompleteAt,
   summarizeReview,
   updateReview,
@@ -424,4 +426,92 @@ test("FG-689: a shard-granularity write preserves the outcome another shard alre
     [1, 2],
     "retrying one shard through a whole-column replace would erase the coverage the retry exists to preserve",
   );
+});
+
+// ─── FG-791: the settled-review base authority ──────────────────────────────
+//
+// The single source of "which tip a post-review verify/docs phase bases on". A settled
+// evidence-led review's candidate_sha is the reviewed tip; anything less than settled, or
+// anything but evidence_led, must NOT repoint a downstream phase — that is what keeps a
+// legacy verdict-mode run degrading to today's publication-receipt base.
+
+/** Insert an evidence-led review and settle it, optionally pinning settled_at so the
+ *  ordering tie-breaks are deterministic rather than nowIso()-dependent. */
+function settleEvidenceReview(runId: string, id: string, candidateSha: string, settledAt?: string): void {
+  insertReview({ id, runId, reviewMode: "evidence_led", candidateSha, state: "awaiting_disposition" });
+  setReviewState(id, "settled");
+  if (settledAt !== undefined) db.prepare(`UPDATE reviews SET settled_at = ? WHERE id = ?`).run(settledAt, id);
+}
+
+test("FG-791: a settled evidence-led review's candidate is the run's base authority", () => {
+  insertRun({ ...RUN, id: "run-791-a" });
+  settleEvidenceReview("run-791-a", "rev-791-a1", "C2sha00");
+  assert.equal(latestSettledReviewCandidateForRun("run-791-a"), "C2sha00");
+});
+
+test("FG-791: a mid-flight (non-settled) review never repoints the base", () => {
+  insertRun({ ...RUN, id: "run-791-b" });
+  settleEvidenceReview("run-791-b", "rev-791-b1", "C2sha00");
+  // A later review is opened and advances its candidate to C3, but has not settled — its
+  // candidate is still moving, so the base stays the last SETTLED tip.
+  insertReview({
+    id: "rev-791-b2",
+    runId: "run-791-b",
+    reviewMode: "evidence_led",
+    candidateSha: "C3sha00",
+    state: "awaiting_disposition",
+  });
+  assert.equal(latestSettledReviewCandidateForRun("run-791-b"), "C2sha00", "the un-settled C3 review is ignored");
+});
+
+test("FG-791: with two settled reviews the later settled_at wins, ties broken by id", () => {
+  insertRun({ ...RUN, id: "run-791-c" });
+  settleEvidenceReview("run-791-c", "rev-791-c1", "Cearly", "2026-09-01T00:00:00.000Z");
+  settleEvidenceReview("run-791-c", "rev-791-c2", "Clate0", "2026-09-02T00:00:00.000Z");
+  assert.equal(latestSettledReviewCandidateForRun("run-791-c"), "Clate0", "the later settled_at is the current candidate");
+
+  // A same-instant settlement is a real tie; id DESC breaks it deterministically.
+  settleEvidenceReview("run-791-c", "rev-791-c3", "Ctie-a", "2026-09-03T00:00:00.000Z");
+  settleEvidenceReview("run-791-c", "rev-791-c4", "Ctie-b", "2026-09-03T00:00:00.000Z");
+  assert.equal(
+    latestSettledReviewCandidateForRun("run-791-c"),
+    "Ctie-b",
+    "id DESC breaks a same-instant tie: rev-791-c4 sorts after rev-791-c3",
+  );
+});
+
+test("FG-791: no review, or only legacy-mode reviews, yields no base authority (degrade)", () => {
+  insertRun({ ...RUN, id: "run-791-none", reviewMode: "legacy_verdict" });
+  assert.equal(latestSettledReviewCandidateForRun("run-791-none"), undefined, "a run with no review has no reviewed candidate");
+
+  insertRun({ ...RUN, id: "run-791-legacy", reviewMode: "legacy_verdict" });
+  insertReview({
+    id: "rev-791-legacy",
+    runId: "run-791-legacy",
+    reviewMode: "legacy_verdict",
+    candidateSha: "Clegacy",
+    state: "awaiting_disposition",
+  });
+  setReviewState("rev-791-legacy", "settled");
+  assert.equal(
+    latestSettledReviewCandidateForRun("run-791-legacy"),
+    undefined,
+    "a SETTLED legacy_verdict review is not an evidence-led candidate and must not repoint a phase",
+  );
+});
+
+test("FG-791: a settled evidence-led review with no candidate_sha names no base", () => {
+  insertRun({ ...RUN, id: "run-791-null" });
+  insertReview({ id: "rev-791-null", runId: "run-791-null", reviewMode: "evidence_led", state: "awaiting_disposition" });
+  setReviewState("rev-791-null", "settled");
+  assert.equal(
+    latestSettledReviewCandidateForRun("run-791-null"),
+    undefined,
+    "a settled review that never recorded a candidate names no tip to base on",
+  );
+
+  // ...and it is skipped rather than shadowing a later settled review that DOES carry one,
+  // even though the null-candidate review settled later (nowIso()) than this pinned one.
+  settleEvidenceReview("run-791-null", "rev-791-has", "Chas00", "2026-09-05T00:00:00.000Z");
+  assert.equal(latestSettledReviewCandidateForRun("run-791-null"), "Chas00");
 });

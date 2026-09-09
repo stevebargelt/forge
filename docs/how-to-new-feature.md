@@ -73,9 +73,13 @@ Gate: `verdict`. The phase advances automatically if reds pass.
 
 Output: `{test_files_written, tests_written, tests_run, tests_passed, tests_failed, coverage_summary}`. No reds. Gate: `human`.
 
+**Base (FG-791):** when the build gate was settled by an evidence-led review, `verify` cuts its worktree from the REVIEWED candidate — the settled review's post-fix tip on the run's clone branch — not from the pre-review integration head. Otherwise the test-engineer would author tests against stale code and publish them onto the reviewed branch (see [Post-review phase base](concepts.md#post-review-phase-base)). A legacy verdict-mode run with no evidence-led review degrades to the last publication receipt, exactly as before. The phase record names the base it used via the `phase.base_resolved` event.
+
 ### `docs`
 
 Output: `{docs_updated, docs_not_updated_reason, stale_docs_found, operator_behavior_changed}`. No reds. Gate: `auto` — the orchestrator reviews the contract and advances without a human stop.
+
+**Base (FG-791):** same rule as `verify` — the reviewed candidate when an evidence-led review settled the build gate, else the publication-receipt base. A later phase whose base is not an ancestor of the run's current candidate is REFUSED at publication (`publication.refused{reason:'stale_base_not_ancestor'}`), and so is one with no recorded base at all once a review has settled (`reason:'base_unrecorded_under_settled_candidate'`) — either way nothing merges, rather than landing a stale-based artifact on the reviewed branch.
 
 ## When something goes wrong
 

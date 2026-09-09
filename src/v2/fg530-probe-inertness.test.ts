@@ -753,6 +753,19 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/runNext.ts",
+    fn: "resolveTaskBaseSha",
+    call: "logEvent",
+    reason:
+      "FG-791: the phase.base_resolved audit append naming the base SHA a mutating task's clone is cut from AND the " +
+      "authority that chose it (reviewed_candidate / publication_receipt / head) — append-only evidence with NO lifecycle " +
+      "state. The DURABLE base record is setTaskWorkspace's (provisionTaskClone, pre-container, allowlisted above); this " +
+      "event is pure provenance nothing reads to decide a transition. resolveTaskBaseSha is a pure read — it mutates no " +
+      "task or run row — so a crash on either side of the append re-resolves the identical base deterministically from the " +
+      "same authority (the settled review's candidate_sha, else the publication receipt, else HEAD) on the next dispatch, " +
+      "losing only a line of provenance about a decision that is itself re-derivable.",
+  },
+  {
+    file: "v2/runNext.ts",
     fn: "settleFailedCloneProvisioning",
     call: "clearTaskWorkspace",
     reason:

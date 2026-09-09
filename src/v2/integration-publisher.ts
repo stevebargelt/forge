@@ -33,6 +33,7 @@ import { logEvent } from "../store/events.js";
 import {
   getPublicationAttempt,
   laneForProject,
+  latestPublishedShaForRun,
   publicationAttemptsForTask,
   recordPublicationIntent,
   releasePublicationMutex,
@@ -46,7 +47,9 @@ import {
   type PublicationAttempt,
   type PublicationState,
 } from "../store/publications.js";
-import { projectIdentity, describeRefusal, describeWait } from "./project-identity.js";
+import { latestSettledReviewCandidateForRun } from "../store/reviews.js";
+import { getTask } from "../store/tasks.js";
+import { projectIdentity, describeRefusal, describeStaleBaseRefusal, describeUnrecordedBaseRefusal, describeWait } from "./project-identity.js";
 import { provenSameOnly } from "../util/path-identity.js";
 // FG-677 (FG-631 absorbed): the retention timing authority, the report vocabulary, and the
 // active-process cwd guard applied at the publication-worktree destroy chokepoint.
@@ -76,6 +79,7 @@ import {
 import {
   CheckoutSyncError,
   DirtyPublishTargetError,
+  isAncestor,
   MutexLostMidPublishError,
   NonFastForwardError,
   localTargetFor,
@@ -426,6 +430,21 @@ async function acquireMutex(
   }
 }
 
+/** FG-791: the run's CURRENT candidate — the tip a later phase's base must descend
+ *  from. Single-sourced with runNext's base authority (resolveTaskBaseSha): the
+ *  settled evidence-led review's candidate_sha when one exists, else the last
+ *  publication receipt for THIS target. `undefined` means there is no candidate yet
+ *  to be stale against — the first mutating task of a run, or a legacy verdict-mode
+ *  run with no settled evidence-led review — and the AC3 preflight is a clean no-op.
+ *
+ *  Reading this here, at publication time, and reading only a SETTLED review, is what
+ *  freezes the candidate by lifecycle ordering rather than a lock: nothing advances a
+ *  candidate after settlement, so a value read here cannot be moved out from under
+ *  the preflight by a concurrent orchestrator commit. */
+function currentCandidateSha(runId: string, target: string): string | undefined {
+  return latestSettledReviewCandidateForRun(runId) ?? latestPublishedShaForRun(runId, target);
+}
+
 /** Validate a candidate in isolation, then publish that EXACT commit through a
  *  short compare-and-swap window. */
 export async function publishIntegration(req: PublishRequest): Promise<PublishOutcome> {
@@ -509,7 +528,88 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
     payload: { attemptId, target: descriptor, project: identity.canonicalDir },
   });
 
+  // FG-791 (AC3): a LATER pipeline phase must never publish a STALE-BASED artifact
+  // onto the reviewed branch. After an evidence-led review settles, the run's current
+  // candidate is the reviewed tip (C2); a verify/docs phase whose recorded base is
+  // the pre-review integration head (C0) validated a tree derived from code the review
+  // already replaced. Merging it back would overwrite the fix with a test that never
+  // saw it — the FG-784 incident (fc881287), observed failing deterministically on the
+  // host and in CI after publication onto the reviewed branch.
+  //
+  // This refusal is LAYERED ON TOP OF, and DISTINCT FROM, the fast-forward ancestry
+  // proof + CAS in publication-target.ts: the incident PASSED that proof (C0 was an
+  // ancestor of the target it merged onto) and still had to be refused. The FF/CAS
+  // proof is untouched; this guard fires BEFORE the lane, the worktree, the mutex and
+  // any ref write, so a refused later phase has claimed and mutated nothing on the
+  // target.
+  //
+  // It is a CLEAN NO-OP for every pre-settlement and legacy path. `currentCandidateSha`
+  // is undefined for the first mutating task (build/fanout, pre-review) and for a
+  // verdict-mode run with no settled evidence-led review — nothing to be stale against.
+  // A base that IS the candidate, or descends from it (the ordinary fanout wave and
+  // request-changes re-run, whose base already resolves to the candidate), is an
+  // ancestor and passes. Only a base that is NOT an ancestor of a REAL current
+  // candidate — the stale-base defect itself — is refused.
+  //
+  // The missing-base refusal (RF-2) is gated on the SETTLED review candidate
+  // specifically, not on `currentCandidate` — which also resolves to a mere
+  // publication receipt (the plan phase's receipt exists before the build fan-out,
+  // whose parent task carries no recorded base and legitimately publishes). Only once
+  // a review has SETTLED does an unrecorded base become the unknown-provenance case:
+  // we cannot prove the phase's validated tree descends from the reviewed tip, so we
+  // refuse rather than fail open (base_unrecorded_under_settled_candidate).
+  const phaseBase = getTask(req.taskId)?.baseSha;
+  const settledCandidate = latestSettledReviewCandidateForRun(req.runId);
+  const currentCandidate = currentCandidateSha(req.runId, descriptor);
+
   try {
+    // The preflight lives INSIDE the try so a refusal returns through the same
+    // `finally` that releases the lane. recordPublicationIntent already enqueued a
+    // `queued` lane row above; a refusal that returned before leaveLane would leave
+    // that row live and queue every later publication for the run behind a phantom.
+    // It still fires BEFORE awaitLaneTurn / the worktree / the mutex / any ref write,
+    // so a refused later phase has claimed and mutated nothing on the target.
+    if (settledCandidate && !phaseBase) {
+      updatePublicationAttempt(attemptId, { state: "failed" });
+      logEvent("publication.refused", {
+        runId: req.runId,
+        taskId: req.taskId,
+        payload: { attemptId, reason: "base_unrecorded_under_settled_candidate", currentCandidate: settledCandidate, target: descriptor },
+      });
+      return {
+        kind: "refused",
+        attemptId,
+        error: describeUnrecordedBaseRefusal({
+          canonicalDir: identity.canonicalDir,
+          taskId: req.taskId,
+          currentCandidate: settledCandidate,
+        }),
+      };
+    }
+    if (
+      phaseBase &&
+      currentCandidate &&
+      phaseBase !== currentCandidate &&
+      !isAncestor(req.projectDir, phaseBase, currentCandidate)
+    ) {
+      updatePublicationAttempt(attemptId, { state: "failed" });
+      logEvent("publication.refused", {
+        runId: req.runId,
+        taskId: req.taskId,
+        payload: { attemptId, reason: "stale_base_not_ancestor", phaseBase, currentCandidate, target: descriptor },
+      });
+      return {
+        kind: "refused",
+        attemptId,
+        error: describeStaleBaseRefusal({
+          canonicalDir: identity.canonicalDir,
+          taskId: req.taskId,
+          phaseBase,
+          currentCandidate,
+        }),
+      };
+    }
+
     await awaitLaneTurn(attemptId, identity.canonicalDir, req.lane);
 
     for (let rebuild = 0; ; rebuild++) {

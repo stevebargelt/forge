@@ -239,3 +239,60 @@ export function describeRefusal(opts: {
     `.`
   );
 }
+
+/** FG-791: the operator-facing refusal when a LATER pipeline phase (verify, docs)
+ *  would publish an artifact whose base is STALE — not an ancestor of the run's
+ *  CURRENT candidate (the reviewed tip a settled evidence-led review advanced to).
+ *
+ *  A deliberate sibling of describeRefusal, and a DISTINCT refusal from the
+ *  fast-forward ancestry proof in publication-target.ts. That proof asks "is the
+ *  target still where this candidate was built on" and protects ref ancestry inside
+ *  the CAS window; this one asks "was this candidate even built on the code the
+ *  review shipped" and fires BEFORE the window. The FG-784 incident (fc881287)
+ *  passed the fast-forward proof — the pre-review head WAS an ancestor of the target
+ *  it merged onto — and still published a test authored against pre-fix semantics
+ *  onto the reviewed branch, where it failed deterministically. The two guards catch
+ *  different defects; neither subsumes the other.
+ *
+ *  It names the phase base, the current candidate and the remedy, because a refusal
+ *  the operator cannot act on is indistinguishable from a wall. */
+export function describeStaleBaseRefusal(opts: {
+  canonicalDir: string;
+  taskId: string;
+  phaseBase: string;
+  currentCandidate: string;
+}): string {
+  return (
+    `forge: refusing to publish task ${opts.taskId} onto ${opts.canonicalDir} — its recorded base ` +
+    `${opts.phaseBase.slice(0, 12)} is NOT an ancestor of the run's current candidate ` +
+    `${opts.currentCandidate.slice(0, 12)} (the reviewed tip). This later phase validated a tree derived ` +
+    `from the PRE-REVIEW integration head, so publishing it would merge a stale-based artifact onto the ` +
+    `reviewed branch — code the review already replaced would be overwritten or contradicted by a test that ` +
+    `never saw the fix (FG-791). Nothing was merged; the target ref is byte-for-byte unchanged. Re-drive this ` +
+    `phase so its worktree bases on the current candidate ${opts.currentCandidate.slice(0, 12)}, then re-publish.`
+  );
+}
+
+/** FG-791 (AC3): the refusal when a settled review candidate EXISTS but the
+ *  publishing task carries NO recorded base. The stale-base guard cannot prove the
+ *  phase's tree descends from the reviewed tip, so it must not fail open: a missing
+ *  base under a settled candidate is exactly the unknown-provenance case the guard
+ *  exists for. Distinct reason from describeStaleBaseRefusal — there the base is
+ *  recorded and proven non-ancestor; here the base is absent and cannot be proven at
+ *  all. (The pre-settlement / legacy no-candidate path stays a clean no-op — only a
+ *  REAL current candidate makes an unrecorded base a refusal.) */
+export function describeUnrecordedBaseRefusal(opts: {
+  canonicalDir: string;
+  taskId: string;
+  currentCandidate: string;
+}): string {
+  return (
+    `forge: refusing to publish task ${opts.taskId} onto ${opts.canonicalDir} — the run has a settled review ` +
+    `candidate ${opts.currentCandidate.slice(0, 12)} (the reviewed tip) but this task has NO recorded base, so ` +
+    `forge cannot prove its validated tree descends from the reviewed code rather than from a pre-review head. ` +
+    `A missing base under a settled candidate is the unknown-provenance case the stale-base guard exists for; ` +
+    `publishing it could overwrite the review's fix with a tree that never saw it (FG-791). Nothing was merged; ` +
+    `the target ref is byte-for-byte unchanged. Re-drive this phase so its worktree records a base on the ` +
+    `current candidate ${opts.currentCandidate.slice(0, 12)}, then re-publish.`
+  );
+}
