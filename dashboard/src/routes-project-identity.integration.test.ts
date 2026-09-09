@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
 const TEST_PORT = 18767;
@@ -42,6 +43,7 @@ const checkouts = [
 {
   const database = new Database(join(forgeHome, "forge.db"));
   database.exec(SCHEMA_SQL);
+  applyMigrations(database);
   const insertRun = database.prepare("INSERT INTO runs (id,workflow,title,status,created_at,project_dir) VALUES (?,?,?,?,?,?)");
   const insertTask = database.prepare("INSERT INTO tasks (id,run_id,phase,agent_role,status,task_package,result,created_at,started_at,completed_at) VALUES (?,?,?,?,?,'{}','{}',?,?,?)");
   checkouts.forEach((projectDir, index) => {

@@ -54,8 +54,8 @@ function sampleBoard(): RemoteBoard {
       projectKey: "forge",
       storageMode: "db",
       tickets: [
-        { id: "FG-781", type: "story", status: "active", title: "Remote Board foundation", epic: "FG-780", created: "2026-09-01", closed: null, related: [] },
-        { id: "FG-782", type: "story", status: "queued", title: "Tailscale Serve adapter", epic: "FG-780", created: "2026-09-02", closed: null, related: [] },
+        { id: "FG-781", type: "story", status: "active", title: "Remote Board foundation", revision: 1, epic: "FG-780", created: "2026-09-01", closed: null, related: [] },
+        { id: "FG-782", type: "story", status: "queued", title: "Tailscale Serve adapter", revision: 1, epic: "FG-780", created: "2026-09-02", closed: null, related: [] },
       ],
     },
     queue: {
@@ -65,8 +65,8 @@ function sampleBoard(): RemoteBoard {
       unavailableReason: null,
       version: 7,
       rows: [
-        { ticketId: "FG-781", title: "Remote Board foundation", type: "story", status: "active", rank: 1, queued: true, blocked: false, inProgress: true, executionState: "running", view: "in_progress", waitKind: null },
-        { ticketId: "FG-783", title: "Planning mutation capability", type: "story", status: "blocked", rank: 2, queued: false, blocked: true, inProgress: false, executionState: "idle", view: "blocked", waitKind: "dependency" },
+        { ticketId: "FG-781", title: "Remote Board foundation", type: "story", status: "active", rank: 1, revision: 1, queued: true, blocked: false, inProgress: true, executionState: "running", view: "in_progress", waitKind: null },
+        { ticketId: "FG-783", title: "Planning mutation capability", type: "story", status: "blocked", rank: 2, revision: 1, queued: false, blocked: true, inProgress: false, executionState: "idle", view: "blocked", waitKind: "dependency" },
       ],
       views: { backlog: [], queued: ["FG-782"], in_progress: ["FG-781"], blocked: ["FG-783"], done: [], executing_not_queued: [] },
     },
@@ -97,6 +97,7 @@ function envelope(state: RemoteBoardState, withBoard: boolean): RemoteBoardEnvel
     generatedAt: "2026-09-08T12:00:00.000Z",
     generation: 1_757_332_800_000,
     board: withBoard ? sampleBoard() : null,
+    capabilities: [],
   };
 }
 

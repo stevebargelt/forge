@@ -26,6 +26,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.js";
 
@@ -69,6 +70,7 @@ const at = "2026-07-24T10:00:00Z";
 function seed(home: string, ticketIds: string[]): void {
   const database = new Database(join(home, "forge.db"));
   database.exec(SCHEMA_SQL);
+  applyMigrations(database);
   const run = database.prepare(
     "INSERT INTO runs (id,workflow,title,status,created_at,project_dir) VALUES (?,?,?,?,?,?)",
   );

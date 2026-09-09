@@ -14,6 +14,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
 const TEST_PORT = 18775;
@@ -61,6 +62,7 @@ const ghostLive = join(testHome, "tmp", "ghost-live");
 {
   const database = new Database(join(forgeHome, "forge.db"));
   database.exec(SCHEMA_SQL);
+  applyMigrations(database);
   const insertRun = database.prepare(
     "INSERT INTO runs (id,workflow,title,status,created_at,project_dir) VALUES (?,?,?,?,?,?)",
   );

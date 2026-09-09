@@ -142,28 +142,41 @@ describe("FG-781 identity resolver — raw headers never establish identity (AC6
   });
 });
 
-describe("FG-781 capability vocabulary — read only, no mutation (AC7 basis)", () => {
-  test("(c) the capability set contains exactly one read capability", () => {
-    assert.deepEqual([...REMOTE_CAPABILITIES], ["read"]);
+describe("FG-781/FG-783 capability vocabulary — closed to read + plan, no general mutate", () => {
+  test("(c) the capability set is exactly {read, plan} — read is unchanged, plan is added", () => {
+    assert.deepEqual([...REMOTE_CAPABILITIES], ["read", "plan"]);
     assert.equal(REMOTE_CAPABILITIES.includes("read"), true);
+    assert.equal(REMOTE_CAPABILITIES.includes("plan"), true);
+    // Closed: nothing beyond these two — the vocabulary has not grown a general write member.
+    assert.equal(REMOTE_CAPABILITIES.length, 2);
   });
 
-  test("(c) no mutation capability can be expressed at the type level", () => {
+  test("(c) 'plan' is a recognized capability at runtime (FG-783)", () => {
+    assert.equal(isRemoteCapability("plan"), true);
+  });
+
+  test("(c) no general mutation capability can be expressed at the type level", () => {
     const read: RemoteCapability = "read";
+    const plan: RemoteCapability = "plan";
     assert.equal(read, "read");
+    assert.equal(plan, "plan");
     // @ts-expect-error "mutate" is not a member of RemoteCapability — proven at typecheck.
     const mutate: RemoteCapability = "mutate";
     // Reference `mutate` so it is not an unused-var error masking the @ts-expect-error.
     assert.equal(typeof mutate, "string");
   });
 
-  test("(c) a forged 'mutate' capability is refused at runtime", () => {
+  test("(c) forged 'mutate' / 'write' / 'admin' capabilities are refused at runtime", () => {
     assert.equal(isRemoteCapability("read"), true);
-    assert.equal(isRemoteCapability("mutate"), false);
+    assert.equal(isRemoteCapability("plan"), true);
+    for (const forged of ["mutate", "write", "admin", "run", "gate", "PLAN", "Read"]) {
+      assert.equal(isRemoteCapability(forged), false, `${forged} must not be a capability`);
+    }
     const candidate: AdapterCandidateIdentity = {
       subject: "verified-op",
-      // A malicious/buggy adapter tries to smuggle a mutate capability past the type gate.
-      capabilities: ["read", "mutate"] as unknown as RemoteCapability[],
+      // A malicious/buggy adapter tries to smuggle a mutate capability past the type gate,
+      // alongside the legitimate plan grant. Any unknown member taints the WHOLE identity.
+      capabilities: ["plan", "mutate"] as unknown as RemoteCapability[],
       projectScope: goodGrant,
       provenance: goodProvenance,
     };
@@ -183,7 +196,7 @@ describe("FG-781 capability vocabulary — read only, no mutation (AC7 basis)", 
     assert.equal(result.ok === false && result.reason, "capability-invalid");
   });
 
-  test("(c) a valid read identity holds only the read capability", () => {
+  test("(c) a valid read identity holds only read — a read grant never implies plan", () => {
     const result = validateAdapterIdentity({
       subject: "verified-op",
       capabilities: ["read"],
@@ -194,6 +207,39 @@ describe("FG-781 capability vocabulary — read only, no mutation (AC7 basis)", 
     if (result.ok) {
       assert.deepEqual([...result.identity.capabilities], ["read"]);
       assert.equal(hasCapability(result.identity, "read"), true);
+      // The additive-capability invariant: read does NOT confer plan.
+      assert.equal(hasCapability(result.identity, "plan"), false);
+    }
+  });
+
+  test("(c) a plan-granted identity holds plan — and a plan grant never implies read", () => {
+    const result = validateAdapterIdentity({
+      subject: "verified-op",
+      capabilities: ["plan"],
+      projectScope: goodGrant,
+      provenance: goodProvenance,
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.deepEqual([...result.identity.capabilities], ["plan"]);
+      assert.equal(hasCapability(result.identity, "plan"), true);
+      // Symmetric invariant: plan does NOT confer read either — each is named explicitly.
+      assert.equal(hasCapability(result.identity, "read"), false);
+    }
+  });
+
+  test("(c) an identity granted [read, plan] holds both, and neither is inferred", () => {
+    const result = validateAdapterIdentity({
+      subject: "verified-op",
+      capabilities: ["read", "plan"],
+      projectScope: goodGrant,
+      provenance: goodProvenance,
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.deepEqual([...result.identity.capabilities], ["read", "plan"]);
+      assert.equal(hasCapability(result.identity, "read"), true);
+      assert.equal(hasCapability(result.identity, "plan"), true);
     }
   });
 });

@@ -146,6 +146,19 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // keyboard-reachable Refresh that re-reads on Enter, single-column no-overflow on a phone
   // and a multi-column grid on a desktop, and a full render with no active agent session (AC5).
   "fg781-remote-board.test.ts": 9,
+  // FG-783 adds `fg783-remote-board-plan` (12 tests): the bounded planning UI on the remote board
+  // in a real browser — the four planning categories (five wire actions) reachable as accessible
+  // triggers; on a recorded APPLIED outcome the client re-reads /api/board rather than optimistically
+  // painting success; a stale-precondition refusal surfaces the redacted safe summary and a retry
+  // path while applying nothing; the submitted envelope carries the LOADED queue version and no
+  // server-authoritative key; keyboard open/close with focus return and a keyboard submit; the
+  // dialog's screen-reader semantics (labelled modal, status + alert live regions, labelled fields);
+  // and idempotency across a transport failure (the retry reuses the request id). The remediation
+  // review adds four: RF-2 gates affordances on the 'plan' capability (a read-only board shows none)
+  // and carries the loaded ticket revision as the annotation precondition; RF-3 announces the applied
+  // outcome in a PERSISTENT live region that survives the dialog close; RF-4 fails planning closed
+  // (an 'unsupported' note, no controls) when the browser has no Web Crypto random source.
+  "fg783-remote-board-plan.test.ts": 12,
   // FG-692 adds `fg402-attention-inbox-overflow` (2 tests): the Attention Inbox row
   // grid does not force a horizontal scroll on a 360px viewport, and its responsive
   // override collapses the row to a single column there (FG-402 RF-3).

@@ -2152,6 +2152,9 @@ export type BacklogTicket = {
   status: string;
   title: string;
   body: string;
+  /** The ticket's monotonic revision — the annotation precondition (RF-2). Null on a
+   *  row that predates the column / carries no revision. */
+  revision: number | null;
   epic?: string;
   created?: string;
   closed?: string;
@@ -2199,7 +2202,7 @@ export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
     .get(projectKey) as { mode: string } | undefined;
 
   const rows = db().prepare(`
-    SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic
+    SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic, revision
     FROM tickets WHERE project_key = ?
   `).all(projectKey) as Array<{
     ticket_id: string;
@@ -2211,6 +2214,7 @@ export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
     closed: string | null;
     closed_commit: string | null;
     epic: string | null;
+    revision: number | null;
   }>;
 
   // Two set-wide queries instead of two per ticket: a board with several hundred
@@ -2238,6 +2242,7 @@ export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
       status: blocked.has(row.ticket_id) && row.status === "active" ? "blocked" : row.status,
       title: row.title,
       body: row.body,
+      revision: row.revision,
       ...(rel && rel.length > 0 ? { related: rel } : {}),
       ...(row.created ? { created: row.created } : {}),
       ...(row.closed ? { closed: row.closed } : {}),
@@ -4808,6 +4813,9 @@ export type QueueBoardRow = {
   /** DURABLE FACT 1 — the one canonical stack rank. Null is a perfectly valid
    *  backlog item, not a deprioritized one. */
   rank: number | null;
+  /** The ticket's monotonic revision — the annotation precondition (RF-2). Null on a
+   *  row that carries no revision. */
+  revision: number | null;
   /** DURABLE FACT 2 — operator queue membership, orthogonal to rank and lifecycle. */
   queued: boolean;
   enqueuedAt: string | null;
@@ -5525,6 +5533,7 @@ export function queueBoard(project: ProjectRecord | null, projects: readonly Pro
       type: row.type,
       status: row.status,
       rank,
+      revision: row.revision,
       queued,
       enqueuedAt: row.enqueued_at,
       enqueuedBy: row.enqueued_by,

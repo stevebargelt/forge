@@ -22,25 +22,35 @@
 //   * A candidate identity is refused unless it carries EXACTLY ONE server-authoritative
 //     project grant with a non-empty member-dir set (risk 3).
 //
-// Designed for additive evolution: FG-782/FG-784 supply a TransportAdapter; FG-783 adds a
-// "mutate" member to the capability vocabulary. Neither is a rewrite of this contract.
+// Designed for additive evolution: FG-782/FG-784 supply a TransportAdapter; FG-783 adds the
+// "plan" member to the capability vocabulary. Neither is a rewrite of this contract.
 
 /**
- * The closed capability vocabulary for the remote surface. FG-781 grants exactly one
- * capability — read — and there is deliberately NO mutation member: the remote surface is
- * read-only, and that is enforced at the type level (nothing can name a mutate capability)
- * as well as at runtime (see {@link isRemoteCapability}). FG-783 will ADD a member here.
+ * The closed capability vocabulary for the remote surface. FG-781 shipped exactly one
+ * capability — `read`. FG-783 ADDS `plan`: the bounded authenticated planning surface
+ * (change stack rank, enqueue/dequeue through readiness gates, reorder the operator queue,
+ * append a bounded planning annotation). There is deliberately still NO general "mutate" /
+ * "write" / "admin" member — a client cannot name one, at the type level (the union is
+ * exactly these two strings) or at runtime (see {@link isRemoteCapability}).
+ *
+ * The two capabilities are INDEPENDENT grants, not a ladder: a `read` grant never implies
+ * `plan`, and a `plan` grant never implies `read`. {@link hasCapability} tests explicit
+ * membership, and the operator mapping (mapping.ts) grants each capability by naming it —
+ * so an identity holds only what its entry lists. Adding `plan` therefore leaves the
+ * FG-781/FG-782 read path byte-for-byte unchanged for any identity that was not granted it.
  */
-export const REMOTE_CAPABILITIES = ["read"] as const;
+export const REMOTE_CAPABILITIES = ["read", "plan"] as const;
 
-/** A capability the remote surface understands. Today: only `"read"`. */
+/** A capability the remote surface understands: `"read"` or `"plan"`. */
 export type RemoteCapability = (typeof REMOTE_CAPABILITIES)[number];
 
 const REMOTE_CAPABILITY_SET: ReadonlySet<string> = new Set(REMOTE_CAPABILITIES);
 
-/** Runtime guard: is `value` a member of the closed capability vocabulary? Guards the
- *  seam where an adapter (untyped at the boundary) could hand back an unknown capability
- *  string — e.g. a forged "mutate" — which must be refused rather than silently carried. */
+/** Runtime guard: is `value` a member of the closed capability vocabulary (`read` | `plan`)?
+ *  Guards the seam where an adapter (untyped at the boundary) could hand back an unknown
+ *  capability string — e.g. a forged "mutate"/"write"/"admin" — which must be refused rather
+ *  than silently carried. Every unknown value, including any capability outside these two,
+ *  returns false and is rejected upstream. */
 export function isRemoteCapability(value: unknown): value is RemoteCapability {
   return typeof value === "string" && REMOTE_CAPABILITY_SET.has(value);
 }
@@ -253,8 +263,9 @@ export function validateAdapterIdentity(
   ignoredIdentityHeaders: readonly string[] = [],
 ): RemoteIdentityResolution {
   const caps = candidate.capabilities ?? [];
-  // Empty grants nothing; any unknown member (e.g. a forged "mutate") taints the whole
-  // identity. Read is the only capability that can survive this in FG-781.
+  // Empty grants nothing; any unknown member (e.g. a forged "mutate"/"write") taints the
+  // whole identity — never a partial grant. Only members of the closed vocabulary (`read`,
+  // `plan`) survive, and each is carried only if the candidate actually named it.
   if (caps.length === 0 || !caps.every(isRemoteCapability)) {
     return { ok: false, reason: "capability-invalid", ignoredIdentityHeaders };
   }
@@ -323,8 +334,11 @@ export function createRemoteIdentityResolver(
   return (request) => resolveRemoteIdentity(request, adapter);
 }
 
-/** Does a verified identity hold `capability`? The single read-check callers use so the
- *  capability test lives in one place as the vocabulary grows (FG-783). */
+/** Does a verified identity hold `capability`? The single capability check callers use so
+ *  the test lives in one place as the vocabulary grows (FG-783 adds `plan`). Membership is
+ *  explicit: `read` and `plan` are independent grants, so `hasCapability(id, "plan")` is
+ *  true only if the identity's mapping entry actually named `plan` — a read-only identity
+ *  returns false, and holding `plan` does not imply `read`. */
 export function hasCapability(
   identity: VerifiedIdentity,
   capability: RemoteCapability,

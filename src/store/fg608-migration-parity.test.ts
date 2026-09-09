@@ -277,6 +277,68 @@ test("FG-608: the host failure itself — an FG-606-shaped tickets table gains i
   assert.equal(row.revision, 1, "pre-FG-608 rows read back the DEFAULT revision");
 });
 
+test("FG-783: both remote-planning tables reach fresh-vs-migrated parity and hold their constraints", () => {
+  const fresh = freshDb();
+  const { db: migrated } = oldestShapeThenMigrated();
+
+  for (const table of ["remote_planning_commands", "ticket_planning_annotations"]) {
+    assert.ok(
+      tableNames(fresh).includes(table),
+      `${table} must exist in a fresh DB — the FG-783 CREATE TABLE is missing from SCHEMA_SQL`,
+    );
+    // The oldest-shape DB strips every restorable column and relies on ADDITIVE_COLUMNS
+    // to restore it; table_info parity here proves the FG-783 entries are exhaustive.
+    assert.deepEqual(
+      shapeOf(migrated, table),
+      shapeOf(fresh, table),
+      `${table}: a migrated DB diverges from a fresh one — an FG-783 column is missing from ADDITIVE_COLUMNS`,
+    );
+    assert.deepEqual(
+      constraintsOf(migrated, table),
+      constraintsOf(fresh, table),
+      `${table}: the CONSTRAINT shape diverges from a fresh DB`,
+    );
+  }
+
+  // request_id is the idempotency key: the PRIMARY KEY carries the UNIQUE-NOT-NULL
+  // constraint that replay-resistance depends on.
+  const requestIdPk = columns(fresh, "remote_planning_commands").find((c) => c.name === "request_id");
+  assert.ok(requestIdPk && requestIdPk.pk > 0, "remote_planning_commands.request_id must be the PRIMARY KEY");
+
+  const insert = fresh.prepare(
+    `INSERT INTO remote_planning_commands
+       (request_id, actor, transport, project_key, action, target_id, precondition, outcome, result_summary, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insert.run("req-1", "actor", "tailscale", "pk-1", "change-rank", "FG-1", "v3", "applied", "ok", "2026-09-08T00:00:00Z");
+  assert.throws(
+    () =>
+      insert.run("req-1", "actor", "tailscale", "pk-1", "enqueue", "FG-2", "v4", "applied", "ok", "2026-09-08T00:01:00Z"),
+    /UNIQUE constraint failed/,
+    "a duplicate request_id must be rejected — the idempotency key is not unique",
+  );
+});
+
+test("FG-783: re-execing SCHEMA_SQL on an aged DB never bumps user_version (BD-15)", () => {
+  // The additive-only forward-gate contract: opening (and re-opening) a store that
+  // predates FG-783 brings the two new tables forward via CREATE TABLE IF NOT EXISTS
+  // without touching PRAGMA user_version, so an older forge binary sharing the DB is
+  // never fenced out.
+  const { db } = oldestShapeThenMigrated();
+  assert.equal(db.pragma("user_version", { simple: true }), 0, "the strip+migrate path must leave user_version at 0");
+
+  // Simulate a subsequent open of the now-aged DB: exec SCHEMA_SQL again (the tables
+  // already exist, so every CREATE no-ops) and re-migrate.
+  db.exec(SCHEMA_SQL);
+  applyMigrations(db);
+  assert.equal(db.pragma("user_version", { simple: true }), 0, "re-execing SCHEMA_SQL must not bump user_version");
+
+  assert.ok(
+    tableNames(db).includes("remote_planning_commands") && tableNames(db).includes("ticket_planning_annotations"),
+    "both FG-783 tables must be present after the aged-DB re-open",
+  );
+});
+
 test("FG-608: re-running applyMigrations on a migrated DB is a no-op", () => {
   const fresh = freshDb();
   const { db: migrated } = oldestShapeThenMigrated();

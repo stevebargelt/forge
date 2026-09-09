@@ -101,6 +101,9 @@ test("AC3/AC4/AC5: a verified adapter grant traverses the real listener without 
     assert.equal(envelope.generation, Date.parse(AT));
     assert.equal(envelope.generatedAt, new Date(Date.parse(AT)).toISOString());
     assert.ok(envelope.board, "an authorized adapter grant reaches the assembled board");
+    // RF-2: the board envelope advertises exactly the identity's granted capabilities, so the
+    // client can gate planning affordances on 'plan'. This grant is read-only → no 'plan'.
+    assert.deepEqual(envelope.capabilities, ["read"], "the board advertises only the granted capabilities");
     assert.match(raw, /FG-ALPHA/, "non-vacuous: granted project data is present");
     for (const token of [...foreignTokens, ...sensitiveTokens]) assert.ok(!raw.includes(token), `remote HTTP response leaked ${token}`);
 

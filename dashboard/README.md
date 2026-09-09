@@ -105,7 +105,7 @@ Off by default (`--remote` / `FORGE_DASHBOARD_REMOTE=1` opts in). Enabling it ne
 
 **Today it refuses every request.** FG-781 ships the mode, the projection contract, and the fail-closed identity interface, but no transport adapter — the piece that turns a proxied request into a verified identity. Every remote route (`GET /`, `GET /api/board`, `GET /remote-client/*`) is served, but `GET /api/board` always answers with the `unauthorized` envelope (`board: null`) until Tailscale Serve (FG-782) or Cloudflare Tunnel+Access (FG-784) wires an adapter in. That is the intended state, not a bug: a spoofed `X-Forwarded-*` / `Tailscale-User-Login` / `Cf-Access-*` header on a direct request is scanned only to be recorded as ignored, never trusted, so there is no way to "turn it on" from the client side.
 
-Once an adapter exists, a granted identity still only ever sees the read-only projection of its **own** scoped project: project summary, backlog/queue, campaign summaries, the attention inbox, and current-activity — never raw logs, transcripts, env values, credentials, filesystem paths, review artifacts, or another project's data, and never a mutation (this story adds none; FG-783 is a separate later ticket). Full route and DTO reference: [Remote Board (FG-781)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781) in the schema contract.
+Once an adapter exists, a granted identity sees the read-only projection of its **own** scoped project: project summary, backlog/queue, campaign summaries, the attention inbox, and current-activity — never raw logs, transcripts, env values, credentials, filesystem paths, review artifacts, or another project's data. Read-only is still the default; a **bounded** planning-mutation surface arrives as an explicit opt-in grant in FG-783 (see [Bounded planning mutations (FG-783)](#bounded-planning-mutations-fg-783) below). Full route and DTO reference: [Remote Board (FG-781)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781) in the schema contract.
 
 ### Tailscale Serve transport (FG-782)
 
@@ -134,6 +134,30 @@ forge remote cloudflare disable    # remove ONLY the Forge-owned ingress config 
 ```
 
 Selecting it never touches the bind — the remote backend stays on loopback `127.0.0.1:8025` and the local dashboard on `127.0.0.1:8024`. On every request the adapter (`dashboard/src/remote/cloudflare/adapter.ts`, kind `cloudflare-access`) requires a loopback socket peer, then **verifies** the token against the team JWKS: signature (RS256 default / ES256 opt-in — `alg:none` and all HS\* rejected structurally), issuer (`https://<team>.cloudflareaccess.com`), audience (the Access application **AUD** tag), and `exp`/`nbf`/`iat`. The expected team/AUD come from a Forge-owned state file (`~/.forge/remote-board-cloudflare-state.json`) re-read per request — **absent team/AUD ⇒ refuse every request** (never accept-any-issuer/audience); an empty-and-unreachable JWKS cache also fails closed. Authorization reuses the **same** per-request-reloaded mapping file (`~/.forge/remote-board-identity.yml`), keyed on the verified email — Cloudflare gains no separate vocabulary. Forge mints **no session/cookie**, so revocation is instant on a mapping edit but bounded by the **Access token lifetime** for an Access-policy change (use short Access sessions; force-logout at `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`). Replay is `exp`/`nbf`-bound (no jti ledger); the JWT and `CF_Authorization` cookie are never logged. **A public hostname with no Access policy is refused** by `doctor`/`setup` and never trusted — an authenticated public hostname, not a public unauthenticated service. Full operator guide: [Remote Board over Cloudflare Tunnel + Access](../docs/how-to-remote-board-cloudflare.md); contract detail: [Remote Board (FG-781/FG-784)](../docs/SCHEMA-CONTRACT.md#remote-board-fg-781).
+### Bounded planning mutations (FG-783)
+
+FG-783 adds a **least-authority** remote *write* surface: an identity granted the new `plan` capability may run **exactly four** planning actions and nothing else. Read-only is unchanged — a `read` grant never implies `plan`, and every identity without `plan` sees the FG-781/FG-782 read path byte-for-byte.
+
+The four actions — **change canonical stack rank**, **enqueue/dequeue** a ticket through the readiness gates, **reorder** the operator queue, and **append a bounded planning annotation** — are the whole vocabulary. Everything else is denied *by construction*: a **closed command registry** (`dashboard/src/remote/planning/registry.ts`) dispatches only these, delegating each to the same in-process store authority a local operator uses; a source-guard test proves it cannot name completion, closure, gate, override, run, campaign, merge, publish, review, disposition, terminal, cleanup, credential, RACI, model-policy, or any arbitrary CLI verb. There is **no CLI dispatch** and no generic remote endpoint.
+
+Grant it in the identity mapping file:
+
+```yaml
+identities:
+  - login: steve@example.com
+    project: pk-forge
+    capabilities: [read, plan]   # read the board AND run the four planning actions
+```
+
+Properties that hold on every command:
+
+- **Server-authoritative envelope** — the actor, transport, and project scope come from the verified identity (never the request body; a body naming them is refused). Only `POST /api/plan` accepts a write, guarded in order by capability → CSRF/same-origin (`Sec-Fetch-Site` + a non-simple content type + an `Origin`/`Host` pin to the Serve hostname from Forge-owned serve-state) → strict envelope validation (bounded body, strict ids/integers) → server-authoritative project scope → a concurrency cap. `GET /api/board`'s response carries the identity's granted `capabilities`, so the client renders planning controls only when `plan` is present — a read-only identity sees no affordance the host would refuse, though the server-side guard above is the actual enforcement.
+- **Idempotent + replay-resistant** — a durable, per-project request-id ledger (`remote_planning_commands`, `PRIMARY KEY (project_key, request_id)`) returns the recorded outcome on redelivery, including after a Forge restart, without re-applying and never across projects. Ledger + precondition + mutation + audit commit in **one** atomic `writeTransaction` in `src/store/remote-planning.ts`; the HTTP handler never writes a Forge table itself.
+- **Precondition-guarded** — rank/reorder use a queue-version compare-and-set, enqueue re-checks readiness, and an annotation binds to the ticket revision. A stale precondition refuses with zero mutation and returns the current safe summary to re-read.
+- **Audited** — actor, transport, request id, precondition, outcome, and timestamp are recorded durably and readable back over `GET /api/plan/audit`, gated on the `read` capability (not `plan`, so a read-only identity can see its project's planning history), scoped to the same project, redacted, never carrying secrets or paths.
+- **Non-optimistic UI** — the board's accessible confirm → submit → result flow re-reads `/api/board` after the recorded outcome rather than painting a hoped-for state, and surfaces refusals with a retry path.
+
+Two additive store tables back this (`remote_planning_commands`, `ticket_planning_annotations`), both `CREATE TABLE IF NOT EXISTS` with `user_version` untouched. Full contract: [Planning command surface (FG-783)](../docs/SCHEMA-CONTRACT.md#planning-command-surface-fg-783); operator guide: [Granting the `plan` capability](../docs/how-to-remote-board-tailscale.md#granting-the-plan-capability-bounded-remote-planning--fg-783); the load-bearing decisions: [ADR 2026-09-08](../learnings/decisions/2026-09-08_remote-board-planning-mutations.md).
 
 ## Validation
 

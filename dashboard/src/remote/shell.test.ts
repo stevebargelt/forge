@@ -16,6 +16,7 @@ import {
   REMOTE_BOARD_ENDPOINT,
   REMOTE_BOARD_ENTRY,
   REMOTE_CLIENT_URL_PREFIX,
+  REMOTE_PLAN_ENDPOINT,
   remoteContentSecurityPolicy,
   remoteCspNonce,
   renderRemoteShell,
@@ -34,9 +35,18 @@ import {
 
 test("the remote CSP pins script-src to 'self' plus the response nonce — no CDN, no unsafe-inline", () => {
   const csp = remoteContentSecurityPolicy("NONCE123");
-  assert.equal(csp, "script-src 'self' 'nonce-NONCE123'");
+  assert.equal(csp, "script-src 'self' 'nonce-NONCE123'; connect-src 'self'");
   assert.match(csp, /script-src 'self'/);
   assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval|https?:\/\//, "the remote CSP must not admit inline strings, eval, or a remote origin");
+});
+
+test("FG-783: the remote CSP pins connect-src to 'self' — the board's fetches (read + planning POST) are same-origin only", () => {
+  const csp = remoteContentSecurityPolicy("NONCE123");
+  assert.match(csp, /connect-src 'self'/, "the board's fetch/XHR egress is pinned to this origin");
+  // Adding connect-src must not loosen script execution: still self+nonce, still no inline/eval/remote.
+  assert.match(csp, /script-src 'self' 'nonce-NONCE123'/, "script-src is unchanged — still self + the response nonce");
+  assert.doesNotMatch(csp, /connect-src[^;]*(https?:\/\/|\*)/, "connect-src must not admit a remote origin or a wildcard");
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/, "no CSP directive admits inline strings or eval");
 });
 
 test("each nonce is fresh — a nonce is not a reusable constant", () => {
@@ -80,9 +90,21 @@ test("RF-3: the board container is NOT a live region — state is announced by t
 test("the shell is responsive and carries no project data in the document itself", () => {
   const html = renderRemoteShell("n");
   assert.match(html, /<meta name="viewport"/, "a phone-usable board declares a viewport");
-  // The bootstrap hands the board ONLY its endpoint path — no identity, no project payload.
+  // The bootstrap hands the board ONLY its endpoint paths — no identity, no project payload.
   assert.ok(html.includes(REMOTE_BOARD_ENDPOINT));
   assert.ok(!/projectKey|projectDir/.test(html), "the shell must not embed any project scope");
+});
+
+test("FG-783: the bootstrap hands the board its planning endpoint (only a path — no identity, no scope)", () => {
+  const html = renderRemoteShell("n");
+  // The route literal is stable and pinned here so the shell copy cannot drift from the server's.
+  assert.equal(REMOTE_PLAN_ENDPOINT, "/api/plan");
+  assert.ok(html.includes(REMOTE_PLAN_ENDPOINT), "the bootstrap carries the planning endpoint path");
+  // The bootstrap carries endpoints ONLY — never an actor, capability, or project scope. Those
+  // are server-authoritative; the board learns its authority from the POST outcome, never a body.
+  const bootstrap = html.match(/window\.__REMOTE_BOARD__=(\{.*?\});/)?.[1] ?? "";
+  assert.ok(bootstrap, "the shell renders the bootstrap object");
+  assert.ok(!/actor|capabilit|projectKey|subject|token|identity/i.test(bootstrap), "the bootstrap must carry no identity/capability/scope");
 });
 
 // ─── config: fail-closed mode resolution ─────────────────────────────────────────
