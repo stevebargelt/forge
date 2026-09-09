@@ -641,6 +641,44 @@ export function reviewsForTask(taskId: string): Review[] {
   return rows.map(rowToReview);
 }
 
+/** FG-791: the SINGLE base-authority read for a run's post-review pipeline phases.
+ *
+ *  Returns the `candidate_sha` of the run's MOST-RECENTLY-SETTLED evidence-led review — the
+ *  reviewed tip a verify/docs phase must base its worktree on, so a later phase tests the code
+ *  the review actually fixed rather than the pre-review integration head. FG-791: a test
+ *  authored against pre-fix semantics passed in-container against the frozen build head and was
+ *  published onto the reviewed branch, where it failed deterministically. The base must repoint
+ *  to the reviewed candidate.
+ *
+ *  Every clause of the query is load-bearing:
+ *   - `state = 'settled'` ONLY. A mid-flight review's candidate is still moving; reading it
+ *     would repoint a downstream phase at a tip that is about to change. Settlement is the
+ *     freeze point relied on here — a lifecycle transition, not a lock — so only a SETTLED
+ *     review is ever read, and no path advances a candidate after settlement.
+ *   - `review_mode = 'evidence_led'` ONLY. A `legacy_verdict` / `legacy_review_loop` run has no
+ *     evidence-led candidate to honor: the helper returns undefined and the caller degrades to
+ *     today's publication-receipt base (no new base source, no reachable new refusal path for
+ *     verdict-mode runs).
+ *   - `candidate_sha IS NOT NULL`. A settled review that never recorded a candidate names no
+ *     tip to base on; it is skipped so a later settled review with a candidate can win, and an
+ *     absence overall returns undefined rather than a null masquerading as a sha.
+ *
+ *  ORDERED BY `settled_at DESC, id DESC`: the last review to settle is the current candidate,
+ *  and a same-instant tie is broken by id so the answer is deterministic. Returns undefined
+ *  when no such review exists — the exact signal the caller reads to fall back. */
+export function latestSettledReviewCandidateForRun(runId: string): string | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT candidate_sha FROM reviews
+        WHERE run_id = ? AND state = 'settled' AND review_mode = 'evidence_led'
+          AND candidate_sha IS NOT NULL
+        ORDER BY settled_at DESC, id DESC
+        LIMIT 1`,
+    )
+    .get(runId) as { candidate_sha: string } | undefined;
+  return row?.candidate_sha ?? undefined;
+}
+
 /** Every state transition emits an event — that is the whole point of the append-only
  *  half of the ledger. A no-op transition (same state) still records, so a coordinator
  *  that re-enters a stage after a crash is visible rather than silent. */
