@@ -79,7 +79,7 @@ Output: `{test_files_written, tests_written, tests_run, tests_passed, tests_fail
 
 Output: `{docs_updated, docs_not_updated_reason, stale_docs_found, operator_behavior_changed}`. No reds. Gate: `auto` — the orchestrator reviews the contract and advances without a human stop.
 
-**Base (FG-791):** same rule as `verify` — the reviewed candidate when an evidence-led review settled the build gate, else the publication-receipt base. A later phase whose base is not an ancestor of the run's current candidate is REFUSED at publication (`publication.refused{reason:'stale_base_not_ancestor'}`, nothing merged) rather than landing a stale-based artifact on the reviewed branch.
+**Base (FG-791):** same rule as `verify` — the reviewed candidate when an evidence-led review settled the build gate, else the publication-receipt base. A later phase whose base is not an ancestor of the run's current candidate is REFUSED at publication (`publication.refused{reason:'stale_base_not_ancestor'}`), and so is one with no recorded base at all once a review has settled (`reason:'base_unrecorded_under_settled_candidate'`) — either way nothing merges, rather than landing a stale-based artifact on the reviewed branch.
 
 ## When something goes wrong
 
