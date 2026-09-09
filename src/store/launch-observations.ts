@@ -39,10 +39,12 @@
 // writeTransaction (BEGIN IMMEDIATE), never a deferred txn that upgrades mid-flight.
 
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { getDb, writeTransaction } from "./db.js";
 import { provenPhysical, identify, compareIdentity, type PathIdentityInput } from "../util/path-identity.js";
+import { repositoryCheckoutIdentity, type RepositoryCheckoutIdentity } from "../util/repository-identity.js";
+import { registryByEvidence } from "./project-registry.js";
 import { LAUNCHES_DIR, classifyExit, isLaunchId, parseExitRecord, type LaunchMeta, type LaunchStatus } from "../v2/launch.js";
 
 /** How a launch's placement was AUTHORIZED. Enum-as-convention (FG-585): TEXT with
@@ -523,6 +525,119 @@ export function launchIdsOwnedByOtherProjects(projectDir: string): Set<string> {
     if (compareIdentity(rowIdentity, caller) !== "same") excluded.add(row.launch_id);
   }
   return excluded;
+}
+
+/** Injectable probes for launchIdsWithVanishedOwner — production uses the real git
+ *  identity + project registry; tests inject deterministic ones so a vanished/moved
+ *  owner can be posed without standing up a git repo per case. */
+export type VanishedOwnerDeps = {
+  /** Defaults to repositoryCheckoutIdentity (real `git`). Resolves the recorded
+   *  spelling to a repository identity whose `exists` proves whether a live git
+   *  checkout root was found up-tree from that path. */
+  checkoutIdentity?: (projectDir: string) => RepositoryCheckoutIdentity;
+  /** Defaults to registryByEvidence. Answers whether the project registry still
+   *  knows a given repository evidence key. */
+  lookupRegistry?: (evidenceKey: string) => { projectKey: string } | undefined;
+};
+
+/** FG-786 / RF-5 INVERTED: the launch ids whose recorded owning checkout is PROVABLY
+ *  gone — the launches a host-global convergence sweep may retire under the DEFAULT
+ *  retention policy from ANY project, so the launches of a since-deleted disposable
+ *  clone (the dead-pane accumulation this ticket was filed on) cannot pile up
+ *  unbounded because RF-5's project scoping treats them as forever-foreign.
+ *
+ *  This ADDS to sweep scope, so its failure direction is the MIRROR of
+ *  launchIdsOwnedByOtherProjects. There, indeterminacy must exclude so a project-local
+ *  override never purges a possibly-OTHER project. Here, indeterminacy must ALSO
+ *  exclude so the widened default-policy sweep never purges a possibly-LIVE project.
+ *  Both fail toward "leave it alone": a launch is returned ONLY when its owner is
+ *  proven vanished, and every doubt keeps it out. Over-inclusion here is an RF-5
+ *  violation (deleting a live project's launches); under-inclusion merely defers
+ *  convergence, which the next pass retries — so the safe verdict is always exclude.
+ *
+ *  VANISHED requires ALL THREE, decided per DISTINCT recorded owner:
+ *    1. the checkout's PARENT directory/volume RESOLVES (identify -> resolved). An
+ *       UNMOUNTED external/network volume, whose parent does not resolve, is
+ *       INDETERMINATE and stays excluded — a remount brings the live checkout back and
+ *       a leaf `existsSync` alone could not tell "deleted" from "volume offline";
+ *    2. the checkout LEAF does NOT resolve — the directory is really gone, proven by
+ *       realpath through identify(), never a bare existsSync of the leaf alone; and
+ *    3. the recorded path no longer resolves to a LIVE git identity —
+ *       repositoryCheckoutIdentity(projectDir).exists is false (findGitRoot found no
+ *       live `.git` up-tree, so a MOVED-BUT-LIVE checkout whose repo root still
+ *       resolves is NOT vanished) AND the project registry does not still know that
+ *       identity's evidence key.
+ *
+ *  Fails CLOSED to an empty set on any store/query throw: unlike
+ *  launchIdsOwnedByOtherProjects (which THROWS so a caller cannot mistake "could not
+ *  read ownership" for "nothing is foreign"), an empty result here is the SAFE answer
+ *  — "nothing PROVEN vanished" only WITHHOLDS scope, so it can never widen deletion.
+ *  A single owner whose classification throws is likewise treated as not-vanished. */
+export function launchIdsWithVanishedOwner(deps: VanishedOwnerDeps = {}): Set<string> {
+  const checkoutIdentity = deps.checkoutIdentity ?? ((dir: string) => repositoryCheckoutIdentity(dir));
+  const lookupRegistry = deps.lookupRegistry ?? registryByEvidence;
+  const vanished = new Set<string>();
+  let rows: Array<{ launch_id: string; project_dir: string; project_dir_canonical: string | null }>;
+  try {
+    rows = getDb()
+      .prepare(
+        `SELECT launch_id, project_dir, project_dir_canonical FROM launch_observations
+         WHERE project_dir IS NOT NULL AND project_dir <> ''`,
+      )
+      .all() as Array<{ launch_id: string; project_dir: string; project_dir_canonical: string | null }>;
+  } catch {
+    // Store/query failure -> empty, never a partial over-broad set that could widen
+    // the sweep past what was actually read.
+    return vanished;
+  }
+
+  // Classify each DISTINCT owner exactly once: repositoryCheckoutIdentity can shell
+  // `git`, and a host whose launches nearly all belong to one dead clone must not pay
+  // that probe per row.
+  const ownerVerdict = new Map<string, boolean>();
+  for (const row of rows) {
+    const canonical =
+      row.project_dir_canonical && row.project_dir_canonical !== "" ? row.project_dir_canonical : null;
+    const ownerKey = `${canonical ?? ""} ${row.project_dir}`;
+    let verdict = ownerVerdict.get(ownerKey);
+    if (verdict === undefined) {
+      verdict = classifyVanishedOwner(row.project_dir, canonical, checkoutIdentity, lookupRegistry);
+      ownerVerdict.set(ownerKey, verdict);
+    }
+    if (verdict) vanished.add(row.launch_id);
+  }
+  return vanished;
+}
+
+/** True only when the owner is PROVEN vanished — see launchIdsWithVanishedOwner for
+ *  the three-part rule and the fail-closed posture. Any throw (a filesystem or git
+ *  probe that errors mid-classification) resolves to NOT vanished. */
+function classifyVanishedOwner(
+  projectDir: string,
+  canonical: string | null,
+  checkoutIdentity: (projectDir: string) => RepositoryCheckoutIdentity,
+  lookupRegistry: (evidenceKey: string) => { projectKey: string } | undefined,
+): boolean {
+  try {
+    // The checkout dir to test for presence: the PROVEN identity recorded at write
+    // time when we have it, else the recorded spelling. For a moved/vanished checkout
+    // both are equally gone; the canonical is simply the stronger spelling.
+    const leaf = resolve(canonical ?? projectDir);
+    const parent = dirname(leaf);
+    // (1) Parent/volume absent -> INDETERMINATE (unmounted volume) -> not vanished.
+    if (identify(parent).kind !== "resolved") return false;
+    // (2) Leaf still present -> the checkout is on disk -> not vanished.
+    if (identify(leaf).kind === "resolved") return false;
+    // (3) Parent present, leaf gone. Confirm no LIVE git identity resolves the owner.
+    const identity = checkoutIdentity(projectDir);
+    if (identity.exists) return false; // a live repo root resolved up-tree (moved-but-live).
+    if (lookupRegistry(identity.key)) return false; // the registry still knows this identity.
+    return true; // PROVEN vanished: parent present, leaf gone, no live git identity.
+  } catch {
+    // Any indeterminacy -> not vanished (fail closed toward exclusion), matching the
+    // store-failure posture of the caller.
+    return false;
+  }
 }
 
 export function listLaunchObservations(limit = 500): LaunchObservation[] {

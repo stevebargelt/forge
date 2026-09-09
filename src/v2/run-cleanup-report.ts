@@ -95,6 +95,11 @@ export type RunCleanupReport = {
   readinessRecords: CleanupDisposition[];
   /** FG-590's disposition, REPORTED not owned: a one-line summary per resource. */
   reportedElsewhere: { launches?: string; containers?: string };
+  /** FG-786 RF-1: set on a host-global (`--all`) pass to record that the CODE-DEFAULT
+   *  retention windows governed it — a FORGE_RETENTION_* env / project-local override was
+   *  deliberately IGNORED so it could not reach across projects. Absent on a project-scoped
+   *  pass (which runs under its own resolved window). */
+  retentionNote?: string;
   /** section name → error message, for a section that could not run. */
   sectionErrors: Record<string, string>;
 };
@@ -265,6 +270,9 @@ export function formatRunCleanupReport(report: RunCleanupReport): string {
   lines.push(...formatSection("generated branches", report.generatedBranches));
   lines.push(...formatSection("publication worktrees", report.publicationWorktrees));
   lines.push(...formatSection("readiness records", report.readinessRecords));
+  if (report.retentionNote !== undefined) {
+    lines.push(`retention: ${report.retentionNote}`);
+  }
   // FG-590 sections are reported, not owned — one line each, no re-derivation.
   if (report.reportedElsewhere.launches !== undefined) {
     lines.push(`tmux launches (FG-590, reported): ${report.reportedElsewhere.launches}`);

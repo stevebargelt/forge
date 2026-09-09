@@ -12,10 +12,10 @@ import { renderedEmptyStore } from "../no-store.js";
 import { logEvent, eventsForTask } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, defaultContainerExitInfo, disposeRunGitWorkspaces, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 import { getContainerCausalEvidenceFromEvents, type ContainerCausalEvidence, type ContainerExitInfo } from "../../v2/failure-kind.js";
-import { classifyRetention, reapEligible, resolveRetention, type RetentionPolicy } from "../../v2/retention-policy.js";
+import { classifyRetention, reapEligible, resolveRetention, DEFAULT_RETENTION_POLICY, type RetentionPolicy } from "../../v2/retention-policy.js";
 import { readRetentionConfig } from "../../backlog/config.js";
-import { sweepTerminalLaunches, findProcessesHoldingCwd, type LaunchSweepResult, type TmuxRunner } from "../../v2/launch.js";
-import { launchIdsOwnedByOtherProjects } from "../../store/launch-observations.js";
+import { sweepTerminalLaunches, createPassCwdGuard, type LaunchSweepResult, type TmuxRunner } from "../../v2/launch.js";
+import { launchIdsOwnedByOtherProjects, launchIdsWithVanishedOwner, openLaunchCwds, type VanishedOwnerDeps } from "../../store/launch-observations.js";
 // FG-677: the terminal-run closeout sections + the unified report vocabulary.
 import { getRun, listRuns } from "../../store/runs.js";
 import { tasksForRun } from "../../store/tasks.js";
@@ -492,6 +492,47 @@ function cleanupErrorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+type OpenLaunchCwd = { cwd: string; description: string };
+type OpenLaunchCwdsRead = { ok: true; cwds: OpenLaunchCwd[] } | { ok: false; reason: string };
+
+/** FG-786 AC2 / RF-6: read the OPEN launch cwds once per closeout pass, store-guarded so the
+ *  store-less fast path opens/mints nothing. These are folded into the per-pass guard as
+ *  extraCwds so a live launch still forces retain at the git-workspace chokepoint.
+ *
+ *  A store-less host is a PROVEN "no open launch holders" (ok, empty). A store read that
+ *  THROWS is NOT flattened to an empty holder list — that would be FAIL-OPEN on a liveness
+ *  input (an open launch's workspace could then be reaped when the process probe misses it,
+ *  RF-6). It returns { ok:false } instead, and buildCloseoutCwdGuard turns that into
+ *  held:'unprobed' (retain) for EVERY workspace, matching RF-5's fail-closed direction. */
+function safeOpenLaunchCwds(read: () => OpenLaunchCwd[] = openLaunchCwds): OpenLaunchCwdsRead {
+  if (!storeExists()) return { ok: true, cwds: [] };
+  try {
+    return { ok: true, cwds: read() };
+  } catch (e) {
+    return { ok: false, reason: cleanupErrorMessage(e) };
+  }
+}
+
+/** FG-786 RF-2/RF-6: the per-pass cwd guard the closeout threads into all three workspace
+ *  chokepoints. A test-injected guard wins (unchanged). Otherwise:
+ *   - RF-6: if the open-launch holder read FAILED, every workspace is held:'unprobed' (retain
+ *     all, fail closed) with a named reason — a liveness input we could not read must never be
+ *     read as "no holder".
+ *   - RF-2: on a good read, the guard is the pass-wide memoizing snapshot made DESTROY-SAFE —
+ *     a held:false verdict (the only one that authorizes a destroy) is re-proven with one fresh
+ *     probe of that path before any mutation acts on it. */
+export function buildCloseoutCwdGuard(
+  openLaunches: OpenLaunchCwdsRead,
+  injected?: (path: string) => CwdHolderResult,
+): (path: string) => CwdHolderResult {
+  if (injected) return injected;
+  if (!openLaunches.ok) {
+    const reason = `open launch holders unreadable — retaining every workspace (fail closed): ${openLaunches.reason}`;
+    return () => ({ held: "unprobed", reason });
+  }
+  return createPassCwdGuard({ extraCwds: openLaunches.cwds, freshProbeAtDestroy: true });
+}
+
 /** FG-677: assemble the terminal-run closeout report. Three independently-erroring
  *  sections — git-workspace/branch (per durably-terminal run), publication-worktree, and
  *  readiness — with the readiness prune's workspaceRetired predicate wired from the
@@ -508,12 +549,34 @@ function performRunCloseout(opts: {
   // Injected for tests; production uses the real docker/tmux probes inside each section.
   containerAlive?: ContainerAlive;
   cwdGuard?: (path: string) => CwdHolderResult;
+  // FG-786 RF-6: injected for tests; production reads the OPEN launch cwds from the store.
+  // A reader that THROWS drives the fail-closed guard (retain every workspace, 'unprobed').
+  openLaunchCwdsReader?: () => Array<{ cwd: string; description: string }>;
 }): RunCleanupReport {
   const report = emptyRunCleanupReport({ dryRun: opts.dryRun, ...(opts.runId ? { runId: opts.runId } : {}) });
   const dryRun = !!opts.dryRun;
   // Workspaces this pass positively retired (or, under dry run, would retire) — the ONLY
   // authority the readiness prune uses to remove a bound record.
   const retired = new Set<string>();
+
+  // FG-786 AC2: build the per-pass cwd guard ONCE at the closeout boundary and share the
+  // SAME closure across all three workspace chokepoints (git workspaces, publication
+  // worktrees, readiness records). Before this, each chokepoint re-enumerated every tmux
+  // pane and spawned one lsof per pid PER workspace — an O(pids) question answered
+  // O(pids × workspaces) times, the hours-long closeout that held the run lock.
+  // createPassCwdGuard enumerates panes+server ONCE (dead panes excluded, AC1) and memoizes
+  // each pid's cwd read, so a whole pass probes each candidate pid at most once. The open
+  // launch cwds are read once here (store-guarded) and folded in as extraCwds so a live
+  // launch still forces retain at the git-workspace chokepoint. A test-injected cwdGuard
+  // wins (the probe-scale test counts through it); the guard is owned at pass scope and is
+  // never a module-level global — a recycled pid across two forge-next waves must not read
+  // back a stale cwd. RF-6: a failed open-launch read forces every workspace to 'unprobed'
+  // (retain). RF-2: the built guard is DESTROY-SAFE — a held:false is re-proven fresh before
+  // any mutation, so a chdir/new pane after the snapshot cannot let a live workspace be reaped.
+  const passGuard = buildCloseoutCwdGuard(
+    opts.openLaunchCwdsReader ? safeOpenLaunchCwds(opts.openLaunchCwdsReader) : safeOpenLaunchCwds(),
+    opts.cwdGuard,
+  );
 
   // ── git-workspace + generated-branch section (per durably-terminal run) ──
   if (storeExists()) {
@@ -535,7 +598,9 @@ function performRunCloseout(opts: {
         const res = disposeRunGitWorkspaces(rid, {
           dryRun,
           ...(opts.containerAlive ? { containerAlive: opts.containerAlive } : {}),
-          ...(opts.cwdGuard ? { cwdGuard: (p: string) => opts.cwdGuard!(p) } : {}),
+          // Ignore the section-local extraCwds arg: the pass guard already folded the open
+          // launch cwds in once (safeOpenLaunchCwds), so every chokepoint shares one probe map.
+          cwdGuard: (p: string) => passGuard(p),
         });
         report.gitWorkspaces.push(...res.gitWorkspaces);
         report.generatedBranches.push(...res.generatedBranches);
@@ -549,7 +614,7 @@ function performRunCloseout(opts: {
     // The sweep is scoped to opts.projectDir so a project-scoped closeout never retires
     // another project's publication worktrees (cross-project blast radius).
     try {
-      const res = sweepPublicationWorktrees({ dryRun, scopeToProjectDir: opts.projectDir, ...(opts.now ? { now: opts.now } : {}), policy: opts.policy, ...(opts.cwdGuard ? { cwdGuard: opts.cwdGuard } : {}) });
+      const res = sweepPublicationWorktrees({ dryRun, scopeToProjectDir: opts.projectDir, ...(opts.now ? { now: opts.now } : {}), policy: opts.policy, cwdGuard: passGuard });
       report.publicationWorktrees.push(...res.publicationWorktrees);
       for (const d of res.publicationWorktrees) if (d.action === "removed") retired.add(d.path);
     } catch (e) {
@@ -562,15 +627,15 @@ function performRunCloseout(opts: {
   // AND a POSITIVE live-reader re-probe at THIS chokepoint proves no dispatch can still
   // consume it. Liveness is re-proven here against fresh state — never assumed absent — and
   // a held OR unprobed workspace is treated as ALIVE and retained (fail closed). The probe
-  // is a fresh cwd-holder check (a host verification reader runs in the workspace), the same
-  // signal the git-workspace and publication chokepoints use.
-  const cwdGuard = opts.cwdGuard ?? ((p: string) => findProcessesHoldingCwd(p));
+  // is a cwd-holder check (a host verification reader runs in the workspace) — the SAME
+  // per-pass guard the git-workspace and publication chokepoints use, so this pass reads
+  // each candidate pid's cwd at most once across all three (FG-786 AC2), not once per gate.
   try {
     const res = pruneReadinessRecords({
       dryRun,
       workspaceRetired: (w) => retired.has(w),
       hasLiveReader: (w) => {
-        const held = cwdGuard(w);
+        const held = passGuard(w);
         return held.held === true || held.held === "unprobed";
       },
     });
@@ -613,36 +678,82 @@ export function performAutomaticCleanup(
     // FG-677: injected for tests; production uses the real docker/tmux probes.
     containerAlive?: ContainerAlive;
     cwdGuard?: (path: string) => CwdHolderResult;
+    // FG-786 AC3: `forge ops cleanup --all` — host-global convergence. When true, the launch
+    // sweep and container reap span EVERY project on this host under the resolved policy with
+    // NO project-local override applied (so a repo `.forge/config.yml`/FORGE_* short window
+    // cannot reach across projects); the OWNED closeout (git workspaces, publication
+    // worktrees — RF-6) stays scoped to projectDir, since those artifacts are project-owned.
+    allProjects?: boolean;
+    // FG-786 AC3: injected for tests; production uses the real git-identity + project-registry
+    // probes inside launchIdsWithVanishedOwner. The fs presence checks always use real dirs.
+    vanishedOwnerDeps?: VanishedOwnerDeps;
+    // FG-786 RF-6: injected for tests; a throwing reader drives the fail-closed pass guard.
+    openLaunchCwdsReader?: () => Array<{ cwd: string; description: string }>;
   } = {},
 ): AutomaticCleanupResult {
   const projectDir = opts.projectDir ?? process.cwd();
+  const allProjects = opts.allProjects === true;
+  // RF-1: `--all` (and the vanished-owner subset below) is host-global — it sweeps every
+  // project's launches/containers, so it must run under the CODE-DEFAULT retention windows
+  // ONLY. A FORGE_RETENTION_* env (or a project-local repo override) can NEVER shorten another
+  // LIVE project's — or a vanished project's — window (RF-5). resolveRetention gives FORGE_*
+  // env precedence over the defaults, so a host-global pass must NOT be resolved through it
+  // (a FORGE_RETENTION_SUCCESS_MS=0 would otherwise make --all a zero-window host-wide sweep).
+  // A project-scoped pass DOES layer the repo/env override on top (its own project's window).
+  const usingCodeDefaults = opts.policy === undefined && allProjects;
   const policy =
     opts.policy ??
-    resolveRetention(safeReadRetentionOverrides(projectDir), process.env);
+    (allProjects ? DEFAULT_RETENTION_POLICY : resolveRetention(safeReadRetentionOverrides(projectDir), process.env));
 
   let launches: AutomaticCleanupResult["launches"];
   try {
-    // RF-5: scope the launch sweep to this project. The container reap is already
-    // projectDir-scoped; the launch sweep was host-global, so a project-local retention
-    // override (a repo `.forge/config.yml` or a FORGE_* env with a short/zero window) would
-    // retire terminal launches OWNED BY OTHER PROJECTS. Exclude any launch the observation
-    // store places in a provably-different project; unowned/host-global launches stay in
-    // scope.
-    const foreignResult = safeForeignLaunchIds(projectDir);
+    // RF-5: scope the project-policy launch sweep to this project. The container reap is
+    // already projectDir-scoped; the launch sweep was host-global, so a project-local
+    // retention override (a repo `.forge/config.yml` or a FORGE_* env with a short/zero
+    // window) would retire terminal launches OWNED BY OTHER PROJECTS. Exclude any launch the
+    // observation store places in a provably-different project; unowned/host-global launches
+    // stay in scope. `--all` (host-global) explicitly runs with NO project-local override
+    // (see `policy` above), so nothing is treated as foreign then.
+    const foreignResult = allProjects ? ({ ok: true as const, foreign: new Set<string>() }) : safeForeignLaunchIds(projectDir);
     if (!foreignResult.ok) {
       // RF-5: cross-project ownership could not be established. FAIL CLOSED — retire NOTHING
       // (removing now could purge another project's terminal launch) and surface the failure
       // rather than silently sweeping over launches we cannot prove are ours to remove.
       launches = { error: `launch sweep skipped: cannot establish cross-project ownership (${foreignResult.error})` };
-    } else {
-      const foreign = foreignResult.foreign;
+    } else if (opts.dryRun) {
       // The launch sweep does not remove anything on a dry run — it only reports would-be
       // work — so a dry run passes a clock but never destroys. sweepTerminalLaunches itself
-      // has no dry-run mode (it removes), so a dry-run cleanup skips the destructive sweep
-      // and reports an empty result rather than removing launches.
-      launches = opts.dryRun
-        ? { scanned: 0, removed: [], retained: [], skippedRunning: [], errors: [] }
-        : sweepTerminalLaunches(policy, { now: opts.now, tmux: opts.tmux, scope: (id) => !foreign.has(id) });
+      // has no dry-run mode (it removes), so a dry-run cleanup skips the destructive sweeps
+      // (both the project-policy and the vanished-owner one) and reports an empty result.
+      launches = { scanned: 0, removed: [], retained: [], skippedRunning: [], errors: [] };
+    } else {
+      const foreign = foreignResult.foreign;
+      // FG-786 AC3: launches whose OWNING project checkout has PROVABLY vanished converge
+      // under the DEFAULT retention policy from ANY project. RF-5 treats a since-deleted
+      // disposable clone's launches as forever-foreign to every live project, so without this
+      // they never converge and their dead tmux panes accumulate unbounded (the exact failure
+      // this ticket was filed on). The classifier fails CLOSED: a store/query problem yields
+      // an empty vanished set (convergence just waits — it never widens deletion), and the
+      // store-less host opens/mints nothing (safeVanishedLaunchIds gates on storeExists).
+      const vanished = safeVanishedLaunchIds(opts.vanishedOwnerDeps);
+      // (1) current-project + host-global-unowned launches under the resolved (possibly
+      //     project-overridden) policy, EXCLUDING both foreign and vanished-owner ids.
+      const primary = sweepTerminalLaunches(policy, {
+        now: opts.now,
+        tmux: opts.tmux,
+        scope: (id) => !foreign.has(id) && !vanished.has(id),
+      });
+      // (2) vanished-owner launches under DEFAULT_RETENTION_POLICY — deliberately NOT the
+      //     caller's (possibly zero-window override) policy. Using the built-in default
+      //     windows means a project-local override can NEVER reach a vanished owner, which by
+      //     construction also means it can never reach a LIVE other project's launches: RF-5
+      //     preserved. The two scopes are DISJOINT (primary excludes vanished; this requires
+      //     it), so no launch is ever swept — or rm'd — twice.
+      const vanishedSweep =
+        vanished.size > 0
+          ? sweepTerminalLaunches(DEFAULT_RETENTION_POLICY, { now: opts.now, tmux: opts.tmux, scope: (id) => vanished.has(id) })
+          : { scanned: 0, removed: [], retained: [], skippedRunning: [], errors: [] };
+      launches = mergeLaunchSweepResults(primary, vanishedSweep);
     }
   } catch (e) {
     launches = { error: e instanceof Error ? e.message : String(e) };
@@ -651,7 +762,9 @@ export function performAutomaticCleanup(
   let containers: AutomaticCleanupResult["containers"];
   try {
     containers = performOpsReapContainers(
-      { dryRun: opts.dryRun, projectDir, policy, ...(opts.now ? { nowMs: opts.now.getTime() } : {}) },
+      // FG-786 AC3: `--all` reaps retained containers host-globally (projectDir undefined =>
+      // every project's containers), mirroring `ops reap-containers --all`.
+      { dryRun: opts.dryRun, projectDir: allProjects ? undefined : projectDir, policy, ...(opts.now ? { nowMs: opts.now.getTime() } : {}) },
       opts.reap ?? defaultContainerReap,
       opts.listContainers ?? defaultContainerList,
       opts.containerExitInfo ?? defaultContainerExitInfo,
@@ -672,6 +785,7 @@ export function performAutomaticCleanup(
       policy,
       ...(opts.containerAlive ? { containerAlive: opts.containerAlive } : {}),
       ...(opts.cwdGuard ? { cwdGuard: opts.cwdGuard } : {}),
+      ...(opts.openLaunchCwdsReader ? { openLaunchCwdsReader: opts.openLaunchCwdsReader } : {}),
     });
   } catch (e) {
     report = emptyRunCleanupReport({ dryRun: opts.dryRun, ...(opts.runId ? { runId: opts.runId } : {}) });
@@ -680,6 +794,11 @@ export function performAutomaticCleanup(
   // The FG-590 launch/container disposition is REPORTED here, never re-run or re-authorized.
   report.reportedElsewhere.launches = summarizeLaunches(launches, !!opts.dryRun);
   report.reportedElsewhere.containers = summarizeContainers(containers);
+  // RF-1: make the host-global code-default retention posture visible on the report.
+  if (usingCodeDefaults) {
+    report.retentionNote =
+      "host-global (--all) sweep — CODE-DEFAULT windows only; FORGE_RETENTION_* / project-local overrides ignored so they cannot reach across projects";
+  }
 
   return { policy, launches, containers, report };
 }
@@ -711,6 +830,35 @@ function safeForeignLaunchIds(projectDir: string): ForeignLaunchIds {
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** FG-786 AC3: the launch ids whose owning project checkout is PROVABLY vanished — the
+ *  positive, RF-5-inverted scope the vanished-owner sweep runs over. It fails CLOSED in the
+ *  ADD direction: unlike safeForeignLaunchIds (which fails closed by REFUSING to sweep), an
+ *  empty result here only WITHHOLDS scope, so a store/query problem — or a store-less host —
+ *  degrades to "nothing proven vanished", which merely defers convergence to a later pass and
+ *  can NEVER widen deletion past what was actually proven. The storeExists guard preserves the
+ *  store-less invariant: no store is opened or minted to answer "nothing is vanished". */
+function safeVanishedLaunchIds(deps?: VanishedOwnerDeps): Set<string> {
+  if (!storeExists()) return new Set();
+  try {
+    return launchIdsWithVanishedOwner(deps ?? {});
+  } catch {
+    return new Set();
+  }
+}
+
+/** FG-786 AC3: fold the two disjoint launch sweeps (the project-policy sweep and the
+ *  vanished-owner DEFAULT-policy sweep) into one LaunchSweepResult for reporting. The scopes
+ *  never overlap, so a simple concatenation cannot double-count or double-remove a launch. */
+function mergeLaunchSweepResults(a: LaunchSweepResult, b: LaunchSweepResult): LaunchSweepResult {
+  return {
+    scanned: a.scanned + b.scanned,
+    removed: [...a.removed, ...b.removed],
+    retained: [...a.retained, ...b.retained],
+    skippedRunning: [...a.skippedRunning, ...b.skippedRunning],
+    errors: [...a.errors, ...b.errors],
+  };
 }
 
 export function registerOps(program: Command): void {
@@ -876,7 +1024,13 @@ export function registerOps(program: Command): void {
   ops
     .command("cleanup")
     .option("--dry-run", "inventory only: perform NO mutation; report the exact proposed disposition and proof for every artifact")
-    .option("--project <dir>", "scope the closeout to a specific project dir (default: cwd)")
+    .option("--project <dir>", "scope the closeout to a specific project dir (default: cwd). Ignored with --all.")
+    // FG-786 AC3: the host-global on-demand convergence surface. Sweeps terminal launches and
+    // retained containers across EVERY project on this host under the resolved (no
+    // project-local override) policy — so a since-deleted disposable clone's launches converge
+    // no matter which project dir you invoke from. The owned closeout (git workspaces,
+    // publication worktrees) stays project-scoped (RF-6).
+    .option("--all", "converge terminal launches and retained containers across every project on this host (default: scope to the current directory's project)")
     .option("--json", "emit structured JSON")
     .description(
       "Terminal-run closeout: reconcile every disposable git workspace, generated branch, publication worktree, " +
@@ -887,10 +1041,12 @@ export function registerOps(program: Command): void {
         ".forge/config.yml `retention:` or FORGE_RETENTION_* env. Never removes a running launch/container, a non-terminal " +
         "task's container, a workspace held by a live process/mount, or an artifact of ambiguous ownership."
     )
-    .action((opts: { dryRun?: boolean; project?: string; json?: boolean }) => {
+    .action((opts: { dryRun?: boolean; project?: string; all?: boolean; json?: boolean }) => {
       ensureForgeDirs();
-      const projectDir = resolve(opts.project ?? process.cwd());
-      const result = performAutomaticCleanup({ dryRun: opts.dryRun, projectDir });
+      // --all is host-global; the owned closeout still needs a projectDir anchor (cwd), so we
+      // resolve one either way and pass allProjects to widen only the launch/container reach.
+      const projectDir = resolve(opts.all ? process.cwd() : opts.project ?? process.cwd());
+      const result = performAutomaticCleanup({ dryRun: opts.dryRun, projectDir, allProjects: opts.all });
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));

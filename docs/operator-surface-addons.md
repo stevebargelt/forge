@@ -119,12 +119,20 @@ pass from disk truth, with no fabricated success, no duplicate resolution, and n
 incident.
 
 **Cross-project ownership guarantee (fail closed).** A project-scoped launch sweep excludes
-any launch the observation store records as owned by a *different* project, so cleanup in
-one workspace never retires another's terminal launches. If that ownership cannot be
-established — the store exists but the ownership query itself fails — the sweep **fails
+any launch the observation store records as owned by a *different, still-live* project, so
+cleanup in one workspace never retires another's terminal launches. If that ownership cannot
+be established — the store exists but the ownership query itself fails — the sweep **fails
 closed**: it retires nothing at all (not even this project's own launches) and reports the
 failure (`forge ops cleanup` prints `launch sweep failed: <reason>`), rather than falling
 back to treating an unread store as "no foreign launches" and sweeping anyway.
+
+That exclusion protects a *live* other project only. A launch whose recorded owning checkout
+no longer resolves on disk (the project itself is gone, not merely a different cwd) is
+proven **vanished-owner** and converges under the code-default retention windows from any
+project — otherwise a since-deleted disposable clone's launches (and their dead tmux panes)
+would accumulate unbounded (FG-786). A live other project's launches are never reached by
+this path; see [`how-to-terminal-cleanup.md`](how-to-terminal-cleanup.md) → Launch retention
+convergence for the exact classification rule.
 
 **Immediate manual sweep and inspection.** The automatic policy does not replace the manual
 commands — they remain available for inspection, early cleanup, and repair:
