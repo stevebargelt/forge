@@ -43,10 +43,15 @@ exit 97
 }
 
 function runFixture(fixture: ReturnType<typeof makeFixture>, extraEnv: NodeJS.ProcessEnv = {}) {
+  const fixtureEnv = { ...process.env };
+  delete fixtureEnv.FORGE_INTEGRATION_TREE_GUARD_ACTIVE;
+  delete fixtureEnv.FORGE_SKIP_TREE_PURITY_GUARD;
+  delete fixtureEnv.FORGE_INTEGRATION_LIST_ONLY;
+
   return spawnSync("bash", ["scripts/run-integration-tests.sh", "serial"], {
     cwd: fixture.root,
     encoding: "utf8",
-    env: { ...process.env, ...extraEnv, PATH: `${fixture.bin}:${process.env.PATH}` },
+    env: { ...fixtureEnv, ...extraEnv, PATH: `${fixture.bin}:${process.env.PATH}` },
   });
 }
 
@@ -94,6 +99,24 @@ test("FG-792: a nested runner does not install another guard across a sibling tr
     assert.equal(nested.status, 0, `nested runner stderr:\n${nested.stderr}`);
     assert.match(readFileSync(fixture.mutation, "utf8"), /^$/, "the sibling transient was created during the nested run");
   } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("FG-792: an active guard in the test process does not leak into an outer fixture runner", () => {
+  const fixture = makeFixture();
+  const previousGuardActive = process.env.FORGE_INTEGRATION_TREE_GUARD_ACTIVE;
+  process.env.FORGE_INTEGRATION_TREE_GUARD_ACTIVE = "1";
+  try {
+    const dirty = runFixture(fixture, { FG792_MUTATION: fixture.mutation });
+    assert.equal(dirty.status, 1, `dirty runner stderr:\n${dirty.stderr}`);
+    assert.match(dirty.stderr, /integration tier dirtied the real checkout/);
+  } finally {
+    if (previousGuardActive === undefined) {
+      delete process.env.FORGE_INTEGRATION_TREE_GUARD_ACTIVE;
+    } else {
+      process.env.FORGE_INTEGRATION_TREE_GUARD_ACTIVE = previousGuardActive;
+    }
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
