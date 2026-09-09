@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,13 +65,23 @@ test("FG-543 build.sh records the real printer digest as docker's forge.build-in
   const root = mkdtempSync(join(tmpdir(), "forge-fg543-build-sh-"));
   const shimDir = join(root, "bin");
   const dockerArgs = join(root, "docker-args.txt");
+  // FG-792: run a COPY of the docker/ build context, never the real checkout.
+  // build.sh stages corp-root.pem into its OWN directory ($HERE) and removes it on
+  // EXIT; run against the real docker/ that transient file races fg571's tree-purity
+  // snapshot (both share integration shard 7/8). The copied build.sh recomputes
+  // REPO_ROOT as <root> and runs the printer from there, so symlink the printer's
+  // source (src) and its tsx runtime (node_modules) in for the resolution to work.
+  const dockerCopy = join(root, "docker");
+  cpSync(join(repoRoot, "docker"), dockerCopy, { recursive: true });
+  symlinkSync(join(repoRoot, "src"), join(root, "src"));
+  symlinkSync(join(repoRoot, "node_modules"), join(root, "node_modules"));
   mkdirSync(shimDir);
   writeFileSync(join(shimDir, "docker"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FORGE_DOCKER_ARGS\"\n");
   chmodSync(join(shimDir, "docker"), 0o755);
   try {
-    const expected = printedDigest(join(repoRoot, "docker"));
-    execFileSync("bash", [join(repoRoot, "docker/build.sh")], {
-      cwd: repoRoot,
+    const expected = printedDigest(dockerCopy);
+    execFileSync("bash", [join(dockerCopy, "build.sh")], {
+      cwd: dockerCopy,
       env: {
         ...process.env,
         HOME: join(root, "home"),
@@ -87,6 +97,11 @@ test("FG-543 build.sh records the real printer digest as docker's forge.build-in
       args.slice(1, 3),
       ["--label", `forge.build-inputs.digest=${expected}`],
       "build.sh must forward the printer's exact output as the image label",
+    );
+    assert.equal(
+      existsSync(join(repoRoot, "docker", "corp-root.pem")),
+      false,
+      "build.sh must stage corp-root.pem under the temp copy, never the real checkout (FG-792)",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
