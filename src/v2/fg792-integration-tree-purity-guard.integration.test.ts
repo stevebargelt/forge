@@ -89,15 +89,44 @@ test("FG-792: the explicit debug bypass permits the mutation and announces that 
   }
 });
 
-test("FG-792: a nested runner does not install another guard across a sibling transient", () => {
+test("FG-792: a genuinely nested runner (marker names a live ancestor) skips the second guard and says so", () => {
   const fixture = makeFixture();
   try {
+    // The fixture bash is spawned directly by this test process, so this process's
+    // pid IS a live ancestor of the runner — the legitimate nested case.
     const nested = runFixture(fixture, {
       FG792_MUTATION: fixture.mutation,
-      FORGE_INTEGRATION_TREE_GUARD_ACTIVE: "1",
+      FORGE_INTEGRATION_TREE_GUARD_ACTIVE: String(process.pid),
     });
     assert.equal(nested.status, 0, `nested runner stderr:\n${nested.stderr}`);
     assert.match(readFileSync(fixture.mutation, "utf8"), /^$/, "the sibling transient was created during the nested run");
+    assert.match(
+      nested.stderr,
+      /nested runner installs no second guard|already active in ancestor runner/i,
+      "the nested skip must announce itself, not disable protection silently",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("FG-792: an external/inherited marker that is not a live ancestor does NOT silently disable the guard", () => {
+  const fixture = makeFixture();
+  try {
+    // FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1 as an ambient/inherited value: pid 1 is
+    // init, never a runner, so it is not a legitimate nesting marker. The guard must
+    // install anyway and still reject a mutation of the real checkout.
+    const external = runFixture(fixture, {
+      FG792_MUTATION: fixture.mutation,
+      FORGE_INTEGRATION_TREE_GUARD_ACTIVE: "1",
+    });
+    assert.equal(external.status, 1, `external-marker runner stderr:\n${external.stderr}`);
+    assert.match(external.stderr, /integration tier dirtied the real checkout/);
+    assert.match(
+      external.stderr,
+      /is not a live ancestor runner; installing the guard anyway/i,
+      "an external marker must be announced and overridden, not honored silently",
+    );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

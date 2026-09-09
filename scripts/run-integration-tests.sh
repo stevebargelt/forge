@@ -49,10 +49,15 @@ set -euo pipefail
 # tier dirtied the real checkout") so the class cannot recur silently. It wraps every
 # run path — a bulk shard, the serial lane, and the unsharded dev run (bulk + serial
 # tail). Bypass ONLY for local debugging by exporting FORGE_SKIP_TREE_PURITY_GUARD=1
-# — never silently. The guard exports FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1 so a
-# NESTED runner (the fg704 runner test, forge-test's reproduced --integration runner)
-# does not install a second guard whose before/after window would straddle the
-# parent's concurrent siblings and false-positive on their transient files.
+# — never silently. The installing runner exports FORGE_INTEGRATION_TREE_GUARD_ACTIVE
+# = its OWN pid so a genuinely NESTED runner (the fg704 runner test, forge-test's
+# reproduced --integration runner) does not install a second guard whose before/after
+# window would straddle the parent's concurrent siblings and false-positive on their
+# transient files. That skip is honored ONLY when the marker names a pid that is a LIVE
+# ANCESTOR of the nested runner, and it announces itself on stderr — it is not silent.
+# A stale marker (owning runner already exited) or an externally/inherited-set marker
+# (e.g. FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1 in the ambient environment) is NOT a live
+# ancestor, so the guard installs anyway rather than being silently disabled.
 
 ARG="${1:-}"
 
@@ -76,6 +81,26 @@ cd "$REPO_ROOT"
 # lane, a bulk shard, and the unsharded dev run since every one of them exits through
 # this trap. LIST_ONLY runs no tests, so it needs no guard.
 PURITY_BEFORE=""
+# is_live_ancestor <pid>: true when <pid> is a live process AND an ancestor of this
+# runner ($$). Walks the parent chain via `ps -o ppid=` (portable to macOS/BSD, unlike
+# /proc) and stops before pid 1 — init is an ancestor of everything and is never a
+# runner, so it can never make an external `=1` marker look legitimate.
+is_live_ancestor() {
+  local target="$1" pid ppid
+  case "$target" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$target" -gt 1 ] || return 1
+  pid=$$
+  while [ "$pid" -gt 1 ]; do
+    ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')" || ppid=""
+    [ -n "$ppid" ] || return 1
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ppid" = "$target" ] && return 0
+    pid="$ppid"
+  done
+  return 1
+}
 check_tree_purity() {
   local orig_exit=$?
   local after
@@ -93,15 +118,26 @@ check_tree_purity() {
   fi
   exit "$orig_exit"
 }
-if [ "${FORGE_INTEGRATION_TREE_GUARD_ACTIVE:-}" != "1" ] \
-  && [ "${FORGE_SKIP_TREE_PURITY_GUARD:-}" != "1" ] \
-  && [ "${FORGE_INTEGRATION_LIST_ONLY:-}" != "1" ]; then
-  export FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1
+GUARD_MARKER="${FORGE_INTEGRATION_TREE_GUARD_ACTIVE:-}"
+if [ "${FORGE_INTEGRATION_LIST_ONLY:-}" = "1" ]; then
+  : # list mode runs no tests, so it needs no guard
+elif [ "${FORGE_SKIP_TREE_PURITY_GUARD:-}" = "1" ]; then
+  echo "notice: FG-792 tree-purity guard BYPASSED (FORGE_SKIP_TREE_PURITY_GUARD=1) — the integration tier may dirty the real checkout; local debugging only" >&2
+elif [ -n "$GUARD_MARKER" ] && is_live_ancestor "$GUARD_MARKER"; then
+  # Genuinely nested: an ancestor runner (pid $GUARD_MARKER) already installed the
+  # guard over this whole process tree. Skip the second guard — but never silently.
+  echo "notice: FG-792 tree-purity guard already active in ancestor runner (pid ${GUARD_MARKER}); nested runner installs no second guard" >&2
+else
+  # No marker, or a stale/external one that is NOT a live ancestor (e.g. an inherited
+  # FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1): install the guard rather than let an
+  # unrelated marker silently disable it. Re-stamp the marker with our own pid so our
+  # real nested children can recognize it.
+  if [ -n "$GUARD_MARKER" ]; then
+    echo "notice: FG-792 tree-purity guard marker FORGE_INTEGRATION_TREE_GUARD_ACTIVE=${GUARD_MARKER} is not a live ancestor runner; installing the guard anyway" >&2
+  fi
+  export FORGE_INTEGRATION_TREE_GUARD_ACTIVE=$$
   PURITY_BEFORE="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
   trap check_tree_purity EXIT
-elif [ "${FORGE_INTEGRATION_TREE_GUARD_ACTIVE:-}" != "1" ] \
-  && [ "${FORGE_SKIP_TREE_PURITY_GUARD:-}" = "1" ]; then
-  echo "notice: FG-792 tree-purity guard BYPASSED (FORGE_SKIP_TREE_PURITY_GUARD=1) — the integration tier may dirty the real checkout; local debugging only" >&2
 fi
 
 ALL=()
