@@ -99,6 +99,9 @@ if [ "${FORGE_INTEGRATION_TREE_GUARD_ACTIVE:-}" != "1" ] \
   export FORGE_INTEGRATION_TREE_GUARD_ACTIVE=1
   PURITY_BEFORE="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
   trap check_tree_purity EXIT
+elif [ "${FORGE_INTEGRATION_TREE_GUARD_ACTIVE:-}" != "1" ] \
+  && [ "${FORGE_SKIP_TREE_PURITY_GUARD:-}" = "1" ]; then
+  echo "notice: FG-792 tree-purity guard BYPASSED (FORGE_SKIP_TREE_PURITY_GUARD=1) — the integration tier may dirty the real checkout; local debugging only" >&2
 fi
 
 ALL=()
