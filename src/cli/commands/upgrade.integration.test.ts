@@ -5,6 +5,7 @@ import { tmpdir, homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { tryGitPull } from "./upgrade.js";
+import { provisionDocsSurfaces } from "./init.js";
 
 let dir: string;
 
@@ -176,6 +177,67 @@ function captureLog(fn: () => void): string {
   try { fn(); } finally { console.log = realLog; }
   return lines.join("\n");
 }
+
+// ─────────── FG-793: provision → pull recurrence and operator report ───────────
+
+test("FG-793: a provisioned untracked docs-surfaces file does not wedge the next pull, but a tracked edit does", () => {
+  // This is the exact on-disk shape of the forge checkout before FG-793: a
+  // tracked project config, no docs-surfaces.yml yet, and an origin capable of
+  // serving a pull.  Use a bare local origin so this remains a real git path
+  // without depending on the network.
+  const origin = mkdtempSync(join(tmpdir(), "forge-upgrade-origin-"));
+  try {
+    initRepo();
+    execSync("mkdir -p .forge && printf 'project: forge\\n' > .forge/config.yml && git add .forge/config.yml && git commit -q -m config", { cwd: dir });
+    execSync("git init -q --bare", { cwd: origin });
+    execSync(`git remote add origin ${origin}`, { cwd: dir });
+
+    const provisioned = provisionDocsSurfaces(dir);
+    assert.equal(provisioned.action, "created", "the real init/upgrade provisioning seam creates the missing file");
+    assert.equal(execSync("git status --porcelain", { cwd: dir, encoding: "utf8" }), "?? .forge/docs-surfaces.yml\n");
+    assert.equal(tryGitPull(dir, /* dryRun */ true).kind, "ok", "the next pull reaches its would-pull path rather than dirty");
+
+    writeFileSync(join(dir, ".forge", "config.yml"), "project: changed\n");
+    assert.equal(tryGitPull(dir, /* dryRun */ true).kind, "dirty", "a tracked edit still stops the pull");
+  } finally {
+    rmSync(origin, { recursive: true, force: true });
+  }
+});
+
+test("FG-793: a fresh forge clone preserves the committed docs-surfaces config without dirtying its tree", () => {
+  const clone = join(dir, "forge-clone");
+  execFileSync("git", ["clone", "-q", "/project", clone]);
+  const path = join(clone, ".forge", "docs-surfaces.yml");
+  const before = readFileSync(path, "utf8");
+
+  const provisioned = provisionDocsSurfaces(clone);
+
+  assert.equal(provisioned.action, "preserved", "the committed valid config makes provisioning a no-op");
+  assert.equal(readFileSync(path, "utf8"), before, "a preserve decision must leave the committed bytes untouched");
+  assert.equal(execSync("git status --porcelain", { cwd: clone, encoding: "utf8" }), "", "a fresh clone remains clean after provisioning");
+});
+
+test("FG-793: real upgrade narration distinguishes tracked dirtiness from untracked provisioning output", () => {
+  const assetsDir = join(COMMANDS_DIR, "..", "..", "..");
+  const report = (): string => captureLog(() => {
+    captureExit(() => runUpgrade(
+      { dryRun: true, skipNpm: true, skipProject: true },
+      { mode: "dev", assetsDir, devDir: dir },
+    ));
+  });
+
+  initRepo({ withRemote: true });
+  execSync("printf tracked > tracked.txt && git add tracked.txt && git commit -q -m tracked && printf changed > tracked.txt", { cwd: dir });
+  assert.match(report(), /\[1\/4\] git pull: DID NOT RUN \(working tree has uncommitted changes in forge repo\)/);
+
+  rmSync(dir, { recursive: true, force: true });
+  dir = mkdtempSync(join(tmpdir(), "forge-upgrade-test-"));
+  initRepo({ withRemote: true });
+  provisionDocsSurfaces(dir);
+  const untrackedReport = report();
+  assert.match(untrackedReport, /\[1\/4\] git pull: would pull from remote/);
+  assert.doesNotMatch(untrackedReport, /\[1\/4\] git pull: DID NOT RUN/);
+});
 
 /** Drive the REAL `forge upgrade` action as a release. The whole action runs —
  *  so a refusal placed anywhere upstream of the installer (the MEDIUM-5 trap)
