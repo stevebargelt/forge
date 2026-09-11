@@ -299,9 +299,53 @@ test("usageRollup: project A's scoped usage includes its deleted-checkout runs a
 });
 
 test("usageTimeSeries: the same scoped total holds day by day", () => {
-  const series = usageTimeSeries("30d", scopeA);
+  const series = usageTimeSeries("30d", scopeA, NOW);
   const total = series.reduce((sum, r) => sum + r.inputTokens, 0);
   assert.equal(total, 700, "AC5: usage over time includes the deleted checkouts, excludes other projects");
+});
+
+test("usageTimeSeries: an injected clock fixes the window while all-time usage ignores it", () => {
+  const oneDayAfterFixture = NOW + 86400_000;
+  const sixtyDaysAfterFixture = NOW + 60 * 86400_000;
+
+  const recentTotal = usageTimeSeries("30d", scopeA, oneDayAfterFixture)
+    .reduce((sum, row) => sum + row.inputTokens, 0);
+  const expiredTotal = usageTimeSeries("30d", scopeA, sixtyDaysAfterFixture)
+    .reduce((sum, row) => sum + row.inputTokens, 0);
+  const allTimeTotal = usageTimeSeries("all", scopeA, sixtyDaysAfterFixture)
+    .reduce((sum, row) => sum + row.inputTokens, 0);
+
+  assert.equal(recentTotal, 700, "a clock one day after the fixed fixture includes its full scoped total");
+  assert.equal(expiredTotal, 0, "the same fixture is outside a 30-day window sixty days later");
+  assert.equal(allTimeTotal, 700, "the all-time query deliberately ignores the injected clock");
+});
+
+test("usageTimeSeries: its default clock behaves like Date.now for a now-relative call", () => {
+  const nowMs = Date.now();
+  const runId = "run-a-now-relative";
+  const taskId = `task-${runId}`;
+  const createdAt = new Date(nowMs - 86400_000).toISOString();
+
+  directRun(runId, alphaDel, PK_A, alphaDel);
+  store
+    .prepare(
+      `INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, result, created_at, started_at, completed_at)
+       VALUES (?, ?, 'implementation', 'engineer', 'complete', '{}', '{"ok":true}', ?, ?, ?)`,
+    )
+    .run(taskId, runId, createdAt, createdAt, createdAt);
+  store
+    .prepare(
+      `INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+       VALUES (?, ?, 'claude-opus-5', 'default', 77, 0, 0, 0, ?)`,
+    )
+    .run(taskId, `req-${runId}`, createdAt);
+
+  const defaultRows = usageTimeSeries("30d", scopeA);
+  const explicitRows = usageTimeSeries("30d", scopeA, nowMs);
+  const defaultTotal = defaultRows.reduce((sum, row) => sum + row.inputTokens, 0);
+
+  assert.deepEqual(defaultRows, explicitRows, "omitting nowMs uses the current Date.now clock");
+  assert.equal(defaultTotal, 77, "the now-relative row is included by the default 30-day window");
 });
 
 test("agentRuntimeTrends: project A's runtime trend counts the deleted-checkout tasks and no others", () => {
