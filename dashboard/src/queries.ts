@@ -1887,13 +1887,17 @@ export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScop
   }));
 }
 
-export function usageTimeSeries(since = "30d", scope?: ProjectScope): UsageTimeSeriesRow[] {
+export function usageTimeSeries(
+  since = "30d",
+  scope?: ProjectScope,
+  nowMs: number = Date.now(),
+): UsageTimeSeriesRow[] {
   const params: unknown[] = [];
   let sinceClause = "";
   if (since !== "all") {
     const m = since.match(/^(\d+)d$/);
     if (m?.[1]) {
-      const cutoff = new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString();
+      const cutoff = new Date(nowMs - parseInt(m[1], 10) * 86400_000).toISOString();
       sinceClause = "AND mc.created_at >= ?";
       params.push(cutoff);
     }

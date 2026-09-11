@@ -299,7 +299,7 @@ test("usageRollup: project A's scoped usage includes its deleted-checkout runs a
 });
 
 test("usageTimeSeries: the same scoped total holds day by day", () => {
-  const series = usageTimeSeries("30d", scopeA);
+  const series = usageTimeSeries("30d", scopeA, NOW);
   const total = series.reduce((sum, r) => sum + r.inputTokens, 0);
   assert.equal(total, 700, "AC5: usage over time includes the deleted checkouts, excludes other projects");
 });
