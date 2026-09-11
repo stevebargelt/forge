@@ -1,0 +1,35 @@
+# forge — docs surfaces (this project: forge itself)
+#
+# `surfaces` is a list of path PREFIXES (relative to the project root), each
+# naming source or config that defines operator-visible behavior. When a
+# completed task's changed files touch one of these prefixes, forge flags
+# docs_impact so the orchestrator can route a documentation-reconciliation
+# follow-up. A path matches when the changed file equals the prefix or starts
+# with it, so a trailing "/" scopes a whole directory.
+#
+# This file is committed on purpose (FG-793): forge's own project-provisioning
+# CREATES .forge/docs-surfaces.yml when it is missing, and an untracked
+# provisioned artifact was wedging `forge upgrade`'s git-pull gate. Tracking it
+# makes the classifier PRESERVE it (valid) instead of recreating it.
+#
+# The list mirrors forge's built-in OPERATOR_SURFACES (src/v2/contract.ts)
+# exactly, so committing this file leaves forge's own docs_impact inference
+# unchanged. Keep it in sync with OPERATOR_SURFACES.
+
+surfaces:
+  - src/cli/ # commands + flags the operator invokes
+  - seeds/workflows/ # workflow shapes
+  - seeds/runtimes/ # provider/auth runtimes
+  - seeds/constraints/ # force-level rules agents obey
+  - seeds/orchestrator-template.md # the orchestrator contract
+  - seeds/forge-raci.md # work-type routing
+  - seeds/model-policy.example.yml # the example operators copy
+  - src/notify/ # notification behavior + flags
+  - src/util/auth-profiles # auth modes/profiles
+  - src/util/creds # credential handling
+  - src/v2/loader.ts # workflow/runtime/policy loading
+  - src/v2/schema.ts # workflow/runtime/policy vocabulary (activity:, runtime:, ...)
+  - src/v2/model-resolution.ts # capability/profile -> model resolution
+  - src/v2/provider-doctor.ts # `forge providers doctor` behavior
+  - src/v2/contract.ts # the task-contract shape operators/agents declare
+  - scripts/install-seeds.sh # what `forge upgrade` provisions

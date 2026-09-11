@@ -58,6 +58,62 @@ test("tryGitPull: returns 'error' when not a git repo", () => {
   assert.ok(r.kind === "error" || r.kind === "no-remote");
 });
 
+// ─────────── FG-793: only TRACKED-file changes block the pull ───────────
+//
+// forge's own project-provisioning creates untracked artifacts in this checkout
+// (FG-546 provisions .forge/docs-surfaces.yml when missing). Before FG-793 the
+// dirty gate ran `git status --porcelain`, which lists untracked files, so a
+// provisioned artifact reported the tree dirty and wedged every subsequent pull.
+// The gate now passes `--untracked-files=no`: untracked files never block, but a
+// modified or staged TRACKED file still does.
+
+test("FG-793: tryGitPull ignores an UNTRACKED-only difference — no-remote (pull would run)", () => {
+  initRepo({ withRemote: false });
+  execSync("touch provisioned-artifact.yml", { cwd: dir }); // untracked, never `git add`ed
+  const r = tryGitPull(dir, /* dryRun */ false);
+  assert.equal(r.kind, "no-remote", "untracked-only tree is NOT dirty; the pull is not refused");
+});
+
+test("FG-793: tryGitPull ignores an UNTRACKED-only difference — dry-run with remote returns 'ok'", () => {
+  initRepo({ withRemote: true });
+  execSync("touch provisioned-artifact.yml", { cwd: dir });
+  const r = tryGitPull(dir, /* dryRun */ true);
+  assert.equal(r.kind, "ok", "untracked-only tree lets the pull proceed");
+});
+
+test("FG-793: tryGitPull still refuses a MODIFIED tracked file", () => {
+  initRepo({ withRemote: true });
+  execSync("echo v1 > tracked.txt && git add tracked.txt && git commit -q -m add", { cwd: dir });
+  execSync("echo v2 > tracked.txt", { cwd: dir }); // tracked, now modified in the worktree
+  const r = tryGitPull(dir, /* dryRun */ false);
+  assert.equal(r.kind, "dirty", "a modified tracked file still blocks the pull");
+});
+
+test("FG-793: tryGitPull still refuses a STAGED new file", () => {
+  initRepo({ withRemote: true });
+  execSync("touch staged.txt && git add staged.txt", { cwd: dir }); // staged into the index
+  const r = tryGitPull(dir, /* dryRun */ false);
+  assert.equal(r.kind, "dirty", "a staged addition still blocks the pull");
+});
+
+// FG-793 AC2: the committed .forge/docs-surfaces.yml in THIS repo must classify
+// as valid-project so init/upgrade PRESERVE it (never create/migrate/repair) —
+// which is what stops the provision→untracked→wedge loop from recurring.
+test("FG-793: the committed .forge/docs-surfaces.yml classifies as valid-project (preserve)", async () => {
+  const { classifyDocsSurfaces } = await import("../../v2/contract.js");
+  const forgeRepoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  const { verdict } = classifyDocsSurfaces(forgeRepoRoot);
+  assert.equal(verdict, "valid-project", "committed docs-surfaces.yml must be valid → preserved, never recreated");
+});
+
+// FG-793 AC2: committing the file must not change forge's own docs_impact
+// inference — its surfaces resolve to exactly the built-in OPERATOR_SURFACES.
+test("FG-793: the committed docs-surfaces.yml leaves forge's operator-surface inference unchanged", async () => {
+  const { loadOperatorSurfaces, OPERATOR_SURFACES } = await import("../../v2/contract.js");
+  const forgeRepoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  assert.deepEqual(loadOperatorSurfaces(forgeRepoRoot), OPERATOR_SURFACES);
+});
+
 // ─────────── FG-577 (criteria 1, 2, 3): EXECUTED asset repair from a release ───────────
 //
 // Release mode is reachable without promoting this host: a disposable tree

@@ -1635,10 +1635,18 @@ type PullResult =
 
 // Exported for testing.
 export function tryGitPull(repoDir: string, dryRun: boolean): PullResult {
-  // Working tree clean? Refuse to pull if dirty — protects in-progress work.
+  // Refuse to pull only when TRACKED files have uncommitted changes
+  // (modified/staged/deleted) — that is the in-progress work the pull would
+  // clobber. `--untracked-files=no` deliberately ignores untracked files:
+  // forge's own project-provisioning creates untracked artifacts in this very
+  // checkout (FG-546 provisions .forge/docs-surfaces.yml when missing), and a
+  // provisioned artifact must never wedge the tool that provisions it (FG-793).
+  // `git pull --ff-only` below is itself the safety net for an untracked
+  // collision — it refuses rather than overwrite an untracked file that a pulled
+  // commit would introduce.
   let statusOut: string;
   try {
-    statusOut = execSync("git status --porcelain", { cwd: repoDir, encoding: "utf8" });
+    statusOut = execSync("git status --porcelain --untracked-files=no", { cwd: repoDir, encoding: "utf8" });
   } catch (e) {
     return { kind: "error", message: `git status failed: ${(e as Error).message}` };
   }
