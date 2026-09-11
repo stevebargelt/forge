@@ -206,7 +206,7 @@ test("FG-793: a provisioned untracked docs-surfaces file does not wedge the next
 
 test("FG-793: a fresh forge clone preserves the committed docs-surfaces config without dirtying its tree", () => {
   const clone = join(dir, "forge-clone");
-  execFileSync("git", ["clone", "-q", "/project", clone]);
+  execFileSync("git", ["clone", "-q", PKG_ROOT, clone]);
   const path = join(clone, ".forge", "docs-surfaces.yml");
   const before = readFileSync(path, "utf8");
 
