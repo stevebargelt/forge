@@ -118,6 +118,7 @@ and the [AWS credential-mount limitation](https://github.com/asheshgoplani/agent
 | Agent Orchestrator | Generation-fenced lifecycle observations, preservation refs, and daemon reconciliation | [Assessment](agent-orchestrator-forge-assessment.md) | [Source](https://github.com/AgentWrapper/agent-orchestrator) |
 | Maestro | One canonical workflow source generated across agent runtimes, plus an Express/Standard split | [Assessment](maestro-forge-assessment.md) | [Source](https://github.com/josstei/maestro-orchestrate) |
 | Claude Squad | Worktree-per-session as a compact default, plus a warning about shared host tmux ownership | [Assessment](claude-squad-forge-assessment.md) | [Source](https://github.com/smtg-ai/claude-squad) |
+| Cafe655 AI system and Session Manager | A read-only, project-scoped interactive-session projection over Forge's existing receipts, liveness, and lineage state | [Assessment](cafe655-ai-session-manager-forge-assessment.md) | [System architecture](https://cafe655.com/ai-field-notes/system-architecture) · [Session Manager spec](https://cafe655.com/ai-field-notes/ai-session-manager-builder) |
 
 ## Standing Boundary
 
