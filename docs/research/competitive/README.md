@@ -89,6 +89,7 @@ support; its Codex subscription support comes from ChatGPT OAuth.
 | Nimbalyst | Yes — Claude Code subscription sign-in | Yes — ChatGPT OAuth | Yes, with caveats | OpenAI API-key sign-in is a separate, usage-billed alternative. Bedrock has documented MCP and tool-search compatibility limitations. |
 | GasTown / GasCity | Yes — launches the authenticated Claude CLI | Yes — launches the authenticated Codex CLI | Yes — forwards AWS and Bedrock environment variables | Authentication belongs to the underlying CLI; GasTown does not turn API billing into subscription access. |
 | Agent Deck | Yes — uses authenticated host sessions and Claude profiles | Yes — uses authenticated host sessions and can share Codex auth with its sandbox | Yes on the host; limited in the Docker sandbox | The sandbox rejects a home-relative `.aws` mount, so AWS-profile or SSO-based Bedrock does not work there by default. |
+| agent-harness | No — reaches Anthropic as a direct `api.anthropic.com` API key (usage-billed), not subscription sign-in | No — no Codex/ChatGPT integration | No — not evidenced | A direct-to-API OpenAI-compatible/Anthropic client (plus local llama.cpp/Ollama, NVIDIA, OpenRouter, Fireworks); it launches no subscription CLI, so it certifies none of these modes. |
 
 Primary evidence: [Codex authentication modes](https://learn.chatgpt.com/docs/auth)
 and [Claude Code setup](https://docs.anthropic.com/en/docs/claude-code/getting-started);
@@ -99,7 +100,8 @@ GasTown on [runtime configuration](https://github.com/gastownhall/gastown/blob/6
 and [Bedrock environment forwarding](https://github.com/gastownhall/gastown/blob/649b832b7672bc7a2dbef26f5983aba6198b819b/internal/config/env.go#L359-L368);
 Agent Deck on [profiles and environment files](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/README.md#L185-L220),
 [sandbox authentication sharing](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/README.md#L409-L424),
-and the [AWS credential-mount limitation](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/skills/agent-deck/references/sandbox.md#L194-L205).
+and the [AWS credential-mount limitation](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/skills/agent-deck/references/sandbox.md#L194-L205);
+agent-harness on [provider base URLs and bearer-key auth](https://github.com/BA-CalderonMorales/agent-harness/blob/428cf0a616867ddb9e062e5bb4df075a93c82ccf/internal/runtime/llm/client.go#L52-L95).
 
 ## Analysis Index
 
@@ -118,6 +120,8 @@ and the [AWS credential-mount limitation](https://github.com/asheshgoplani/agent
 | Agent Orchestrator | Generation-fenced lifecycle observations, preservation refs, and daemon reconciliation | [Assessment](agent-orchestrator-forge-assessment.md) | [Source](https://github.com/AgentWrapper/agent-orchestrator) |
 | Maestro | One canonical workflow source generated across agent runtimes, plus an Express/Standard split | [Assessment](maestro-forge-assessment.md) | [Source](https://github.com/josstei/maestro-orchestrate) |
 | Claude Squad | Worktree-per-session as a compact default, plus a warning about shared host tmux ownership | [Assessment](claude-squad-forge-assessment.md) | [Source](https://github.com/smtg-ai/claude-squad) |
+| Cafe655 AI system and Session Manager | A read-only, project-scoped interactive-session projection over Forge's existing receipts, liveness, and lineage state | [Assessment](cafe655-ai-session-manager-forge-assessment.md) | [System architecture](https://cafe655.com/ai-field-notes/system-architecture) · [Session Manager spec](https://cafe655.com/ai-field-notes/ai-session-manager-builder) |
+| agent-harness | Provider-agnostic encrypted credential store with `secret://` `{env,file,cmd}` indirection, plus a local-first (llama.cpp/GGUF) default that runs with no API key | [Assessment](agent-harness-forge-assessment.md) | [Source](https://github.com/BA-CalderonMorales/agent-harness) |
 
 ## Standing Boundary
 
