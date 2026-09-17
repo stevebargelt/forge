@@ -106,9 +106,13 @@ test("FG-346 interactive mixed Anthropic/OpenAI: writes a valid policy; summary 
     assert.equal(reloaded!.schema_version, 2);
     assert.match(readFileSync(join(h.dir, "model-policy.yml"), "utf8"), /schema_version: 2/);
 
-    // The mixed-provider pin actually resolves to the OpenAI codex profile.
+    // FG-796 / RF-1: OpenAI is only UNKNOWN here (unverified), so the all-Enter
+    // default must NOT pin the skeptic to the unverified codex — it falls to an
+    // available Anthropic profile. The generated policy never names an unverified
+    // provider while an available one exists.
     const summary = Object.fromEntries(res.summaryLines!.map((l) => [l.label, l.profile]));
-    assert.equal(summary["research skeptic"], "openai-subscription-codex");
+    assert.equal(summary["research skeptic"], "anthropic-subscription-opus");
+    assert.doesNotMatch(summary["research skeptic"]!, /openai|codex/, "no unverified codex pin");
 
     // Guarantee 2: the printed summary equals one recomputed from the RELOADED policy.
     const recomputed = renderRoutingSummary(computeRoutingSummary(reloaded!, {}));
@@ -177,11 +181,34 @@ test("FG-346 non-interactive execution: complete flags generate deterministicall
   );
 });
 
-test("FG-346 non-interactive without flags: retains the seed default, does not block", async () => {
+// FG-796: non-interactive with no flags now GENERATES from detected availability
+// (the deterministic all-Enter equivalent), never a verbatim seed copy.
+test("FG-796 non-interactive without flags: generates from detected availability, no seed copy", async () => {
   await withHarness({ isTTY: false, selection: undefined }, async (h) => {
     const res = await runHostModelPolicySetup(h.deps);
+    assert.equal(res.action, "generated");
+    assert.equal(h.writes.length, 1);
+    assert.equal(h.seedCopies, 0);
+    const reloaded = loadModelPolicy({});
+    assert.ok(reloaded, "the generated policy loads via the production loader");
+    // MIXED = anthropic subscription available → defaults land on a subscription profile.
+    assert.match(reloaded!.defaults.profile, /^anthropic-subscription-/);
+  });
+});
+
+// FG-796: the verbatim seed copy survives ONLY as the zero-provider non-interactive
+// fallback, with a printed notice.
+test("FG-796 non-interactive, zero providers: seed-copy fallback with a printed notice", async () => {
+  const allDown: AuthProbe[] = [
+    { provider: "anthropic", mode: "subscription", status: "unavailable", detail: "x" },
+    { provider: "openai", mode: "subscription", status: "unavailable", detail: "x" },
+  ];
+  const logs: string[] = [];
+  await withHarness({ isTTY: false, selection: undefined, probes: allDown, log: (m) => logs.push(m) }, async (h) => {
+    const res = await runHostModelPolicySetup(h.deps);
     assert.equal(res.action, "seed-retained");
-    assert.equal(h.writes.length, 0);
     assert.equal(h.seedCopies, 1);
+    assert.equal(h.writes.length, 0);
+    assert.ok(logs.some((l) => /no usable provider detected/i.test(l) && /VERBATIM/i.test(l)), "printed the fallback notice");
   });
 });

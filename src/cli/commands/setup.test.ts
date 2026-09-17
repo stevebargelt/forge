@@ -7,8 +7,9 @@ import assert from "node:assert/strict";
 import { existsSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Command } from "commander";
 import { FORGE_HOME } from "../../util/paths.js";
-import { provisionModelPolicy, writeHostPolicy, copySeedExclusive } from "./setup.js";
+import { provisionModelPolicy, writeHostPolicy, copySeedExclusive, resolveReviewProfile, registerSetup } from "./setup.js";
 
 const ACTIVE = join(FORGE_HOME, "model-policy.yml");
 const SEED = join(FORGE_HOME, "model-policy.example.yml");
@@ -67,6 +68,64 @@ test("#252 provisionModelPolicy: no seed installed → fail step pointing at for
   } finally {
     clean();
   }
+});
+
+// FG-796 (AC4): the review-loop reviewer default follows the host policy, not a
+// hard-coded codex-subscription.
+const REVIEW_POLICY = (review?: string) =>
+  "schema_version: 2\non_unavailable: fail\nmodel_profiles:\n" +
+  "  anthropic-bedrock-sonnet:\n    provider: anthropic\n    auth: bedrock\n    map:\n      default: { model: m, cost_tier: standard }\n      review: { model: m, cost_tier: standard }\n" +
+  "defaults:\n  profile: anthropic-bedrock-sonnet\n  activity: {" + (review ? ` review: ${review} ` : "") + "}\n";
+
+test("FG-796/AC4: resolveReviewProfile follows defaults.activity.review when present", () => {
+  clean();
+  writeFileSync(ACTIVE, REVIEW_POLICY("anthropic-bedrock-sonnet"));
+  try {
+    const r = resolveReviewProfile(undefined);
+    assert.equal(r.profile, "anthropic-bedrock-sonnet");
+    assert.equal(r.resolvedFrom, "defaults.activity.review");
+  } finally {
+    clean();
+  }
+});
+
+test("FG-796/AC4: resolveReviewProfile falls back to defaults.profile when review is unmapped", () => {
+  clean();
+  writeFileSync(ACTIVE, REVIEW_POLICY());
+  try {
+    const r = resolveReviewProfile(undefined);
+    assert.equal(r.profile, "anthropic-bedrock-sonnet");
+    assert.equal(r.resolvedFrom, "defaults.profile");
+  } finally {
+    clean();
+  }
+});
+
+test("FG-796/AC4: an explicit --review-profile always wins over the policy default", () => {
+  clean();
+  writeFileSync(ACTIVE, REVIEW_POLICY("anthropic-bedrock-sonnet"));
+  try {
+    const r = resolveReviewProfile("codex-subscription");
+    assert.equal(r.profile, "codex-subscription");
+    assert.equal(r.resolvedFrom, undefined, "explicit selection is not a policy-derived default");
+  } finally {
+    clean();
+  }
+});
+
+// RF-2 (review-8bd58b66522b): the `--yes` help text must match shipped behavior — a
+// no-flag headless run GENERATES from detected availability (seed copy only when zero
+// providers are detected), it does NOT retain the seed default. Discriminating: before
+// the fix the option said "else retain the seed default", contradicting the generation path.
+test("RF-2/FG-796: --yes help text describes generate-from-availability, not seed-default retention", () => {
+  const program = new Command();
+  registerSetup(program);
+  const setupCmd = program.commands.find((c) => c.name() === "setup")!;
+  assert.ok(setupCmd, "setup command registered");
+  const yesOpt = setupCmd.options.find((o) => o.long === "--yes")!;
+  assert.ok(yesOpt, "--yes option registered");
+  assert.doesNotMatch(yesOpt.description, /retain the seed default/i, "the stale seed-default claim is gone");
+  assert.match(yesOpt.description, /detected provider availability/i, "help names generation from detected availability");
 });
 
 // RF-2: --reconfigure overwrites the live policy in place — do it atomically (temp +

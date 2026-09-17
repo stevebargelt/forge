@@ -77,6 +77,21 @@ test("#252 reviewLoopReadiness: auth unavailable → warn (opt-in, never blocks)
   assert.match(c.detail, /auth unavailable/);
 });
 
+// FG-796 (AC4): the reviewer profile need not be codex-subscription. It follows the
+// policy's defaults.activity.review; reviewLoopReadiness names that resolution.
+test("FG-796/AC4: reviewLoopReadiness reports how a non-flag reviewer profile was resolved", () => {
+  const c = reviewLoopReadiness(
+    inputs({
+      clis: [{ command: "codex", present: true, neededBy: [] }],
+      profileAuth: [{ profile: "claude-bedrock", provider: "anthropic", auth: "bedrock", status: "available", detail: "AWS present" }],
+    }),
+    "claude-bedrock",
+    "defaults.activity.review",
+  );
+  assert.equal(c.name, "review-loop reviewer (claude-bedrock)", "the resolved profile names the check");
+  assert.match(c.detail, /default from defaults\.activity\.review/);
+});
+
 // ── buildSetupReport ──
 
 test("#252 buildSetupReport: a fail in any surface → NOT ready; created/warn do not block", () => {

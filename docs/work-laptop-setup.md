@@ -54,13 +54,13 @@ forge setup
 
 Three things happen in one step:
 
-1. **Authors `~/.forge/model-policy.yml`** — interactively asks which profile to route to each capability (from what `forge providers doctor` finds on this host), or generates deterministically from selection flags non-interactively. With neither a TTY nor selection flags it copies `model-policy.example.yml` verbatim as the seed-default fallback — **but only when a usable provider is detected and the seed is installed.** If `forge providers doctor` finds no usable provider (or the seed is missing), setup writes **nothing** and prints a named advisory rather than installing a policy for a provider you can't use. Only when the active policy is absent — an existing policy is never overwritten unless you pass `--reconfigure`. See `docs/how-to-model-policy.md` for the full flag/branch reference.
+1. **Authors `~/.forge/model-policy.yml`** — interactively asks which profile to route to each capability (from what `forge providers doctor` finds on this host), or generates deterministically from selection flags non-interactively. With neither a TTY nor selection flags it still **generates** a policy — from the same detected-availability defaults an all-Enter interactive run would pick — so a Bedrock-only host is authored onto Bedrock, not handed a seed naming a provider it lacks. When providers are detected but none is confirmed **available** (every probe comes back merely `unknown`), it fails closed instead: writes **nothing** and prints an advisory naming each unverifiable profile with its next-action, pointing at an interactive `forge setup` run (where the unverified choices are still offered) or a credential. Only when `forge providers doctor` finds **no usable provider at all** does it fall back to copying `model-policy.example.yml` verbatim, with a printed notice that its defaults may name a provider/auth this host doesn't have; with no usable provider and no seed to copy, it writes **nothing** and prints a named advisory instead. Only when the active policy is absent — an existing policy is never overwritten unless you pass `--reconfigure`. See `docs/how-to-model-policy.md` for the full flag/branch reference.
 2. **Refreshes the flat `~/.forge/routing-policy.yml`** from the RACI seed. This file is generated, not hand-maintained — but since FG-583 it is **not** a dispatch source. The routing policy dispatch actually reads is the one compiled **into the atomic seed generation**, which only `forge upgrade` publishes (step 2 above). `forge setup` does **not** publish a generation, so this step alone does not make routing effective for dispatch.
 3. **Runs a read-only release check** — agent image, in-image runtime CLIs (`claude`, `codex`, `pi`), per-profile provider auth, model and routing policy validity. No live agent run; everything is verified statically.
 
 > **`forge setup` alone does not make the host dispatch-ready.** Dispatch reads exclusively the seed generation that `forge upgrade --skip-project` publishes (step 2). Until that generation is published the host fails closed — `forge next` and every gate advance refuse with a named, repairable no-generation state (`forge doctor` reports it). If you followed step 2 the generation is already published; `forge setup` here only adds the active model policy and the readiness check. This matches `README.md` and `docs/quick-start.md`.
 
-The report also includes a "review-loop reviewer (codex-subscription)" readiness line so you know whether `forge review-loop` is usable before you need it.
+The report also includes a review-loop reviewer readiness line — named after whatever `--review-profile` was passed, or (by default) the policy's `defaults.activity.review`, falling back to `defaults.profile` — so you know whether `forge review-loop` is usable before you need it.
 
 `forge setup` exits 0 when there are no blocking failures. Warnings (missing creds for optional profiles, review-loop not ready) are informational — they don't block ordinary agent work.
 
@@ -68,7 +68,7 @@ Useful flags:
 ```bash
 forge setup --dry-run                 # preview what would be created, no writes
 forge setup --review-profile <name>   # check a different reviewer profile
-forge setup --yes                     # non-interactive: generate from selection flags, else retain the seed default
+forge setup --yes                     # non-interactive: generate from selection flags, or from detected provider availability
 forge setup --reconfigure             # re-author an existing model policy (interactive or with flags)
 ```
 
@@ -88,7 +88,7 @@ Work through whatever `forge setup` flagged. None of these require a live agent 
 
 **Bedrock, Pi, and Groq are opt-in.** `forge setup` diagnosing them as unavailable is expected and not a blocker unless you plan to use those providers on this machine.
 
-`~/.forge/*` is **host-local personal config and is never committed.** You do not need to hand-write `model-policy.yml` or `routing-policy.yml` — `forge setup` authors both when they're absent: it asks (or generates from flags) `model-policy.yml` from the providers actually detected on this host, falling back to the seed default non-interactively with no flags **when a usable provider is detected** (with no usable provider it writes nothing and advises); `routing-policy.yml` is always recompiled from the RACI seed.
+`~/.forge/*` is **host-local personal config and is never committed.** You do not need to hand-write `model-policy.yml` or `routing-policy.yml` — `forge setup` authors both when they're absent: it asks (or generates from flags, or — with no flags and no TTY — from detected provider availability) `model-policy.yml` from the providers actually detected on this host; only with **no usable provider detected** does it fall back to copying the seed default verbatim (or, lacking even a seed, write nothing and advise); `routing-policy.yml` is always recompiled from the RACI seed.
 
 ## 5. Iterate until green
 
@@ -109,7 +109,7 @@ Use `forge doctor` any time you want to recheck readiness without touching files
 |---|---|
 | `forge upgrade` | Refresh `~/.forge/`'s forge-owned seeds from the running forge (agent/constraint/RACI seeds included, always-upgraded since FG-777 and gated on a one-time host-edit backup — FG-776; the Forge-owned agent protocols publish into the seed generation, never into your seeds — FG-654), recompile routing, re-init project, run release check. Exits nonzero whenever a requested step didn't happen — under a release that always includes refusing to pull/`npm install` the checkout |
 | `forge-dev upgrade [--rebuild-image]` | The same, driven from the checkout: also pulls forge commits, `npm install`s, and builds the agent image (`--rebuild-image` is dev-checkout only) |
-| `forge setup [--dry-run]` | Author active model policy (interactive Q&A or flags; seed-copy fallback) if absent, refresh routing policy, run release check |
+| `forge setup [--dry-run]` | Author active model policy (interactive Q&A, flags, or generated from detected availability; verbatim seed copy only when zero providers are detected) if absent, refresh routing policy, run release check |
 | `forge doctor` | Read-only release check (image, CLIs, auth, policies) — no writes |
 | `forge auth login` | Wire Claude subscription credentials into the forge OAuth volume |
 

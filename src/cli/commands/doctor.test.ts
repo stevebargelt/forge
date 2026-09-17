@@ -121,6 +121,47 @@ test("#229 gatherProfileAuth: reads the PROJECT policy's profiles + marks reacha
   assert.equal(byName["proj-optin"]!.reachable, false, "defined-but-not-defaulted is opt-in");
 });
 
+// FG-796 (AC3): gatherProfileAuth records WHY a profile is reachable (the policy
+// sources) and which same-provider profiles ARE available on this host. Availability
+// is driven entirely by env keys the harness controls (AWS_PROFILE / ANTHROPIC_API_KEY),
+// never the host's real credentials.
+test("FG-796/AC3: gatherProfileAuth records reachableVia sources + same-provider availability", () => {
+  const policy = `
+schema_version: 2
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      default: { model: m, cost_tier: standard }
+      review: { model: m, cost_tier: standard }
+  claude-bedrock:
+    provider: anthropic
+    auth: bedrock
+    map:
+      default: { model: m, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: { review: claude-api }
+overrides:
+  agents: { red-wide: claude-api }
+allowed_profiles: [claude-api, claude-bedrock]
+`;
+  writeProjectPolicy(policy);
+  process.env.AWS_PROFILE = "test-profile";   // claude-bedrock available
+  // ANTHROPIC_API_KEY stays unset (beforeEach) → claude-api unavailable.
+  const rows = gatherProfileAuth({ projectDir });
+  const api = rows.find((r) => r.profile === "claude-api")!;
+  assert.equal(api.status, "unavailable");
+  assert.equal(api.reachable, true);
+  assert.deepEqual(api.reachableVia, ["defaults.profile", "defaults.activity.review", "overrides.agents.red-wide"]);
+  assert.deepEqual(api.sameProviderAvailable, ["claude-bedrock"], "the available same-provider profile is offered as a re-point target");
+  const bedrock = rows.find((r) => r.profile === "claude-bedrock")!;
+  assert.equal(bedrock.status, "available");
+  assert.equal(bedrock.reachable, false, "opt-in only (not in defaults/overrides)");
+});
+
 test("#229 upgrade-tail path: a project profile with a missing cred fails the release check (reachable)", () => {
   writeProjectPolicy();
   // GROQ_API_KEY unset (beforeEach) → proj-default (reachable) is unavailable.

@@ -133,6 +133,79 @@ test("#229 default-reachable profile (reachable:true) with missing cred → fail
   assert.equal(r.ok, false);
 });
 
+// ── FG-796 (AC3): auth advice names WHY a profile is reachable and targets the fix ──
+
+test("FG-796/AC3: reachable-via sources are named in the detail", () => {
+  const r = buildReleaseReport(green({
+    profileAuth: [
+      {
+        profile: "claude-subscription", provider: "anthropic", auth: "subscription", status: "unavailable",
+        detail: "no ~/.claude subscription", reachable: true,
+        reachableVia: ["defaults.profile", "defaults.activity.review", "overrides.agents.red-wide"],
+        sameProviderAvailable: [],
+      },
+    ],
+  }));
+  const c = r.checks.find((c) => c.name.includes("claude-subscription"))!;
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /reachable via defaults\.profile, defaults\.activity\.review, overrides\.agents\.red-wide/);
+});
+
+test("FG-796/AC3: same-provider available → advise `forge setup --reconfigure`, NOT `forge auth login`", () => {
+  // The Bedrock-only host case: claude-subscription is unavailable but claude-bedrock
+  // (same provider) IS available, so the repair is re-pointing, not a subscription login.
+  const r = buildReleaseReport(green({
+    profileAuth: [
+      {
+        profile: "claude-subscription", provider: "anthropic", auth: "subscription", status: "unavailable",
+        detail: "no ~/.claude subscription", reachable: true,
+        reachableVia: ["defaults.profile"], sameProviderAvailable: ["claude-bedrock"],
+      },
+      { profile: "claude-bedrock", provider: "anthropic", auth: "bedrock", status: "available", detail: "AWS profile present" },
+    ],
+  }));
+  const c = r.checks.find((c) => c.name.includes("claude-subscription (anthropic"))!;
+  assert.equal(c.status, "fail");
+  assert.match(c.next ?? "", /forge setup --reconfigure/);
+  assert.match(c.next ?? "", /claude-bedrock/);
+  assert.match(c.next ?? "", /auth: auto/);
+  assert.doesNotMatch(c.next ?? "", /forge auth login/);
+});
+
+test("FG-796/AC3: pin-only reachable, no same-provider alternative → advise removing/re-pointing the pin by name", () => {
+  // red-wide pinned to codex on a codex-less host with no other openai profile.
+  const r = buildReleaseReport(green({
+    profileAuth: [
+      {
+        profile: "codex-subscription", provider: "openai", auth: "subscription", status: "unavailable",
+        detail: "no ~/.codex/auth.json", reachable: true,
+        reachableVia: ["overrides.agents.red-wide", "overrides.agents.research-skeptic"],
+        sameProviderAvailable: [],
+      },
+    ],
+  }));
+  const c = r.checks.find((c) => c.name.includes("codex-subscription"))!;
+  assert.equal(c.status, "fail");
+  assert.match(c.next ?? "", /remove or re-point the pin\(s\)/);
+  assert.match(c.next ?? "", /overrides\.agents\.red-wide/);
+  assert.doesNotMatch(c.next ?? "", /forge auth login/);
+});
+
+test("FG-796/AC3: default-reachable, no same-provider alternative → `forge auth login` remains the advice", () => {
+  const r = buildReleaseReport(green({
+    profileAuth: [
+      {
+        profile: "claude-subscription", provider: "anthropic", auth: "subscription", status: "unavailable",
+        detail: "no OAuth", reachable: true,
+        reachableVia: ["defaults.profile", "defaults.activity.review"], sameProviderAvailable: [],
+      },
+    ],
+  }));
+  const c = r.checks.find((c) => c.name.includes("claude-subscription"))!;
+  assert.equal(c.status, "fail");
+  assert.match(c.next ?? "", /forge auth login/);
+});
+
 test("#229 bedrock profile present → AWS diagnostic surfaced (available → ok)", () => {
   const r = buildReleaseReport(green({
     profileAuth: [

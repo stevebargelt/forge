@@ -5,7 +5,9 @@
  *   forge init --prefix MYPREFIX  →  forge backlog file "ticket"  →  MYPREFIX-NNN
  *
  * Also verifies idempotency: a second `forge init` run must not clobber
- * backlog/notes.md or .forge/model-policy.yml written by the first run.
+ * backlog/notes.md or .forge/docs-surfaces.yml written by the first run. Per
+ * FG-796, init no longer provisions a project-level .forge/model-policy.yml at all
+ * (the host policy is the default); those cases are covered below.
  */
 
 import { test, beforeEach, afterEach } from "node:test";
@@ -93,25 +95,37 @@ test("integ FG-332: running forge init twice does not clobber backlog/notes.md",
   assert.equal(notesAfter, customNotes, "backlog/notes.md must not be clobbered by second forge init");
 });
 
-test("integ FG-332: running forge init twice does not clobber .forge/model-policy.yml", () => {
-  // First run.
-  const first = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
-  assert.equal(first.status, 0, `first forge init failed: ${first.stderr}`);
-
+// FG-796 (AC7): forge init no longer provisions a PROJECT-level model-policy.yml.
+// A project policy is a deliberate override that fully replaces the host policy;
+// seeding it per project silently installs the subscription-default + codex-pin
+// shape (NOT READY on a Bedrock-only host). init leaves it absent and says so.
+test("integ FG-796/AC7: forge init on a fresh project creates NO .forge/model-policy.yml", () => {
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(res.status, 0, `forge init failed: ${res.stderr}`);
   const modelPolicyPath = join(projectDir, ".forge", "model-policy.yml");
-  assert.ok(existsSync(modelPolicyPath), ".forge/model-policy.yml should exist after first init");
+  assert.equal(existsSync(modelPolicyPath), false, "no project model-policy.yml should be provisioned");
+  assert.match(res.stdout, /model-policy\.yml:\s*not provisioned per project/, "init explains the host policy is the default");
+});
 
-  // Simulate operator customization.
-  const customPolicy = "# custom operator policy\nmodel_profiles: []\n";
+test("integ FG-796/AC7: forge init preserves an existing project model-policy.yml byte-for-byte", () => {
+  const modelPolicyPath = join(projectDir, ".forge", "model-policy.yml");
+  mkdirSync(dirname(modelPolicyPath), { recursive: true });
+  const customPolicy = "# custom operator policy\nschema_version: 2\nmodel_profiles:\n  p:\n    provider: anthropic\n    auth: bedrock\n    map:\n      default: { model: m, cost_tier: standard }\ndefaults:\n  profile: p\n  activity: {}\n";
   writeFileSync(modelPolicyPath, customPolicy);
 
-  // Second run.
-  const second = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
-  assert.equal(second.status, 0, `second forge init failed: ${second.stderr}`);
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks"]);
+  assert.equal(res.status, 0, `forge init failed: ${res.stderr}`);
+  assert.equal(readFileSync(modelPolicyPath, "utf8"), customPolicy, "existing project policy untouched byte-for-byte");
+  assert.match(res.stdout, /model-policy\.yml:.*left untouched/, "init names the existing override as untouched");
+});
 
-  // model-policy.yml must not have been overwritten.
-  const policyAfter = readFileSync(modelPolicyPath, "utf8");
-  assert.equal(policyAfter, customPolicy, ".forge/model-policy.yml must not be clobbered by second forge init");
+test("integ FG-796/AC7: forge init --dry-run does not say WOULD create the project model-policy", () => {
+  const res = runForge(["init", "--project", projectDir, "--no-install-hooks", "--dry-run"]);
+  assert.equal(res.status, 0, `forge init --dry-run failed: ${res.stderr}`);
+  // The model-policy line must not forecast a create.
+  const line = res.stdout.split("\n").find((l) => l.includes("model-policy.yml:")) ?? "";
+  assert.doesNotMatch(line, /WOULD create/, "dry-run must not forecast provisioning a project policy");
+  assert.match(line, /not provisioned per project/);
 });
 
 test("integ FG-332: running forge init twice does not clobber .forge/docs-surfaces.yml", () => {

@@ -141,7 +141,7 @@ export function registerInit(program: Command): void {
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
         console.log(`  backlog/:         ${describeBacklogScaffoldPlan(projectDir)}`);
         console.log(`  config.yml:       ${options.prefix ? `WOULD write prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
-        console.log(`  model-policy.yml: ${describeSeedProvisionPlan(forgeProjectDir, "model-policy.yml")}`);
+        console.log(`  model-policy.yml: ${projectModelPolicyNotice(forgeProjectDir)}`);
         console.log(`  docs-surfaces.yml:${describeDocsSurfacesProvisionPlan(projectDir)}`);
         // AC8 (RF-3): dry-run must forecast the 'requires operator repair' state
         // with the SAME actionable warning the live write path emits — name the
@@ -176,7 +176,12 @@ export function registerInit(program: Command): void {
       if (options.prefix) {
         writeBacklogConfig(projectDir, { prefix: options.prefix });
       }
-      const modelPolicyResult = provisionSeedFile(forgeProjectDir, "model-policy.yml", "model-policy.example.yml");
+      // FG-796: forge init no longer provisions a PROJECT-level model-policy.yml. A
+      // project policy is a deliberate operator override that fully replaces the host
+      // policy; seeding it silently installs the subscription-default + codex-pin shape
+      // per project (NOT READY on a Bedrock-only host). Leave it absent — the host
+      // policy (or legacy resolution) applies — and any existing project policy is
+      // untouched (we never write it).
       const docsSurfacesOutcome = provisionDocsSurfaces(projectDir);
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
@@ -189,7 +194,7 @@ export function registerInit(program: Command): void {
       console.log(`  .forge/:          ${willCreateForgeDir ? "created" : "already exists"}`);
       console.log(`  backlog/:         ${backlogScaffoldResult}`);
       console.log(`  config.yml:       ${options.prefix ? `wrote prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
-      console.log(`  model-policy.yml: ${modelPolicyResult}`);
+      console.log(`  model-policy.yml: ${projectModelPolicyNotice(forgeProjectDir)}`);
       console.log(`  docs-surfaces.yml:${docsSurfacesStatusLine(docsSurfacesOutcome)}`);
       if (docsSurfacesOutcome.action === "requires-operator-repair") {
         console.warn(`        ${docsSurfacesRepairWarning(docsSurfacesOutcome.path, docsSurfacesOutcome.detail)}`);
@@ -428,8 +433,16 @@ export function provisionSeedFile(forgeDir: string, targetName: string, seedName
   return "created";
 }
 
-function describeSeedProvisionPlan(forgeDir: string, targetName: string): string {
-  return existsSync(join(forgeDir, targetName)) ? "already exists" : "WOULD create";
+// FG-796: init does NOT provision a project-level model-policy.yml. This one line
+// tells the operator where the default lives and how to override it. An existing
+// project policy is named as such (init never touches it) so the operator can tell
+// "I have an override" from "I'm on the host default".
+export function projectModelPolicyNotice(forgeDir: string): string {
+  const overridePath = join(forgeDir, "model-policy.yml");
+  if (existsSync(overridePath)) {
+    return `project override present at ${overridePath} — left untouched (fully replaces the host policy)`;
+  }
+  return `not provisioned per project — the host policy (~/.forge/model-policy.yml) is the default; create ${overridePath} only to override it`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

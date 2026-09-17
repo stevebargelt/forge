@@ -15,7 +15,7 @@ npm install
 ./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; any directory on your $PATH
 forge auth login                 # personal Mac only
 forge upgrade --skip-project     # REQUIRED — publishes the seed generation dispatch reads (see below)
-forge setup                      # author the active model policy (asks, or generates from flags — seed fallback) + routing policy; readiness check
+forge setup                      # author the active model policy (asks, or generates from flags/detected availability — seed only if no provider found) + routing policy; readiness check
 ```
 
 `which forge` now resolves and `forge --help` runs from any directory.

@@ -31,7 +31,7 @@ Now build a release, select it, and put the machine-wide `forge` on `$PATH`. On 
 ./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; pick any directory on your $PATH
 forge auth login                 # one-time, personal Mac only (skip if using Bedrock)
 forge upgrade --skip-project     # REQUIRED — publishes the seed generation dispatch reads (see below)
-forge setup                      # author the active model policy (asks, or generates from flags — seed fallback) + routing policy, then run the readiness check
+forge setup                      # author the active model policy (asks, or generates from flags/detected availability — seed only if no provider found) + routing policy, then run the readiness check
 ```
 
 `which forge` should now resolve, and `forge release current` should name the release you promoted. You won't need to be in `~/code/forge` to run forge from this point on.
