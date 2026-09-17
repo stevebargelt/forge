@@ -74,7 +74,10 @@ policy unless you pass `--reconfigure`, and it is not a migration path
   (research-primary, research-skeptic), previews the generated YAML, and
   writes it only on confirmation.
 - **`--reconfigure`** — re-runs the same Q&A against an *existing* policy, with
-  your current choices pre-selected as defaults (Enter keeps them).
+  your current choices pre-selected as defaults (Enter keeps them). Run
+  non-interactively (`--yes`/no TTY) without a complete set of selection
+  flags, reconfigure can't prompt, so it leaves the existing policy unchanged
+  with a named advisory instead of guessing.
 - **Non-interactive with a complete selection** (`--yes`, or no TTY, plus at
   least `--default-profile`) — generates deterministically, no prompts:
 
@@ -88,20 +91,71 @@ policy unless you pass `--reconfigure`, and it is not a migration path
   Combined with `--reconfigure` this OVERWRITES the existing policy, so setup
   prints the proposed YAML before writing it — the same preview the
   interactive path shows — even though there's no prompt to confirm it.
-- **Non-interactive with no/incomplete flags** — copies the installed
-  `model-policy.example.yml` seed verbatim as the seed-default fallback, with a
-  named advisory; setup never blocks waiting on a prompt that can't happen.
-- **Non-interactive with no/incomplete flags, and no seed installed** — a
+- **Non-interactive with no/incomplete flags, and at least one provider
+  available** — GENERATES a policy from detected provider availability
+  instead: the same `defaultAnswers` an all-Enter interactive run would pick,
+  over the providers `forge providers doctor` actually finds. On a
+  Bedrock-only host this authors `defaults.profile` and every
+  `defaults.activity` entry onto `claude-bedrock`, with no pin naming a
+  provider the host doesn't have. This is never a verbatim seed copy — see
+  [Bedrock-only host](#bedrock-only-host) below.
+- **No usable provider detected at all** — there's no availability to author
+  from. Interactive, `--reconfigure`, and `--dry-run` stay advisory with
+  nothing written; run `forge auth login` / `codex login` etc. and re-run.
+  Plain non-interactive `forge setup` instead falls back to copying the
+  installed `model-policy.example.yml` seed verbatim, printing a notice that
+  its defaults may name a provider/auth this host lacks — the only path that
+  still does a verbatim copy.
+- **No usable provider detected, non-interactive, and no seed installed** — a
   damaged or incomplete install has nothing to copy: setup writes **nothing**
   and reports a named advisory pointing at `forge upgrade` (which installs the
   seed) rather than reporting a phantom "created" policy.
-- **No usable provider detected** — advisory, nothing written; run
-  `forge auth login` / `codex login` etc. and re-run.
 
 A present `model-policy.yml` is never overwritten without `--reconfigure` —
 bare `forge setup` against an existing policy is always a no-op preserve.
 `--dry-run` previews the generated YAML (interactive or flag-driven) without
 writing it.
+
+### Bedrock-only host
+
+On a host whose only Anthropic auth is Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`
+plus an AWS profile — no Claude subscription, no Codex), `forge setup`
+authors `defaults.profile` and every `defaults.activity` entry onto the
+Bedrock profile, and adds no `overrides.agents` pin naming a provider this
+host doesn't have — the host is READY the moment the policy is written, with
+no `forge auth login` / `codex login` needed first.
+
+`forge doctor`'s auth rows name **why** a profile is default-reachable —
+`defaults.profile` / `defaults.activity.<capability>` /
+`overrides.agents.<role>` — and target the fix at that reason instead of a
+blanket "log in":
+
+- Another profile of the **same provider** is available on this host → the
+  advice is `forge setup --reconfigure` (or setting the unreachable profile's
+  `auth: auto`), not obtaining a credential this host doesn't need.
+- The profile is reachable **only** through an agent pin, with no
+  same-provider alternative → the advice names the pin(s) to remove or
+  re-point.
+- No auth for that provider exists on this host at all → `forge auth login` /
+  `codex login` remains the advice, because a credential genuinely has to be
+  provided.
+
+**An older, seed-shaped policy** — one authored before this behavior shipped,
+or hand-copied from an older seed carrying `codex-subscription` /
+`claude-subscription` pins — is repaired the same way:
+`forge setup --reconfigure` re-runs authoring against this host's detected
+availability. Non-interactively it regenerates from scratch (a Bedrock-only
+host preselects bedrock for every capability and drops the unreachable
+pins); interactively your current choices are pre-selected, so pressing
+Enter through every prompt lands on the same corrected result.
+
+`auth: auto` on a profile is the portable alternative to a fixed pin: instead
+of naming one auth mode, it resolves to whatever the environment offers
+(`CLAUDE_CODE_USE_BEDROCK` → bedrock, `ANTHROPIC_API_KEY` → api, else
+subscription) — the same policy file then reads as READY on a Bedrock-only
+host and a subscription host alike, at the cost of only failing loud when
+*none* of those are present, rather than naming one specific auth as
+required.
 
 ## Schema versioning and migration
 
