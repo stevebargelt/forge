@@ -324,7 +324,7 @@ export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
 }
 
 /** Stamp the resolved model id at task-create time. Loads the runtime YAML,
- *  resolves alias → concrete model id (e.g. `spec-writer` → `us.anthropic.claude-sonnet-4-6`),
+ *  resolves alias → concrete model id (e.g. `spec-writer` → `us.anthropic.claude-sonnet-5`),
  *  returns it. Returns undefined if the runtime fails to load — we don't want
  *  a model-lookup failure to block task creation; the task itself will fail
  *  at dispatch with a clearer error.

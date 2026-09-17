@@ -35,7 +35,7 @@ models:
   # Reds + ambient work use Haiku. Default lands on Sonnet as the middle ground.
   spec-writer: claude-opus-4-8
   fast-orchestrator: claude-haiku-4-5
-  default: claude-sonnet-4-6
+  default: claude-sonnet-5
 
 auth:
   mode: oauth-volume   # bind-mounts the forge-claude-oauth-v2 volume at /home/agent

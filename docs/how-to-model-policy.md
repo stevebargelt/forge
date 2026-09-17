@@ -28,8 +28,8 @@ model_profiles:
     auth: subscription          # subscription | api | bedrock | auto
     map:
       reasoning: { model: claude-opus-4-8,   cost_tier: premium }
-      review:    { model: claude-sonnet-4-6, cost_tier: standard }
-      default:   { model: claude-sonnet-4-6, cost_tier: standard }
+      review:    { model: claude-sonnet-5, cost_tier: standard }
+      default:   { model: claude-sonnet-5, cost_tier: standard }
       # spec-writer/fast-orchestrator are the orchestrator-facing activity names
       # (`forge invoke … --model spec-writer` / `fast-orchestrator`). Map them so
       # those EXPLICIT activities hit the map directly instead of falling through
@@ -41,7 +41,7 @@ model_profiles:
     provider: anthropic
     auth: bedrock
     map:
-      default: { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      default: { model: us.anthropic.claude-sonnet-5, cost_tier: standard }
 defaults:
   profile: claude-subscription   # ultimate fallback
   activity:

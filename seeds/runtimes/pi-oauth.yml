@@ -33,7 +33,7 @@ image: agent-dev-worker:latest
 models:
   # Legacy-mode default model handed to pi as ${MODEL}; provider pinned below.
   # Must be a model your authenticated subscription can serve.
-  default: claude-sonnet-4-6
+  default: claude-sonnet-5
 
 auth:
   mode: pi-auth   # RO-mount ~/.forge/pi-agent/auth.json; entrypoint copies it to

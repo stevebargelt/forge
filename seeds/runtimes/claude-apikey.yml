@@ -25,9 +25,9 @@ detect:
 image: agent-dev-worker:latest
 
 models:
-  spec-writer: claude-sonnet-4-6
+  spec-writer: claude-sonnet-5
   fast-orchestrator: claude-haiku-4-5
-  default: claude-sonnet-4-6
+  default: claude-sonnet-5
 
 auth:
   mode: apikey   # injects ANTHROPIC_API_KEY=<host value> as -e; container's

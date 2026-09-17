@@ -436,8 +436,8 @@ export type UsageModelMismatch = {
 };
 
 // Bedrock model ids carry a region and vendor prefix in the runtime YAML
-// ("us.anthropic.claude-sonnet-4-6") while the provider's own events emit the short
-// form ("claude-sonnet-4-6"). Those are the SAME selection, so comparing them raw
+// ("us.anthropic.claude-sonnet-5") while the provider's own events emit the short
+// form ("claude-sonnet-5"). Those are the SAME selection, so comparing them raw
 // would report a mismatch on every bedrock launch and teach operators to ignore the
 // signal. Normalize both sides once, here, next to the mapping comment at the top of
 // this file that documents the same convention for the rollup.
