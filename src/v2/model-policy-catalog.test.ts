@@ -31,7 +31,7 @@ test("familiesFor: openai/subscription is a single codex family; groq/api is kim
 
 test("modelIdForFamily: concrete ids come from the installed seed", () => {
   assert.equal(modelIdForFamily("anthropic", "subscription", "opus"), "claude-opus-5");
-  assert.equal(modelIdForFamily("anthropic", "subscription", "sonnet"), "claude-sonnet-4-6");
+  assert.equal(modelIdForFamily("anthropic", "subscription", "sonnet"), "claude-sonnet-5");
   assert.equal(modelIdForFamily("anthropic", "subscription", "haiku"), "claude-haiku-4-5");
   // openai codex → a gpt-5.6-* id from the seed's codex-subscription default.
   const codex = modelIdForFamily("openai", "subscription", "codex");

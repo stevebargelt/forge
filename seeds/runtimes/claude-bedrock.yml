@@ -35,11 +35,11 @@ image: agent-dev-worker:latest
 # Default model aliases — referenced by steps as `model: <alias>`. Resolved at
 # spawn time. Aliases let workflow YAML stay model-version-agnostic.
 models:
-  # Work-account Bedrock: Opus is NOT available. spec-writer maps to Sonnet 4.6
+  # Work-account Bedrock: Opus is NOT available. spec-writer maps to Sonnet 5
   # (the strongest available model). Reds + ambient work use Haiku.
-  spec-writer: us.anthropic.claude-sonnet-4-6
+  spec-writer: us.anthropic.claude-sonnet-5
   fast-orchestrator: us.anthropic.claude-haiku-4-5-20251001-v1:0
-  default: us.anthropic.claude-sonnet-4-6
+  default: us.anthropic.claude-sonnet-5
 
 # Auth mode. env-snapshot is default per #121. mount is opt-in for genuinely
 # long-running containers (>1h, STS would expire mid-run). The TS runner reads

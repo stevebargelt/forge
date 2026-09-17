@@ -39,7 +39,7 @@ image: agent-dev-worker:latest
 models:
   # Only consulted in legacy mode (no model-policy.yml). Concrete model id handed
   # to pi as ${MODEL}; provider is pinned in the invocation below.
-  default: claude-sonnet-4-6
+  default: claude-sonnet-5
 
 auth:
   mode: apikey   # injects the resolved upstream provider's API key as -e

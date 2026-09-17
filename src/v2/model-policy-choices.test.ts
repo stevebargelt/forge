@@ -31,7 +31,7 @@ test("offerableChoices: available + unknown offered, unavailable hidden", () => 
 test("offerableChoices: available choices carry a concrete seed-derived model id and no nextAction", () => {
   const sonnet = offerableChoices(mixed).find((c) => c.profileName === "anthropic-subscription-sonnet");
   assert.ok(sonnet);
-  assert.equal(sonnet!.model, "claude-sonnet-4-6");
+  assert.equal(sonnet!.model, "claude-sonnet-5");
   assert.equal(sonnet!.status, "available");
   assert.equal(sonnet!.nextAction, undefined);
 });

@@ -35,9 +35,9 @@ model_profiles:
     auth: subscription
     map:
       reasoning: { model: claude-opus-5,   cost_tier: premium }
-      review:    { model: claude-sonnet-4-6, cost_tier: standard }
+      review:    { model: claude-sonnet-5, cost_tier: standard }
       fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
-      default:   { model: claude-sonnet-4-6, cost_tier: standard }
+      default:   { model: claude-sonnet-5, cost_tier: standard }
       # FG-560: spec-writer/fast-orchestrator are the orchestrator-facing capability
       # names — copied from reasoning/fast so `--model spec-writer` resolves to an
       # EXACT map hit rather than falling through to map.default.
@@ -51,11 +51,11 @@ model_profiles:
     auth: bedrock
     on_unavailable: fail
     map:
-      reasoning: { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
-      review:    { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      reasoning: { model: us.anthropic.claude-sonnet-5, cost_tier: standard }
+      review:    { model: us.anthropic.claude-sonnet-5, cost_tier: standard }
       fast:      { model: us.anthropic.claude-haiku-4-5-20251001-v1:0, cost_tier: cheap }
-      default:   { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
-      spec-writer: { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      default:   { model: us.anthropic.claude-sonnet-5, cost_tier: standard }
+      spec-writer: { model: us.anthropic.claude-sonnet-5, cost_tier: standard }
       fast-orchestrator: { model: us.anthropic.claude-haiku-4-5-20251001-v1:0, cost_tier: cheap }
 
   # Anthropic API key (escape hatch).
@@ -64,9 +64,9 @@ model_profiles:
     auth: api
     map:
       reasoning: { model: claude-opus-5,   cost_tier: premium }
-      review:    { model: claude-sonnet-4-6, cost_tier: standard }
+      review:    { model: claude-sonnet-5, cost_tier: standard }
       fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
-      default:   { model: claude-sonnet-4-6, cost_tier: standard }
+      default:   { model: claude-sonnet-5, cost_tier: standard }
       spec-writer: { model: claude-opus-5, cost_tier: premium }
       fast-orchestrator: { model: claude-haiku-4-5, cost_tier: cheap }
 
