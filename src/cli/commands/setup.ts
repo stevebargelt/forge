@@ -191,6 +191,19 @@ function safeLoadHostPolicy() {
   }
 }
 
+// FG-796: resolve the review-loop reviewer profile to VERIFY. An explicit
+// --review-profile wins; otherwise it follows the (just-provisioned) host policy —
+// defaults.activity.review, else defaults.profile. Falls back to codex-subscription
+// only when no policy is readable, preserving the historical name in that one case.
+export function resolveReviewProfile(explicit: string | undefined): { profile: string; resolvedFrom?: string } {
+  if (explicit) return { profile: explicit };
+  const policy = safeLoadHostPolicy();
+  const review = policy?.defaults.activity?.review;
+  if (review) return { profile: review, resolvedFrom: "defaults.activity.review" };
+  if (policy?.defaults.profile) return { profile: policy.defaults.profile, resolvedFrom: "defaults.profile" };
+  return { profile: "codex-subscription" };
+}
+
 // Ensure routing-policy.yml exists/compiled from the host RACI. routing-policy is
 // derived (never hand-maintained), so setup recompiles it like upgrade does.
 export function provisionRoutingPolicy(dryRun: boolean): SetupStep {
@@ -252,7 +265,7 @@ export function registerSetup(program: Command): void {
     .command("setup")
     .description("Get this host ready for forge: interactively author the model-policy from detected providers (or seed it), then run the read-only release check (#252, FG-346)")
     .option("--dry-run", "report/preview what setup would create/change without writing")
-    .option("--review-profile <name>", "review-loop reviewer profile to verify (default: codex-subscription)")
+    .option("--review-profile <name>", "review-loop reviewer profile to verify (default: the policy's defaults.activity.review, else defaults.profile)")
     .option("--yes", "non-interactive: generate deterministically from selection flags, else retain the seed default (no prompts)")
     .option("--reconfigure", "re-author an existing host model-policy (preview + preserve unmodified choices); without it an existing policy is never overwritten")
     .option("--default-profile <name>", "headless: the defaults.profile / default-work profile")
@@ -284,7 +297,12 @@ export function registerSetup(program: Command): void {
       ];
       const inputs = gatherReleaseInputs(undefined, { projectDir: process.cwd() });
       const release = buildReleaseReport(inputs);
-      const reviewLoop = reviewLoopReadiness(inputs, opts.reviewProfile ?? "codex-subscription");
+      // FG-796: the review-loop reviewer default follows the just-provisioned policy —
+      // its defaults.activity.review, else defaults.profile — not a hard-coded
+      // codex-subscription (which is NOT READY on a host with no Codex). An explicit
+      // --review-profile always wins.
+      const reviewer = resolveReviewProfile(opts.reviewProfile);
+      const reviewLoop = reviewLoopReadiness(inputs, reviewer.profile, reviewer.resolvedFrom);
       const report = buildSetupReport(provisioning, release, reviewLoop);
       console.log(renderSetupReport(report));
       if (modelPolicy.summaryText) {

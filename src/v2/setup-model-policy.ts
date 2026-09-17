@@ -6,7 +6,11 @@
 //
 // Branch matrix (the acceptance boundary):
 //   (i)   existing host policy + not --reconfigure → NEVER overwrite; advisory.
-//   (ii)  no offerable provider                    → advisory; no write.
+//   (ii)  no offerable provider                    → non-interactive absent-policy
+//                                                     provisioning copies the seed
+//                                                     VERBATIM with a printed notice
+//                                                     (FG-796); interactive stays
+//                                                     advisory with no write.
 //   (iii) interactive + absent policy              → Q&A, preview, write on confirm,
 //                                                     reload + summarize.
 //   (iv)  cancellation (declined at confirm)        → no write.
@@ -14,8 +18,13 @@
 //   (vi)  --reconfigure (interactive)               → explicit preview mode, current
 //                                                     policy seeds the defaults.
 //   (vii) non-interactive + complete flags          → deterministic generate.
-//   (viii) non-interactive + incomplete input       → retain the seed default with a
-//                                                      NAMED advisory; never block.
+//   (viii) non-interactive + no/partial flags       → GENERATE from detected availability
+//                                                      (defaultAnswers over offered
+//                                                      choices), never a verbatim seed
+//                                                      copy (FG-796). A non-interactive
+//                                                      reconfigure without complete flags
+//                                                      is the exception: it cannot prompt,
+//                                                      so it leaves the policy unchanged.
 //
 // This is initial-authoring / explicit-reconfigure only. `forge upgrade` remains the
 // sole migration authority; setup never migrates and is not a general setup wizard.
@@ -356,9 +365,50 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
     };
   }
 
-  // (ii) nothing offerable → advisory, no write.
+  // (ii) nothing offerable. There is no detected availability to AUTHOR a policy
+  // from. FG-796: for NON-INTERACTIVE absent-policy provisioning, fall back to
+  // copying the shipped example verbatim (the only path with a documented default),
+  // printing a notice that names WHY it is a verbatim copy rather than a policy
+  // tuned to this host. Interactive / reconfigure / dry-run stay advisory — they
+  // must not silently copy a subscription-shaped seed.
   const choices = offerableChoices(deps.probes);
   if (choices.length === 0) {
+    const nonInteractive = !deps.isTTY || deps.yes;
+    if (nonInteractive && !deps.reconfigure && !deps.dryRun) {
+      deps.log(
+        "notice: no usable provider detected (provider-doctor reports none available) — cannot author a " +
+          "model policy from this host's availability; copying the example model-policy.example.yml VERBATIM " +
+          "as a fallback. Its defaults name provider/auth this host may lack; configure a provider and re-run " +
+          "`forge setup` to author one tuned to this host.",
+      );
+      let copied: boolean;
+      try {
+        copied = deps.copySeed?.() ?? false;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") return concurrentPreservedResult();
+        throw e;
+      }
+      if (!copied) {
+        const advisory =
+          "no usable provider detected and no seed model-policy.example.yml to copy — no model policy was created. " +
+          "Install seeds with `forge upgrade`, then configure a provider and re-run `forge setup`.";
+        return {
+          action: "no-seed",
+          wrote: false,
+          advisory,
+          step: { name: "model-policy.yml", status: "warn", detail: advisory, next: "run `forge upgrade` to install the seed, then configure a provider and re-run `forge setup`" },
+        };
+      }
+      const advisory =
+        "no usable provider detected — copied the example model policy verbatim (its defaults name provider/auth " +
+        "this host may lack). Configure a provider and re-run `forge setup` to author one tuned to this host.";
+      return {
+        action: "seed-retained",
+        wrote: true,
+        advisory,
+        step: { name: "model-policy.yml", status: "created", detail: advisory, next: "configure a provider, then re-run `forge setup` to author a tuned policy" },
+      };
+    }
     const advisory =
       "no usable provider detected (provider-doctor reports none available or unknown) — cannot author a model policy. " +
       "Configure a provider (e.g. `forge auth login`, `codex login`) then re-run `forge setup`.";
@@ -376,42 +426,10 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
   // Non-interactive. --yes forces this deterministic path even on a TTY, so
   // `forge setup --yes` never blocks on a prompt (the protected invariant).
   if (!deps.isTTY || deps.yes) {
-    if (hasCompleteSelection(deps.selection)) {
-      let answers: Answers;
-      try {
-        answers = buildAnswersFromSelection(choices, deps.selection!, defaults);
-      } catch (e) {
-        return invalidResult(e);
-      }
-      let gen;
-      try {
-        gen = generateModelPolicy({ choices, ...answers });
-      } catch (e) {
-        return invalidResult(e);
-      }
-      if (deps.dryRun) {
-        deps.log(gen.yaml);
-        return {
-          action: "generated-dry-run",
-          wrote: false,
-          yamlPreview: gen.yaml,
-          advisory: "dry run — previewed the generated policy, nothing written.",
-          step: { name: "model-policy.yml", status: "would-create", detail: "would generate active host policy from flags", next: "run `forge setup` (without --dry-run) to write it" },
-        };
-      }
-      // RF-1: a non-interactive --reconfigure OVERWRITES an existing policy, so the
-      // operator's output must SHOW the proposed policy before it lands — the same
-      // preview the interactive path prints. --reconfigure + --yes/flags remain the
-      // explicit confirmation; the preview is what makes the overwrite non-silent.
-      if (deps.reconfigure) {
-        deps.log("\nProposed ~/.forge/model-policy.yml (--reconfigure overwrite):\n");
-        deps.log(gen.yaml);
-      }
-      return writeAndSummarize(deps, gen.yaml);
-    }
-
-    // (viii) non-interactive + incomplete input → retain seed default, never block.
-    if (deps.reconfigure) {
+    // (viii) --reconfigure needs a TTY or complete flags — no interactive prompt is
+    // possible here, so an incomplete non-interactive reconfigure leaves the existing
+    // policy unchanged (never a seed copy over a hand-tuned policy).
+    if (deps.reconfigure && !hasCompleteSelection(deps.selection)) {
       const advisory =
         "--reconfigure requires a TTY or complete selection flags — no interactive prompt is possible non-interactively, " +
         "so the existing policy is left unchanged (no seed copy).";
@@ -422,50 +440,45 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
         step: { name: "model-policy.yml", status: "warn", detail: advisory },
       };
     }
-    if (!deps.dryRun) {
-      // RF-4: the seed-copy is exclusive too — a policy that appeared between the
-      // policyPresent snapshot and this copy is preserved, not clobbered.
-      let copied: boolean;
-      try {
-        copied = deps.copySeed?.() ?? false;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "EEXIST") return concurrentPreservedResult();
-        throw e;
-      }
-      // RF-3: copySeed is a no-op when no seed exists (damaged/incomplete install).
-      // Do NOT report a created/retained policy that was never written — say plainly
-      // that nothing was created, with a named advisory pointing at the fix.
-      if (!copied) {
-        const advisory =
-          "non-interactive with no selection flags and no seed model-policy.example.yml to copy — " +
-          "no model policy was created. Install seeds with `forge upgrade`, or run `forge setup` in a " +
-          "TTY / pass selection flags to author one.";
-        return {
-          action: "no-seed",
-          wrote: false,
-          advisory,
-          step: { name: "model-policy.yml", status: "warn", detail: advisory, next: "run `forge upgrade` to install the seed, then re-run `forge setup`" },
-        };
-      }
-      const advisory =
-        "non-interactive with no selection flags — retained the seed default model policy (no Q&A). " +
-        "Run `forge setup` in a TTY, or pass selection flags, to author routing.";
+
+    // FG-796: author from detected availability. Complete flags drive the selection;
+    // otherwise GENERATE deterministically from defaultAnswers over the offered
+    // (available) choices — the same policy an all-Enter interactive run would write.
+    // The verbatim seed copy is NOT used here: it is the zero-provider fallback only
+    // (branch (ii)), so a Bedrock-only host is authored onto Bedrock, never handed a
+    // subscription-shaped seed that names providers it lacks.
+    let answers: Answers;
+    try {
+      answers = deps.selection ? buildAnswersFromSelection(choices, deps.selection, defaults) : defaults;
+    } catch (e) {
+      return invalidResult(e);
+    }
+    let gen;
+    try {
+      gen = generateModelPolicy({ choices, ...answers });
+    } catch (e) {
+      return invalidResult(e);
+    }
+    if (deps.dryRun) {
+      deps.log(gen.yaml);
+      const detail = deps.selection ? "would generate active host policy from flags" : "would generate active host policy from detected provider availability";
       return {
-        action: "seed-retained",
-        wrote: true,
-        advisory,
-        step: { name: "model-policy.yml", status: "created", detail: advisory },
+        action: "generated-dry-run",
+        wrote: false,
+        yamlPreview: gen.yaml,
+        advisory: "dry run — previewed the generated policy, nothing written.",
+        step: { name: "model-policy.yml", status: "would-create", detail, next: "run `forge setup` (without --dry-run) to write it" },
       };
     }
-    const advisory =
-      "non-interactive with no selection flags — would retain the seed default model policy (no Q&A). " +
-      "Run `forge setup` in a TTY, or pass selection flags, to author routing.";
-    return {
-      action: "seed-retained",
-      wrote: false,
-      advisory,
-      step: { name: "model-policy.yml", status: "would-create", detail: advisory },
-    };
+    // RF-1: a non-interactive --reconfigure OVERWRITES an existing policy, so the
+    // operator's output must SHOW the proposed policy before it lands — the same
+    // preview the interactive path prints. --reconfigure + --yes/flags remain the
+    // explicit confirmation; the preview is what makes the overwrite non-silent.
+    if (deps.reconfigure) {
+      deps.log("\nProposed ~/.forge/model-policy.yml (--reconfigure overwrite):\n");
+      deps.log(gen.yaml);
+    }
+    return writeAndSummarize(deps, gen.yaml);
   }
 
   // Interactive (absent policy, or --reconfigure).

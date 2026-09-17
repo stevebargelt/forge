@@ -100,9 +100,15 @@ export function routingPolicyStep(opts: { presentBefore: boolean; ensuredOk: boo
 /** Is `forge review-loop --review-profile <reviewerProfile>` runnable on this host,
  *  verified statically: the profile is defined + its auth is available, AND the
  *  codex CLI is present in the image. Non-blocking (warn) — it's an opt-in path,
- *  not default-work readiness. */
-export function reviewLoopReadiness(inputs: ReleaseInputs, reviewerProfile = "codex-subscription"): ReleaseCheck {
+ *  not default-work readiness.
+ *
+ *  FG-796: `resolvedFrom` names HOW the reviewer profile was chosen when it was not
+ *  an explicit `--review-profile` flag (e.g. "defaults.activity.review",
+ *  "defaults.profile"). Surfaced in the detail so the operator can see which policy
+ *  field drove the default rather than a hard-coded codex-subscription. */
+export function reviewLoopReadiness(inputs: ReleaseInputs, reviewerProfile = "codex-subscription", resolvedFrom?: string): ReleaseCheck {
   const name = `review-loop reviewer (${reviewerProfile})`;
+  const from = resolvedFrom ? ` [default from ${resolvedFrom}]` : "";
   const gaps: string[] = [];
 
   const profile = inputs.profileAuth.find((p) => p.profile === reviewerProfile);
@@ -116,12 +122,12 @@ export function reviewLoopReadiness(inputs: ReleaseInputs, reviewerProfile = "co
   else if (codex.present === null) gaps.push("codex CLI not probed (image/docker unavailable)");
 
   if (gaps.length === 0) {
-    return { name, status: "ok", detail: `configured — ${reviewerProfile} available + codex CLI present (verified statically, no agent run)` };
+    return { name, status: "ok", detail: `configured — ${reviewerProfile} available + codex CLI present (verified statically, no agent run)${from}` };
   }
   return {
     name,
     status: "warn",
-    detail: gaps.join("; "),
+    detail: `${gaps.join("; ")}${from}`,
     next: `resolve the above to use \`forge review-loop --review-profile ${reviewerProfile}\``,
   };
 }

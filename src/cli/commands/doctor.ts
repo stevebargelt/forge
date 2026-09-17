@@ -253,17 +253,48 @@ export function gatherProfileAuth(ctx: LoadContext = {}): AuthInputs[] {
   // Default-reachable profiles run without an explicit --profile: the default,
   // any activity default, and any agent override. A missing cred on one of these
   // blocks; an opt-in-only profile (defined but only selectable via --profile)
-  // only warns.
-  const reachable = new Set<string>([
-    policy.defaults.profile,
-    ...Object.values(policy.defaults.activity ?? {}),
-    ...Object.values(policy.overrides?.agents ?? {}),
-  ]);
-  const rows: AuthInputs[] = [];
-  for (const [name, profile] of Object.entries(policy.model_profiles)) {
+  // only warns. FG-796: track the SOURCES per profile so the advice can name WHY a
+  // profile is reachable (defaults.profile / defaults.activity.<cap> /
+  // overrides.agents.<role>) and target the fix at the right lever.
+  const reachableVia = new Map<string, string[]>();
+  const addSource = (name: string, source: string) => {
+    const list = reachableVia.get(name) ?? [];
+    list.push(source);
+    reachableVia.set(name, list);
+  };
+  addSource(policy.defaults.profile, "defaults.profile");
+  for (const [cap, prof] of Object.entries(policy.defaults.activity ?? {})) addSource(prof, `defaults.activity.${cap}`);
+  for (const [role, prof] of Object.entries(policy.overrides?.agents ?? {})) addSource(prof, `overrides.agents.${role}`);
+
+  // First pass: probe every profile so we know which providers have ANY available
+  // profile on this host (the basis for "re-point instead of forge auth login").
+  const probed = Object.entries(policy.model_profiles).map(([name, profile]) => {
     const auth: EffectiveAuth = profile.auth === "auto" ? detectAuthMode() : profile.auth;
-    const probe = probeAuth(profile.provider, auth);
-    rows.push({ profile: name, provider: profile.provider, auth, status: probe.status, detail: probe.detail, reachable: reachable.has(name) });
+    return { name, provider: profile.provider, auth, probe: probeAuth(profile.provider, auth) };
+  });
+  const availableByProvider = new Map<string, string[]>();
+  for (const p of probed) {
+    if (p.probe.status === "available") {
+      const list = availableByProvider.get(p.provider) ?? [];
+      list.push(p.name);
+      availableByProvider.set(p.provider, list);
+    }
+  }
+
+  const rows: AuthInputs[] = [];
+  for (const p of probed) {
+    const via = reachableVia.get(p.name) ?? [];
+    const sameProviderAvailable = (availableByProvider.get(p.provider) ?? []).filter((n) => n !== p.name);
+    rows.push({
+      profile: p.name,
+      provider: p.provider,
+      auth: p.auth,
+      status: p.probe.status,
+      detail: p.probe.detail,
+      reachable: via.length > 0,
+      reachableVia: via,
+      sameProviderAvailable,
+    });
   }
   return rows;
 }

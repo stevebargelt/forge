@@ -73,6 +73,14 @@ export type AuthInputs = {
    *  on a reachable profile blocks (fail); on an opt-in-only profile it warns.
    *  Defaults to true (treat as blocking) when omitted. */
   reachable?: boolean;
+  /** FG-796: the SOURCES that make this profile default-reachable, so the advice can
+   *  name WHY it blocks — e.g. ["defaults.profile", "defaults.activity.review",
+   *  "overrides.agents.red-wide"]. Empty/undefined for an opt-in-only profile. */
+  reachableVia?: string[];
+  /** FG-796: names of OTHER profiles of the SAME provider that ARE available on this
+   *  host. When non-empty, a missing cred is repaired by re-pointing to one of these
+   *  (`forge setup --reconfigure`), NOT by `forge auth login`. */
+  sameProviderAvailable?: string[];
 };
 
 export type RoutingInputs = {
@@ -174,13 +182,35 @@ function authCheck(a: AuthInputs): ReleaseCheck {
   const label = `auth ${a.profile} (${a.provider}/${a.auth})`;
   if (a.status === "available") return { name: label, status: "ok", detail: a.detail };
   if (a.status === "unavailable") {
-    const next = `provide the credential for ${a.provider}/${a.auth} before dispatching this profile`;
     // A default-reachable profile with no cred blocks; an opt-in-only profile
     // (selected only via --profile) just warns — it can't break default work.
     if (a.reachable === false) {
+      const next = `provide the credential for ${a.provider}/${a.auth} before dispatching this profile`;
       return { name: label, status: "warn", detail: `${a.detail} — opt-in profile (only runs when selected via --profile)`, next };
     }
-    return { name: label, status: "fail", detail: a.detail, next };
+    // FG-796: name WHY it is reachable (the policy sources), then give an advice
+    // that fits this host, not a blanket `forge auth login`.
+    const via = a.reachableVia ?? [];
+    const whyReachable = via.length > 0 ? ` — reachable via ${via.join(", ")}` : "";
+    const sameProvider = a.sameProviderAvailable ?? [];
+    const pinSources = via.filter((v) => v.startsWith("overrides.agents."));
+    let next: string;
+    if (sameProvider.length > 0) {
+      // Another profile of the SAME provider works here — re-point to it rather than
+      // chasing a credential for an auth this host does not use.
+      next =
+        `re-point to an available ${a.provider} profile (${sameProvider.join(", ")}) with ` +
+        `\`forge setup --reconfigure\`, or set this profile's auth: auto`;
+    } else if (pinSources.length > 0 && pinSources.length === via.length) {
+      // Reachable ONLY through agent pins and no same-provider alternative exists:
+      // the fix is to remove/re-point the pin(s) by name, not to obtain a credential.
+      next = `remove or re-point the pin(s) naming this profile: ${pinSources.join(", ")}`;
+    } else {
+      // Reached through defaults with no same-provider alternative — the credential
+      // genuinely has to be provided (`forge auth login` for subscription auth).
+      next = `provide the credential for ${a.provider}/${a.auth} (e.g. \`forge auth login\`) — no other available ${a.provider} profile to re-point to`;
+    }
+    return { name: label, status: "fail", detail: `${a.detail}${whyReachable}`, next };
   }
   // unknown: not determinable from the host (OAuth in a docker volume, or a
   // provider/auth with no host-side probe) — flag, never block.

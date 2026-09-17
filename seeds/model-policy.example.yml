@@ -119,15 +119,20 @@ defaults:
 overrides:
   # agent role -> profile. Pin specific agents to a specific provider/auth. This
   # is mixed-provider routing: the SAME workflow YAML runs across providers, the
-  # policy decides per-agent. Example: security review on Bedrock, a wide red on
-  # Codex — both from one unchanged workflow.
-  agents:
-    red-security: claude-bedrock
-    red-wide: codex-subscription
-    # Mixed-provider dual research: each independent researcher runs on a different
-    # provider, ensuring no shared context or provider-level bias between branches.
-    research-primary: claude-subscription
-    research-skeptic: codex-subscription
+  # policy decides per-agent.
+  #
+  # FG-796: this example ships with NO role pins. Pins hardcoded here name a
+  # specific provider/auth (e.g. codex-subscription, claude-bedrock) that a given
+  # host may not have — a Bedrock-only host that copied a codex pin would be NOT
+  # READY the moment it was provisioned, and red-wide (in every review) would fail
+  # at dispatch. `forge setup` OWNS pins: it authors them from detected provider
+  # availability (setup-model-policy.ts defaultAnswers over model-policy-choices),
+  # so a generated policy only ever pins to a profile that exists on this host —
+  # e.g. the dual-research skeptic is pinned to a different available provider, and
+  # the codex skeptic pin is added only when codex is actually available. Add pins
+  # here by hand only if you are hand-authoring this file and know the profiles are
+  # reachable on every host that will use it.
+  agents: {}
 
 # Bounds orchestrator autonomy (enforced once bounded orchestrator choice lands
 # in the Run stage, #225). Empty/absent = all defined profiles allowed.

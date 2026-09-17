@@ -26,6 +26,7 @@ import {
   provisionDocsSurfaces,
   describeDocsSurfacesProvisionPlan,
   provisionSeedFile,
+  projectModelPolicyNotice,
   scaffoldBacklogDirs,
   skippedClaudeCommands,
   skippedClaudeCommandOutcomes,
@@ -1267,16 +1268,26 @@ test("scaffoldBacklogDirs: idempotent — re-run when everything already exists 
   assert.equal(readFileSync(join(projectDir, "backlog", "notes.md"), "utf8"), "# my real notes\nkeep me\n", "notes.md must not be clobbered");
 });
 
-// ----- provisionSeedFile (model-policy + docs-surfaces) -----
+// ----- FG-796 (AC7): init does NOT provision a project model-policy.yml -----
 
-test("provisionSeedFile: creates model-policy.yml when absent", () => {
-  mkdirSync(join(projectDir, ".forge"), { recursive: true });
-  const result = provisionSeedFile(join(projectDir, ".forge"), "model-policy.yml", "model-policy.example.yml");
-  assert.equal(result, "created");
-  assert.ok(existsSync(join(projectDir, ".forge", "model-policy.yml")));
-  const content = readFileSync(join(projectDir, ".forge", "model-policy.yml"), "utf8");
-  assert.match(content, /model_profiles/);
+test("projectModelPolicyNotice: absent project policy → names the host default + how to override", () => {
+  const forgeDir = join(projectDir, ".forge");
+  const notice = projectModelPolicyNotice(forgeDir);
+  assert.match(notice, /not provisioned per project/);
+  assert.match(notice, /~\/\.forge\/model-policy\.yml/);
+  assert.match(notice, new RegExp(join(forgeDir, "model-policy.yml").replace(/[.]/g, "\\.")));
 });
+
+test("projectModelPolicyNotice: existing project policy → named as an untouched override", () => {
+  const forgeDir = join(projectDir, ".forge");
+  mkdirSync(forgeDir, { recursive: true });
+  writeFileSync(join(forgeDir, "model-policy.yml"), "# custom\n");
+  const notice = projectModelPolicyNotice(forgeDir);
+  assert.match(notice, /left untouched/);
+  assert.equal(readFileSync(join(forgeDir, "model-policy.yml"), "utf8"), "# custom\n", "the notice never writes");
+});
+
+// ----- provisionSeedFile (still used for docs-surfaces) -----
 
 test("provisionSeedFile: skips model-policy.yml when already present", () => {
   const forgeDir = join(projectDir, ".forge");

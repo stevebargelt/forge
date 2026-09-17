@@ -22,6 +22,19 @@ const PROBES: AuthProbe[] = [
   { provider: "openai", mode: "subscription", status: "unknown", detail: "run `codex login`" },
 ];
 
+// Zero offerable providers (everything unavailable) — the seed-copy fallback case.
+const ALL_DOWN: AuthProbe[] = [
+  { provider: "anthropic", mode: "subscription", status: "unavailable", detail: "x" },
+  { provider: "openai", mode: "subscription", status: "unavailable", detail: "x" },
+];
+
+// Bedrock-only host: only the AWS Bedrock profile is available.
+const BEDROCK_ONLY: AuthProbe[] = [
+  { provider: "anthropic", mode: "bedrock", status: "available", detail: "AWS profile + CLAUDE_CODE_USE_BEDROCK=1" },
+  { provider: "anthropic", mode: "subscription", status: "unavailable", detail: "no ~/.claude subscription" },
+  { provider: "openai", mode: "subscription", status: "unavailable", detail: "no ~/.codex/auth.json" },
+];
+
 function scriptedPrompt(answers: string[], confirm: boolean): Prompt {
   let i = 0;
   return {
@@ -151,17 +164,18 @@ test("--reconfigure preview: writes and preserves the unmodified default choice"
 });
 
 // RF-1: --yes must force the deterministic non-interactive path EVEN on a TTY, so
-// `forge setup --yes` never blocks on a prompt (the protected invariant). With no
-// selection flags and no existing policy that path retains the seed default.
-test("RF-1: --yes on a TTY takes the non-interactive path, never prompting", async () => {
+// `forge setup --yes` never blocks on a prompt (the protected invariant). FG-796:
+// with providers available and no selection flags, that path now GENERATES from
+// detected availability (never a verbatim seed copy).
+test("RF-1/FG-796: --yes on a TTY generates from availability, never prompting or copying the seed", async () => {
   await withDeps(
     // isTTY:true (a real TTY) + yes:true + no selection → must NOT prompt.
     { isTTY: true, yes: true, selection: undefined, prompt: scriptedPrompt([], true) },
     async (deps, state) => {
       const res = await runHostModelPolicySetup(deps);
-      assert.equal(res.action, "seed-retained", "took the deterministic seed-default path, not the interactive Q&A");
-      assert.equal(state.writes.length, 0, "no generated policy written");
-      assert.equal(state.seedCopies, 1, "seed copied as the non-interactive fallback");
+      assert.equal(res.action, "generated", "took the deterministic generate path, not the interactive Q&A");
+      assert.equal(state.writes.length, 1, "one generated policy written");
+      assert.equal(state.seedCopies, 0, "no verbatim seed copy when providers are available");
     },
   );
 });
@@ -244,7 +258,9 @@ test("RF-4: the seed-fallback copy preserves a concurrently-created policy, neve
   writeFileSync(destPath, "EXISTING HOST POLICY\n"); // appeared after the policyPresent snapshot
   try {
     await withDeps(
-      { isTTY: false, selection: undefined, copySeed: () => copySeedExclusive(seedPath, destPath) },
+      // FG-796: the verbatim seed-copy fallback only runs when ZERO providers are
+      // offerable, so this concurrency case is exercised with all providers down.
+      { probes: ALL_DOWN, isTTY: false, selection: undefined, copySeed: () => copySeedExclusive(seedPath, destPath) },
       async (deps) => {
         const res = await runHostModelPolicySetup(deps);
         assert.equal(res.action, "preserved", "concurrent create reported as preserved, not clobbered");
@@ -306,9 +322,9 @@ test("RF-1: non-interactive --reconfigure previews the proposed policy before ov
 // written — it reports "no-seed" with a named advisory. Discriminating: before the fix
 // copySeed's void return let the caller infer success from the callback merely existing,
 // so a run with no seed reported status "created" for a file that does not exist.
-test("RF-3: no seed to copy → reports no-seed, nothing written, not a phantom created policy", async () => {
+test("RF-3/FG-796: zero providers + no seed to copy → no-seed, nothing written, not a phantom created policy", async () => {
   await withDeps(
-    { isTTY: false, selection: undefined, copySeed: () => false },
+    { probes: ALL_DOWN, isTTY: false, selection: undefined, copySeed: () => false },
     async (deps, state) => {
       const res = await runHostModelPolicySetup(deps);
       assert.equal(res.action, "no-seed", "honest: no policy was created");
@@ -333,35 +349,132 @@ test("non-interactive + complete flags: deterministic generate, one write, no pr
   );
 });
 
-test("non-interactive + no flags: retains the seed default with an advisory, no generated write", async () => {
+// FG-796 (AC1): non-interactive with no flags GENERATES from detected availability
+// (the deterministic all-Enter equivalent), not a verbatim seed copy.
+test("FG-796/AC1: non-interactive + no flags generates from availability, no verbatim seed copy", async () => {
   await withDeps({ isTTY: false, selection: undefined }, async (deps, state) => {
     const res = await runHostModelPolicySetup(deps);
-    assert.equal(res.action, "seed-retained");
-    assert.equal(state.writes.length, 0, "no generated policy written");
-    assert.equal(state.seedCopies, 1, "seed copied as the fallback");
-    assert.match(res.advisory ?? "", /seed default/);
+    assert.equal(res.action, "generated");
+    assert.equal(state.writes.length, 1, "one generated policy written");
+    assert.equal(state.seedCopies, 0, "no verbatim seed copy when providers are available");
   });
 });
 
-test("non-interactive + no flags + --dry-run: no seed copy, no write", async () => {
+test("FG-796/AC1: non-interactive + no flags + --dry-run previews the generated policy, no write or copy", async () => {
   await withDeps({ isTTY: false, dryRun: true, selection: undefined }, async (deps, state) => {
     const res = await runHostModelPolicySetup(deps);
-    assert.equal(res.action, "seed-retained");
+    assert.equal(res.action, "generated-dry-run");
     assert.equal(state.writes.length, 0);
     assert.equal(state.seedCopies, 0);
+    assert.ok(state.logs.some((l) => /model_profiles/.test(l)), "the generated policy was previewed");
   });
 });
 
-test("no offerable provider: advisory, nothing written or copied", async () => {
-  const allDown: AuthProbe[] = [
-    { provider: "anthropic", mode: "subscription", status: "unavailable", detail: "x" },
-    { provider: "openai", mode: "subscription", status: "unavailable", detail: "x" },
+// FG-796 (AC1): bedrock-only host — every default lands on the Bedrock profile and
+// NO pin names an unavailable provider.
+test("FG-796/AC1: bedrock-only host generates a Bedrock-only policy with no unavailable-provider pin", async () => {
+  await withDeps({ probes: BEDROCK_ONLY, isTTY: false, selection: undefined }, async (deps, state) => {
+    const res = await runHostModelPolicySetup(deps);
+    assert.equal(res.action, "generated");
+    assert.equal(state.seedCopies, 0);
+    const policy = loadModelPolicy({});
+    assert.ok(policy, "the generated policy loads");
+    assert.match(policy!.defaults.profile, /^anthropic-bedrock-/, "defaults.profile is a Bedrock profile");
+    for (const [cap, prof] of Object.entries(policy!.defaults.activity)) {
+      assert.match(prof, /^anthropic-bedrock-/, `defaults.activity.${cap} is a Bedrock profile`);
+    }
+    for (const [role, prof] of Object.entries(policy!.overrides.agents)) {
+      assert.match(prof, /^anthropic-bedrock-/, `pin ${role} names a Bedrock profile, never codex/subscription`);
+      assert.doesNotMatch(prof, /codex|subscription/, `pin ${role} names no unavailable provider`);
+    }
+  });
+});
+
+// FG-796 (AC1): subscription-only host — the codex skeptic pin is NOT added (codex
+// is not offered), and defaults land on the subscription profile.
+test("FG-796/AC1: subscription-only host omits the codex skeptic pin", async () => {
+  const subOnly: AuthProbe[] = [
+    { provider: "anthropic", mode: "subscription", status: "available", detail: "ok" },
+    { provider: "openai", mode: "subscription", status: "unavailable", detail: "no ~/.codex/auth.json" },
   ];
-  await withDeps({ probes: allDown, isTTY: false }, async (deps, state) => {
+  await withDeps({ probes: subOnly, isTTY: false, selection: undefined }, async (deps) => {
+    const res = await runHostModelPolicySetup(deps);
+    assert.equal(res.action, "generated");
+    const policy = loadModelPolicy({})!;
+    assert.match(policy.defaults.profile, /^anthropic-subscription-/);
+    for (const prof of Object.values(policy.overrides.agents)) {
+      assert.doesNotMatch(prof, /openai|codex/, "no codex pin without codex availability");
+    }
+  });
+});
+
+// FG-796 (AC1): subscription + codex host — the codex skeptic pin IS added.
+test("FG-796/AC1: subscription+codex host pins the research skeptic to codex", async () => {
+  const subCodex: AuthProbe[] = [
+    { provider: "anthropic", mode: "subscription", status: "available", detail: "ok" },
+    { provider: "openai", mode: "subscription", status: "available", detail: "ok" },
+  ];
+  await withDeps({ probes: subCodex, isTTY: false, selection: undefined }, async (deps) => {
+    const res = await runHostModelPolicySetup(deps);
+    assert.equal(res.action, "generated");
+    const policy = loadModelPolicy({})!;
+    assert.equal(policy.overrides.agents["research-skeptic"], "openai-subscription-codex", "skeptic pinned to codex when available");
+  });
+});
+
+// FG-796 (AC1): nothing detected — non-interactive fallback copies the seed VERBATIM
+// with a printed notice naming why; interactive stays advisory.
+test("FG-796/AC1: nothing detected, non-interactive → seed-copy fallback with a printed notice", async () => {
+  await withDeps({ probes: ALL_DOWN, isTTY: false }, async (deps, state) => {
+    const res = await runHostModelPolicySetup(deps);
+    assert.equal(res.action, "seed-retained");
+    assert.equal(res.wrote, true);
+    assert.equal(state.seedCopies, 1, "seed copied as the zero-provider fallback");
+    assert.equal(state.writes.length, 0, "no generated policy — nothing to author from");
+    assert.ok(
+      state.logs.some((l) => /no usable provider detected/i.test(l) && /VERBATIM/i.test(l)),
+      "printed a notice naming why the seed was copied verbatim",
+    );
+  });
+});
+
+test("FG-796/AC1: nothing detected, interactive → advisory, nothing written or copied", async () => {
+  await withDeps({ probes: ALL_DOWN, isTTY: true }, async (deps, state) => {
     const res = await runHostModelPolicySetup(deps);
     assert.equal(res.action, "no-provider");
     assert.equal(res.wrote, false);
     assert.equal(state.writes.length, 0);
     assert.equal(state.seedCopies, 0);
   });
+});
+
+// FG-796 (AC5): a seed-shaped host policy (subscription default + codex pins) is
+// repaired by an interactive --reconfigure with only Enter on a bedrock-only host —
+// the preselected defaults are Bedrock and the codex/subscription pins are dropped.
+test("FG-796/AC5: reconfigure over a seed-shaped policy on a bedrock-only host preselects Bedrock, drops the codex pins", async () => {
+  const seedShaped = ModelPolicySchema.parse({
+    schema_version: 2,
+    model_profiles: {
+      "claude-subscription": { provider: "anthropic", auth: "subscription", map: { default: { model: "claude-sonnet-4-6", cost_tier: "standard" } } },
+      "claude-bedrock": { provider: "anthropic", auth: "bedrock", map: { default: { model: "us.anthropic.claude-sonnet-4-6", cost_tier: "standard" } } },
+      "codex-subscription": { provider: "openai", auth: "subscription", map: { default: { model: "gpt-5.6-terra", cost_tier: "standard" } } },
+    },
+    defaults: { profile: "claude-subscription", activity: { default: "claude-subscription", review: "claude-subscription" } },
+    overrides: { agents: { "red-wide": "codex-subscription", "research-skeptic": "codex-subscription", "red-security": "claude-bedrock" } },
+  });
+  await withDeps(
+    { probes: BEDROCK_ONLY, isTTY: true, reconfigure: true, policyPresent: true, loadExisting: () => seedShaped, prompt: scriptedPrompt([], true) },
+    async (deps, state) => {
+      const res = await runHostModelPolicySetup(deps);
+      assert.equal(res.action, "generated");
+      assert.equal(state.writes.length, 1);
+      const written = state.writes[0]!;
+      assert.doesNotMatch(written, /codex-subscription|claude-subscription/, "seed-shaped subscription/codex profile names are gone");
+      const policy = loadModelPolicy({})!;
+      assert.match(policy.defaults.profile, /^anthropic-bedrock-/, "reconfigure preselected Bedrock for the default");
+      for (const prof of Object.values(policy.overrides.agents)) {
+        assert.match(prof, /^anthropic-bedrock-/, "every surviving pin names an available Bedrock profile");
+      }
+    },
+  );
 });
