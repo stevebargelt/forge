@@ -373,19 +373,43 @@ test("RF-1/FG-796: available beats unknown for the same family; authored default
   );
 });
 
-// RF-1: only-unknown host — no available profile exists, so generation legitimately
-// falls to the unverified choice, but it must SAY SO in a notice naming the profiles.
-test("RF-1/FG-796: only-unknown host authors from the unverified profiles but names them in a notice", async () => {
+// RF-1 (fail closed): only-unknown host — NO offered choice is available, so the
+// non-interactive path writes NOTHING (a generated policy names only available
+// profiles). It returns the advisory outcome and names each unverifiable profile with
+// its next-action detail, pointing the operator at an interactive run or a credential.
+test("RF-1/FG-796: only-unknown host writes nothing and returns an advisory naming the unverifiable profiles", async () => {
   await withDeps({ probes: ALL_UNKNOWN, isTTY: false, selection: undefined }, async (deps, state) => {
     const res = await runHostModelPolicySetup(deps);
-    assert.equal(res.action, "generated");
-    assert.equal(state.writes.length, 1, "still authors — there is offerable structure");
-    const policy = loadModelPolicy({})!;
-    assert.match(policy.defaults.profile, /^anthropic-subscription-/, "the only (unverified) provider is used");
+    assert.equal(res.action, "unverified-only", "fail closed — did not author onto an unverified provider");
+    assert.equal(res.wrote, false);
+    assert.equal(state.writes.length, 0, "nothing written when no offered profile is available");
+    assert.equal(existsSync(join(state.dir, "model-policy.yml")), false, "no policy file created");
+    assert.equal(state.seedCopies, 0, "not a seed copy either — providers ARE offered, just unverified");
+    assert.equal(res.step.status, "warn");
+    // The advisory + notice name the unverifiable profile AND its next-action detail.
+    assert.match(res.advisory ?? "", /anthropic-subscription-/, "advisory names the unverifiable profile");
+    assert.match(res.advisory ?? "", /creds volume present but unverified/, "advisory carries the probe's next-action detail");
+    assert.match(res.advisory ?? "", /interactively|configure a provider/i, "advisory points at interactive run or a credential");
     assert.ok(
-      state.logs.some((l) => /unverified/i.test(l) && new RegExp(policy.defaults.profile).test(l)),
-      "printed a notice naming the unverified profile(s) it had to author from",
+      state.logs.some(
+        (l) => /anthropic-subscription-/.test(l) && /creds volume present but unverified/.test(l),
+      ),
+      "printed a notice naming the unverifiable profile + its next-action",
     );
+  });
+});
+
+// RF-1 (fail closed) --dry-run: the preview of the only-unknown non-interactive branch
+// also writes nothing and returns the same advisory — there is nothing to author.
+test("RF-1/FG-796: only-unknown host + --dry-run writes nothing and returns the advisory", async () => {
+  await withDeps({ probes: ALL_UNKNOWN, isTTY: false, dryRun: true, selection: undefined }, async (deps, state) => {
+    const res = await runHostModelPolicySetup(deps);
+    assert.equal(res.action, "unverified-only");
+    assert.equal(res.wrote, false);
+    assert.equal(state.writes.length, 0);
+    assert.equal(state.seedCopies, 0);
+    assert.equal(existsSync(join(state.dir, "model-policy.yml")), false);
+    assert.match(res.advisory ?? "", /anthropic-subscription-/);
   });
 });
 

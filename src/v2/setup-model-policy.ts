@@ -21,7 +21,13 @@
 //   (viii) non-interactive + no/partial flags       → GENERATE from detected availability
 //                                                      (defaultAnswers over offered
 //                                                      choices), never a verbatim seed
-//                                                      copy (FG-796). A non-interactive
+//                                                      copy (FG-796). FAIL CLOSED when NO
+//                                                      offered choice is available (every
+//                                                      probe unknown): write NOTHING and
+//                                                      return an advisory naming the
+//                                                      unverifiable profiles (RF-1) — a
+//                                                      generated policy names only
+//                                                      available profiles. A non-interactive
 //                                                      reconfigure without complete flags
 //                                                      is the exception: it cannot prompt,
 //                                                      so it leaves the policy unchanged.
@@ -91,6 +97,7 @@ export type HostModelPolicyAction =
   | "seed-retained"
   | "no-seed"
   | "no-provider"
+  | "unverified-only"
   | "cancelled"
   | "invalid-selection";
 
@@ -466,6 +473,34 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
         wrote: false,
         advisory,
         step: { name: "model-policy.yml", status: "warn", detail: advisory },
+      };
+    }
+
+    // FG-796 / RF-1 (fail closed): NO offered choice is AVAILABLE — every profile here
+    // is an unverified `unknown` probe. A GENERATED policy must name only profiles
+    // available at authoring time, so the non-interactive path (including its --dry-run
+    // preview) writes NOTHING rather than silently authoring onto an unverified provider.
+    // The operator decides in an interactive run (where the tagged unknown choices are
+    // offered) or after providing a credential. Interactive behavior is unchanged: it
+    // still offers the tagged unknown choices below.
+    if (!choices.some((c) => c.status === "available")) {
+      const unverifiable = choices.map((c) => `${c.profileName} (${c.nextAction ?? "availability unknown"})`);
+      const advisory =
+        "no provider availability could be verified from this host — every offered profile is unverified " +
+        `(${unverifiable.join("; ")}). A generated policy must name only available profiles, so nothing was ` +
+        "written. Run `forge setup` interactively to choose among the unverified profiles, or configure a " +
+        "provider (e.g. `forge auth login`, `codex login`) and re-run `forge setup`.";
+      deps.log(`notice: ${advisory}`);
+      return {
+        action: "unverified-only",
+        wrote: false,
+        advisory,
+        step: {
+          name: "model-policy.yml",
+          status: "warn",
+          detail: advisory,
+          next: "run `forge setup` interactively to choose an unverified profile, or configure a provider and re-run `forge setup`",
+        },
       };
     }
 
