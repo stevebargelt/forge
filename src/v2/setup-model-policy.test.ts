@@ -35,6 +35,19 @@ const BEDROCK_ONLY: AuthProbe[] = [
   { provider: "openai", mode: "subscription", status: "unavailable", detail: "no ~/.codex/auth.json" },
 ];
 
+// RF-1: the same family is offered by an UNKNOWN probe (subscription) and an
+// AVAILABLE probe (bedrock). Generation must name the available one.
+const AVAILABLE_AND_UNKNOWN_SAME_FAMILY: AuthProbe[] = [
+  { provider: "anthropic", mode: "subscription", status: "unknown", detail: "creds volume present but unverified" },
+  { provider: "anthropic", mode: "bedrock", status: "available", detail: "AWS profile + CLAUDE_CODE_USE_BEDROCK=1" },
+];
+
+// RF-1: nothing is verified — every probe is UNKNOWN. Generation still authors a
+// policy (there is offerable structure) but must NAME the unverified profiles in a notice.
+const ALL_UNKNOWN: AuthProbe[] = [
+  { provider: "anthropic", mode: "subscription", status: "unknown", detail: "creds volume present but unverified" },
+];
+
 function scriptedPrompt(answers: string[], confirm: boolean): Prompt {
   let i = 0;
   return {
@@ -335,6 +348,45 @@ test("RF-3/FG-796: zero providers + no seed to copy → no-seed, nothing written
       assert.equal(state.writes.length, 0);
     },
   );
+});
+
+// RF-1: available beats unknown for the SAME family — the generated policy names the
+// available (bedrock) profile, never the unverified same-family subscription one, and
+// prints no unverified notice because every route is covered by an available profile.
+test("RF-1/FG-796: available beats unknown for the same family; authored defaults name the available profile, no notice", async () => {
+  await withDeps(
+    { probes: AVAILABLE_AND_UNKNOWN_SAME_FAMILY, isTTY: false, selection: undefined },
+    async (deps, state) => {
+      const res = await runHostModelPolicySetup(deps);
+      assert.equal(res.action, "generated");
+      assert.equal(state.writes.length, 1);
+      const policy = loadModelPolicy({})!;
+      assert.match(policy.defaults.profile, /^anthropic-bedrock-/, "available (bedrock) chosen over the unknown same-family profile");
+      for (const [cap, prof] of Object.entries(policy.defaults.activity)) {
+        assert.doesNotMatch(prof, /subscription/, `defaults.activity.${cap} names no unverified subscription profile`);
+      }
+      for (const prof of Object.values(policy.overrides.agents)) {
+        assert.match(prof, /^anthropic-bedrock-/, "every pin names an available profile");
+      }
+      assert.ok(!state.logs.some((l) => /unverified/i.test(l)), "no unverified notice when available profiles cover every route");
+    },
+  );
+});
+
+// RF-1: only-unknown host — no available profile exists, so generation legitimately
+// falls to the unverified choice, but it must SAY SO in a notice naming the profiles.
+test("RF-1/FG-796: only-unknown host authors from the unverified profiles but names them in a notice", async () => {
+  await withDeps({ probes: ALL_UNKNOWN, isTTY: false, selection: undefined }, async (deps, state) => {
+    const res = await runHostModelPolicySetup(deps);
+    assert.equal(res.action, "generated");
+    assert.equal(state.writes.length, 1, "still authors — there is offerable structure");
+    const policy = loadModelPolicy({})!;
+    assert.match(policy.defaults.profile, /^anthropic-subscription-/, "the only (unverified) provider is used");
+    assert.ok(
+      state.logs.some((l) => /unverified/i.test(l) && new RegExp(policy.defaults.profile).test(l)),
+      "printed a notice naming the unverified profile(s) it had to author from",
+    );
+  });
 });
 
 test("non-interactive + complete flags: deterministic generate, one write, no prompt", async () => {

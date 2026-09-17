@@ -106,9 +106,13 @@ test("FG-346 interactive mixed Anthropic/OpenAI: writes a valid policy; summary 
     assert.equal(reloaded!.schema_version, 2);
     assert.match(readFileSync(join(h.dir, "model-policy.yml"), "utf8"), /schema_version: 2/);
 
-    // The mixed-provider pin actually resolves to the OpenAI codex profile.
+    // FG-796 / RF-1: OpenAI is only UNKNOWN here (unverified), so the all-Enter
+    // default must NOT pin the skeptic to the unverified codex — it falls to an
+    // available Anthropic profile. The generated policy never names an unverified
+    // provider while an available one exists.
     const summary = Object.fromEntries(res.summaryLines!.map((l) => [l.label, l.profile]));
-    assert.equal(summary["research skeptic"], "openai-subscription-codex");
+    assert.equal(summary["research skeptic"], "anthropic-subscription-opus");
+    assert.doesNotMatch(summary["research skeptic"]!, /openai|codex/, "no unverified codex pin");
 
     // Guarantee 2: the printed summary equals one recomputed from the RELOADED policy.
     const recomputed = renderRoutingSummary(computeRoutingSummary(reloaded!, {}));

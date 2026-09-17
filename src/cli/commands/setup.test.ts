@@ -7,8 +7,9 @@ import assert from "node:assert/strict";
 import { existsSync, writeFileSync, readFileSync, rmSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Command } from "commander";
 import { FORGE_HOME } from "../../util/paths.js";
-import { provisionModelPolicy, writeHostPolicy, copySeedExclusive, resolveReviewProfile } from "./setup.js";
+import { provisionModelPolicy, writeHostPolicy, copySeedExclusive, resolveReviewProfile, registerSetup } from "./setup.js";
 
 const ACTIVE = join(FORGE_HOME, "model-policy.yml");
 const SEED = join(FORGE_HOME, "model-policy.example.yml");
@@ -110,6 +111,21 @@ test("FG-796/AC4: an explicit --review-profile always wins over the policy defau
   } finally {
     clean();
   }
+});
+
+// RF-2 (review-8bd58b66522b): the `--yes` help text must match shipped behavior — a
+// no-flag headless run GENERATES from detected availability (seed copy only when zero
+// providers are detected), it does NOT retain the seed default. Discriminating: before
+// the fix the option said "else retain the seed default", contradicting the generation path.
+test("RF-2/FG-796: --yes help text describes generate-from-availability, not seed-default retention", () => {
+  const program = new Command();
+  registerSetup(program);
+  const setupCmd = program.commands.find((c) => c.name() === "setup")!;
+  assert.ok(setupCmd, "setup command registered");
+  const yesOpt = setupCmd.options.find((o) => o.long === "--yes")!;
+  assert.ok(yesOpt, "--yes option registered");
+  assert.doesNotMatch(yesOpt.description, /retain the seed default/i, "the stale seed-default claim is gone");
+  assert.match(yesOpt.description, /detected provider availability/i, "help names generation from detected availability");
 });
 
 // RF-2: --reconfigure overwrites the live policy in place — do it atomically (temp +

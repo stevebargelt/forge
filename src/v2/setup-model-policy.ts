@@ -119,9 +119,16 @@ function pickPreferred(
   prefs: Array<[string, string]>,
   fallback: ProfileChoice,
 ): ProfileChoice {
-  for (const [provider, family] of prefs) {
-    const c = choices.find((x) => x.provider === provider && x.family === family);
-    if (c) return c;
+  // Rank status=available above status=unknown: fall to an unverified choice only
+  // when NO available profile satisfies any preference (FG-796 / RF-1 — a generated
+  // policy must not name an unverified profile while an available one exists).
+  for (const wantAvailable of [true, false]) {
+    for (const [provider, family] of prefs) {
+      const c = choices.find(
+        (x) => x.provider === provider && x.family === family && (x.status === "available") === wantAvailable,
+      );
+      if (c) return c;
+    }
   }
   return fallback;
 }
@@ -130,7 +137,10 @@ function pickPreferred(
  *  overrides where it names still-offered profiles. Guaranteed valid for non-empty
  *  choices. */
 export function defaultAnswers(choices: ProfileChoice[], existing?: ModelPolicy): Answers {
-  const fallback = choices[0];
+  // Prefer an AVAILABLE choice as the ultimate fallback so nothing lands on an
+  // unverified profile while an available one exists; only an all-unknown host
+  // falls to the first (unknown) choice (FG-796 / RF-1).
+  const fallback = choices.find((c) => c.status === "available") ?? choices[0];
   if (!fallback) throw new Error("defaultAnswers requires at least one offered choice");
   const names = new Set(choices.map((c) => c.profileName));
 
@@ -138,8 +148,12 @@ export function defaultAnswers(choices: ProfileChoice[], existing?: ModelPolicy)
   const opus = pickPreferred(choices, [["anthropic", "opus"], ["anthropic", "sonnet"]], fallback);
   const haiku = pickPreferred(choices, [["anthropic", "haiku"], ["anthropic", "sonnet"]], fallback);
   const main = sonnet;
-  const codex = choices.find((c) => c.provider === "openai" && c.family === "codex");
-  const skeptic = codex ?? choices.find((c) => c.profileName !== main.profileName) ?? main;
+  // The skeptic wants a DIFFERENT vendor (codex) — but only when it is AVAILABLE.
+  // An unverified codex must not be pinned while an available profile exists; fall
+  // to any other available profile, else main (FG-796 / RF-1).
+  const codex = choices.find((c) => c.provider === "openai" && c.family === "codex" && c.status === "available");
+  const skeptic =
+    codex ?? choices.find((c) => c.status === "available" && c.profileName !== main.profileName) ?? main;
 
   let answers: Answers = {
     defaultProfile: main.profileName,
@@ -167,6 +181,20 @@ export function defaultAnswers(choices: ProfileChoice[], existing?: ModelPolicy)
   }
 
   return answers;
+}
+
+/** The profiles named by `answers` whose offered status is `unknown` — selected only
+ *  because no AVAILABLE profile covered that route. The non-interactive generation path
+ *  names these in a notice so an authored policy never SILENTLY pins an unverified
+ *  provider (FG-796 / RF-1). */
+export function unverifiedSelections(choices: ProfileChoice[], answers: Answers): string[] {
+  const status = new Map(choices.map((c) => [c.profileName, c.status] as const));
+  const named = new Set<string>([
+    answers.defaultProfile,
+    ...Object.values(answers.activity),
+    ...Object.values(answers.rolePins),
+  ]);
+  return [...named].filter((name) => status.get(name) === "unknown").sort();
 }
 
 // ── Answer resolution helpers ──────────────────────────────────────────────
@@ -458,6 +486,17 @@ export async function runHostModelPolicySetup(deps: HostModelPolicyDeps): Promis
       gen = generateModelPolicy({ choices, ...answers });
     } catch (e) {
       return invalidResult(e);
+    }
+    // FG-796 / RF-1: if the generation had to name any UNVERIFIED profile (no
+    // available profile covered that route), say so — an authored policy never
+    // silently pins a provider whose availability was not confirmed.
+    const unverified = unverifiedSelections(choices, answers);
+    if (unverified.length > 0) {
+      deps.log(
+        "notice: no verified provider covered every route — the generated policy names unverified " +
+          `profile(s) ${unverified.join(", ")} (provider/auth detected but availability not confirmed). ` +
+          "Confirm the provider (see `forge providers doctor`) and re-run `forge setup` once verified.",
+      );
     }
     if (deps.dryRun) {
       deps.log(gen.yaml);

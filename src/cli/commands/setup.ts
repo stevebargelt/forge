@@ -243,7 +243,8 @@ type SetupOpts = {
 };
 
 // Assemble a HeadlessSelection from CLI flags, or undefined if none were given
-// (which keeps the non-interactive path on the seed-default fallback).
+// (the non-interactive path then GENERATES from detected availability — FG-796 —
+// falling back to the verbatim seed only when no provider is detected).
 function selectionFromOpts(opts: SetupOpts): HeadlessSelection | undefined {
   const rolePins = opts.pin && Object.keys(opts.pin).length > 0 ? opts.pin : undefined;
   const any =
@@ -266,7 +267,7 @@ export function registerSetup(program: Command): void {
     .description("Get this host ready for forge: interactively author the model-policy from detected providers (or seed it), then run the read-only release check (#252, FG-346)")
     .option("--dry-run", "report/preview what setup would create/change without writing")
     .option("--review-profile <name>", "review-loop reviewer profile to verify (default: the policy's defaults.activity.review, else defaults.profile)")
-    .option("--yes", "non-interactive: generate deterministically from selection flags, else retain the seed default (no prompts)")
+    .option("--yes", "non-interactive: generate the policy deterministically — from selection flags when given, else from detected provider availability; the verbatim seed is copied only when no provider is detected (no prompts)")
     .option("--reconfigure", "re-author an existing host model-policy (preview + preserve unmodified choices); without it an existing policy is never overwritten")
     .option("--default-profile <name>", "headless: the defaults.profile / default-work profile")
     .option("--reasoning <name>", "headless: profile for reasoning-heavy work")
