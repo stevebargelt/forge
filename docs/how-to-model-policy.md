@@ -98,7 +98,14 @@ policy unless you pass `--reconfigure`, and it is not a migration path
   Bedrock-only host this authors `defaults.profile` and every
   `defaults.activity` entry onto `claude-bedrock`, with no pin naming a
   provider the host doesn't have. This is never a verbatim seed copy — see
-  [Bedrock-only host](#bedrock-only-host) below.
+  [Bedrock-only host](#bedrock-only-host) below. A **verified (`available`)**
+  probe always wins over an **unverified (`unknown`)** one offering the same
+  role — e.g. an unconfirmed subscription credential never gets pinned over a
+  confirmed Bedrock profile. Generation only falls to an unverified profile
+  when no available alternative covers that route at all, and when it does it
+  prints a notice naming the unverified profile(s) so it's never a silent
+  guess; re-run `forge setup --reconfigure` once `forge providers doctor`
+  confirms the credential.
 - **No usable provider detected at all** — there's no availability to author
   from. Interactive, `--reconfigure`, and `--dry-run` stay advisory with
   nothing written; run `forge auth login` / `codex login` etc. and re-run.
