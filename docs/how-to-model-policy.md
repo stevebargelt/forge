@@ -106,6 +106,16 @@ policy unless you pass `--reconfigure`, and it is not a migration path
   prints a notice naming the unverified profile(s) so it's never a silent
   guess; re-run `forge setup --reconfigure` once `forge providers doctor`
   confirms the credential.
+- **Non-interactive with no/incomplete flags, and NO offered choice is
+  available (every probed profile is unverified `unknown`)** — fails closed:
+  writes **nothing**, including under `--dry-run`. A generated policy names
+  only profiles available at authoring time, so with none available there is
+  nothing it can legitimately author. The advisory names each unverifiable
+  profile with its next-action detail and points at running `forge setup`
+  interactively — where the tagged unknown choices are still offered and you
+  decide — or configuring a provider (`forge auth login` / `codex login`) and
+  re-running. This differs from the next case below: providers ARE detected
+  here, just none confirmed reachable.
 - **No usable provider detected at all** — there's no availability to author
   from. Interactive, `--reconfigure`, and `--dry-run` stay advisory with
   nothing written; run `forge auth login` / `codex login` etc. and re-run.
