@@ -67,18 +67,20 @@ function runForge(args: string[], host: "bedrock" | "subscription") {
   return spawnSync(NODE_EXEC, [BUILT_CLI_ENTRY, ...args], { cwd: projectDir, encoding: "utf8", env });
 }
 
+function releasePreflightIsUnavailable(output: string): boolean {
+  return /image\s+agent-dev-worker:latest\s+not built on this host/i.test(output) || /could not probe docker/i.test(output);
+}
+
 function assertHostIndependentSuccess(result: ReturnType<typeof runForge>, command: string): void {
   const output = `${result.stdout}\n${result.stderr}`;
-  const releasePreflightIsUnavailable =
-    /image agent-dev-worker:latest not built on this host/i.test(output) ||
-    /could not probe docker/i.test(output);
+  const preflightIsUnavailable = releasePreflightIsUnavailable(output);
 
   // Setup and doctor deliberately include release readiness. A Docker-less CI
   // host can therefore reject an otherwise-valid FG-796 policy after the CLI
   // has written it and rendered the relevant auth/routing evidence. Keep the
   // exit-code expectation where the host preflight is available, but do not
   // let that unrelated host verdict mask the policy behavior under test.
-  if (releasePreflightIsUnavailable) {
+  if (preflightIsUnavailable) {
     assert.notEqual(result.status, null, `${command} must execute even when release preflight is unavailable`);
     return;
   }
@@ -99,6 +101,12 @@ function assertAllDefaultCapabilitiesUse(policy: ModelPolicy, profile: string): 
 }
 
 test("integ FG-796: bedrock-only setup generates a bedrock-only policy and doctor is ready", () => {
+  assert.equal(
+    releasePreflightIsUnavailable("image agent-dev-worker:latest      not built on this host"),
+    true,
+    "the unavailable-image detector must match column-aligned release preflight output",
+  );
+
   const setup = runForge(["setup", "--yes"], "bedrock");
   assertHostIndependentSuccess(setup, "setup");
   assert.match(setup.stdout, /default work:\s+anthropic-bedrock-sonnet/i);
