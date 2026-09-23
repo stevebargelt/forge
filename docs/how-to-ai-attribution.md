@@ -71,8 +71,8 @@ Rejected (case-insensitive):
 - `Co-Authored-By:` trailers naming any of the above (any variant — `Claude Opus`, `Claude
   Sonnet`, `Claude Code`, etc.)
 - `Generated with <tool>` boilerplate and any `🤖 …` signature
-- Bare mentions of "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT" in commit
-  messages, PR titles, PR bodies, issue bodies, or issue comments
+- Bare mentions of "Claude", "Anthropic", "Codex", "OpenAI", "ChatGPT", "Gemini", or
+  "Copilot" in commit messages, PR titles, PR bodies, issue bodies, or issue comments
 
 ## Technical-identifier exemptions
 
@@ -80,11 +80,13 @@ These are allowed through even under `suppress` — they're legitimate technical
 identifiers, not attribution prose:
 
 - `CLAUDE.md` (the canonical project-setup filename)
-- `CLAUDE_*`, `ANTHROPIC_*`, `OPENAI_*`, `CODEX_*` environment variable names (e.g.
-  `CLAUDE_CODE_USE_BEDROCK`, `OPENAI_API_KEY`, `CODEX_HOME`)
+- `CLAUDE_*`, `ANTHROPIC_*`, `OPENAI_*`, `CODEX_*`, `GEMINI_*`, `COPILOT_*` environment
+  variable names (e.g. `CLAUDE_CODE_USE_BEDROCK`, `OPENAI_API_KEY`, `CODEX_HOME`,
+  `GEMINI_API_KEY`)
 - `.claude` / `.claude/` (config dir)
 - `@anthropic-ai/*`, `@openai/*` package names
-- Model ids: `claude-opus-*`, `claude-sonnet-*`, `claude-haiku-*`, `gpt-*`, `o<N>-*`
+- Model ids: `claude-opus-*`, `claude-sonnet-*`, `claude-haiku-*`, `gpt-*`, `o<N>-*`,
+  `gemini-*`
 - `codex-subscription`, `codex-apikey`, and other `codex-*` runtime/identifier names
 - `forge claude`, `forge codex` (forge subcommands wrapping the CLIs)
 - `` `claude` ``, `` `codex` `` in backticks (literal binary names) and the bare lowercase

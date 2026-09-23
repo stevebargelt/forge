@@ -12,7 +12,7 @@ antiPrompt: "Demonstrate that any commit message, pull request body, or GitHub m
 When you commit code, create pull requests, open issues, or post any other message destined for git or GitHub (via `git commit`, `gh pr create`, `gh issue create`, `gh api`, or similar):
 
 - **Do not include a `Co-Authored-By` trailer naming an AI assistant** — "Claude" (or any variant: `Claude Opus`, `Claude Sonnet`, `Claude Code`), "Codex", "ChatGPT", or any other assistant.
-- **Do not mention "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT"** in commit messages, PR titles, PR bodies, issue bodies, or issue comments.
+- **Do not mention "Claude", "Anthropic", "Codex", "OpenAI", "ChatGPT", "Gemini", or "Copilot"** in commit messages, PR titles, PR bodies, issue bodies, or issue comments.
 - **Do not include a "🤖 Generated with Claude Code"** signature (or the Codex / Copilot / Gemini equivalents) or any similar AI-attribution boilerplate.
 
 Write commits and PRs as a human author would. The work is attributable to the human; AI tooling is an implementation detail of how the work got done, not part of the public record.
