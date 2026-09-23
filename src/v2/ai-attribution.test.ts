@@ -50,6 +50,26 @@ test("readAiAttribution: unrecognized/malformed value fails closed to the suppre
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("readAiAttribution: a NESTED (non-top-level) ai_attribution key reads as the suppress default (RF-1)", () => {
+  // The reader honors ONLY the top-level key. An indented key under some other mapping
+  // is not the toggle, so it resolves to suppress — and the commit-msg hook's column-0
+  // grep must agree (proven in fg799-commit-hook-toggle.integration.test.ts).
+  const dir = tmpProject();
+  writeConfig(dir, "nested:\n  ai_attribution: allow\n");
+  assert.deepEqual(readAiAttribution(dir), { mode: "suppress", source: "default" });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("readAiAttribution: quoted and trailing-comment allow forms read as allow (RF-3 parity)", () => {
+  // The same YAML forms the hook's grep must accept: "allow", 'allow', allow # comment.
+  for (const yaml of ['ai_attribution: "allow"\n', "ai_attribution: 'allow'\n", "ai_attribution: allow # approved\n"]) {
+    const dir = tmpProject();
+    writeConfig(dir, yaml);
+    assert.deepEqual(readAiAttribution(dir), { mode: "allow", source: "project-config" }, `reader must treat ${JSON.stringify(yaml)} as allow`);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("writeAiAttribution: round-trips and PRESERVES other keys", () => {
   const dir = tmpProject();
   writeConfig(dir, "project_key: pk-abc\nbacklog:\n  prefix: FG\n");

@@ -15,7 +15,8 @@
 # forge runs (Claude/Anthropic, Codex/OpenAI/ChatGPT, Gemini, Copilot):
 #   - "Co-Authored-By:" lines naming claude|anthropic|codex|openai|chatgpt|gemini|copilot
 #   - "Generated with <tool>" boilerplate and any "🤖 …" attribution line
-#   - Any bare mention of "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT"
+#   - Any bare mention of "Claude", "Anthropic", "Codex", "OpenAI", "ChatGPT",
+#     "Gemini", or "Copilot"
 #
 # Exit 0 = commit proceeds. Exit nonzero = commit blocked.
 
@@ -25,10 +26,16 @@ MSG_FILE="$1"
 
 # FG-799: per-project allow toggle. A grep-only read of the repo's committed
 # .forge/config.yml (no YAML parser in bash) — a top-level `ai_attribution: allow`
-# disables enforcement entirely for this project.
+# disables enforcement entirely for this project. This grep must agree with the
+# TypeScript reader (src/v2/ai-attribution.ts), which honors ONLY the top-level key
+# and accepts the YAML forms `allow`, `"allow"`, `'allow'`, and a trailing comment:
+#   - Anchored at column 0 (^ai_attribution:) so an INDENTED / nested key — which the
+#     reader resolves to suppress — never disables enforcement here (RF-1).
+#   - Optional single/double quotes around allow and an optional trailing comment, so
+#     the same values the reader treats as allow take the early exit (RF-3).
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -n "$ROOT" ] && [ -f "$ROOT/.forge/config.yml" ] \
-   && grep -qE '^[[:space:]]*ai_attribution:[[:space:]]*allow[[:space:]]*$' "$ROOT/.forge/config.yml"; then
+   && grep -qE '^ai_attribution:[[:space:]]*["'\'']?allow["'\'']?[[:space:]]*(#.*)?$' "$ROOT/.forge/config.yml"; then
   exit 0
 fi
 
@@ -50,11 +57,12 @@ fi
 # Strip comment lines (git's own diff annotations) AND strip well-known technical
 # identifiers that legitimately contain the banned words:
 #   - CLAUDE.md (canonical project-setup filename)
-#   - CLAUDE_<UPPER>, ANTHROPIC_<UPPER>, OPENAI_<UPPER>, CODEX_<UPPER> (env vars
-#     like CLAUDE_CODE_USE_BEDROCK, OPENAI_API_KEY, CODEX_HOME)
+#   - CLAUDE_<UPPER>, ANTHROPIC_<UPPER>, OPENAI_<UPPER>, CODEX_<UPPER>,
+#     GEMINI_<UPPER>, COPILOT_<UPPER> (env vars like CLAUDE_CODE_USE_BEDROCK,
+#     OPENAI_API_KEY, CODEX_HOME, GEMINI_API_KEY)
 #   - .claude / .claude/ (config dir)
 #   - @anthropic-ai/*, @openai/* (package names)
-#   - claude-opus-*/claude-sonnet-*/claude-haiku-*, gpt-*, o<N>-* (model ids)
+#   - claude-opus-*/claude-sonnet-*/claude-haiku-*, gpt-*, o<N>-*, gemini-* (model ids)
 #   - codex-subscription/codex-apikey and other codex-* runtime/identifier names
 #   - forge claude / forge codex (forge subcommands wrapping the CLIs)
 #   - `claude` / `codex` in backticks (literal binary names)
@@ -71,9 +79,12 @@ if grep -v '^[[:space:]]*#' "$MSG_FILE" \
        s/ANTHROPIC_[A-Z_]+//g
        s/OPENAI_[A-Z_]+//g
        s/CODEX_[A-Z_]+//g
+       s/GEMINI_[A-Z_]+//g
+       s/COPILOT_[A-Z_]+//g
        s|\.claude(/[a-zA-Z0-9_/-]*)?||g
        s/claude-(code|opus|sonnet|haiku)[a-z0-9._-]*//g
        s/gpt-[a-z0-9._-]*//g
+       s/gemini-[a-z0-9._-]*//g
        s/(^|[^a-zA-Z0-9])o[0-9][a-z0-9._-]*//g
        s/codex-(subscription|apikey)[a-z0-9._-]*//g
        s/codex-[a-z0-9._-]*//g
@@ -88,10 +99,10 @@ if grep -v '^[[:space:]]*#' "$MSG_FILE" \
        s/(^|[^a-zA-Z])codex([^a-zA-Z]|$)/\1\2/g
        s/(^|[^a-zA-Z])codex([^a-zA-Z]|$)/\1\2/g
      ' \
-   | grep -qiE '\b(claude|anthropic|codex|openai|chatgpt)\b'; then
-  printf '\033[31m✗ commit blocked:\033[0m commit message mentions "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT" in prose.\n' >&2
+   | grep -qiE '\b(claude|anthropic|codex|openai|chatgpt|gemini|copilot)\b'; then
+  printf '\033[31m✗ commit blocked:\033[0m commit message mentions "Claude", "Anthropic", "Codex", "OpenAI", "ChatGPT", "Gemini", or "Copilot" in prose.\n' >&2
   printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
-  printf '  (Technical identifiers like CLAUDE.md, OPENAI_API_KEY, CODEX_HOME, .claude/, claude-opus-*, gpt-*, `claude`, `codex`, --claude, forge codex, @openai/* are allowed.)\n' >&2
+  printf '  (Technical identifiers like CLAUDE.md, OPENAI_API_KEY, CODEX_HOME, GEMINI_API_KEY, .claude/, claude-opus-*, gpt-*, gemini-*, `claude`, `codex`, --claude, forge codex, @openai/* are allowed.)\n' >&2
   printf '  To bypass: git commit --no-verify  (rare; only when the prose reference is intentional)\n' >&2
   exit 1
 fi

@@ -404,3 +404,51 @@ PROJECT body.`);
   assert.deepEqual(eff.skipped, [{ id: "no-ai-attribution", reason: "toggle ai_attribution=allow" }]);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ── FG-799 (RF-2): enabled_when is HOST-ONLY — a project additive constraint cannot
+// gate its OWN enforcement on project config. Such a constraint stays active regardless
+// of the toggle; the ignored field is recorded, never honored. ──
+
+// A distinct, non-colliding project id carrying an enabled_when — the additive layer.
+function writeToggledProjectRule(projConstraintsDir: string, equals: string): void {
+  writeRaw(projConstraintsDir, "project-gated.md", `---
+id: project-gated
+level: force
+roles: []
+workflows: []
+enabled_when: { config: ai_attribution, equals: ${equals} }
+antiPrompt: project rule
+---
+Project gated body.`);
+}
+
+test("resolveEffectiveConstraints: a project enabled_when=allow rule stays ACTIVE under allow (gate not honored)", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  writeToggledProjectRule(projConstraintsDir, "allow");
+  writeAiConfig(projectDir, "allow");
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints.map((c) => c.id), ["project-gated"], "the additive rule enforces regardless of the toggle");
+  assert.deepEqual(eff.skipped, [], "a project rule is never dropped by its own enabled_when");
+  assert.deepEqual(
+    eff.ignoredEnabledWhen,
+    [{ id: "project-gated", reason: "enabled_when ai_attribution=allow ignored (project layer; host-only gate)" }],
+    "the ignored project gate is recorded, not honored",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveEffectiveConstraints: a project enabled_when=suppress rule ALSO stays active under allow (never self-gated off)", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  // Under a HOST gate this equals=suppress rule would be dropped when the mode is allow;
+  // as a PROJECT rule it must stay active — the project cannot make its own guardrail
+  // contingent on the config it controls.
+  writeToggledProjectRule(projConstraintsDir, "suppress");
+  writeAiConfig(projectDir, "allow");
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints.map((c) => c.id), ["project-gated"], "project rule active even though its gate would not hold as a host gate");
+  assert.deepEqual(eff.skipped, []);
+  assert.equal(eff.ignoredEnabledWhen.length, 1);
+  rmSync(root, { recursive: true, force: true });
+});

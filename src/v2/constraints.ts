@@ -59,35 +59,50 @@ export function projectConstraintsDir(projectDir: string): string {
 // layer throws from parseConstraintFile (loud/safe) — never a silent skip, which would be an
 // invisible guardrail gap.
 export type ConstraintSkip = { id: string; reason: string };
-export type EffectiveConstraints = { constraints: Constraint[]; skipped: ConstraintSkip[] };
+// `skipped` — constraints DROPPED from the effective set by a host enabled_when gate.
+// `ignoredEnabledWhen` — constraints KEPT (active) whose enabled_when was NOT honored
+// because it was declared by the PROJECT layer, not the host (FG-799 / RF-2). These are
+// distinct: a dropped constraint does not enforce; an ignored-gate one enforces
+// unconditionally. Do not conflate them into one list.
+export type EffectiveConstraints = {
+  constraints: Constraint[];
+  skipped: ConstraintSkip[];
+  ignoredEnabledWhen: ConstraintSkip[];
+};
 
 // FG-799: the toggle-aware resolver. Builds the host-union-project set exactly as
-// before (host-wins on id collision), then evaluates each constraint's enabled_when
-// against the PROJECT's config, dropping the ones whose toggle does not hold and
-// recording an auditable skip note. A constraint without enabled_when is always
-// kept — so a tree with no toggled constraints is byte-identical to before, with an
-// empty `skipped`. Host-wins is UNCHANGED: a project constraint colliding with a
-// host id is dropped up front, so it can never supply an enabled_when for a host rule.
+// before (host-wins on id collision), then evaluates enabled_when against the
+// PROJECT's config — but ONLY for HOST-declared constraints, dropping the ones whose
+// toggle does not hold and recording an auditable skip note. A constraint without
+// enabled_when is always kept — so a tree with no toggled constraints is byte-identical
+// to before, with an empty `skipped`. Host-wins is UNCHANGED: a project constraint
+// colliding with a host id is dropped up front, so it can never supply an enabled_when
+// for a host rule.
+//
+// RF-2: enabled_when is honored ONLY on the HOST copy of a constraint. A project-layer
+// ADDITIVE constraint that carries enabled_when must NOT be able to gate its own
+// enforcement on project-controlled config — that would let a project make its guardrail
+// contingent on a value it also owns. Such a constraint is therefore loaded WITHOUT the
+// gate (always active), and the ignored field is recorded in `ignoredEnabledWhen`.
 export function resolveEffectiveConstraints(opts: {
   hostDir: string;
   projectDir?: string;
 }): EffectiveConstraints {
   const host = loadAllConstraints(opts.hostDir);
-  const union =
+  const hostIds = new Set(host.map((c) => c.id));
+  const project =
     opts.projectDir === undefined
-      ? host
-      : (() => {
-          const hostIds = new Set(host.map((c) => c.id));
-          const project = loadAllConstraints(projectConstraintsDir(opts.projectDir!));
-          return [...host, ...project.filter((c) => !hostIds.has(c.id))];
-        })();
+      ? []
+      : loadAllConstraints(projectConstraintsDir(opts.projectDir!)).filter((c) => !hostIds.has(c.id));
 
   // enabled_when today understands ONE config, ai_attribution, gating the host
   // no-ai-attribution force rule against the project's mode (default suppress).
   const aiMode = opts.projectDir ? readAiAttribution(opts.projectDir).mode : "suppress";
   const constraints: Constraint[] = [];
   const skipped: ConstraintSkip[] = [];
-  for (const c of union) {
+  const ignoredEnabledWhen: ConstraintSkip[] = [];
+
+  for (const c of host) {
     if (c.enabledWhen) {
       const actual = c.enabledWhen.config === "ai_attribution" ? aiMode : undefined;
       if (actual !== c.enabledWhen.equals) {
@@ -97,7 +112,18 @@ export function resolveEffectiveConstraints(opts: {
     }
     constraints.push(c);
   }
-  return { constraints, skipped };
+
+  for (const c of project) {
+    if (c.enabledWhen) {
+      ignoredEnabledWhen.push({
+        id: c.id,
+        reason: `enabled_when ${c.enabledWhen.config}=${c.enabledWhen.equals} ignored (project layer; host-only gate)`,
+      });
+    }
+    constraints.push(c);
+  }
+
+  return { constraints, skipped, ignoredEnabledWhen };
 }
 
 export function loadEffectiveConstraints(opts: { hostDir: string; projectDir?: string }): Constraint[] {

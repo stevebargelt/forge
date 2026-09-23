@@ -12,10 +12,20 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { provisionWorkspaceCommitMsgHook } from "../util/commit-msg-hook.js";
+
+const BUNDLED_HOOK = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "scripts",
+  "git-hooks",
+  "commit-msg-no-ai-attribution",
+);
 
 const tmpDirs: string[] = [];
 
@@ -38,6 +48,23 @@ function makeRepo(mode?: "suppress" | "allow"): string {
     mkdirSync(join(dir, ".forge"), { recursive: true });
     writeFileSync(join(dir, ".forge", "config.yml"), `ai_attribution: ${mode}\n`);
   }
+  provisionWorkspaceCommitMsgHook(dir);
+  return dir;
+}
+
+/** Like makeRepo, but writes VERBATIM YAML into .forge/config.yml — for exercising the
+ *  exact key forms (nested, quoted, commented) the hook's grep must agree with. */
+function makeRepoRawConfig(configYaml: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-fg799-hook-"));
+  tmpDirs.push(dir);
+  git(dir, "init", "-q", "-b", "main");
+  git(dir, "config", "user.email", "test@forge.test");
+  git(dir, "config", "user.name", "Forge Test");
+  writeFileSync(join(dir, "README.md"), "# fg799\n");
+  git(dir, "add", ".");
+  git(dir, "commit", "-q", "-m", "initial");
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  writeFileSync(join(dir, ".forge", "config.yml"), configYaml);
   provisionWorkspaceCommitMsgHook(dir);
   return dir;
 }
@@ -109,5 +136,73 @@ test("FG-799 (AC3): allow lets EVERY attribution variant commit", () => {
   ] as const) {
     const r = attempt(dir, `${label.replace(/\W+/g, "-")}.txt`, msg);
     assert.equal(r.ok, true, `${label} must COMMIT under allow\n${r.stderr}`);
+  }
+});
+
+// ── RF-1: the allow short-circuit must agree with the TS reader, which honors ONLY the
+// top-level key. An INDENTED / nested ai_attribution: allow is not the toggle, so it must
+// NOT disable enforcement. ──
+test("FG-799 (RF-1): a nested (indented) ai_attribution: allow does NOT bypass the hook", () => {
+  const dir = makeRepoRawConfig("nested:\n  ai_attribution: allow\n");
+  assert.equal(
+    attempt(dir, "nested.txt", CODEX_TRAILER).ok,
+    false,
+    "an indented ai_attribution key resolves to suppress (RF-1) — the trailer must be REFUSED",
+  );
+});
+
+// ── RF-3: the hook must honor the same allow FORMS the YAML reader does — an optional
+// single/double quote and an optional trailing comment — while still requiring column 0. ──
+test("FG-799 (RF-3): quoted and commented top-level allow take the allow early exit", () => {
+  for (const yaml of ["ai_attribution: allow # approved\n", 'ai_attribution: "allow"\n', "ai_attribution: 'allow'\n"]) {
+    const dir = makeRepoRawConfig(yaml);
+    assert.equal(
+      attempt(dir, "allow.txt", CODEX_TRAILER).ok,
+      true,
+      `allow form ${JSON.stringify(yaml)} must let the Codex trailer COMMIT`,
+    );
+  }
+});
+
+test("FG-799 (RF-3): a value of allowed / allow_x is NOT allow and stays suppress", () => {
+  for (const yaml of ["ai_attribution: allowed\n", "ai_attribution: allow_x\n"]) {
+    const dir = makeRepoRawConfig(yaml);
+    assert.equal(
+      attempt(dir, "notallow.txt", CODEX_TRAILER).ok,
+      false,
+      `${JSON.stringify(yaml)} is not the allow value — the trailer must be REFUSED`,
+    );
+  }
+});
+
+// ── RF-4: under suppress the bare-mention matcher covers the FULL provider set, including
+// Gemini and Copilot, while keeping their technical-identifier exemptions. ──
+test("FG-799 (RF-4): bare Gemini and Copilot mentions are refused under suppress", () => {
+  const dir = makeRepo("suppress");
+  assert.equal(attempt(dir, "gemini.txt", "feat: widget\n\nGemini wrote this.\n").ok, false, "bare Gemini refused");
+  assert.equal(attempt(dir, "copilot.txt", "feat: widget\n\nCopilot suggested this.\n").ok, false, "bare Copilot refused");
+});
+
+test("FG-799 (RF-4): Gemini/Copilot technical identifiers still commit under suppress", () => {
+  const dir = makeRepo("suppress");
+  const msg = "chore: bump gemini-1.5-pro; set GEMINI_API_KEY and COPILOT_TOKEN\n";
+  const r = attempt(dir, "ids.txt", msg);
+  assert.equal(r.ok, true, `technical gemini/copilot identifiers must COMMIT under suppress\n${r.stderr}`);
+});
+
+// ── RF-4: the bare-mention provider set is DERIVED FROM the same list as the trailer set —
+// a parity lock so a future provider addition cannot land in one matcher but not the other. ──
+test("FG-799 (RF-4): hook bare-mention provider set matches the Co-Authored-By trailer set", () => {
+  const hook = readFileSync(BUNDLED_HOOK, "utf8");
+  const pull = (re: RegExp, what: string): string[] => {
+    const group = hook.match(re)?.[1];
+    assert.ok(group, `could not locate the ${what} provider alternation in the hook`);
+    return group.split("|").sort();
+  };
+  const trailer = pull(/Co-Authored-By:.*?\(([a-z|]+)\)/, "Co-Authored-By trailer");
+  const bare = pull(/\\b\(([a-z|]+)\)\\b/, "bare-mention");
+  assert.deepEqual(bare, trailer, "the bare-mention matcher must cover exactly the trailer provider set");
+  for (const provider of ["gemini", "copilot"]) {
+    assert.ok(bare.includes(provider), `bare-mention set must include ${provider} (RF-4)`);
   }
 });
