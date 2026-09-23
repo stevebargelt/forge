@@ -7,6 +7,7 @@ import {
   parseConstraintFile,
   filterConstraints,
   loadEffectiveConstraints,
+  resolveEffectiveConstraints,
   projectConstraintsDir,
   type Constraint,
 } from "./constraints.js";
@@ -287,5 +288,167 @@ No id.`);
     () => loadEffectiveConstraints({ hostDir, projectDir }),
     /missing required frontmatter/,
   );
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ── FG-799 (AC2): enabled_when — the ai_attribution toggle gates a host force rule ──
+
+function writeAiConfig(projectDir: string, mode: string): void {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.yml"), `ai_attribution: ${mode}\n`);
+}
+
+// A no-ai-attribution-shaped host constraint: force-level with enabled_when suppress.
+function writeToggledHostRule(hostDir: string): void {
+  writeRaw(hostDir, "no-ai-attribution.md", `---
+id: no-ai-attribution
+level: force
+roles: []
+workflows: []
+enabled_when: { config: ai_attribution, equals: suppress }
+antiPrompt: prove attribution
+---
+No AI attribution.`);
+}
+
+test("parseConstraintFile: enabled_when is parsed; absent → undefined", () => {
+  const dir = setup();
+  const gated = writeConstraint(dir, "gated.md", `---
+id: gated
+level: force
+roles: []
+workflows: []
+enabled_when: { config: ai_attribution, equals: suppress }
+---
+Body.`);
+  assert.deepEqual(gated.enabledWhen, { config: "ai_attribution", equals: "suppress" });
+
+  const plain = writeConstraint(dir, "plain.md", `---
+id: plain
+level: force
+roles: []
+workflows: []
+---
+Body.`);
+  assert.equal(plain.enabledWhen, undefined);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("parseConstraintFile: a malformed enabled_when throws (loud/safe)", () => {
+  const dir = setup();
+  assert.throws(() => writeConstraint(dir, "bad.md", `---
+id: bad
+level: force
+roles: []
+workflows: []
+enabled_when: "just a string"
+---
+Body.`), /malformed enabled_when|requires string/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("resolveEffectiveConstraints: suppress (explicit) KEEPS the toggled rule, no skip", () => {
+  const { root, hostDir, projectDir } = effectiveSetup();
+  writeToggledHostRule(hostDir);
+  writeAiConfig(projectDir, "suppress");
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints.map((c) => c.id), ["no-ai-attribution"]);
+  assert.deepEqual(eff.skipped, []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveEffectiveConstraints: ABSENT config defaults to suppress → rule KEPT", () => {
+  const { root, hostDir, projectDir } = effectiveSetup();
+  writeToggledHostRule(hostDir);
+  // no .forge/config.yml written
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints.map((c) => c.id), ["no-ai-attribution"]);
+  assert.deepEqual(eff.skipped, []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveEffectiveConstraints: allow SKIPS the toggled rule and records the reason", () => {
+  const { root, hostDir, projectDir } = effectiveSetup();
+  writeToggledHostRule(hostDir);
+  writeAiConfig(projectDir, "allow");
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints, [], "toggled-off constraint is dropped from the effective set");
+  assert.deepEqual(eff.skipped, [{ id: "no-ai-attribution", reason: "toggle ai_attribution=allow" }]);
+  // loadEffectiveConstraints (the plain wrapper) reflects the same drop.
+  assert.deepEqual(loadEffectiveConstraints({ hostDir, projectDir }).map((c) => c.id), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// host-wins regression: a project constraint that redefines no-ai-attribution — even
+// one that supplies its OWN enabled_when — is still dropped; the HOST rule (and its
+// toggle) is what's evaluated.
+test("resolveEffectiveConstraints: allow-mode host-wins — a project no-ai-attribution redefine cannot resurrect it", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  writeToggledHostRule(hostDir);
+  writeAiConfig(projectDir, "allow");
+  // The project tries to redefine the same id WITHOUT a toggle, hoping to force it on.
+  writeRaw(projConstraintsDir, "no-ai-attribution.md", `---
+id: no-ai-attribution
+level: force
+roles: []
+workflows: []
+antiPrompt: PROJECT attribution rule
+---
+PROJECT body.`);
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints, [], "the project redefine is dropped (host-wins); the host rule stays toggled off");
+  assert.deepEqual(eff.skipped, [{ id: "no-ai-attribution", reason: "toggle ai_attribution=allow" }]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ── FG-799 (RF-2): enabled_when is HOST-ONLY — a project additive constraint cannot
+// gate its OWN enforcement on project config. Such a constraint stays active regardless
+// of the toggle; the ignored field is recorded, never honored. ──
+
+// A distinct, non-colliding project id carrying an enabled_when — the additive layer.
+function writeToggledProjectRule(projConstraintsDir: string, equals: string): void {
+  writeRaw(projConstraintsDir, "project-gated.md", `---
+id: project-gated
+level: force
+roles: []
+workflows: []
+enabled_when: { config: ai_attribution, equals: ${equals} }
+antiPrompt: project rule
+---
+Project gated body.`);
+}
+
+test("resolveEffectiveConstraints: a project enabled_when=allow rule stays ACTIVE under allow (gate not honored)", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  writeToggledProjectRule(projConstraintsDir, "allow");
+  writeAiConfig(projectDir, "allow");
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints.map((c) => c.id), ["project-gated"], "the additive rule enforces regardless of the toggle");
+  assert.deepEqual(eff.skipped, [], "a project rule is never dropped by its own enabled_when");
+  assert.deepEqual(
+    eff.ignoredEnabledWhen,
+    [{ id: "project-gated", reason: "enabled_when ai_attribution=allow ignored (project layer; host-only gate)" }],
+    "the ignored project gate is recorded, not honored",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveEffectiveConstraints: a project enabled_when=suppress rule ALSO stays active under allow (never self-gated off)", () => {
+  const { root, hostDir, projectDir, projConstraintsDir } = effectiveSetup();
+  // Under a HOST gate this equals=suppress rule would be dropped when the mode is allow;
+  // as a PROJECT rule it must stay active — the project cannot make its own guardrail
+  // contingent on the config it controls.
+  writeToggledProjectRule(projConstraintsDir, "suppress");
+  writeAiConfig(projectDir, "allow");
+
+  const eff = resolveEffectiveConstraints({ hostDir, projectDir });
+  assert.deepEqual(eff.constraints.map((c) => c.id), ["project-gated"], "project rule active even though its gate would not hold as a host gate");
+  assert.deepEqual(eff.skipped, []);
+  assert.equal(eff.ignoredEnabledWhen.length, 1);
   rmSync(root, { recursive: true, force: true });
 });

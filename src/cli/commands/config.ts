@@ -1,7 +1,13 @@
 import type { Command } from "commander";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { buildConfigGraph } from "../../v2/config-graph.js";
 import type { ConfigGraph } from "../../v2/config-graph-types.js";
+import {
+  AI_ATTRIBUTION_MODES,
+  renderAiAttributionLine,
+  writeAiAttribution,
+  type AiAttributionMode,
+} from "../../v2/ai-attribution.js";
 
 // `forge config graph --project . --json` — the read-only EFFECTIVE config graph
 // the orchestrator and the dashboard both consume. The JSON is buildConfigGraph
@@ -66,5 +72,39 @@ export function registerConfig(program: Command): void {
       } else {
         console.log(renderConfigGraphHuman(graph));
       }
+    });
+
+  // FG-799: `forge config set ai-attribution <suppress|allow>` — a read-modify-write
+  // of <project>/.forge/config.yml that PRESERVES every other key. The CLI key is
+  // kebab (ai-attribution); the YAML key is snake (ai_attribution). Invalid values
+  // are refused, naming the two that are valid.
+  config
+    .command("set <key> <value>")
+    .option("--project <dir>", "project whose .forge/config.yml to write (default: cwd)")
+    .description("Set a project config value. Supported key: ai-attribution (suppress|allow).")
+    .action((key: string, value: string, opts: { project?: string }) => {
+      if (key !== "ai-attribution") {
+        throw new Error(`unknown config key '${key}'. Supported: ai-attribution`);
+      }
+      if (!AI_ATTRIBUTION_MODES.includes(value as AiAttributionMode)) {
+        throw new Error(
+          `invalid ai-attribution value '${value}'. Valid values: ${AI_ATTRIBUTION_MODES.join(", ")}`,
+        );
+      }
+      const projectDir = resolve(opts.project ?? process.cwd());
+      writeAiAttribution(projectDir, value as AiAttributionMode);
+      console.log(`set ai-attribution = ${value} (${join(projectDir, ".forge", "config.yml")})`);
+    });
+
+  // FG-799: `forge config show` — the effective per-project settings and where each
+  // came from. Today that is the ai_attribution mode; the line is identical to the
+  // one `forge doctor` prints.
+  config
+    .command("show")
+    .option("--project <dir>", "project whose effective config to show (default: cwd)")
+    .description("Show effective per-project config (ai attribution mode + source).")
+    .action((opts: { project?: string }) => {
+      const projectDir = resolve(opts.project ?? process.cwd());
+      console.log(renderAiAttributionLine(projectDir));
     });
 }

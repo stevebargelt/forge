@@ -8,6 +8,7 @@ import {
   adapterOutcomeLines,
   adapterReportLines,
   applyOrchestratorBlock,
+  renderOrchestratorTemplate,
   looksLikeForgeProject,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
@@ -41,6 +42,7 @@ import {
 // The dry-run forecast reads the verdict directly (no write) so it cannot disagree
 // with the real run's provisioning decision.
 import { classifyDocsSurfaces, type DocsSurfacesVerdict } from "../../v2/contract.js";
+import { readAiAttribution } from "../../v2/ai-attribution.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../../v2/release-doctor.js";
@@ -1337,7 +1339,10 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           projectInit = "template-not-found";
           say(`[4/4] project init: block NOT refreshed — template not found at ${templatePath}`);
         } else {
-          const template = readFileSync(templatePath, "utf8");
+          const template = renderOrchestratorTemplate(
+            readFileSync(templatePath, "utf8"),
+            readAiAttribution(cwd).mode,
+          );
           const existing = readFileSync(projectClaudeMd, "utf8");
           const result = applyOrchestratorBlock(existing, template);
           if (result.action === "needs-markers") {

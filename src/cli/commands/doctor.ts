@@ -32,6 +32,7 @@ import {
 import { inspectSeedInstall, type SeedInstallState } from "../../v2/seed-generation.js";
 import { computeBuildInputDigest } from "../../v2/build-input-digest.js";
 import { classifyDocsSurfaces, type DocsSurfacesClassification } from "../../v2/contract.js";
+import { formatAiAttribution, readAiAttribution, type AiAttribution } from "../../v2/ai-attribution.js";
 import {
   buildModelPolicyStatus,
   renderModelPolicyStatus,
@@ -387,6 +388,10 @@ export type DoctorFindings = {
    *  COMPOSING discovery (step 6) with the classifier (step 5). Doctor NEVER writes;
    *  `forge upgrade` is the sole migration authority. */
   modelPolicyStatus: ModelPolicyStatus;
+  /** FG-799: the project's effective AI-attribution mode + where it came from
+   *  (project config or the suppress default). Informational — does not move the
+   *  readiness exit code. */
+  aiAttribution: AiAttribution;
   /** FG-693: WHICH TREE doctor read, as the one contract (util/path-identity.ts)
    *  proved it — not as the ambient spelling doctor happened to be handed.
    *
@@ -432,6 +437,8 @@ export function gatherDoctorFindings(projectDir: string = process.cwd(), imageNa
     // forgeHome pinned to FORGE_HOME so the host row is the SAME policy doctor's
     // other checks read; projectDir seeds project discovery from this checkout.
     modelPolicyStatus: buildModelPolicyStatus({ forgeHome: FORGE_HOME }),
+    // FG-799: the per-project AI-attribution mode, read from the same projectDir.
+    aiAttribution: readAiAttribution(projectDir),
   };
 }
 
@@ -448,6 +455,8 @@ export function doctorJson(f: DoctorFindings): unknown {
     // FG-560: the model-policy migration status a script can branch on — same value
     // the human section renders, so the two renderings can never disagree.
     modelPolicyStatus: f.modelPolicyStatus,
+    // FG-799: the effective AI-attribution mode + source a script can branch on.
+    aiAttribution: f.aiAttribution,
     // FG-693: the proven identity of the tree doctor read, for a script that must
     // decide whether two doctor runs describe the same checkout. The as-written
     // spelling stays on projectAdapters.projectDir for display.
@@ -491,6 +500,7 @@ export function renderDoctor(f: DoctorFindings): string {
   push(renderProjectAdapterDrift(f.projectAdapters));
   push(renderDocsSurfaces(f.docsSurfaces));
   push(renderModelPolicyStatus(f.modelPolicyStatus));
+  push(formatAiAttribution(f.aiAttribution));
   if (f.seedInstall.kind === "incomplete") {
     out.push(
       `\nSeed install: INCOMPLETE (repairable) — ${f.seedInstall.reason}\n` +

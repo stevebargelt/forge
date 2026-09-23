@@ -209,6 +209,26 @@ export function writeProjectKey(projectDir: string, projectKey: string): void {
 // this is a diagnostics-lifecycle read, and it must never be the thing that breaks a
 // command. NOTHING is ever written here: reading the config never materializes defaults
 // into it. Durations are MILLISECONDS, matching RetentionOverrides.
+// FG-799: set a single TOP-LEVEL scalar key in .forge/config.yml, preserving every
+// other key (read-modify-write, never template-overwrite) and reusing the same
+// symlink-guarded atomic write path as writeProjectKey. Creates the file/dir if
+// absent. A malformed existing file is overwritten cleanly (matching writeProjectKey).
+export function writeTopLevelConfigKey(projectDir: string, key: string, value: string): void {
+  const configPath = safeConfigPath(projectDir);
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+
+  let existing: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    try {
+      existing = (parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown>) ?? {};
+    } catch {
+      // malformed — overwrite cleanly
+    }
+  }
+  existing[key] = value;
+  atomicWriteConfig(projectDir, stringifyYaml(existing));
+}
+
 export function readRetentionConfig(projectDir: string): RetentionOverrides | undefined {
   const configPath = join(projectDir, ".forge", "config.yml");
   if (!existsSync(configPath)) return undefined;
