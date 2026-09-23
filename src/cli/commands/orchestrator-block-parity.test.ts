@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyOrchestratorBlock } from "./init.js";
+import { applyOrchestratorBlock, renderOrchestratorTemplate } from "./init.js";
 
 // FG-563: Seed -> generated CLAUDE.md orchestrator-block parity is TESTED, not
 // assumed. This locks the invariant that the committed CLAUDE.md orchestrator
@@ -19,7 +19,10 @@ const seedPath = resolve(repoRoot, "seeds", "orchestrator-template.md");
 const claudeMdPath = resolve(repoRoot, "CLAUDE.md");
 
 test("committed CLAUDE.md orchestrator block is in parity with the seed (no drift)", () => {
-  const seed = readFileSync(seedPath, "utf8");
+  // FG-799: the seed now carries ai_attribution block-conditionals; the committed
+  // CLAUDE.md is the RENDERED block, and this forge repo stays `suppress`. Render
+  // the template the same way the installer does before comparing.
+  const seed = renderOrchestratorTemplate(readFileSync(seedPath, "utf8"), "suppress");
   const claudeMd = readFileSync(claudeMdPath, "utf8");
 
   const result = applyOrchestratorBlock(claudeMd, seed);

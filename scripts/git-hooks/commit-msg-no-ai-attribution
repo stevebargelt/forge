@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# commit-msg hook — refuse commits that mention Claude/Anthropic or include
-# AI-attribution boilerplate. Defense-in-depth for the
-# no-ai-attribution force-level constraint.
+# commit-msg hook — refuse commits that attribute work to an AI assistant.
+# Defense-in-depth for the no-ai-attribution force-level constraint.
 #
 # Installed by `forge init` into <project>/.git/hooks/commit-msg.
 # Bypass with `git commit --no-verify` only when you genuinely need to
-# reference Claude/Anthropic in a commit (rare).
+# reference an AI assistant in a commit (rare).
 #
-# Patterns rejected (case-insensitive):
-#   - "Co-Authored-By:" lines containing "Claude" (any variant)
-#   - "Co-Authored-By:" lines containing "anthropic" (matches noreply@anthropic.com)
-#   - "Generated with Claude Code" attribution boilerplate
-#   - Any bare mention of "Claude", "Anthropic", or "Claude Code"
+# FG-799: this hook is per-project TOGGLEABLE. If <repo-root>/.forge/config.yml
+# sets `ai_attribution: allow` the hook exits 0 silently (attribution is fine in
+# that project). Absent or `suppress` → enforce. The read is a single grep — no
+# YAML parser in bash — matching a top-level `ai_attribution: allow` line only.
+#
+# Patterns rejected under suppress (case-insensitive), widened to every assistant
+# forge runs (Claude/Anthropic, Codex/OpenAI/ChatGPT, Gemini, Copilot):
+#   - "Co-Authored-By:" lines naming claude|anthropic|codex|openai|chatgpt|gemini|copilot
+#   - "Generated with <tool>" boilerplate and any "🤖 …" attribution line
+#   - Any bare mention of "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT"
 #
 # Exit 0 = commit proceeds. Exit nonzero = commit blocked.
 
@@ -19,52 +23,75 @@ set -eu
 
 MSG_FILE="$1"
 
-if grep -qiE '^[[:space:]]*Co-Authored-By:.*(claude|anthropic)' "$MSG_FILE"; then
-  printf '\033[31m✗ commit blocked:\033[0m commit message contains a "Co-Authored-By: Claude/Anthropic" trailer.\n' >&2
+# FG-799: per-project allow toggle. A grep-only read of the repo's committed
+# .forge/config.yml (no YAML parser in bash) — a top-level `ai_attribution: allow`
+# disables enforcement entirely for this project.
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$ROOT" ] && [ -f "$ROOT/.forge/config.yml" ] \
+   && grep -qE '^[[:space:]]*ai_attribution:[[:space:]]*allow[[:space:]]*$' "$ROOT/.forge/config.yml"; then
+  exit 0
+fi
+
+if grep -qiE '^[[:space:]]*Co-Authored-By:.*(claude|anthropic|codex|openai|chatgpt|gemini|copilot)' "$MSG_FILE"; then
+  printf '\033[31m✗ commit blocked:\033[0m commit message contains a "Co-Authored-By: <AI assistant>" trailer.\n' >&2
   printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
   printf '  To bypass: git commit --no-verify  (rare; only when the reference is intentional)\n' >&2
   exit 1
 fi
 
-if grep -qiE 'generated with claude code|🤖.*claude' "$MSG_FILE"; then
+if grep -qiE 'generated with (claude code|codex|chatgpt|copilot|gemini)|🤖' "$MSG_FILE"; then
   printf '\033[31m✗ commit blocked:\033[0m commit message contains AI-attribution boilerplate.\n' >&2
   printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
   printf '  To bypass: git commit --no-verify\n' >&2
   exit 1
 fi
 
-# Bare mentions of Claude / Anthropic / Claude Code in body or title.
-# Strip comment lines (git's own diff annotations) AND strip well-known
-# technical identifiers that legitimately contain the banned words:
+# Bare mentions of Claude / Anthropic / Codex / OpenAI / ChatGPT in body or title.
+# Strip comment lines (git's own diff annotations) AND strip well-known technical
+# identifiers that legitimately contain the banned words:
 #   - CLAUDE.md (canonical project-setup filename)
-#   - CLAUDE_<UPPER>, ANTHROPIC_<UPPER> (env vars like CLAUDE_CODE_USE_BEDROCK)
+#   - CLAUDE_<UPPER>, ANTHROPIC_<UPPER>, OPENAI_<UPPER>, CODEX_<UPPER> (env vars
+#     like CLAUDE_CODE_USE_BEDROCK, OPENAI_API_KEY, CODEX_HOME)
 #   - .claude / .claude/ (config dir)
-#   - claude-code / @anthropic-ai/* (package/CLI names)
-#   - claude-opus-4-7 / claude-sonnet-4-6 / claude-haiku-* (model identifiers)
-#   - forge claude (forge subcommand wrapping the CLI)
-#   - `claude` in backticks (literal binary name)
-#   - --claude (CLI flag)
-#   - bare lowercase "claude" (CLI tool name; capitalized "Claude" is still caught)
-# These show up in nearly every forge commit. After stripping, what's left
-# is prose mentions, which are the actual rule target.
+#   - @anthropic-ai/*, @openai/* (package names)
+#   - claude-opus-*/claude-sonnet-*/claude-haiku-*, gpt-*, o<N>-* (model ids)
+#   - codex-subscription/codex-apikey and other codex-* runtime/identifier names
+#   - forge claude / forge codex (forge subcommands wrapping the CLIs)
+#   - `claude` / `codex` in backticks (literal binary names)
+#   - --claude / --codex (CLI flags)
+#   - bare lowercase "claude"/"codex" (CLI tool names; capitalized forms still caught)
+# These show up in nearly every forge commit. After stripping, what's left is prose
+# mentions, which are the actual rule target.
 if grep -v '^[[:space:]]*#' "$MSG_FILE" \
    | sed -E '
        s|@anthropic-ai/?[a-zA-Z0-9_-]*||g
+       s|@openai/?[a-zA-Z0-9_-]*||g
        s/CLAUDE\.md//g
        s/CLAUDE_[A-Z_]+//g
        s/ANTHROPIC_[A-Z_]+//g
+       s/OPENAI_[A-Z_]+//g
+       s/CODEX_[A-Z_]+//g
        s|\.claude(/[a-zA-Z0-9_/-]*)?||g
        s/claude-(code|opus|sonnet|haiku)[a-z0-9._-]*//g
+       s/gpt-[a-z0-9._-]*//g
+       s/(^|[^a-zA-Z0-9])o[0-9][a-z0-9._-]*//g
+       s/codex-(subscription|apikey)[a-z0-9._-]*//g
+       s/codex-[a-z0-9._-]*//g
        s/forge[[:space:]]+claude//g
+       s/forge[[:space:]]+codex//g
        s/`claude`//g
+       s/`codex`//g
        s/--claude//g
+       s/--codex//g
        s/(^|[^a-zA-Z])claude([^a-zA-Z]|$)/\1\2/g
        s/(^|[^a-zA-Z])claude([^a-zA-Z]|$)/\1\2/g
+       s/(^|[^a-zA-Z])codex([^a-zA-Z]|$)/\1\2/g
+       s/(^|[^a-zA-Z])codex([^a-zA-Z]|$)/\1\2/g
      ' \
-   | grep -qiE '\b(claude|anthropic|claude code)\b'; then
-  printf '\033[31m✗ commit blocked:\033[0m commit message mentions "Claude", "Anthropic", or "Claude Code" in prose.\n' >&2
+   | grep -qiE '\b(claude|anthropic|codex|openai|chatgpt)\b'; then
+  printf '\033[31m✗ commit blocked:\033[0m commit message mentions "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT" in prose.\n' >&2
   printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
-  printf '  (Technical identifiers like CLAUDE.md, ANTHROPIC_API_KEY, .claude/, claude-code, claude-opus-*, `claude`, --claude, forge claude, @anthropic-ai/*, and lowercase "claude" are allowed.)\n' >&2
+  printf '  (Technical identifiers like CLAUDE.md, OPENAI_API_KEY, CODEX_HOME, .claude/, claude-opus-*, gpt-*, `claude`, `codex`, --claude, forge codex, @openai/* are allowed.)\n' >&2
   printf '  To bypass: git commit --no-verify  (rare; only when the prose reference is intentional)\n' >&2
   exit 1
 fi

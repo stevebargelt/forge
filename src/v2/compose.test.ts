@@ -124,6 +124,70 @@ Don't bluff.`
   rmSync(root, { recursive: true, force: true });
 });
 
+// ── FG-799 (AC2): the ai_attribution toggle is exposed on the compose result ──
+
+function writeToggledConstraint(constraintsDir: string): void {
+  writeFileSync(
+    join(constraintsDir, "no-ai-attribution.md"),
+    `---
+id: no-ai-attribution
+level: force
+roles: []
+workflows: []
+enabled_when: { config: ai_attribution, equals: suppress }
+antiPrompt: prove attribution
+---
+No AI attribution.`,
+  );
+}
+
+function projectWithMode(root: string, mode: "suppress" | "allow"): string {
+  const projectDir = join(root, `project-${mode}`);
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.yml"), `ai_attribution: ${mode}\n`);
+  return projectDir;
+}
+
+test("FG-799: compose records no skip under suppress (constraint present in the effective set)", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeToggledConstraint(constraintsDir);
+  const out = composeSystemPrompt({
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+    projectDir: projectWithMode(root, "suppress"),
+  });
+  assert.ok(out.ok);
+  assert.deepEqual(out.ok && out.constraintsSkipped, []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("FG-799: compose omits no-ai-attribution and records the skip reason under allow", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  // enabled_when carries empty roles/workflows, so it is role-independent — the skip
+  // is recorded on the compose result no matter which role is composed.
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeToggledConstraint(constraintsDir);
+  const out = composeSystemPrompt({
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+    projectDir: projectWithMode(root, "allow"),
+  });
+  assert.ok(out.ok);
+  assert.deepEqual(out.ok && out.constraintsSkipped, [
+    { id: "no-ai-attribution", reason: "toggle ai_attribution=allow" },
+  ]);
+  // And the constraint text never reaches the prompt.
+  assert.ok(out.ok && !out.prompt.includes("no-ai-attribution"));
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("composeSystemPrompt: tagged constraint is excluded when runTags has no match", () => {
   const { agentDir, constraintsDir, root } = setup();
   writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");

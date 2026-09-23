@@ -19,7 +19,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { filterConstraints, loadEffectiveConstraints } from "./constraints.js";
+import { filterConstraints, resolveEffectiveConstraints, type ConstraintSkip } from "./constraints.js";
 import { assertAgentProtocolCurrent, type AgentProtocolStamp } from "./agent-protocol.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import type { Workflow, Step } from "./schema.js";
@@ -62,7 +62,16 @@ export type ComposeArgs = {
  *  retry — so the refusal lives here rather than being re-implemented, and forgotten,
  *  at five dispatchers. Same call FG-583 made when it put its refusal in the loader. */
 export type ComposeResult =
-  | { ok: true; prompt: string; protocol?: AgentProtocolStamp }
+  | {
+      ok: true;
+      prompt: string;
+      protocol?: AgentProtocolStamp;
+      /** FG-799: constraints dropped from the effective set by a declared toggle
+       *  (enabled_when), e.g. no-ai-attribution when the project's ai_attribution
+       *  mode is `allow`. Empty when nothing was toggled off. Auditable evidence of
+       *  WHY a normally-present constraint did not apply to this dispatch. */
+      constraintsSkipped: ConstraintSkip[];
+    }
   | { ok: false; refusal: string; role: string };
 
 function defaultAgentDir(role: string): string {
@@ -162,11 +171,11 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
 
   // FG-775: tier-3 SUGGEST set draws from the HOST-UNION-PROJECT effective set. The host
   // suggest constraints always apply; <project>/.forge/constraints adds more (host-wins on id).
-  const all = loadEffectiveConstraints({
+  const effective = resolveEffectiveConstraints({
     hostDir: resolveConstraintsDir(args.constraintsDir),
     projectDir: args.projectDir,
   });
-  const suggest = filterConstraints(all, {
+  const suggest = filterConstraints(effective.constraints, {
     role: args.role,
     workflow: args.workflow.name,
     phase: args.step.id,  // v1's "phase" maps 1:1 to v2's "step.id"
@@ -184,5 +193,6 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
     ok: true,
     prompt: sections.join("\n\n---\n\n") + "\n",
     ...(protocol.stamp ? { protocol: protocol.stamp } : {}),
+    constraintsSkipped: effective.skipped,
   };
 }

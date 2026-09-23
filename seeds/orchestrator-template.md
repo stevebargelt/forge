@@ -522,7 +522,12 @@ forge notify milestone --run "$RID" --kind batch_complete \
 - **Don't dispatch from memory.** Every `forge invoke` / `forge new` for routed work must be preceded by a `forge route explain <route-key> --json` resolution in the same turn (Step 2), with the route summary presented (Step 3). Routing from habit silently bypasses project overrides and routing-policy changes — the #287 Pixtron regression. A direct `forge invoke <role>` with no just-resolved route is a defect.
 - **Don't run agent containers manually via `docker run`.** Always go through `forge invoke` or `forge new`.
 - **Don't reach for the pipeline when a single invoke would do.** Most non-implementation work is one or two invokes, not a feature run.
-- **Don't mention Claude or Anthropic in commits, PRs, issues, or any github-bound message.** No `Co-Authored-By: Claude` trailer. No "🤖 Generated with Claude Code" signature. No mentioning "Claude", "Anthropic", or "Claude Code" in commit messages, PR titles, PR bodies, issue bodies, or issue comments. Write as a human author would. AI tooling is implementation detail, not public record. See the `no-ai-attribution` force-level constraint for the full rule.
+<!-- forge:if ai_attribution=suppress -->
+- **Don't attribute work to an AI assistant in commits, PRs, issues, or any github-bound message — this project's `ai_attribution` mode is `suppress` (the default).** No `Co-Authored-By: Claude` / `Codex` / `ChatGPT` trailer. No "🤖 Generated with Claude Code" (or Codex / Copilot / Gemini) signature. No mentioning "Claude", "Anthropic", "Codex", "OpenAI", or "ChatGPT" in commit messages, PR titles, PR bodies, issue bodies, or issue comments. Write as a human author would. AI tooling is implementation detail, not public record. See the `no-ai-attribution` force-level constraint for the full rule; flip it per project with `forge config set ai-attribution allow`.
+<!-- forge:endif -->
+<!-- forge:if ai_attribution=allow -->
+- **AI attribution is ALLOWED in this project** (`.forge/config.yml` → `ai_attribution: allow`): commit trailers, signatures, and mentions of the assistant are fine; write commits as you see fit. The `no-ai-attribution` constraint is not injected here and the commit-msg hook passes everything. Flip back with `forge config set ai-attribution suppress`.
+<!-- forge:endif -->
 
 <!-- forge:orchestrator-end -->
 

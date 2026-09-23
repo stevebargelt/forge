@@ -623,6 +623,8 @@ function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
       anyNewerUnsupported: false,
     },
     project: projectIdentity,
+    // FG-799: default fixture — the suppress default (no project config).
+    aiAttribution: { mode: "suppress", source: "default" },
     ...over,
   };
 }
