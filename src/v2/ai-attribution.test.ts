@@ -11,7 +11,20 @@ import {
   writeAiAttribution,
   formatAiAttribution,
 } from "./ai-attribution.js";
-import { parseAiAttributionConfig } from "./ai-attribution-parse.js";
+import { parseAiAttributionConfig, scalarValue, stripComment } from "./ai-attribution-parse.js";
+
+// FG-799 (RF-1): import the shipped hook reader's parse helpers to compare them, value
+// by value, against the TS copy. The specifier is a runtime-built URL (not a static
+// string) so tsc types it `any` rather than demanding a .d.ts for the plain `.mjs`;
+// the reader's CLI block is guarded by an import.meta.url check, so importing it here
+// has no side effect.
+type ParseHelpers = {
+  parseAiAttributionConfig(text: string | null): { mode: "allow" | "suppress"; recognized: boolean };
+  scalarValue(rest: string): string;
+  stripComment(s: string): string;
+};
+const readerUrl = new URL("../../scripts/git-hooks/read-ai-attribution.mjs", import.meta.url).href;
+const hookReader = (await import(readerUrl)) as ParseHelpers;
 
 function tmpProject(): string {
   return mkdtempSync(join(tmpdir(), "forge-ai-attr-"));
@@ -59,6 +72,51 @@ test("FG-799: readAiAttribution resolves every table input to the shared parser'
     }
     assert.equal(readAiAttribution(dir).mode, row.mode, `readAiAttribution mode for ${row.label}`);
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// FG-799 (RF-1): the shipped hook reader duplicates the parse by necessity (bare node,
+// no node_modules), so the two copies must agree at the level where bytes matter — the
+// EXACT values the parse helpers return, not just the resolved mode. The mode-only table
+// above is blind to a divergence that fails closed either way: the malformed-quote
+// sentinel once differed (space in the reader, NUL in the TS copy) yet both mapped to
+// suppress, so no mode assertion could catch it. This pins the helpers by value.
+const SCALAR_EDGE_INPUTS = [
+  "allow",
+  "suppress",
+  " allow ",
+  '"allow"',
+  "'allow'",
+  "allow # trailing",
+  '"allow',      // opens a double quote it never closes → the malformed-quote sentinel
+  "'allow",      // opens a single quote it never closes → the sentinel
+  '"allow\'',    // mismatched quotes → the sentinel
+  "",
+  "   ",
+  "# comment-only",
+  'x "y" # z',
+];
+
+test("FG-799 (RF-1): the hook reader's parse helpers return byte-identical values to the TS copy", () => {
+  for (const input of SCALAR_EDGE_INPUTS) {
+    assert.equal(hookReader.scalarValue(input), scalarValue(input), `scalarValue divergence on ${JSON.stringify(input)}`);
+    assert.equal(hookReader.stripComment(input), stripComment(input), `stripComment divergence on ${JSON.stringify(input)}`);
+  }
+  // The malformed-quote sentinel is the exact byte that drifted: pin it explicitly and
+  // confirm it still fails closed (matches no recognized mode) on BOTH copies.
+  const sentinel = scalarValue('"x');
+  assert.equal(hookReader.scalarValue('"x'), sentinel, "the malformed-quote sentinel must be byte-identical across copies");
+  assert.notEqual(sentinel, "allow");
+  assert.notEqual(sentinel, "suppress");
+
+  // And the top-level parse agrees deeply on every config in the shared table.
+  for (const row of AI_ATTRIBUTION_TABLE) {
+    if (typeof row.config !== "string") continue;
+    assert.deepEqual(
+      hookReader.parseAiAttributionConfig(row.config),
+      parseAiAttributionConfig(row.config),
+      `parseAiAttributionConfig divergence on ${row.label}`,
+    );
   }
 });
 

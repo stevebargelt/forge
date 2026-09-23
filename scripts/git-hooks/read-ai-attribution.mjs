@@ -15,7 +15,10 @@
 // node_modules reachable at all. So it imports nothing beyond node builtins and carries
 // the parse inline. The algorithm is a character-for-character copy of
 // src/v2/ai-attribution-parse.ts, PINNED BY TEST: ai-attribution.test.ts drives this
-// reader and readAiAttribution over the same table and asserts they agree on every row.
+// reader and readAiAttribution over the same table AND compares the two copies' parse
+// helpers (parseAiAttributionConfig, scalarValue, stripComment) return value by value
+// across the edges — so a behaviorally-inert drift (the malformed-quote sentinel once
+// differed space-vs-NUL between the copies) still fails the pin, not just a mode diff.
 //
 // ─── FAIL CLOSED, NEVER THROW ────────────────────────────────────────────────
 // Contract: print exactly `allow` or `suppress` on stdout, exit 0. On ANY failure — no
@@ -25,6 +28,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 function main() {
   const projectDir = process.argv[2];
@@ -82,9 +86,18 @@ function stripComment(s) {
   return s;
 }
 
-try {
-  process.stdout.write(main() === "allow" ? "allow" : "suppress");
-} catch {
-  process.stdout.write("suppress");
+// Run the CLI ONLY when invoked directly (the commit-msg hook shells out to this
+// file). Guarding it lets the pin test import the parse helpers below without the
+// side effect of reading argv / writing stdout / exiting.
+function runCli() {
+  try {
+    process.stdout.write(main() === "allow" ? "allow" : "suppress");
+  } catch {
+    process.stdout.write("suppress");
+  }
+  process.exit(0);
 }
-process.exit(0);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runCli();
+
+export { parseAiAttributionConfig, scalarValue, stripComment };
