@@ -41,11 +41,19 @@ constraint file named `no-ai-attribution` is still dropped on id collision). See
 
 **2. The `commit-msg` git hook** (`scripts/git-hooks/commit-msg-no-ai-attribution`,
 installed by `forge init`/`forge upgrade` into `<project>/.git/hooks/commit-msg`, and
-installed as a self-contained file into every task clone per FG-685). Its first act is a
-single grep of the repo's own `.forge/config.yml` for a top-level `ai_attribution: allow`
-line — no YAML parser in bash. If it matches, the hook exits 0 immediately and nothing else
-runs. Otherwise (absent config, or `suppress`) it enforces: see the provider set and
-exemptions below.
+installed as a self-contained file into every task clone per FG-685). Its first act is to
+run the standalone reader `scripts/git-hooks/read-ai-attribution.mjs` (resolved as a
+sibling of the hook's own real path, and materialized alongside it in a provisioned
+workspace clone) under bare `node`. The reader shares the exact parse the TypeScript side
+uses (`src/v2/ai-attribution-parse.ts`; the `.mjs` copy is pinned character-identical to it
+by test) and prints `allow` or `suppress` — so quoted values, trailing comments, a root key
+with leading indentation, a nested key, and a malformed value all resolve identically in
+the hook and in `forge config show`/`forge doctor`, with no separate bash dialect to keep
+in sync. If it prints `allow`, the hook exits 0 immediately and nothing else runs.
+Otherwise (absent config, `suppress`, or the reader printing anything else) it enforces:
+see the provider set and exemptions below. If `node` isn't on `PATH` or the reader can't be
+found or run, the hook fails closed to `suppress` and prints one stderr notice explaining
+why — a broken toolchain is never silently permissive.
 
 **3. The orchestrator block in `CLAUDE.md`.** The template
 (`seeds/orchestrator-template.md`) carries the mode-specific bullet between
