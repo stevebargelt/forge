@@ -8,8 +8,8 @@
 #
 # FG-799: this hook is per-project TOGGLEABLE. If <repo-root>/.forge/config.yml
 # sets `ai_attribution: allow` the hook exits 0 silently (attribution is fine in
-# that project). Absent or `suppress` → enforce. The read is a single grep — no
-# YAML parser in bash — matching a top-level `ai_attribution: allow` line only.
+# that project). Absent or `suppress` → enforce. The mode is read by ONE parser
+# shared with the TypeScript reader (see below) — never a bash grep of the YAML.
 #
 # Patterns rejected under suppress (case-insensitive), widened to every assistant
 # forge runs (Claude/Anthropic, Codex/OpenAI/ChatGPT, Gemini, Copilot):
@@ -24,18 +24,59 @@ set -eu
 
 MSG_FILE="$1"
 
-# FG-799: per-project allow toggle. A grep-only read of the repo's committed
-# .forge/config.yml (no YAML parser in bash) — a top-level `ai_attribution: allow`
-# disables enforcement entirely for this project. This grep must agree with the
-# TypeScript reader (src/v2/ai-attribution.ts), which honors ONLY the top-level key
-# and accepts the YAML forms `allow`, `"allow"`, `'allow'`, and a trailing comment:
-#   - Anchored at column 0 (^ai_attribution:) so an INDENTED / nested key — which the
-#     reader resolves to suppress — never disables enforcement here (RF-1).
-#   - Optional single/double quotes around allow and an optional trailing comment, so
-#     the same values the reader treats as allow take the early exit (RF-3).
+# FG-799: per-project allow toggle. The mode is decided by ONE parser — the
+# standalone reader that sits right next to this hook — never a bash grep of the
+# YAML. A grep and the TypeScript reader (src/v2/ai-attribution.ts) cannot be kept
+# in agreement at the edges (a root key with leading indentation, a mismatched
+# quote); the reader IS that parser's other caller, so hook and reader now read the
+# same mode by construction.
+#
+# The reader sits alongside this hook in BOTH shapes it ships in: reached through the
+# promoted release (this file is a symlink installed by `forge init`; resolve the real
+# path and the reader is its sibling), or copied as bytes into a provisioned
+# workspace's .git/hooks next to the hook copy (src/util/commit-msg-hook.ts). So it is
+# found as a sibling of this hook's REAL path in either case.
+#
+# Fail closed and VISIBLE: if node is missing or the reader cannot be found/run, treat
+# the mode as suppress and print one stderr notice naming why — a broken toolchain must
+# never read as silently permissive.
+
+# Resolve this hook's own real path (walk the symlink chain; readlink -f is not on
+# stock macOS), then take the directory it lives in.
+resolve_hook_dir() {
+  local src="$1" dir
+  while [ -h "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+HOOK_DIR="$(resolve_hook_dir "${BASH_SOURCE[0]}")"
+READER="$HOOK_DIR/read-ai-attribution.mjs"
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -n "$ROOT" ] && [ -f "$ROOT/.forge/config.yml" ] \
-   && grep -qE '^ai_attribution:[[:space:]]*["'\'']?allow["'\'']?[[:space:]]*(#.*)?$' "$ROOT/.forge/config.yml"; then
+
+AI_MODE="suppress"
+if [ -n "$ROOT" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    printf '\033[33mnote:\033[0m no-ai-attribution hook: node not found — enforcing suppress (could not read ai_attribution).\n' >&2
+  elif [ ! -f "$READER" ]; then
+    printf '\033[33mnote:\033[0m no-ai-attribution hook: reader missing at %s — enforcing suppress.\n' "$READER" >&2
+  else
+    READER_OUT="$(node "$READER" "$ROOT" 2>/dev/null || true)"
+    case "$READER_OUT" in
+      allow) AI_MODE="allow" ;;
+      suppress) AI_MODE="suppress" ;;
+      *) printf '\033[33mnote:\033[0m no-ai-attribution hook: reader gave unexpected output %s — enforcing suppress.\n' "${READER_OUT:-<empty>}" >&2 ;;
+    esac
+  fi
+fi
+
+if [ "$AI_MODE" = "allow" ]; then
   exit 0
 fi
 

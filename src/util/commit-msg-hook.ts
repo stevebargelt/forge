@@ -61,6 +61,52 @@ export function tryResolveHookSource(): string | undefined {
   return hookSourceCandidates().find((c) => existsSync(c));
 }
 
+// FG-799: the standalone ai_attribution reader the hook shells out to. It must be
+// materialized RIGHT NEXT TO the hook copy in a provisioned workspace, because the
+// hook resolves it as a sibling of its own real path — and here the hook is a byte
+// copy inside .git/hooks, not a symlink into the release where the reader is bundled.
+// Without the sibling the hook fails closed to suppress (safe, but the per-project
+// allow toggle would never take effect in a clone, and every commit would print the
+// reader-missing notice).
+export const READER_BASENAME = "read-ai-attribution.mjs";
+
+function readerSourceCandidates(): string[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return [
+    join(here, "..", "..", "scripts", "git-hooks", READER_BASENAME),
+    join(here, "..", "..", "..", "scripts", "git-hooks", READER_BASENAME),
+  ];
+}
+
+function tryResolveReaderSource(): string | undefined {
+  return readerSourceCandidates().find((c) => existsSync(c));
+}
+
+/** Copy the ai_attribution reader next to a just-materialized hook. Idempotent
+ *  (skips when already byte-identical) and best-effort on the source: the reader is
+ *  bundled with the release, so a dev tree missing it just leaves the hook to fail
+ *  closed rather than aborting provisioning. */
+function installReaderAlongside(hookTarget: string): void {
+  const source = tryResolveReaderSource();
+  if (!source) return;
+  const dest = join(dirname(hookTarget), READER_BASENAME);
+  const bytes = readFileSync(source);
+  try {
+    if (readFileSync(dest).equals(bytes)) return;
+  } catch {
+    /* absent — write it */
+  }
+  const tmp = join(dirname(dest), `.${READER_BASENAME}.forge-${process.pid}.tmp`);
+  try {
+    unlinkSync(tmp);
+  } catch {
+    /* no stale temp to clear */
+  }
+  writeFileSync(tmp, bytes, { mode: 0o755 });
+  chmodSync(tmp, 0o755);
+  renameSync(tmp, dest);
+}
+
 /** The dev-checkout hook source, required. Only a genuine dev-arm install with no
  *  resolvable source reaches this throw — the promoted arm never calls it. */
 export function resolveHookSource(): string {
@@ -177,9 +223,11 @@ export function executeWorkspaceCommitMsgHook(plan: WorkspaceHookPlan): string {
       if (now.kind !== plan.expect) return "skipped — changed since plan";
       mkdirSync(dirname(plan.target), { recursive: true });
       atomicWriteHook(plan.target, bundled);
+      installReaderAlongside(plan.target);
       return `installed ${plan.target}`;
     }
     case "already-installed":
+      installReaderAlongside(plan.target);
       return "already installed (no change)";
     case "exists-other":
       return `SKIPPED — existing hook (${plan.details}); leave it alone`;

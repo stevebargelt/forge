@@ -11,6 +11,7 @@ import {
   writeAiAttribution,
   formatAiAttribution,
 } from "./ai-attribution.js";
+import { parseAiAttributionConfig } from "./ai-attribution-parse.js";
 
 function tmpProject(): string {
   return mkdtempSync(join(tmpdir(), "forge-ai-attr-"));
@@ -20,6 +21,46 @@ function writeConfig(dir: string, yaml: string): void {
   mkdirSync(join(dir, ".forge"), { recursive: true });
   writeFileSync(join(dir, ".forge", "config.yml"), yaml);
 }
+
+// FG-799 (follow-up): the shared parser table. readAiAttribution and the standalone
+// hook reader are BOTH this one algorithm — the whole point of collapsing the bash grep
+// and the `yaml` reader onto a single parse. This tier pins the TypeScript side (the
+// parser + readAiAttribution) over the table; the integration tier spawns the .mjs
+// reader over the SAME rows and pins it to readAiAttribution end-to-end (a unit test may
+// not spawn child processes). RF-5 (root key with leading indentation) and RF-6
+// (mismatched quotes) are the two edges the old grep and reader DISAGREED on.
+type Row = { label: string; config?: string | "unreadable"; mode: "allow" | "suppress" };
+
+export const AI_ATTRIBUTION_TABLE: Row[] = [
+  { label: "absent config", config: undefined, mode: "suppress" },
+  { label: "allow", config: "ai_attribution: allow\n", mode: "allow" },
+  { label: "suppress", config: "ai_attribution: suppress\n", mode: "suppress" },
+  { label: "quoted allow", config: 'ai_attribution: "allow"\n', mode: "allow" },
+  { label: "single-quoted allow", config: "ai_attribution: 'allow'\n", mode: "allow" },
+  { label: "allow with trailing comment", config: "ai_attribution: allow # ok\n", mode: "allow" },
+  { label: "root key with leading indentation (RF-5)", config: "  ai_attribution: allow\n", mode: "allow" },
+  { label: "nested key (RF-1)", config: "nested:\n  ai_attribution: allow\n", mode: "suppress" },
+  { label: "mismatched quotes (RF-6)", config: 'ai_attribution: "allow\'\n', mode: "suppress" },
+  { label: "unknown value", config: "ai_attribution: banana\n", mode: "suppress" },
+  { label: "unreadable file", config: "unreadable", mode: "suppress" },
+];
+
+test("FG-799: readAiAttribution resolves every table input to the shared parser's mode (RF-1/3/5/6)", () => {
+  for (const row of AI_ATTRIBUTION_TABLE) {
+    const dir = tmpProject();
+    if (row.config === "unreadable") {
+      // config.yml as a DIRECTORY makes readFileSync throw regardless of uid (chmod 000
+      // is moot under a root container).
+      mkdirSync(join(dir, ".forge", "config.yml"), { recursive: true });
+    } else if (row.config !== undefined) {
+      writeConfig(dir, row.config);
+      // the pure parser and the file-reading wrapper must agree on the text case
+      assert.equal(parseAiAttributionConfig(row.config).mode, row.mode, `parser mode for ${row.label}`);
+    }
+    assert.equal(readAiAttribution(dir).mode, row.mode, `readAiAttribution mode for ${row.label}`);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("readAiAttribution: absent config → suppress (default)", () => {
   const dir = tmpProject();

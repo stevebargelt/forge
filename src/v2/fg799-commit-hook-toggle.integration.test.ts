@@ -12,20 +12,16 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { provisionWorkspaceCommitMsgHook } from "../util/commit-msg-hook.js";
+import { readAiAttribution } from "./ai-attribution.js";
 
-const BUNDLED_HOOK = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "scripts",
-  "git-hooks",
-  "commit-msg-no-ai-attribution",
-);
+const HOOKS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "git-hooks");
+const BUNDLED_HOOK = join(HOOKS_DIR, "commit-msg-no-ai-attribution");
+const READER_MJS = join(HOOKS_DIR, "read-ai-attribution.mjs");
 
 const tmpDirs: string[] = [];
 
@@ -139,40 +135,94 @@ test("FG-799 (AC3): allow lets EVERY attribution variant commit", () => {
   }
 });
 
-// ── RF-1: the allow short-circuit must agree with the TS reader, which honors ONLY the
-// top-level key. An INDENTED / nested ai_attribution: allow is not the toggle, so it must
-// NOT disable enforcement. ──
-test("FG-799 (RF-1): a nested (indented) ai_attribution: allow does NOT bypass the hook", () => {
-  const dir = makeRepoRawConfig("nested:\n  ai_attribution: allow\n");
-  assert.equal(
-    attempt(dir, "nested.txt", CODEX_TRAILER).ok,
-    false,
-    "an indented ai_attribution key resolves to suppress (RF-1) — the trailer must be REFUSED",
+// ── RF-1/RF-3/RF-5/RF-6: the allow short-circuit is decided by the SAME parser the TS
+// reader uses (via the standalone read-ai-attribution.mjs the hook shells out to), so
+// the hook and the reader can no longer disagree on the edges a bash grep could not
+// match: a root key with leading indentation is still top-level (RF-5, allow), a nested
+// key is not the toggle (RF-1, suppress), and a mismatched-quote value fails closed
+// (RF-6, suppress). Every row here drives a REAL commit through the installed hook and
+// is mirrored against readAiAttribution in ai-attribution.test.ts's agreement table. ──
+const TOGGLE_TABLE: ReadonlyArray<{ label: string; config: string; allows: boolean }> = [
+  { label: "RF-3 bare allow", config: "ai_attribution: allow\n", allows: true },
+  { label: "RF-3 double-quoted allow", config: 'ai_attribution: "allow"\n', allows: true },
+  { label: "RF-3 single-quoted allow", config: "ai_attribution: 'allow'\n", allows: true },
+  { label: "RF-3 commented allow", config: "ai_attribution: allow # approved\n", allows: true },
+  { label: "RF-5 root key with leading indentation", config: "  ai_attribution: allow\n", allows: true },
+  { label: "RF-1 nested (indented) key", config: "nested:\n  ai_attribution: allow\n", allows: false },
+  { label: "RF-6 mismatched quotes", config: 'ai_attribution: "allow\'\n', allows: false },
+  { label: "RF-3 allowed (not allow)", config: "ai_attribution: allowed\n", allows: false },
+  { label: "RF-3 allow_x (not allow)", config: "ai_attribution: allow_x\n", allows: false },
+  { label: "explicit suppress", config: "ai_attribution: suppress\n", allows: false },
+];
+
+test("FG-799 (RF-1/3/5/6): every ai_attribution form drives the hook the same way the TS reader resolves it", () => {
+  for (const row of TOGGLE_TABLE) {
+    const dir = makeRepoRawConfig(row.config);
+    const r = attempt(dir, "toggle.txt", CODEX_TRAILER);
+    assert.equal(
+      r.ok,
+      row.allows,
+      `${row.label} — ${JSON.stringify(row.config)} must ${row.allows ? "COMMIT (allow)" : "be REFUSED (suppress)"}\n${r.stderr}`,
+    );
+  }
+});
+
+// ── The end-to-end parity pin: the standalone reader the hook shells out to resolves
+// the SAME mode as readAiAttribution for every input, run as a real `node` spawn exactly
+// as the hook invokes it (the unit tier pins the TS side over the same rows; a unit test
+// may not spawn a subprocess, so the reader half lives here). ──
+test("FG-799: the standalone reader and readAiAttribution agree on every input (RF-1/3/5/6)", () => {
+  const table: ReadonlyArray<{ label: string; config?: string | "unreadable"; mode: "allow" | "suppress" }> = [
+    { label: "absent config", config: undefined, mode: "suppress" },
+    { label: "allow", config: "ai_attribution: allow\n", mode: "allow" },
+    { label: "suppress", config: "ai_attribution: suppress\n", mode: "suppress" },
+    { label: "quoted allow", config: 'ai_attribution: "allow"\n', mode: "allow" },
+    { label: "single-quoted allow", config: "ai_attribution: 'allow'\n", mode: "allow" },
+    { label: "allow with trailing comment", config: "ai_attribution: allow # ok\n", mode: "allow" },
+    { label: "root key with leading indentation (RF-5)", config: "  ai_attribution: allow\n", mode: "allow" },
+    { label: "nested key (RF-1)", config: "nested:\n  ai_attribution: allow\n", mode: "suppress" },
+    { label: "mismatched quotes (RF-6)", config: 'ai_attribution: "allow\'\n', mode: "suppress" },
+    { label: "unknown value", config: "ai_attribution: banana\n", mode: "suppress" },
+    { label: "unreadable file", config: "unreadable", mode: "suppress" },
+  ];
+  for (const row of table) {
+    const dir = mkdtempSync(join(tmpdir(), "forge-fg799-reader-"));
+    tmpDirs.push(dir);
+    if (row.config === "unreadable") {
+      mkdirSync(join(dir, ".forge", "config.yml"), { recursive: true }); // a dir → readFileSync throws
+    } else if (row.config !== undefined) {
+      mkdirSync(join(dir, ".forge"), { recursive: true });
+      writeFileSync(join(dir, ".forge", "config.yml"), row.config);
+    }
+    const viaReader = execFileSync(process.execPath, [READER_MJS, dir], { encoding: "utf8" }).trim();
+    const viaTs = readAiAttribution(dir).mode;
+    assert.equal(viaReader, row.mode, `reader mode for ${row.label}`);
+    assert.equal(viaReader, viaTs, `reader and readAiAttribution DISAGREE on ${row.label}`);
+  }
+});
+
+// ── Point 3: the reader is shipped ALONGSIDE the hook copy, so the toggle actually
+// works in a provisioned workspace (no reachable node_modules there). ──
+test("FG-799: provisioning installs the ai_attribution reader next to the hook copy", () => {
+  const dir = makeRepo("allow");
+  assert.ok(
+    existsSync(join(dir, ".git", "hooks", "read-ai-attribution.mjs")),
+    "the standalone reader must sit next to the copied commit-msg hook",
   );
 });
 
-// ── RF-3: the hook must honor the same allow FORMS the YAML reader does — an optional
-// single/double quote and an optional trailing comment — while still requiring column 0. ──
-test("FG-799 (RF-3): quoted and commented top-level allow take the allow early exit", () => {
-  for (const yaml of ["ai_attribution: allow # approved\n", 'ai_attribution: "allow"\n', "ai_attribution: 'allow'\n"]) {
-    const dir = makeRepoRawConfig(yaml);
-    assert.equal(
-      attempt(dir, "allow.txt", CODEX_TRAILER).ok,
-      true,
-      `allow form ${JSON.stringify(yaml)} must let the Codex trailer COMMIT`,
-    );
-  }
-});
-
-test("FG-799 (RF-3): a value of allowed / allow_x is NOT allow and stays suppress", () => {
-  for (const yaml of ["ai_attribution: allowed\n", "ai_attribution: allow_x\n"]) {
-    const dir = makeRepoRawConfig(yaml);
-    assert.equal(
-      attempt(dir, "notallow.txt", CODEX_TRAILER).ok,
-      false,
-      `${JSON.stringify(yaml)} is not the allow value — the trailer must be REFUSED`,
-    );
-  }
+// ── Point 4c: a reader that cannot be run must fail CLOSED and VISIBLY — enforce
+// suppress and say why on stderr, never silently permit. ──
+test("FG-799: a missing reader forces suppress and prints a notice (never silently permissive)", () => {
+  const dir = makeRepoRawConfig("ai_attribution: allow\n"); // would ALLOW if the reader ran
+  rmSync(join(dir, ".git", "hooks", "read-ai-attribution.mjs"), { force: true });
+  const r = attempt(dir, "no-reader.txt", CODEX_TRAILER);
+  assert.equal(r.ok, false, "with the reader gone the hook must fall back to suppress and REFUSE the trailer");
+  assert.match(
+    r.stderr,
+    /reader missing|enforcing suppress/,
+    `the suppress fallback must be VISIBLE on stderr, not silent\n${r.stderr}`,
+  );
 });
 
 // ── RF-4: under suppress the bare-mention matcher covers the FULL provider set, including

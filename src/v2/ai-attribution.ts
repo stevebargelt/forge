@@ -2,23 +2,27 @@
 //
 // <project>/.forge/config.yml carries an optional top-level `ai_attribution` key:
 //   suppress | allow. ABSENT = suppress (today's behavior; no project changes on
-//   upgrade). This is the single source the three enforcement points read their
-//   mode from: the no-ai-attribution constraint's enabled_when gate
-//   (constraints.ts), the orchestrator-block render (init.ts renderer), and — via a
-//   bash-only grep, NOT this reader — the commit-msg hook.
+//   upgrade). This is the single source the enforcement points read their mode
+//   from: the no-ai-attribution constraint's enabled_when gate (constraints.ts),
+//   the orchestrator-block render (init.ts renderer), and the commit-msg hook.
 //
-// Fail-closed: absent, malformed, or an unrecognized value all read as the default
-// `suppress`. A silent "allow" from a broken config is the one outcome this reader
-// must never produce.
+// The parse itself lives in ai-attribution-parse.ts — dependency-free, and shared
+// (by test-pinned duplication) with the standalone hook reader — so the hook and
+// this reader can no longer DISAGREE at the edges the way the old bash grep and
+// `yaml` library did (FG-799 follow-up). Fail-closed: absent, malformed, nested, or
+// an unrecognized value all read as the default `suppress`.
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
 import { writeTopLevelConfigKey } from "../backlog/config.js";
+import {
+  AI_ATTRIBUTION_MODES,
+  parseAiAttributionConfig,
+  type AiAttributionMode,
+} from "./ai-attribution-parse.js";
 
-export type AiAttributionMode = "suppress" | "allow";
-
-export const AI_ATTRIBUTION_MODES: readonly AiAttributionMode[] = ["suppress", "allow"];
+export { AI_ATTRIBUTION_MODES };
+export type { AiAttributionMode };
 
 export type AiAttribution = {
   mode: AiAttributionMode;
@@ -29,18 +33,16 @@ export type AiAttribution = {
 
 export function readAiAttribution(projectDir: string): AiAttribution {
   const configPath = join(projectDir, ".forge", "config.yml");
-  if (!existsSync(configPath)) return { mode: "suppress", source: "default" };
-  let parsed: unknown;
+  let text: string;
   try {
-    parsed = parseYaml(readFileSync(configPath, "utf8"));
+    text = readFileSync(configPath, "utf8");
   } catch {
     return { mode: "suppress", source: "default" };
   }
-  const top = (parsed as Record<string, unknown> | null) ?? {};
-  const raw = top["ai_attribution"];
-  if (raw === "allow") return { mode: "allow", source: "project-config" };
-  if (raw === "suppress") return { mode: "suppress", source: "project-config" };
-  return { mode: "suppress", source: "default" };
+  const parsed = parseAiAttributionConfig(text);
+  return parsed.recognized
+    ? { mode: parsed.mode, source: "project-config" }
+    : { mode: "suppress", source: "default" };
 }
 
 export function writeAiAttribution(projectDir: string, mode: AiAttributionMode): void {
