@@ -379,13 +379,14 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
       }
 
       // FG-805 — ONE delivery path. Claude Code loads the project's CLAUDE.md on its
-      // own, so when that file carries the fenced forge block, appending the same
-      // policy again hands the session every rule twice. The block is the delivery;
-      // the receipt says so and digests the bytes the session actually reads.
+      // own, so when that file carries the forge block, appending the same policy again
+      // hands the session every rule twice. The block is the delivery ONLY when it is
+      // exactly the policy this forge renders: markers in a code fence, or a stale,
+      // foreign or hand-edited block, must not suppress the Forge-owned carrier.
       const block = claudeMdOrchestratorBlock(ctx.projectDir);
-      if (block !== null) {
+      const blockCurrent = block !== null && normalizeLineEndings(block) === normalizeLineEndings(content);
+      if (blockCurrent) {
         const blockDigest = createHash("sha256").update(block).digest("hex").slice(0, 16);
-        const current = block === content;
         return {
           path: null,
           content: null,
@@ -394,23 +395,23 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
           evidence:
             `orchestrator policy delivered via the forge block in ${join(ctx.projectDir, "CLAUDE.md")} ` +
             `(sha256:${blockDigest}); ${flag} not passed, so the policy is not delivered twice. The block ` +
-            (current
-              ? `matches the policy rendered from ${source} for ai_attribution=${attribution}.`
-              : `differs from the policy rendered from ${source} for ai_attribution=${attribution}.`),
+            `matches the policy rendered from ${source} for ai_attribution=${attribution}.`,
           argv: [],
-          limitations: current
-            ? []
-            : [
-                {
-                  capability: "instruction-source",
-                  note:
-                    `the forge block in CLAUDE.md is not the orchestrator policy this forge renders for ` +
-                    `ai_attribution=${attribution}, and it is the only copy this session receives. Run \`forge upgrade\` ` +
-                    "to re-render it.",
-                },
-              ],
+          limitations: [],
         };
       }
+      const drift: CapabilityLimitation[] =
+        block === null
+          ? []
+          : [
+              {
+                capability: "instruction-source",
+                note:
+                  `the forge block in CLAUDE.md is not the orchestrator policy this forge renders for ` +
+                  `ai_attribution=${attribution}, so the rendered policy is appended as well and the session also ` +
+                  "reads the differing block. Run `forge upgrade` to re-render it.",
+              },
+            ];
 
       const digest = createHash("sha256").update(content).digest("hex").slice(0, 16);
       const generation = `${executionMode()}@${digest}`;
@@ -430,7 +431,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
           acceptance: "accepted",
           evidence: `${readiness.evidence["carrierProbe"]}; policy rendered from ${source} for ai_attribution=${attribution} (sha256:${digest})`,
           argv: [CARRIER_INLINE_FLAG, content],
-          limitations: [],
+          limitations: drift,
         };
       }
 
@@ -443,7 +444,7 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
         acceptance: "accepted",
         evidence: `${readiness.evidence["carrierProbe"]}; policy rendered from ${source} for ai_attribution=${attribution} (sha256:${digest})`,
         argv: [CARRIER_FILE_FLAG, join(forgeHome(), "orchestrators", "prompts", `${ctx.sessionKey}.md`)],
-        limitations: [],
+        limitations: drift,
       };
     },
 
@@ -714,8 +715,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
 // Preflight (advisory only — FG-499)
 // ---------------------------------------------------------------------------
 
-/** FG-805 — the orchestrator policy the project's CLAUDE.md already delivers to a
- *  Claude session, or null. "Carries the block" means what `forge init` means by it:
+/** FG-805 — the forge block body the project's CLAUDE.md carries, or null. The
+ *  caller decides whether it is a usable delivery (it must equal the rendered
+ *  policy). "Carries the block" means what `forge init` means by it:
  *  BALANCED start/end markers with a body between them. A lone start marker is a torn
  *  block init refuses to splice, so it is not treated as a delivery path. */
 export function claudeMdOrchestratorBlock(projectRoot: string): string | null {
@@ -730,6 +732,10 @@ export function claudeMdOrchestratorBlock(projectRoot: string): string | null {
   if (start < 0 || end <= start) return null;
   const body = text.slice(start + ORCHESTRATOR_MARKER.length, end).trim();
   return body.length > 0 ? body : null;
+}
+
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n");
 }
 
 /** The project-shape warnings `forge claude` has always printed. Non-blocking: the

@@ -67,7 +67,7 @@ project. `forge init`/`forge upgrade` re-render on every run, so flipping the mo
 re-running picks up the change; editing `CLAUDE.md` between the
 `<!-- forge:orchestrator-start -->` / `-end -->` markers by hand doesn't stick.
 
-Launch carriers resolve the same conditionals with the same renderer, keyed to the project's mode: `forge claude` and `forge codex` never deliver both bullets or a `forge:if` marker. When the project's `CLAUDE.md` already carries the block, `forge claude` appends nothing (that block is the single delivery path) and flags a block that doesn't match this forge's render for the mode as drift — fix with `forge upgrade`. The Codex carrier is published per mode by `forge upgrade`.
+Launch carriers resolve the same conditionals with the same renderer, keyed to the project's mode: `forge claude` and `forge codex` never deliver both bullets or a `forge:if` marker. When the project's `CLAUDE.md` carries exactly the block this forge renders for the mode, `forge claude` appends nothing (that block is the single delivery path). A block that doesn't match — stale, edited, or rendered for the other mode — does not suppress the carrier: the rendered policy is appended and the mismatch is recorded as drift — fix with `forge upgrade`. The Codex carrier is published per mode by `forge upgrade`.
 
 ## The provider set (`suppress`)
 
