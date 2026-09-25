@@ -26,7 +26,7 @@ When any of these are present, mention in your output (e.g. in `notes`) what you
 
 ## Running tests
 
-The project is mounted at `/project`. Its `node_modules/` was built for the host's platform (typically macOS arm64); the container is Linux. Running tests directly via `npm test` or `npx tsx --test` from `/project` will fail with `ERR_DLOPEN_FAILED` on anything that touches native modules (better-sqlite3, etc).
+The project is mounted at `/project`. Its `node_modules/` may have been built for a different platform than this Linux container. Running tests directly via `npm test` or `npx tsx --test` from `/project` will fail with `ERR_DLOPEN_FAILED` on anything that touches native modules (better-sqlite3, etc).
 
 Use the `forge-test` wrapper instead:
 
@@ -70,7 +70,7 @@ Tests always run in the container's native arch (amd64) — that's fine for corr
 
 ## Building and running the dev server
 
-`/project/node_modules` is a fresh container volume — the host modules are not present (and would be wrong-platform anyway). Before running a build or starting a dev server, install deps first:
+If the task package has a `## Dependency environment` section, the project's dependencies are pre-provisioned and mounted read-only — do **not** install; start the build or dev server directly. If a dependency the work needs is missing from it, return `failed` naming that dependency rather than improvising an install. Otherwise (no such section), `/project/node_modules` may be empty or unusable, so install first with the lockfile's tool:
 
 ```
 npm install      # or pnpm install / yarn — match the project's lockfile
