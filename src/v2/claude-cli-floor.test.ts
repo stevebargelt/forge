@@ -59,6 +59,22 @@ test("FG-804 compareVersions is numeric, not lexical", () => {
   assert.equal(compareVersions("2.1.280", "2.1.280"), 0);
 });
 
+test("FG-804 parseClaudeCliVersion keeps a prerelease tag", () => {
+  assert.equal(parseClaudeCliVersion("claude 2.1.280-beta.1"), "2.1.280-beta.1");
+  assert.equal(parseClaudeCliVersion("2.1.281-rc.2 (Claude Code)\n"), "2.1.281-rc.2");
+});
+
+test("FG-804 prerelease floor: beta at the floor fails, beta above passes, final at the floor passes", () => {
+  const floor = requiredClaudeCliVersion("claude-opus-5-5")!;
+  assert.ok(compareVersions(parseClaudeCliVersion("claude 2.1.280-beta.1")!, floor) < 0);
+  assert.ok(compareVersions(parseClaudeCliVersion("claude 2.1.281-beta.1")!, floor) >= 0);
+  assert.ok(compareVersions(parseClaudeCliVersion("2.1.280 (Claude Code)")!, floor) >= 0);
+  assert.ok(compareVersions("2.1.280-beta.2", "2.1.280-beta.10") < 0);
+  assert.ok(compareVersions("2.1.280-alpha", "2.1.280-beta") < 0);
+  assert.ok(compareVersions("2.1.280-beta", "2.1.280-beta.1") < 0);
+  assert.equal(compareVersions("2.1.280-beta.1", "2.1.280-beta.1"), 0);
+});
+
 test("FG-804 Dockerfile pin guard: every claude-code install references the CLAUDE_CODE_VERSION ARG", () => {
   const body = readFileSync(dockerfilePath, "utf8");
   const installs = instructions(body).filter((l) => /^RUN\b/i.test(l) && l.includes("@anthropic-ai/claude-code"));

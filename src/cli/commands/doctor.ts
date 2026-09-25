@@ -6,7 +6,7 @@
 // `run --rm --entrypoint sh -c 'command -v …'` — no mounts, no task, no agent.
 
 import type { Command } from "commander";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FORGE_HOME } from "../../util/paths.js";
@@ -247,17 +247,35 @@ function gatherClis(image: ImageInputs, probe: CliProbe = probeClisInImage, ctx:
 
 type ClaudeVersionProbe = (image: string) => ClaudeCliVersionInputs["probe"];
 
-// FG-804: read the in-image `claude --version`. A docker failure or unparseable
-// output is `unreadable` — reported by the check, never a silent pass.
-function probeClaudeCliVersion(image: string): ClaudeCliVersionInputs["probe"] {
+type VersionExec = (file: string, args: string[], opts: ExecFileSyncOptionsWithStringEncoding) => string;
+
+const CLAUDE_VERSION_TIMEOUT_MS = 60_000;
+
+// FG-804: read the in-image `claude --version`. A docker failure, a timeout, or
+// unparseable output is `unreadable` — reported by the check, never a silent pass.
+// The container is named so a timed-out run can be force-removed: killing the
+// docker client alone does not stop a hung `claude` inside it.
+export function probeClaudeCliVersion(
+  image: string,
+  { timeoutMs = CLAUDE_VERSION_TIMEOUT_MS, exec = execFileSync as VersionExec }: { timeoutMs?: number; exec?: VersionExec } = {},
+): ClaudeCliVersionInputs["probe"] {
+  const container = `forge-claude-version-${process.pid}-${Date.now()}`;
   let out: string;
   try {
-    out = execFileSync("docker", ["run", "--rm", "--entrypoint", "claude", image, "--version"], {
+    out = exec("docker", ["run", "--rm", "--entrypoint", "claude", "--name", container, image, "--version"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
     });
   } catch (e) {
-    const err = e as Error & { stderr?: Buffer | string };
+    const err = e as Error & { stderr?: Buffer | string; code?: string };
+    if (err.code === "ETIMEDOUT") {
+      try {
+        exec("docker", ["rm", "-f", container], { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], timeout: 10_000 });
+      } catch { /* best-effort cleanup; the timeout is what gets reported */ }
+      return { kind: "unreadable", detail: `\`claude --version\` timed out after ${timeoutMs}ms` };
+    }
     const stderr = typeof err.stderr === "string" ? err.stderr : err.stderr?.toString() ?? "";
     const line = `${stderr}\n${err.message ?? ""}`.split("\n").find((l) => l.trim().length > 0)?.trim();
     return { kind: "unreadable", detail: `\`claude --version\` failed: ${line ?? "unknown error"}` };

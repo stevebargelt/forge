@@ -42,18 +42,49 @@ export function requiredClaudeCliVersion(modelId: string): string | undefined {
   return best;
 }
 
-/** Pull the semver out of `claude --version` output (`2.1.281 (Claude Code)`).
- *  undefined when the output carries no recognizable version. */
+/** Pull the semver out of `claude --version` output (`2.1.281 (Claude Code)`),
+ *  keeping any prerelease tag (`2.1.280-beta.1`) so it compares BELOW its final
+ *  release. undefined when the output carries no recognizable version. */
 export function parseClaudeCliVersion(output: string): string | undefined {
-  return /(\d+)\.(\d+)\.(\d+)/.exec(output)?.[0];
+  return /\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?/.exec(output)?.[0];
 }
 
+/** Semver precedence: numeric core first, then a prerelease sorts below the
+ *  same core without one (`2.1.280-beta.1` < `2.1.280`). */
 export function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
+  const [coreA, preA] = splitPrerelease(a);
+  const [coreB, preB] = splitPrerelease(b);
+  const pa = coreA.split(".").map(Number);
+  const pb = coreB.split(".").map(Number);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const d = (pa[i] ?? 0) - (pb[i] ?? 0);
     if (d !== 0) return d;
   }
+  if (preA === undefined || preB === undefined) {
+    return preA === preB ? 0 : preA === undefined ? 1 : -1;
+  }
+  const ia = preA.split(".");
+  const ib = preB.split(".");
+  for (let i = 0; i < Math.max(ia.length, ib.length); i++) {
+    const x = ia[i];
+    const y = ib[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = /^\d+$/.test(x);
+    const ny = /^\d+$/.test(y);
+    if (nx && ny) {
+      const d = Number(x) - Number(y);
+      if (d !== 0) return d;
+    } else if (nx !== ny) {
+      return nx ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
   return 0;
+}
+
+function splitPrerelease(v: string): [string, string | undefined] {
+  const i = v.indexOf("-");
+  return i < 0 ? [v, undefined] : [v.slice(0, i), v.slice(i + 1)];
 }

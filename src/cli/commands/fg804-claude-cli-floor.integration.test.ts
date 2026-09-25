@@ -5,12 +5,12 @@
 
 import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NODE_EXEC, BUILT_CLI_ENTRY } from "../../integration-cli-spawn.js";
-import { gatherReleaseInputs } from "./doctor.js";
+import { gatherReleaseInputs, probeClaudeCliVersion } from "./doctor.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
 
 let projectDir: string;
@@ -70,7 +70,9 @@ set -eu
 if [ "$1" = image ] && [ "$2" = ls ]; then echo fixture-image-id; exit 0; fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then echo fixture-digest; exit 0; fi
 if [ "$1" = run ] && [ "$4" = sh ]; then echo 'OK claude'; exit 0; fi
+if [ "$1" = rm ]; then echo "$*" >> "$(dirname "$0")/rm.log"; exit 0; fi
 if [ "$1" = run ] && [ "$4" = claude ]; then
+  if [ "\${FG804_CLAUDE_VERSION:-}" = hang ]; then exec sleep 1000; fi
   if [ "\${FG804_CLAUDE_VERSION:-}" = unreadable ]; then echo 'broken version output'; else echo "\${FG804_CLAUDE_VERSION:-2.1.281} (Claude Code)"; fi
   exit 0
 fi
@@ -146,4 +148,29 @@ test("FG-804 release gather path: upgrade's gathered inputs surface the same blo
   assert.match(row?.detail ?? "", /claude-opus-5-5\[1m\]/);
   assert.doesNotMatch(row?.detail ?? "", /codex-fixture|pi-fixture/);
   assert.equal(report.ok, false);
+});
+
+test("FG-804 a hung in-image `claude --version` is killed at its deadline, reported unreadable, and its container removed", () => {
+  const path = process.env.PATH;
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  process.env.FG804_CLAUDE_VERSION = "hang";
+  const started = Date.now();
+  try {
+    const probe = probeClaudeCliVersion("agent-dev-worker:latest", { timeoutMs: 500 });
+    assert.ok(Date.now() - started < 10_000, "the probe must not block past its deadline");
+    assert.equal(probe.kind, "unreadable");
+    assert.match((probe as { detail: string }).detail, /timed out after 500ms/);
+    assert.match(readFileSync(join(binDir, "rm.log"), "utf8"), /^rm -f forge-claude-version-\S+$/m);
+  } finally {
+    process.env.PATH = path;
+    delete process.env.FG804_CLAUDE_VERSION;
+  }
+});
+
+test("FG-804 CLI spawn: a prerelease at the floor (2.1.280-beta.1) blocks doctor", () => {
+  const result = runDoctor("2.1.280-beta.1");
+  assert.notEqual(result.status, 0, result.stderr);
+  const row = versionRow(result.stdout);
+  assert.equal(row.status, "fail");
+  assert.match(row.detail, /2\.1\.280-beta\.1/);
 });

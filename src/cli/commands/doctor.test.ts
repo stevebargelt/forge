@@ -19,6 +19,7 @@ import {
   gatherProfileAuth,
   gatherReleaseInputs,
   computeCurrentBuildInputDigest,
+  probeClaudeCliVersion,
   readRecordedDigest,
   renderDoctor,
   renderDocsSurfaces,
@@ -1212,6 +1213,43 @@ test("FG-804 an unreadable in-image claude version is an explicit fail, not a si
   const c = report.checks.find((x) => x.name === "claude CLI version")!;
   assert.equal(c.status, "fail");
   assert.match(c.detail, /could not determine/);
+});
+
+test("FG-804 a prerelease at the floor (2.1.280-beta.1) FAILS the version floor", () => {
+  const { report } = claudeVersionReport("2.1.280-beta.1");
+  const c = report.checks.find((x) => x.name === "claude CLI version")!;
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /2\.1\.280-beta\.1/);
+  assert.equal(report.ok, false);
+});
+
+test("FG-804 the in-image probe keeps a prerelease tag from `claude --version`", () => {
+  const probe = probeClaudeCliVersion("img", { exec: () => "claude 2.1.280-beta.1\n" });
+  assert.deepEqual(probe, { kind: "version", version: "2.1.280-beta.1" });
+});
+
+test("FG-804 a timed-out in-image `claude --version` is unreadable and force-removes the container", () => {
+  const calls: string[][] = [];
+  const probe = probeClaudeCliVersion("img", {
+    timeoutMs: 300,
+    exec: (file, args, opts) => {
+      calls.push([file, ...args]);
+      if (args[0] === "rm") return "";
+      assert.equal(opts.timeout, 300);
+      throw Object.assign(new Error("spawnSync docker ETIMEDOUT"), { code: "ETIMEDOUT" });
+    },
+  });
+  assert.equal(probe.kind, "unreadable");
+  assert.match((probe as { detail: string }).detail, /timed out after 300ms/);
+  const name = calls[0]![calls[0]!.indexOf("--name") + 1];
+  assert.ok(name, "the run is named so it can be removed");
+  assert.deepEqual(calls[1], ["docker", "rm", "-f", name]);
+});
+
+test("FG-804 the default in-image probe is bounded by a timeout", () => {
+  let seen: number | undefined;
+  probeClaudeCliVersion("img", { exec: (_f, _a, opts) => { seen = opts.timeout as number; return "2.1.281 (Claude Code)"; } });
+  assert.ok(seen !== undefined && seen > 0 && seen <= 120_000);
 });
 
 test("FG-804 the version is not probed when the claude CLI itself is unavailable", () => {
