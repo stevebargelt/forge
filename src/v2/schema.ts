@@ -350,10 +350,20 @@ export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 const EffortLevelSchema = z.enum(EFFORT_LEVELS);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
+export const EFFORT_VALUE_PLACEHOLDER = "${EFFORT}";
+
 const InvocationEffortSchema = z.object({
   // Rendered in place of the placeholder; ${EFFORT} is the runtime-native value.
-  args: z.array(z.string()).min(1),
-  // Forge level -> runtime-native value, for CLIs whose enum differs.
+  // It must appear, or a hardcoded mapping would pass a different level than the
+  // manifest records as applied.
+  args: z
+    .array(z.string())
+    .min(1)
+    .refine((args) => args.some((a) => a.includes(EFFORT_VALUE_PLACEHOLDER)), {
+      message: `invocation.effort.args must reference '${EFFORT_VALUE_PLACEHOLDER}' so the resolved effort reaches the CLI`,
+    }),
+  // Forge level -> runtime-native value, for CLIs whose enum differs; an unmapped
+  // level passes through as itself.
   values: z.partialRecord(EffortLevelSchema, z.string().min(1)).optional(),
 });
 

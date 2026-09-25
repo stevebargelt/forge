@@ -125,6 +125,23 @@ test("runtime schema: invocation.effort and the ${EFFORT_ARGS} placeholder must 
   assert.equal(RuntimeSchema.safeParse(noBlock).success, false, "placeholder without effort block is refused");
 });
 
+test("runtime schema: invocation.effort.args must reference ${EFFORT} (a hardcoded level is refused)", () => {
+  const base = loadSeedRuntime("claude-oauth");
+  const hardcoded = { ...base, invocation: { ...base.invocation, effort: { args: ["--effort", "low"] } } };
+  const r = RuntimeSchema.safeParse(hardcoded);
+  assert.equal(r.success, false, "args without ${EFFORT} are refused");
+  assert.match(r.error!.issues.map((i) => i.message).join("\n"), /invocation\.effort\.args must reference '\$\{EFFORT\}'/);
+  const embedded = { ...base, invocation: { ...base.invocation, effort: { args: ["--effort=${EFFORT}"] } } };
+  assert.equal(RuntimeSchema.safeParse(embedded).success, true, "${EFFORT} embedded in an arg is accepted");
+});
+
+test("runtime schema: every shipped seed runtime with an effort mapping still validates", () => {
+  for (const name of ["claude-apikey", "claude-bedrock", "claude-oauth", "codex-subscription", "pi-apikey", "pi-oauth"]) {
+    const rt = loadSeedRuntime(name);
+    assert.ok(rt.invocation.effort, `${name} declares invocation.effort`);
+  }
+});
+
 // ── AC4: unset effort → byte-identical argv (golden, copied from the pre-FG-807 seeds) ──
 
 const CLAUDE_ARGV = [
