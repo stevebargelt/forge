@@ -252,7 +252,7 @@ test("FG-576: the render is deterministic — same input, identical bytes", () =
   // not of two publishes happening to agree.
   const scaffold = `HEAD\n\n${CODEX_CARRIER_ORIENTATION_MARKER}\n\n${CODEX_CARRIER_SPLICE_MARKER}\n`;
   const template = "<!-- forge:orchestrator-start -->\nBODY\n<!-- forge:orchestrator-end -->\nTAIL\n";
-  assert.equal(renderCodexCarrier(scaffold, template), renderCodexCarrier(scaffold, template));
+  assert.equal(renderCodexCarrier(scaffold, template, "suppress"), renderCodexCarrier(scaffold, template, "suppress"));
 
   // …and then end-to-end: two independent publishes of the SAME release produce
   // byte-identical carriers in two different generation dirs.

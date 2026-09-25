@@ -55,11 +55,12 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  GENERATION_CODEX_CARRIER,
   codexCarrierPath,
+  generationCodexCarrierRel,
   generationCodexCarrierState,
   resolveSeedGeneration,
 } from "../v2/seed-generation.js";
+import { readAiAttribution } from "../v2/ai-attribution.js";
 import { findOrchestratorReceiptBySessionIdentity } from "../store/orchestrator-receipts.js";
 import type { CapabilityLimitation } from "../store/orchestrator-receipts.js";
 import { markTaskComplete, markTaskFailed } from "../store/tasks.js";
@@ -463,8 +464,13 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): Orchestrator
 
       // Where the Forge-owned carrier for THIS launch comes from: the published seed
       // generation, pinned by that generation's own provenance manifest.
+      // FG-805: the generation carries one rendered variant per ai_attribution mode;
+      // bind the one keyed to THIS project's effective mode.
+      const attribution = readAiAttribution(ctx.projectDir).mode;
       const generation = resolveSeedGeneration(forgeHome());
-      const carrierState = generation ? generationCodexCarrierState(generation) : ({ kind: "absent" } as const);
+      const carrierState = generation
+        ? generationCodexCarrierState(generation, attribution)
+        : ({ kind: "absent" } as const);
 
       if (carrierState.kind === "tampered") {
         // Not a degradation: these are bytes no release rendered. Binding them would
@@ -520,7 +526,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): Orchestrator
       if (support.kind === "supported") {
         if (carrierState.kind === "present" && generation) {
           evidence["carrierPath"] = carrierState.path;
-          evidence["carrierSha256"] = generation.manifest.files[GENERATION_CODEX_CARRIER] ?? "";
+          evidence["carrierSha256"] = generation.manifest.files[generationCodexCarrierRel(attribution)] ?? "";
+          evidence["carrierAttribution"] = attribution;
           evidence["carrierGeneration"] = generation.root;
           evidence["carrierRelease"] = generation.manifest.sourceAssetRoot;
         } else {
@@ -528,7 +535,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): Orchestrator
             capability: "instruction-source",
             note:
               `the published Forge seed generation carries no Codex instruction carrier ` +
-              `(${generation ? `${codexCarrierPath(generation)} is absent` : "no seed generation is published"}), so ` +
+              `for ai_attribution=${attribution} ` +
+              `(${generation ? `${codexCarrierPath(generation, attribution)} is absent` : "no seed generation is published"}), so ` +
               `none was bound and ${NOT_INITIALIZED}. Run \`forge upgrade\` to publish one.`,
           });
         }
@@ -557,7 +565,8 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): Orchestrator
         evidence:
           `${readiness.evidence["carrierProbe"]}; carrier bound per launch as ` +
           `\`${CODEX_CONFIG_FLAG} ${CODEX_INSTRUCTIONS_CONFIG_KEY}=${path}\` (sha256:${readiness.evidence["carrierSha256"]}, ` +
-          `rendered by release ${readiness.evidence["carrierRelease"]}). Nothing was written to the operator's Codex ` +
+          `rendered by release ${readiness.evidence["carrierRelease"]} for ai_attribution=` +
+          `${readiness.evidence["carrierAttribution"]}). Nothing was written to the operator's Codex ` +
           `config root and CODEX_HOME was not set.`,
         argv: [CODEX_CONFIG_FLAG, `${CODEX_INSTRUCTIONS_CONFIG_KEY}=${path}`],
         limitations: [],

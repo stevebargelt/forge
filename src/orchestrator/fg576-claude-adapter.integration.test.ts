@@ -22,6 +22,7 @@ import { resolveOrchestratorLaunch, type OrchestratorDecision, type Orchestrator
 import type { AuthProbe } from "../v2/provider-doctor.js";
 import { currentAdapterStamp } from "../cli/commands/init.js";
 import { projectAdapterBaseline } from "../v2/seed-drift.js";
+import { renderOrchestratorPolicy } from "../v2/seed-generation.js";
 import {
   buildClaudeChildEnv,
   claudeAdapterGenerationAdvisories,
@@ -192,14 +193,16 @@ test("integ FG-576: an unrunnable help probe records the absence of evidence and
   );
 });
 
-test("integ FG-576 D8: the carrier is the canonical seed verbatim, materialized under FORGE'S OWN root only", () => {
+test("integ FG-576 D8: the carrier is the canonical seed's rendered policy region, materialized under FORGE'S OWN root only", () => {
   const adapter = adapterWithHelp(HELP_WITH_FILE_FLAG);
   const ctx = contextFor(decisionFor());
   const readiness = adapter.probeReadiness(ctx);
   assert.ok(readiness.ok);
   const carrier = adapter.declareInstructionCarrier(ctx, readiness.readiness);
 
-  assert.equal(carrier.content, readFileSync(CANONICAL_TEMPLATE, "utf8"));
+  // FG-805: rendered for the project's ai_attribution mode (absent config = suppress)
+  // and sliced to the marker region, not the raw seed.
+  assert.equal(carrier.content, renderOrchestratorPolicy(readFileSync(CANONICAL_TEMPLATE, "utf8"), "suppress"));
   assert.ok(carrier.path!.startsWith(home), `carrier ${carrier.path} escaped the Forge root ${home}`);
   assert.equal(carrier.argv[1], carrier.path);
 

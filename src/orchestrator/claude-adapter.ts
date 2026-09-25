@@ -43,6 +43,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { assetRoot, executionMode } from "../v2/asset-root.js";
+import { readAiAttribution } from "../v2/ai-attribution.js";
+import { renderOrchestratorPolicy } from "../v2/seed-generation.js";
 import { currentAdapterStamp } from "../cli/commands/init.js";
 import { inspectProjectAdapters } from "../v2/seed-drift.js";
 import { claudeSlashCommand } from "../v2/render-claude-commands.js";
@@ -84,6 +86,7 @@ import {
 } from "./adapter.js";
 
 const ORCHESTRATOR_MARKER = "<!-- forge:orchestrator-start -->";
+const ORCHESTRATOR_END_MARKER = "<!-- forge:orchestrator-end -->";
 
 /** The flag forms this adapter will bind the carrier to, in preference order. The
  *  file form keeps an 80KB instruction surface out of argv; the inline form is the
@@ -364,15 +367,51 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
       }
 
       const source = carrierSourcePath();
+      const attribution = readAiAttribution(ctx.projectDir).mode;
       let content: string;
       try {
-        content = readFileSync(source, "utf8");
+        content = renderOrchestratorPolicy(readFileSync(source, "utf8"), attribution);
       } catch (e) {
         return none(
-          `the canonical orchestrator policy at ${source} could not be read (${(e as Error).message}), so no ` +
+          `the canonical orchestrator policy at ${source} could not be read or rendered (${(e as Error).message}), so no ` +
             "Forge-owned instruction carrier was bound to this session.",
         );
       }
+
+      // FG-805 — ONE delivery path. Claude Code loads the project's CLAUDE.md on its
+      // own, so when that file carries the forge block, appending the same policy again
+      // hands the session every rule twice. The block is the delivery ONLY when it is
+      // exactly the policy this forge renders: markers in a code fence, or a stale,
+      // foreign or hand-edited block, must not suppress the Forge-owned carrier.
+      const block = claudeMdOrchestratorBlock(ctx.projectDir);
+      const blockCurrent = block !== null && normalizeLineEndings(block) === normalizeLineEndings(content);
+      if (blockCurrent) {
+        const blockDigest = createHash("sha256").update(block).digest("hex").slice(0, 16);
+        return {
+          path: null,
+          content: null,
+          generation: `${executionMode()}@${blockDigest}`,
+          acceptance: "accepted",
+          evidence:
+            `orchestrator policy delivered via the forge block in ${join(ctx.projectDir, "CLAUDE.md")} ` +
+            `(sha256:${blockDigest}); ${flag} not passed, so the policy is not delivered twice. The block ` +
+            `matches the policy rendered from ${source} for ai_attribution=${attribution}.`,
+          argv: [],
+          limitations: [],
+        };
+      }
+      const drift: CapabilityLimitation[] =
+        block === null
+          ? []
+          : [
+              {
+                capability: "instruction-source",
+                note:
+                  `the forge block in CLAUDE.md is not the orchestrator policy this forge renders for ` +
+                  `ai_attribution=${attribution}, so the rendered policy is appended as well and the session also ` +
+                  "reads the differing block. Run `forge upgrade` to re-render it.",
+              },
+            ];
 
       const digest = createHash("sha256").update(content).digest("hex").slice(0, 16);
       const generation = `${executionMode()}@${digest}`;
@@ -390,9 +429,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
           content: null,
           generation,
           acceptance: "accepted",
-          evidence: `${readiness.evidence["carrierProbe"]}; policy rendered from ${source} (sha256:${digest})`,
+          evidence: `${readiness.evidence["carrierProbe"]}; policy rendered from ${source} for ai_attribution=${attribution} (sha256:${digest})`,
           argv: [CARRIER_INLINE_FLAG, content],
-          limitations: [],
+          limitations: drift,
         };
       }
 
@@ -403,9 +442,9 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
         content,
         generation,
         acceptance: "accepted",
-        evidence: `${readiness.evidence["carrierProbe"]}; policy rendered from ${source} (sha256:${digest})`,
+        evidence: `${readiness.evidence["carrierProbe"]}; policy rendered from ${source} for ai_attribution=${attribution} (sha256:${digest})`,
         argv: [CARRIER_FILE_FLAG, join(forgeHome(), "orchestrators", "prompts", `${ctx.sessionKey}.md`)],
-        limitations: [],
+        limitations: drift,
       };
     },
 
@@ -675,6 +714,29 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): Orchestrat
 // ---------------------------------------------------------------------------
 // Preflight (advisory only — FG-499)
 // ---------------------------------------------------------------------------
+
+/** FG-805 — the forge block body the project's CLAUDE.md carries, or null. The
+ *  caller decides whether it is a usable delivery (it must equal the rendered
+ *  policy). "Carries the block" means what `forge init` means by it:
+ *  BALANCED start/end markers with a body between them. A lone start marker is a torn
+ *  block init refuses to splice, so it is not treated as a delivery path. */
+export function claudeMdOrchestratorBlock(projectRoot: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(join(projectRoot, "CLAUDE.md"), "utf8");
+  } catch {
+    return null;
+  }
+  const start = text.indexOf(ORCHESTRATOR_MARKER);
+  const end = text.indexOf(ORCHESTRATOR_END_MARKER);
+  if (start < 0 || end <= start) return null;
+  const body = text.slice(start + ORCHESTRATOR_MARKER.length, end).trim();
+  return body.length > 0 ? body : null;
+}
+
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
 
 /** The project-shape warnings `forge claude` has always printed. Non-blocking: the
  *  operator can still launch into a half-configured session on purpose.
