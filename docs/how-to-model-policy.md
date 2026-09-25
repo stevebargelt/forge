@@ -372,6 +372,19 @@ Every policy-mode task writes provider + model + auth + `resolvedBy` (plus the
 `manifest.json` and emits `model.profile_resolved` (or `model.profile_unavailable`
 when a gate fails — activity-unmapped, availability, or tool-capability).
 
+### Newer models can need a newer Claude Code CLI
+
+The API rejects a model that the `claude` CLI in the agent image is too old for
+(`Claude Code 2.1.224 does not support this model; version 2.1.280 or newer is
+required`). `forge doctor` guards this with a **`claude CLI version`** row: it
+compares the in-image `claude --version` against the per-model minimums in
+`CLAUDE_CLI_FLOORS` (`src/v2/claude-cli-floor.ts`) for every model your runtime
+aliases and policy profiles route through `claude`, and fails when the image is
+too old. When you adopt a model whose provider requires a newer CLI, add a floor
+entry there (and make sure the Dockerfile's `CLAUDE_CODE_VERSION` satisfies it);
+a model with no entry is not checked. See
+[the image pin and version floor](how-to-upgrade.md#what-the-upgrade-does-not-do).
+
 ## Mixed-provider (Walk — shipped)
 
 Two providers are live: **anthropic** (subscription/api/bedrock) and **openai**

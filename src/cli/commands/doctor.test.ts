@@ -19,6 +19,7 @@ import {
   gatherProfileAuth,
   gatherReleaseInputs,
   computeCurrentBuildInputDigest,
+  probeClaudeCliVersion,
   readRecordedDigest,
   renderDoctor,
   renderDocsSurfaces,
@@ -1132,4 +1133,127 @@ test("FG-546 `forge doctor`: the real action renders docs-surfaces state, human 
   const json = await runRegisteredDoctor(projectDir, ["--json"]);
   const payload = JSON.parse(json.out) as { docsSurfaces: { verdict: string } };
   assert.equal(payload.docsSurfaces.verdict, "known-legacy-generated");
+});
+
+// FG-804: the wiring — the models the claude CLI can be asked to serve come from the
+// policy profiles bound to a claude runtime AND that runtime's aliases, and the
+// in-image version read only runs when the claude CLI is present.
+const CLAUDE_APIKEY_RUNTIME = `
+name: claude-apikey
+description: test claude runtime
+image: agent-dev-worker:latest
+models:
+  default: claude-sonnet-5
+auth:
+  mode: apikey
+mounts: []
+invocation:
+  command: claude
+  args: []
+container:
+  name: forge-test
+  remove_on_exit: true
+  idle_timeout_seconds: 300
+result:
+  file: /task/result.json
+`;
+
+const OPUS_POLICY = `
+on_unavailable: fail
+schema_version: 2
+model_profiles:
+  claude:
+    provider: anthropic
+    auth: api
+    map:
+      default: { model: claude-sonnet-5, cost_tier: standard }
+      reasoning: { model: claude-opus-5-5, cost_tier: premium }
+defaults:
+  profile: claude
+  activity: {}
+allowed_profiles: [claude]
+`;
+
+function claudeVersionReport(version: string | null, claudePresent: boolean | null = true) {
+  writeProjectPolicy(OPUS_POLICY);
+  mkdirSync(join(projectDir, ".forge", "runtimes"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "runtimes", "claude-apikey.yml"), CLAUDE_APIKEY_RUNTIME);
+  process.env.ANTHROPIC_API_KEY = "sk-test";
+  let probed = false;
+  const inputs = gatherReleaseInputs("agent-dev-worker:latest", { projectDir }, {
+    inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, recordedDigest: "d", currentInputDigest: "d" }),
+    probeClisInImage: (_i, commands) => Object.fromEntries(commands.map((c) => [c, claudePresent])),
+    probeClaudeCliVersion: () => {
+      probed = true;
+      return version === null ? { kind: "unreadable", detail: "no output" } : { kind: "version", version };
+    },
+  });
+  return { inputs, report: buildReleaseReport(inputs), probed };
+}
+
+test("FG-804 doctor FAILS when the image's claude CLI is below a policy model's floor", () => {
+  const { inputs, report } = claudeVersionReport("2.1.224");
+  assert.ok(inputs.claudeCli!.models.some((m) => m.model === "claude-opus-5-5" && m.source === "profile claude.reasoning"));
+  assert.ok(inputs.claudeCli!.models.some((m) => m.source === "runtime claude-apikey.models.default"), "runtime aliases are included");
+  const c = report.checks.find((x) => x.name === "claude CLI version")!;
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /claude-opus-5-5.*2\.1\.280/);
+  assert.match(c.detail, /2\.1\.224/);
+  assert.equal(report.ok, false);
+  assert.equal(doctorReady(findings({ report })), false);
+});
+
+test("FG-804 doctor passes the version floor when the image's claude CLI is >= required", () => {
+  const { report } = claudeVersionReport("2.1.281");
+  assert.equal(report.checks.find((x) => x.name === "claude CLI version")!.status, "ok");
+});
+
+test("FG-804 an unreadable in-image claude version is an explicit fail, not a silent pass", () => {
+  const { report } = claudeVersionReport(null);
+  const c = report.checks.find((x) => x.name === "claude CLI version")!;
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /could not determine/);
+});
+
+test("FG-804 a prerelease at the floor (2.1.280-beta.1) FAILS the version floor", () => {
+  const { report } = claudeVersionReport("2.1.280-beta.1");
+  const c = report.checks.find((x) => x.name === "claude CLI version")!;
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /2\.1\.280-beta\.1/);
+  assert.equal(report.ok, false);
+});
+
+test("FG-804 the in-image probe keeps a prerelease tag from `claude --version`", () => {
+  const probe = probeClaudeCliVersion("img", { exec: () => "claude 2.1.280-beta.1\n" });
+  assert.deepEqual(probe, { kind: "version", version: "2.1.280-beta.1" });
+});
+
+test("FG-804 a timed-out in-image `claude --version` is unreadable and force-removes the container", () => {
+  const calls: string[][] = [];
+  const probe = probeClaudeCliVersion("img", {
+    timeoutMs: 300,
+    exec: (file, args, opts) => {
+      calls.push([file, ...args]);
+      if (args[0] === "rm") return "";
+      assert.equal(opts.timeout, 300);
+      throw Object.assign(new Error("spawnSync docker ETIMEDOUT"), { code: "ETIMEDOUT" });
+    },
+  });
+  assert.equal(probe.kind, "unreadable");
+  assert.match((probe as { detail: string }).detail, /timed out after 300ms/);
+  const name = calls[0]![calls[0]!.indexOf("--name") + 1];
+  assert.ok(name, "the run is named so it can be removed");
+  assert.deepEqual(calls[1], ["docker", "rm", "-f", name]);
+});
+
+test("FG-804 the default in-image probe is bounded by a timeout", () => {
+  let seen: number | undefined;
+  probeClaudeCliVersion("img", { exec: (_f, _a, opts) => { seen = opts.timeout as number; return "2.1.281 (Claude Code)"; } });
+  assert.ok(seen !== undefined && seen > 0 && seen <= 120_000);
+});
+
+test("FG-804 the version is not probed when the claude CLI itself is unavailable", () => {
+  const { report, probed } = claudeVersionReport("2.1.281", null);
+  assert.equal(probed, false);
+  assert.equal(report.checks.find((x) => x.name === "claude CLI version")!.status, "skip");
 });

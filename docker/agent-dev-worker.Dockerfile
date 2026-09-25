@@ -38,8 +38,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 
 # Tell node + npm to trust the corporate CA at runtime as well.
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
-    && npm install -g @anthropic-ai/claude-code
+RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt
+
+# Claude Code CLI, pinned (FG-804). An unpinned install froze at whatever the
+# first cached layer resolved; bumping this ARG changes the build-input digest,
+# so doctor flags the image STALE until rebuilt. Must satisfy every floor in
+# src/v2/claude-cli-floor.ts (doctor fails a model the image's CLI is too old for).
+ARG CLAUDE_CODE_VERSION=2.1.281
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Codex CLI (AWN-7 Walk): second provider runtime. Pinned for reproducible
 # builds; bump CODEX_CLI_VERSION to upgrade. Provides the `codex` bin used by

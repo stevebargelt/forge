@@ -128,7 +128,7 @@ const RUNTIME_BINDING: Record<string, Partial<Record<EffectiveAuth, string>>> = 
   },
 };
 
-function bindRuntime(provider: string, auth: EffectiveAuth): string {
+export function bindRuntime(provider: string, auth: EffectiveAuth): string {
   const runtime = RUNTIME_BINDING[provider]?.[auth];
   if (!runtime) {
     const known = Object.entries(RUNTIME_BINDING)
