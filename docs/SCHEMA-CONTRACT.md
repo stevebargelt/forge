@@ -625,6 +625,7 @@ Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
 - `container.stderr.log` — raw container stderr
 - `package.md` — the task package handed to the agent (inputs, output contract)
 - `CLAUDE.md` — the composed system prompt the agent saw
+- `TASKS.md` — optional; the agent's own checklist, kept by read-write dispatches with more than one step (FG-809). A retry snapshots it, with the last `progress.jsonl` records, into the new task's `inputs.previous_failure.previous_attempt`
 
 The dashboard reads `container.stdout.log` and `container.stderr.log` for the detail view; the rest are for the human's inspection via `forge show` or direct filesystem access.
 

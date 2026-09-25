@@ -28,7 +28,21 @@ const FRAMING = `## Output contract
 
 Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}. For red agents, the role-specific output must match the Verdict schema (verdict, confidence, findings).
 
-Optionally, for long-running work, you MAY append progress records to /task/progress.jsonl — one JSON object per line — and forge will surface them on the run timeline. Shapes: {"type":"progress","message":"...","percent":0-100}, {"type":"artifact","kind":"screenshot","path":"/task/..."}, {"type":"decision","summary":"..."}. This is purely optional; never put secrets in it, and result.json is still the required deliverable.`;
+Optionally, for long-running work, you MAY append progress records to /task/progress.jsonl — one JSON object per line — and forge will surface them on the run timeline. Shapes: {"type":"progress","message":"...","percent":0-100}, {"type":"artifact","kind":"screenshot","path":"/task/..."}, {"type":"decision","summary":"..."}. This is purely optional; never put secrets in it, and result.json is still the required deliverable.
+
+## Non-interactive run
+
+This run is non-interactive: nobody reads or answers you until it ends, and ending your turn ends the run. Keep going whenever the next step needs no input. Do not end on a summary naming the next step, an offer to continue, or a list of options — do that work instead. Finish when the step's acceptance criteria are met and result.json is written. Stop early only when you are blocked, and then return status "failed" naming exactly what is needed.`;
+
+// FG-809: only a dispatch whose /project is mounted writable receives these. The mount mode
+// is the classification — a red or reviewer mounted :ro is never told to keep a checklist.
+const WRITE_MODE_FRAMING = `## Actions you must not take
+
+Unless the task explicitly names the action, never: push or force-push; rewrite or reset git history; delete branches or tags; run migrations or destructive SQL against any database that is not a scratch database; change anything outside /project (and your /task output files). If the work needs one of these, stop and return status "failed" naming the blocker.
+
+## Task checklist
+
+If your work has more than one step, keep /task/TASKS.md: write the checklist there before you start, tick an item only once it is validated, add items you discover along the way, and re-read it after a context summarization or a resume — it, not the conversation, is your plan of record. If the task package carries a previous attempt's record, start from what it shows as done, verifying rather than trusting it.`;
 
 export type ComposeArgs = {
   role: string;
@@ -54,6 +68,9 @@ export type ComposeArgs = {
    *  STALE against. Defaults to the tree this forge runs from; a test that publishes a
    *  disposable release passes that release's seeds. */
   releaseSeedsDir?: string;
+  /** FG-809: the /project mount this dispatch runs under — the same value handed to the
+   *  container. `rw` adds the write-mode framing (destructive-action list, TASKS.md). */
+  projectMode: "rw" | "ro";
 };
 
 /** FG-654: composing is no longer unconditionally possible. THIS is the one seam every
@@ -187,7 +204,7 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
     sections.push(`# Constraints\n\n${body}`);
   }
 
-  sections.push(FRAMING);
+  sections.push(args.projectMode === "rw" ? `${FRAMING}\n\n${WRITE_MODE_FRAMING}` : FRAMING);
 
   return {
     ok: true,

@@ -456,6 +456,7 @@ test("integ FG-654: the manifest records the COMPOSED bytes' sha, not a fresh re
     workflow: INVOKE_SHAPE,
     step: INVOKE_SHAPE.steps[0]!,
     seedGeneration: gen,
+    projectMode: "ro",
   });
   assert.ok(composed.ok, composed.ok ? "" : composed.refusal);
   if (!composed.ok) return;
