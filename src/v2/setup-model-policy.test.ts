@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   runHostModelPolicySetup,
   type HostModelPolicyDeps,
@@ -189,6 +190,21 @@ test("RF-1/FG-796: --yes on a TTY generates from availability, never prompting o
       assert.equal(res.action, "generated", "took the deterministic generate path, not the interactive Q&A");
       assert.equal(state.writes.length, 1, "one generated policy written");
       assert.equal(state.seedCopies, 0, "no verbatim seed copy when providers are available");
+    },
+  );
+});
+
+test("FG-807: forge setup --yes keeps Haiku as the non-interactive review default", async () => {
+  await withDeps(
+    { isTTY: true, yes: true, selection: undefined, prompt: scriptedPrompt([], true) },
+    async (deps, state) => {
+      const res = await runHostModelPolicySetup(deps);
+      assert.equal(res.action, "generated");
+      const policy = ModelPolicySchema.parse(parseYaml(state.writes[0]!));
+      const reviewProfile = policy.defaults.activity.review!;
+      assert.equal(reviewProfile, "anthropic-subscription-haiku", "--yes must not silently raise red cost to Opus");
+      assert.equal(policy.model_profiles[reviewProfile]!.map.review!.model, "claude-haiku-4-5");
+      assert.equal(policy.model_profiles[reviewProfile]!.map.review!.effort, undefined);
     },
   );
 });

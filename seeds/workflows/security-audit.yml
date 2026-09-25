@@ -37,7 +37,6 @@ steps:
       open_questions}. Classify, do not exploit.
     reds:
       - agent: red-security
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 
@@ -66,15 +65,12 @@ steps:
       {report: markdown, critical_count, high_count, pass: boolean}.
     reds:
       - agent: red-security
-        activity: fast-orchestrator
         authority: authoritative   # fail blocks the verdict gate
         gate_on_verdict: true
       - agent: red-wide
-        activity: fast-orchestrator
         authority: authoritative   # fail blocks the verdict gate
         gate_on_verdict: true
       - agent: red-narrow
-        activity: fast-orchestrator
         # Findings annotate; a verdict this red AUTHORS never blocks. But a red
         # that returns NO review does block, at any authority: forge synthesizes
         # the inconclusive, and an incomplete panel can't clear the gate.

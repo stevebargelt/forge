@@ -35,7 +35,8 @@ model_profiles:
     auth: subscription
     map:
       reasoning: { model: claude-opus-5,   cost_tier: premium }
-      review:    { model: claude-sonnet-5, cost_tier: standard }
+      # FG-807: every red resolves `review`. Opus 5.5 at low effort.
+      review:    { model: claude-opus-5-5, cost_tier: premium, effort: low }
       fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
       default:   { model: claude-sonnet-5, cost_tier: standard }
       # FG-560: spec-writer/fast-orchestrator are the orchestrator-facing capability
@@ -64,7 +65,8 @@ model_profiles:
     auth: api
     map:
       reasoning: { model: claude-opus-5,   cost_tier: premium }
-      review:    { model: claude-sonnet-5, cost_tier: standard }
+      # FG-807: every red resolves `review`. Opus 5.5 at low effort.
+      review:    { model: claude-opus-5-5, cost_tier: premium, effort: low }
       fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
       default:   { model: claude-sonnet-5, cost_tier: standard }
       spec-writer: { model: claude-opus-5, cost_tier: premium }

@@ -14,8 +14,8 @@ import {
   isKnownRole,
 } from "./model-policy-catalog.js";
 
-test("familiesFor: anthropic/subscription offers opus, sonnet, haiku", () => {
-  assert.deepEqual(familiesFor("anthropic", "subscription").sort(), ["haiku", "opus", "sonnet"]);
+test("familiesFor: anthropic/subscription offers opus, sonnet, haiku, opus-review", () => {
+  assert.deepEqual(familiesFor("anthropic", "subscription").sort(), ["haiku", "opus", "opus-review", "sonnet"]);
 });
 
 test("familiesFor: anthropic/bedrock has no opus (not exposed on Bedrock)", () => {

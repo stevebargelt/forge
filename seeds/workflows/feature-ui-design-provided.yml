@@ -7,7 +7,8 @@ description: Feature work with UI design already in hand. Architect → plan →
 # Model rationale: only architect uses spec-writer (Opus). plan / build / verify
 # use default (Sonnet) — translating architecture to a plan, implementing
 # against acceptance criteria, and judging tests are well within Sonnet's
-# capability. Reds stay on fast-orchestrator (Haiku) for triage.
+# capability. Reds carry no activity: their role default (`review`) routes
+# them to the policy's review row (FG-807).
 
 inputs:
   - name: prd
@@ -28,11 +29,9 @@ steps:
       See architect seed.
     reds:
       - agent: red-wide
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       - agent: red-narrow
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 
@@ -71,23 +70,18 @@ steps:
       failure_mode: fail-phase
     reds:
       - agent: red-wide
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-narrow
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-frontend
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-backend
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-security
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
 

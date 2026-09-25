@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync }
 import { dirname, isAbsolute, join, normalize, sep } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
-import { resolveRuntimeMetadata } from "./schema.js";
+import { effortRecord, resolveRuntimeEffort, resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
@@ -816,7 +816,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       return { runId, taskId, status: "failed", error: toolCapability.reason };
     }
   }
-  const resolvedBlock = manifestModelBlock(resolution);
+  const resolvedBlock = manifestModelBlock(resolution, effortRecord(resolveRuntimeEffort(runtime, resolution.effort)));
   if (resolvedBlock) {
     logEvent("model.profile_resolved", { runId, taskId, payload: resolvedBlock });
   }
@@ -1005,7 +1005,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
       // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
       runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
-      ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
+      ...(resolvedBlock ? { model: resolvedBlock } : {}),
       controlPlane,
       // FG-654: RECORDED here, at the same dispatch-time seam as every other receipt, so
       // "which protocol did this agent run under" is answerable from durable state after
@@ -1157,6 +1157,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     ...(dependencyEnvironment ? { DEPENDENCY_CACHE_MOUNT_RO: "1" } : {}),
     MODEL: resolution.model,
     UPSTREAM_PROVIDER: resolution.provider ?? "",
+    EFFORT: resolution.effort ?? "",
     SYSTEM_PROMPT: systemPrompt,
     TASK_PACKAGE_MARKDOWN: taskPackageMarkdown,
     DESIGN_DIR: args.designDir,

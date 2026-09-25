@@ -15,7 +15,7 @@ import {
 } from "../../v2/model-provenance.js";
 import { probeAuth, type AuthProbe } from "../../v2/provider-doctor.js";
 import { loadRuntime, loadModelPolicyWithSource } from "../../v2/loader.js";
-import { resolveRuntimeMetadata } from "../../v2/schema.js";
+import { effortRecord, resolveRuntimeEffort, resolveRuntimeMetadata } from "../../v2/schema.js";
 import { requiresStructuredResult } from "../../v2/role-capabilities.js";
 
 export function registerModel(program: Command): void {
@@ -105,9 +105,11 @@ export function registerModel(program: Command): void {
         let effectiveToolCapable: boolean | undefined;
         let dispatchable: boolean | undefined;
         let toolCapabilityNote: string | undefined;
+        let effort: string | undefined;
         if (!legacy) {
           try {
             const rt = loadRuntime(resolution.runtime);
+            effort = effortRecord(resolveRuntimeEffort(rt, resolution.effort));
             const runtimeMeta = resolveRuntimeMetadata(rt);
             effectiveToolCapable = resolution.toolCapable ?? (runtimeMeta.runtimeKind !== "pi");
             dispatchable = !requiresStructuredResult(agent) || effectiveToolCapable;
@@ -122,6 +124,7 @@ export function registerModel(program: Command): void {
             // (the two provenance axes + the refusal outcome); spread verbatim.
             ...resolution,
             ...(probe ? { availability: probe } : {}),
+            ...(effort ? { effectiveEffort: effort } : {}),
             ...(!legacy && effectiveToolCapable !== undefined ? { toolCapable: resolution.toolCapable, effectiveToolCapable, dispatchable } : {}),
             // FG-560: the activity_unmapped refusal as a structured block a script
             // can branch on — present ONLY when the resolution is that refusal.
@@ -140,6 +143,7 @@ export function registerModel(program: Command): void {
           line("provider:", resolution.provider ?? "");
           line("auth:", `${resolution.auth} (effective)`);
           line("cost tier:", resolution.costTier ?? "");
+          if (effort) line("effort:", effort);
         }
         line("runtime:", resolution.runtime);
         line("resolved by:", resolution.resolvedBy);

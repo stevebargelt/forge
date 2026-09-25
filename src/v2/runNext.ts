@@ -28,7 +28,7 @@ import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, 
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
-import { resolveRuntimeMetadata } from "./schema.js";
+import { effortRecord, resolveRuntimeEffort, resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
@@ -4651,7 +4651,8 @@ async function runContainer(args: {
       return { kind: "failed", error: toolCapability.reason };
     }
   }
-  const resolvedBlock = manifestModelBlock(args.resolution);
+  const effortRec = effortRecord(resolveRuntimeEffort(runtime, args.resolution.effort));
+  const resolvedBlock = manifestModelBlock(args.resolution, effortRec);
   if (resolvedBlock) {
     logEvent("model.profile_resolved", { runId: args.runId, taskId: args.taskId, payload: resolvedBlock });
   }
@@ -5015,7 +5016,7 @@ async function runContainer(args: {
     // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
     // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
     runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
-    ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
+    ...(resolvedBlock ? { model: resolvedBlock } : {}),
     ...(controlPlane ? { controlPlane } : {}),
     // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
     // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
@@ -5046,6 +5047,7 @@ async function runContainer(args: {
     PROJECT_MODE: args.projectMode,
     MODEL: args.resolution.model,
     UPSTREAM_PROVIDER: args.resolution.provider ?? "",
+    EFFORT: args.resolution.effort ?? "",
     SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: taskPackageMarkdown,
     DESIGN_DIR: args.designDir,

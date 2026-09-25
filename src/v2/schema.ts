@@ -12,6 +12,7 @@
 // loses the runtime-validation half of what we're after.
 
 import { z } from "zod";
+import { substitute } from "./resolve.js";
 
 // ------------------------------------------------------------------
 // Shared primitives
@@ -340,11 +341,46 @@ const MountDefSchema = z.object({
   optional: z.boolean().default(false),
 });
 
-const InvocationDefSchema = z.object({
-  command: z.string().min(1),
-  args: z.array(z.string()),
-  stdin: z.string().optional(),
+// FG-807: the literal arg that expands to invocation.effort.args when a resolved
+// effort is set, and to NOTHING when it is not — so an unset effort leaves argv
+// byte-identical to a runtime with no effort support at all.
+export const EFFORT_ARGS_PLACEHOLDER = "${EFFORT_ARGS}";
+
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+const EffortLevelSchema = z.enum(EFFORT_LEVELS);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
+const InvocationEffortSchema = z.object({
+  // Rendered in place of the placeholder; ${EFFORT} is the runtime-native value.
+  args: z.array(z.string()).min(1),
+  // Forge level -> runtime-native value, for CLIs whose enum differs.
+  values: z.partialRecord(EffortLevelSchema, z.string().min(1)).optional(),
 });
+
+const InvocationDefSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()),
+    stdin: z.string().optional(),
+    effort: InvocationEffortSchema.optional(),
+  })
+  .superRefine((inv, ctx) => {
+    const placeholders = inv.args.filter((a) => a === EFFORT_ARGS_PLACEHOLDER).length;
+    if (inv.effort && placeholders !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["args"],
+        message: `invocation.effort requires exactly one '${EFFORT_ARGS_PLACEHOLDER}' arg (found ${placeholders})`,
+      });
+    }
+    if (!inv.effort && placeholders > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["args"],
+        message: `'${EFFORT_ARGS_PLACEHOLDER}' arg requires an invocation.effort block`,
+      });
+    }
+  });
 
 const ContainerDefSchema = z.object({
   name: z.string().min(1), // typically "forge-{{TASK_ID}}"
@@ -432,6 +468,31 @@ export function resolveRuntimeMetadata(rt: Runtime): RuntimeMetadata {
   };
 }
 
+// FG-807: how a runtime honors a policy-resolved effort level. `applied` carries
+// the rendered argv the ${EFFORT_ARGS} placeholder expands to; `ignored` names why
+// the runtime cannot honor it — dispatch proceeds without it rather than failing.
+export type EffortOutcome =
+  | { status: "applied"; level: EffortLevel; value: string; args: string[] }
+  | { status: "ignored"; level: EffortLevel; reason: string };
+
+export function resolveRuntimeEffort(runtime: Runtime, level: EffortLevel | undefined): EffortOutcome | undefined {
+  if (!level) return undefined;
+  const spec = runtime.invocation.effort;
+  if (!spec) {
+    return { status: "ignored", level, reason: `runtime '${runtime.name}' declares no invocation.effort mapping` };
+  }
+  const value = spec.values?.[level] ?? level;
+  return { status: "applied", level, value, args: spec.args.map((a) => substitute(a, { EFFORT: value })) };
+}
+
+/** The manifest `model.effort` string: the level, the runtime-native value when
+ *  it differs, or `ignored (<reason>)`. */
+export function effortRecord(outcome: EffortOutcome | undefined): string | undefined {
+  if (!outcome) return undefined;
+  if (outcome.status === "ignored") return `ignored (${outcome.reason})`;
+  return outcome.value === outcome.level ? outcome.level : `${outcome.level} (as ${outcome.value})`;
+}
+
 // ------------------------------------------------------------------
 // Model policy YAML (model-policy.yml) — AWN-7 Crawl (FORGE-DEC provider-resolution)
 // ------------------------------------------------------------------
@@ -480,6 +541,7 @@ const CapabilityEntrySchema = z.object({
   model: z.string().min(1),
   cost_tier: CostTierSchema,
   tool_capable: z.boolean().optional(),
+  effort: EffortLevelSchema.optional(),
 });
 
 const ModelProfileSchema = z
