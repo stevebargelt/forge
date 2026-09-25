@@ -12,6 +12,7 @@
 // report, never mutates.
 
 import type { ExecutionMode } from "./asset-root.js";
+import { compareVersions, requiredClaudeCliVersion } from "./claude-cli-floor.js";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 
@@ -56,6 +57,20 @@ export type CliInputs = {
   neededBy: string[];         // runtime names that need this CLI, e.g. ["codex-subscription"]
 };
 
+/** FG-804: the in-image Claude Code version against the models it may be asked to
+ *  serve. `not-probed` = the image or the claude CLI is unavailable (their own
+ *  checks already report that); `unreadable` = the CLI is present but
+ *  `claude --version` could not be run or parsed. */
+export type ClaudeCliVersionInputs = {
+  probe:
+    | { kind: "version"; version: string }
+    | { kind: "unreadable"; detail: string }
+    | { kind: "not-probed" };
+  /** Every model the effective host model policy / claude runtime aliases can
+   *  resolve to on the claude CLI, with where it came from. */
+  models: Array<{ model: string; source: string }>;
+};
+
 export type PolicyInputs = {
   present: boolean;           // model-policy.yml exists?
   valid: boolean;             // parses + passes schema?
@@ -92,6 +107,8 @@ export type RoutingInputs = {
 export type ReleaseInputs = {
   image: ImageInputs;
   clis: CliInputs[];
+  /** FG-804: absent when no configured runtime runs the claude CLI. */
+  claudeCli?: ClaudeCliVersionInputs;
   policy: PolicyInputs;
   profileAuth: AuthInputs[];
   routing: RoutingInputs;
@@ -168,6 +185,46 @@ function cliCheck(c: CliInputs, mode: ExecutionMode): ReleaseCheck {
   return { name: `cli ${c.command}`, status: "ok", detail: `present in the image${who}` };
 }
 
+const PIN_ADVICE = "if CLAUDE_CODE_VERSION in docker/agent-dev-worker.Dockerfile is itself below the floor, bump it first";
+
+function claudeCliVersionCheck(c: ClaudeCliVersionInputs, mode: ExecutionMode): ReleaseCheck {
+  const name = "claude CLI version";
+  const floored = new Map<string, { required: string; sources: string[] }>();
+  for (const { model, source } of c.models) {
+    const required = requiredClaudeCliVersion(model);
+    if (!required) continue;
+    const entry = floored.get(model) ?? { required, sources: [] };
+    entry.sources.push(source);
+    floored.set(model, entry);
+  }
+  if (c.probe.kind === "not-probed") {
+    return { name, status: "skip", detail: "not probed — the image or its claude CLI is unavailable" };
+  }
+  if (c.probe.kind === "unreadable") {
+    // AC4: an unknown version is reported, never a silent pass. It blocks only when
+    // some configured model actually has a floor the unknown version might miss.
+    const detail = `could not determine the in-image Claude Code version (${c.probe.detail})`;
+    return floored.size > 0
+      ? { name, status: "fail", detail: `${detail}; cannot verify floors for ${[...floored.keys()].join(", ")}`, next: rebuildAdvice(mode) }
+      : { name, status: "warn", detail, next: rebuildAdvice(mode) };
+  }
+  const version = c.probe.version;
+  const short = [...floored].filter(([, f]) => compareVersions(version, f.required) < 0);
+  if (short.length > 0) {
+    const what = short
+      .map(([model, f]) => `${model} (${f.sources.join(", ")}) requires Claude Code >= ${f.required}`)
+      .join("; ");
+    return {
+      name,
+      status: "fail",
+      detail: `image has Claude Code ${version}, too old for the configured models: ${what} — those dispatches will fail at the API`,
+      next: `${rebuildAdvice(mode)}; ${PIN_ADVICE}`,
+    };
+  }
+  const floors = floored.size > 0 ? `meets every configured model floor (${[...floored.keys()].join(", ")})` : "no configured model declares a version floor";
+  return { name, status: "ok", detail: `image has Claude Code ${version}; ${floors}` };
+}
+
 function policyCheck(p: PolicyInputs): ReleaseCheck {
   if (!p.present) {
     return { name: "model-policy.yml", status: "ok", detail: "absent — legacy resolution (runtime.models[alias]); not an error" };
@@ -231,6 +288,7 @@ export function buildReleaseReport(inp: ReleaseInputs): ReleaseReport {
   const checks: ReleaseCheck[] = [
     imageCheck(inp.image, inp.mode),
     ...inp.clis.map((c) => cliCheck(c, inp.mode)),
+    ...(inp.claudeCli ? [claudeCliVersionCheck(inp.claudeCli, inp.mode)] : []),
     policyCheck(inp.policy),
     ...inp.profileAuth.map(authCheck),
     routingCheck(inp.routing),

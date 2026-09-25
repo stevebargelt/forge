@@ -15,7 +15,8 @@ import { resolvePolicyPath } from "../../raci/project.js";
 import { assetRoot, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
 import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.js";
 import { probeAuth } from "../../v2/provider-doctor.js";
-import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
+import { bindRuntime, detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
+import { parseClaudeCliVersion } from "../../v2/claude-cli-floor.js";
 import { validateRoutePolicyFile } from "./route.js";
 import {
   currentAdapterStamp,
@@ -44,6 +45,7 @@ import {
   type ReleaseInputs,
   type ReleaseReport,
   type CliInputs,
+  type ClaudeCliVersionInputs,
   type AuthInputs,
   type ImageInputs,
 } from "../../v2/release-doctor.js";
@@ -243,6 +245,76 @@ function gatherClis(image: ImageInputs, probe: CliProbe = probeClisInImage, ctx:
   }));
 }
 
+type ClaudeVersionProbe = (image: string) => ClaudeCliVersionInputs["probe"];
+
+// FG-804: read the in-image `claude --version`. A docker failure or unparseable
+// output is `unreadable` — reported by the check, never a silent pass.
+function probeClaudeCliVersion(image: string): ClaudeCliVersionInputs["probe"] {
+  let out: string;
+  try {
+    out = execFileSync("docker", ["run", "--rm", "--entrypoint", "claude", image, "--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    const err = e as Error & { stderr?: Buffer | string };
+    const stderr = typeof err.stderr === "string" ? err.stderr : err.stderr?.toString() ?? "";
+    const line = `${stderr}\n${err.message ?? ""}`.split("\n").find((l) => l.trim().length > 0)?.trim();
+    return { kind: "unreadable", detail: `\`claude --version\` failed: ${line ?? "unknown error"}` };
+  }
+  const version = parseClaudeCliVersion(out);
+  if (!version) return { kind: "unreadable", detail: `unrecognized \`claude --version\` output: ${JSON.stringify(out.trim())}` };
+  return { kind: "version", version };
+}
+
+// FG-804: every model the claude CLI can be asked to serve — the aliases of each
+// runtime that invokes `claude`, plus every model-policy profile entry whose
+// runtime (explicit, or bound from provider/auth) invokes `claude`.
+function claudeModels(claudeRuntimes: string[], ctx: LoadContext): ClaudeCliVersionInputs["models"] {
+  const models: ClaudeCliVersionInputs["models"] = [];
+  for (const name of claudeRuntimes) {
+    try {
+      for (const [alias, model] of Object.entries(loadRuntime(name, ctx).models)) {
+        models.push({ model, source: `runtime ${name}.models.${alias}` });
+      }
+    } catch { /* a malformed runtime is not this check's to report */ }
+  }
+  let policy;
+  try {
+    policy = loadModelPolicy(ctx);
+  } catch {
+    return models; // invalid policy is reported by the policy check
+  }
+  for (const [name, profile] of Object.entries(policy?.model_profiles ?? {})) {
+    let command: string;
+    try {
+      const auth: EffectiveAuth = profile.auth === "auto" ? detectAuthMode() : profile.auth;
+      command = loadRuntime(profile.runtime ?? bindRuntime(profile.provider, auth), ctx).invocation.command;
+    } catch {
+      continue; // unbindable/unknown runtime fails loud at dispatch, not here
+    }
+    if (command !== "claude") continue;
+    for (const [alias, entry] of Object.entries(profile.map)) {
+      models.push({ model: entry.model, source: `profile ${name}.${alias}` });
+    }
+  }
+  return models;
+}
+
+function gatherClaudeCli(
+  image: ImageInputs,
+  clis: CliInputs[],
+  probe: ClaudeVersionProbe,
+  ctx: LoadContext,
+): ClaudeCliVersionInputs | undefined {
+  const claude = clis.find((c) => c.command === "claude");
+  if (!claude) return undefined;
+  return {
+    probe: claude.present === true ? probe(image.name) : { kind: "not-probed" },
+    models: claudeModels(claude.neededBy, ctx),
+  };
+}
+
 export function gatherProfileAuth(ctx: LoadContext = {}): AuthInputs[] {
   let policy;
   try {
@@ -340,6 +412,8 @@ function gatherRouting(): ReleaseInputs["routing"] {
 export type DoctorProbes = {
   inspectImage?: (name: string) => ImageInputs;
   probeClisInImage?: CliProbe;
+  /** FG-804: override the in-image `claude --version` read. */
+  probeClaudeCliVersion?: ClaudeVersionProbe;
   /** FG-543: override the current build-input digest computation — lets tests verify
    *  the repo dir is forwarded correctly without needing a real build context. */
   buildInputDigest?: (repoDir: string) => string | undefined;
@@ -354,9 +428,12 @@ export function gatherReleaseInputs(
   const image = probes.inspectImage
     ? probes.inspectImage(imageName)
     : inspectImage(imageName, ctx.forgeRepoDir, probes.buildInputDigest);
+  const clis = gatherClis(image, probes.probeClisInImage ?? probeClisInImage, ctx);
+  const claudeCli = gatherClaudeCli(image, clis, probes.probeClaudeCliVersion ?? probeClaudeCliVersion, ctx);
   return {
     image,
-    clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage, ctx),
+    clis,
+    ...(claudeCli ? { claudeCli } : {}),
     policy: gatherPolicy(ctx),
     profileAuth: gatherProfileAuth(ctx),
     routing: gatherRouting(),

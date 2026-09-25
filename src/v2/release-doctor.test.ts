@@ -309,3 +309,46 @@ test("#229 summarizeProblems lists only non-ok rows with their next-commands", (
   assert.equal(problems.length, 1);
   assert.match(problems[0]!, /cli codex.*missing.*→/);
 });
+
+// FG-804: the in-image Claude Code version against the configured models' floors.
+const opus55 = [{ model: "claude-opus-5-5", source: "profile claude.reasoning" }, { model: "claude-sonnet-5", source: "profile claude.default" }];
+
+test("FG-804 claude CLI older than a configured model's floor → blocking fail naming model, required, image version, rebuild", () => {
+  const r = buildReleaseReport(green({ claudeCli: { probe: { kind: "version", version: "2.1.224" }, models: opus55 } }));
+  const c = r.checks.find((x) => x.name === "claude CLI version")!;
+  assert.equal(c.status, "fail");
+  assert.equal(r.ok, false);
+  assert.match(c.detail, /claude-opus-5-5/);
+  assert.match(c.detail, /2\.1\.280/);
+  assert.match(c.detail, /2\.1\.224/);
+  assert.match(c.detail, /profile claude\.reasoning/);
+  assert.doesNotMatch(c.detail, /claude-sonnet-5/, "a model without a floor is not named as too old");
+  assert.match(c.next ?? "", /docker\/build\.sh|--rebuild-image/);
+  assert.match(c.next ?? "", /CLAUDE_CODE_VERSION/);
+});
+
+test("FG-804 claude CLI at or above every floor → ok", () => {
+  for (const version of ["2.1.280", "2.1.281"]) {
+    const r = buildReleaseReport(green({ claudeCli: { probe: { kind: "version", version }, models: opus55 } }));
+    assert.equal(status(r, "claude CLI version"), "ok", version);
+    assert.equal(r.ok, true);
+  }
+});
+
+test("FG-804 unreadable in-image version is reported explicitly: fail with a floored model, warn without", () => {
+  const probe = { kind: "unreadable" as const, detail: "`claude --version` failed: boom" };
+  const floored = buildReleaseReport(green({ claudeCli: { probe, models: opus55 } }));
+  const c = floored.checks.find((x) => x.name === "claude CLI version")!;
+  assert.equal(c.status, "fail");
+  assert.match(c.detail, /could not determine the in-image Claude Code version/);
+  assert.match(c.detail, /boom/);
+
+  const unfloored = buildReleaseReport(green({ claudeCli: { probe, models: [{ model: "claude-sonnet-5", source: "x" }] } }));
+  assert.equal(status(unfloored, "claude CLI version"), "warn");
+  assert.equal(unfloored.ok, true);
+});
+
+test("FG-804 not-probed (image/CLI unavailable) → skip, never a silent ok", () => {
+  const r = buildReleaseReport(green({ claudeCli: { probe: { kind: "not-probed" }, models: opus55 } }));
+  assert.equal(status(r, "claude CLI version"), "skip");
+});
