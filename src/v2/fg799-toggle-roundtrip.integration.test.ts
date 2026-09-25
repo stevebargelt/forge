@@ -194,7 +194,7 @@ test("FG-799 E2E: real seed toggle governs compose skip, runner red anti-prompts
   const agentDir = join(process.env.FORGE_HOME!, "agents", "engineer");
 
   mode(project, "suppress");
-  const suppressCompose = composeSystemPrompt({ role: "engineer", workflow: REVIEW_WORKFLOW, step: REVIEW_WORKFLOW.steps[0]!, agentDir, constraintsDir: constraints, projectDir: project });
+  const suppressCompose = composeSystemPrompt({ role: "engineer", workflow: REVIEW_WORKFLOW, step: REVIEW_WORKFLOW.steps[0]!, agentDir, constraintsDir: constraints, projectDir: project, projectMode: "rw" });
   assert.ok(suppressCompose.ok);
   assert.deepEqual(suppressCompose.constraintsSkipped, []);
   const suppressModes = await redFailureModes(project);
@@ -210,7 +210,7 @@ test("FG-799 E2E: real seed toggle governs compose skip, runner red anti-prompts
   assert.ok(!effective.constraints.some((constraint) => constraint.antiPrompt === "PROJECT INVERSION MUST NEVER WIN"));
 
   mode(project, "allow");
-  const allowCompose = composeSystemPrompt({ role: "engineer", workflow: REVIEW_WORKFLOW, step: REVIEW_WORKFLOW.steps[0]!, agentDir, constraintsDir: constraints, projectDir: project });
+  const allowCompose = composeSystemPrompt({ role: "engineer", workflow: REVIEW_WORKFLOW, step: REVIEW_WORKFLOW.steps[0]!, agentDir, constraintsDir: constraints, projectDir: project, projectMode: "rw" });
   assert.ok(allowCompose.ok);
   assert.deepEqual(allowCompose.constraintsSkipped, [{ id: "no-ai-attribution", reason: "toggle ai_attribution=allow" }]);
   const allowModes = await redFailureModes(project);

@@ -24,6 +24,7 @@ import {
   renderDependencyEnvironmentSection,
   type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
+import { renderPreviousAttemptSection, splitPreviousAttempt } from "./previous-attempt.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
@@ -719,6 +720,7 @@ async function dispatchSingleStep(args: {
     // FG-773: inert override anchor — args.projectDir is the owning project (the host
     // mount), which is exactly the project the primary resolves overrides against.
     projectDir: args.projectDir,
+    projectMode: "rw",
   });
 
   const taskPackage: TaskPackage = {
@@ -1784,6 +1786,7 @@ async function runOneRed(args: {
     // FG-773: the red resolves overrides against the OWNING project, NOT args.projectDir —
     // which in publish mode is the ephemeral integration/candidate worktree it reviews.
     projectDir: args.overrideProjectDir,
+    projectMode: "ro",
   });
   const taskPackage: TaskPackage = {
     taskId: redTaskId,
@@ -4212,6 +4215,7 @@ async function runFanoutChild(args: {
     seedGeneration: args.seedGeneration,
     // FG-773: inert override anchor — the owning project the fan-out child runs against.
     projectDir: args.projectDir,
+    projectMode: "rw",
   });
   const taskPackage: TaskPackage = {
     taskId: childTaskId,
@@ -5419,6 +5423,7 @@ function emptyTaskPackage(taskId: string, runId: string, phase: string, role: st
 }
 
 export function renderTaskPackage(tp: TaskPackage, dependencyEnvironment?: DependencyEnvironmentReceipt): string {
+  const { inputs, record: previousAttempt } = splitPreviousAttempt(tp.inputs);
   const sections = [
     `# Task ${tp.taskId}`,
     ``,
@@ -5429,9 +5434,10 @@ export function renderTaskPackage(tp: TaskPackage, dependencyEnvironment?: Depen
     `## Inputs`,
     ``,
     "```json",
-    JSON.stringify(tp.inputs, null, 2),
+    JSON.stringify(inputs, null, 2),
     "```",
     ``,
+    ...renderPreviousAttemptSection(previousAttempt),
   ];
   if (typeof tp.spec === "string" && tp.spec.trim().length > 0) {
     sections.push(`## Spec`, ``, tp.spec, ``);

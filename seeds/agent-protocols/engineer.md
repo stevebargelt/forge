@@ -30,3 +30,7 @@ whole point of batching:
 - **The batch is immutable at its revision.** If the disposition changes while you run, the host
   creates a NEW revision for later work; your task stays bound to the one you were given. Do not
   go looking for a newer scope.
+- **Do not commit, amend, reset, rebase, stash, or push (FG-809).** The coordinator commits the
+  fix cycle; you never do. Leave your edits in the worktree and declare every path you changed in
+  `files_changed`. A commit you author moves the workspace head off the candidate the cycle is
+  bound to, and the cycle refuses rather than adopting it.

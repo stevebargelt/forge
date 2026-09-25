@@ -13,8 +13,10 @@ import type { Workflow } from "./schema.js";
 /** FG-654: composeSystemPrompt returns a discriminated result now — a covered role with
  *  an unresolvable protocol REFUSES rather than composing. These cases all use the
  *  uncovered `architect` role, so unwrapping is the whole adaptation. */
-function promptOf(args: Parameters<typeof composeSystemPrompt>[0]): string {
-  const out = composeSystemPrompt(args);
+function promptOf(
+  args: Omit<Parameters<typeof composeSystemPrompt>[0], "projectMode"> & { projectMode?: "rw" | "ro" },
+): string {
+  const out = composeSystemPrompt({ projectMode: "rw", ...args });
   assert.ok(out.ok, out.ok ? "" : out.refusal);
   return out.prompt;
 }
@@ -159,6 +161,7 @@ test("FG-799: compose records no skip under suppress (constraint present in the 
     agentDir,
     constraintsDir,
     projectDir: projectWithMode(root, "suppress"),
+    projectMode: "rw",
   });
   assert.ok(out.ok);
   assert.deepEqual(out.ok && out.constraintsSkipped, []);
@@ -178,6 +181,7 @@ test("FG-799: compose omits no-ai-attribution and records the skip reason under 
     agentDir,
     constraintsDir,
     projectDir: projectWithMode(root, "allow"),
+    projectMode: "rw",
   });
   assert.ok(out.ok);
   assert.deepEqual(out.ok && out.constraintsSkipped, [
@@ -457,6 +461,7 @@ test("FG-774: the tier-0 protocol is unchanged whether or not an addendum is pre
     projectDir,
     seedGeneration: fxWith.gen,
     releaseSeedsDir: fixtureReleaseSeeds(fxWith.gen),
+    projectMode: "rw",
   });
   assert.ok(outWith.ok, outWith.ok ? "" : outWith.refusal);
 
@@ -508,6 +513,7 @@ function composeFor(
     // The fixture's protocol bytes ARE its release's, so the staleness baseline is the
     // disposable release it published from rather than the tree the test runs in.
     releaseSeedsDir: fixtureReleaseSeeds(fx.gen),
+    projectMode: "rw",
   });
 }
 
@@ -661,4 +667,88 @@ test("FG-654: a `## ` heading inside a code fence is content, not an embedded pr
   const out = composeFor("red-backend", fx, fx.gen);
   assert.ok(out.ok, out.ok ? "" : out.refusal);
   rmSync(fx.root, { recursive: true, force: true });
+});
+
+// ─── FG-809: the headless-agent contract in the shared framing ──────────────
+
+const NON_INTERACTIVE_NEEDLES = [
+  "## Non-interactive run",
+  "Keep going whenever the next step needs no input.",
+  "Do not end on a summary naming the next step, an offer to continue, or a list of options",
+  "Finish when the step's acceptance criteria are met",
+  'Stop early only when you are blocked, and then return status "failed" naming exactly what is needed.',
+];
+
+const WRITE_MODE_NEEDLES = [
+  "## Actions you must not take",
+  "push or force-push",
+  "rewrite or reset git history",
+  "delete branches or tags",
+  "run migrations or destructive SQL against any database that is not a scratch database",
+  "change anything outside /project",
+  '## Task checklist',
+  "keep /task/TASKS.md",
+  "tick an item only once it is validated",
+  "add items you discover",
+  "re-read it after a context summarization or a resume",
+];
+
+function composeMode(role: string, projectMode: "rw" | "ro"): string {
+  const covered = (COVERED_ROLES as readonly string[]).includes(role);
+  const fx = covered ? protocolFixture(role) : { ...setup(), gen: undefined };
+  writeFileSync(join(fx.agentDir, "CLAUDE.md"), `# ${role}`);
+  const out = promptOf({
+    role,
+    workflow: WORKFLOW,
+    step: { ...WORKFLOW.steps[0]!, agent: role },
+    agentDir: fx.agentDir,
+    constraintsDir: fx.constraintsDir,
+    projectMode,
+    ...(fx.gen ? { seedGeneration: fx.gen, releaseSeedsDir: fixtureReleaseSeeds(fx.gen) } : {}),
+  });
+  rmSync(fx.root, { recursive: true, force: true });
+  return out;
+}
+
+for (const role of ["engineer", "frontend-specialist", "backend-specialist", "test-engineer", "documentation-maintainer", "agentic-platform-builder"]) {
+  test(`FG-809: write-mode (${role}, /project rw) gets the non-interactive rule, the destructive-action list and TASKS.md`, () => {
+    const out = composeMode(role, "rw");
+    for (const needle of [...NON_INTERACTIVE_NEEDLES, ...WRITE_MODE_NEEDLES]) assert.ok(out.includes(needle), `${role}: missing ${needle}`);
+  });
+}
+
+for (const role of ["red-wide", "shipping-reviewer", "review-rechecker", "research-skeptic", "synthesizer"]) {
+  test(`FG-809: read-only (${role}, /project ro) gets the non-interactive rule and nothing write-mode`, () => {
+    const out = composeMode(role, "ro");
+    for (const needle of NON_INTERACTIVE_NEEDLES) assert.ok(out.includes(needle), `${role}: missing ${needle}`);
+    for (const needle of WRITE_MODE_NEEDLES) assert.ok(!out.includes(needle), `${role}: must not carry ${needle}`);
+    assert.ok(!out.includes("TASKS.md"), `${role}: a read-only role is never told to keep TASKS.md`);
+  });
+}
+
+test("FG-809: composed-prompt snapshot for a read-only role — output contract + non-interactive rule, no TASKS.md", () => {
+  assert.equal(
+    composeMode("red-narrow", "ro"),
+    `## The review protocol
+
+current generation
+
+
+---
+
+# red-narrow
+
+---
+
+## Output contract
+
+Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}. For red agents, the role-specific output must match the Verdict schema (verdict, confidence, findings).
+
+Optionally, for long-running work, you MAY append progress records to /task/progress.jsonl — one JSON object per line — and forge will surface them on the run timeline. Shapes: {"type":"progress","message":"...","percent":0-100}, {"type":"artifact","kind":"screenshot","path":"/task/..."}, {"type":"decision","summary":"..."}. This is purely optional; never put secrets in it, and result.json is still the required deliverable.
+
+## Non-interactive run
+
+This run is non-interactive: nobody reads or answers you until it ends, and ending your turn ends the run. Keep going whenever the next step needs no input. Do not end on a summary naming the next step, an offer to continue, or a list of options — do that work instead. Finish when the step's acceptance criteria are met and result.json is written. Stop early only when you are blocked, and then return status "failed" naming exactly what is needed.
+`,
+  );
 });

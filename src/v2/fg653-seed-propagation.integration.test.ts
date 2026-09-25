@@ -188,6 +188,7 @@ test("integ FG-653: the rule reaches the reviewer's COMPOSED system prompt, reso
         workflow: WORKFLOW,
         step: { ...WORKFLOW.steps[0]!, agent: role },
         seedGeneration: gen,
+        projectMode: role.startsWith("red-") ? "ro" : "rw",
       });
       assert.ok(composed.ok, composed.ok ? "" : `${role}: ${composed.refusal}`);
       const prompt = composed.ok ? composed.prompt : "";

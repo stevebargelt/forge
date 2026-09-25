@@ -37,6 +37,7 @@ import type { Workflow } from "./schema.js";
 import { classifyTaskLineage } from "./lifecycle-evaluator.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
+import { capturePreviousAttempt, PREVIOUS_ATTEMPT_KEY } from "./previous-attempt.js";
 import { resolveSeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, isActivityUnmapped, activityUnmappedMessage, ACTIVITY_UNMAPPED_REASON, type ModelResolution } from "./model-resolution.js";
 import {
@@ -476,6 +477,7 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     seedGeneration: resolveSeedGeneration(),
     // FG-773: inert override anchor — the project this retry runs against.
     projectDir,
+    projectMode: readOnlyProject ? "ro" : "rw",
   });
   if (!composed.ok) refuse(composed.refusal);
   const composedSystemPrompt = composed.prompt;
@@ -768,6 +770,8 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   // staged auth-state). parentId is left undefined — see the PRIMARY note below.
   // composedSystemPrompt is cleared (re-composed at dispatch). status pending.
   const newId = newTaskId(task.phase);
+  // FG-809: the new task dir starts empty — copy across what the failed attempt recorded.
+  const previousAttempt = capturePreviousAttempt(taskDir(task.runId, task.id));
   const newTask: Task = {
     id: newId,
     runId: task.runId,
@@ -797,7 +801,12 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
       // failure_kind is a classifier label).
       inputs: {
         ...task.taskPackage.inputs,
-        previous_failure: { kind: failureKind ?? "unknown", error: task.error ?? null, failedTaskId: task.id },
+        previous_failure: {
+          kind: failureKind ?? "unknown",
+          error: task.error ?? null,
+          failedTaskId: task.id,
+          ...(previousAttempt ? { [PREVIOUS_ATTEMPT_KEY]: previousAttempt } : {}),
+        },
       },
       composedSystemPrompt: adHoc?.composedSystemPrompt ?? "", // re-compose at dispatch
     },
