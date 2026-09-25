@@ -82,6 +82,7 @@ const NOT_PROJECT_PATH_IDENTITY: Record<string, string> = {
   "src/v2/fg571-harness.ts": "release-fixture harness: builds the temp trees the release tests run against",
   "src/v2/release.ts": "the name appears inside a GENERATED shell script, not as a call in this module",
   "src/store/schema.ts": "the name appears in a SQL comment describing how a column was produced",
+  "src/v2/previous-attempt.ts": "refuses a failed task's agent-planted symlink — confirms the read file resolves inside its task dir",
 };
 
 /** Production modules a LATER FG-693 step migrates, or that no step in this plan

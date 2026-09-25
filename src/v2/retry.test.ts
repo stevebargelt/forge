@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -282,6 +283,45 @@ test("FG-809: a retry of an attempt that left no TASKS.md or progress carries no
   const pf = (nt.taskPackage.inputs as Record<string, unknown>)["previous_failure"] as Record<string, unknown>;
   assert.equal(pf["previous_attempt"], undefined);
   assert.ok(!renderTaskPackage(nt.taskPackage).includes("What the previous attempt completed"));
+});
+
+test("FG-809: a retry never follows a symlinked TASKS.md or progress.jsonl out of the failed task dir", async () => {
+  failedTask("t-link", "idle_timeout");
+  const dir = taskDir(RUN.id, "t-link");
+  mkdirSync(dir, { recursive: true });
+  const outside = mkdtempSync(join(tmpdir(), "fg809-host-"));
+  const secret = join(outside, "secret.txt");
+  writeFileSync(secret, "HOST_SECRET_SENTINEL\n");
+  symlinkSync(secret, join(dir, "TASKS.md"));
+  symlinkSync(secret, join(dir, "progress.jsonl"));
+  const out = await retry("t-link");
+  const nt = getTask(out.newTask.id)!;
+  const pf = (nt.taskPackage.inputs as Record<string, unknown>)["previous_failure"] as Record<string, unknown>;
+  const record = pf["previous_attempt"] as { tasks_md?: string; progress_tail?: string[]; skipped?: string[] };
+  assert.equal(record.tasks_md, undefined);
+  assert.equal(record.progress_tail, undefined);
+  assert.deepEqual(record.skipped, [
+    "TASKS.md: previous attempt file skipped: not a regular file",
+    "progress.jsonl: previous attempt file skipped: not a regular file",
+  ]);
+  for (const pkg of [JSON.stringify(nt.taskPackage), renderTaskPackage(nt.taskPackage), renderInvokeTaskPackage(nt.taskPackage, "x")]) {
+    assert.ok(!pkg.includes("HOST_SECRET_SENTINEL"), "symlink target content must not reach the package");
+  }
+  assert.match(renderTaskPackage(nt.taskPackage), /- TASKS\.md: previous attempt file skipped: not a regular file/);
+});
+
+test("FG-809: a directory named TASKS.md is skipped while a regular progress.jsonl is still read", async () => {
+  failedTask("t-dir", "idle_timeout");
+  const dir = taskDir(RUN.id, "t-dir");
+  mkdirSync(join(dir, "TASKS.md"), { recursive: true });
+  writeFileSync(join(dir, "progress.jsonl"), JSON.stringify({ type: "progress", message: "still-here" }) + "\n");
+  const out = await retry("t-dir");
+  const nt = getTask(out.newTask.id)!;
+  const pf = (nt.taskPackage.inputs as Record<string, unknown>)["previous_failure"] as Record<string, unknown>;
+  const record = pf["previous_attempt"] as { tasks_md?: string; progress_tail?: string[]; skipped?: string[] };
+  assert.equal(record.tasks_md, undefined);
+  assert.deepEqual(record.skipped, ["TASKS.md: previous attempt file skipped: not a regular file"]);
+  assert.deepEqual(record.progress_tail?.map((l) => JSON.parse(l).message), ["still-here"]);
 });
 
 test("retry after auth failure: allowed (user may have fixed auth), disposition carries advice", async () => {
