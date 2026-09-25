@@ -4,7 +4,9 @@ import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, rename
 import { basename, join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeBacklogConfig } from "../../backlog/config.js";
-import { readAiAttribution, type AiAttributionMode } from "../../v2/ai-attribution.js";
+import { readAiAttribution, renderOrchestratorTemplate } from "../../v2/ai-attribution.js";
+
+export { renderOrchestratorTemplate };
 import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
 import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH, currentLinkIn } from "../../util/paths.js";
 // FG-253: the project-scoped operator adapters. The BYTES come from the two
@@ -592,34 +594,6 @@ function readTemplate(): string {
   throw new Error(
     `orchestrator template not found. Looked at:\n  ${candidates.join("\n  ")}`
   );
-}
-
-// FG-799: the orchestrator template carries ai_attribution block-conditionals —
-// lines between `<!-- forge:if ai_attribution=<mode> -->` and `<!-- forge:endif -->`
-// survive ONLY when <mode> matches the project's; the marker lines themselves are
-// ALWAYS stripped. A template with no such markers is returned byte-for-byte. This
-// is the ONLY per-mode difference in the rendered block — `forge upgrade` re-renders
-// and flips it when the mode changes.
-const IF_MARKER_RE = /^[ \t]*<!-- forge:if ai_attribution=(suppress|allow) -->[ \t]*$/;
-const ENDIF_MARKER_RE = /^[ \t]*<!-- forge:endif -->[ \t]*$/;
-
-export function renderOrchestratorTemplate(template: string, mode: AiAttributionMode): string {
-  const lines = template.split("\n");
-  const out: string[] = [];
-  let keep = true;
-  for (const line of lines) {
-    const ifm = line.match(IF_MARKER_RE);
-    if (ifm) {
-      keep = ifm[1] === mode;
-      continue;
-    }
-    if (ENDIF_MARKER_RE.test(line)) {
-      keep = true;
-      continue;
-    }
-    if (keep) out.push(line);
-  }
-  return out.join("\n");
 }
 
 export type BlockAction = "replaced" | "repaired" | "appended" | "unchanged" | "needs-markers";

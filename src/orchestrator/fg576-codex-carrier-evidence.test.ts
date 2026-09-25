@@ -32,6 +32,7 @@ import {
   CODEX_CARRIER_SOURCE_REL,
   CODEX_CARRIER_SPLICE_MARKER,
   GENERATION_CODEX_CARRIER,
+  GENERATION_CODEX_CARRIER_ALLOW,
   codexCarrierPath,
   publishSeedGeneration,
   resolveSeedGeneration,
@@ -269,6 +270,19 @@ test("FG-576 AC8/AC1: a probed-supported build binds the generation's carrier pe
     assert.ok(bytes.includes(skill), `the bound carrier does not name the installed skill '${skill}'`);
   }
   assert.match(bytes, /activation is unverified/i);
+});
+
+test("FG-805: an ai_attribution=allow project binds the generation's allow-rendered carrier, not the default", () => {
+  const gen = publishCarrierGeneration();
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.yml"), "ai_attribution: allow\n", "utf8");
+
+  const planned = planLaunch(adapterWithVersion(SUPPORTED_VERSION), contextFor(decisionFor()));
+  assert.ok(planned.ok, planned.ok ? "" : planned.refusal.message);
+  const configIndex = planned.plan.argv.indexOf("-c");
+  assert.equal(planned.plan.argv[configIndex + 1], `${CODEX_INSTRUCTIONS_CONFIG_KEY}=${codexCarrierPath(gen, "allow")}`);
+  assert.match(String(planned.plan.carrier.evidence), new RegExp(gen.manifest.files[GENERATION_CODEX_CARRIER_ALLOW]!));
+  assert.match(String(planned.plan.carrier.evidence), /ai_attribution=allow/);
 });
 
 test("FG-576 AC8 REGRESSION: a build without the instructions-file capability is refused BEFORE spawn, with a named remedy", () => {

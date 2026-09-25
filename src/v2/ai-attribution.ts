@@ -4,7 +4,7 @@
 //   suppress | allow. ABSENT = suppress (today's behavior; no project changes on
 //   upgrade). This is the single source the enforcement points read their mode
 //   from: the no-ai-attribution constraint's enabled_when gate (constraints.ts),
-//   the orchestrator-block render (init.ts renderer), and the commit-msg hook.
+//   the orchestrator-block render (renderOrchestratorTemplate below), and the commit-msg hook.
 //
 // The parse itself lives in ai-attribution-parse.ts — dependency-free, and shared
 // (by test-pinned duplication) with the standalone hook reader — so the hook and
@@ -43,6 +43,35 @@ export function readAiAttribution(projectDir: string): AiAttribution {
   return parsed.recognized
     ? { mode: parsed.mode, source: "project-config" }
     : { mode: "suppress", source: "default" };
+}
+
+// FG-799: the orchestrator template carries ai_attribution block-conditionals —
+// lines between `<!-- forge:if ai_attribution=<mode> -->` and `<!-- forge:endif -->`
+// survive ONLY when <mode> matches the project's; the marker lines themselves are
+// ALWAYS stripped. A template with no such markers is returned byte-for-byte. This
+// is the ONLY per-mode difference in the rendered block — `forge upgrade` re-renders
+// and flips it when the mode changes. FG-805: the Claude and Codex launch carriers
+// render through this same function, so no delivered policy carries both bullets.
+const IF_MARKER_RE = /^[ \t]*<!-- forge:if ai_attribution=(suppress|allow) -->[ \t]*$/;
+const ENDIF_MARKER_RE = /^[ \t]*<!-- forge:endif -->[ \t]*$/;
+
+export function renderOrchestratorTemplate(template: string, mode: AiAttributionMode): string {
+  const lines = template.split("\n");
+  const out: string[] = [];
+  let keep = true;
+  for (const line of lines) {
+    const ifm = line.match(IF_MARKER_RE);
+    if (ifm) {
+      keep = ifm[1] === mode;
+      continue;
+    }
+    if (ENDIF_MARKER_RE.test(line)) {
+      keep = true;
+      continue;
+    }
+    if (keep) out.push(line);
+  }
+  return out.join("\n");
 }
 
 export function writeAiAttribution(projectDir: string, mode: AiAttributionMode): void {

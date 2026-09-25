@@ -36,6 +36,7 @@
 // written, leaving the unrelated target byte-for-byte unchanged.
 
 import { compilePolicyFile } from "../raci/host-policy.js";
+import { AI_ATTRIBUTION_MODES, renderOrchestratorTemplate, type AiAttributionMode } from "./ai-attribution.js";
 import {
   cpSync,
   existsSync,
@@ -114,6 +115,16 @@ export const GENERATION_ROUTING_POLICY = "routing-policy.yml";
  *  release rendered. */
 export const GENERATION_CODEX_CARRIER = "codex/orchestrator-instructions.md";
 
+/** FG-805 — the carrier is rendered ONCE PER ai_attribution MODE, because the mode is
+ *  per-project while the generation is per-host: the launch picks the variant keyed
+ *  to the target project's effective mode. `suppress` (the default) keeps the
+ *  historical path so a single-mode reader still binds the default policy. */
+export const GENERATION_CODEX_CARRIER_ALLOW = "codex/orchestrator-instructions.allow.md";
+
+export function generationCodexCarrierRel(mode: AiAttributionMode): string {
+  return mode === "allow" ? GENERATION_CODEX_CARRIER_ALLOW : GENERATION_CODEX_CARRIER;
+}
+
 /** The carrier's scaffolding SOURCE, relative to a release's seeds/ dir. Same relative
  *  path as the published artifact deliberately: the flat $FORGE_HOME/codex copy the
  *  drift detector measures (seed-drift.ts SEED_SPECS) is the source, so `forge doctor`
@@ -143,6 +154,30 @@ const ORCHESTRATOR_TEMPLATE_REL = "orchestrator-template.md";
 const TEMPLATE_START_MARKER = "<!-- forge:orchestrator-start -->";
 const TEMPLATE_END_MARKER = "<!-- forge:orchestrator-end -->";
 
+/** FG-805 — the ONE derivation of the Forge orchestrator policy a launch carrier
+ *  delivers: the template's ai_attribution conditionals resolved by the SAME renderer
+ *  `forge init` / `forge upgrade` use for CLAUDE.md, then sliced to the marker-delimited
+ *  region. The tail after the end marker is the project's own "Stack + project
+ *  context" placeholder, which is not Forge policy. Both the Codex carrier (below) and
+ *  the Claude carrier (claude-adapter.ts) render through here, so neither can deliver
+ *  both attribution bullets or the placeholder tail. */
+export function renderOrchestratorPolicy(template: string, mode: AiAttributionMode): string {
+  const rendered = renderOrchestratorTemplate(template, mode);
+  const startIdx = rendered.indexOf(TEMPLATE_START_MARKER);
+  const endIdx = rendered.indexOf(TEMPLATE_END_MARKER);
+  if (startIdx < 0 || endIdx <= startIdx) {
+    throw new Error(
+      `forge seed: the canonical orchestrator policy at seeds/${ORCHESTRATOR_TEMPLATE_REL} carries no ` +
+        `${TEMPLATE_START_MARKER} … ${TEMPLATE_END_MARKER} region.\n` +
+        `Launch carriers are DERIVED from that region — the tail after the end marker is the project's own ` +
+        `"Stack + project context", which is not Forge policy and must not reach a carrier. Fix: restore the ` +
+        `markers in the template.`,
+    );
+  }
+  const bodyStart = rendered.indexOf("\n", startIdx + TEMPLATE_START_MARKER.length);
+  return rendered.slice(bodyStart < 0 ? startIdx + TEMPLATE_START_MARKER.length : bodyStart + 1, endIdx).trim();
+}
+
 /** Render the Codex carrier from the two canonical seeds. PURE — no I/O, no clock, no
  *  paths — so `same input → identical bytes` is a property of the function rather than
  *  of the caller's discipline (AC8).
@@ -155,7 +190,7 @@ const TEMPLATE_END_MARKER = "<!-- forge:orchestrator-end -->";
  *  once" is what makes the splice point unambiguous; "at least once" would have shipped
  *  it. FG-253's orientation marker is held to the same standard, plus a placement check
  *  the count alone cannot make. */
-export function renderCodexCarrier(scaffold: string, template: string): string {
+export function renderCodexCarrier(scaffold: string, template: string, mode: AiAttributionMode): string {
   const occurrences = scaffold.split(CODEX_CARRIER_SPLICE_MARKER).length - 1;
   if (occurrences !== 1) {
     throw new Error(
@@ -186,19 +221,7 @@ export function renderCodexCarrier(scaffold: string, template: string): string {
     );
   }
 
-  const startIdx = template.indexOf(TEMPLATE_START_MARKER);
-  const endIdx = template.indexOf(TEMPLATE_END_MARKER);
-  if (startIdx < 0 || endIdx <= startIdx) {
-    throw new Error(
-      `forge seed: the canonical orchestrator policy at seeds/${ORCHESTRATOR_TEMPLATE_REL} carries no ` +
-        `${TEMPLATE_START_MARKER} … ${TEMPLATE_END_MARKER} region.\n` +
-        `The Codex carrier is DERIVED from that region — the tail after the end marker is the project's own ` +
-        `"Stack + project context", which is not Forge policy and must not reach the carrier. Fix: restore the ` +
-        `markers in the template.`,
-    );
-  }
-  const bodyStart = template.indexOf("\n", startIdx + TEMPLATE_START_MARKER.length);
-  const policy = template.slice(bodyStart < 0 ? startIdx + TEMPLATE_START_MARKER.length : bodyStart + 1, endIdx).trim();
+  const policy = renderOrchestratorPolicy(template, mode);
 
   const body = stripAuthoringHeader(scaffold.slice(0, scaffold.indexOf(CODEX_CARRIER_SPLICE_MARKER)));
   // The orientation marker survived the two edits above only if it sits inside the
@@ -667,11 +690,15 @@ export function publishSeedGeneration(opts: PublishSeedGenerationOptions): Publi
             `told how to act and nothing about what Forge expects of it. Fix: reinstall the release.`,
         );
       }
-      const rendered = renderCodexCarrier(readFileSync(carrierSrc, "utf8"), readFileSync(templateSrc, "utf8"));
-      const carrierDst = join(staging, GENERATION_CODEX_CARRIER);
-      mkdirSync(join(carrierDst, ".."), { recursive: true });
-      writeFileSync(carrierDst, rendered);
-      files[GENERATION_CODEX_CARRIER] = sha256OfBytes(carrierDst);
+      const scaffold = readFileSync(carrierSrc, "utf8");
+      const template = readFileSync(templateSrc, "utf8");
+      for (const mode of AI_ATTRIBUTION_MODES) {
+        const rel = generationCodexCarrierRel(mode);
+        const carrierDst = join(staging, rel);
+        mkdirSync(join(carrierDst, ".."), { recursive: true });
+        writeFileSync(carrierDst, renderCodexCarrier(scaffold, template, mode));
+        files[rel] = sha256OfBytes(carrierDst);
+      }
       codexCarrierPublished = true;
     }
 
@@ -748,8 +775,8 @@ export type GenerationPolicyState =
 /** FG-576: where the Forge-owned Codex instruction carrier lives inside a resolved
  *  generation. The ONE place the generation-relative path is turned into an absolute
  *  one, so the launch binding (step 7) and publication cannot drift about it. */
-export function codexCarrierPath(gen: SeedGeneration): string {
-  return join(gen.root, GENERATION_CODEX_CARRIER);
+export function codexCarrierPath(gen: SeedGeneration, mode: AiAttributionMode = "suppress"): string {
+  return join(gen.root, generationCodexCarrierRel(mode));
 }
 
 /** FG-576 — the integrity state of a generation's Codex instruction carrier, measured
@@ -767,8 +794,11 @@ export type GenerationCarrierState =
   | { kind: "present"; path: string }
   | { kind: "tampered"; path: string; reason: string };
 
-export function generationCodexCarrierState(gen: SeedGeneration): GenerationCarrierState {
-  const rel = GENERATION_CODEX_CARRIER;
+export function generationCodexCarrierState(
+  gen: SeedGeneration,
+  mode: AiAttributionMode = "suppress",
+): GenerationCarrierState {
+  const rel = generationCodexCarrierRel(mode);
   const expected = gen.manifest.files[rel];
   const path = join(gen.root, rel);
   const onDisk = existsSync(path);
