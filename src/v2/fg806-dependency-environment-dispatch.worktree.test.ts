@@ -119,12 +119,15 @@ function containerName(args: string[]): string {
   return index >= 0 ? (args[index + 1] ?? "") : "";
 }
 
-function exec(): DockerExecFn {
+function exec(opts: { onProbe?: () => void } = {}): DockerExecFn {
   return async ({ args, stdoutPath, stderrPath }) => {
     mkdirSync(dirname(stdoutPath), { recursive: true });
     writeFileSync(stderrPath, "");
     const name = containerName(args);
-    if (name.startsWith("forge-depprobe-")) return answerDependencyProbe(args, stdoutPath);
+    if (name.startsWith("forge-depprobe-")) {
+      opts.onProbe?.();
+      return answerDependencyProbe(args, stdoutPath);
+    }
     if (name.startsWith("forge-depload-")) return answerDependencyLoad(args);
     writeFileSync(stdoutPath, "stub");
     if (!name.startsWith("forge-provision-")) {
@@ -175,4 +178,28 @@ test("fg806: a ready pipeline dependency outcome reaches the mounted package.md"
 test("fg806: a not_applicable pipeline dependency outcome leaves package.md without the section", async () => {
   const packageMarkdown = await dispatchPackage(false, "linux");
   assert.doesNotMatch(packageMarkdown, /## Dependency environment/);
+});
+
+test("fg806: a failed package.md re-render fails the task before any agent container starts", async () => {
+  setPlatform("darwin");
+  const { runId } = startRun({ workflow: WORKFLOW, title: "fg806-rewrite-fail", inputs: {}, projectDir: makeProject(true) });
+  const agentStarts: string[] = [];
+  const base = exec({
+    onProbe: () => {
+      const task = tasksForRun(runId)[0]!;
+      const packagePath = join(taskDir(runId, task.id), "package.md");
+      rmSync(packagePath, { force: true });
+      mkdirSync(packagePath);
+    },
+  });
+  const dockerExec: DockerExecFn = async (call) => {
+    const name = containerName(call.args);
+    if (name === `forge-${tasksForRun(runId)[0]!.id}`) agentStarts.push(name);
+    return base(call);
+  };
+  await runNext({ runId, workflow: WORKFLOW, dockerExec });
+  const task = tasksForRun(runId)[0]!;
+  assert.equal(task.status, "failed");
+  assert.match(task.error ?? "", /could not be re-written with this dispatch's dependency-environment contract/);
+  assert.deepEqual(agentStarts, []);
 });

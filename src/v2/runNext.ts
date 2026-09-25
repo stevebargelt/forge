@@ -4994,7 +4994,17 @@ async function runContainer(args: {
   // from one string, as invoke does, so /task/package.md and TASK_PACKAGE_MARKDOWN
   // cannot disagree about what the agent was told.
   const taskPackageMarkdown = renderTaskPackage(args.taskPackage, dependencyEnvironment);
-  writeFileSync(join(dir, "package.md"), taskPackageMarkdown);
+  try {
+    writeFileSync(join(dir, "package.md"), taskPackageMarkdown);
+  } catch (e) {
+    const error =
+      `the task package could not be re-written with this dispatch's dependency-environment contract ` +
+      `(${(e as Error).message}) — refused rather than start a container whose /task/package.md and delivered ` +
+      `prompt disagree. No container started.`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error });
+    return { kind: "failed", error };
+  }
 
   writeTaskManifest(dir, {
     taskId: args.taskId,
