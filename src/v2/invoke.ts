@@ -42,6 +42,7 @@ import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js
 import {
   DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
   dependencyEnvironmentResolvedPayload,
+  renderDependencyEnvironmentSection,
   type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
@@ -1592,32 +1593,7 @@ function previousFailureSection(tp: TaskPackage): string[] {
   ];
 }
 
-// FG-678: the agent is TOLD what its dependency environment is, rather than left
-// to discover it. The section is emitted only when the host actually bound one —
-// there is no honest sentence to write about a dispatch that resolved
-// `not_applicable`, and inventing one is how "the workspace has no deps" gets
-// asserted about a workspace nobody checked. Read-only and read-write dispatches
-// get the same text: the environment is immutable on both, because the volumes are
-// mounted `:ro` either way (the writable bind is the PROJECT, not its
-// node_modules).
-function dependencyEnvironmentSection(receipt: DependencyEnvironmentReceipt | undefined): string[] {
-  if (!receipt) return [];
-  return [
-    `## Dependency environment`,
-    ``,
-    `Forge resolved and attested this dispatch's dependency environment on the host BEFORE your container ` +
-      `started: the project's declared dependencies, keyed to its lockfile (cacheKey ${receipt.cacheKey}, ` +
-      `node ${receipt.nodeVersion}, ABI ${receipt.abi}), mounted read-only over the project's node_modules.`,
-    ``,
-    `It is IMMUTABLE for this dispatch. Do not run \`npm ci\` / \`npm install\` / \`yarn\` / \`pnpm install\` — the ` +
-      `mount is read-only, so an install cannot write into it, and nothing you install could outlive this ` +
-      `container anyway. If the work genuinely requires a dependency this environment does not carry, say so in ` +
-      `result.json and fail the task rather than improvising an install.`,
-    ``,
-  ];
-}
-
-function renderInvokeTaskPackage(
+export function renderInvokeTaskPackage(
   tp: TaskPackage,
   task: string,
   dependencyEnvironment?: DependencyEnvironmentReceipt,
@@ -1633,7 +1609,7 @@ function renderInvokeTaskPackage(
     task,
     ``,
     ...previousFailureSection(tp),
-    ...dependencyEnvironmentSection(dependencyEnvironment),
+    ...renderDependencyEnvironmentSection(dependencyEnvironment),
     `## Output contract`,
     ``,
     `Write a single JSON object to /task/result.json. At minimum: {"status": "complete"|"failed", ...your role-specific output}.`,

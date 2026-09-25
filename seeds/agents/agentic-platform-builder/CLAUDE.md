@@ -72,7 +72,7 @@ Read that as **infra broken, tests unknown** — no test result was produced. Su
 
 ## Building and running the dev server
 
-`/project/node_modules` is a fresh container volume — the host modules are not present (and would be wrong-platform anyway). Before running a build or starting a dev server, install deps first:
+If the task package has a `## Dependency environment` section, the project's dependencies are pre-provisioned and mounted read-only — do **not** install; start the build or dev server directly. If a dependency the work needs is missing from it, return `failed` naming that dependency rather than improvising an install. Otherwise (no such section), `/project/node_modules` may be empty or unusable, so install first with the lockfile's tool:
 
 ```
 npm install      # or pnpm install / yarn — match the project's lockfile

@@ -21,6 +21,7 @@ import {
   DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
   provisionerContainerName,
   dependencyEnvironmentResolvedPayload,
+  renderDependencyEnvironmentSection,
   type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
@@ -4988,6 +4989,23 @@ async function runContainer(args: {
     }
   }
 
+  // FG-806: package.md was materialized above, BEFORE the environment resolved, so
+  // the receipt-bearing section can only be rendered here — re-render both copies
+  // from one string, as invoke does, so /task/package.md and TASK_PACKAGE_MARKDOWN
+  // cannot disagree about what the agent was told.
+  const taskPackageMarkdown = renderTaskPackage(args.taskPackage, dependencyEnvironment);
+  try {
+    writeFileSync(join(dir, "package.md"), taskPackageMarkdown);
+  } catch (e) {
+    const error =
+      `the task package could not be re-written with this dispatch's dependency-environment contract ` +
+      `(${(e as Error).message}) — refused rather than start a container whose /task/package.md and delivered ` +
+      `prompt disagree. No container started.`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error });
+    return { kind: "failed", error };
+  }
+
   writeTaskManifest(dir, {
     taskId: args.taskId,
     runId: args.runId,
@@ -5029,7 +5047,7 @@ async function runContainer(args: {
     MODEL: args.resolution.model,
     UPSTREAM_PROVIDER: args.resolution.provider ?? "",
     SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
-    TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
+    TASK_PACKAGE_MARKDOWN: taskPackageMarkdown,
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,
     ...depSpawnFields,
@@ -5400,7 +5418,7 @@ function emptyTaskPackage(taskId: string, runId: string, phase: string, role: st
   };
 }
 
-function renderTaskPackage(tp: TaskPackage): string {
+export function renderTaskPackage(tp: TaskPackage, dependencyEnvironment?: DependencyEnvironmentReceipt): string {
   const sections = [
     `# Task ${tp.taskId}`,
     ``,
@@ -5426,6 +5444,7 @@ function renderTaskPackage(tp: TaskPackage): string {
   }
   return [
     ...sections,
+    ...renderDependencyEnvironmentSection(dependencyEnvironment),
     `## Output contract`,
     ``,
     `Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}.`,
