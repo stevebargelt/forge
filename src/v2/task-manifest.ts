@@ -153,6 +153,9 @@ export type TaskManifest = {
     // exact | default-fallback. Present in every policy-mode manifest.
     capabilitySource: string;
     mappingPath: string;
+    // FG-807: the effort level the runtime was handed ("low", "max (as xhigh)"),
+    // or "ignored (<reason>)". Absent when the policy entry set no effort.
+    effort?: string;
   };
   // FG-350: RECORDED dispatch-time control-plane provenance. Optional: pre-FG-350
   // manifests omit it. Consumers must degrade gracefully when absent (legacy path).

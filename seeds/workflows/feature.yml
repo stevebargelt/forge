@@ -35,7 +35,8 @@ review_mode: evidence_led
 # use default (Sonnet) — translating architecture to a plan, implementing
 # against acceptance criteria, and judging tests are well within Sonnet's
 # capability. Build fans out, so Opus burn there was the bulk of cost without
-# a quality justification. Reds stay on fast-orchestrator (Haiku) for triage.
+# a quality justification. Reds carry no activity: their role default
+# (`review`) routes them to the policy's review row (FG-807).
 
 # What inputs `forge new` must collect for this workflow.
 # Maps to today's CLI flags: --brief here, --question for investigation, --prd for
@@ -60,7 +61,6 @@ steps:
       job with the code in front of them. See architect seed for the discipline.
     reds:
       - agent: red-wide
-        activity: fast-orchestrator
         # Informational: a verdict this red AUTHORS doesn't block the gate on its
         # own, fail included. A red that returns NO review (crash, idle timeout,
         # OOM, unreadable result, model error) blocks regardless of authority —
@@ -68,7 +68,6 @@ steps:
         authority: specialist
         gate_on_verdict: false
       - agent: red-narrow
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 
@@ -164,29 +163,23 @@ steps:
     # to authoritative while `review_mode: evidence_led` stands above.
     reds:
       - agent: red-wide
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       - agent: red-narrow
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       - agent: red-frontend
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       - agent: red-backend
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       - agent: red-security
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       # Not a risk lens, so never lens-selected away: the shipping reviewer's six duties are
       # about the review as a whole, not about one slice of the diff.
       - agent: shipping-reviewer
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 

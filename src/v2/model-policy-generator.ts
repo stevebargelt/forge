@@ -18,7 +18,7 @@
 //     mistaken for a hand-authored file.
 
 import { stringify as stringifyYaml } from "yaml";
-import { ModelPolicySchema, type ModelPolicy, type CostTier } from "./schema.js";
+import { ModelPolicySchema, type ModelPolicy, type CostTier, type EffortLevel } from "./schema.js";
 import {
   costTierForFamily,
   isKnownRole,
@@ -60,11 +60,14 @@ export class InvalidSelectionError extends Error {
   }
 }
 
-function capabilityEntry(choice: ProfileChoice): { model: string; cost_tier: CostTier; tool_capable?: boolean } {
-  const entry: { model: string; cost_tier: CostTier; tool_capable?: boolean } = {
+type CapabilityEntry = { model: string; cost_tier: CostTier; tool_capable?: boolean; effort?: EffortLevel };
+
+function capabilityEntry(choice: ProfileChoice): CapabilityEntry {
+  const entry: CapabilityEntry = {
     model: choice.model,
     cost_tier: costTierForFamily(choice.family),
   };
+  if (choice.effort) entry.effort = choice.effort;
   // Runtime-fronted (pi/groq) upstreams are guilty-until-proven-innocent at
   // dispatch — a structured role is refused unless the entry is tool_capable.
   if (isRuntimeFronted(choice.provider)) entry.tool_capable = true;

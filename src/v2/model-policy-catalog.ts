@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assetRoot } from "./asset-root.js";
 import type { EffectiveAuth } from "./model-resolution.js";
-import type { CostTier } from "./schema.js";
+import type { CostTier, EffortLevel } from "./schema.js";
 
 // ── The owned family structure ──────────────────────────────────────────────
 //
@@ -44,8 +44,10 @@ type FamilySource = {
 const FAMILY_SOURCES: Record<string, FamilySource[]> = {
   "anthropic/subscription": [
     { family: "opus", seedProfile: "claude-subscription", seedCapability: "reasoning" },
-    { family: "sonnet", seedProfile: "claude-subscription", seedCapability: "review" },
+    { family: "sonnet", seedProfile: "claude-subscription", seedCapability: "default" },
     { family: "haiku", seedProfile: "claude-subscription", seedCapability: "fast" },
+    // FG-807: the red-cost choice — the seed's review entry (model + effort).
+    { family: "opus-review", seedProfile: "claude-subscription", seedCapability: "review" },
   ],
   "anthropic/bedrock": [
     // Work-account Bedrock does NOT expose Opus — sonnet is the strongest there.
@@ -54,8 +56,9 @@ const FAMILY_SOURCES: Record<string, FamilySource[]> = {
   ],
   "anthropic/api": [
     { family: "opus", seedProfile: "claude-api", seedCapability: "reasoning" },
-    { family: "sonnet", seedProfile: "claude-api", seedCapability: "review" },
+    { family: "sonnet", seedProfile: "claude-api", seedCapability: "default" },
     { family: "haiku", seedProfile: "claude-api", seedCapability: "fast" },
+    { family: "opus-review", seedProfile: "claude-api", seedCapability: "review" },
   ],
   "openai/subscription": [
     // Codex is a single family; take its id from the profile default.
@@ -70,6 +73,7 @@ const FAMILY_SOURCES: Record<string, FamilySource[]> = {
 // sonnet standard, haiku cheap). Used when the generator emits capability entries.
 const COST_TIER_BY_FAMILY: Record<string, CostTier> = {
   opus: "premium",
+  "opus-review": "premium",
   sonnet: "standard",
   haiku: "cheap",
   codex: "standard",
@@ -91,7 +95,7 @@ type SeedProfile = {
   provider?: string;
   auth?: string;
   runtime?: string;
-  map?: Record<string, { model?: string; cost_tier?: string }>;
+  map?: Record<string, { model?: string; cost_tier?: string; effort?: EffortLevel }>;
 };
 type SeedPolicy = { model_profiles?: Record<string, SeedProfile> };
 
@@ -136,6 +140,19 @@ export function modelIdForFamily(
   const seedProfile = loadSeed().model_profiles?.[source.seedProfile];
   const model = seedProfile?.map?.[source.seedCapability]?.model;
   return typeof model === "string" && model.length > 0 ? model : undefined;
+}
+
+/** FG-807: the effort level the seed sets on a family's source entry, if any. */
+export function effortForFamily(
+  provider: string,
+  auth: EffectiveAuth,
+  family: string,
+): EffortLevel | undefined {
+  const source = (FAMILY_SOURCES[providerAuthKey(provider, auth)] ?? []).find(
+    (f) => f.family === family,
+  );
+  if (!source) return undefined;
+  return loadSeed().model_profiles?.[source.seedProfile]?.map?.[source.seedCapability]?.effort;
 }
 
 /** Coarse cost tier for a family (defaults to "standard"). */

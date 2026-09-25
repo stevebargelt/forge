@@ -85,21 +85,22 @@ test("a project copy of the shipped policy resolves review and default through s
   mkdirSync(join(projectDir, ".forge"), { recursive: true });
   copyFileSync(shippedPolicy, join(projectDir, ".forge", "model-policy.yml"));
 
-  for (const [profile, expectedModel] of [
-    ["claude-subscription", "claude-sonnet-5"],
-    ["claude-bedrock", "us.anthropic.claude-sonnet-5"],
+  // FG-807: the subscription review row moved to Opus 5.5 at low effort; Bedrock keeps Sonnet.
+  for (const [profile, alias, expectedModel] of [
+    ["claude-subscription", "review", "claude-opus-5-5"],
+    ["claude-subscription", "default", "claude-sonnet-5"],
+    ["claude-bedrock", "review", "us.anthropic.claude-sonnet-5"],
+    ["claude-bedrock", "default", "us.anthropic.claude-sonnet-5"],
   ] as const) {
-    for (const alias of ["review", "default"]) {
-      const resolution = resolveModel({
-        agentRole: "engineer",
-        stepAlias: alias,
-        cliProfile: profile,
-        ctx: { projectDir },
-      });
-      assert.equal(resolution.profile, profile);
-      assert.equal(resolution.model, expectedModel, `${profile}.${alias}`);
-      assert.equal(resolution.resolvedBy, "cli.--profile");
-    }
+    const resolution = resolveModel({
+      agentRole: "engineer",
+      stepAlias: alias,
+      cliProfile: profile,
+      ctx: { projectDir },
+    });
+    assert.equal(resolution.profile, profile);
+    assert.equal(resolution.model, expectedModel, `${profile}.${alias}`);
+    assert.equal(resolution.resolvedBy, "cli.--profile");
   }
 });
 

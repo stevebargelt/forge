@@ -20,8 +20,8 @@ import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "n
 import { spawnSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Runtime } from "./schema.js";
-import { resolveRuntimeMetadata } from "./schema.js";
+import type { EffortLevel, Runtime } from "./schema.js";
+import { EFFORT_ARGS_PLACEHOLDER, resolveRuntimeEffort, resolveRuntimeMetadata } from "./schema.js";
 import {
   exportAwsCreds,
   oauthVolumeName,
@@ -74,6 +74,9 @@ export type SpawnContext = SubstContext & {
   // in legacy mode (no policy) → the pi YAML's `${UPSTREAM_PROVIDER:-anthropic}`
   // fallback preserves the anthropic-bound Crawl behavior.
   UPSTREAM_PROVIDER?: string;
+  // FG-807: the policy-resolved effort level. Unset/empty → the runtime's
+  // ${EFFORT_ARGS} placeholder renders to nothing (argv unchanged).
+  EFFORT?: string;
   SYSTEM_PROMPT: string;
   // Rendered task-package markdown; piped to the container as stdin per the
   // runtime YAML's `invocation.stdin` field. Mirrors v1 spine's behavior.
@@ -1320,9 +1323,15 @@ export function buildDockerArgs(
   const imageIndex = args.length;
   args.push(runtime.image);
 
-  // Invocation command + args (each arg substituted).
+  // Invocation command + args (each arg substituted). The FG-807 effort
+  // placeholder expands to the runtime's effort args, or to no args at all.
   args.push(substitute(runtime.invocation.command, ctx));
+  const effort = resolveRuntimeEffort(runtime, ctx.EFFORT as EffortLevel | undefined);
   for (const arg of runtime.invocation.args) {
+    if (arg === EFFORT_ARGS_PLACEHOLDER) {
+      if (effort?.status === "applied") args.push(...effort.args);
+      continue;
+    }
     args.push(substitute(arg, ctx));
   }
 

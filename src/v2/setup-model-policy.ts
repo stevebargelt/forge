@@ -269,7 +269,9 @@ export function hasCompleteSelection(selection?: HeadlessSelection): boolean {
 const CAPABILITY_PROMPTS: Array<[string, string]> = [
   ["default", "default work"],
   ["reasoning", "reasoning-heavy work"],
-  ["review", "review work"],
+  // FG-807: the red-cost choice — every red resolves `review`, and a feature run
+  // dispatches several per review round.
+  ["review", "review work — every red reviewer runs on this, several per feature run (red cost; *-opus-review = Opus at low effort, premium)"],
   ["fast", "fast/cheap work"],
 ];
 
@@ -282,7 +284,8 @@ function logChoices(log: (m: string) => void, choices: ProfileChoice[]): void {
   log("Available model profiles (from `forge providers doctor`):");
   choices.forEach((c, i) => {
     const tag = c.status === "unknown" ? `  [unverified: ${c.nextAction ?? "availability unknown"}]` : "";
-    log(`  ${i + 1}. ${c.profileName}  (${c.model})${tag}`);
+    const effort = c.effort ? `, effort ${c.effort}` : "";
+    log(`  ${i + 1}. ${c.profileName}  (${c.model}${effort})${tag}`);
   });
 }
 

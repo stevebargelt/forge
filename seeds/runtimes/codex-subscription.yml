@@ -68,9 +68,13 @@ invocation:
     - --skip-git-repo-check                        # /project isn't guaranteed to be a git repo
     - -m
     - "${MODEL}"
+    - "${EFFORT_ARGS}"                # FG-807: expands to effort.args below, or to nothing when unset
     - --cd
     - /project
     - "-"                                          # read the prompt from stdin
+  effort:
+    args: ["-c", "model_reasoning_effort=${EFFORT}"]
+    values: { max: xhigh }            # verified against codex-cli 0.144.1 (ConfigToml key); OpenAI's enum tops out at xhigh
   # Verified against codex-cli 0.135.0: `codex exec` has NO system-prompt flag
   # (no --append-system-prompt equivalent), so the composed system prompt is
   # prepended to the task package in the single stdin stream. The system prompt

@@ -43,7 +43,6 @@ steps:
       open_questions}. Classify, do not exploit.
     reds:
       - agent: red-security
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 
@@ -60,15 +59,12 @@ steps:
       {report: markdown, critical_count, high_count, pass: boolean}.
     reds:
       - agent: red-security
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-wide
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-narrow
-        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 ```

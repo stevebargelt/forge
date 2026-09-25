@@ -57,11 +57,9 @@ Edit the workflow **seed** (`seeds/workflows/feature-ui-design-needed.yml`) and 
     # ...
     reds:
       - agent: red-wide
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: security-reviewer   # ← add your new role here
-        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
 ```
@@ -85,8 +83,7 @@ Watch `~/.forge/runs/<run-id>/<task-id>/CLAUDE.md` to confirm the composed promp
 
   ```yaml
   reds:
-    - agent: red-security
-      activity: fast-orchestrator
+    - agent: red-security         # no activity: reds resolve the role default `review`
       authority: authoritative     # or: specialist
       gate_on_verdict: true        # default: true
   ```

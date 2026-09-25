@@ -14,7 +14,8 @@
 
 import type { AuthProbe } from "./provider-doctor.js";
 import type { EffectiveAuth } from "./model-resolution.js";
-import { familiesFor, modelIdForFamily } from "./model-policy-catalog.js";
+import type { EffortLevel } from "./schema.js";
+import { effortForFamily, familiesFor, modelIdForFamily } from "./model-policy-catalog.js";
 
 export type ChoiceStatus = "available" | "unknown";
 
@@ -26,6 +27,8 @@ export type ProfileChoice = {
   family: string;
   /** Concrete model id from the catalog (seed-derived). */
   model: string;
+  /** FG-807: effort level from the seed entry, carried into the generated map. */
+  effort?: EffortLevel;
   status: ChoiceStatus;
   /** For `unknown` choices: the probe's next-action detail, VERBATIM. */
   nextAction?: string;
@@ -41,12 +44,14 @@ export function offerableChoices(probes: AuthProbe[]): ProfileChoice[] {
     for (const family of familiesFor(probe.provider, probe.mode)) {
       const model = modelIdForFamily(probe.provider, probe.mode, family);
       if (!model) continue; // family with no seed-derived id — never emit free text
+      const effort = effortForFamily(probe.provider, probe.mode, family);
       out.push({
         profileName: `${probe.provider}-${probe.mode}-${family}`,
         provider: probe.provider,
         auth: probe.mode,
         family,
         model,
+        ...(effort ? { effort } : {}),
         status,
         ...(status === "unknown" ? { nextAction: probe.detail } : {}),
       });

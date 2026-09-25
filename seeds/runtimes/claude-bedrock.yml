@@ -89,6 +89,7 @@ invocation:
   args:
     - --model
     - "${MODEL}"
+    - "${EFFORT_ARGS}"                # FG-807: expands to effort.args below, or to nothing when unset
     - --append-system-prompt
     - "${SYSTEM_PROMPT}"
     - --dangerously-skip-permissions
@@ -97,6 +98,8 @@ invocation:
     - --verbose
     - --include-partial-messages
     - --print
+  effort:
+    args: ["--effort", "${EFFORT}"]
   stdin: "${TASK_PACKAGE_MARKDOWN}"  # piped in; matches today's spawn.ts
 
 # Container lifecycle.

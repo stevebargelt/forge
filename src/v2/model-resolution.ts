@@ -28,7 +28,7 @@
 
 import { loadModelPolicy, resolveModelForTask, type LoadContext } from "./loader.js";
 import { detectCredsMode } from "../util/creds.js";
-import type { CostTier, OnUnavailable } from "./schema.js";
+import type { CostTier, EffortLevel, OnUnavailable } from "./schema.js";
 import type { SeedGeneration } from "./seed-generation.js";
 
 // Effective auth is the AuthMode enum minus "auto" — "auto" is an INPUT that
@@ -79,6 +79,9 @@ export type ModelResolution = {
   /** Whether the resolved model supports tool calls. Undefined = unset in policy
    *  (defaults at dispatch time: non-pi runtimes default true, pi defaults false). */
   toolCapable?: boolean;
+  /** FG-807: the profile map entry's effort level, handed to the runtime as
+   *  ${EFFORT}. Undefined = unset (the runtime's argv is unchanged). */
+  effort?: EffortLevel;
   /** FG-560 axis 1 — where the capability alias came from. undefined in legacy mode. */
   capabilitySource?: CapabilitySource;
   /** FG-560 axis 2 — how the concrete model was read from the profile map.
@@ -104,6 +107,9 @@ const DEFAULT_ACTIVITY_BY_ROLE: Record<string, string> = {
   // FG-639: the evidence-led lifecycle's Stage 8 role. Review work, so it resolves the
   // same activity as the discipline reds rather than falling through to "default".
   "review-rechecker": "review",
+  // FG-807: sits in feature.yml's red panel; shipped workflows no longer pin reds to
+  // an activity, so it needs the review default to route with the other reds.
+  "shipping-reviewer": "review",
   "architecture-advisor": "reasoning",
   "tech-lead": "reasoning",
   "prompt-author": "design",
@@ -286,6 +292,7 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
     runtime,
     onUnavailable: profile.on_unavailable ?? policy.on_unavailable,
     toolCapable: entry.tool_capable,
+    ...(entry.effort ? { effort: entry.effort } : {}),
     capabilitySource,
     mappingPath,
     outcome,
@@ -360,9 +367,10 @@ export function taskModelFields(
 
 // The manifest `model` block a resolution implies — written only in policy mode.
 // Returns undefined in legacy mode (resolvedBy="legacy") so the manifest simply
-// omits the block, matching pre-AWN-7 manifests.
-export function manifestModelBlock(res: ModelResolution):
-  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string; capabilitySource: string; mappingPath: string }
+// omits the block, matching pre-AWN-7 manifests. `effort` is the FG-807 record
+// (spawn.ts effortRecord) of how the runtime honored res.effort; omitted when unset.
+export function manifestModelBlock(res: ModelResolution, effort?: string):
+  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string; capabilitySource: string; mappingPath: string; effort?: string }
   | undefined {
   if (res.resolvedBy === "legacy") return undefined;
   return {
@@ -379,5 +387,6 @@ export function manifestModelBlock(res: ModelResolution):
     // dispatch manifest, not only the task row.
     capabilitySource: res.capabilitySource ?? "",
     mappingPath: res.mappingPath ?? "",
+    ...(effort ? { effort } : {}),
   };
 }

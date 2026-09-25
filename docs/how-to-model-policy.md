@@ -28,7 +28,7 @@ model_profiles:
     auth: subscription          # subscription | api | bedrock | auto
     map:
       reasoning: { model: claude-opus-4-8,   cost_tier: premium }
-      review:    { model: claude-sonnet-5, cost_tier: standard }
+      review:    { model: claude-opus-5-5, cost_tier: premium, effort: low }   # optional effort — see below
       default:   { model: claude-sonnet-5, cost_tier: standard }
       # spec-writer/fast-orchestrator are the orchestrator-facing activity names
       # (`forge invoke … --model spec-writer` / `fast-orchestrator`). Map them so
@@ -59,6 +59,50 @@ overrides:
 subscription); a *pinned* auth (`bedrock`/`api`/`subscription`) fails loud if
 unavailable rather than silently switching.
 
+### Effort and red routing (FG-807)
+
+A capability entry may carry an optional `effort` — `low`, `medium`, `high`,
+`xhigh`, or `max`. Newer models (Opus 5.5) always think and are tuned by effort
+rather than prompt wording; low-effort Opus 5.5 is reported to review as well as
+Opus 5 at high effort, with fewer false alarms.
+
+```yaml
+      review: { model: claude-opus-5-5, cost_tier: premium, effort: low }
+```
+
+An invalid level is rejected when the policy loads, not silently dropped. Each
+runtime maps the level to its own CLI through an `invocation.effort` block in
+its runtime YAML (`args`, plus optional `values` for CLIs whose enum differs)
+and a literal `"${EFFORT_ARGS}"` arg in `invocation.args` — the two are
+required together. `${EFFORT_ARGS}` expands to the mapped args, or to nothing:
+
+| Runtime | Argv added | Level mapping |
+|---|---|---|
+| claude (oauth / apikey / bedrock) | `--effort <level>` | as-is |
+| pi (oauth / apikey) | `--thinking <level>` | `max` → `xhigh` |
+| codex | `-c model_reasoning_effort=<level>` | `max` → `xhigh` |
+
+With `effort` unset the argv is unchanged. A runtime with no `invocation.effort`
+mapping does not fail the dispatch; it records the effort as
+`ignored (<reason>)`. The effort (or that ignored record) appears in the
+manifest's `model` block, the `model.profile_resolved` event, and
+`forge model resolve` (`effort:` line; `effectiveEffort` in `--json`).
+
+**Reds route by role, not by a pinned alias.** The shipped workflows no longer
+set `activity: fast-orchestrator` on their reds; every red (including
+`shipping-reviewer`) resolves the role default `review`, so the policy's
+`review` row decides what reviews run on. `fast-orchestrator` remains for
+triage-style callers. The example policy's `claude-subscription` and
+`claude-api` `review` rows are `claude-opus-5-5`, `premium`, `effort: low`;
+`claude-bedrock` keeps Sonnet and codex is unchanged. A feature run dispatches
+several reds per round, so this is a cost choice: point `review` back at a
+Sonnet or Haiku entry to spend less.
+
+`forge upgrade` never changes an existing host policy — a policy you already
+have keeps its `review` row until you edit it or re-run `forge setup
+--reconfigure`. On a **legacy host with no `model-policy.yml`**, reds now
+resolve `runtime.models.default` rather than `fast-orchestrator`.
+
 ### Or let `forge setup` author it (FG-346)
 
 `forge setup` can author `~/.forge/model-policy.yml` for you instead of you
@@ -72,7 +116,10 @@ policy unless you pass `--reconfigure`, and it is not a migration path
 - **TTY, no existing policy** — prompts for a profile per capability (default,
   reasoning-heavy, review, fast/cheap work) and per notable role pin
   (research-primary, research-skeptic), previews the generated YAML, and
-  writes it only on confirmation.
+  writes it only on confirmation. The review prompt is the red-cost choice
+  (every red runs on it): on Claude subscription/API hosts it offers an
+  `*-opus-review` profile (Opus 5.5 at low effort, premium) alongside Sonnet.
+  The non-interactive default stays Haiku.
 - **`--reconfigure`** — re-runs the same Q&A against an *existing* policy, with
   your current choices pre-selected as defaults (Enter keeps them). Run
   non-interactively (`--yes`/no TTY) without a complete set of selection
