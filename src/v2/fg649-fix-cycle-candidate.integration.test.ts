@@ -292,6 +292,10 @@ function harness(
 
   const deps: CoordinatorDeps = {
     ...wiring,
+    // FG-813: forge would execute every fixer-listed test file itself; this fixture's test file is a
+    // placeholder and its verdicts are driven through the rechecker, so forge's execution is off here.
+    // Per-file lane binding is covered by review-run.test.ts and fg788-dashboard-lane.
+    runTrustedTier: undefined,
     verify: (sha) => ({ ok: true, sha, executedRequiredChecks: true, detail: "reused green CI" }),
     shippingInput: ({ review, candidateSha }: { review: Review; candidateSha: string }) => {
       // Identity continuity is computed from the REAL repository head — the protected invariant

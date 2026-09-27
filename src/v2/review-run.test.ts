@@ -1176,6 +1176,207 @@ test("FG-744 / RF-4: a same-named assertion in MORE THAN ONE fixer-listed file i
   assert.notEqual(finding.resolution, "resolved", "an ambiguous same-named binding never resolves");
 });
 
+// ─── FG-813 / FG-788: each named test binds to ITS OWN file, executed by forge in its own lane ──
+
+const T_UNIT = "the partial write is refused at the unit tier";
+const T_INTEG = "the reconcile path retries once against the real store";
+const T_SEMI = "defaults to the review activity; fast-orchestrator stays mapped";
+const F_UNIT = "src/v2/reconcile.test.ts";
+const F_INTEG = "src/v2/reconcile.integration.test.ts";
+
+function green(...names: string[]): string {
+  return ["TAP version 13", ...names.map((n, i) => `ok ${i + 1} - ${n}`), `1..${names.length}`].join("\n");
+}
+
+/** A fixer naming `executedAssertion`, a rechecker that executed ONLY `rechecked` (a subset, by
+ *  default the first unit test), and forge's own per-file lane runner answering from `lanes`. */
+function fg813Harness(opts: {
+  executedAssertion: unknown;
+  filesChanged?: string[];
+  rechecked?: string;
+  lanes: Record<string, { runnerOutput?: string; blocked?: string; notExecuted?: string }>;
+  calls: Array<{ tier: string; testFiles: string[] }>;
+}): Harness {
+  const subset = opts.rechecked ?? T_UNIT;
+  return harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded at both tiers",
+          files_changed: opts.filesChanged ?? ["src/v2/reconcile.ts", F_UNIT, F_INTEG],
+          evidence: "added the named regression tests",
+          executed_assertion: opts.executedAssertion,
+        })),
+      },
+    }),
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-1",
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: { kind: "regression_test", test_name: subset, runner_output: green(subset) },
+        })),
+        new_findings: [],
+      },
+    }),
+    runTrustedTier: (ctx) => {
+      opts.calls.push({ tier: ctx.tier, testFiles: ctx.testFiles });
+      return opts.lanes[ctx.testFiles[0] as string] ?? { runnerOutput: green("an unrelated test") };
+    },
+  });
+}
+
+async function recheckRF1(h: Harness): Promise<{ outcome: Awaited<ReturnType<typeof runNextStage>>; finding: ReviewFinding }> {
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  const outcome = await runNextStage(REVIEW, h.deps);
+  const finding = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1") as ReviewFinding;
+  return { outcome, finding };
+}
+
+const CROSS_TIER = [
+  { test_file: F_UNIT, test_name: T_UNIT },
+  { test_file: F_INTEG, test_name: T_INTEG },
+];
+
+test("FG-813 / AC5a+AC5e: a fix named by two tests in two files and two lanes resolves on forge's own per-file runs, although the rechecker ran only one", async () => {
+  const calls: Array<{ tier: string; testFiles: string[] }> = [];
+  const h = fg813Harness({
+    executedAssertion: CROSS_TIER,
+    calls,
+    lanes: { [F_UNIT]: { runnerOutput: green(T_UNIT) }, [F_INTEG]: { runnerOutput: green(T_INTEG) } },
+  });
+  const { outcome, finding } = await recheckRF1(h);
+  assert.equal(outcome.status, "advanced");
+  // Each file ran ALONE, in ITS OWN lane.
+  assert.deepEqual(
+    calls.map((c) => `${c.tier}:${c.testFiles.join(",")}`).sort(),
+    [`integration:${F_INTEG}`, `unit:${F_UNIT}`],
+  );
+  assert.equal(finding.resolution, "resolved", "every named test executed in its own file at the candidate");
+  assert.equal(finding.resolutionEvidenceKind, "regression_test");
+  assert.equal(finding.resolvedSha, h.head());
+});
+
+test("FG-813 / AC5b: the same cross-file list with one member FAILING records still_present naming that member", async () => {
+  const h = fg813Harness({
+    executedAssertion: CROSS_TIER,
+    calls: [],
+    lanes: {
+      [F_UNIT]: { runnerOutput: green(T_UNIT) },
+      [F_INTEG]: { runnerOutput: `TAP version 13\nnot ok 1 - ${T_INTEG}\n1..1` },
+    },
+  });
+  const { finding } = await recheckRF1(h);
+  assert.equal(finding.resolution, "still_present");
+  assert.match(finding.resolutionEvidence ?? "", new RegExp(`'${T_INTEG}' FAILED`));
+});
+
+test("FG-813 / AC5b+AC2: a member ABSENT from its OWN file is inconclusive naming it — a same-named test in another file never stands in", async () => {
+  // The integration name is printed by the UNIT file's run, not by its own file's. Per-member
+  // binding means that does not count: it is absent where the fixer said it lives.
+  const h = fg813Harness({
+    executedAssertion: CROSS_TIER,
+    calls: [],
+    lanes: {
+      [F_UNIT]: { runnerOutput: green(T_UNIT, T_INTEG) },
+      [F_INTEG]: { runnerOutput: green("some other integration test") },
+    },
+  });
+  const { finding } = await recheckRF1(h);
+  assert.equal(finding.resolution, "inconclusive");
+  assert.match(finding.resolutionEvidence ?? "", new RegExp(`'${T_INTEG}' did not appear in forge's run of ${F_INTEG}`));
+});
+
+test("FG-813 / AC5c: a structured title containing '; ' binds WHOLE at the recheck", async () => {
+  const h = fg813Harness({
+    executedAssertion: [{ test_file: F_UNIT, test_name: T_SEMI }],
+    rechecked: "an unrelated passing test",
+    calls: [],
+    lanes: { [F_UNIT]: { runnerOutput: `✔ ${T_SEMI} (1.1ms)\nℹ pass 1` } },
+  });
+  const { finding } = await recheckRF1(h);
+  assert.equal(finding.resolution, "resolved", "the title is one name, never split into two that match nothing");
+});
+
+test("FG-813 / AC5d: a LEGACY '; '-joined string still resolves when every name is co-located in one listed file", async () => {
+  const calls: Array<{ tier: string; testFiles: string[] }> = [];
+  const h = fg813Harness({
+    executedAssertion: `${T_UNIT}; ${T_INTEG}`,
+    filesChanged: ["src/v2/reconcile.ts", F_UNIT],
+    calls,
+    lanes: { [F_UNIT]: { runnerOutput: green(T_UNIT, T_INTEG) } },
+  });
+  const { finding } = await recheckRF1(h);
+  assert.deepEqual(calls, [{ tier: "unit", testFiles: [F_UNIT] }]);
+  assert.equal(finding.resolution, "resolved");
+});
+
+test("FG-813 / RF-4 preserved: a LEGACY name found in MORE THAN ONE listed file is ambiguous, never resolved", async () => {
+  const h = fg813Harness({
+    executedAssertion: T_UNIT,
+    calls: [],
+    lanes: { [F_UNIT]: { runnerOutput: green(T_UNIT) }, [F_INTEG]: { runnerOutput: green(T_UNIT) } },
+  });
+  const { finding } = await recheckRF1(h);
+  assert.equal(finding.resolution, "inconclusive");
+  assert.match(finding.resolutionEvidence ?? "", /appears in more than one fixer-listed test file/);
+});
+
+test("FG-788 AC1+AC2: dashboard files execute in the dashboard workspace lanes; a Chrome-less browser lane is not_executed, never blocked_environment", async () => {
+  const DASH = "dashboard/src/remote/sync.test.ts";
+  const BROWSER = "dashboard/browser-tests/fg781-remote-board.test.ts";
+  const calls: Array<{ tier: string; testFiles: string[] }> = [];
+  const h = fg813Harness({
+    executedAssertion: [
+      { test_file: DASH, test_name: "sync pushes the projection" },
+      { test_file: BROWSER, test_name: "the remote board renders" },
+    ],
+    filesChanged: [DASH, BROWSER],
+    calls,
+    lanes: {
+      [DASH]: { runnerOutput: green("sync pushes the projection") },
+      [BROWSER]: { notExecuted: "dashboard_browser lane (cwd=dashboard/): chrome precondition: none was found" },
+    },
+  });
+  const { outcome, finding } = await recheckRF1(h);
+  assert.deepEqual(
+    calls.map((c) => c.tier).sort(),
+    ["dashboard_browser", "dashboard_unit"],
+    "the lane is chosen by the file",
+  );
+  assert.equal(outcome.status, "advanced", "a missing Chrome does not stop the stage as blocked_environment");
+  assert.equal(finding.resolution, "inconclusive");
+  assert.match(finding.resolutionEvidence ?? "", /forge did not execute 'the remote board renders'.*dashboard_browser lane \(cwd=dashboard\/\)/);
+});
+
+test("FG-788 AC4: a lane that could not run stops the stage blocked_environment NAMING the lane attempted", async () => {
+  const DASH = "dashboard/src/remote/sync.test.ts";
+  const h = fg813Harness({
+    executedAssertion: [{ test_file: DASH, test_name: "sync pushes the projection" }],
+    filesChanged: [DASH],
+    calls: [],
+    lanes: { [DASH]: { blocked: "spawn node ENOENT" } },
+  });
+  const { outcome, finding } = await recheckRF1(h);
+  assert.equal(outcome.status, "stopped");
+  assert.match(outcome.message, /dashboard_unit lane \(cwd=dashboard\/\)/);
+  assert.match(outcome.message, /spawn node ENOENT/);
+  assert.notEqual(finding.resolution, "resolved");
+});
+
 test("FG-639 / RF-8: the store-level guard still holds — a scope_change cannot clear a carried finding's proof", () => {
   // The FG-649 narrowing above means a resolved finding is not normally re-carried at all, so
   // this store-level exclusion is now defence in depth rather than the first line. It is still

@@ -31,7 +31,12 @@ import {
 } from "./reviews.js";
 import { newFixBatchId, nowIso } from "../util/ids.js";
 import { storeNowMs } from "./publications.js";
-import { executedAssertionIdentityValid } from "../v2/review-evidence.js";
+import {
+  executedAssertionIdentityValid,
+  parseStoredExecutedAssertion,
+  serializeExecutedAssertion,
+  type ExecutedAssertion,
+} from "../v2/review-evidence.js";
 
 export const FIX_BATCH_STATES = ["open", "dispatched", "ingested", "superseded"] as const;
 export type FixBatchState = (typeof FIX_BATCH_STATES)[number];
@@ -371,7 +376,7 @@ export type FixBatchResultRecord = {
   evidenceSha256?: string;
   /** FG-710 Shape B: the candidate-bound executed-assertion identity the fixer named for a
    *  demonstrated `fixed` finding. Surfaced to the recheck so Stage 8 executes THIS assertion. */
-  executedAssertion?: string;
+  executedAssertion?: ExecutedAssertion;
   ingestedAt: string;
 };
 
@@ -402,7 +407,7 @@ function rowToResult(row: ResultRow): FixBatchResultRecord {
     interaction: row.interaction ?? undefined,
     evidencePath: row.evidence_path ?? undefined,
     evidenceSha256: row.evidence_sha256 ?? undefined,
-    executedAssertion: row.executed_assertion ?? undefined,
+    executedAssertion: row.executed_assertion !== null ? parseStoredExecutedAssertion(row.executed_assertion) : undefined,
     ingestedAt: row.ingested_at,
   };
 }
@@ -425,7 +430,7 @@ export type IncomingFixResult = {
   interaction?: string;
   evidencePath?: string;
   evidenceSha256?: string;
-  executedAssertion?: string;
+  executedAssertion?: ExecutedAssertion;
 };
 
 export type FixIngestion =
@@ -619,7 +624,7 @@ export function ingestFixBatchResults(
         r.interaction ?? null,
         r.evidencePath ?? null,
         r.evidenceSha256 ?? null,
-        r.executedAssertion ?? null,
+        r.executedAssertion !== undefined ? serializeExecutedAssertion(r.executedAssertion) : null,
         at,
       );
     }

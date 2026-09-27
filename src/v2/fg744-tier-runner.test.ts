@@ -5,10 +5,17 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tierTestCommand } from "../cli/commands/review-wiring.js";
+import {
+  executeAcceptanceTests,
+  runLaneTestFiles,
+  runOnCleanCandidate,
+  tierTestCommand,
+} from "../cli/commands/review-wiring.js";
+import { assessAcceptanceClaims, type AcClaim } from "./review-evidence.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const FILE = "src/v2/example.integration.test.ts";
@@ -38,4 +45,137 @@ test("FG-744: the worktree tier runner matches the test:worktree script, plus th
   assert.equal(`${cmd} ${args.join(" ")}`, `${worktreeRunner} ${FILE}`);
   // The worktree tier does NOT carry the integration build preload.
   assert.ok(!args.includes("./src/integration-build-preload.ts"));
+});
+
+test("FG-813: the unit lane runner matches the test:unit script, plus the scoped file", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  const unitRunner = pkg.scripts["test:unit"]?.split("$(find")[0]?.trim();
+  assert.ok(unitRunner, "package.json must define test:unit");
+  const { cmd, args, cwd } = tierTestCommand("unit", ["src/v2/x.test.ts"]);
+  assert.equal(`${cmd} ${args.join(" ")}`, `${unitRunner} src/v2/x.test.ts`);
+  assert.equal(cwd, ".");
+});
+
+test("FG-788 AC1: the dashboard lanes run the dashboard workspace's own `tsx --test` runner from cwd=dashboard, file relative to it", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "dashboard", "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  // `tsx --test` IS node with the tsx loader; the lane spells it that way so it needs no bin shim.
+  for (const [script, lane, file] of [
+    ["test", "dashboard_unit", "dashboard/src/remote/sync.test.ts"],
+    ["test:integration", "dashboard_integration", "dashboard/src/x.integration.test.ts"],
+    ["test:browser", "dashboard_browser", "dashboard/browser-tests/fg781-remote-board.test.ts"],
+  ] as const) {
+    assert.match(pkg.scripts[script] ?? "", /^tsx --test /, `dashboard ${script} must still be a tsx --test runner`);
+    const { cmd, args, cwd } = tierTestCommand(lane, [file]);
+    assert.equal(cwd, "dashboard");
+    assert.deepEqual([cmd, ...args], ["node", "--import", "tsx", "--test", file.replace(/^dashboard\//, "")]);
+  }
+});
+
+test("FG-813 / FG-788: Stage 9 re-binds a met regression-test claim to forge's own run of its file, in that file's lane", () => {
+  const title = "defaults to the review activity; fast-orchestrator stays mapped";
+  const ran: string[] = [];
+  const claims = executeAcceptanceTests(
+    [
+      // Claimed output is stale/empty; forge's own dashboard-lane run is what binds.
+      { ref: "AC-1", verdict: "met", evidence: { kind: "regression_test", test_name: title, test_file: "dashboard/src/a.test.ts", runner_output: "" } },
+      // Forge's run shows it RED — the claim does not survive on its own say-so.
+      { ref: "AC-2", verdict: "met", evidence: { kind: "regression_test", test_name: "b", test_file: "src/b.integration.test.ts", runner_output: "ok 1 - b" } },
+      // A lane forge attempted but could not run never falls back to the supplied output.
+      { ref: "AC-3", verdict: "met", evidence: { kind: "regression_test", test_name: "c", test_file: "dashboard/browser-tests/c.test.ts", runner_output: "ok 1 - c" } },
+      { ref: "AC-4", verdict: "unmet" },
+    ],
+    (lane, file) => {
+      ran.push(`${lane}:${file}`);
+      if (lane === "dashboard_unit") return { runnerOutput: `✔ ${title} (1ms)` };
+      if (lane === "integration") return { runnerOutput: "not ok 1 - b" };
+      return { notExecuted: "chrome precondition" };
+    },
+  );
+  assert.deepEqual(ran, [
+    "dashboard_unit:dashboard/src/a.test.ts",
+    "integration:src/b.integration.test.ts",
+    "dashboard_browser:dashboard/browser-tests/c.test.ts",
+  ]);
+  const verdicts = assessAcceptanceClaims(claims, "cand1").map((a) => a.verdict);
+  assert.deepEqual(verdicts, ["met", "unproven", "unproven", "unmet"]);
+});
+
+function metClaim(ref: string, file: string, title: string): AcClaim {
+  // The supplied output carries the EXACT title — it would be met if forge ever assessed it.
+  return { ref, verdict: "met", evidence: { kind: "regression_test", test_name: title, test_file: file, runner_output: `✔ ${title} (1ms)` } };
+}
+
+test("FG-813 RF-1: a cited file forge could not execute is unproven, never met on the supplied output", () => {
+  const project = mkdtempSync(join(tmpdir(), "fg813-rf1-"));
+  const outside = mkdtempSync(join(tmpdir(), "fg813-rf1-outside-"));
+  const priorChrome = process.env["FORGE_CHROME_BIN"];
+  try {
+    const put = (rel: string): void => {
+      mkdirSync(dirname(join(project, rel)), { recursive: true });
+      writeFileSync(join(project, rel), "");
+    };
+    put("dashboard/browser-tests/c.test.ts");
+    writeFileSync(join(outside, "x.test.ts"), "");
+    mkdirSync(join(project, "src/v2"), { recursive: true });
+    symlinkSync(join(outside, "x.test.ts"), join(project, "src/v2/escape.test.ts"));
+    process.env["FORGE_CHROME_BIN"] = join(project, "no-such-chrome");
+
+    const claims = [
+      metClaim("missing", "src/v2/missing.test.ts", "missing title"),
+      metClaim("refused", "src/v2/escape.test.ts", "escape title"),
+      metClaim("chrome-less", "dashboard/browser-tests/c.test.ts", "browser title"),
+    ];
+    const assessed = assessAcceptanceClaims(
+      executeAcceptanceTests(claims, (lane, file) => runLaneTestFiles(project, lane, [file])),
+      "cand1",
+    );
+    assert.deepEqual(
+      assessed.map((a) => a.verdict),
+      ["unproven", "unproven", "unproven"],
+    );
+    assert.match(assessed[0]?.detail ?? "", /^forge could not execute src\/v2\/missing\.test\.ts in the unit lane .*does not exist at the candidate/);
+    assert.match(assessed[1]?.detail ?? "", /^forge could not execute src\/v2\/escape\.test\.ts in the unit lane .*resolves outside the workspace/);
+    assert.match(assessed[2]?.detail ?? "", /^forge could not execute dashboard\/browser-tests\/c\.test\.ts in the dashboard_browser lane .*chrome precondition/);
+  } finally {
+    if (priorChrome === undefined) delete process.env["FORGE_CHROME_BIN"];
+    else process.env["FORGE_CHROME_BIN"] = priorChrome;
+    rmSync(project, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("FG-813 RF-1: a run the post-run workspace check refuses is unproven, not met on the supplied output", () => {
+  const title = "post-run title";
+  const checks = [undefined, { reason: "workspace_dirty_at_candidate", message: "the run dirtied src/x.ts" }];
+  const assessed = assessAcceptanceClaims(
+    executeAcceptanceTests([metClaim("post", "src/v2/p.test.ts", title)], (lane) =>
+      runOnCleanCandidate(lane, () => checks.shift(), () => ({ runnerOutput: `✔ ${title} (1ms)` })),
+    ),
+    "cand1",
+  );
+  assert.equal(assessed[0]?.verdict, "unproven");
+  assert.match(assessed[0]?.detail ?? "", /forge could not execute src\/v2\/p\.test\.ts in the unit lane .*workspace_dirty_at_candidate: the run dirtied src\/x\.ts/);
+});
+
+test("FG-813 RF-2: a workspace moved after the outer check and before the run executes nothing and leaves the claim unproven", () => {
+  const title = "pre-run title";
+  let executed = 0;
+  const assessed = assessAcceptanceClaims(
+    executeAcceptanceTests([metClaim("pre", "src/v2/q.test.ts", title)], (lane) =>
+      runOnCleanCandidate(
+        lane,
+        () => ({ reason: "candidate_not_checked_out", message: "the workspace is on deadbeef" }),
+        () => {
+          executed += 1;
+          return { runnerOutput: `✔ ${title} (1ms)` };
+        },
+      ),
+    ),
+    "cand1",
+  );
+  assert.equal(executed, 0, "a pre-run refusal must not execute the cited test");
+  assert.equal(assessed[0]?.verdict, "unproven");
+  assert.match(assessed[0]?.detail ?? "", /candidate_not_checked_out: the workspace is on deadbeef/);
 });

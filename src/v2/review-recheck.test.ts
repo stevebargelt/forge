@@ -11,7 +11,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ingestRecheck, recheckIsNoOp } from "./review-recheck.js";
+import { ingestRecheck, recheckIsNoOp, type TrustedTierRun } from "./review-recheck.js";
+import { testExecution } from "./review-evidence.js";
 import type { ReviewFinding } from "../store/reviews.js";
 
 const REVIEW = "review-r1";
@@ -637,6 +638,23 @@ test("FG-657: a lane covering EVERY test the claim names resolves it through the
 
 const ASSERTION_744 = "the reconcile path guards a partial write";
 const INTEGRATION_EXECUTED = `TAP version 13\nok 1 - ${ASSERTION_744}\n1..1\n# pass 1`;
+const FILE_744 = "src/v2/fg737.integration.test.ts";
+
+/** Forge's run of the cited assertion's OWN file, as the coordinator binds it. */
+function ownFileRun(runnerOutput: string, candidateSha: string): TrustedTierRun {
+  return {
+    candidateSha,
+    members: [
+      {
+        testName: ASSERTION_744,
+        searchedFiles: [FILE_744],
+        file: FILE_744,
+        lane: "integration",
+        execution: testExecution(runnerOutput, [ASSERTION_744]),
+      },
+    ],
+  };
+}
 
 /** The exact FG-737 RF-1 finding: demonstrated, its cited assertion in an integration test. The
  *  rechecker's self-reported evidence is the FAST gate, which does not contain that assertion. */
@@ -674,13 +692,7 @@ test("FG-744 / AC1+AC4: forge's trusted integration-tier run of the cited assert
     expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
-      [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts"],
-        candidateSha: SHA,
-        assertionFile: "src/v2/fg737.integration.test.ts",
-        runnerOutput: INTEGRATION_EXECUTED,
-      },
+      [`${REVIEW}/RF-1`]: ownFileRun(INTEGRATION_EXECUTED, SHA),
     },
   });
   assert.equal(r.ok, true);
@@ -688,7 +700,7 @@ test("FG-744 / AC1+AC4: forge's trusted integration-tier run of the cited assert
   assert.equal(r.applications[0]?.resolution, "resolved", "forge's own tier execution is the trusted proof");
   assert.equal(r.applications[0]?.coverage, "executed");
   assert.equal(r.applications[0]?.evidenceKind, "regression_test");
-  assert.match(r.applications[0]?.detail ?? "", /executed and passed in forge's integration tier/);
+  assert.match(r.applications[0]?.detail ?? "", /executed and passed in forge's run of src\/v2\/fg737.integration.test.ts in the integration lane/);
   assert.equal(r.returnsToDisposition, false);
 });
 
@@ -700,13 +712,7 @@ test("FG-744 / AC3: a SKIPPED assertion in the trusted tier run never resolves",
     expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
-      [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts"],
-        candidateSha: SHA,
-        assertionFile: "src/v2/fg737.integration.test.ts",
-        runnerOutput: skipped,
-      },
+      [`${REVIEW}/RF-1`]: ownFileRun(skipped, SHA),
     },
   });
   assert.equal(r.ok, true);
@@ -724,13 +730,7 @@ test("FG-744 / AC3: a RED (failing) assertion in the trusted tier run is the fin
     expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
-      [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts"],
-        candidateSha: SHA,
-        assertionFile: "src/v2/fg737.integration.test.ts",
-        runnerOutput: red,
-      },
+      [`${REVIEW}/RF-1`]: ownFileRun(red, SHA),
     },
   });
   assert.equal(r.ok, true);
@@ -752,9 +752,8 @@ test("FG-744 / AC3: an ABSENT assertion (no fixer-listed file contains it) never
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
       [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts"],
         candidateSha: SHA,
+        members: [{ testName: ASSERTION_744, searchedFiles: [FILE_744], execution: "absent" }],
       },
     },
   });
@@ -773,10 +772,17 @@ test("FG-744 / AC3: a BLOCKED trusted tier run records blocked_environment cover
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
       [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts"],
         candidateSha: SHA,
-        blocked: "workspace_dirty_at_candidate: uncommitted changes",
+        members: [
+          {
+            testName: ASSERTION_744,
+            searchedFiles: [FILE_744],
+            file: FILE_744,
+            lane: "integration",
+            execution: "blocked",
+            reason: "integration lane (cwd=<repo root>): workspace_dirty_at_candidate: uncommitted changes",
+          },
+        ],
       },
     },
   });
@@ -796,13 +802,7 @@ test("FG-744 / RF-3: a trusted run bound to a DIFFERENT candidate sha never reso
     expected: [finding({ ordinal: 1, reachability: "demonstrated" })],
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
-      [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts"],
-        candidateSha: "a-stale-earlier-candidate",
-        assertionFile: "src/v2/fg737.integration.test.ts",
-        runnerOutput: INTEGRATION_EXECUTED,
-      },
+      [`${REVIEW}/RF-1`]: ownFileRun(INTEGRATION_EXECUTED, "a-stale-earlier-candidate"),
     },
   });
   assert.equal(r.ok, true);
@@ -823,10 +823,15 @@ test("FG-744 / RF-4: the cited assertion in MORE THAN ONE listed file is an ambi
     fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION_744 },
     trustedTierRuns: {
       [`${REVIEW}/RF-1`]: {
-        tiers: ["integration"],
-        testFiles: ["src/v2/fg737.integration.test.ts", "src/v2/unrelated.integration.test.ts"],
         candidateSha: SHA,
-        ambiguousFiles: ["src/v2/fg737.integration.test.ts", "src/v2/unrelated.integration.test.ts"],
+        members: [
+          {
+            testName: ASSERTION_744,
+            searchedFiles: [FILE_744, "src/v2/unrelated.integration.test.ts"],
+            execution: "ambiguous",
+            ambiguousFiles: [FILE_744, "src/v2/unrelated.integration.test.ts"],
+          },
+        ],
       },
     },
   });
@@ -834,6 +839,6 @@ test("FG-744 / RF-4: the cited assertion in MORE THAN ONE listed file is an ambi
   if (!r.ok) return;
   assert.equal(r.applications[0]?.resolution, "inconclusive");
   assert.equal(r.applications[0]?.coverage, "not_executed");
-  assert.match(r.applications[0]?.detail ?? "", /appears in more than one fixer-listed higher-tier file/);
+  assert.match(r.applications[0]?.detail ?? "", /appears in more than one fixer-listed test file/);
   assert.equal(r.returnsToDisposition, true);
 });
