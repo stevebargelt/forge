@@ -12,7 +12,7 @@
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { pinnedVerificationEnv } from "../../v2/host-readiness.js";
 import { applyOrchestratorBlock } from "./init.js";
@@ -45,7 +45,16 @@ import type {
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
 import { REVIEW_DISPATCH_ROLES, RISK_LENSES } from "../../v2/review-contract.js";
-import type { AcClaim } from "../../v2/review-evidence.js";
+import {
+  describeLane,
+  laneCwd,
+  normalizeTestPath,
+  testLaneForFile,
+  type AcClaim,
+  type TestLane,
+} from "../../v2/review-evidence.js";
+import { chromePreconditionMessage, findChrome } from "../../util/chrome-bin.js";
+import { provenPhysical } from "../../util/path-identity.js";
 import type { DocsCloseout } from "../../v2/review-shipping.js";
 import type { Review } from "../../store/reviews.js";
 
@@ -404,7 +413,9 @@ function fixerTask(ctx: FixerContext): string {
             remediation_summary: "…",
             files_changed: ["src/…"],
             evidence: "the test you added or the existing evidence you used",
-            executed_assertion: "the exact test name your proof executed, as the runner prints it",
+            executed_assertion: [
+              { test_file: "src/…/the-file.test.ts", test_name: "the exact test name, as the runner prints it" },
+            ],
           },
         ],
       },
@@ -417,10 +428,14 @@ function fixerTask(ctx: FixerContext): string {
     `- EXACTLY ONE entry per finding id in the payload. An omitted, duplicated, or foreign`,
     `  id is refused by the host and NOTHING from your result is applied. An omission is`,
     `  never read as a resolution.`,
-    `- \`executed_assertion\` is REQUIRED when you mark a DEMONSTRATED finding "fixed": name the`,
-    `  candidate-bound assertion your proof executed — the test name as the runner prints it,`,
-    `  or several joined with "; ". The recheck executes THAT assertion; a demonstrated fix with`,
-    `  no named executed assertion cannot complete the remediation stage. Omit it otherwise.`,
+    `- \`executed_assertion\` is REQUIRED when you mark a DEMONSTRATED finding "fixed": a LIST of`,
+    `  \`{ "test_file", "test_name" }\` — one entry per test your proof executed, each naming the`,
+    `  repo-relative file it lives in (e.g. src/…/x.test.ts, src/…/x.integration.test.ts,`,
+    `  dashboard/src/…/x.test.ts, dashboard/browser-tests/x.test.ts) and the test name EXACTLY as`,
+    `  the runner prints it. One test per entry — never join names into one string. Forge executes`,
+    `  each file itself, in its own lane, at the candidate, and every named test must pass in its`,
+    `  own file; a demonstrated fix with no named executed assertion cannot complete the`,
+    `  remediation stage. Omit it otherwise.`,
     `- CONDITIONAL fields — include ONLY when they apply, never as empty strings:`,
     `    \`scope_change_reason\` — REQUIRED when result is "scope_change": what scope would have`,
     `      to move. If a finding cannot be resolved without changing scope, say so and it returns`,
@@ -526,6 +541,16 @@ function recheckerTask(ctx: RecheckContextIn): string {
     ctx.delta,
     "```",
     ``,
+    `## Running a cited test — in its OWN lane`,
+    ``,
+    `Forge itself executes every test a fixer named, in that file's lane, at the candidate. When YOU`,
+    `run a test, run it the way its lane does, or its imports will not resolve:`,
+    `- src/**/*.test.ts (unit), *.integration.test.ts, *.worktree.test.ts — from the repo root.`,
+    `- dashboard/src/**/*.test.ts and dashboard/browser-tests/*.test.ts — from cwd dashboard/`,
+    `  (\`cd dashboard && npx tsx --test <path relative to dashboard>\`), exactly as its npm scripts`,
+    `  and CI do; from the repo root its @forge/* aliases do not resolve (ERR_MODULE_NOT_FOUND).`,
+    `If you set \`environment_blocked\`, name the lane and cwd you attempted in the reason.`,
+    ``,
     `## Output contract`,
     ``,
     `Write /task/result.json as:`,
@@ -551,23 +576,108 @@ function recheckerTask(ctx: RecheckContextIn): string {
   ].join("\n");
 }
 
-/** FG-744 (fork C): the exact `node --test` runner each higher tier uses, scoped to a single
- *  file — the SAME invocation `scripts/run-integration-tests.sh` (integration bulk) and the
- *  `test:worktree` package script run, and the one forge-test reproduces when it narrows a tier
- *  to one path (FG-695). Reproduced rather than shelled through those entry points because both
- *  select their own file set (`$(find …)` / a k/N shard selector) and cannot be pointed at one
- *  file. The integration tier adds `integration-build-preload.ts` so a scoped integration test
- *  transpiles the src graph exactly as the bulk lane does; the worktree tier does not.
- *  fg744-tier-runner.test.ts pins these against the live tier definitions so they cannot drift. */
+/** FG-744 (fork C) / FG-813 / FG-788: the exact runner each lane uses, scoped to a single file,
+ *  and the directory it runs from. The root lanes reproduce the `test:unit` / `test:worktree`
+ *  package scripts and `scripts/run-integration-tests.sh`'s bulk runner; the dashboard lanes
+ *  reproduce the dashboard workspace's `test` / `test:integration` / `test:browser` scripts
+ *  (`tsx --test`, i.e. node with the tsx loader) and run with cwd = dashboard/, where its tsconfig
+ *  `@forge/*` aliases resolve exactly as in CI. Reproduced rather than shelled through those
+ *  entry points because each selects its own file set (`$(find …)` / a shard selector) and cannot
+ *  be pointed at one file. `files` are repo-relative; a dashboard lane is handed them relative to
+ *  its own cwd. fg744-tier-runner.test.ts pins these against the live definitions. */
 export function tierTestCommand(
-  tier: "integration" | "worktree",
+  tier: TestLane,
   files: readonly string[],
-): { cmd: string; args: string[] } {
+): { cmd: string; args: string[]; cwd: "." | "dashboard" } {
+  const cwd = laneCwd(tier);
+  if (cwd === "dashboard") {
+    return { cmd: "node", args: ["--import", "tsx", "--test", ...files.map((f) => f.replace(/^dashboard\//, ""))], cwd };
+  }
   const preload =
     tier === "integration"
       ? ["--import", "tsx", "--import", "./src/integration-build-preload.ts", "--import", "./src/test-setup.ts"]
       : ["--import", "tsx", "--import", "./src/test-setup.ts"];
-  return { cmd: "node", args: [...preload, "--test", ...files] };
+  return { cmd: "node", args: [...preload, "--test", ...files], cwd };
+}
+
+export type LaneRunResult = { runnerOutput?: string; blocked?: string; notExecuted?: string };
+
+/** Execute cited test files in their declared lane, host-side, from the workspace. CONFINED: every
+ *  file must be a repo-relative test path whose OWN lane is `lane` and whose real path stays inside
+ *  the workspace, and the only command run is the lane's declared runner — nothing a fixer wrote
+ *  selects what executes beyond "this test file". The caller owns the candidate-checkout check. */
+export function runLaneTestFiles(projectDir: string, lane: TestLane, files: readonly string[]): LaneRunResult {
+  const root = provenPhysical(projectDir);
+  if (root === null) return { blocked: `${describeLane(lane)}: the workspace ${projectDir} does not resolve` };
+  for (const file of files) {
+    const normalized = normalizeTestPath(file);
+    if (normalized === undefined || testLaneForFile(normalized) !== lane) {
+      return { notExecuted: `'${file}' is not a test file of the ${describeLane(lane)}` };
+    }
+    const real = provenPhysical(join(projectDir, normalized));
+    if (real === null) return { notExecuted: `cited test file '${file}' does not exist at the candidate` };
+    if (real !== root && !real.startsWith(root + sep)) {
+      return { notExecuted: `cited test file '${file}' resolves outside the workspace (${relative(root, real)})` };
+    }
+  }
+
+  const env = pinnedVerificationEnv("review-recheck");
+  if (lane === "dashboard_browser") {
+    // FG-642: the browser lane needs a real Chrome. A Chrome-less host cannot run it — that is a
+    // named `not_executed`, never an environment block of the whole stage and never green.
+    const chrome = findChrome();
+    if (chrome === undefined) {
+      return { notExecuted: `${describeLane(lane)}: ${chromePreconditionMessage("the dashboard browser lane")}` };
+    }
+    env["FORGE_CHROME_BIN"] = chrome;
+  }
+
+  const { cmd, args, cwd } = tierTestCommand(lane, files);
+  try {
+    return {
+      runnerOutput: execFileSync(cmd, args, {
+        cwd: join(projectDir, cwd),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+      }),
+    };
+  } catch (e) {
+    // A NON-ZERO EXIT IS NOT A BLOCK. node:test exits non-zero when a test FAILS, and a red cited
+    // assertion is the finding still being present — real output the recheck reads as `failed`.
+    // Only a spawn that produced NO output at all (the binary missing, the workspace unreadable)
+    // is an environment fault, and it names the lane attempted (FG-788 AC4).
+    const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
+    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    if (out.trim() === "") return { blocked: `${describeLane(lane)} running '${cmd} ${args.join(" ")}': ${(e as Error).message}` };
+    return { runnerOutput: out };
+  }
+}
+
+/** FG-813 / FG-788: Stage 9's acceptance claims, with every `met` regression-test claim that names
+ *  a `test_file` in a forge lane re-bound to FORGE's execution of that file. When forge produced
+ *  output it replaces the claimed runner output (and any environment-block declaration — forge
+ *  ran it); when forge could not run the lane the claim is assessed exactly as supplied. */
+export function executeAcceptanceTests(
+  claims: readonly AcClaim[],
+  run: (lane: TestLane, file: string) => LaneRunResult,
+): AcClaim[] {
+  const cache = new Map<string, LaneRunResult>();
+  return claims.map((c) => {
+    const ev = c.evidence as { kind?: unknown; test_file?: unknown } | undefined;
+    if (c.verdict !== "met" || ev?.kind !== "regression_test" || typeof ev.test_file !== "string") return c;
+    const file = normalizeTestPath(ev.test_file);
+    const lane = file !== undefined ? testLaneForFile(file) : undefined;
+    if (file === undefined || lane === undefined) return c;
+    let res = cache.get(file);
+    if (res === undefined) {
+      res = run(lane, file);
+      cache.set(file, res);
+    }
+    if (res.runnerOutput === undefined) return c;
+    const { environment_blocked: _blocked, ...rest } = c.evidence as Record<string, unknown>;
+    return { ...c, evidence: { ...rest, runner_output: res.runnerOutput } };
+  });
 }
 
 /** FG-649: the paths `git status --porcelain -z --untracked-files=all` reports as moved.
@@ -2055,35 +2165,18 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     // `blocked` environment fault, never a silent run against a different tree.
     runTrustedTier: async ({ tier, testFiles, candidateSha }) => {
       const refusal = workspaceRefusal(candidateSha);
-      if (refusal !== undefined) return { blocked: `${refusal.reason}: ${refusal.message}` };
-      const { cmd, args } = tierTestCommand(tier, testFiles);
-      let output: string;
-      try {
-        output = execFileSync(cmd, args, {
-          cwd: ctx.projectDir,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-          env: pinnedVerificationEnv("review-recheck"),
-        });
-      } catch (e) {
-        // A NON-ZERO EXIT IS NOT A BLOCK. node:test exits non-zero when a test FAILS, and a
-        // red cited assertion is the finding still being present — real TAP output the recheck
-        // reads as `failed`, never a blocked environment. Only a spawn that produced NO output
-        // at all (the binary missing, the workspace unreadable) is an environment fault.
-        const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
-        const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-        if (out.trim() === "") return { blocked: (e as Error).message };
-        output = out;
-      }
-      // RF-1: the pre-run refusal proves the tree was the clean candidate BEFORE the tier ran, but
-      // the tier runs arbitrary test code that can move HEAD or dirty the tree. Re-confirm the
-      // candidate is still checked out clean AFTER the run — output captured from a tree the tier
+      if (refusal !== undefined) return { blocked: `${describeLane(tier)}: ${refusal.reason}: ${refusal.message}` };
+      const res = runLaneTestFiles(ctx.projectDir, tier, testFiles);
+      if (res.runnerOutput === undefined) return res;
+      // RF-1: the pre-run refusal proves the tree was the clean candidate BEFORE the lane ran, but
+      // the lane runs arbitrary test code that can move HEAD or dirty the tree. Re-confirm the
+      // candidate is still checked out clean AFTER the run — output captured from a tree the run
       // itself changed is not evidence about the candidate, so it is a `blocked` environment fault,
-      // never an accepted result. (Evaluated on the captured `output`, pass or fail: a failing
-      // assertion — the finding still present — is a legitimate result only if the tree held still.)
+      // never an accepted result. (Evaluated pass or fail: a failing assertion — the finding still
+      // present — is a legitimate result only if the tree held still.)
       const postRefusal = workspaceRefusal(candidateSha);
-      if (postRefusal !== undefined) return { blocked: `${postRefusal.reason}: ${postRefusal.message}` };
-      return { runnerOutput: output };
+      if (postRefusal !== undefined) return { blocked: `${describeLane(tier)}: ${postRefusal.reason}: ${postRefusal.message}` };
+      return res;
     },
 
     shippingInput: async ({ review, candidateSha }) => {
@@ -2125,7 +2218,16 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
                   verification.reusedEvidence ??
                   verification.steps.map((s) => `${s.name}: ${s.ok ? "ok" : "FAILED"}`).join(", "),
               },
-        acceptance: ctx.acceptance ?? [],
+        // FG-813 / FG-788: a met claim citing a regression test FILE is executed by forge itself,
+        // in that file's lane, at the candidate — its own output replaces the claimed one. Only on
+        // a tree verified clean at the candidate; otherwise the claims are assessed as supplied.
+        acceptance:
+          refusal === undefined
+            ? executeAcceptanceTests(ctx.acceptance ?? [], (lane, file) => {
+                const res = runLaneTestFiles(ctx.projectDir, lane, [file]);
+                return workspaceRefusal(candidateSha) === undefined ? res : {};
+              })
+            : (ctx.acceptance ?? []),
         ...(ctx.docsCloseout !== undefined ? { docsCloseout: ctx.docsCloseout } : {}),
         tipTrust: {
           kind: trust.kind,

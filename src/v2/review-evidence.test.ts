@@ -21,8 +21,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   assessAcceptanceClaims,
+  executedAssertionIdentityValid,
+  executedAssertionNames,
+  parseStoredExecutedAssertion,
   resolveTestExecution,
+  serializeExecutedAssertion,
   testExecution,
+  testLaneForFile,
   validateResolutionEvidence,
 } from "./review-evidence.js";
 
@@ -1447,12 +1452,13 @@ test("FG-657: a SINGLE valid name still validates at the public surface — neit
   );
 });
 
-test("FG-657: the ACCEPTANCE-CRITERION surface inherits both closures — a blank member and a subset lane are 'unproven', never met", () => {
-  // Stage 9 maps acceptance criteria through the same validator at `speculative`, the
-  // loosest reachability there is. Loosest must still mean every named test executed
-  // somewhere: an AC claimed `met` on a malformed list, or on a lane that ran half of it,
-  // is exactly the finding leaving the ledger that the two fixes exist to stop.
-  const [blank, subset, complete] = assessAcceptanceClaims(
+test("FG-657 / FG-813: the ACCEPTANCE-CRITERION surface reads test_name as ONE name — a joined, blank-membered or subset-covered citation is never met", () => {
+  // Stage 9 maps acceptance criteria through the same validator at `speculative`, the loosest
+  // reachability there is. FG-813 AC4: there a regression_test's `test_name` is ONE title and is
+  // never split, so a "; "-joined string is a title nothing printed, and a lane covering part of
+  // it covers none of it. A criterion proven by several tests cites them as several claims or as
+  // an anchored step's `ran` list.
+  const [blank, subset, joined] = assessAcceptanceClaims(
     [
       { ref: "AC-1", verdict: "met", evidence: { kind: "regression_test", test_name: `${PAIR[0]}; ;`, runner_output: PAIR_GREEN } },
       {
@@ -1470,8 +1476,60 @@ test("FG-657: the ACCEPTANCE-CRITERION surface inherits both closures — a blan
     SHA,
   );
   assert.equal(blank?.verdict, "unproven", "a blank member is not met at the loosest reachability either");
-  assert.match(blank?.detail ?? "", /\(blank member \d+ of \d+\)/);
   assert.equal(subset?.verdict, "unproven", "half a claim covered is not a criterion met");
-  assert.match(subset?.detail ?? "", /does not cover 'the reconcile path retries once'/);
-  assert.equal(complete?.verdict, "met", "and a complete multi-name citation is still met — the surface did not just get stricter");
+  assert.match(subset?.detail ?? "", /does not cover 'the reconcile path guards a partial write; the reconcile path retries once'/);
+  assert.equal(joined?.verdict, "unproven", "a joined string is one title the runner never printed");
+  assert.match(joined?.detail ?? "", /does not appear in the cited runner output/);
+});
+// ─── FG-813 / FG-788: structured executed_assertion, per-file lanes, one-name acceptance ────
+
+const SEMI_TITLE = "defaults to the review activity; fast-orchestrator stays mapped";
+
+test("FG-813 / AC4+AC5c: a Stage 9 acceptance test_name containing '; ' binds as ONE name", () => {
+  const [a, b] = assessAcceptanceClaims(
+    [
+      { ref: "AC-1", verdict: "met", evidence: { kind: "regression_test", test_name: SEMI_TITLE, runner_output: `✔ ${SEMI_TITLE} (0.9ms)` } },
+      // The split halves printed separately are NOT the one title the claim names.
+      {
+        ref: "AC-2",
+        verdict: "met",
+        evidence: {
+          kind: "regression_test",
+          test_name: SEMI_TITLE,
+          runner_output: "✔ defaults to the review activity (1ms)\n✔ fast-orchestrator stays mapped (1ms)",
+        },
+      },
+    ],
+    SHA,
+  );
+  assert.equal(a?.verdict, "met", "the whole title executed");
+  assert.equal(b?.verdict, "unproven", "two different tests are not the one title cited");
+});
+
+test("FG-813 / AC1: a structured executed_assertion names each test whole, bound to its file; the legacy string still splits", () => {
+  const structured = [
+    { test_file: "src/a.test.ts", test_name: SEMI_TITLE },
+    { test_file: "src/b.integration.test.ts", test_name: "retries once" },
+  ];
+  assert.deepEqual(executedAssertionNames(structured), [SEMI_TITLE, "retries once"]);
+  assert.deepEqual(executedAssertionNames("alpha; beta"), ["alpha", "beta"]);
+  assert.equal(executedAssertionIdentityValid(structured), true);
+  assert.equal(executedAssertionIdentityValid([]), false, "an empty list names no test");
+  assert.equal(executedAssertionIdentityValid("alpha; ;"), false, "the legacy blank-member refusal is unchanged");
+  // Round-trips through the one TEXT column; a legacy string (even one starting '[') stays a string.
+  assert.deepEqual(parseStoredExecutedAssertion(serializeExecutedAssertion(structured)), structured);
+  assert.equal(parseStoredExecutedAssertion("alpha; beta"), "alpha; beta");
+  assert.equal(parseStoredExecutedAssertion("[unit] alpha"), "[unit] alpha");
+});
+
+test("FG-813 / FG-788: every file kind a citation can name maps to its own lane; paths outside the workspace map to none", () => {
+  assert.equal(testLaneForFile("src/v2/x.test.ts"), "unit");
+  assert.equal(testLaneForFile("src/v2/x.integration.test.ts"), "integration");
+  assert.equal(testLaneForFile("src/v2/x.worktree.test.ts"), "worktree");
+  assert.equal(testLaneForFile("dashboard/src/remote/sync.test.ts"), "dashboard_unit");
+  assert.equal(testLaneForFile("./dashboard/src/x.integration.test.ts"), "dashboard_integration");
+  assert.equal(testLaneForFile("dashboard/browser-tests/fg781-remote-board.test.ts"), "dashboard_browser");
+  for (const unsafe of ["/etc/x.test.ts", "../other/src/x.test.ts", "src/../../x.test.ts", "src/x.ts", "scripts/x.test.ts", ""]) {
+    assert.equal(testLaneForFile(unsafe), undefined, unsafe);
+  }
 });

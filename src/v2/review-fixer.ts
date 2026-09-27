@@ -11,6 +11,7 @@
 
 import { z } from "zod";
 import { FIX_RESULTS, type IncomingFixResult } from "../store/fix-batches.js";
+import { ExecutedAssertionRefSchema } from "./review-evidence.js";
 
 /** FG-710 Shape A: the OPTIONAL, CONDITIONAL fields the fixer template prints. Forge's own
  *  template used to print these unconditionally, so an agent copying the example naturally
@@ -46,14 +47,17 @@ const PerFindingShape = z
     evidence_path: z.string().trim().min(1).optional(),
     evidence_sha256: z.string().trim().min(1).optional(),
     /** FG-710 Shape B: the candidate-bound executed-assertion identity the FG-639 recheck
-     *  binds — the test NAME (or "; "-joined names) the fixer's proof executed. OPTIONAL at
+     *  binds. FG-813: a list of `{test_file, test_name}` — each named test bound to its OWN file,
+     *  its name never split — or, for back-compat, the legacy string (split on "; "). OPTIONAL at
      *  the schema level: the schema has no reachability, so it cannot know when this is
      *  required. The batch-aware requirement (a demonstrated `fixed` finding must name it)
      *  is enforced in ingestFixBatchResults, which has the payload's reachability. It is NOT
      *  empty-normalized (RF-6): an empty string is a `min(1)` refusal like any other non-scoped
      *  field, and an OMITTED one on a demonstrated `fixed` finding is what routes to the
      *  Shape-B identity check. */
-    executed_assertion: z.string().trim().min(1).optional(),
+    executed_assertion: z
+      .union([z.string().trim().min(1), z.array(ExecutedAssertionRefSchema).min(1)])
+      .optional(),
   })
   .strict()
   .superRefine((v, ctx) => {

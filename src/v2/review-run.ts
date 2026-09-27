@@ -116,8 +116,16 @@ import {
 import type { ReviewDiffFile, ReviewDiffRendering, ReviewDiffResult, ReviewDiffSizeUnit } from "./review-diff.js";
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
-import { ingestRecheck, type TrustedTierRun } from "./review-recheck.js";
-import { isHigherTierTestFile, resolveTestExecution, testTierForFile } from "./review-evidence.js";
+import { ingestRecheck, type TrustedMemberRun, type TrustedTierRun } from "./review-recheck.js";
+import {
+  executedAssertionMembers,
+  normalizeTestPath,
+  renderExecutedAssertion,
+  resolveTestExecution,
+  testLaneForFile,
+  type ExecutedAssertion,
+  type TestLane,
+} from "./review-evidence.js";
 import { assessShippingReview, type ShippingAssessment, type ShippingInput } from "./review-shipping.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -453,20 +461,19 @@ export type CoordinatorDeps = {
     dependencyEnvironment?: DependencyEnvironmentReceipt;
     protocol?: { role: string; sha256: string; taskId: string };
   }>;
-  /** FG-744 (fork C): run the tier that actually contains a fixer's cited assertion — an
-   *  integration (`*.integration.test.ts`) or worktree (`*.worktree.test.ts`) tier the review's
-   *  fast gate does not run — scoped to that test file at the candidate, host-side. Returns the
-   *  runner output forge captured, or a `blocked` reason when the environment could not execute
-   *  it. This is the trusted LOCAL execution fork C resolves on; NO operator-supplied output is
+  /** FG-744 (fork C) / FG-813 / FG-788: run ONE cited test file in its own lane — unit,
+   *  integration, worktree, or the dashboard workspace lanes (cwd = dashboard/) — at the candidate,
+   *  host-side. Returns the runner output forge captured, a `blocked` reason naming the lane when
+   *  the environment could not execute it, or `notExecuted` when forge deliberately did not run it
+   *  (the path is not a test file of that lane, or a precondition such as Chrome is absent). This
+   *  is the trusted LOCAL execution the recheck resolves on; NO operator-supplied output is
    *  admitted (authenticated per-test CI evidence is FG-751). OPTIONAL: a caller that wires no
-   *  tier runner keeps the pre-FG-744 behavior — a higher-tier assertion the fast gate cannot
-   *  contain records `not_executed` — so no existing test has to grow a seam it does not exercise;
-   *  the real wiring always provides it. */
+   *  runner keeps the rechecker-evidence path; the real wiring always provides it. */
   runTrustedTier?: (ctx: {
-    tier: "integration" | "worktree";
+    tier: TestLane;
     testFiles: string[];
     candidateSha: string;
-  }) => Awaitable<{ runnerOutput?: string; blocked?: string }>;
+  }) => Awaitable<{ runnerOutput?: string; blocked?: string; notExecuted?: string }>;
   shippingInput: (ctx: {
     review: Review;
     candidateSha: string;
@@ -2099,6 +2106,35 @@ export async function runDocsAmendment(
 
 // ─── stage 8 ────────────────────────────────────────────────────────────────
 
+type LaneRun = { lane?: TestLane; runnerOutput?: string; blocked?: string; notExecuted?: string };
+
+/** FG-813: a structured member binds to ITS OWN file's isolated run and nowhere else. */
+function memberFromOwnFile(testName: string, file: string, res: LaneRun): TrustedMemberRun {
+  const at = { testName, searchedFiles: [file], file, ...(res.lane !== undefined ? { lane: res.lane } : {}) };
+  if (res.blocked !== undefined) return { ...at, execution: "blocked", reason: res.blocked };
+  if (res.notExecuted !== undefined) return { ...at, execution: "not_executed", reason: res.notExecuted };
+  return { ...at, execution: resolveTestExecution(res.runnerOutput ?? "", [testName]).execution };
+}
+
+/** FG-813: a legacy (fileless) member must be found in EXACTLY ONE of the fixer's listed test
+ *  files — present in none is unbound, present in several is an ambiguity refused (RF-4). A lane
+ *  that could not run is an environment fault for the member: nothing is recorded present or
+ *  absent from a file that could not execute. */
+function memberFromListedFiles(testName: string, runs: Array<{ file: string } & LaneRun>): TrustedMemberRun {
+  const searchedFiles = runs.map((r) => r.file);
+  const blocked = runs.find((r) => r.blocked !== undefined);
+  if (blocked !== undefined) return { ...memberFromOwnFile(testName, blocked.file, blocked), searchedFiles };
+  const containing = runs.filter(
+    (r) => r.notExecuted === undefined && resolveTestExecution(r.runnerOutput ?? "", [testName]).execution !== "absent",
+  );
+  if (containing.length > 1) {
+    return { testName, searchedFiles, execution: "ambiguous", ambiguousFiles: containing.map((r) => r.file) };
+  }
+  const bound = containing[0] ?? runs.find((r) => r.notExecuted !== undefined);
+  if (bound === undefined) return { testName, searchedFiles, execution: "absent" };
+  return { ...memberFromOwnFile(testName, bound.file, bound), searchedFiles };
+}
+
 async function runRecheck(reviewId: string, transition: Transition, deps: CoordinatorDeps): Promise<StageOutcome> {
   const snap = snapshot(reviewId);
   const review = snap.review;
@@ -2123,94 +2159,72 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   // RF-5: the executed-assertion identity the fixer NAMED per finding, threaded into ingestion so
   // a `resolved` verdict is bound to THIS assertion having executed — not merely rendered into the
   // rechecker's free-text claim, where nothing checked that the recheck ran the named test.
-  const fixerAssertions: Record<string, string> = {};
-  // FG-744 (fork C): the higher-tier test file(s) a fixer's cited assertion lives in, per
-  // finding id — an integration/worktree file the review's fast gate cannot execute. Keyed
-  // ONLY when the fixer also named an executed assertion: without a named identity there is
-  // nothing for the trusted tier run to bind its resolution to.
-  const fixerTierFiles: Record<string, string[]> = {};
+  const fixerAssertions: Record<string, ExecutedAssertion> = {};
+  // FG-813: the test files a LEGACY (string) identity may bind in — the fixer's listed test
+  // files. A structured identity names each test's own file and needs no list.
+  const fixerTestFiles: Record<string, string[]> = {};
   for (const b of snap.batches) {
     for (const r of fixBatchResults(b.id)) {
       if (r.evidence === undefined && r.executedAssertion === undefined) continue;
       // FG-710 Shape B: the executed-assertion identity rides WITH the claim so the recheck
-      // executes the SAME named assertion against the candidate (AC6). Stage 8 stays the sole
-      // candidate-bound executor — this only tells it which assertion to run.
+      // executes the SAME named assertion against the candidate (AC6).
       fixerEvidence[r.findingId] =
         r.executedAssertion !== undefined
-          ? `${r.evidence ?? ""}\n\nexecuted assertion: ${r.executedAssertion}`.trim()
+          ? `${r.evidence ?? ""}\n\nexecuted assertion: ${renderExecutedAssertion(r.executedAssertion)}`.trim()
           : (r.evidence as string);
       if (r.executedAssertion !== undefined) {
         fixerAssertions[r.findingId] = r.executedAssertion;
-        const higher = (r.filesChanged ?? []).filter(isHigherTierTestFile);
-        if (higher.length > 0) fixerTierFiles[r.findingId] = [...new Set(higher)];
+        const tests = (r.filesChanged ?? []).flatMap((f) => {
+          const n = normalizeTestPath(f);
+          return n !== undefined && n.endsWith(".test.ts") ? [n] : [];
+        });
+        fixerTestFiles[r.findingId] = [...new Set(tests)];
       }
     }
   }
 
-  // FG-744 (fork C): TRUSTED TIER EXECUTION. When a fixer's cited assertion lives in an
-  // integration/worktree test file, the review's fast gate cannot execute it, so forge runs
-  // THAT tier itself (scoped to the file) at the candidate and resolves on its own execution —
-  // the only trusted proof. Keyed by finding id and threaded into ingestion, where it is
-  // authoritative for those findings. A caller that wired no `runTrustedTier` keeps the
-  // pre-FG-744 behavior (the higher-tier assertion records `not_executed`), so this is skipped
-  // wholesale when the seam is absent.
+  // FG-744 (fork C) / FG-813 / FG-788: TRUSTED EXECUTION. Forge executes every test the fixer
+  // named, itself, at the candidate, each in the lane its OWN file lives in — unit, integration,
+  // worktree, or the dashboard workspace lanes — and resolves on its own execution, the only
+  // trusted proof. Resolution then no longer depends on which subset the rechecker agent chose
+  // to run. A caller that wired no `runTrustedTier` keeps the rechecker-evidence path, so this is
+  // skipped wholesale when the seam is absent; so is a legacy identity with no listed test file,
+  // which gives forge nothing to execute.
   const trustedTierRuns: Record<string, TrustedTierRun> = {};
-  if (deps.runTrustedTier !== undefined && Object.keys(fixerTierFiles).length > 0) {
+  if (deps.runTrustedTier !== undefined) {
     const runTrustedTier = deps.runTrustedTier;
-    // RF-2/RF-4: each fixer-listed higher-tier file is run IN ISOLATION, not as a combined set, so
-    // the binding is to the assertion's OWN test file. A same-named assertion in another listed
-    // file cannot then contribute to the resolution, and its presence in more than one file is a
-    // detectable ambiguity we refuse rather than a merge we accept. One run per distinct (tier,
-    // file) — several findings can share a file, and the tier is deterministic in the candidate.
-    const cache = new Map<string, { runnerOutput?: string; blocked?: string }>();
-    const runFile = async (file: string): Promise<{ tier: "integration" | "worktree"; runnerOutput?: string; blocked?: string }> => {
-      const tier = testTierForFile(file) as "integration" | "worktree";
-      const key = `${tier}::${file}`;
-      let res = cache.get(key);
+    // RF-2/RF-4: each file is run IN ISOLATION, never as a combined set, so a member binds to its
+    // OWN file and a same-named test in another file is a detectable ambiguity, never a merge.
+    // One run per distinct file — several findings and members can share one.
+    const cache = new Map<string, LaneRun>();
+    const runFile = async (file: string): Promise<LaneRun> => {
+      let res = cache.get(file);
       if (res === undefined) {
-        res = await runTrustedTier({ tier, testFiles: [file], candidateSha: candidate });
-        cache.set(key, res);
+        const lane = testLaneForFile(file);
+        res =
+          lane === undefined
+            ? { notExecuted: `'${file}' is not a test file in any lane forge executes` }
+            : { lane, ...(await runTrustedTier({ tier: lane, testFiles: [file], candidateSha: candidate })) };
+        cache.set(file, res);
       }
-      return { tier, ...res };
+      return res;
     };
 
-    for (const [findingId, files] of Object.entries(fixerTierFiles)) {
-      // Keyed together at 2142–2145: a finding only lands in fixerTierFiles when the fixer also
-      // named an executed assertion. The `?? ""` is a type guard, not a real branch — an empty
-      // identity would simply bind no file (resolveTestExecution reports it absent everywhere).
-      const named = fixerAssertions[findingId] ?? "";
-      const runs = [];
-      for (const file of files) runs.push({ file, ...(await runFile(file)) });
-      const tiers = [...new Set(runs.map((r) => r.tier))];
+    for (const [findingId, named] of Object.entries(fixerAssertions)) {
+      const legacyFiles = fixerTestFiles[findingId] ?? [];
+      if (typeof named === "string" && legacyFiles.length === 0) continue;
 
-      // A tier that could not run at all is an environment fault for the whole finding — nothing
-      // is recorded present or absent from a lane that could not execute.
-      const blocked = runs.find((r) => r.blocked !== undefined);
-      if (blocked !== undefined) {
-        trustedTierRuns[findingId] = { tiers, testFiles: files, candidateSha: candidate, blocked: blocked.blocked };
-        continue;
+      const members: TrustedMemberRun[] = [];
+      for (const m of executedAssertionMembers(named)) {
+        if (m.testFile !== undefined) {
+          members.push(memberFromOwnFile(m.testName, m.testFile, await runFile(m.testFile)));
+          continue;
+        }
+        const searched: Array<{ file: string } & LaneRun> = [];
+        for (const file of legacyFiles) searched.push({ file, ...(await runFile(file)) });
+        members.push(memberFromListedFiles(m.testName, searched));
       }
-
-      // The file(s) whose OWN isolated run actually contains the cited assertion — executed,
-      // failed, or skipped, but not absent. This, not the fixer's broad list, is what a resolution
-      // binds to.
-      const containing = runs.filter((r) => resolveTestExecution(r.runnerOutput ?? "", named).execution !== "absent");
-      if (containing.length > 1) {
-        trustedTierRuns[findingId] = {
-          tiers,
-          testFiles: files,
-          candidateSha: candidate,
-          ambiguousFiles: containing.map((r) => r.file),
-        };
-        continue;
-      }
-      const bound = containing[0];
-      trustedTierRuns[findingId] = {
-        tiers,
-        testFiles: files,
-        candidateSha: candidate,
-        ...(bound !== undefined ? { assertionFile: bound.file, runnerOutput: bound.runnerOutput ?? "" } : {}),
-      };
+      trustedTierRuns[findingId] = { candidateSha: candidate, members };
     }
   }
 
@@ -2324,13 +2338,16 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   const blocked = ingestion.applications.filter((a) => a.coverage === "blocked_environment");
   if (blocked.length > 0) {
     const refs = blocked.map((a) => a.findingRef).join(", ");
-    const reason = `the rechecker reported blocked_environment coverage for ${refs}`;
+    // FG-788 AC4: the detail names the lane that was attempted, so an operator can tell a genuine
+    // missing dependency from a wrong-cwd execution.
+    const reason = `the rechecker reported blocked_environment coverage for ${refs}: ${blocked.map((a) => a.detail).join(" | ")}`;
     setReviewState(reviewId, "blocked_environment", { reason });
     return {
       transition,
       status: "stopped",
       message:
-        `blocked_environment: the rechecker declared it could not execute the coverage it cited for ${refs}. ` +
+        `blocked_environment: the rechecker declared it could not execute the coverage it cited for ${refs} ` +
+        `(${blocked.map((a) => a.detail).join(" | ")}). ` +
         `No resolution, no finding and no stage record was written — a lane that could not run is not evidence ` +
         `that a finding is present OR absent. No fixer was dispatched and no review cycle was consumed.`,
     };

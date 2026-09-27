@@ -284,10 +284,62 @@ export function ranTestNames(ran: string | readonly string[]): string[] {
  *  candidate is Stage 8's job — the recheck stays the sole candidate-bound executor (FG-639).
  *  Enforcing the shape here is what stops a demonstrated `fixed` finding from landing with no
  *  assertion for the recheck to bind, which is the FG-709 defect. */
-export function executedAssertionIdentityValid(ran: string | undefined): boolean {
+export function executedAssertionIdentityValid(ran: ExecutedAssertion | undefined): boolean {
   if (ran === undefined) return false;
+  if (typeof ran !== "string") {
+    return ran.length > 0 && ran.every((m) => m.test_name.trim() !== "" && m.test_file.trim() !== "");
+  }
   const names = ranTestNames(ran);
   return names.length > 0 && names.every((n) => n !== "");
+}
+
+// ─── the fixer's executed-assertion identity (FG-813) ───────────────────────
+
+/** One test the fixer's proof executed, bound to ITS OWN file. `test_name` is ONE name and is
+ *  never split: a title that itself contains "; " is still one title. */
+export const ExecutedAssertionRefSchema = z
+  .object({
+    test_file: z.string().trim().min(1),
+    test_name: z.string().trim().min(1),
+  })
+  .strict();
+
+export type ExecutedAssertionRef = z.infer<typeof ExecutedAssertionRefSchema>;
+
+/** The fixer's `executed_assertion`: the structured list (FG-813), or the legacy string that is
+ *  split with `ranTestNames` exactly as before. A legacy name carries no file, so it binds only
+ *  when it is found in exactly one of the fixer's listed test files. */
+export type ExecutedAssertion = string | ExecutedAssertionRef[];
+
+export type NamedAssertionMember = { testName: string; testFile?: string };
+
+export function executedAssertionMembers(a: ExecutedAssertion): NamedAssertionMember[] {
+  return typeof a === "string"
+    ? ranTestNames(a).map((testName) => ({ testName }))
+    : a.map((m) => ({ testName: m.test_name.trim(), testFile: m.test_file.trim() }));
+}
+
+export function executedAssertionNames(a: ExecutedAssertion): string[] {
+  return executedAssertionMembers(a).map((m) => m.testName);
+}
+
+export function renderExecutedAssertion(a: ExecutedAssertion): string {
+  return typeof a === "string" ? a : a.map((m) => `'${m.test_name}' (${m.test_file})`).join(", ");
+}
+
+/** Storage form: the legacy string verbatim, the structured list as JSON. */
+export function serializeExecutedAssertion(a: ExecutedAssertion): string {
+  return typeof a === "string" ? a : JSON.stringify(a);
+}
+
+export function parseStoredExecutedAssertion(stored: string): ExecutedAssertion {
+  if (!stored.trimStart().startsWith("[")) return stored;
+  try {
+    const parsed = z.array(ExecutedAssertionRefSchema).min(1).safeParse(JSON.parse(stored));
+    return parsed.success ? parsed.data : stored;
+  } catch {
+    return stored;
+  }
 }
 
 /** RF-5: the test-name identity a validated resolution evidence establishes as EXECUTED — the
@@ -326,12 +378,62 @@ export function testTierForFile(path: string): TestTier {
   return "fast";
 }
 
-/** Is this a test file whose tier the review's fast gate (typecheck + unit `test`) does NOT
- *  run? The fast gate structurally cannot contain an integration/worktree assertion, so a
- *  recheck that binds a resolution from fast-gate output records `not_executed` for one even
- *  though the assertion exists and passes at its own tier — the FG-744 defect. */
-export function isHigherTierTestFile(path: string): boolean {
-  return path.endsWith(".test.ts") && testTierForFile(path) !== "fast";
+/** The lanes a cited test file can execute in (FG-813 / FG-788) — one per file kind the repo's
+ *  own package scripts and CI jobs run: the root `test:unit`, `test:integration` and
+ *  `test:worktree` tiers, and the dashboard WORKSPACE's `test`, `test:integration` and
+ *  `test:browser` scripts, which run with cwd = dashboard/ so its tsconfig `@forge/*` aliases
+ *  resolve. A dashboard file executed from the repo root fails on those aliases, which is not
+ *  evidence about the code in either direction — so the lane is chosen by the FILE, never by the
+ *  caller. */
+export const TEST_LANES = [
+  "unit",
+  "integration",
+  "worktree",
+  "dashboard_unit",
+  "dashboard_integration",
+  "dashboard_browser",
+] as const;
+export type TestLane = (typeof TEST_LANES)[number];
+
+/** The lane a cited test file executes in, or undefined when it is not a test file forge can run.
+ *  CONFINED ON PURPOSE: a path that is absolute, escapes the workspace, or lives outside the
+ *  test roots the declared lanes select from resolves to no lane, so a fixer-supplied path can
+ *  never select what runs beyond "this test file, in its declared lane". */
+export function testLaneForFile(path: string): TestLane | undefined {
+  const file = normalizeTestPath(path);
+  if (file === undefined || !file.endsWith(".test.ts")) return undefined;
+  if (file.startsWith("dashboard/browser-tests/")) return "dashboard_browser";
+  if (file.startsWith("dashboard/src/")) {
+    return file.endsWith(".integration.test.ts") ? "dashboard_integration" : "dashboard_unit";
+  }
+  if (file.startsWith("src/")) {
+    const tier = testTierForFile(file);
+    return tier === "fast" ? "unit" : tier;
+  }
+  return undefined;
+}
+
+/** The repo-relative, normalized form of a cited path, or undefined when it is not confined to
+ *  the workspace. */
+export function normalizeTestPath(path: string): string | undefined {
+  const trimmed = path.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (trimmed === "" || trimmed.startsWith("/") || /^[A-Za-z]:/.test(trimmed) || trimmed.includes("\0")) {
+    return undefined;
+  }
+  const segments = trimmed.split("/");
+  if (segments.some((seg) => seg === ".." || seg === "." || seg === "")) return undefined;
+  return trimmed;
+}
+
+/** The directory a lane runs from, relative to the workspace root. */
+export function laneCwd(lane: TestLane): "." | "dashboard" {
+  return lane.startsWith("dashboard_") ? "dashboard" : ".";
+}
+
+/** How a lane is named in a refusal — the lane AND its cwd, so a reader can tell a genuine
+ *  missing dependency from a wrong-cwd execution (FG-788 AC4). */
+export function describeLane(lane: TestLane): string {
+  return `${lane} lane (cwd=${laneCwd(lane) === "." ? "<repo root>" : "dashboard/"})`;
 }
 
 /** How one member of a cited list is named in a refusal. A blank member has no name to
@@ -460,6 +562,9 @@ export type EvidenceContext = {
   candidateSha: string;
   reachability: Reachability;
   findingRef: string;
+  /** FG-813: a cited `test_name` is ONE test title, never a "; "-joined list. Stage 9's
+   *  acceptance evidence reads it this way, so a title that itself contains "; " binds whole. */
+  testNameIsOneName?: boolean;
 };
 
 /** Validate one resolution-evidence claim. Returns the evidence to store, or a refusal
@@ -518,8 +623,9 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
   }
 
   // A cited test. Everything below is the skip-evidence rule.
+  const named: string | string[] = ctx.testNameIsOneName === true ? [ev.test_name.trim()] : ev.test_name;
   if (ev.environment_blocked !== undefined) {
-    const lane = checkAlternateLane(ev.alternate_lane, ctx, ranTestNames(ev.test_name));
+    const lane = checkAlternateLane(ev.alternate_lane, ctx, ranTestNames(named));
     if (lane.ok) {
       return {
         ok: true,
@@ -549,7 +655,7 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
     };
   }
 
-  const { execution, test } = resolveTestExecution(ev.runner_output, ev.test_name);
+  const { execution, test } = resolveTestExecution(ev.runner_output, named);
   // A RED CITED TEST IS NOT RESCUED BY ANOTHER LANE. A skip or an absence is a gap another
   // mandatory lane can fill; a failure at this candidate is the finding still being
   // present, so it refuses before the alternate-lane arm is ever consulted.
@@ -573,7 +679,7 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
     };
   }
 
-  const lane = checkAlternateLane(ev.alternate_lane, ctx, ranTestNames(ev.test_name));
+  const lane = checkAlternateLane(ev.alternate_lane, ctx, ranTestNames(named));
   if (lane.ok) {
     return {
       ok: true,
@@ -637,7 +743,13 @@ function checkAlternateLane(
         `lane is held to the same per-test identity the primary lane is.`,
     };
   }
-  const assertion = resolveTestExecution(claim.runner_output, claim.executed_assertion);
+  // A lane naming exactly the one whole title a one-name claim cites is read as that one name,
+  // not split — the same rule the claim itself is held to.
+  const laneNames =
+    ctx.testNameIsOneName === true && claim.executed_assertion.trim() === required[0] && required.length === 1
+      ? [claim.executed_assertion.trim()]
+      : ranTestNames(claim.executed_assertion);
+  const assertion = resolveTestExecution(claim.runner_output, laneNames);
   if (assertion.execution !== "executed") {
     return {
       ok: false,
@@ -660,7 +772,7 @@ function checkAlternateLane(
   // prefix. A lane naming a superset passes: running more than was asked for still runs
   // what was asked for. Coverage is checked over the members the claim names, not over the
   // subset that failed here, so the lane stands in for the whole claim it rescues.
-  const covered = new Set(ranTestNames(claim.executed_assertion));
+  const covered = new Set(laneNames);
   const uncovered = required.findIndex((name) => !covered.has(name));
   if (uncovered !== -1) {
     return {
@@ -819,6 +931,7 @@ export function assessAcceptanceClaims(claims: readonly AcClaim[], candidateSha:
       candidateSha,
       reachability: "speculative",
       findingRef: c.ref,
+      testNameIsOneName: true,
     });
     return check.ok
       ? { ref: c.ref, verdict: "met", detail: check.detail }

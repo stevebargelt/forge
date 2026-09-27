@@ -12,8 +12,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { tierTestCommand } from "../cli/commands/review-wiring.js";
-import { testExecution } from "./review-evidence.js";
+import { executeAcceptanceTests, tierTestCommand } from "../cli/commands/review-wiring.js";
+import { assessAcceptanceClaims, testExecution, testLaneForFile, type AcClaim } from "./review-evidence.js";
 import { ingestRecheck } from "./review-recheck.js";
 import type { ReviewFinding } from "../store/reviews.js";
 
@@ -45,7 +45,12 @@ const FINDING: ReviewFinding = {
 };
 
 function runIntegrationTier(probe: string): string {
-  const { cmd, args } = tierTestCommand("integration", [probe]);
+  return runTier("integration", probe);
+}
+
+/** Runs the production lane command, rather than manufacturing the TAP that Stage 8/9 reads. */
+function runTier(tier: "unit" | "integration", probe: string): string {
+  const { cmd, args } = tierTestCommand(tier, [probe]);
   const env = { ...process.env };
   delete env["NODE_TEST_CONTEXT"];
   // Isolate the NESTED integration-tier run's build tree from the shard's shared
@@ -75,9 +80,6 @@ function runIntegrationTier(probe: string): string {
 }
 
 function recheckFrom(output: string, probe: string) {
-  // The coordinator binds `assertionFile` only when the file's isolated run actually contains the
-  // cited assertion — mirror that here so the recheck sees a run bound to the assertion's own file.
-  const contains = testExecution(output, ASSERTION) !== "absent";
   return ingestRecheck(
     {
       review_id: REVIEW,
@@ -92,10 +94,16 @@ function recheckFrom(output: string, probe: string) {
       fixerAssertions: { [`${REVIEW}/RF-1`]: ASSERTION },
       trustedTierRuns: {
         [`${REVIEW}/RF-1`]: {
-          tiers: ["integration"],
-          testFiles: [probe],
           candidateSha: CANDIDATE,
-          ...(contains ? { assertionFile: probe, runnerOutput: output } : {}),
+          members: [
+            {
+              testName: ASSERTION,
+              searchedFiles: [probe],
+              file: probe,
+              lane: "integration",
+              execution: testExecution(output, [ASSERTION]),
+            },
+          ],
         },
       },
     },
@@ -160,4 +168,168 @@ test("FG-744: real integration-tier skipped, failed, and absent assertions never
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("FG-813: forge executes every structured cross-file member in its own real lane even when the rechecker supplied only one", () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const unitFile = `src/v2/fg813-unit-${suffix}.test.ts`;
+  const integrationFile = `src/v2/fg813-integration-${suffix}.integration.test.ts`;
+  const unitPath = join(REPO_ROOT, unitFile);
+  const integrationPath = join(REPO_ROOT, integrationFile);
+  const unitName = "FG-813 unit member really executed";
+  const integrationName = "FG-813 integration member really executed";
+  const findingId = `${REVIEW}/RF-1`;
+  try {
+    writeFileSync(unitPath, `import { test } from "node:test";\ntest(${JSON.stringify(unitName)}, () => {});\n`);
+    writeFileSync(integrationPath, `import { test } from "node:test";\ntest(${JSON.stringify(integrationName)}, () => {});\n`);
+    const result = ingestRecheck(
+      {
+        review_id: REVIEW,
+        candidate_sha: CANDIDATE,
+        // This intentionally reports evidence for only the unit member. The trusted host runs
+        // below are the proof for both, so the rechecker subset cannot block resolution.
+        rechecked: [
+          {
+            finding_id: findingId,
+            result: "resolved",
+            evidence_kind: "regression_test",
+            evidence: { kind: "regression_test", test_name: unitName, runner_output: `ok 1 - ${unitName}` },
+          },
+        ],
+        new_findings: [],
+      },
+      {
+        reviewId: REVIEW,
+        candidateSha: CANDIDATE,
+        expected: [FINDING],
+        fixerAssertions: { [findingId]: [{ test_file: unitFile, test_name: unitName }, { test_file: integrationFile, test_name: integrationName }] },
+        trustedTierRuns: {
+          [findingId]: {
+            candidateSha: CANDIDATE,
+            members: [
+              { testName: unitName, searchedFiles: [unitFile], file: unitFile, lane: "unit", execution: testExecution(runTier("unit", unitFile), unitName) },
+              {
+                testName: integrationName,
+                searchedFiles: [integrationFile],
+                file: integrationFile,
+                lane: "integration",
+                execution: testExecution(runTier("integration", integrationFile), integrationName),
+              },
+            ],
+          },
+        },
+      },
+    );
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.applications[0]?.resolution, "resolved");
+  } finally {
+    rmSync(unitPath, { force: true });
+    rmSync(integrationPath, { force: true });
+  }
+});
+
+test("FG-813: a structured member that fails or is absent in its OWN real file remains named in the coordinator evidence", () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const unitFile = `src/v2/fg813-negative-unit-${suffix}.test.ts`;
+  const integrationFile = `src/v2/fg813-negative-integration-${suffix}.integration.test.ts`;
+  const unitPath = join(REPO_ROOT, unitFile);
+  const integrationPath = join(REPO_ROOT, integrationFile);
+  const unitName = "FG-813 control member really executed";
+  const target = "FG-813 named member in its own integration file";
+  const findingId = `${REVIEW}/RF-1`;
+  const assess = () =>
+    ingestRecheck(
+      {
+        review_id: REVIEW,
+        candidate_sha: CANDIDATE,
+        rechecked: [{ finding_id: findingId, result: "resolved", evidence_kind: "regression_test", evidence: {} }],
+        new_findings: [],
+      },
+      {
+        reviewId: REVIEW,
+        candidateSha: CANDIDATE,
+        expected: [FINDING],
+        fixerAssertions: { [findingId]: [{ test_file: unitFile, test_name: unitName }, { test_file: integrationFile, test_name: target }] },
+        trustedTierRuns: {
+          [findingId]: {
+            candidateSha: CANDIDATE,
+            members: [
+              { testName: unitName, searchedFiles: [unitFile], file: unitFile, lane: "unit", execution: testExecution(runTier("unit", unitFile), unitName) },
+              { testName: target, searchedFiles: [integrationFile], file: integrationFile, lane: "integration", execution: testExecution(runTier("integration", integrationFile), target) },
+            ],
+          },
+        },
+      },
+    );
+  try {
+    writeFileSync(unitPath, `import { test } from "node:test";\ntest(${JSON.stringify(unitName)}, () => {});\n`);
+    writeFileSync(
+      integrationPath,
+      `import { test } from "node:test"; import assert from "node:assert/strict";\ntest(${JSON.stringify(target)}, () => assert.fail("still broken"));\n`,
+    );
+    let result = assess();
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.applications[0]?.resolution, "still_present");
+      assert.match(result.applications[0]?.detail ?? "", new RegExp(`'${target}' FAILED`));
+    }
+
+    writeFileSync(integrationPath, `import { test } from "node:test";\ntest("a different assertion", () => {});\n`);
+    result = assess();
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.applications[0]?.resolution, "inconclusive");
+      assert.match(result.applications[0]?.detail ?? "", new RegExp(`'${target}' did not appear in forge's run of ${integrationFile}`));
+    }
+  } finally {
+    rmSync(unitPath, { force: true });
+    rmSync(integrationPath, { force: true });
+  }
+});
+
+test("FG-813: Stage 9 re-executes the cited file, preserves a semicolon title whole, and rejects fabricated output", () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const file = `src/v2/fg813-stage9-${suffix}.test.ts`;
+  const path = join(REPO_ROOT, file);
+  const exactTitle = "FG-813 acceptance; title stays whole";
+  try {
+    writeFileSync(path, `import { test } from "node:test";\ntest(${JSON.stringify(exactTitle)}, () => {});\n`);
+    const claims: AcClaim[] = [
+      {
+        ref: "semicolon title",
+        verdict: "met",
+        evidence: { kind: "regression_test", test_file: file, test_name: exactTitle, runner_output: "fabricated" },
+      },
+      {
+        ref: "fabricated absent test",
+        verdict: "met",
+        evidence: { kind: "regression_test", test_file: file, test_name: "this title is not in the file", runner_output: "ok 1 - this title is not in the file" },
+      },
+    ];
+    const rebound = executeAcceptanceTests(claims, (lane, cited) => ({ runnerOutput: runTier(lane as "unit", cited) }));
+    const assessed = assessAcceptanceClaims(rebound, CANDIDATE);
+    assert.equal(assessed[0]?.verdict, "met", "the exact semicolon title ran as one name");
+    assert.equal(assessed[1]?.verdict, "unproven", "forge output replaces fabricated agent output");
+  } finally {
+    rmSync(path, { force: true });
+  }
+});
+
+test("FG-813: unsafe or non-test fixer paths select no lane and are never passed to a runner", () => {
+  const refused = ["../src/v2/review-run.test.ts", "/tmp/outside.test.ts", "src/v2/review-run.ts"];
+  for (const file of refused) assert.equal(testLaneForFile(file), undefined, file);
+  let calls = 0;
+  const claims: AcClaim[] = refused.map((test_file, i) => ({
+    ref: `refused ${i}`,
+    verdict: "met",
+    evidence: { kind: "regression_test", test_file, test_name: "must not run", runner_output: "fabricated" },
+  }));
+  assert.deepEqual(
+    executeAcceptanceTests(claims, () => {
+      calls += 1;
+      return { runnerOutput: "impossible" };
+    }),
+    claims,
+  );
+  assert.equal(calls, 0, "no unsafe path reached a lane runner");
 });

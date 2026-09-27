@@ -1434,6 +1434,24 @@ actual boundary that cannot ship together.
 > unaltered by this note. Operator-facing detail is
 > [review-rechecker](../concepts.md#review-rechecker).
 
+### FG-813 / FG-788 refinement — per-file binding and every-lane trusted execution
+
+> **[SHIPPED (FG-813, FG-788).]** The fixer's `executed_assertion` was one
+> `"; "`-joined string, and a resolution needed every name in ONE file's output
+> or in the rechecker agent's chosen subset, so cross-file lists, agent-dependent
+> coverage and titles containing `"; "` all failed to bind. It is now a list of
+> `{test_file, test_name}` (the legacy string is still accepted and split as
+> before). Forge executes each named file itself at the candidate, in the lane
+> its own file lives in — unit, integration, worktree, and the dashboard
+> workspace lanes (`dashboard_unit`, `dashboard_integration`,
+> `dashboard_browser`, run with cwd `dashboard/` so its `@forge/*` aliases
+> resolve) — and binds each name to its own file; that execution is authoritative
+> for the finding over the rechecker's evidence. Stage 9 matches a
+> `regression_test` `test_name` as one name and re-executes a `met` claim's
+> `test_file` in its lane. The evidence bar and the RF-5/FG-639 invariant are
+> unchanged. Operator-facing detail is
+> [Review coordinator](../concepts.md#review-coordinator).
+
 ### Migration safety
 
 - Persist exactly one `review_mode` per run:

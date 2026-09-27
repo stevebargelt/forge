@@ -113,3 +113,22 @@ test("FG-710: executedAssertionIdentityValid accepts a named assertion and rejec
   assert.equal(executedAssertionIdentityValid("   "), false);
   assert.equal(executedAssertionIdentityValid("alpha; ; beta"), false, "a blank member makes the whole identity invalid");
 });
+
+test("FG-813 / AC1: executed_assertion accepts the structured {test_file, test_name} list, unsplit, and still the legacy string", () => {
+  const title = "defaults to the review activity; fast-orchestrator stays mapped";
+  const structured = [
+    { test_file: "src/v2/model-policy.test.ts", test_name: title },
+    { test_file: "dashboard/src/remote/sync.test.ts", test_name: "sync pushes the projection" },
+  ];
+  const r = parseFixerResult(base([{ ...FIXED, executed_assertion: structured }]));
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.results[0]?.executedAssertion, structured, "the title is carried whole");
+
+  const legacy = parseFixerResult(base([{ ...FIXED, executed_assertion: "alpha; beta" }]));
+  assert.equal(legacy.ok, true);
+  if (legacy.ok) assert.equal(legacy.results[0]?.executedAssertion, "alpha; beta");
+
+  for (const bad of [[], [{ test_name: title }], [{ test_file: "src/x.test.ts", test_name: "" }]]) {
+    assert.equal(parseFixerResult(base([{ ...FIXED, executed_assertion: bad }])).ok, false, JSON.stringify(bad));
+  }
+});

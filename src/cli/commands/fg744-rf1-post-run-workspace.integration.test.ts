@@ -39,6 +39,7 @@ function initRepo(): { dir: string; head: string } {
 // candidate by the fix cycle before the recheck runs. That leaves the tree clean at the candidate
 // going in, so the only thing that can dirty it is code the probe runs — the RF-1 case.
 function writeProbe(dir: string, name: string, body: string): { file: string; head: string } {
+  // Returned repo-relative, exactly as a fixer lists it — the lane runner refuses any other form.
   const file = join(dir, "src", name);
   writeFileSync(
     file,
@@ -47,7 +48,7 @@ function writeProbe(dir: string, name: string, body: string): { file: string; he
   execFileSync("git", ["add", "-A"], { cwd: dir });
   execFileSync("git", ["commit", "-q", "-m", `probe ${name}`], { cwd: dir });
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
-  return { file, head };
+  return { file: `src/${name}`, head };
 }
 
 // The subprocess is `node --test`; if THIS process's node-test context leaks in through the
