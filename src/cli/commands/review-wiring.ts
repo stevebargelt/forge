@@ -654,10 +654,32 @@ export function runLaneTestFiles(projectDir: string, lane: TestLane, files: read
   }
 }
 
+type WorkspaceRefusal = { reason: string; message: string };
+
+/** Run one lane only on the clean candidate: the workspace is re-checked immediately BEFORE the
+ *  run (a refusal executes nothing) and AFTER it — the lane runs arbitrary test code that can move
+ *  HEAD or dirty the tree, and output captured from a tree the run itself changed is not evidence
+ *  about the candidate. Either refusal is a `blocked` environment fault, never a result. */
+export function runOnCleanCandidate(
+  lane: TestLane,
+  refusal: () => WorkspaceRefusal | undefined,
+  run: () => LaneRunResult,
+): LaneRunResult {
+  const pre = refusal();
+  if (pre !== undefined) return { blocked: `${describeLane(lane)}: ${pre.reason}: ${pre.message}` };
+  const res = run();
+  if (res.runnerOutput === undefined) return res;
+  const post = refusal();
+  if (post !== undefined) return { blocked: `${describeLane(lane)}: ${post.reason}: ${post.message}` };
+  return res;
+}
+
 /** FG-813 / FG-788: Stage 9's acceptance claims, with every `met` regression-test claim that names
  *  a `test_file` in a forge lane re-bound to FORGE's execution of that file. When forge produced
  *  output it replaces the claimed runner output (and any environment-block declaration — forge
- *  ran it); when forge could not run the lane the claim is assessed exactly as supplied. */
+ *  ran it). Once forge has attempted the file, the supplied output is never assessed: a run that
+ *  produced no output makes the claim `unproven`, naming the lane and why. Claims that select no
+ *  forge lane are assessed exactly as supplied. */
 export function executeAcceptanceTests(
   claims: readonly AcClaim[],
   run: (lane: TestLane, file: string) => LaneRunResult,
@@ -674,7 +696,10 @@ export function executeAcceptanceTests(
       res = run(lane, file);
       cache.set(file, res);
     }
-    if (res.runnerOutput === undefined) return c;
+    if (res.runnerOutput === undefined) {
+      const why = res.blocked ?? res.notExecuted ?? "the run produced no output";
+      return { ...c, verdict: "unproven", reason: `forge could not execute ${file} in the ${describeLane(lane)}: ${why}` };
+    }
     const { environment_blocked: _blocked, ...rest } = c.evidence as Record<string, unknown>;
     return { ...c, evidence: { ...rest, runner_output: res.runnerOutput } };
   });
@@ -2164,19 +2189,11 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     // workspace that is not clean AT the candidate cannot produce evidence about it, so it is a
     // `blocked` environment fault, never a silent run against a different tree.
     runTrustedTier: async ({ tier, testFiles, candidateSha }) => {
-      const refusal = workspaceRefusal(candidateSha);
-      if (refusal !== undefined) return { blocked: `${describeLane(tier)}: ${refusal.reason}: ${refusal.message}` };
-      const res = runLaneTestFiles(ctx.projectDir, tier, testFiles);
-      if (res.runnerOutput === undefined) return res;
-      // RF-1: the pre-run refusal proves the tree was the clean candidate BEFORE the lane ran, but
-      // the lane runs arbitrary test code that can move HEAD or dirty the tree. Re-confirm the
-      // candidate is still checked out clean AFTER the run — output captured from a tree the run
-      // itself changed is not evidence about the candidate, so it is a `blocked` environment fault,
-      // never an accepted result. (Evaluated pass or fail: a failing assertion — the finding still
-      // present — is a legitimate result only if the tree held still.)
-      const postRefusal = workspaceRefusal(candidateSha);
-      if (postRefusal !== undefined) return { blocked: `${describeLane(tier)}: ${postRefusal.reason}: ${postRefusal.message}` };
-      return res;
+      return runOnCleanCandidate(
+        tier,
+        () => workspaceRefusal(candidateSha),
+        () => runLaneTestFiles(ctx.projectDir, tier, testFiles),
+      );
     },
 
     shippingInput: async ({ review, candidateSha }) => {
@@ -2219,14 +2236,17 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
                   verification.steps.map((s) => `${s.name}: ${s.ok ? "ok" : "FAILED"}`).join(", "),
               },
         // FG-813 / FG-788: a met claim citing a regression test FILE is executed by forge itself,
-        // in that file's lane, at the candidate — its own output replaces the claimed one. Only on
-        // a tree verified clean at the candidate; otherwise the claims are assessed as supplied.
+        // in that file's lane, at the candidate — its own output replaces the claimed one. Each run
+        // is bracketed by a fresh clean-candidate check; a refused run leaves the claim unproven.
         acceptance:
           refusal === undefined
-            ? executeAcceptanceTests(ctx.acceptance ?? [], (lane, file) => {
-                const res = runLaneTestFiles(ctx.projectDir, lane, [file]);
-                return workspaceRefusal(candidateSha) === undefined ? res : {};
-              })
+            ? executeAcceptanceTests(ctx.acceptance ?? [], (lane, file) =>
+                runOnCleanCandidate(
+                  lane,
+                  () => workspaceRefusal(candidateSha),
+                  () => runLaneTestFiles(ctx.projectDir, lane, [file]),
+                ),
+              )
             : (ctx.acceptance ?? []),
         ...(ctx.docsCloseout !== undefined ? { docsCloseout: ctx.docsCloseout } : {}),
         tipTrust: {

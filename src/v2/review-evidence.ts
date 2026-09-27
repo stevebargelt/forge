@@ -885,6 +885,9 @@ export type AcClaim = {
    *  same executed-test rule as a resolution: a criterion whose only evidence is a
    *  skipped test is `unproven`, not met. */
   evidence?: unknown;
+  /** Set by forge, never by a claimant: why forge settled this verdict itself (e.g. it could not
+   *  execute the cited test file). Reported as the assessment's detail. */
+  reason?: string;
 };
 
 /** FG-733: read-time shape validation for `--acceptance`. The command used to cast the parsed
@@ -920,7 +923,7 @@ export type AcAssessment = {
 export function assessAcceptanceClaims(claims: readonly AcClaim[], candidateSha: string): AcAssessment[] {
   return claims.map((c) => {
     if (c.verdict !== "met") {
-      return { ref: c.ref, verdict: c.verdict, detail: `claimed ${c.verdict}` };
+      return { ref: c.ref, verdict: c.verdict, detail: c.reason ?? `claimed ${c.verdict}` };
     }
     if (c.evidence === undefined) {
       return { ref: c.ref, verdict: "unproven", detail: `claimed met with no cited evidence` };
