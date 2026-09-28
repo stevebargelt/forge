@@ -37,10 +37,10 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 11 | Dashboard actions as named CLI verbs with previewed effect | P2 | Medium |
 | 12 | Attention Inbox with audited dismissal, snooze and inline resolution | P2 | Small-Medium |
 | 13 | A cockpit: one navigable object graph from ticket to evidence | P2 | Medium |
-| 14 | One outbound safe-projection function for notifications | P3 | Small |
-| 15 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 16 | Role-scoped secret bindings | P3 | Medium |
-| 17 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
+| 14 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
+| 15 | One outbound safe-projection function for notifications | P3 | Small |
+| 16 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 17 | Role-scoped secret bindings | P3 | Medium |
 | 18 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
 | 19 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
 | 20 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
@@ -417,7 +417,7 @@ control-plane receipt. Size: small.
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
 containers today, and when one arrives the credential half of it is already
-covered by role-scoped secret bindings (recommendation 16) — that should land
+covered by role-scoped secret bindings (recommendation 17) — that should land
 before any gateway is considered.
 
 **Priority.** P2.
@@ -875,9 +875,109 @@ the cockpit is host-wide and project-scoped exactly as today.
 
 **Priority.** P2.
 
+### 14. Scheduled triggers that file and enqueue; the armed dispatcher runs them
+
+**Pattern.** Paperclip's routines materialize a schedule, webhook or API
+trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
+The issue carries an origin fingerprint and follows a declared concurrency
+policy: `coalesce_if_active`, `skip_if_active` or `always_enqueue`. Catch-up
+is bounded, and a partial unique index keeps at most one open issue per
+routine. Webhooks are HMAC-signed with a replay window. Routine issues then
+wake the assigned agent directly: the routine's own code queues an assignment
+wake (`server/src/services/routines.ts:1907-1976`), and that wake path
+re-applies budget, throttle and claim checks itself (lane A §6a) — the
+routine is both the thing that files the work and the thing that starts it,
+so every one of those checks has to be re-implemented on its path.
+
+**Why it fits Forge.** Forge has no cron, launchd or webhook starts (lane D
+§5), and that blocks a whole class of project: any project whose work is
+inherently periodic, not just occasionally recurring. An operator's own
+example is a project that reads a mailbox on a schedule and files or triages
+a ticket from whatever it finds; periodic dependency audits and docs-drift
+sweeps are the same shape. What that class needs is a trigger that files one
+ticket per occurrence, coalesces if the previous occurrence is still running,
+and then **runs unattended, with no human touching it** — filing a ticket
+nobody dispatches is not periodic work, it's a to-do list that never gets
+shorter.
+
+Forge already has the executor for that: the armed queue dispatcher. On a
+host where `forge queue dispatcher arm` has been run, a ticket that a trigger
+files and enqueues is claimed and dispatched on the dispatcher's next tick
+like any other queued ticket, with no session and no operator in the loop.
+The trigger's job is only to produce the ticket and put it in the queue; the
+dispatcher that is already running is what makes it execute unattended.
+
+**Invariant reconciliation — why the trigger doesn't dispatch directly.**
+The question this has to answer is not "do we want triggered tickets to run
+unattended" — we do, that's the entire point of a trigger — it's "why does
+the trigger file-and-enqueue instead of dispatching the container itself."
+The answer is invariant 23: queue membership is planning intent, and
+execution authority is a separate explicit act that only arming the
+dispatcher grants (`forge queue dispatcher arm`; FG-591 D2). A trigger that
+could dispatch on its own would be a second, unrecorded source of that
+authority, reachable by editing a cron expression instead of running a CLI
+command. Keeping the trigger to file-and-enqueue instead of dispatch buys
+three things, each of them a real accident a direct-dispatch trigger would
+reopen:
+
+- **One switch stops every source of unattended work.** Disarm the
+  dispatcher and scheduled work stops along with campaigns and every other
+  queued ticket. A cron entry that could dispatch on its own could not be
+  stopped this way — it would keep spawning containers on a host the
+  operator believes is idle, because disarming the dispatcher is not a
+  disarming of the trigger.
+- **One capacity bound.** A triggered ticket that goes through the queue
+  counts against the same `max_active_runs`, checked inside the same
+  `claimNextEligible` write transaction as every other claim. A trigger that
+  dispatched directly would over-admit silently, the way invariant 23 already
+  warns any ceiling checked outside that transaction does.
+- **One admission path.** Readiness, the cooldown in recommendation 6, and
+  the budget refusal in recommendation 3 all apply for free to anything that
+  goes through the queue scan. A trigger with its own dispatch path would
+  need its own copy of each of those checks, or it would skip them.
+
+Paperclip's routines pay for skipping this: because the routine wakes the
+agent directly, its own code has to re-implement budget, throttle and claim
+checks inside that wake path (lane A §6a) instead of getting them from a
+single shared admission gate. Forge's trigger gets the identical
+end-to-end outcome — a ticket appears and, unattended, gets worked — through
+the dispatcher it already has, for one fewer piece of authority in the
+system, not a weaker outcome.
+
+**Proposed shape.**
+
+- A `triggers:` section in project config, with a cron expression, a ticket
+  template path, a concurrency policy (`coalesce_if_active`, `skip_if_active`
+  or `always_enqueue`) and a catch-up cap.
+- A `forge triggers tick` verb, run by the controller loop from
+  recommendation 1, that files each due ticket from its template *and
+  enqueues it* — the tick's job ends with the ticket queued for the
+  dispatcher, not merely written to the store.
+- An `origin_fingerprint` column on `tickets` with a partial unique index on
+  open tickets per trigger.
+- A `forge doctor` line that warns when a project declares `triggers:` but
+  the host's dispatcher is not armed. That is the one configuration where
+  triggered tickets pile up in the queue with nothing to claim them, silently
+  turning a "runs unattended" feature back into a to-do list.
+
+Size: medium. No webhooks in the first slice, because Forge has no inbound
+listener apart from the remote board.
+
+**Risks.** Do not dispatch from a trigger — that is the one authority a
+trigger must never hold, for the reasons above. Do not let triggered tickets
+bypass readiness assessment; the queue scan already refuses
+`readiness_ineligible`. Do not let a trigger arm the dispatcher: arming stays
+the operator's own CLI act (`forge queue dispatcher arm`), never something a
+config file or a schedule can trigger on the trigger's behalf.
+
+**Priority.** P2. Any project whose work is inherently periodic — a mailbox
+sweep, a monitoring check, a periodic report — is blocked on this, and the
+controller loop from recommendation 1 already exists once P1 lands, making
+this small to add on top of it.
+
 ## P3 — Could
 
-### 14. One outbound safe-projection function for notifications
+### 15. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -897,7 +997,7 @@ recommendation 18 lands.
 
 **Priority.** P3.
 
-### 15. Content-hash provenance and a static audit for skills and role seeds
+### 16. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -928,7 +1028,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 16. Role-scoped secret bindings
+### 17. Role-scoped secret bindings
 
 **Pattern.** Paperclip resolves a secret into run env only when a binding row
 exists for the specific consumer and config path. `resolveSecretValueInternal`
@@ -1052,42 +1152,6 @@ enforces nothing.
 
 **Priority.** P3 — becomes P2 the moment any role is expected to call an
 external service with a credential.
-
-### 17. Scheduled triggers that file and enqueue, never dispatch
-
-**Pattern.** Paperclip's routines materialize a schedule, webhook or API
-trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
-The issue carries an origin fingerprint and follows a declared concurrency
-policy: `coalesce_if_active`, `skip_if_active` or `always_enqueue`. Catch-up
-is bounded, and a partial unique index keeps at most one open issue per
-routine. Webhooks are HMAC-signed with a replay window.
-
-**Why it fits Forge.** Forge has no cron, launchd or webhook starts (lane D
-§5). Recurring hygiene work, such as dependency audits, docs-drift sweeps and
-the doc/code drift list in the companion assessment, is filed by hand.
-
-**Invariant reconciliation.** Invariant 23 says enqueuing never authorizes a
-container. A Forge trigger may therefore file a ticket from a template and
-enqueue it. Execution still requires the armed dispatcher or an operator. This
-is a stricter shape than Paperclip's, where routine issues wake agents
-directly.
-
-**Proposed shape.**
-
-- A `triggers:` section in project config, with a cron expression, a ticket
-  template path, a concurrency policy and a catch-up cap.
-- A `forge triggers tick` verb, run by the controller loop from
-  recommendation 1, that files and enqueues due tickets.
-- An `origin_fingerprint` column on `tickets` with a partial unique index on
-  open tickets per trigger.
-
-Size: medium. No webhooks in the first slice, because Forge has no inbound
-listener apart from the remote board.
-
-**Risks.** Do not dispatch from a trigger. Do not let triggered tickets bypass
-readiness assessment; the queue scan already refuses `readiness_ineligible`.
-
-**Priority.** P3.
 
 ### 18. Answer operator asks from a phone with opaque expiring tokens
 
@@ -1335,5 +1399,6 @@ reach; none of them make the dashboard itself an authority.
 11. Add an `attention_dismissals` table and a `forge attention dismiss|snooze <item>` verb, wire it into the inbox's per-row resolving button, and complete `KIND_META`/CSS for `stale_verification` and `kanban_conflict`
 12. Add a run index page and link task detail and Explain to each other, each behind its own URL
 13. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-14. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
-15. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
+14. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
+15. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+16. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
