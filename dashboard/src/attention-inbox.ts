@@ -11,28 +11,31 @@
 
 /** The item kinds the inbox surfaces. Deliberately a CLOSED, source-agnostic
  *  vocabulary — the operator-facing categories from the ticket's Acceptance Criteria,
- *  never the internal enum a source happens to record. */
-export type AttentionItemKind =
-  | "waiting_gate"
-  | "campaign_paused"
-  | "blocked_by_red_or_reviewer"
-  | "missing_acceptance_or_readiness"
-  | "auth_setup"
-  | "merge_conflict"
-  | "integration_blocked_park"
+ *  never the internal enum a source happens to record. A runtime array so the client's
+ *  render table can be checked against it (attention-inbox-render.test.ts). */
+export const ATTENTION_ITEM_KINDS = [
+  "waiting_gate",
+  "campaign_paused",
+  "blocked_by_red_or_reviewer",
+  "missing_acceptance_or_readiness",
+  "auth_setup",
+  "merge_conflict",
+  "integration_blocked_park",
   // FG-746: a host/CI verification start that has gone STALE under still-active,
   // nonterminal work — its finish event never arrived and the attempt is past
   // its staleness bound, so a human must decide whether to re-run or clear it.
   // A terminal-parent attempt (the FG-667 case) never reaches this kind: it is
   // dropped by the shared terminal-authority predicate before classification.
-  | "stale_verification"
+  "stale_verification",
   // FG-785: an external kanban card was moved/deleted/edited on the provider board
   // outside Forge, so the external state and Forge's one-way projection have diverged.
   // The divergence is NEVER applied to Forge (outbound-only): it is recorded as an OPEN
   // `kanban_conflicts` store row and surfaced here until an authorized host-operator
   // resolution closes that row. The inbox holds no resolution state of its own — a
   // resolved row simply stops producing this item on the next projection.
-  | "kanban_conflict";
+  "kanban_conflict",
+] as const;
+export type AttentionItemKind = (typeof ATTENTION_ITEM_KINDS)[number];
 
 /** Known priority, or null when the source recorded none. Kept as a small named
  *  vocabulary rather than a raw ordinal so a client renders a label, not a number. */

@@ -7,18 +7,22 @@
 // `Attention inbox unavailable` + Retry, and NEVER the calm empty copy — because that
 // copy is reachable only from a validated payload.
 //
-// READ-ONLY: the only control is Retry (re-reads) and the per-row link (navigates via
-// the hash). There is no advance/reject/mutation here — the inbox renders existing Forge
+// READ-ONLY: the only controls are Retry / Refresh (re-read; Refresh also re-sorts the
+// pinned rows, FG-819) and the per-row link (navigates via the hash). There is no advance/reject/mutation here — the inbox renders existing Forge
 // state and typed attention records; it invents no chat semantics.
 
 import { h } from "preact";
 import htm from "htm";
 import { inboxView, inboxItemAge } from "./attention-inbox-render.js";
+import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
 
 const html = htm.bind(h);
 
-export function AttentionInboxSection({ load, now, onRetry }) {
+// `orderedItems`/`listProps`/`onRefresh` are supplied by PinnedAttentionInboxSection
+// (FG-819 order pinning); without them the section renders the server order as-is.
+export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null }) {
   const view = inboxView(load);
+  const items = orderedItems ?? view.items;
   return html`
     <section class="attention-inbox" aria-labelledby="attention-inbox-heading">
       <div class="home-section-heading">
@@ -26,6 +30,7 @@ export function AttentionInboxSection({ load, now, onRetry }) {
           <div class="home-section-kicker">Needs you</div>
           <h2 id="attention-inbox-heading">Attention inbox</h2>
         </div>
+        ${onRefresh ? html`<${PinRefreshButton} label="Refresh and re-sort the attention inbox" onClick=${onRefresh} />` : null}
       </div>
       ${view.phase === "loading"
         ? html`<div class="inbox-loading" role="status">${view.message}</div>`
@@ -37,12 +42,31 @@ export function AttentionInboxSection({ load, now, onRetry }) {
                 ${view.degraded.length > 0
                   ? html`<div class="inbox-degraded" role="status">Some sources could not be read: ${view.degraded.join(", ")}.</div>`
                   : null}
-                <div class="inbox-list">
-                  ${view.items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} />`)}
+                <div class="inbox-list" ...${listProps}>
+                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} />`)}
                 </div>
               `}
     </section>
   `;
+}
+
+/** The Home inbox: the section above, with its rows pinned to the order first shown until
+ *  an idle, tab-visibility, or manual-refresh boundary (FG-819). */
+export function PinnedAttentionInboxSection({ load, now, onRetry }) {
+  const view = inboxView(load);
+  const pin = usePinnedOrder(view.phase === "ready" ? view.items : null, (summary) => summary.id);
+  const refresh = () => {
+    pin.resort();
+    if (onRetry) onRetry();
+  };
+  return html`<${AttentionInboxSection}
+    load=${load}
+    now=${now}
+    onRetry=${refresh}
+    orderedItems=${pin.items}
+    listProps=${pin.activityProps}
+    onRefresh=${refresh}
+  />`;
 }
 
 // One row: the kind badge, the severity, the identity (ticket/project), the reason and

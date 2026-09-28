@@ -285,7 +285,7 @@ It exists because the dashboard used to project Forge **tasks** and nothing else
 
 ### One visible dashboard owner
 
-The dashboard has one visible owner for live work: **In flight**. It renders agent tasks from `/api/in-flight`, collapses orchestrators there, and adds compact rows for the four non-task waits below. The detailed durable projection remains available under Activity → **Diagnostics** and in `forge status`, but it does not render a second Agents section.
+The dashboard has one visible owner for live work: **In flight**. It renders agent tasks from `/api/in-flight`, collapses orchestrators there, and adds compact rows for the four non-task waits below. The detailed durable projection remains available under Activity → **Diagnostics** and in `forge status`, but it does not render a second Agents section. On Home, its task rows hold the order first shown until a boundary passes — see [Row order pinning](#row-order-pinning-fg-819) under Attention inbox.
 
 - **Host verification** — [durable launches](#durable-launch) with a persisted observation that **declared the purpose `host_verification`** (FG-700). A launch is *never* rendered under Agents, however long it runs and whoever submitted it.
 - **CI checks** — configured shipping checks at the exact candidate sha, from observations the review-loop's existing CI observer persists. The dashboard label describes the operator question (are PR checks in progress?) rather than exposing Forge's internal “required CI” term.
@@ -422,6 +422,8 @@ Five independently-read sources, folded together by the ONE assembly point, `com
 
 Every mapper translates its own internal enum into the SAME closed, nine-member `AttentionItemKind` union one-way — a source's internal vocabulary (a `FailureKind`, an `OperatorWaitSource`, a review disposition, a verification's stale flag, a kanban conflict's `moved`/`deleted`/`edited` kind) never reaches the client raw, so renaming an internal enum cannot break a consumer of the inbox contract.
 
+(FG-819) Client honesty runs the other way too: `attention-inbox-render.js`'s badge table carries all nine kinds, each with its own label and tone — `stale_verification` and `kanban_conflict` included, no longer the neutral unknown-kind badge they fell back to before this ticket. A unit test scrapes the SAME `ATTENTION_ITEM_KINDS` runtime array the store's `AttentionItemKind` type is derived from and asserts every member has a render entry, so a tenth kind added without a matching badge fails that test rather than silently rendering raw. The neutral badge stays reachable — a kind the running client's badge table does not yet know about (e.g. a newer server's kind against an older client) still degrades to it rather than rendering nothing.
+
 ### Severity, dedup, and sort
 
 `severity` is `"high" | "medium" | "low"`, or `null` when the source recorded none — a known severity always outranks an unknown one. One underlying blocker must surface as ONE row: two items sharing a `runId` collapse to whichever has the higher-precedence `kind` (a hard block — `blocked_by_red_or_reviewer`, `merge_conflict`, `integration_blocked_park`, `auth_setup` — outranks `stale_verification`, which outranks `kanban_conflict` (an external-board divergence never blocks a Forge lifecycle gate), which outranks the readiness gap `missing_acceptance_or_readiness`, which outranks the softer `campaign_paused`/`waiting_gate` waits), then the more severe, then the lexicographically earlier id; items sharing no run collapse only when they share their own id, so two distinct tickets' readiness gaps stay two rows. The surviving items sort severity-known-first, then oldest-`startedAt`-first, then by id — a pure, total, deterministic order.
@@ -435,6 +437,12 @@ The envelope is `{generatedAt, scope, items, empty, degraded}`. Each of the five
 ### Surface
 
 Pure persisted-state read: no git/gh/tmux/docker/CLI subprocess, and no mutation. Rendered as its own `AttentionInboxSection` on the dashboard Home view, above the In-flight group, polled with the same own-your-own-outcome discipline as Current activity (one read per URL in flight; a failed read IS the return value, never a linger of the last render). Each row links to the relevant surface by kind — an `auth_setup` row to Control plane, `campaign_paused` to Campaigns, `missing_acceptance_or_readiness` to the ticket in Backlog, a run/task blocker to its Run Map — or renders with no link when the item carries no id the target needs. Schema: `docs/SCHEMA-CONTRACT.md` → `/api/attention-inbox`.
+
+On Home, this list's row order is additionally pinned per [Row order pinning](#row-order-pinning-fg-819) below — the same client-side behavior In flight uses, so a poll cannot reorder a row out from under an operator mid-read.
+
+### Row order pinning (FG-819)
+
+Both 2-second Home lists — Attention inbox and In flight — freeze the row order they first render and only adopt the server's latest ranking at a boundary: an idle stretch with no pointer/keyboard activity anywhere over the list (`ORDER_PIN_IDLE_MS`, 150 seconds), the tab returning to visible after being hidden, or the list's own Refresh control. Between boundaries a new row is appended wherever it lands in the latest read rather than reordering the rows already on screen, and a row the server stopped returning is simply dropped from the pinned order — pinning holds ORDER only, never membership or content, so a pinned row still shows its latest read (`dashboard/client/order-pin-render.js`, `order-pin-view.js`). This exists because the server re-ranks on every poll, and without it a row an operator is mid-read on could jump position under the cursor.
 
 ## Design corpus
 

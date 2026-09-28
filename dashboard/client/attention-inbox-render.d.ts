@@ -8,7 +8,9 @@ export type AttentionItemKind =
   | "missing_acceptance_or_readiness"
   | "auth_setup"
   | "merge_conflict"
-  | "integration_blocked_park";
+  | "integration_blocked_park"
+  | "stale_verification"
+  | "kanban_conflict";
 
 export type AttentionSeverity = "high" | "medium" | "low";
 

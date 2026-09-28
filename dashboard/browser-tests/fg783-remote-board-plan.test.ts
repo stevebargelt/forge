@@ -87,7 +87,15 @@ function liveEnvelope(board: RemoteBoard): RemoteBoardEnvelope {
 }
 
 function liveEnvelopeWithCaps(board: RemoteBoard, capabilities: RemoteBoardEnvelope["capabilities"]): RemoteBoardEnvelope {
-  return { state: "live", generatedAt: "2026-09-08T12:00:00.000Z", generation: 1_757_332_800_000, board, capabilities };
+  return {
+    state: "live",
+    generatedAt: "2026-09-08T12:00:00.000Z",
+    generation: 1_757_332_800_000,
+    board,
+    capabilities,
+    lastSuccessfulAt: "2026-09-08T12:00:00.000Z",
+    staleReason: null,
+  };
 }
 
 // ─── scripted server state, reset per test ──────────────────────────────────────

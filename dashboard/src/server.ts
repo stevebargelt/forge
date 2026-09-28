@@ -20,11 +20,12 @@
 // - GET /api/orchestrators                interactive orchestrators for ONE project, liveness-joined; the only route that can carry a remote-control URL (?projectKey|?projectDir REQUIRED, FG-576)
 //
 // - POST /api/queue/enqueue|dequeue|rank|reorder   the operator's QUEUE PLANNING writes (FG-591)
+// - POST /api/projects/classify                    records a legacy workspace's purpose (FG-745)
 //
-// Every GET is a read. The four POSTs above are the ONLY mutating routes on this
-// surface, and they do not write the DB either: each shells exactly one named `forge
-// queue` verb (FORGE-DEC-015), guarded same-origin and behind a non-simple content
-// type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
+// Every GET is a read. The five POSTs above — four queue verbs plus classify — are the
+// ONLY mutating routes on this surface, and they do not write the DB either: each shells
+// exactly one named `forge queue` / `forge projects classify` verb (FORGE-DEC-015),
+// guarded same-origin and behind a non-simple content type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
 // exposed here (FG-591 D2) — that is authority to run repo-writing containers
 // unattended, and it stays CLI-only. See queue-mutation.ts.
 
