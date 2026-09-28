@@ -38,15 +38,16 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 12 | Attention Inbox with audited dismissal, snooze and inline resolution | P2 | Small-Medium |
 | 13 | A cockpit: one navigable object graph from ticket to evidence | P2 | Medium |
 | 14 | A Roles surface: every agent seed as a browsable, deep-linkable object | P2 | Medium |
-| 15 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
-| 16 | Operator diagnostic skill for stalled work | P3 | Small |
-| 17 | One outbound safe-projection function for notifications | P3 | Small |
-| 18 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 19 | Role-scoped secret bindings | P3 | Medium |
-| 20 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 21 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
-| 22 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
-| 23 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
+| 15 | Left-column navigation, with the information architecture settled by a UX research pass first | P2 | Medium |
+| 16 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
+| 17 | Operator diagnostic skill for stalled work | P3 | Small |
+| 18 | One outbound safe-projection function for notifications | P3 | Small |
+| 19 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 20 | Role-scoped secret bindings | P3 | Medium |
+| 21 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 22 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 23 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
+| 24 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
 
 ## P1 — Must
 
@@ -419,7 +420,7 @@ control-plane receipt. Size: small.
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
 containers today, and when one arrives the credential half of it is already
-covered by role-scoped secret bindings (recommendation 19) — that should land
+covered by role-scoped secret bindings (recommendation 20) — that should land
 before any gateway is considered.
 
 **Priority.** P2.
@@ -939,7 +940,7 @@ cockpit recommendation (§13) — with tabs that each name their source:
 - **Configuration** — `settings.json`, the runtime seed bound by policy,
   and the auth strategy.
 - **Secrets** — "none: containers receive no project secrets" until
-  role-scoped secret bindings (recommendation 19) land, then the
+  role-scoped secret bindings (recommendation 20) land, then the
   bindings themselves.
 - **Tools** — the `settings.json` tools list, flagged as
   declared-but-unenforced (confirmed: nothing outside its own tests reads
@@ -974,7 +975,103 @@ individually testable views rather than one file (Patterns to avoid #9).
 composes entirely from data the store and the seed generation already
 carry.
 
-### 15. Scheduled triggers that file and enqueue; the armed dispatcher runs them
+### 15. Left-column navigation, with the information architecture settled by a UX research pass first
+
+**Pattern.** Paperclip's streamlined sidebar (`ui/src/components/Sidebar.tsx:145-247`)
+opens with a short top block — New Task, Search, Dashboard with a live-run
+count, Inbox with an unread badge that turns danger-toned when failed runs
+exist — then two collapsible grouped sections, Work (Tasks, Projects,
+Routines, Artifacts) and Org (Agents, Skills, Connectors, Audit), plugin
+sidebar slots, and a Recent Tasks list marked with live-issue dots (lane E
+§1). A five-item bottom bar — Home, Tasks, New Task, Agents, Inbox — replaces
+it below the 768px mobile breakpoint (lane E §7). This is the operator's own
+stated reference point: "I like paperclip's UI and UX quite a bit," said
+while asking for exactly this nav shape.
+
+**Why it fits Forge.** Lane F's plainest finding is Forge's dashboard
+navigation itself: one horizontal tab strip of 13 buttons — home, activity,
+projects, usage, ops, workbench, control plane, backlog, queue, reviews,
+shipping, campaigns, run map (`dashboard/client/main.js:662-674`) — with no
+grouping, no sidebar, no breadcrumbs, and no counters or badges on the tabs,
+scrolling horizontally on narrow screens (lane F §1). Routing is hash-based
+over a closed set of 12 views plus `home` (`dashboard/client/view-routing.js:1`),
+and project scope travels as component state rather than the URL hash, so a
+scoped view cannot be deep-linked (lane F §1). The operator calls the strip
+cumbersome, and it was already set to get worse: the Roles surface
+(recommendation 14) is a fourteenth tab-shaped thing with no group to join,
+and the cockpit (recommendation 13) wants a run index plus deep-linkable
+task/Explain pages that need a stable place to live. Grouping is the point,
+not a cosmetic wrapper around the same 13 buttons: a sidebar that reflects
+what is happening / needs me / work / actors / governance makes Forge's
+object model legible in the nav itself, the way lane E's screen contract
+already asks every Paperclip screen to answer what is happening, does it
+need me, what do I do.
+
+**Proposed shape.** Two steps, in this order, because deciding the groups in
+the same change that ships the layout is the mistake that produced 13 flat
+tabs in the first place.
+
+1. **First, a UX research pass to settle the information architecture,
+   before any layout code.** Dispatch it through Forge's own research route:
+   the `research` route (`research-specialist`, `path: invoke`) for a single-lane
+   pass, or the `research-synthesis` workflow (`forge new research-synthesis`)
+   when a grouping is contested and independent primary/skeptic research
+   pays for itself. Feed it the two lane reports (lane E §1, §7; lane F §1)
+   and Paperclip's `Sidebar.tsx` as inputs. Its deliverable is an IA document
+   under `docs/research/` that:
+   - proposes the nav groups and their order;
+   - states which of the 13 current tabs merge, split or move under a group;
+   - decides where scope (project) lives in the URL, closing the gap lane F
+     §1 names directly;
+   - sets the counter/badge policy — server-derived only, one attention
+     derivation shared with the CLI, per Patterns to avoid #1 and #2, not a
+     client-computed count;
+   - designs breadcrumbs for the cockpit's deep-linkable pages
+     (recommendation 13);
+   - proposes the mobile arrangement; and
+   - answers, for every nav item, which of the three screen-contract
+     questions (what is happening / does it need me / what do I do) it
+     serves.
+   If a Pencil mockup is wanted once the groups are settled, the visual pass
+   goes through the `ui_design` route afterward — `prompt-author` produces
+   `PROMPT.md`, then the human drives `forge design` (`docs/repo-guide.md`),
+   handing back `.pen` and exported PNGs.
+2. **Then the layout change.** A left column replaces the strip, rendered
+   from the IA document's groups. Hash routes gain the scope and the group so
+   every view is deep-linkable, closing both open gaps lane F §1 names. One
+   status/badge source feeds every count. The strip is retired in the same
+   change — not kept behind a flag as a second nav an operator has to choose
+   between.
+
+Size: medium. The research pass is a `research`/`research-synthesis`
+dispatch plus a doc; the layout change touches the dashboard shell's nav
+module, `view-routing.js`, and the render-module split
+(`*-render.js`/`*-view.js`) the newer inbox and current-activity surfaces
+already use.
+
+**Risks and what not to copy.** Do not decide the groups inside the layout
+PR — "we'll sort the nav later" is how 13 flat tabs happened, and the research
+document exists precisely so that question is answered before the layout
+change starts. Do not compute badges in the client or persist read/dismiss
+state in `localStorage` (Patterns to avoid #1, #2) — Forge's invariant 10
+already requires that state to live in the store, and the counter policy the
+research pass sets must read from there. Do not keep a legacy strip behind a
+flag once the sidebar ships; Patterns to avoid #5 is Paperclip's own warning
+about exactly this — 23 `.production.tsx` twins kept alive by one flag,
+maintained twice and drifting apart. Do not add a company/org scope switcher
+— Forge's scope is host-wide with an optional project filter, not
+Paperclip's per-company board, so the sidebar has no organization level to
+select. Keep the render-module split (Patterns to avoid #9) rather than
+letting one shell file grow; `dashboard/client/main.js` is already 2,708
+lines (lane F §8), and a monolithic nav shell would be the same mistake
+Paperclip's 8,320-line `IssueDetail.tsx` already shows the cost of.
+
+**Priority.** P2. The operator asked for it directly, and it is the
+precondition for the Roles surface (recommendation 14) and the cockpit
+(recommendation 13) reading as one coherent object model rather than two
+more entries competing for space on a 13-button strip.
+
+### 16. Scheduled triggers that file and enqueue; the armed dispatcher runs them
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -1091,7 +1188,7 @@ this small to add on top of it.
 
 ## P3 — Could
 
-### 16. Operator diagnostic skill for stalled work
+### 17. Operator diagnostic skill for stalled work
 
 **Pattern.** Paperclip's `diagnose-why-work-stopped` skill
 (`.agents/skills/diagnose-why-work-stopped/SKILL.md`) is diagnostic-only: "No
@@ -1166,7 +1263,7 @@ them.
 
 **Priority.** P3.
 
-### 17. One outbound safe-projection function for notifications
+### 18. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -1182,11 +1279,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 20 lands.
+recommendation 21 lands.
 
 **Priority.** P3.
 
-### 18. Content-hash provenance and a static audit for skills and role seeds
+### 19. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -1217,7 +1314,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 19. Role-scoped secret bindings
+### 20. Role-scoped secret bindings
 
 **Pattern.** Paperclip resolves a secret into run env only when a binding row
 exists for the specific consumer and config path. `resolveSecretValueInternal`
@@ -1342,7 +1439,7 @@ enforces nothing.
 **Priority.** P3 — becomes P2 the moment any role is expected to call an
 external service with a credential.
 
-### 20. Answer operator asks from a phone with opaque expiring tokens
+### 21. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -1372,7 +1469,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 21. Policy evals: scenario × profile matrix with hard gates
+### 22. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -1400,7 +1497,7 @@ Size: large.
 
 **Priority.** P3.
 
-### 22. Honest freshness and recovery cards on the surfaces that already poll
+### 23. Honest freshness and recovery cards on the surfaces that already poll
 
 **Pattern.** Paperclip surfaces recovery where the work already lives: a
 stateful card cycling RECOVERY NEEDED → IN PROGRESS → ESCALATED → RESOLVED,
@@ -1446,7 +1543,7 @@ recover` or the registry from recommendation 11 doesn't already expose.
 
 **Priority.** P3.
 
-### 23. Status tokens and shared formatters as the only visual vocabulary
+### 24. Status tokens and shared formatters as the only visual vocabulary
 
 **Pattern.** Paperclip's palette logic is stated as a rule — "gray inert,
 blue liveness, amber queued, violet review, green done, red blocked" — and
@@ -1588,8 +1685,9 @@ reach; none of them make the dashboard itself an authority.
 11. Add an `attention_dismissals` table and a `forge attention dismiss|snooze <item>` verb, wire it into the inbox's per-row resolving button, and complete `KIND_META`/CSS for `stale_verification` and `kanban_conflict`
 12. Add a run index page and link task detail and Explain to each other, each behind its own URL
 13. Add a Roles nav entry and a `#roles/<role>/<tab>` page backed by read-only `GET /api/roles` and `GET /api/roles/:role`, projecting the current seed generation and the store into Overview/Instructions/Skills/Configuration/Secrets/Tools/Tasks/Receipts/Usage tabs, with no write route (FG-817)
-14. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-15. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
-16. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
-17. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
-18. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
+14. UX research pass: information architecture for a left-column dashboard nav (docs/research/), then the layout change
+15. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+16. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
+17. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+18. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
+19. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
