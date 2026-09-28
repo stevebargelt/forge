@@ -2,15 +2,17 @@
 // contract (docs/SCHEMA-CONTRACT.md), not only the envelope. A non-dashboard consumer
 // (Stream Deck, forge status) must be able to build against a defined item shape.
 //
-// This is not vacuous: the `kind` vocabulary the doc must list is SCRAPED from the
-// AttentionItemKind union in attention-inbox.ts, so adding or renaming a kind without
-// documenting it fails this test — a hardcoded list would keep passing through a rename.
+// This is not vacuous: the `kind` vocabulary the doc must list is the runtime
+// ATTENTION_ITEM_KINDS array the AttentionItemKind type is derived from, so adding or
+// renaming a kind without documenting it fails this test — a hardcoded list would keep
+// passing through a rename.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ATTENTION_ITEM_KINDS } from "./attention-inbox.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -18,13 +20,9 @@ function read(rel: string): string {
   return readFileSync(join(repoRoot, rel), "utf8");
 }
 
-/** The kinds the closed vocabulary carries, scraped from the union declaration in the
- *  source so the doc check tracks the source rather than a copy that can drift. */
+/** The kinds the closed vocabulary carries — the source array itself, not a copy. */
 function attentionItemKinds(): string[] {
-  const src = read("dashboard/src/attention-inbox.ts");
-  const block = src.match(/export type AttentionItemKind =\s*([\s\S]*?);/);
-  assert.ok(block, "AttentionItemKind union must be present in attention-inbox.ts");
-  return [...block![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+  return [...ATTENTION_ITEM_KINDS];
 }
 
 /** How many independently-read sources attentionInbox() actually composes, scraped from

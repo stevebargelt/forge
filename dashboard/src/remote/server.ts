@@ -35,6 +35,9 @@ import {
 import {
   assembleRemoteBoard,
   hostUnavailableRemoteBoard,
+  staleRemoteBoard,
+  REMOTE_BOARD_POLL_INTERVAL_MS,
+  type AssembleRemoteBoardOptions,
   redactRemoteFreeText,
   unauthorizedRemoteBoard,
   type RemoteBoardEnvelope,
@@ -121,6 +124,11 @@ export interface RemoteBoardDeps {
    *  under FORGE_HOME; tests inject a record so the CSRF guard has a public hostname to pin to
    *  without a real `tailscale serve setup`. Absent state fails the guard closed (step 4). */
   readonly readServeState?: () => ServeStateRecord | null;
+  /** FG-819: the host read that produces a board. Default: assembleRemoteBoard. Tests inject
+   *  a read that fails on demand to drive the failed-read-after-success path. */
+  readonly readBoard?: (grant: RemoteProjectGrant, options: AssembleRemoteBoardOptions) => RemoteBoardEnvelope;
+  /** FG-819: the freshness bound past which a served projection is `stale`. */
+  readonly pollIntervalMs?: number;
 }
 
 /** RF-4: is the adapter's CLAIMED member-dir set consistent with the granted project's OWN
@@ -364,6 +372,11 @@ export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: Inco
   const now = deps.now ?? (() => Date.now());
   const clientDir = deps.clientDir ?? REMOTE_CLIENT_DIR;
   const serveState = deps.readServeState ?? (() => readServeState());
+  const readBoard = deps.readBoard ?? assembleRemoteBoard;
+  const pollIntervalMs = deps.pollIntervalMs ?? REMOTE_BOARD_POLL_INTERVAL_MS;
+  // FG-819: the last successful read per granted project, re-served as `stale` (never `live`)
+  // when a later host read fails. Bounded by the number of registered projects.
+  const lastSuccess = new Map<string, RemoteBoardEnvelope>();
   // Per-handler concurrency counter — each server instance caps its own in-flight planning
   // commands, so tests that spin up several handlers do not share a global gate.
   let planInFlight = 0;
@@ -410,17 +423,28 @@ export function createRemoteBoardHandler(deps: RemoteBoardDeps = {}): (req: Inco
       sendEnvelope(res, unauthorizedRemoteBoard(now()));
       return;
     }
+    const capabilities = resolution.identity.capabilities;
+    const grant: RemoteProjectGrant = { project, memberDirs: project.projectDirs };
+    const readAtMs = now();
+    let envelope: RemoteBoardEnvelope;
     try {
-      const grant: RemoteProjectGrant = { project, memberDirs: project.projectDirs };
       // RF-2: carry the verified identity's granted capabilities onto the envelope so the
       // client renders planning affordances ONLY for a `plan`-capable identity. A read-only
       // identity is never shown mutation controls the server would refuse.
-      sendEnvelope(res, assembleRemoteBoard(grant, { nowMs: now(), capabilities: resolution.identity.capabilities }));
+      envelope = readBoard(grant, { nowMs: readAtMs, capabilities });
     } catch {
       // A degraded/unreadable host store must never take the surface down, and never leak
-      // an internal error string — the closed envelope carries no project data.
-      sendEnvelope(res, hostUnavailableRemoteBoard(now()));
+      // an internal error string. FG-819: after a prior success the last good board is
+      // re-served as `stale` with its own timestamp; a read that never succeeded is
+      // `host-unavailable` with no project data.
+      const prior = lastSuccess.get(project.key);
+      sendEnvelope(res, prior ? staleRemoteBoard(prior, "read-failed", capabilities) : hostUnavailableRemoteBoard(now()));
+      return;
     }
+    lastSuccess.set(project.key, envelope);
+    // FG-819: a projection that aged past the poll interval before it could be served is
+    // behind the host — say so rather than present it as live.
+    sendEnvelope(res, now() - readAtMs > pollIntervalMs ? staleRemoteBoard(envelope, "aged", capabilities) : envelope);
   }
 
   /**

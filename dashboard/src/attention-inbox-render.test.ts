@@ -19,6 +19,9 @@ import {
   isRenderableInboxItem,
 } from "../client/attention-inbox-render.js";
 import { AttentionInboxSection } from "../client/attention-inbox-view.js";
+import { pinnedOrder, pinIdleElapsed, ORDER_PIN_IDLE_MS } from "../client/order-pin-render.js";
+import { ATTENTION_ITEM_KINDS } from "./attention-inbox.js";
+import { renderShell } from "./shell.js";
 import type { AttentionItem, InboxEnvelope } from "../client/attention-inbox-render.js";
 
 const NOW = new Date("2026-08-22T12:00:00.000Z").getTime();
@@ -204,5 +207,54 @@ describe("AttentionInboxSection — rendered honesty", () => {
     const text = textOf(h(AttentionInboxSection as never, { load, now: NOW, onRetry: () => {} }) as unknown as Vnode);
     assert.match(text, new RegExp(INBOX_UNAVAILABLE_LABEL));
     assert.doesNotMatch(text, new RegExp(INBOX_EMPTY_LABEL));
+  });
+});
+
+describe("FG-819: every store-side inbox kind has a render entry and a CSS rule", () => {
+  const css = renderShell();
+
+  for (const kind of ATTENTION_ITEM_KINDS) {
+    test(`${kind} renders its own badge, never the neutral unknown fallback`, () => {
+      const badge = inboxItemBadge({ kind });
+      assert.equal(badge.class, `inbox-kind-${kind}`, `${kind} has no KIND_META entry in attention-inbox-render.js`);
+      assert.notEqual(badge.label, kind, `${kind} renders its raw kind string instead of a label`);
+      assert.match(css, new RegExp(`\\.badge\\.inbox-kind-${kind} \\{[^}]*color:`), `${kind} has no .badge.inbox-kind-${kind} rule in shell.ts`);
+    });
+  }
+
+  test("the two FG-746/FG-785 kinds carry their operator labels", () => {
+    assert.equal(inboxItemBadge({ kind: "stale_verification" }).label, "Stale verification");
+    assert.equal(inboxItemBadge({ kind: "kanban_conflict" }).label, "Kanban conflict");
+  });
+});
+
+describe("FG-819: order pinning", () => {
+  const key = (x: { id: string }) => x.id;
+  const rows = (...ids: string[]) => ids.map((id) => ({ id }));
+
+  test("no pin adopts the server order", () => {
+    const out = pinnedOrder(null, rows("b", "a"), key);
+    assert.deepEqual(out.keys, ["b", "a"]);
+  });
+
+  test("a re-ranked read keeps the pinned order and appends new rows at the end", () => {
+    const out = pinnedOrder(["a", "b", "c"], rows("d", "c", "b", "a"), key);
+    assert.deepEqual(out.items.map(key), ["a", "b", "c", "d"]);
+    assert.deepEqual(out.keys, ["a", "b", "c", "d"]);
+  });
+
+  test("a row the server dropped is dropped, the rest keep their slots", () => {
+    const out = pinnedOrder(["a", "b", "c"], rows("c", "a"), key);
+    assert.deepEqual(out.items.map(key), ["a", "c"]);
+  });
+
+  test("the pinned row carries the latest content, not the pinned snapshot", () => {
+    const out = pinnedOrder(["a"], [{ id: "a", v: 2 }], key);
+    assert.deepEqual(out.items, [{ id: "a", v: 2 }]);
+  });
+
+  test("idle elapses only after the full idle window", () => {
+    assert.equal(pinIdleElapsed(0, ORDER_PIN_IDLE_MS - 1), false);
+    assert.equal(pinIdleElapsed(0, ORDER_PIN_IDLE_MS), true);
   });
 });

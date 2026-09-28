@@ -15,7 +15,7 @@
 // the actual boot hook (../server.ts → maybeStartRemoteBoardFromEnv), not a hand-built
 // server. `remoteBoardServer` is the dedicated listener that hook returned.
 
-import { after, afterEach, beforeEach, describe, test } from "node:test";
+import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +31,7 @@ import type { BoundRemoteIdentityResolver, RemoteIdentityResolution, VerifiedIde
 import type { ProjectRecord } from "../queries.js";
 import type { IdentityGrant, IdentityMapping } from "./mapping.js";
 import type { ServeStateRecord } from "./tailscale/serve-state.js";
+import { assembleRemoteBoard, REMOTE_BOARD_POLL_INTERVAL_MS, type AssembleRemoteBoardOptions, type RemoteProjectGrant } from "./projection.js";
 import { applyMigrations, setDbForTest, writeTransaction } from "../../../src/store/db.js";
 import { SCHEMA_SQL } from "../../../src/store/schema.js";
 import { upsertTicket, getTicket, type TicketRow } from "../../../src/store/tickets.js";
@@ -850,5 +851,183 @@ describe("FG-783: the bounded planning POST surface", () => {
     assert.equal(audit.json.projectKey, PLAN_PK);
     assert.ok(audit.json.rows.every((r: { targetId: string }) => r.targetId !== "OT-1"), "no foreign project row leaks into the audit");
     assert.ok(audit.json.rows.some((r: { requestId: string }) => r.requestId === "mine-1"), "this project's own row is present");
+  });
+});
+
+// ─── FG-819: the remote board emits `stale` honestly ────────────────────────────
+//
+// Drives the REAL handler over a REAL on-disk store. Successful reads are the real
+// assembleRemoteBoard; the only seam is a switch that makes the host read throw, and an
+// injected clock that can make one read outlast the poll interval.
+
+describe("FG-819: remote board freshness — live, stale, host-unavailable", () => {
+  let db: DatabaseInstance;
+  let prevDb: DatabaseInstance | null;
+  let srv: Server;
+  let port: number;
+  let clockMs: number;
+  let readCostMs: number;
+  let hostReadFails: boolean;
+
+  /** A running task on an active run in the granted project — what the board's activity
+   *  summary reads, so a real store change is visible in the served board. */
+  function addLiveTask(taskId: string): void {
+    const at = "2026-09-28T11:00:00.000Z";
+    db.prepare("INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, 'feature', ?, 'active', ?, ?)")
+      .run(`run-${taskId}`, `run ${taskId}`, at, PLAN_DIR);
+    db.prepare("INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, created_at, started_at) VALUES (?, ?, 'build', 'engineer', 'running', '', ?, ?)")
+      .run(taskId, `run-${taskId}`, at, at);
+  }
+
+  const agentIds = (body: any): string[] => body.board.activity.agents.map((a: { taskId: string }) => a.taskId).sort();
+
+  function readBoard(grant: RemoteProjectGrant, options: AssembleRemoteBoardOptions) {
+    if (hostReadFails) throw new Error("host store unreadable");
+    const envelope = assembleRemoteBoard(grant, options);
+    clockMs += readCostMs;
+    return envelope;
+  }
+
+  async function getBoard(): Promise<{ status: number; json: any }> {
+    const res = await post(port, "/api/board", { method: "GET" });
+    return { status: res.status, json: res.json };
+  }
+
+  // The dashboard's read path opens FORGE_HOME/forge.db itself, so the store lives there
+  // (one per describe) and the writer handle is swapped in for the seeding writes.
+  before(() => {
+    db = new Database(join(process.env.FORGE_HOME!, "forge.db"));
+    db.pragma("journal_mode = WAL");
+    db.exec(SCHEMA_SQL);
+    applyMigrations(db);
+    prevDb = setDbForTest(db);
+    resetPublishBarrierForTest();
+    addLiveTask("task-one");
+  });
+
+  after(() => {
+    setDbForTest(prevDb as DatabaseInstance);
+    if (db.open) db.close();
+  });
+
+  beforeEach(async () => {
+    clockMs = Date.parse("2026-09-28T12:00:00.000Z");
+    readCostMs = 0;
+    hostReadFails = false;
+    srv = createRemoteBoardServer({
+      resolveIdentity: (async () => grantResolution({ capabilities: ["read"] })) as BoundRemoteIdentityResolver,
+      lookupProject: (key) => (key === PLAN_PK ? planProject() : undefined),
+      now: () => clockMs,
+      readBoard,
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    port = (srv.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+  });
+
+  test("live -> stale (projection aged past the poll interval) -> live", async () => {
+    const first = await getBoard();
+    assert.equal(first.status, 200);
+    assert.equal(first.json.state, "live");
+    assert.equal(first.json.staleReason, null);
+    assert.equal(first.json.lastSuccessfulAt, first.json.generatedAt);
+    assert.ok(agentIds(first.json).includes("task-one"), "a real store read");
+
+    clockMs += 5_000;
+    readCostMs = REMOTE_BOARD_POLL_INTERVAL_MS + 1;
+    const readAt = new Date(clockMs).toISOString();
+    const aged = await getBoard();
+    assert.equal(aged.status, 200);
+    assert.equal(aged.json.state, "stale", "a projection older than the poll interval when served is never live");
+    assert.equal(aged.json.staleReason, "aged");
+    assert.equal(aged.json.lastSuccessfulAt, readAt, "it carries the time of the read that produced it");
+    assert.ok(aged.json.board, "stale still carries the board");
+
+    readCostMs = 0;
+    const again = await getBoard();
+    assert.equal(again.json.state, "live", "a timely read is live again");
+    assert.equal(again.json.staleReason, null);
+  });
+
+  test("a failed host read after a prior success is stale, carrying the last successful timestamp", async () => {
+    const ok = await getBoard();
+    assert.equal(ok.json.state, "live");
+    const syncedAt = ok.json.lastSuccessfulAt;
+
+    // The store moves on, then the host read starts failing.
+    addLiveTask("task-two");
+    clockMs += 60_000;
+    hostReadFails = true;
+    const failed = await getBoard();
+    assert.equal(failed.status, 200);
+    assert.equal(failed.json.state, "stale", "a failed read after success re-serves the last board as stale, never live");
+    assert.equal(failed.json.staleReason, "read-failed");
+    assert.equal(failed.json.lastSuccessfulAt, syncedAt);
+    assert.equal(failed.json.generatedAt, syncedAt, "the stamps are the board's own, not the re-send time");
+    assert.deepEqual(failed.json.capabilities, ["read"]);
+    assert.deepEqual(agentIds(failed.json), agentIds(ok.json), "the board is the last successful one, not a fabricated current read");
+    assert.ok(!agentIds(failed.json).includes("task-two"));
+
+    hostReadFails = false;
+    const recovered = await getBoard();
+    assert.equal(recovered.json.state, "live");
+    assert.ok(agentIds(recovered.json).includes("task-two"), "recovery serves the current store");
+  });
+
+  test("a stale cached board never bypasses identity: a direct/spoofed origin is still refused", async () => {
+    // Use the real listener with an adapter-shaped resolver that grants only a normal request.
+    // This makes the ordering meaningful: establish a successful cached projection, make the
+    // host read fail (so a legitimate caller would receive stale), then prove the request is
+    // stopped at the identity boundary before that cache can be returned.
+    const guarded = createRemoteBoardServer({
+      resolveIdentity: (async ({ headers }) => {
+        if (headers.origin || headers["x-forwarded-user"]) {
+          return { ok: false, reason: "no-identity", ignoredIdentityHeaders: ["x-forwarded-user"] };
+        }
+        return grantResolution({ capabilities: ["read"] });
+      }) as BoundRemoteIdentityResolver,
+      lookupProject: (key) => (key === PLAN_PK ? planProject() : undefined),
+      now: () => clockMs,
+      readBoard,
+    });
+    try {
+      await new Promise<void>((r) => guarded.listen(0, "127.0.0.1", r));
+      const guardedPort = (guarded.address() as AddressInfo).port;
+      const live = await post(guardedPort, "/api/board", { method: "GET" });
+      assert.equal(live.status, 200);
+      assert.equal(live.json.state, "live");
+
+      hostReadFails = true;
+      const spoofed = await post(guardedPort, "/api/board", {
+        method: "GET",
+        headers: { origin: "https://evil.example", "x-forwarded-user": "attacker@evil.example" },
+      });
+      assert.equal(spoofed.status, 401, "a direct origin is refused instead of receiving a stale cache");
+      assert.equal(spoofed.json.state, "unauthorized");
+      assert.equal(spoofed.json.board, null, "the prior board never leaks through a failed identity check");
+      assert.equal(spoofed.json.lastSuccessfulAt, null);
+
+      const stale = await post(guardedPort, "/api/board", { method: "GET" });
+      assert.equal(stale.status, 200, "the verified caller still receives the useful stale board");
+      assert.equal(stale.json.state, "stale");
+      assert.equal(stale.json.staleReason, "read-failed");
+    } finally {
+      guarded.closeAllConnections?.();
+      await new Promise<void>((r) => guarded.close(() => r()));
+    }
+  });
+
+  test("a host read that never succeeded is host-unavailable with no data, not stale", async () => {
+    hostReadFails = true;
+    const res = await getBoard();
+    assert.equal(res.status, 503);
+    assert.equal(res.json.state, "host-unavailable");
+    assert.equal(res.json.board, null);
+    assert.equal(res.json.lastSuccessfulAt, null);
+    assert.equal(res.json.staleReason, null);
   });
 });

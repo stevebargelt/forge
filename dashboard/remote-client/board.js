@@ -33,7 +33,7 @@ const STATES = {
   stale: {
     hasData: true,
     label: "Stale",
-    status: "Stale — showing the last known board. This is NOT live data.",
+    status: "Stale — this is NOT live data.",
   },
   "host-unavailable": {
     hasData: false,
@@ -50,6 +50,12 @@ const STATES = {
     label: "Unsupported",
     status: "Unsupported — this board cannot serve the requested view. No data is shown.",
   },
+};
+
+/** FG-819: why a stale envelope is stale, in operator words. */
+const STALE_REASONS = {
+  "read-failed": "The latest host read failed; press Refresh to retry.",
+  aged: "The host answered too slowly for this to count as live.",
 };
 
 // ─── tiny DOM helper (no framework) ──────────────────────────────────────────────
@@ -262,13 +268,17 @@ function stateBanner(state, envelope) {
     el("span", { class: "rb-state-label", text: meta.label }),
     el("span", { class: "rb-state-detail", text: meta.status }),
   );
-  if (meta.hasData && envelope && envelope.generatedAt) {
-    banner.appendChild(
-      el("span", {
-        class: "rb-state-time",
-        text: `${state === "stale" ? "as of" : "updated"} ${formatTime(envelope.generatedAt)}`,
-      }),
-    );
+  if (state === "stale" && envelope) {
+    // FG-819: a stale board names WHEN it last synced, and why it is not current, so the
+    // operator can judge it rather than mistake it for the host's present state.
+    const syncedAt = envelope.lastSuccessfulAt || envelope.generatedAt;
+    if (syncedAt) {
+      banner.appendChild(el("span", { class: "rb-state-time", text: `Showing the last successful sync ${formatTime(syncedAt)}` }));
+    }
+    const why = STALE_REASONS[envelope.staleReason];
+    if (why) banner.appendChild(el("span", { class: "rb-state-reason", text: why }));
+  } else if (meta.hasData && envelope && envelope.generatedAt) {
+    banner.appendChild(el("span", { class: "rb-state-time", text: `updated ${formatTime(envelope.generatedAt)}` }));
   }
   return banner;
 }
@@ -797,6 +807,7 @@ const STYLE = String.raw`
 .rb-state-label { font-weight: 700; letter-spacing: 0.02em; }
 .rb-state-detail { color: #cfcfd6; font-weight: 400; }
 .rb-state-time { color: #9a9aa3; font-variant-numeric: tabular-nums; }
+.rb-state-reason { color: #cfcfd6; }
 .rb-state--live { color: #4ade80; }
 .rb-state--stale { color: #fbbf24; }
 .rb-state--host-unavailable { color: #f87171; }

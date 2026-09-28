@@ -30,7 +30,10 @@
 // FRESHNESS (protected invariant #8). The response is a discriminated envelope carrying an
 // explicit generation stamp and one of five states — live / stale / host-unavailable /
 // unauthorized / unsupported. Data is present ONLY for live and stale; every closed/refused
-// state carries `board: null`, so cached data can never be rendered as live.
+// state carries `board: null`, so cached data can never be rendered as live. The server
+// (FG-819) serves `stale` when the projection aged past REMOTE_BOARD_POLL_INTERVAL_MS before
+// it was sent, or when a host read failed after a prior success (re-serving that success,
+// stamped with `lastSuccessfulAt`); a read that never succeeded is `host-unavailable`.
 
 import type { ProjectRecord } from "@forge/projects";
 import type { Campaign } from "@forge/types";
@@ -60,6 +63,14 @@ import type { RemoteCapability } from "./identity.js";
 export const REMOTE_BOARD_STATES = ["live", "stale", "host-unavailable", "unauthorized", "unsupported"] as const;
 export type RemoteBoardState = (typeof REMOTE_BOARD_STATES)[number];
 
+/** FG-819: how old a served projection may be and still be `live`. A read that took longer
+ *  than this to reach the response is served `stale`, never `live`. */
+export const REMOTE_BOARD_POLL_INTERVAL_MS = 30_000;
+
+/** Why a `stale` envelope is stale: the projection aged past the poll interval before it
+ *  was served, or the latest host read failed and the last successful one is being shown. */
+export type RemoteBoardStaleReason = "aged" | "read-failed";
+
 export type RemoteBoardEnvelope = {
   state: RemoteBoardState;
   /** ISO timestamp of the read that produced `board`. Never fabricated from "now" when the
@@ -76,6 +87,11 @@ export type RemoteBoardEnvelope = {
    *  `plan` is present, so a read-only identity is never shown mutation controls the
    *  server would refuse. Empty on every refusal/degradation (no verified identity). */
   capabilities: readonly RemoteCapability[];
+  /** FG-819: ISO timestamp of the last SUCCESSFUL host read — the read that produced `board`.
+   *  Null on every refusal/degradation (no board, so no sync to point at). */
+  lastSuccessfulAt: string | null;
+  /** FG-819: set only on `stale`; null otherwise. */
+  staleReason: RemoteBoardStaleReason | null;
 };
 
 /** The five allowlist DTOs the remote board carries. `projectSummary`, plus the combined
@@ -520,12 +536,34 @@ export function assembleRemoteBoard(
     };
   });
 
+  const generatedAt = new Date(nowMs).toISOString();
   return {
     state: options.stale ? "stale" : "live",
-    generatedAt: new Date(nowMs).toISOString(),
+    generatedAt,
     generation: nowMs,
     board,
     capabilities: options.capabilities ? [...options.capabilities] : [],
+    lastSuccessfulAt: generatedAt,
+    staleReason: options.stale ? "aged" : null,
+  };
+}
+
+/** FG-819: re-serve a previously successful envelope as `stale`. Its generation stamps stay
+ *  those of the read that produced the board, so the client shows when the data is from,
+ *  never when it was re-sent; the capabilities are the CURRENT identity's. */
+export function staleRemoteBoard(
+  lastSuccess: RemoteBoardEnvelope,
+  reason: RemoteBoardStaleReason,
+  capabilities: readonly RemoteCapability[],
+): RemoteBoardEnvelope {
+  return {
+    state: "stale",
+    generatedAt: lastSuccess.generatedAt,
+    generation: lastSuccess.generation,
+    board: lastSuccess.board,
+    capabilities: [...capabilities],
+    lastSuccessfulAt: lastSuccess.lastSuccessfulAt ?? lastSuccess.generatedAt,
+    staleReason: reason,
   };
 }
 
@@ -536,7 +574,15 @@ export function assembleRemoteBoard(
 // on every request in FG-781 (no transport adapter is wired, so identity is always absent).
 
 function closedEnvelope(state: RemoteBoardState, nowMs: number): RemoteBoardEnvelope {
-  return { state, generatedAt: new Date(nowMs).toISOString(), generation: nowMs, board: null, capabilities: [] };
+  return {
+    state,
+    generatedAt: new Date(nowMs).toISOString(),
+    generation: nowMs,
+    board: null,
+    capabilities: [],
+    lastSuccessfulAt: null,
+    staleReason: null,
+  };
 }
 
 /** No verified identity / project-scope grant / capability — refuse without project data. */

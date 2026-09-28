@@ -23,7 +23,8 @@ import {
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
 import { INBOX_LOADING, readAttentionInbox } from "./attention-inbox-render.js";
-import { AttentionInboxSection } from "./attention-inbox-view.js";
+import { PinnedAttentionInboxSection } from "./attention-inbox-view.js";
+import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
 import { formatDuration } from "./duration.js";
 
 const html = htm.bind(h);
@@ -192,7 +193,7 @@ function App() {
   }, [projectFilter, checkoutFilter]);
 
   const retryInbox = useCallback(() => {
-    inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
+    return inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
   }, [projectFilter, checkoutFilter]);
 
   const pollPlanUsage = useCallback(async () => {
@@ -716,6 +717,7 @@ function App() {
             onRetryActivity=${retryCurrentActivity}
             inboxLoad=${inboxLoad}
             onRetryInbox=${retryInbox}
+            onRefreshInFlight=${poll}
             now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
@@ -799,6 +801,7 @@ function App() {
             onTaskClick=${(id) => setSelectedTaskId(id)}
             activityLoad=${activityLoad}
             onRetryActivity=${retryCurrentActivity}
+            onRefresh=${poll}
           />
 
           <details class="activity-diagnostics">
@@ -832,7 +835,7 @@ function App() {
   `;
 }
 
-function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
+function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, onRefreshInFlight, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
   return html`
     <section class="home-view" aria-label="Dashboard home">
       <${UsageLimits}
@@ -842,7 +845,7 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
         refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
-      <${AttentionInboxSection} load=${inboxLoad} now=${now} onRetry=${onRetryInbox} />
+      <${PinnedAttentionInboxSection} load=${inboxLoad} now=${now} onRetry=${onRetryInbox} />
       <div class="home-in-flight-group">
         <div class="home-section-heading">
           <div>
@@ -862,6 +865,7 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
           labelledBy="home-in-flight-heading"
           activityLoad=${activityLoad}
           onRetryActivity=${onRetryActivity}
+          onRefresh=${onRefreshInFlight}
         />
       </div>
       <section class="home-ops-summary" aria-labelledby="home-ops-heading">
@@ -2273,9 +2277,13 @@ function OrchestratorRow({ entry, onTaskClick }) {
 // host-verification and CI-check waits are rows here as well. Activity keeps the full
 // persisted evidence under an explicit Diagnostics disclosure; it is never a second
 // visible activity summary and it never owns agent rows.
-function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null, activityLoad = null, onRetryActivity = null }) {
+function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null, activityLoad = null, onRetryActivity = null, onRefresh = null }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
-  const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
+  // FG-819: task rows hold the order first shown until an idle / tab-visibility / Refresh
+  // boundary, so the 2s poll cannot reorder them under the operator.
+  const pin = usePinnedOrder(inFlight.filter((t) => t.agentRole !== "orchestrator"), (t) => t.taskId);
+  const work = pin.items;
+  const refresh = () => pin.refresh(onRefresh);
   // FG-576 (AC7): "N orchestrators active" counts LIVENESS, not a DB row. A task
   // row whose receipt says the launcher is gone stops being counted — that row is
   // the phantom this ticket closes, and it is never reconciled away by the docker
@@ -2322,8 +2330,11 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   const nothingLive = work.length === 0 && activeOrchestrators.length === 0 && standalone.length === 0 && !anyWaits;
 
   return html`
-    <section class="in-flight" aria-labelledby=${labelledBy || undefined}>
+    <section class="in-flight" aria-labelledby=${labelledBy || undefined} ...${pin.activityProps}>
       ${showHeading ? html`<h2>In flight</h2>` : null}
+      ${work.length > 1
+        ? html`<div class="pin-toolbar"><${PinRefreshButton} label="Refresh and re-sort in-flight tasks" onClick=${refresh} /></div>`
+        : null}
       ${orchestrators.length > 0 ? html`
         <div class="orch-group">
           <div class="orch-header" onClick=${onToggleOrch}>

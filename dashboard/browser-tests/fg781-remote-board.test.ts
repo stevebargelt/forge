@@ -17,8 +17,9 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
@@ -32,6 +33,8 @@ import {
 import type { RemoteBoard, RemoteBoardEnvelope, RemoteBoardState } from "../src/remote/projection.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const SHOTS = process.env.FG819_SCREENSHOT_DIR ?? join(tmpdir(), "fg819-screenshots");
+mkdirSync(SHOTS, { recursive: true });
 const REMOTE_CLIENT_DIR = resolve(HERE, "..", "remote-client");
 
 // ─── fixtures: a full project-scoped board, and one envelope per state ────────────
@@ -98,6 +101,8 @@ function envelope(state: RemoteBoardState, withBoard: boolean): RemoteBoardEnvel
     generation: 1_757_332_800_000,
     board: withBoard ? sampleBoard() : null,
     capabilities: [],
+    lastSuccessfulAt: withBoard ? "2026-09-08T12:00:00.000Z" : null,
+    staleReason: state === "stale" ? "read-failed" : null,
   };
 }
 
@@ -167,9 +172,21 @@ test("renders the STALE state as explicitly NOT live — cached data is never pa
   // The board data is still shown (a stale board is useful) — but the banner says NOT live,
   // and NO live marker survives the transition.
   assert.match((await stale.innerText()).toLowerCase(), /not live/, "a stale board must state that it is not live");
+  // FG-819: it names the last successful sync and why it is stale, beside a Refresh control.
+  assert.match(await stale.innerText(), /Showing the last successful sync /);
+  assert.match(await stale.innerText(), /latest host read failed/);
+  assert.equal(await page.getByRole("button", { name: "Refresh the board" }).count(), 1);
+  await page.screenshot({ path: join(SHOTS, "fg819-remote-board-stale.png"), fullPage: true });
   assert.equal(await page.locator('[data-state="live"]').count(), 0, "the live marker must not persist once the read is stale");
   assert.equal(await page.locator(".rb-state--live").count(), 0, "no residual live styling after a stale read");
   await assert.doesNotReject(page.getByRole("heading", { level: 2, name: "Project" }).waitFor());
+
+  // A stale board is a recoverable read state, not a sticky warning. The same real client
+  // Refresh control must replace the stale copy with the next live envelope.
+  boardEnvelope = envelope("live", true);
+  await page.getByRole("button", { name: "Refresh the board" }).click();
+  await page.locator('[data-state="live"]').waitFor();
+  assert.equal(await page.locator('[data-state="stale"]').count(), 0, "a successful Refresh clears the stale warning");
   await page.close();
 });
 

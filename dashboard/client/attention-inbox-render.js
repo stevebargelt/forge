@@ -29,6 +29,8 @@ const KIND_META = {
   auth_setup: { label: "Auth / setup", class: "inbox-kind-auth_setup" },
   merge_conflict: { label: "Merge conflict", class: "inbox-kind-merge_conflict" },
   integration_blocked_park: { label: "Integration parked", class: "inbox-kind-integration_blocked_park" },
+  stale_verification: { label: "Stale verification", class: "inbox-kind-stale_verification" },
+  kanban_conflict: { label: "Kanban conflict", class: "inbox-kind-kanban_conflict" },
 };
 
 const SEVERITY_LABELS = { high: "high", medium: "medium", low: "low" };
