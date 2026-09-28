@@ -6,13 +6,15 @@ Paperclip source inspected: [`paperclipai/paperclip`](https://github.com/papercl
 commit `0f14d261233c545aa6a8a38ec253c498a5130fff` (2026-09-27, 4,603 commits).
 Forge source inspected: this repository at `8e8e7e9f` (2026-09-28).
 
-Evidence was gathered by four read-only lanes under FG-814: Paperclip's
+Evidence was gathered by six read-only lanes under FG-814: Paperclip's
 control plane and work model (lane A), its runtime and extensibility (lane B),
-its data model, run lifecycle and engineering quality (lane C), and a Forge
-profile on the same axes (lane D). Each lane read source, schema and tests and
-cited path and line. The synthesis re-checked the claims that recommendations
-depend on against both source trees. Paperclip paths below are relative to the
-Paperclip repository root; Forge paths are relative to this repository.
+its data model, run lifecycle and engineering quality (lane C), a Forge
+profile on the same axes (lane D), Paperclip's web UI as an operator control
+plane (lane E), and a Forge dashboard profile (lane F). Each lane read
+source, schema and tests and cited path and line. The synthesis re-checked
+the claims that recommendations depend on against both source trees.
+Paperclip paths below are relative to the Paperclip repository root; Forge
+paths are relative to this repository.
 
 Companion document: [Recommendations For Forge From Paperclip](paperclip-forge-recommendations.md).
 
@@ -326,7 +328,8 @@ Forge gets reproducibility and gives up third-party extension.
 | Tool governance (MCP) | Gateway, profiles, quarantine, per-run tokens, `--strict-mcp-config` | No MCP config supplied to containers; no strict flag | Paperclip ahead |
 | Audit log | `activity_log` with responsible human; writable by board actors via API | Append-only `events`; Forge is the only writer | Forge ahead on integrity |
 | Live updates | In-process WebSocket bus, no replay | Dashboard polls durable rows; no outbound calls (invariant 21) | Different goal |
-| Operator attention | Inbox plus decide-by feed (feed flagged off) | Attention Inbox with closed kinds and a `degraded` state | Parity |
+| Operator attention | Inbox (mine/recent/unread/blocked/all) plus a Decisions desk (flagged off by default): both closed-set feeds with inline dismiss/snooze/resolve, audited server-side, resurfacing on new activity, though the two feeds use divergent badge formulas (lane E §2) | Attention Inbox with closed kinds and a `degraded` state, but read-only: resolution is copy-pasting a CLI string, and two of nine kinds (`stale_verification`, `kanban_conflict`) render as an unknown badge (lane F §3, §9) | Paperclip ahead |
+| Operator actions from the UI | Approve, pause/resume, cancel, hire/terminate, edit instructions, raise budget, answer asks, with impact preview and typed confirm (lane E §3) | Queue planning + classify only; gates/retry/cancel CLI-only (lane F §2) | Paperclip ahead |
 | Remote and mobile | Responsive web; chat connectors experimental | Outbound ntfy/SMS; read/plan remote board | Paperclip ahead (unqualified) |
 | Multi-human | Invites, joins, first-admin claim, board keys | Absent by design | Different goal |
 | Evals | Scored runner and E2E campaigns, weekly; cases private | Per-change reds and done audit; no longitudinal evals | Paperclip ahead |
@@ -428,6 +431,18 @@ question, request confirmation or suggest subtasks. Each ask has a resolver
 policy (anyone, not the creator, or human only), idempotency, and a declared
 continuation that wakes the assignee on accept (`packages/db/src/schema/issue_thread_interactions.ts:16-80`).
 In Forge, an agent that needs input can only fail and describe what it needs.
+
+**Operator surface.** Paperclip's UI treats confirmation as a function of
+blast radius, not a uniform click: a server-computed impact preview
+("N tasks will be cancelled") renders before a destructive fan-out commits,
+typed identifier confirmation is reserved for the one irreversible bulk
+cancel, and named, inline-resolvable buttons put the verb on the button
+itself (lane E §3, items 4-6). A dismiss holds only while the underlying
+item's activity has not advanced past it, so resolving attention never
+hides new evidence (lane E item 2). Forge's dashboard has none of this: two
+POST routes, no gate/retry/cancel surface, and an Attention Inbox whose only
+resolution path is copying a CLI string out of `requestedAction` (lane F
+§2-3).
 
 **Typed recovery records.** A recovery action carries an owner type, attempt
 budget, outcome vocabulary, and at most one active record per issue. A new
@@ -588,6 +603,8 @@ Lane reports (FG-814, read-only):
 - Lane C: Paperclip data model, run lifecycle, observability, API and
   engineering quality.
 - Lane D: Forge profile on the same axes.
+- Lane E: Paperclip's web UI as an operator control plane.
+- Lane F: Forge dashboard profile.
 
 Paperclip (commit `0f14d2612`), principal paths:
 
