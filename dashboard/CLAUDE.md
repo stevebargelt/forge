@@ -1,6 +1,6 @@
 # dashboard
 
-The forge dashboard workspace. Read-only view of `~/.forge/forge.db` plus an HTTP server that serves agent results as markdown cards. Shells out to `forge` for mutations (gate decisions, retries) — never writes the DB directly.
+The forge dashboard workspace. Read-only view of `~/.forge/forge.db` plus an HTTP server that serves agent results as markdown cards. Shells out to `forge` for its closed set of mutations (the four `forge queue` verbs and `forge projects classify`) — never writes the DB directly. Gate decisions, next and retries stay CLI-only.
 
 ## Layout
 

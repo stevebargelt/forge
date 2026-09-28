@@ -55,10 +55,7 @@ export function AttentionInboxSection({ load, now, onRetry, orderedItems = null,
 export function PinnedAttentionInboxSection({ load, now, onRetry }) {
   const view = inboxView(load);
   const pin = usePinnedOrder(view.phase === "ready" ? view.items : null, (summary) => summary.id);
-  const refresh = () => {
-    pin.resort();
-    if (onRetry) onRetry();
-  };
+  const refresh = () => pin.refresh(onRetry);
   return html`<${AttentionInboxSection}
     load=${load}
     now=${now}

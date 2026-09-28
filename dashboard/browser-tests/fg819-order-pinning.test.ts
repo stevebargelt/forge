@@ -260,6 +260,28 @@ test("FG-819: a manual Refresh re-sorts, and is a keyboard-reachable button", as
   await page.close();
 });
 
+test("FG-819: a manual Refresh adopts the order its own re-read fetched, not the order already held", async () => {
+  inboxRank = ["A", "B", "C"];
+  inFlightRank = ["A", "B", "C"];
+  const page = await openHome();
+  await waitForOrder(() => inboxOrder(page), ["A", "B", "C"], "inbox");
+  await waitForOrder(() => inFlightOrder(page), ["A", "B", "C"], "in flight");
+
+  // Freeze the page clock so no interval poll can deliver the re-ranked read: the only
+  // read that sees the new ranking is the one the Refresh itself triggers.
+  const pageNow = Number(await page.evaluate("Date.now()"));
+  await page.clock.pauseAt(pageNow + 100);
+  inboxRank = ["C", "A", "B"];
+  inFlightRank = ["C", "A", "B"];
+
+  await page.getByRole("button", { name: "Refresh and re-sort in-flight tasks" }).click();
+  await waitForOrder(() => inFlightOrder(page), ["C", "A", "B"], "in flight after Refresh fetched the new ranking");
+
+  await page.getByRole("button", { name: "Refresh and re-sort the attention inbox" }).click();
+  await waitForOrder(() => inboxOrder(page), ["C", "A", "B"], "inbox after Refresh fetched the new ranking");
+  await page.close();
+});
+
 function createFixtureServer(): Server {
   return createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");

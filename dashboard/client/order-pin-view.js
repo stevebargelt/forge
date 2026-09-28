@@ -12,8 +12,8 @@ const html = htm.bind(h);
 /** Pin `items` (keyed by `keyOf`) to the order first shown until a boundary. Pass
  *  `items === null` while the list is not in a readable state: the pin is left alone, so
  *  a transient failed read does not count as a boundary. Returns the ordered items (null
- *  when given null), `resort` for a manual refresh, and `activityProps` to spread on the
- *  list's container so pointer/keyboard activity over it postpones the idle re-sort. */
+ *  when given null), `refresh` for the manual boundary, and `activityProps` to spread on
+ *  the list's container so pointer/keyboard activity over it postpones the idle re-sort. */
 export function usePinnedOrder(items, keyOf, idleMs = ORDER_PIN_IDLE_MS) {
   const pinned = useRef(null);
   const lastActivity = useRef(Date.now());
@@ -24,6 +24,18 @@ export function usePinnedOrder(items, keyOf, idleMs = ORDER_PIN_IDLE_MS) {
     lastActivity.current = Date.now();
     rerender();
   }, []);
+
+  // The manual boundary re-sorts once the re-read it triggers has landed. Re-sorting
+  // first would pin the order already held, and the fresh read would then arrive into a
+  // pinned list and never be adopted.
+  const refresh = useCallback((read) => {
+    const pending = read ? read() : null;
+    if (pending && typeof pending.then === "function") {
+      pending.then(resort, resort);
+    } else {
+      resort();
+    }
+  }, [resort]);
 
   const markActive = useCallback(() => {
     lastActivity.current = Date.now();
@@ -67,7 +79,7 @@ export function usePinnedOrder(items, keyOf, idleMs = ORDER_PIN_IDLE_MS) {
 
   return {
     items: ordered,
-    resort,
+    refresh,
     activityProps: { onPointerMove: markActive, onPointerDown: markActive, onWheel: markActive, onKeyDown: markActive },
   };
 }

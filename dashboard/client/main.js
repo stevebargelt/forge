@@ -193,7 +193,7 @@ function App() {
   }, [projectFilter, checkoutFilter]);
 
   const retryInbox = useCallback(() => {
-    inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
+    return inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
   }, [projectFilter, checkoutFilter]);
 
   const pollPlanUsage = useCallback(async () => {
@@ -2283,10 +2283,7 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   // boundary, so the 2s poll cannot reorder them under the operator.
   const pin = usePinnedOrder(inFlight.filter((t) => t.agentRole !== "orchestrator"), (t) => t.taskId);
   const work = pin.items;
-  const refresh = () => {
-    pin.resort();
-    if (onRefresh) onRefresh();
-  };
+  const refresh = () => pin.refresh(onRefresh);
   // FG-576 (AC7): "N orchestrators active" counts LIVENESS, not a DB row. A task
   // row whose receipt says the launcher is gone stops being counted — that row is
   // the phantom this ticket closes, and it is never reconciled away by the docker
