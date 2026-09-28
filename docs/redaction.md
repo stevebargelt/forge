@@ -40,7 +40,7 @@ config references, not credential material.
 
 ## Control-plane config graph (FG-349)
 
-`forge config graph [--json]`, the dashboard's control-plane tab, and its
+`forge config graph [--json]`, the dashboard's Config view, and its
 `/api/config-graph` read path expose the same kind of provenance as the
 `controlPlane` manifest block above, but live (EFFECTIVE) rather than
 dispatch-time (RECORDED) — see `docs/concepts.md` and `docs/invariants.md` for
