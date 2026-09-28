@@ -1,0 +1,653 @@
+# Recommendations For Forge From Paperclip
+
+Date: 2026-09-28. Source commits: Paperclip `0f14d2612` (2026-09-27), Forge
+`8e8e7e9f`. Evidence: the FG-814 lane reports and the companion
+[Paperclip Assessment Compared To Forge](paperclip-forge-assessment.md).
+Paperclip paths are relative to the Paperclip repository root; Forge paths are
+relative to this repository.
+
+## Summary
+
+Paperclip's value to Forge is concentrated in the machinery that keeps a
+long-running agent system solvent and moving: a spend ledger evaluated at
+admission time, an always-on reconcile tick, damping for loops that make no
+progress, typed human asks with a declared continuation, and typed recovery
+records. Forge lacks each of these. `docs/research/competitive/forge-feature-opportunities.md`
+does not cover any of them except recovery, which it treats as a gap audit
+rather than a record shape. None of them requires Forge to adopt Paperclip's
+persistent org, its agent-callable control-plane API, or its claim-based
+completion. The three P1 items close admitted Forge weaknesses: no spend
+ceiling, crash detection that waits for a human, and usage data too thin to
+price. They fit inside invariants 1, 10, 11 and 23 as long as budgets remain
+admission tests and never become reapers. Everything else is P2 or P3 and
+should follow the existing backlog discipline: gap-walk first, then file.
+
+| # | Recommendation | Priority | Size |
+|---|---|---|---|
+| 1 | Typed usage semantics: cost status, usage basis, provider error family | P1 | Small |
+| 2 | Supervised reconcile tick for orphaned run tasks | P1 | Medium |
+| 3 | Spend guardrails as admission tests | P1 | Medium |
+| 4 | Status-domain guard for enum-as-convention columns | P2 | Small |
+| 5 | Lock the container MCP surface with `--strict-mcp-config` | P2 | Small |
+| 6 | Failure-history cooldown in the queue scan | P2 | Small |
+| 7 | Typed operator asks with a declared continuation | P2 | Medium |
+| 8 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
+| 9 | One outbound safe-projection function for notifications | P3 | Small |
+| 10 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 11 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
+| 12 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 13 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+
+## P1 — Must
+
+### 1. Typed usage semantics: cost status, usage basis, provider error family
+
+**Pattern.** Paperclip adapters return usage as typed result fields rather
+than leaving the server to infer them from logs (`packages/adapter-utils/src/types.ts:69-117`):
+
+- `usageBasis` says whether a report is a per-run delta or a cumulative
+  session total.
+- `billingType` distinguishes metered API, subscription-included and
+  subscription-overage usage.
+- `costUsd` is carried where the provider reports it.
+- A classified `errorFamily` (`transient_upstream`, `provider_quota`,
+  `model_refusal`, …) accompanies failures.
+
+The server subtracts previous totals for cumulative adapters
+(`server/src/services/heartbeat.ts:11953-11981`) and marks usage without a
+price as `unpriced` rather than zero (`heartbeat.ts:5218-5229`). Its eval
+discipline states the rule plainly: "missing cost is unknown, not free"
+(`doc/evals.md:109-165`). Paperclip breaks that rule in its own budget path by
+forcing subscription usage to zero cents (`heartbeat.ts:5213`). Forge should
+not copy that part.
+
+**Why it fits Forge.** `model_calls` is token-only
+(`src/store/schema.ts:229-244`). The Claude stream-json `total_cost_usd` and
+pi's pre-computed cost are dropped (`src/store/model-calls.ts:222-232`).
+`forge usage` can offer only a unitless `weighted_tokens` proxy
+(`src/cli/commands/usage.ts:1-18`). Recommendation 3 cannot price anything
+without this. A failure taxonomy would also let the retry policy, the
+attention inbox and the dispatcher distinguish a quota wall from a model
+refusal without parsing log text.
+
+**Proposed shape.** Add these nullable columns to `model_calls` through
+`ADDITIVE_COLUMNS`:
+
+- `cost_usd_reported`
+- `cost_status` (`reported | derived | unpriced`)
+- `billing_mode` (`metered | subscription | unknown`, taken from the runtime's
+  `auth_strategy`)
+
+Each `log_format` parser fills them where the runtime reports cost. Add a
+`provider_failure_family` field to the task's failure evidence, populated from
+the same parsers, and keep its vocabulary closed in TypeScript, as FG-585
+requires for enum-as-convention columns. `forge usage` reports dollars only
+for `reported` rows and shows the `unpriced` token share separately, never
+summed as zero. Size: small. Touches the parsers in `src/store/model-calls.ts`,
+the columns, and the `forge usage` renderer.
+
+**Risks and what not to copy.** Do not zero subscription usage. A
+subscription run is `unpriced`, and its tokens stay the budget currency. Do
+not add Paperclip's second manual ingest path, which bypasses its own
+normalization (`server/src/routes/costs.ts:114-127`). Keep a single writer.
+
+**Priority.** P1.
+
+### 2. Supervised reconcile tick for orphaned run tasks
+
+**Pattern.** Paperclip's server drives recovery from a single scheduler.
+
+- It binds HTTP before recovery so detached runners can reattach.
+- It runs a recovery phase at startup: hot-restart adoption, orphan reaping,
+  retry promotion and stranded-issue reconciliation (`server/src/index.ts:981-985,1472-1545`).
+- It repeats the orphan reaper every five minutes (`index.ts:1759-1790`).
+
+The reaper skips runs that another owner provably holds. For the rest, it
+probes the OS pid and classifies each run as `process_detached` (alive,
+keep running) or `failed/process_lost` (dead). A dead run gets its leases
+released, a lifecycle event appended, and at most one retry
+(`heartbeat.ts:18841-19330`).
+
+**Why it fits Forge.** This is Forge's most clearly admitted liveness gap.
+Reconcile is opportunistic. It runs at the top of `forge next`, `forge status`
+and `forge show --reconcile` (`src/v2/reconcile.ts:1-20`), and "there is no
+daemon and no resident observer" (`docs/concepts.md:341`). The recorded
+failure is a task left `running` for about two hours "because nothing
+triggered reconcileRun" (`src/ops/reconcile-candidate.ts:4-8`).
+
+Forge already has a long-lived process. The queue dispatcher wakes on durable
+rows and runs a five-minute watchdog tick (`src/queue/dispatcher-loop.ts:11-33,122-133`).
+That tick reconciles queue *claims* (`reconcileClaimExecution`, `:568`), not
+run *tasks*: `reconcileRun` is called only from CLI commands and `src/ops/`.
+The dispatcher is also not restarted after a reboot (D9;
+`learnings/decisions/2026-08-06_queue-dispatch-capacity-and-authorization.md:95,148`).
+
+**Proposed shape.** Add a reconcile sweep to a supervised process.
+
+1. Add a `forge reconcile watch` loop. It calls the existing `reconcileRun`
+   for every `active` run on the host at a bounded interval, and writes one
+   evaluation row per sweep: runs examined, orphans classified, and actions
+   taken. The row mirrors `dispatcher_evaluations`, so an idle sweep is still
+   evidence.
+2. Let the dispatcher tick call the same sweep when it is armed, so hosts
+   running the dispatcher need no second process.
+3. Close D9 by shipping an optional launchd agent template for the watch loop.
+   Forge's orchestrator host is macOS-only for isolation. `forge doctor`
+   reports whether the watch loop is supervised.
+
+The sweep uses only reconcile's existing actions. It never dispatches, so it
+needs no arming, and it does not touch invariant 23's authorization rule.
+Size: medium. Touches `src/v2/reconcile.ts` callers, a new CLI verb, a new
+evaluation table, `forge doctor`, and a launchd template under `scripts/`.
+
+**Risks and what not to copy.** Paperclip's reaper can queue an automatic
+retry. Forge should not, because retry is manual by policy
+(`src/v2/retry-policy.ts`). The sweep may classify, record and surface in the
+Attention Inbox, but re-driving stays `forge recover --re-drive`. Keep
+reconcile's assumption that a container with unknown liveness is alive
+(`src/v2/reconcile.ts:1-20`); Paperclip's pid-probe split between detached
+and lost is the same stance. Do not build a general daemon that owns
+lifecycle. The loop is a supervised caller of existing verbs.
+
+**Priority.** P1.
+
+### 3. Spend guardrails as admission tests
+
+**Pattern.** Paperclip keeps spend policies per company, agent and project,
+with a calendar-month or lifetime window, a warn percentage, and a hard stop
+(`packages/db/src/schema/budget_policies.ts:9-41`). Each cost event is written
+to a ledger (`cost_events`) and evaluated synchronously against every
+matching policy. A soft crossing opens a deduplicated incident. A hard
+crossing opens an incident and a `budget_override_required` approval, pauses
+the scope, and cancels active and queued work
+(`server/src/services/budgets.ts:214-260,380-393`). The same
+`getInvocationBlock` is checked at wake admission, queued-run claim,
+continuation and recovery (`budgets.ts:718-864`). Resolution is either
+`keep_paused` or `raise_budget_and_resume`. Separately, per-agent daily caps
+limit run count and cost (`heartbeat.ts:16596-16720`).
+
+**Why it fits Forge.** Forge has no spend ceiling of any kind (lane D §9).
+
+- `cost_tier` is a label that is never enforced (`src/v2/schema.ts:534-537`).
+- `allowed_profiles` and `max_cost_tier` have been "still future" since May
+  (`docs/how-to-model-policy.md:547-551`).
+- The detached-execution ADR names "a hung agent burning tokens" as a revisit
+  trigger (`learnings/decisions/2026-07-12_detached-agent-execution.md:110`).
+
+With an armed dispatcher and campaigns, Forge now runs unattended long enough
+for this to matter. `forge-feature-opportunities.md` does not list budgets.
+
+**Invariant reconciliation.** Paperclip's hard stop cancels running work.
+Forge's invariant 23 says "Disable and capacity reduction are admission tests,
+never reapers". A budget ceiling is a capacity reduction, so in Forge a
+breach:
+
+- refuses new admissions;
+- raises an Attention Inbox item;
+- leaves running work to finish or to an explicit `forge cancel` by the
+  operator.
+
+Invariant 15 is served by making the override an operator CLI act, never an
+agent act.
+
+**Proposed shape.**
+
+- **Policy source.** Budgets are declared in `model-policy.yml` under a new
+  `budgets:` block, whose migration authority is `forge upgrade` (invariant 7).
+  Each entry has a scope (`host | project | workflow | role`), a window
+  (`day | calendar_month`), a metric (`weighted_tokens` or `usd_reported`),
+  `warn_percent`, and `hard`.
+- **Enforcement points.** One pure evaluator over `model_calls` is called at
+  three existing admission points:
+  - the pre-spawn refusal list in `runContainer` (`src/v2/runNext.ts:4605-4657`),
+    as a new refusal `budget_exceeded`;
+  - `claimNextEligible`, as a new `ScanReason` `budget`;
+  - campaign `start` and `resume`.
+- **Incidents.** A `budget_incidents` table, deduplicated per policy, window
+  and threshold by a partial unique index, is rendered as an Attention Inbox
+  source.
+- **Override.** `forge budget raise <policy> --amount --operator` records a
+  RECORDED override. No agent path can call it.
+
+Size: medium. Depends on recommendation 1 for the dollar metric; the
+`weighted_tokens` metric works without it.
+
+**Risks and what not to copy.** Do not cancel running containers
+automatically. Do not keep Paperclip's denormalized `spent_monthly_cents`
+counters beside the ledger, because they can drift; compute from `model_calls`
+at evaluation time. Do not budget subscription runs in dollars. Price in
+dollars only where a runtime reports cost, and never let `unpriced` read as
+zero. Usage is captured after the container exits
+(`src/v2/runNext.ts:5123,5133`), so one run can overshoot a limit. Say so in
+the docs; do not add mid-run token metering.
+
+**Priority.** P1.
+
+## P2 — Should
+
+### 4. Status-domain guard for enum-as-convention columns
+
+**Pattern.** Paperclip keeps every status as plain `text`, with allowed values
+in TypeScript `as const` arrays (`packages/shared/src/constants.ts`). Lane C
+found a concrete out-of-domain write. `setWakeupStatus` accepts a free string,
+and run finalization writes `timed_out` or `interrupted` into a column whose
+domain contains neither (`heartbeat.ts:24981-24983,13041-13049`). Nothing
+catches it.
+
+**Why it fits Forge.** Forge made the same trade on purpose. Newer tables
+carry no CHECK so that old and new binaries can coexist
+(`src/store/schema.ts:394-396`; FG-585), and legality is "enforced by the
+accessors" (`src/store/schema.ts:1694-1697`). Paperclip shows how that fails:
+one writer that bypasses an accessor. Lane C's Forge note flags `tasks.status`
+as the same risk.
+
+**Proposed shape.** Add two cheap checks.
+
+1. A unit-tier test that scans `src/store/**` for raw
+   `UPDATE … SET <status column> =` and `INSERT` statements that do not take
+   their value from the owning vocabulary constant, with an allowlist. Forge
+   already enforces repository rules with tests, as in
+   `src/test-tiers.test.ts`.
+2. A `forge doctor` read-only probe that reports rows whose status falls
+   outside the current vocabulary. It never repairs them; reporting keeps
+   invariant 1 intact.
+
+Size: small.
+
+**Risks.** Do not add CHECK constraints. SQLite cannot widen them on the
+additive path, which is why FG-585 exists.
+
+**Priority.** P2.
+
+### 5. Lock the container MCP surface with `--strict-mcp-config`
+
+**Pattern.** Paperclip launches Claude with `--mcp-config <managed> --strict-mcp-config`
+(`packages/adapters/claude-local/src/server/execute.ts:904`), so only servers
+the control plane chose can load. It also quarantines tool definitions that
+change on refresh (`server/src/services/tool-access.ts:7435-7470`).
+
+**Why it fits Forge.** Forge gives containers no MCP configuration and
+isolates settings with `--setting-sources ""` (`src/v2/spawn.ts:1347`). A
+search of `src/` and `seeds/` finds no `--strict-mcp-config`. The container
+works in `/project`, so a checked-in project `.mcp.json` is inside the mount.
+The synthesis did not verify whether the current flags already stop it from
+loading. That question should be settled by a test, not by reasoning.
+
+**Proposed shape.** First add an integration test in which a fixture project
+checks in an `.mcp.json` and the test asserts that no server starts in the
+container. If the test fails, add `--strict-mcp-config` with an empty managed
+config to the claude runtime invocation block in `seeds/runtimes/claude-*.yml`,
+and add the Codex equivalent where one exists. Record `mcp: none` in the
+control-plane receipt. Size: small.
+
+**Risks.** Do not import Paperclip's gateway, profiles or policy engine. Its
+first-match-by-priority semantics already contradict its own documentation
+(lane B §6). Forge has no use case for governed third-party tools in
+containers today.
+
+**Priority.** P2.
+
+### 6. Failure-history cooldown in the queue scan
+
+**Pattern.** Paperclip's rewake throttle holds back further event-free wakes
+once an agent has two consecutive successful runs on an issue with no issue
+progress. The cooldown starts at 120 seconds and doubles up to 30 minutes.
+Human comments bypass it, and agent comments deliberately do not
+(`server/src/services/issue-rewake-throttle.ts:3-20,27-184`). Liveness
+continuations are capped at two, after which the system asks a human
+(`server/src/services/recovery/run-liveness-continuations.ts:9-145`).
+
+**Why it fits Forge.** A `launch_failed` release leaves a ticket "immediately
+re-claimable" (`src/queue/dispatch-execution.ts:609,658`). The scan vocabulary
+has no failure-history member (`src/store/queue-claims.ts:204-226`). With
+`max_active_runs` at its default of 1, a persistent cause such as broken auth
+or a dependency-environment refusal can make an armed dispatcher claim, fail
+and re-claim the same ticket on every tick. The synthesis did not trace
+whether a `failed` release is re-claimable in the same way. The gap walk
+should confirm that first.
+
+**Proposed shape.** Add a `ScanReason` `cooling_down`, computed inside the
+scan from the ticket's recent `queue_claims` releases. After N consecutive
+`failed` or `launch_failed` releases, back off exponentially. The `detail`
+field carries the streak and the next eligible time, as `ScanEntry.detail`
+already does for other reasons. When the streak crosses a threshold, raise an
+Attention Inbox item. An operator `forge queue retry <ticket>` clears the
+cooldown. Nothing is written on a scan, so the rule stays a pure derivation.
+Size: small.
+
+**Risks.** Do not classify progress by reading model prose, as Paperclip's
+liveness classifier partly does (`server/src/services/run-liveness.ts:62-77`).
+Use only structured release outcomes.
+
+**Priority.** P2.
+
+### 7. Typed operator asks with a declared continuation
+
+**Pattern.** Paperclip's `issue_thread_interactions` lets an agent attach a
+typed ask to its work item (`packages/db/src/schema/issue_thread_interactions.ts:16-80`;
+`constants.ts:259-346`):
+
+- **Kinds:** `ask_user_questions`, `request_confirmation`,
+  `request_checkbox_confirmation`, `suggest_tasks`, and others.
+- **Statuses:** pending, answered, accepted, rejected, expired, and others.
+- **Resolver policy:** anyone, not the creator, or human only. It is forced
+  to human only for tool actions and secrets.
+- **Continuation:** a declared field, one of `none`, `wake_assignee` or
+  `wake_assignee_on_accept`.
+
+Asks are idempotent, and accepted `suggest_tasks` become real issues.
+Confirmation that an agent may edit another agent's instructions must come
+from a previous run, show a diff, and be consumed once
+(`server/src/services/change-consent-gate.ts:114-230`).
+
+**Why it fits Forge.** Forge's human touchpoints sit at step boundaries:
+`human` gates with advance, reject or request-changes (`src/v2/gate.ts:9-20`).
+A container that needs a decision mid-task can only return `failed` and
+describe what it needs, as the non-interactive framing tells it to do
+(`src/v2/compose.ts:27-35`). The operator then reconstructs the question from
+prose. The Attention Inbox has closed kinds and no typed ask.
+
+**Proposed shape.**
+
+- **Contract.** Extend the `result.json` contract with an optional
+  `asks: [{kind, question, options?, resolver}]`, where `kind` is one of
+  `question`, `confirm` or `choose`, and `resolver` is fixed to `operator` for
+  now. A task returning asks parks in the existing `awaiting_gate` state,
+  which avoids a new `tasks.status` that would need an ADR under
+  `docs/repo-guide.md:67`. The inbox's `human_gate` projection currently
+  resolves the gate kind from the workflow step (`docs/concepts.md:390`), so
+  it must also treat an open ask on the task as an operator wait.
+- **Storage.** Asks are stored in an `operator_asks` table keyed by task, with
+  an idempotency key.
+- **Answering.** `forge ask answer <id> --value …` records the answer, then
+  re-dispatches through the existing retry path. The answer goes into the task
+  package's previous-attempt section (`src/v2/previous-attempt.ts`), next to
+  the carried `TASKS.md`.
+- **Surface.** Asks become an Attention Inbox source.
+
+Size: medium.
+
+**Risks and what not to copy.** Do not let agents answer each other's asks.
+Invariant 15 keeps the resolver human. Do not let accepted suggestions create
+tickets automatically; a `suggest_tickets` kind should stage a
+`forge backlog file` preview for the operator. Do not copy Paperclip's three
+overlapping "changes requested" notions. An ask is not a gate verdict and
+never advances publication.
+
+**Priority.** P2.
+
+### 8. Typed recovery records with owner, attempts and outcome
+
+**Pattern.** Paperclip's `issue_recovery_actions` table
+(`packages/db/src/schema/issue_recovery_actions.ts:30-63`; `constants.ts:377-415`)
+has:
+
+- **Kind:** `stranded_assigned_issue`, `active_run_watchdog`,
+  `workspace_validation`, and others.
+- **Status:** active, escalated, resolved, cancelled.
+- **Owner type:** agent, user, board, system.
+- **Outcome:** restored, handed_back, false_positive, escalated, and others.
+- **Retry budget:** attempt counts per failure lane, with backoff
+  (`server/src/services/recovery/service.ts:522-527`).
+
+A partial unique index allows at most one active record per issue, and a new
+failure identity cancels and replaces the old record
+(`server/src/services/issue-recovery-actions.ts:243-302`). Closing an issue
+that has an active recovery action requires recovery authority. Partial unique
+indexes also deduplicate every kind of system-generated recovery issue
+(`packages/db/src/schema/issues.ts:137-201`).
+
+**Why it fits Forge.** `forge-feature-opportunities.md` §3 asks for a recovery
+gap audit: whether recovery resumed, respawned or only retained evidence. It
+proposes no record shape. Forge's orphan kinds and `awaiting_recovery` say
+what failed, but not who owns the repair, how many attempts were made, or how
+it ended (`docs/concepts.md:678-740`). The new material from Paperclip is the
+shape: owner, attempt budget, outcome vocabulary, one active record per item,
+and supersede-on-new-identity. That shape turns §3's four audit questions into
+queryable facts.
+
+**Proposed shape.** Add a `recovery_records` table keyed to task, with:
+
+- `failure_kind`, reusing the existing orphan kinds;
+- `owner` (`operator | forge`);
+- `attempts`;
+- `outcome` (`resumed | respawned | retained | discarded | false_positive | escalated`);
+- `superseded_by`;
+- a partial unique index on the active record per task.
+
+`forge recover` and the reconcile sweep from recommendation 2 write the
+records. The Attention Inbox and the Run Map read them. Run this after the §3
+gap walk, not before it. Size: medium.
+
+**Risks.** Do not add Paperclip's task-watchdog *agent*. That is an LLM
+reviewing a stalled subtree, and the prior synthesis rules out persistent
+worker pools. Keep recovery deterministic, with the operator as the only
+judgment-bearing owner.
+
+**Priority.** P2.
+
+## P3 — Could
+
+### 9. One outbound safe-projection function for notifications
+
+**Pattern.** `projectSafeChatPublicationText` is "the only text projection
+allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
+redacts credentials, and neutralizes @-all (`server/src/services/chat-publication-projection.ts:152-243`).
+
+**Why it fits Forge.** Forge sends ntfy and SMS text built in
+`src/notify/format.ts`. Its env redaction is a fail-closed allowlist on the
+container side (FG-707), but outbound notification text has no single
+chokepoint that a test can hold to account.
+
+**Proposed shape.** Route every transport through one `projectOutbound(text)`
+function. Add a unit test asserting that no transport module imports a
+formatter except through it. Size: small.
+
+**Risks.** None of note. Keep notifications outbound-only unless
+recommendation 12 lands.
+
+**Priority.** P3.
+
+### 10. Content-hash provenance and a static audit for skills and role seeds
+
+**Pattern.** Paperclip records a `contentHash` for each catalog skill and an
+`originHash` for each installed skill. It holds updates when local edits are
+detected (`local_modifications`), derives a trust level from contents, and
+runs a pre-install byte audit with hard stops for remote-fetch-exec, secret
+exfiltration and inventory mismatch (`server/src/services/company-skills.ts:692-730,2516-2635`).
+
+**Why it fits Forge.** Forge already stamps the sha256 of the agent protocol
+into each manifest (`src/v2/task-manifest.ts:163-175`), and FG-776/777 back up
+host edits before `forge upgrade` overwrites agents. Role seeds and host skills
+carry no per-file hash in the receipt, so an Explain view cannot say which
+role prose a dispatch ran with.
+
+**Proposed shape.**
+
+- Extend the control-plane receipt with sha256 hashes of the composed role
+  seed, the project addendum and the mounted skill directory.
+- Have `forge upgrade` report `local_modifications` per file before the
+  existing backup.
+- Add a static audit to `install-seeds.sh` and `forge upgrade` for the two
+  hard-stop patterns that matter to Forge: piping a fetch into a shell, and
+  reading credentials.
+
+Size: small.
+
+**Risks.** Do not build a skills store, social layer or per-tenant DB
+versioning. Forge's unit is the seed file and its generation.
+
+**Priority.** P3.
+
+### 11. Scheduled triggers that file and enqueue, never dispatch
+
+**Pattern.** Paperclip's routines materialize a schedule, webhook or API
+trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
+The issue carries an origin fingerprint and follows a declared concurrency
+policy: `coalesce_if_active`, `skip_if_active` or `always_enqueue`. Catch-up
+is bounded, and a partial unique index keeps at most one open issue per
+routine. Webhooks are HMAC-signed with a replay window.
+
+**Why it fits Forge.** Forge has no cron, launchd or webhook starts (lane D
+§5). Recurring hygiene work, such as dependency audits, docs-drift sweeps and
+the doc/code drift list in the companion assessment, is filed by hand.
+
+**Invariant reconciliation.** Invariant 23 says enqueuing never authorizes a
+container. A Forge trigger may therefore file a ticket from a template and
+enqueue it. Execution still requires the armed dispatcher or an operator. This
+is a stricter shape than Paperclip's, where routine issues wake agents
+directly.
+
+**Proposed shape.**
+
+- A `triggers:` section in project config, with a cron expression, a ticket
+  template path, a concurrency policy and a catch-up cap.
+- A `forge triggers tick` verb, run by the reconcile watch loop from
+  recommendation 2, that files and enqueues due tickets.
+- An `origin_fingerprint` column on `tickets` with a partial unique index on
+  open tickets per trigger.
+
+Size: medium. No webhooks in the first slice, because Forge has no inbound
+listener apart from the remote board.
+
+**Risks.** Do not dispatch from a trigger. Do not let triggered tickets bypass
+readiness assessment; the queue scan already refuses `readiness_ineligible`.
+
+**Priority.** P3.
+
+### 12. Answer operator asks from a phone with opaque expiring tokens
+
+**Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
+as native chat buttons behind opaque seven-day action tokens
+(`server/src/services/chat-interaction-publications.ts:1-31`;
+`chat-question-forms.ts:21-30`). While an ask is pending, run prose stays
+internal. Paperclip's own qualification says no provider is
+production-qualified, so the product evidence is thin. The token pattern is
+the part worth taking.
+
+**Why it fits Forge.** Forge's notifications are outbound only, with no reply
+or acknowledgement channel (lane D §6). The remote board already verifies
+identity at the transport and permits only `read | plan`
+(`dashboard/src/remote/identity.ts:1-44`).
+
+**Proposed shape.** Only after recommendation 7 exists, a notification for an
+operator ask carries a link to the remote board. The link includes an opaque,
+single-use, short-lived token bound to the ask id and the expected answer
+domain. The remote board adds one capability, `answer_ask`, which shells out
+to `forge ask answer` (invariant 10). Gate advance, publication, cancel and
+close remain impossible remotely, as the remote-board decision
+record requires (`learnings/decisions/2026-09-08_remote-board-planning-mutations.md`). Size:
+medium.
+
+**Risks.** Do not build chat connectors. Paperclip's 38k-line subsystem is
+unqualified on every provider. Do not accept SMS replies as answers; there is
+no identity binding on SMS.
+
+**Priority.** P3.
+
+### 13. Policy evals: scenario × profile matrix with hard gates
+
+**Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
+cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
+Workflow scoring applies hard gates first, and any failure scores the cell
+zero. Weighted dimensions follow (`packages/paperclip-runner/src/eval/workflow-scoring.ts:20-29,147-166`).
+Its hygiene rules include never merging partial campaigns into one score,
+treating missing cost as unknown, and keeping presentation separate from the
+source of truth.
+
+**Why it fits Forge.** `forge-feature-opportunities.md` §8 already proposes
+outcome-informed analytics over *observed* runs. Paperclip adds a
+*controlled* complement: replaying a fixed scenario set against two
+model-policy profiles or effort levels, so a routing change is justified by a
+comparison rather than by production drift. Forge's per-test evidence parsing
+(`src/v2/review-evidence.ts`) is a natural hard gate.
+
+**Proposed shape.** A `forge eval run --scenarios <dir> --profiles a,b`. It
+dispatches each scenario through the normal pipeline per profile, scores each
+cell with hard gates (tests executed and passed, reds not failing) and then
+with usage from recommendation 1, and writes results to an `eval_cells` table.
+Size: large.
+
+**Risks.** This costs real money and time. It should wait until budgets
+(recommendation 3) can cap it. Keep results advisory, as §8 already requires.
+
+**Priority.** P3.
+
+## Explicitly Decline
+
+**Persistent employees on heartbeat timers.** Timer-woken, long-lived agents
+with an org chart, a manager and a budget (lane A §1, §3) would add a standing
+actor class. They would also collide with invariant 23: execution authority is
+an explicit, recorded act. The prior synthesis already declines persistent
+worker pools. Paperclip's rewake throttle, its liveness continuations and its
+recorded 25-session recovery show the maintenance cost of that model.
+
+**An agent-callable control-plane API.** Paperclip's runner exposes 35
+semantic operations. They include `create_task`, `hire_agent`,
+`reassign_task`, and a generic `search_api`/`call_api` into the real HTTP
+router, authorized by a run-scoped JWT (`doc/runner-api-tools.md`;
+`server/src/services/native-runtime/paperclip-runner-tool-authority.ts:81-88`).
+Forge containers never reach the host store (invariant 20), and all mutation
+goes through the Forge control plane (invariant 10). Recommendation 7 gets the
+useful half, structured requests from an agent, through the `result.json`
+contract without a callback channel.
+
+**Claim-based completion.** Paperclip auto-derives completion criteria from an
+issue's title and lets the agent's claim close low-risk work
+(`server/src/services/native-runtime/completion-contracts.ts:38-92`). This
+contradicts invariant 11 directly.
+
+**Multi-tenant RBAC and the responsible-user model.** Companies, memberships,
+21 grant keys and permission intersection are well engineered (lane A §1), but
+Forge is single-operator by design (`src/v2/host-readiness.ts:236`). If a
+second human approver is ever wanted, study the responsible-user intersection
+then. It should not be pre-built.
+
+**Heuristic liveness over model prose.** Paperclip classifies runs as
+`plan_only` or `empty_response` partly by regular expressions over output
+(`server/src/services/run-liveness.ts:62-77`), and finds exhausted retries by
+a `LIKE` over log text (`attention-exhausted-runs.ts:14-18`). The prior
+synthesis already declines "tmux, PTY text, or agent self-report as task
+truth".
+
+**In-process plugin and adapter installation.** `POST /adapters/install`
+installs a package from npm and imports it into the server process without
+isolation (`server/src/adapters/plugin-loader.ts:149-195`). The plugin
+capability list includes `approvals.respond` and `authorization.grants.write`,
+against Paperclip's own spec (`constants.ts:1362-1384`). This would move
+authority out of the DB-authoritative ledger into third-party code. Forge's
+atomic seed generations are the right extension unit.
+
+**A goal hierarchy as stored data.** Paperclip's goal tree is auto-filled,
+carries no invariants, is absent from the wake prompt, and is flagged off in
+the UI (lane A §2c). If Forge wants "why" context, it should inject the
+ticket's epic and problem statement into the task package rather than add a
+goal table.
+
+**Board columns as execution state and loose transitions.** Paperclip does not
+enforce its documented issue transition matrix (`server/src/services/issues.ts:302-307`).
+Forge's CAS state machines and ADR-guarded status set are a deliberate
+advantage. The prior synthesis already declines mutable board columns as
+canonical state.
+
+**Four approval mechanisms.** Approvals, execution stages, thread
+interactions and decisions overlap, with three notions of "changes requested"
+(lane A §4). Forge should keep gates plus the one ask type in recommendation
+7. The prior synthesis warns about exactly this vocabulary density.
+
+**A writable audit log.** Paperclip lets board actors insert activity rows
+with a caller-chosen actor (`server/src/routes/activity.ts:92-100`). Forge's
+events table has one writer, and it should stay that way.
+
+**Zero-priced subscription usage.** See recommendation 1.
+
+## Suggested First Tickets
+
+1. Record cost status, billing mode and reported USD in `model_calls`; show unpriced usage separately in `forge usage`
+2. Add a supervised `forge reconcile watch` sweep over active runs, with a launchd template and a `forge doctor` check
+3. Add spend guardrails from `model-policy.yml` as pre-spawn, queue-claim and campaign admission refusals, with Attention Inbox incidents
+4. Add a `cooling_down` queue scan reason after consecutive failed or launch_failed releases
+5. Prove with a test that a checked-in `.mcp.json` cannot load in agent containers, and pass `--strict-mcp-config` if it can
+6. Add a unit-tier guard against raw status writes outside the store vocabulary accessors, and a `forge doctor` out-of-domain probe
+7. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+8. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
