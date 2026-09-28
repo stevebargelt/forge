@@ -39,15 +39,17 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 13 | A cockpit: one navigable object graph from ticket to evidence | P2 | Medium |
 | 14 | A Roles surface: every agent seed as a browsable, deep-linkable object | P2 | Medium |
 | 15 | Left-column navigation, with the information architecture settled by a UX research pass first | P2 | Medium |
-| 16 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
-| 17 | Operator diagnostic skill for stalled work | P3 | Small |
-| 18 | One outbound safe-projection function for notifications | P3 | Small |
-| 19 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 20 | Role-scoped secret bindings | P3 | Medium |
-| 21 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 22 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
-| 23 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
-| 24 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
+| 16 | Engagement workspaces: a cheap Forge-owned repo for work that belongs to no project | P2 | Medium |
+| 17 | Document workflows: assessment, report and deck with source-cited review | P2 | Medium |
+| 18 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
+| 19 | Operator diagnostic skill for stalled work | P3 | Small |
+| 20 | One outbound safe-projection function for notifications | P3 | Small |
+| 21 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 22 | Role-scoped secret bindings | P3 | Medium |
+| 23 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 24 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 25 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
+| 26 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
 
 ## P1 — Must
 
@@ -420,7 +422,7 @@ control-plane receipt. Size: small.
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
 containers today, and when one arrives the credential half of it is already
-covered by role-scoped secret bindings (recommendation 20) — that should land
+covered by role-scoped secret bindings (recommendation 22) — that should land
 before any gateway is considered.
 
 **Priority.** P2.
@@ -940,7 +942,7 @@ cockpit recommendation (§13) — with tabs that each name their source:
 - **Configuration** — `settings.json`, the runtime seed bound by policy,
   and the auth strategy.
 - **Secrets** — "none: containers receive no project secrets" until
-  role-scoped secret bindings (recommendation 20) land, then the
+  role-scoped secret bindings (recommendation 22) land, then the
   bindings themselves.
 - **Tools** — the `settings.json` tools list, flagged as
   declared-but-unenforced (confirmed: nothing outside its own tests reads
@@ -1071,7 +1073,195 @@ precondition for the Roles surface (recommendation 14) and the cockpit
 (recommendation 13) reading as one coherent object model rather than two
 more entries competing for space on a 13-button strip.
 
-### 16. Scheduled triggers that file and enqueue; the armed dispatcher runs them
+### 16. Engagement workspaces: a cheap Forge-owned repo for work that belongs to no project
+
+**Pattern.** Paperclip's `issues.projectId` is nullable
+(`packages/db/src/schema/issues.ts:36`) — a task needs no project — and its
+information architecture makes that explicit: "Company is the only scope.
+Project is a filter or a detail page, never a scope" (lane E §1). Its agent
+execution workspace strategies — `project_primary | git_worktree |
+adapter_managed | cloud_sandbox`
+(`server/src/services/execution-workspace-policy.ts:36`) — materialize a
+workspace on demand rather than requiring one to already exist, several of
+them ephemeral by construction. Reframed for Forge, what that combination
+buys is: start work without first owning a codebase.
+
+**Why it fits Forge.** Forge is repo-based, not project-based, and every
+guarantee it makes hangs off a git repository, not off code: workspace
+isolation (`src/v2/spawn.ts` mounts exactly one project, plus at most one
+extra read-only mount, `--design-dir` at `/design`), the private per-task
+clone, CAS-published integration (invariants 13-14), the DB-authoritative
+backlog keyed by `project_key` (`.forge/config.yml`), sha-bound review
+evidence (`src/v2/review-evidence.ts`), the dispatch receipt, and usage
+rollups. None of that requires the repository to contain code —
+`.forge/config.yml` plus a `.git` directory is the whole entry fee — but
+nothing today makes paying that fee cheap for a one-off engagement. Creating
+a repo for an assessment or a deck is manual ceremony with no workflow
+support: `git init`, hand-write `.forge/config.yml`, choose a `project_key`,
+and only then does `forge new` have anything to point at.
+
+This study is the worked example, and its own friction names the gap
+precisely. It had to borrow a Forge clone as `--project`, because dispatching
+against the live checkout being worked in refuses outright —
+`self_host_workspace`, since an isolated workspace's `npm ci` would delete
+the `node_modules` the running orchestrator and every concurrent `forge` on
+the host are loaded from (`docs/concepts.md` → "Forge never prepares its own
+checkout"). One `--design-dir` mount carried both the Paperclip repository
+under assessment and the lane notes — a single read-only slot standing in
+for what should be two named inputs. The shipped workflows are code-shaped
+(`feature`, `security-audit`; `research-synthesis` is the one document-shaped
+exception, see recommendation 17), so this six-lane-then-synthesis study ran
+as a sequence of ad hoc `forge invoke` dispatches rather than a named
+workflow. And the output had to land inside *some* repository — this
+document, under `docs/research/competitive/` — because a file in a git
+repository is the only shape Forge's publication model knows how to produce.
+
+**Proposed shape.**
+
+1. **`forge workspace new <name> --kind engagement [--input name=<dir> ...]`**
+   creates a fresh git repository under a new Forge-owned root,
+   `~/.forge/workspaces/<name>/`, alongside the existing
+   `~/.forge/worktrees/` convention. It writes a minimal `.forge/config.yml`
+   (a fresh `project_key`, no CI expectation declared) and records the
+   workspace's purpose as a new `engagement` kind in `workspace_purposes`
+   (`src/store/workspace-purpose.ts`) — an additive, enum-as-convention value
+   alongside the five already there (recommendation 4's own pattern: a `text`
+   column with no DB CHECK, so an old binary reads an unrecognized future
+   kind as `unclassified` rather than choking on it). Unlike the three kinds
+   that suppress the Projects entry (`disposable_clone` / `worktree` /
+   `evidence_fixture`) and unlike the generic `operator` label, `engagement`
+   shows as its own labeled card, so an operator scanning Projects can tell
+   an engagement repo from a codebase they actually own. The verb refuses if
+   `<name>` already names a workspace, rather than overwriting one.
+2. **Generalize `--design-dir` into repeatable `--input name=<dir>` read-only
+   mounts** at `/inputs/<name>` (`src/v2/spawn.ts`, alongside the existing
+   `DESIGN_DIR` optional mount), so the repository under assessment and the
+   operator's collected data (interview notes, an export, a spreadsheet) are
+   named inputs rather than one corpus directory doing double duty.
+   `--design-dir <dir>` stays as sugar for `--input design=<dir>`, so every
+   workflow that already reads `/design` keeps working unchanged.
+3. **A dashboard "New engagement" control on the Projects view**, added to
+   the second closed action registry recommendation 11 proposes: fields for
+   name, kind, optional inputs, and an optional first ticket title. It shells
+   exactly `forge workspace new ...`, then `forge backlog file` when a title
+   is given — two named CLI verbs, never a bespoke server-side create path.
+   Unlike the existing `classify` route, which takes a caller-supplied
+   absolute `dir` because it repairs a directory that already exists, this
+   control never accepts a path: the workspace root is fixed server-side,
+   the caller supplies only a name, and a preview step — mirroring
+   `classify`'s own shape — shows the resolved path and `project_key` before
+   the operator confirms. An `--input` directory is the one caller-supplied
+   path on this route, and it gets the same treatment `classify`'s `dir`
+   already gets: must exist, must be absolute, resolved and echoed back in
+   the preview before the commit call. The actor is recorded as `dashboard`,
+   the same server-side attribution `classify` already uses.
+4. **Arming the dispatcher for the new workspace stays exactly what it is
+   today** — a separate, explicit, CLI-only act (`forge queue dispatcher
+   arm`; invariant 23) — so a workspace-creation control never doubles as an
+   unattended-execution grant.
+5. **Later slice:** the same control on the remote board, behind the `plan`
+   capability the remote-board decision record already scopes mutations to
+   (`learnings/decisions/2026-09-08_remote-board-planning-mutations.md`).
+
+Size: medium. Touches `workspace-purpose.ts`'s closed kind vocabulary, a new
+`forge workspace` CLI surface, `spawn.ts`'s mount-building loop, and the
+dashboard action registry from recommendation 11.
+
+**Risks and what not to copy.** Do not add a projectless dispatch mode — a
+task with no repository at all skips workspace isolation and has nothing for
+review evidence or publication to bind to; an engagement repo is cheap
+precisely because it is still a real repository, not an exception to needing
+one. Do not let the dashboard accept a destination path for the new
+workspace; the root is fixed server-side on purpose, the same discipline
+recommendation 11 already states for every action in its registry. Do not
+copy Paperclip's company-above-project scope — Forge stays host-wide with a
+project filter; `engagement` is one more workspace kind, not a new scope
+level.
+
+**Priority.** P2.
+
+### 17. Document workflows: assessment, report and deck with source-cited review
+
+**Pattern.** Paperclip's planning mode revisions its plan document through
+`document_revisions` and binds plan approval to one revision — "Plan
+approval is a `request_confirmation` bound to a plan revision" — with
+reviewers working over annotation threads anchored to the document (lane A
+§4; `task-plan-context.ts:12-55`, `plan-review-context.ts:21-200`,
+`issue-thread-interactions.ts:2220-2310`; the underlying
+`document_annotation_threads`/`_comments`/`_anchor_snapshots` tables, lane
+C). Separately, its artifact-upload workflow exists because a generated
+deliverable a reviewer needs to inspect cannot stay a local workspace path —
+"cloud users and reviewers often cannot access the agent's disk," so a
+deliverable is registered and attached to the work item before disposition
+(`doc/AGENT-ARTIFACTS.md`). Both are evidence that document work needs its
+own review shape, distinct from a code diff's. This study is the same
+observation from the inside: it was driven by hand as research lanes →
+synthesis → maintainer → PR, because nothing in Forge runs that shape as a
+named pipeline.
+
+**Why it fits Forge.** The shipped workflows are code-shaped — `feature`,
+`security-audit` — and `research-synthesis` is the one document-shaped
+exception (`seeds/workflows/`). The evidence-led review's acceptance-evidence
+kinds are `regression_test | replayed_reproduction | anchored_verification |
+bounded_inspection` (`src/v2/review-evidence.ts`), and Stage 8's rechecker
+locally re-executes a fixer's cited test file itself rather than trusting the
+rechecker's self-report (`docs/concepts.md` → review-rechecker) — which has
+no meaning for a report with no test suite, and a deck has no review
+pipeline at all.
+
+**Proposed shape.** Three workflows under `seeds/workflows/`:
+
+- **`assessment`** — N research lanes over `/inputs` → synthesis → reds →
+  `documentation-maintainer` → PR into the engagement repo; the FG-814 lane
+  structure this study itself used, generalized from a hand-run sequence
+  into a named workflow.
+- **`report`** — brief → outline (`gate: human`) → draft →
+  red-wide/red-narrow → `documentation-maintainer`.
+- **`deck`** — research → outline (`gate: human`) → `prompt-author` → a
+  slides-build step handed to the host session, the same host-side handoff
+  shape `forge design` already uses for Pencil (`docs/repo-guide.md`:
+  "Forge's role is to author the prompt … then hand off to the tracked
+  session"; no agent-led design phase runs in a container). Output is
+  committed into the engagement repo; a `.pptx` in git is an acceptable
+  interim shape until Forge has a non-code deliverable store.
+
+Their "done" is the ticket's acceptance-criteria grid plus reviewer
+findings, identically to every other workflow. Add ONE new member to the
+fixed five-name `risk_lenses` vocabulary (`wide | narrow | frontend |
+backend | security`, `docs/concepts.md` → Review coordinator), `sourcing`,
+mapped to a new red role, `red-sourcing`: its discovery pass finds every
+load-bearing claim in the document that cites no file under `/inputs` and no
+URL in a sources list. This extends the fixed vocabulary to a sixth closed
+name; it is not the general conditional-workflow language the PRD forbids
+for lens selection. The ledger, the disposition flow (`forge review
+disposition`; `docs/concepts.md` → `review_disposition` gate) and candidate
+binding (`contract_confirmed_sha`, `advanceCandidate`) stay completely
+unchanged — one authority model governs a `sourcing` finding exactly as it
+governs a code finding. What differs is only which evidence kinds can close
+one: a document has no test suite, so `regression_test` and
+`replayed_reproduction` are never available, and `anchored_verification`
+isn't either, because it requires an executed `verification_step` alongside
+the cited location (`src/v2/review-evidence.ts` — anchored code reading
+alone is an argument about the source, not a verification of behavior) — a
+citation has nothing to execute. That leaves `bounded_inspection` — the
+rechecker reads the cited passage in `/inputs/<name>/<file>` and states the
+inspection's limitation — as the only kind that can ever close a `sourcing`
+finding, which caps its `reachability` at `speculative`, the weakest tier
+the evidence table recognizes (`SUFFICIENT[reachability]`, same file). That
+is an honest ceiling, not a bug to route around: a `sourcing` finding is
+real coverage of a real risk (an uncited claim), reported at the confidence
+a citation check actually earns.
+
+**Risks.** Do not weaken the evidence-led review for code by treating
+`sourcing` as a substitute for tests — it is additive, and its own evidence
+ceiling (`speculative`, `bounded_inspection` only) keeps it from ever
+masquerading as a `demonstrated` or `supported` code finding. Do not let a
+document workflow publish anywhere but the engagement repo it ran in. Keep
+reds read-only, exactly as every other lens already is.
+
+**Priority.** P2.
+
+### 18. Scheduled triggers that file and enqueue; the armed dispatcher runs them
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -1188,7 +1378,7 @@ this small to add on top of it.
 
 ## P3 — Could
 
-### 17. Operator diagnostic skill for stalled work
+### 19. Operator diagnostic skill for stalled work
 
 **Pattern.** Paperclip's `diagnose-why-work-stopped` skill
 (`.agents/skills/diagnose-why-work-stopped/SKILL.md`) is diagnostic-only: "No
@@ -1263,7 +1453,7 @@ them.
 
 **Priority.** P3.
 
-### 18. One outbound safe-projection function for notifications
+### 20. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -1279,11 +1469,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 21 lands.
+recommendation 23 lands.
 
 **Priority.** P3.
 
-### 19. Content-hash provenance and a static audit for skills and role seeds
+### 21. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -1314,7 +1504,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 20. Role-scoped secret bindings
+### 22. Role-scoped secret bindings
 
 **Pattern.** Paperclip resolves a secret into run env only when a binding row
 exists for the specific consumer and config path. `resolveSecretValueInternal`
@@ -1439,7 +1629,7 @@ enforces nothing.
 **Priority.** P3 — becomes P2 the moment any role is expected to call an
 external service with a credential.
 
-### 21. Answer operator asks from a phone with opaque expiring tokens
+### 23. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -1469,7 +1659,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 22. Policy evals: scenario × profile matrix with hard gates
+### 24. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -1497,7 +1687,7 @@ Size: large.
 
 **Priority.** P3.
 
-### 23. Honest freshness and recovery cards on the surfaces that already poll
+### 25. Honest freshness and recovery cards on the surfaces that already poll
 
 **Pattern.** Paperclip surfaces recovery where the work already lives: a
 stateful card cycling RECOVERY NEEDED → IN PROGRESS → ESCALATED → RESOLVED,
@@ -1543,7 +1733,7 @@ recover` or the registry from recommendation 11 doesn't already expose.
 
 **Priority.** P3.
 
-### 24. Status tokens and shared formatters as the only visual vocabulary
+### 26. Status tokens and shared formatters as the only visual vocabulary
 
 **Pattern.** Paperclip's palette logic is stated as a rule — "gray inert,
 blue liveness, amber queued, violet review, green done, red blocked" — and
@@ -1686,8 +1876,10 @@ reach; none of them make the dashboard itself an authority.
 12. Add a run index page and link task detail and Explain to each other, each behind its own URL
 13. Add a Roles nav entry and a `#roles/<role>/<tab>` page backed by read-only `GET /api/roles` and `GET /api/roles/:role`, projecting the current seed generation and the store into Overview/Instructions/Skills/Configuration/Secrets/Tools/Tasks/Receipts/Usage tabs, with no write route (FG-817)
 14. UX research pass: information architecture for a left-column dashboard nav (docs/research/), then the layout change
-15. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-16. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
-17. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
-18. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
-19. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
+15. Add `forge workspace new <name> --kind engagement [--input name=<dir> ...]`, a new `engagement` `workspace_purposes` kind, and a dashboard "New engagement" control on the Projects view that shells it with a server-fixed root and a previewed path/`project_key`
+16. Add `assessment`, `report` and `deck` workflows under `seeds/workflows/`, and a new `sourcing` risk lens — evidence capped at `bounded_inspection`/`speculative` — so a document's load-bearing claims get cited-source review through the existing ledger and disposition flow
+17. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+18. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
+19. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+20. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
+21. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
