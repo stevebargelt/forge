@@ -326,35 +326,63 @@ the docs; do not add mid-run token metering.
 
 ### 4. Status-domain guard for enum-as-convention columns
 
-**Pattern.** Paperclip keeps every status as plain `text`, with allowed values
-in TypeScript `as const` arrays (`packages/shared/src/constants.ts`). Lane C
-found a concrete out-of-domain write. `setWakeupStatus` accepts a free string,
-and run finalization writes `timed_out` or `interrupted` into a column whose
-domain contains neither (`heartbeat.ts:24981-24983,13041-13049`). Nothing
-catches it.
+**Pattern.** Both codebases store status columns as plain `text` and enforce
+the set of legal values only in application code, not in the database — call
+it enum-as-convention. Paperclip lists its wakeup-request statuses in a
+TypeScript `as const` array, `WAKEUP_REQUEST_STATUSES`
+(`packages/shared/src/constants.ts:907-916`); the database column itself will
+accept any string at all. The database can't stop a bad write; only the code
+writing to it can, and only if every writer goes through a path that checks.
 
-**Why it fits Forge.** Forge made the same trade on purpose. Newer tables
-carry no CHECK so that old and new binaries can coexist
-(`src/store/schema.ts:394-396`; FG-585), and legality is "enforced by the
-accessors" (`src/store/schema.ts:1694-1697`). Paperclip shows how that fails:
-one writer that bypasses an accessor. Lane C's Forge note flags `tasks.status`
-as the same risk.
+That's exactly where Paperclip's `setWakeupStatus` fails. Its `status`
+parameter is typed as plain `string`, not the `WakeupRequestStatus` union, so
+TypeScript's compiler has nothing to reject (`heartbeat.ts:13041-13049`). Run
+finalization then calls it with `outcome === "succeeded" ? "completed" :
+status`, where `status` is the *run's* status, not a wakeup status
+(`heartbeat.ts:24981-24983`). Run statuses include `timed_out` and
+`interrupted`, neither of which is a legal wakeup status. So when a run times
+out, `timed_out` — a value from the wrong vocabulary — lands in the
+`agent_wakeup_requests.status` column. TypeScript didn't catch it because the
+parameter was typed as `string`; Postgres didn't catch it because the column
+is untyped text. Every later reader that switches on the eight documented
+wakeup statuses now has to handle a ninth value nobody told it about.
 
-**Proposed shape.** Add two cheap checks.
+**Why it fits Forge.** Forge makes this same trade deliberately, for a real
+reason: a CHECK constraint would break the "an old and a new binary can share
+`~/.forge/forge.db`" guarantee, since SQLite cannot widen a CHECK once one
+exists, and an old binary would reject values a newer binary legitimately
+writes (`src/store/schema.ts:394-396`, `1694-1697`; FG-585). So legality is
+enforced entirely by accessors that "refuse by name" instead of by a database
+constraint — the same trade Paperclip made, and Paperclip's bug is what
+happens when one writer skips the accessor. Forge has the same shape of
+columns today: `tasks.status`, `queue_claims.state`, continuation state, and
+the orchestrator-receipt vocabularies are all unconstrained text guarded only
+by convention. A single raw `UPDATE` that writes a value from the wrong
+vocabulary — the same mistake Paperclip made — would succeed silently.
 
-1. A unit-tier test that scans `src/store/**` for raw
-   `UPDATE … SET <status column> =` and `INSERT` statements that do not take
-   their value from the owning vocabulary constant, with an allowlist. Forge
-   already enforces repository rules with tests, as in
-   `src/test-tiers.test.ts`.
-2. A `forge doctor` read-only probe that reports rows whose status falls
-   outside the current vocabulary. It never repairs them; reporting keeps
-   invariant 1 intact.
+**Proposed shape.** Two checks, chosen because each is cheap relative to what
+it catches, and neither reintroduces a database constraint.
+
+1. A unit-tier test that scans `src/store/**` for raw `UPDATE … SET <status
+   column> =` and `INSERT` statements whose value isn't drawn from the
+   column's own vocabulary constant, with an allowlist for the accessors
+   themselves. This is the same class of bug as Paperclip's — a value from
+   the wrong vocabulary reaching the right-looking column — caught at PR time
+   instead of in production. Forge already polices repository rules this way
+   (`src/test-tiers.test.ts`), so this adds a rule, not a new mechanism.
+2. A `forge doctor` read-only probe, one `SELECT status, COUNT(*) ... WHERE
+   status NOT IN (<vocabulary>)` per status column, that reports rows already
+   out of domain — drift left behind by an older binary or a past bug. It
+   only reports, never repairs, so it can't compromise the accessor-only
+   write path that invariant 1 depends on.
 
 Size: small.
 
-**Risks.** Do not add CHECK constraints. SQLite cannot widen them on the
-additive path, which is why FG-585 exists.
+**Risks.** Do not add CHECK constraints — that's the one fix this
+recommendation deliberately avoids, since SQLite can't widen a CHECK on the
+additive-only path Forge relies on (FG-585). The two checks above are placed
+exactly where the cost is affordable: at the code that writes, and in a
+diagnostic that only reads.
 
 **Priority.** P2.
 
