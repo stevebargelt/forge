@@ -85,7 +85,7 @@ What neither arm sees is an arm that consults the environment and returns green 
 
 ## The dashboard browser tier (FG-642)
 
-`dashboard/browser-tests/*.test.ts` is twenty-eight suites / 142 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
+`dashboard/browser-tests/*.test.ts` is thirty-one suites / 169 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
 
 ```bash
 npm run test:browser -w dashboard      # the whole tier, ~6.5s with a browser present
@@ -105,7 +105,7 @@ A candidate must be a **file**. Symlinks are followed deliberately — the agent
 
 ### It fails, it never skips
 
-A Chrome-less environment takes every one of the 142 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
+A Chrome-less environment takes every one of the 169 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
 
 ```
 chrome precondition: the dashboard browser tier requires a real Chrome/Chromium binary and none was
@@ -115,7 +115,7 @@ MacOS/Google Chrome; ubuntu: npx playwright-core install --with-deps chromium). 
 environment must FAIL this tier, never skip to green (FG-642).
 ```
 
-Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting the Chrome-less run reports `tierTestTotal()` failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`. Since FG-694 the test carries no count literal of its own: `src/util/browser-tier-census.ts` is the one source of truth for the tier's suite set and per-suite counts (151 tests across 29 suites as of FG-781, which added `fg781-remote-board.test.ts` — the focused Remote Board client's honest rendering of all five projection states, its keyboard/screen-reader surface, and its phone/desktop layout — on top of the 142 tests across 28 suites as of FG-692, which added `fg692-orchestrator-keyboard.test.ts` and `fg402-attention-inbox-overflow.test.ts` and grew existing suites — including `fg348-run-map.test.ts` to 6 for the Explain panel's keyboard-dismissal and focus-containment tests — for its keyboard-accessibility work), and both this guard and `src/util/fg642-browser-tier-consistency.test.ts` resolve their expectation from it — see [`browser-tier-census.ts`](../src/util/browser-tier-census.ts).
+Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting the Chrome-less run reports `tierTestTotal()` failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`. Since FG-694 the test carries no count literal of its own: `src/util/browser-tier-census.ts` is the one source of truth for the tier's suite set and per-suite counts (169 tests across 31 suites as of FG-819, which added `fg819-order-pinning.test.ts` — every store vocabulary kind rendered to its own real-browser badge, and the Home inbox/In-flight rows holding their order across re-ranked polls until the idle, tab-visibility, or manual-Refresh boundary — and FG-783's `fg783-remote-board-plan.test.ts` (the Remote Board's bounded planning UI), both landing after the last checkpoint here, on top of the 151 tests across 29 suites as of FG-781, which added `fg781-remote-board.test.ts` — the focused Remote Board client's honest rendering of all five projection states, its keyboard/screen-reader surface, and its phone/desktop layout — on top of the 142 tests across 28 suites as of FG-692, which added `fg692-orchestrator-keyboard.test.ts` and `fg402-attention-inbox-overflow.test.ts` and grew existing suites — including `fg348-run-map.test.ts` to 6 for the Explain panel's keyboard-dismissal and focus-containment tests — for its keyboard-accessibility work), and both this guard and `src/util/fg642-browser-tier-consistency.test.ts` resolve their expectation from it — see [`browser-tier-census.ts`](../src/util/browser-tier-census.ts).
 
 ### Running it in an agent container
 
