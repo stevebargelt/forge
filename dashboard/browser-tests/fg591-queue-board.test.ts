@@ -286,7 +286,7 @@ async function openBoard(): Promise<Page> {
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: `Open all ${projectLabel} checkouts` }).click();
-  await page.getByRole("button", { name: "queue", exact: true }).click();
+  await page.getByRole("link", { name: "Queue", exact: true }).click();
   await page.locator(".queue-view").waitFor();
   await page.locator(".queue-column-queued .queue-card").first().waitFor();
   return page;

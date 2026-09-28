@@ -1,7 +1,7 @@
 // forge-dashboard client. Preact + htm; no build step. Polls every 2s.
 
 import { h, render } from "preact";
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "preact/hooks";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "preact/hooks";
 import htm from "htm";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
@@ -15,7 +15,9 @@ import { CampaignsView } from "./campaigns.js";
 import { ControlPlaneView } from "./control-plane.js";
 import { RunMap } from "./run-map.js";
 import { RunExplainPanel } from "./run-explain-panel.js";
-import { initialView, hashForView, runIdFromHash } from "./view-routing.js";
+import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, navItemFor } from "./view-routing.js";
+import { NavColumn, BottomBar, NavDrawer } from "./nav-view.js";
+import { scopeSummary, scopedHref } from "./nav-render.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
   verificationRowBadge,
@@ -54,13 +56,21 @@ function appendScope(url, project, checkoutDir = null) {
 
 
 function App() {
-  // Top-level view toggle. Home is the default landing view; Activity retains
-  // the full recent-output feed and its project filtering behavior.
-  const [view, setView] = useState(() => initialView(window.location.hash));
-  // When set, both /api/feed and /api/in-flight are filtered to this project.
-  // Clicking a project card sets this AND switches to activity view.
-  const [projectFilter, setProjectFilter] = useState(null);
-  const [checkoutFilter, setCheckoutFilter] = useState(null);
+  // FG-820: the hash is the source of truth for view, object id and — on list views —
+  // scope (view-routing.js). Scope-less views and object pages leave the scope in hand
+  // untouched, so moving between list views keeps it. Never persisted anywhere else.
+  const [initialRoute] = useState(() => parseHash(window.location.hash));
+  const [route, setRoute] = useState(() => ({ view: initialRoute.view, id: initialRoute.id, tab: initialRoute.tab }));
+  const [scope, setScope] = useState(() => initialRoute.scope);
+  const [routeNotice, setRouteNotice] = useState(() => initialRoute.notice);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const moreRef = useRef(null);
+  const mainRef = useRef(null);
+  const view = route.view;
+  // The server scope: `projectFilter` is keyed on the project key alone so its identity
+  // only changes when the scope does, which is what every scope-invalidation effect keys on.
+  const projectFilter = useMemo(() => (scope.project ? { key: scope.project } : null), [scope.project]);
+  const checkoutFilter = scope.checkout;
   const [feed, setFeed] = useState([]);
   const [inFlight, setInFlight] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -100,7 +110,7 @@ function App() {
   const controlPlaneSeq = useRef(0);
   // FG-348: the Run Map graph for the currently-selected run + the Explain panel's
   // open task. selectedRunId is deep-linkable via #run-map/<runId>.
-  const [selectedRunId, setSelectedRunId] = useState(() => runIdFromHash(window.location.hash));
+  const selectedRunId = view === "run-map" ? route.id : null;
   const [runMapGraph, setRunMapGraph] = useState(null);
   // Scope+run token for the run-map read: a response for a scope/run we have
   // navigated away from must never repaint the graph now on screen.
@@ -117,7 +127,7 @@ function App() {
   // FG-395: the campaign list projection + the currently-opened campaign's detail.
   // Works unscoped (all campaigns) as well as project-scoped, unlike shipping-audit.
   const [campaigns, setCampaigns] = useState(null);
-  const [selectedCampaignId, setSelectedCampaignId] = useState(null);
+  const selectedCampaignId = view === "campaigns" ? route.id : null;
   const campaignsSeq = useRef(0);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
@@ -155,8 +165,6 @@ function App() {
     // showing its last payload as though it were still current; this read owns its
     // own outcome — including its own failure — and always lands.
     activityReader.current.poll(`/api/current-activity${q}`);
-    // FG-402: same own-your-own-outcome discipline as the current-activity poll above.
-    inboxReader.current.poll(`/api/attention-inbox${q}`);
     try {
       const reqs = [
         view === "activity" ? fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`) : Promise.resolve(null),
@@ -258,6 +266,17 @@ function App() {
     return () => clearInterval(id);
   }, [poll, view]);
 
+  // FG-402: the inbox read owns its own outcome like the current-activity read. FG-820:
+  // it runs on every view, not just the ones the main poll serves, because the Home
+  // badge in the nav reads it everywhere.
+  useEffect(() => {
+    const url = `/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`;
+    const read = () => inboxReader.current.poll(url);
+    read();
+    const id = setInterval(read, POLL_MS);
+    return () => clearInterval(id);
+  }, [projectFilter, checkoutFilter]);
+
   useEffect(() => {
     if (view !== "home" && view !== "usage") return;
     pollPlanUsage();
@@ -271,15 +290,6 @@ function App() {
     const id = setInterval(pollUsage, USAGE_POLL_MS);
     return () => clearInterval(id);
   }, [pollUsage, view]);
-
-  useEffect(() => {
-    const revealActiveTab = () => {
-      document.querySelector(".view-tabs .tab-active")?.scrollIntoView({ block: "nearest", inline: "center" });
-    };
-    revealActiveTab();
-    window.addEventListener("resize", revealActiveTab);
-    return () => window.removeEventListener("resize", revealActiveTab);
-  }, [view]);
 
   const pollOps = useCallback(async () => {
     try {
@@ -371,15 +381,28 @@ function App() {
   // window last): this retires the leaving scope's in-flight read and shows the
   // loading state immediately, instead of rendering the previous scope's
   // numbers (or error) under the new scope's label for one round trip.
-  const changeCheckoutFilter = (next) => {
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const routeRef = useRef(route);
+  routeRef.current = route;
+
+  const adoptScope = (next) => {
+    const prev = scopeRef.current;
+    if (prev.project === next.project && prev.checkout === next.checkout) return;
     invalidateRuntimePanels();
-    setCheckoutFilter(next);
+    scopeRef.current = next;
+    setScope(next);
   };
 
-  const changeProjectScope = (project, checkoutDir = null) => {
-    invalidateRuntimePanels();
-    setProjectFilter(project);
-    setCheckoutFilter(checkoutDir);
+  // The scope control. On a list view the hash is rewritten in place (replaceState — a
+  // scope change is not a navigation); an open campaign detail closes, as it always has.
+  const changeScope = (next) => {
+    adoptScope(next);
+    const current = routeRef.current;
+    if (!carriesScope(current.view)) return;
+    const id = current.view === "campaigns" ? null : current.id;
+    if (id !== current.id) setRoute({ ...current, id });
+    replaceHash(hashFor({ ...current, id, scope: next }));
   };
 
   const pollGovernance = useCallback(async () => {
@@ -393,7 +416,7 @@ function App() {
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
-    if (view !== "governance") return;
+    if (view !== "routing") return;
     pollGovernance();
     const id = setInterval(pollGovernance, USAGE_POLL_MS);
     return () => clearInterval(id);
@@ -432,7 +455,7 @@ function App() {
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
-    if (view !== "control-plane") return;
+    if (view !== "config") return;
     pollControlPlane();
     const id = setInterval(pollControlPlane, USAGE_POLL_MS);
     return () => clearInterval(id);
@@ -559,7 +582,6 @@ function App() {
   useEffect(() => {
     campaignsSeq.current += 1;
     setCampaigns(null);
-    setSelectedCampaignId(null);
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
@@ -621,90 +643,87 @@ function App() {
   // evidence is contextual (run/task Explain, campaign detail, shipping audit). The
   // tab-only recent-feed poll and manual ticket/item lookup are gone with it.
 
+  // Alias, group-shaped, unknown-key and bare-object hashes are rewritten to their
+  // canonical form without adding a history entry.
+  useEffect(() => {
+    if (initialRoute.rewrite) replaceHash(initialRoute.canonical);
+  }, []);
+
   useEffect(() => {
     const onHash = () => {
-      setView(initialView(window.location.hash));
-      // FG-348: keep the selected run in step with the hash so a deep link
-      // (#run-map/<runId>) and the back button both land on the right run.
-      setSelectedRunId(runIdFromHash(window.location.hash));
+      const parsed = parseHash(window.location.hash);
+      if (parsed.rewrite) replaceHash(parsed.canonical);
+      if (carriesScope(parsed.view)) adoptScope(parsed.scope);
+      // FG-348: the selected run follows the hash, so a deep link (#run-map/<runId>)
+      // and the back button both land on the right run.
+      setRoute({ view: parsed.view, id: parsed.id, tab: parsed.tab });
+      setRouteNotice(parsed.notice);
+      setDrawerOpen(false);
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const switchView = (next) => {
-    setView(next);
-    window.location.hash = hashForView(next);
+  // The drawer only exists below the 720px nav breakpoint; widening past it closes it.
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const wide = window.matchMedia("(min-width: 720px)");
+    const onChange = () => { if (wide.matches) setDrawerOpen(false); };
+    wide.addEventListener("change", onChange);
+    return () => wide.removeEventListener("change", onChange);
+  }, [drawerOpen]);
+
+  const navigate = (location) => {
+    window.location.hash = hashFor({ ...location, scope: location.scope ?? scopeRef.current });
   };
 
-  // FG-348: open the Run Map for a specific run (from the activity/in-flight feed
-  // or a deep link). Sets the run AND the deep-linkable hash together.
-  const openRunMap = (runId) => {
-    setSelectedRunId(runId);
-    setView("run-map");
-    window.location.hash = hashForView("run-map", runId);
-  };
+  // FG-348: open the Run Map for a specific run (from the activity/in-flight feed).
+  const openRunMap = (runId) => navigate({ view: "run-map", id: runId });
 
+  // A project card (or one of its checkouts) scopes the dashboard and opens Activity.
   const filterByProject = (project, checkoutDir = null) => {
-    changeProjectScope(project, checkoutDir);
-    switchView("activity");
+    navigate({ view: "activity", scope: { project: project.key, checkout: checkoutDir } });
   };
 
-  const clearProjectFilter = () => {
-    changeProjectScope(null, null);
+  const skipToContent = (e) => {
+    e.preventDefault();
+    mainRef.current?.focus();
   };
+
+  const currentRoute = ROUTES[view];
+  const currentGroup = GROUPS.find((g) => g.id === currentRoute.group);
+  const scopedProject = scope.project ? projects.find((p) => p.key === scope.project) ?? null : null;
+  const navColumn = (idPrefix) => html`<${NavColumn}
+    view=${view}
+    scope=${scope}
+    projects=${projects}
+    onScopeChange=${changeScope}
+    now=${now}
+    inboxLoad=${inboxLoad}
+    idPrefix=${idPrefix}
+  />`;
 
   return html`
-    <div class="app">
-      <header class="topbar">
-        <h1>
-          <img src="/client/logo-mark.svg" width="32" height="32" class="brand-mark" alt="forge" />
-          <nav class="view-tabs">
-            <button class=${"tab " + (view === "home" ? "tab-active" : "")} onClick=${() => switchView("home")}>home</button>
-            <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
-            <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
-            <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
-            <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
-            <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>workbench</button>
-            <button class=${"tab " + (view === "control-plane" ? "tab-active" : "")} onClick=${() => switchView("control-plane")}>control plane</button>
-            <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
-            <button class=${"tab " + (view === "queue" ? "tab-active" : "")} onClick=${() => switchView("queue")}>queue</button>
-            <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
-            <button class=${"tab " + (view === "shipping" ? "tab-active" : "")} onClick=${() => switchView("shipping")}>shipping</button>
-            <button class=${"tab " + (view === "campaigns" ? "tab-active" : "")} onClick=${() => switchView("campaigns")}>campaigns</button>
-            <button class=${"tab " + (view === "run-map" ? "tab-active" : "")} onClick=${() => switchView("run-map")}>run map</button>
-          </nav>
-        </h1>
-        <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
+    <div class="app-shell">
+      <a class="skip-link" href=${hashFor({ ...route, scope })} onClick=${skipToContent}>Skip to content</a>
+      <div class="nav-column">${navColumn("nav")}</div>
+      <header class="mobile-head">
+        <img src="/client/logo-mark.svg" width="24" height="24" class="brand-mark" alt="forge" />
+        <span class="mobile-head-scope muted">${scopeSummary(scope, scopedProject)}</span>
       </header>
+      <main id="main-content" class="app" tabindex="-1" ref=${mainRef}>
+      <div class="page-head">
+        <span class="page-kicker">${currentGroup?.label}</span>
+        <h1 class="page-title">${currentRoute.label}</h1>
+      </div>
+
+      ${routeNotice ? html`<div class="card route-notice muted" role="status">${routeNotice}</div>` : null}
 
       ${error ? html`<div class="card" style="color: var(--err);">Error: ${error}</div>` : null}
 
-      ${projectFilter && view !== "projects" ? html`
-        <div class="filter-banner project-scope-banner">
-          <span>Filtered to <strong>${projectFilter.label}</strong></span>
-          <div class="project-scope-options" aria-label="Project checkout scope">
-            <button
-              class=${"checkout-scope-btn" + (!checkoutFilter ? " checkout-scope-btn-active" : "")}
-              onClick=${() => changeCheckoutFilter(null)}
-              aria-pressed=${!checkoutFilter}
-            >all checkouts</button>
-            ${(projectFilter.checkouts || []).map((checkout) => html`
-              <button
-                key=${checkout.projectDir}
-                class=${"checkout-scope-btn" + (checkoutFilter === checkout.projectDir ? " checkout-scope-btn-active" : "")}
-                onClick=${() => changeCheckoutFilter(checkout.projectDir)}
-                aria-pressed=${checkoutFilter === checkout.projectDir}
-                title=${checkout.projectDir}
-              >${checkoutScopeLabel(checkout)}</button>
-            `)}
-          </div>
-          <button class="clear-filter" onClick=${clearProjectFilter}>clear ×</button>
-        </div>
-      ` : null}
-
       ${view === "home"
         ? html`<${HomeView}
+            hrefFor=${(hash) => scopedHref(hash, scope)}
             planUsage=${planUsage}
             planUsageLoading=${planUsageLoading}
             planUsageRefreshing=${planUsageRefreshing}
@@ -727,20 +746,22 @@ function App() {
           />`
         : view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} onReload=${poll} />`
-        : view === "governance"
+        : view === "routing"
         ? projectFilter && !checkoutFilter
-          ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
+          ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
           : html`<${GovernanceView} data=${governance} />`
-        : view === "control-plane"
+        : view === "config"
         ? projectFilter && !checkoutFilter
-          ? html`<div class="card muted" style="margin-top: 20px;">The control-plane config graph is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
+          ? html`<div class="card muted" style="margin-top: 20px;">The config graph is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
           : html`<${ControlPlaneView} data=${controlPlane} />`
         : view === "run-map"
-        ? !selectedRunId
-          ? html`<div class="card muted" style="margin-top: 20px;">Open a run from the activity feed to see its Run Map, or deep-link one via <span class="mono">#run-map/&lt;runId&gt;</span>.</div>`
-          : html`<${RunMap} graph=${runMapGraph} onSelect=${(taskId) => setSelectedExplainTaskId(taskId)} />`
+        ? html`<${RunMap} graph=${runMapGraph} onSelect=${(taskId) => setSelectedExplainTaskId(taskId)} />`
+        : view === "runs"
+        ? html`<div class="card muted placeholder-view" style="margin-top: 20px;">The run index lands in FG-821. Until then, open a run from <a href=${hashFor({ view: "activity", scope })}>Activity</a>.</div>`
+        : view === "roles"
+        ? html`<div class="card muted placeholder-view" style="margin-top: 20px;">Role pages land in a later ticket. <a href=${hashFor({ view: "routing", scope })}>Routing</a> and <a href=${hashFor({ view: "config", scope })}>Config</a> explain how a role resolves today.</div>`
         : view === "backlog"
-        ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
+        ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} ticketId=${route.id} />`
         : view === "queue"
         ? html`<${QueueBoardView}
             data=${queue}
@@ -749,15 +770,15 @@ function App() {
             onReload=${pollQueue}
           />`
         : view === "reviews"
-        ? html`<${ReviewsView} data=${reviews} />`
+        ? html`<${ReviewsView} data=${reviews} reviewId=${route.id} />`
         : view === "shipping"
         ? html`<${ShippingAuditView} data=${shippingAudit} />`
         : view === "campaigns"
         ? html`<${CampaignsView}
             data=${campaigns}
             selectedId=${selectedCampaignId}
-            onSelect=${setSelectedCampaignId}
-            onCloseDetail=${() => setSelectedCampaignId(null)}
+            onSelect=${(id) => navigate({ view: "campaigns", id })}
+            onCloseDetail=${() => navigate({ view: "campaigns" })}
           />`
         : view === "ops"
         ? html`<${OpsView}
@@ -831,11 +852,26 @@ function App() {
         scopeQuery=${projectScopeQuery(projectFilter, checkoutFilter)}
         onClose=${() => setSelectedExplainTaskId(null)}
       />` : null}
+      </main>
+      <${BottomBar}
+        view=${view}
+        current=${navItemFor(view)}
+        scope=${scope}
+        inboxLoad=${inboxLoad}
+        drawerOpen=${drawerOpen}
+        onOpenDrawer=${() => setDrawerOpen(true)}
+        moreRef=${moreRef}
+      />
+      ${drawerOpen ? html`<${NavDrawer} onClose=${() => setDrawerOpen(false)} returnFocusRef=${moreRef}>${navColumn("drawer")}</${NavDrawer}>` : null}
     </div>
   `;
 }
 
-function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, onRefreshInFlight, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
+function replaceHash(hash) {
+  window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${hash}`);
+}
+
+function HomeView({ hrefFor, planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, onRefreshInFlight, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
   return html`
     <section class="home-view" aria-label="Dashboard home">
       <${UsageLimits}
@@ -845,7 +881,7 @@ function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageR
         refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
-      <${PinnedAttentionInboxSection} load=${inboxLoad} now=${now} onRetry=${onRetryInbox} />
+      <${PinnedAttentionInboxSection} load=${inboxLoad} now=${now} onRetry=${onRetryInbox} hrefFor=${hrefFor} />
       <div class="home-in-flight-group">
         <div class="home-section-heading">
           <div>
@@ -2097,13 +2133,6 @@ function checkoutRow(project, checkout, onPick) {
       <span class="project-path mono faint">${checkout.projectDir}</span>
     </button>
   `;
-}
-
-function checkoutScopeLabel(checkout) {
-  if (checkout.exists === false) {
-    return (checkout.branch || checkout.projectDir.split("/").pop()) + " (missing)";
-  }
-  return checkout.branch || checkout.projectDir.split("/").pop();
 }
 
 // Visual state for the card. Drives a CSS class for dimming/highlighting.

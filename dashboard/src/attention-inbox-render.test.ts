@@ -78,14 +78,14 @@ describe("inboxItemSummary — badge, severity, link per kind", () => {
     assert.equal(s.link!.hash, "#run-map/run-2");
   });
 
-  test("missing acceptance criteria links to backlog", () => {
+  test("missing acceptance criteria links to the ticket in the backlog", () => {
     const s = inboxItemSummary(makeItem({ id: "readiness:FG-9", kind: "missing_acceptance_or_readiness", severity: "medium", source: "readiness", links: { runId: null, taskId: null, ticketId: "FG-9", campaignId: null, itemId: null, projectDir: null, projectLabel: null } }));
-    assert.deepEqual(s.link, { hash: "#backlog", label: "Open FG-9" });
+    assert.deepEqual(s.link, { hash: "#backlog/FG-9", label: "Open FG-9" });
   });
 
-  test("auth/setup links to the control plane", () => {
+  test("auth/setup links to Config", () => {
     const s = inboxItemSummary(makeItem({ id: "task:t3", kind: "auth_setup" }));
-    assert.deepEqual(s.link, { hash: "#control-plane", label: "Open control plane" });
+    assert.deepEqual(s.link, { hash: "#config", label: "Open config" });
   });
 
   test("campaign pause links to campaigns", () => {

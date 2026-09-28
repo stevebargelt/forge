@@ -28,7 +28,7 @@ import {
   mutationOutcome,
 } from "../client/queue-board-state.js";
 import { QUEUE_BOARD_VIEWS } from "./queries.js";
-import { hashForView, initialView } from "../client/view-routing.js";
+import { hashFor, parseHash } from "../client/view-routing.js";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
@@ -121,14 +121,14 @@ function board(rows: Array<ReturnType<typeof row>>, overrides: Record<string, un
 test("the board is a deep-linkable view through the existing view-routing module", () => {
   // The queue tab goes through view-routing like every other tab rather than
   // inventing a second routing path — "the queue is stalled, look" is a link.
-  assert.equal(initialView("#queue"), "queue");
-  assert.equal(hashForView("queue"), "#queue");
+  assert.equal(parseHash("#queue").view, "queue");
+  assert.equal(hashFor({ view: "queue" }), "#queue");
   // And the existing routes are untouched: adding a view must not steal the
   // hashless route or shadow a sibling.
-  assert.equal(initialView(""), "home");
-  assert.equal(initialView("#unknown"), "home");
-  assert.equal(initialView("#reviews"), "reviews");
-  assert.equal(hashForView("home"), "");
+  assert.equal(parseHash("").view, "home");
+  assert.equal(parseHash("#unknown").view, "home");
+  assert.equal(parseHash("#reviews").view, "reviews");
+  assert.equal(hashFor({ view: "home" }), "#home");
 });
 
 // ─── the five projections ────────────────────────────────────────────────────

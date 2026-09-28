@@ -16,12 +16,12 @@
 
 import type { Database } from "better-sqlite3";
 import { basename } from "node:path";
-import { redactSecrets } from "../../src/v2/host-readiness.js";
-import { retryPolicy } from "../../src/v2/retry-policy.js";
+import { redactSecrets } from "./host-readiness.js";
+import { retryPolicy } from "./retry-policy.js";
 import type { AttentionItem, AttentionItemKind } from "./attention-inbox.js";
 
-/** Same shape as queries.ProjectScope, redeclared so this module needs no import from
- *  queries.ts (which imports this module — a cycle we do not want at type level). */
+/** Same shape as the dashboard's queries.ProjectScope, redeclared so this core module
+ *  carries no dashboard dependency (the CLI derives the inbox too — FG-820). */
 export type InboxProjectScope = string | readonly string[] | undefined;
 
 type FailedTaskRow = {

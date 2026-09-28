@@ -55,7 +55,7 @@ export function inboxSeverityBadge(item) {
 }
 
 /** Where a row links, by kind: run/task blockers → the run map; a ticket readiness gap →
- *  backlog; a campaign pause → campaigns; an auth/setup wall → the control-plane surface.
+ *  that ticket in the backlog; a campaign pause → campaigns; an auth/setup wall → Config.
  *  Returns null when the item carries no id the target needs (so the row renders with no
  *  link rather than a dead one). */
 export function inboxItemLink(item) {
@@ -65,23 +65,27 @@ export function inboxItemLink(item) {
   const ticketId = typeof links.ticketId === "string" && links.ticketId !== "" ? links.ticketId : null;
   switch (item.kind) {
     case "auth_setup":
-      return { hash: "#control-plane", label: "Open control plane" };
+      return { hash: "#config", label: "Open config" };
     case "campaign_paused":
       return { hash: "#campaigns", label: "Open campaigns" };
     case "missing_acceptance_or_readiness":
-      return ticketId ? { hash: "#backlog", label: `Open ${ticketId}` } : { hash: "#backlog", label: "Open backlog" };
+      return ticketId ? { hash: ticketHash(ticketId), label: `Open ${ticketId}` } : { hash: "#backlog", label: "Open backlog" };
     case "waiting_gate":
     case "blocked_by_red_or_reviewer":
     case "merge_conflict":
     case "integration_blocked_park":
       if (runId) return { hash: `#run-map/${encodeURIComponent(runId)}`, label: "Open run" };
-      if (ticketId) return { hash: "#backlog", label: `Open ${ticketId}` };
+      if (ticketId) return { hash: ticketHash(ticketId), label: `Open ${ticketId}` };
       return null;
     default:
       if (runId) return { hash: `#run-map/${encodeURIComponent(runId)}`, label: "Open run" };
-      if (ticketId) return { hash: "#backlog", label: `Open ${ticketId}` };
+      if (ticketId) return { hash: ticketHash(ticketId), label: `Open ${ticketId}` };
       return null;
   }
+}
+
+function ticketHash(ticketId) {
+  return `#backlog/${encodeURIComponent(ticketId)}`;
 }
 
 /** The whole render decision for ONE item, as data — the view is a rendering of this and

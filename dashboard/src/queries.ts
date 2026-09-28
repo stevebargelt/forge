@@ -98,12 +98,15 @@ import {
 // FG-402: the Human Attention Inbox. The aggregator (`attentionInbox`) below composes
 // FG-734's already-derived operator/CI waits with the failure/park and readiness/review
 // mappers into the ONE stable external envelope.
-import { composeInbox, type AttentionItem, type AttentionSeverity, type InboxEnvelope, type InboxScope } from "./attention-inbox.js";
-import { listOpenConflicts, type KanbanConflict, type KanbanConflictKind } from "@forge/kanban-projection";
-import { redactRemoteFreeText } from "./remote/projection.js";
-import { waitAttentionItems } from "./attention-inbox-waits.js";
-import { failureAttentionItems } from "./attention-inbox-failures.js";
-import { readinessAttentionItems } from "./attention-inbox-readiness.js";
+import { deriveAttentionInbox, type InboxEnvelope, type InboxScope } from "./attention-inbox.js";
+import { listOpenConflicts } from "@forge/kanban-projection";
+import { failureAttentionItems } from "../../src/v2/attention-inbox-failures.js";
+import { readinessAttentionItems } from "../../src/v2/attention-inbox-readiness.js";
+import { type InProgressVerification, type StaleVerificationRow } from "../../src/v2/attention-inbox-sources.js";
+// FG-820: the kanban-conflict mapper moved to core with the rest of the inbox mappers;
+// re-exported so existing consumers of this module keep their import.
+export { kanbanConflictsToAttentionItems } from "../../src/v2/attention-inbox-sources.js";
+export type { InProgressVerification };
 // FG-590: the ONE shared retention annotation `forge status` also uses — same function,
 // so the two surfaces carry the disposition AND the resolved policy identically (FG-679).
 import {
@@ -2972,31 +2975,6 @@ function readAttemptId(payload: Record<string, unknown>): string | null {
 const VERIFICATION_START_TYPES = ["review_loop.verification_started", "campaign_item.host_gate_started"] as const;
 const VERIFICATION_FINISH_TYPES = ["review_loop.verification_finished", "campaign_item.host_gate_finished"] as const;
 
-export type InProgressVerification =
-  | {
-      kind: "review_loop_verification";
-      attemptId: string;
-      runId: string | null;
-      ticketId: string | null;
-      sha: string | null;
-      mode: string | null;
-      round: number | null;
-      startedAt: string;
-      stale: boolean;
-    }
-  | {
-      kind: "campaign_reconcile_gate";
-      attemptId: string;
-      runId: string | null;
-      campaignId: string | null;
-      itemId: string | null;
-      ticketId: string | null;
-      command: string | null;
-      testedSha: string | null;
-      startedAt: string;
-      stale: boolean;
-    };
-
 // FG-746: campaign-gate terminal authority — the sibling of FG-594's review-loop
 // run-status guard. A reconcile gate's liveness is governed by its campaign+item
 // state, NOT the owning run's status (item.runId is frequently null, and a
@@ -4246,18 +4224,12 @@ export function retentionPolicyForDashboard(): RetentionPolicy {
   return resolveRetention(undefined, process.env);
 }
 
-// ── FG-746 (C3): stale-verification attention source ────────────────────────────
+// ── FG-746 (C3): stale-verification attention source (store read) ─────────────────
 //
-// The Human Attention destination for an unmatched host/CI verification start that
-// has gone STALE under still-active, nonterminal work. It consumes the SAME
-// terminal-authority-corrected `inProgressVerifications` the Current Activity live
-// view reads, split by the SAME `classifyVerification` predicate — so a terminal
-// FG-667 attempt (already dropped upstream) is neither live nor an attention item,
-// with no forked terminal logic (protected_invariant #3). Only the `actionable`
-// (stale) rows become items; the `live` rows stay in Current Activity.
-function verificationLabelForProjectDir(projectDir: string | null): string | null {
-  return projectDir ? basename(projectDir) : null;
-}
+// The mapper lives in core (src/v2/attention-inbox-sources.ts); this read supplies the
+// actionable (stale) rows of the SAME terminal-authority-corrected
+// `inProgressVerifications` the Current Activity live view reads, split by the SAME
+// `classifyVerification` predicate, each with the project dir its link resolves to.
 
 /** Resolve the run's project_dir for a review-loop attention item's link. Best-effort:
  *  a missing run just yields a null projectDir/label (the item still carries its run
@@ -4268,235 +4240,54 @@ function runProjectDir(runId: string | null): string | null {
   return row?.project_dir ?? null;
 }
 
-function verificationAttentionItems(scope: ProjectScope, nowMs: number): AttentionItem[] {
-  const rows = inProgressVerifications(nowMs, scope).filter((v) => classifyVerification(v) === "actionable");
-  const items: AttentionItem[] = [];
-  for (const v of rows) {
-    if (v.kind === "review_loop_verification") {
-      const projectDir = runProjectDir(v.runId);
-      const command = v.mode === "ci-wait" ? "CI wait" : `review-loop verification (round ${v.round ?? "?"})`;
-      items.push({
-        id: `verification:${v.attemptId}`,
-        kind: "stale_verification",
-        severity: "medium",
-        startedAt: v.startedAt,
-        reason: `A review-loop ${v.mode === "ci-wait" ? "CI wait" : "host verification"} for ${v.ticketId ?? "an unknown ticket"} (candidate ${v.sha ? v.sha.slice(0, 10) : "unknown"}) started but never reported a result, and is now past its staleness bound — its owning run is still active.`,
-        requestedAction: `Inspect the run and re-run or clear the stalled verification (\`forge show ${v.runId ?? v.ticketId ?? v.attemptId}\`).`,
-        openState: "open",
-        source: "verification",
-        links: {
-          runId: v.runId,
-          taskId: null,
-          ticketId: v.ticketId,
-          campaignId: null,
-          itemId: null,
-          projectDir,
-          projectLabel: verificationLabelForProjectDir(projectDir),
-        },
-      });
-    } else {
-      const projectDir = campaignProjectIdentity(v.campaignId, canonicalShape()).projectDir;
-      items.push({
-        id: `verification:${v.attemptId}`,
-        kind: "stale_verification",
-        severity: "medium",
-        startedAt: v.startedAt,
-        reason: `A campaign reconcile host gate (${v.command ?? "host verification"}) for ${v.ticketId ?? "an unknown ticket"} on candidate ${v.testedSha ? v.testedSha.slice(0, 10) : "unknown"} started but never reported a result, and is now past its staleness bound under active, nonterminal campaign work.`,
-        requestedAction: `Inspect the campaign item and re-run or clear the stalled gate (\`forge campaign show ${v.campaignId ?? "<campaign>"}\`).`,
-        openState: "open",
-        source: "campaign_item",
-        links: {
-          runId: v.runId,
-          taskId: null,
-          ticketId: v.ticketId,
-          campaignId: v.campaignId,
-          itemId: v.itemId,
-          projectDir,
-          projectLabel: verificationLabelForProjectDir(projectDir),
-        },
-      });
-    }
-  }
-  return items;
+function staleVerificationRows(scope: ProjectScope, nowMs: number): StaleVerificationRow[] {
+  return inProgressVerifications(nowMs, scope)
+    .filter((v) => classifyVerification(v) === "actionable")
+    .map((v) => ({
+      verification: v,
+      projectDir:
+        v.kind === "review_loop_verification"
+          ? runProjectDir(v.runId)
+          : campaignProjectIdentity(v.campaignId, canonicalShape()).projectDir,
+    }));
 }
 
-// ── FG-785: kanban-conflict attention source ─────────────────────────────────────
+// ── FG-402 / FG-820: the Human Attention Inbox ──────────────────────────────────
 //
-// The Human Attention destination for an external-board divergence recorded by the
-// outbound kanban sync (step 4). It is a PURE, OPEN-ONLY projection of the store's
-// `kanban_conflicts` rows: a conflict item exists exactly while its row is `open`, and
-// resolution is a store write (the `forge kanban conflicts-resolve` CLI, step 6), NEVER
-// an inbox mutation — the inbox holds no resolution state of its own (AC5). The mapper
-// writes nothing; it only reads the open rows via the @forge store accessor.
-//
-// The both-versions payload is arbitrary JSON the store keeps verbatim, and the EXTERNAL
-// side is untrusted provider content. Each embedded version is passed through
-// redactRemoteFreeText (the FG-781 free-text denylist) before it enters the operator-
-// facing `reason`, so a path/secret pasted onto an external card cannot ride the seal
-// out through this item. The `requestedAction` carries only the opaque Forge conflict id
-// and static text, so it is left intact for host copy-paste (the remote projection
-// redacts it again at the boundary, like every other source).
-
-/** Per-kind severity: an externally DELETED card is the most consequential divergence
- *  (the projected card is gone), a move/edit is medium. An unknown future kind a newer
- *  binary wrote falls back to medium rather than throwing. */
-const KANBAN_CONFLICT_SEVERITY: Record<KanbanConflictKind, AttentionSeverity> = {
-  deleted: "high",
-  moved: "medium",
-  edited: "medium",
-};
-
-/** A bounded, single-line digest of one side of a conflict's both-versions payload, so the
- *  operator sees WHAT diverged without the inbox item growing unbounded. The value is
- *  arbitrary (the store keeps it verbatim); it is stringified and clamped here, then
- *  redacted by the caller before it enters the item text. */
-function summarizeConflictVersion(value: unknown): string {
-  if (value === null || value === undefined) return "none";
-  const raw = typeof value === "string" ? value : safeJson(value);
-  // RF-3: redact on the FULL text BEFORE clamping. A credential-shaped token straddling the clamp
-  // cutoff would otherwise lose the shape the redactor keys on, so its prefix would survive the
-  // slice and ride into the browser-facing inbox reason. Redacting first, then clamping the
-  // already-scrubbed result, keeps no fragment of an untrusted external secret intact.
-  const redacted = redactRemoteFreeText(raw);
-  const CLAMP = 240;
-  return redacted.length > CLAMP ? `${redacted.slice(0, CLAMP)}…` : redacted;
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/** PURE mapper (unit-testable, no store access): project OPEN kanban conflicts into
- *  attention items of the `kanban_conflict` kind, carrying both-version context and the
- *  ticket/project links. Callers pass only open rows (see kanbanConflictAttentionItems);
- *  a resolved row simply never reaches here, so it disappears from the inbox. */
-export function kanbanConflictsToAttentionItems(conflicts: readonly KanbanConflict[]): AttentionItem[] {
-  return conflicts.map((c) => {
-    const verb = c.kind === "deleted" ? "deleted" : c.kind === "moved" ? "moved" : "edited";
-    const forgeSide = summarizeConflictVersion(c.forgeVersion);
-    const externalSide = summarizeConflictVersion(c.externalVersion);
-    // Redact the whole reason: it embeds untrusted external card content, and it carries
-    // no host command (the id lives only in requestedAction), so redaction can't harm a
-    // copy-pasteable action here.
-    const reason = redactRemoteFreeText(
-      `An external kanban card for ticket ${c.ticketIdentity} on the "${c.provider}" board was ${verb} outside Forge; ` +
-        `Forge's one-way projection and the external state have diverged and the change was NOT applied to any Forge state. ` +
-        `Forge version: ${forgeSide} · External version: ${externalSide}.`,
-    );
-    const requestedAction =
-      `Review the divergence and record an authorized resolution — \`forge kanban conflicts-resolve ${c.id}\`. ` +
-      `Resolution is host-operator only; no inbound planning change is applied to Forge this release.`;
-    return {
-      id: `kanban_conflict:${c.id}`,
-      kind: "kanban_conflict",
-      severity: KANBAN_CONFLICT_SEVERITY[c.kind] ?? "medium",
-      // The conflict's detection time is when this attention condition began — never "now".
-      startedAt: c.detectedAt,
-      reason,
-      requestedAction,
-      openState: "open",
-      source: "kanban_conflict",
-      links: {
-        runId: null,
-        taskId: null,
-        // Opaque Forge identity (AC1): the ticket the projected card maps to, and the
-        // project key as a display label. No provider concept, no filesystem path.
-        ticketId: c.ticketIdentity,
-        campaignId: null,
-        itemId: c.id,
-        projectDir: null,
-        projectLabel: c.projectIdentity,
-      },
-    };
-  });
-}
-
-/** The store-reading wrapper the aggregator composes. Reads ONLY the currently-open
- *  conflicts through the @forge accessor (no lifecycle-table read, no write) and hands
- *  them to the pure mapper. Conflict rows are keyed on the opaque (project, provider)
- *  identity rather than a filesystem dir, so this is a host-wide open-only projection —
- *  not scoped by projectDir like the run/campaign-derived sources. */
-function kanbanConflictAttentionItems(): AttentionItem[] {
-  return kanbanConflictsToAttentionItems(listOpenConflicts());
-}
-
-// ── FG-402: the Human Attention Inbox aggregator ────────────────────────────────
-//
-// A source-agnostic, OPEN-ONLY projection over persisted Forge state. It reuses the
-// existing `currentActivity(scope)` derivation for operator/CI waits — so the inbox
-// cannot drift from `forge status` / Current activity — and calls the failure/park and
-// readiness/review mappers, then composes them into the ONE stable envelope. Every
-// source read is absorbed into `degraded` on failure so a store that predates one
-// source's tables still returns the rest rather than a blank/500. Pure persisted-state
-// read: no git/gh/tmux/docker/CLI subprocess, no mutation (protected_invariant #1); it
-// shares only the same bounded, cached project-registry evidence read that
-// currentActivity itself already performs.
-export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now()): InboxEnvelope {
+// The derivation is core's `deriveAttentionInbox` (src/v2/attention-inbox.ts); this
+// supplies its store readers, bound to the dashboard's read-only handle and resolved
+// project scope. Waits reuse the existing `currentActivity(scope)` derivation so the
+// inbox cannot drift from `forge status` / Current activity. Kanban conflict rows are
+// keyed on the opaque (project, provider) identity rather than a filesystem dir, so
+// that source is a host-wide open-only projection — not scoped by projectDir like the
+// run/campaign-derived sources. `forge attention list` reaches this SAME function through
+// attentionInboxFor (dashboard/src/attention/cli-entry.ts).
+export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now(), runId?: string): InboxEnvelope {
   const inboxScope: InboxScope = {
-    runId: null,
+    runId: runId ?? null,
     projectDirs: scope === undefined ? null : typeof scope === "string" ? [scope] : [...scope],
   };
-  const degraded: string[] = [];
   const handle = db();
+  return deriveAttentionInbox(
+    {
+      operatorWaits: () => {
+        const activity = currentActivity(scope, undefined, nowMs);
+        return { operatorWaits: activity.operatorWaits, ciWaits: activity.ciWaits };
+      },
+      failures: () => failureAttentionItems(handle, scope, nowMs),
+      readiness: () => readinessAttentionItems(handle, scope, nowMs),
+      staleVerifications: () => staleVerificationRows(scope, nowMs),
+      openKanbanConflicts: () => listOpenConflicts(),
+    },
+    { generatedAt: new Date(nowMs).toISOString(), scope: inboxScope },
+  );
+}
 
-  let waitItems: AttentionItem[] = [];
-  try {
-    const activity = currentActivity(scope, undefined, nowMs);
-    waitItems = waitAttentionItems({ operatorWaits: activity.operatorWaits, ciWaits: activity.ciWaits });
-  } catch (err) {
-    degraded.push("waits");
-    console.error("attentionInbox: deriving operator/CI waits failed:", err);
-  }
-
-  let failureItems: AttentionItem[] = [];
-  try {
-    failureItems = failureAttentionItems(handle, scope, nowMs);
-  } catch (err) {
-    degraded.push("failures");
-    console.error("attentionInbox: reading failure/park items failed:", err);
-  }
-
-  let readinessItems: AttentionItem[] = [];
-  try {
-    const readiness = readinessAttentionItems(handle, scope, nowMs);
-    readinessItems = readiness.items;
-    // A per-source read failure names itself (e.g. "readiness", "review") rather than
-    // throwing; surface each marker so a partial failure renders as degraded, never as a
-    // calm empty inbox.
-    for (const marker of readiness.degraded) if (!degraded.includes(marker)) degraded.push(marker);
-  } catch (err) {
-    degraded.push("readiness");
-    console.error("attentionInbox: reading readiness/review items failed:", err);
-  }
-
-  let verificationItems: AttentionItem[] = [];
-  try {
-    verificationItems = verificationAttentionItems(scope, nowMs);
-  } catch (err) {
-    degraded.push("verification");
-    console.error("attentionInbox: reading stale-verification items failed:", err);
-  }
-
-  // FG-785: open external-kanban conflicts. A store predating the kanban_conflicts table
-  // (or any other read failure) names itself in `degraded` rather than taking the inbox
-  // down — a partial read never renders as a calm empty inbox.
-  let kanbanConflictItems: AttentionItem[] = [];
-  try {
-    kanbanConflictItems = kanbanConflictAttentionItems();
-  } catch (err) {
-    degraded.push("kanban_conflicts");
-    console.error("attentionInbox: reading kanban-conflict items failed:", err);
-  }
-
-  return composeInbox([waitItems, failureItems, readinessItems, verificationItems, kanbanConflictItems], {
-    generatedAt: new Date(nowMs).toISOString(),
-    scope: inboxScope,
-    degraded,
-  });
+/** FG-820: the ONE request-to-envelope call GET /api/attention-inbox and `forge attention
+ *  list` share — the same scope resolution (projectKey / projectDir) and the same
+ *  derivation, so the CLI's --json is the envelope the dashboard serves. */
+export function attentionInboxFor(request: { projectKey?: string; projectDir?: string; runId?: string }): InboxEnvelope {
+  return attentionInbox(resolveProjectScope(request.projectKey, request.projectDir), Date.now(), request.runId);
 }
 
 /** BD-10: launch detail addressed by IDENTITY. The id is validated against the same

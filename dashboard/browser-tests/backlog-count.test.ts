@@ -90,7 +90,7 @@ after(async () => {
 async function openBacklog(page: Page): Promise<void> {
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Forge checkouts" }).click();
-  await page.getByRole("button", { name: "backlog" }).click();
+  await page.getByRole("link", { name: "Backlog", exact: true }).click();
   await page.locator(".backlog-result-count").waitFor();
 }
 

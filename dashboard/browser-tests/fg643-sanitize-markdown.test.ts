@@ -133,7 +133,7 @@ after(async () => {
 async function openTicket(page: Page): Promise<void> {
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: `Open all ${projectLabel} checkouts` }).click();
-  await page.getByRole("button", { name: "backlog" }).click();
+  await page.getByRole("link", { name: "Backlog", exact: true }).click();
   await page.getByRole("button", { name: `Open story ${TICKET_ID}: Raw hostile Markdown` }).click();
   await page.getByRole("dialog", { name: `Ticket ${TICKET_ID}` }).waitFor();
 }

@@ -38,7 +38,7 @@ import {
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, hostVerificationsForCampaignTicket, hostVerificationsForCampaign,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
-  runMap, taskExplain, verificationEvidenceForTask, attentionInbox,
+  runMap, taskExplain, verificationEvidenceForTask, attentionInboxFor,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
@@ -196,7 +196,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/attention-inbox") {
     let payload: string;
     try {
-      payload = JSON.stringify(attentionInbox(scopeFromUrl(url)));
+      payload = JSON.stringify(
+        attentionInboxFor({
+          projectKey: url.searchParams.get("projectKey") ?? undefined,
+          projectDir: url.searchParams.get("projectDir") ?? undefined,
+          runId: url.searchParams.get("runId") ?? undefined,
+        }),
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("/api/attention-inbox: reading the attention inbox failed:", err);

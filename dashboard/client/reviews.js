@@ -7,7 +7,7 @@
 // to add on the same day the ledger first renders.
 
 import { h } from "preact";
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
 import {
   dispositionBadgeClass,
@@ -85,9 +85,9 @@ function FindingsTable({ findings }) {
     </div>`;
 }
 
-function ReviewCard({ review, expanded, onToggle }) {
+function ReviewCard({ review, expanded, onToggle, linked = false }) {
   return html`
-    <div class="card review-card">
+    <div class=${"card review-card" + (linked ? " review-card-linked" : "")} data-review-id=${review.id}>
       <div class="row" style="justify-content: space-between; align-items: baseline;">
         <div>
           <span class="badge ${reviewStateBadgeClass(review.state)}">${review.state}</span>
@@ -114,8 +114,15 @@ function ReviewCard({ review, expanded, onToggle }) {
     </div>`;
 }
 
-export function ReviewsView({ data }) {
+// FG-820: `reviewId` comes from a #reviews/<reviewId> deep link; that review opens
+// expanded and scrolls into view. A review outside the loaded ledger window stays unfound.
+export function ReviewsView({ data, reviewId = null }) {
   const [expanded, setExpanded] = useState({});
+  const linkedLoaded = Boolean(reviewId && data && (data.reviews || []).some((r) => r.id === reviewId));
+  useEffect(() => {
+    if (!linkedLoaded) return;
+    document.querySelector(`[data-review-id="${CSS.escape(reviewId)}"]`)?.scrollIntoView({ block: "start" });
+  }, [reviewId, linkedLoaded]);
   if (!data) return html`<div class="muted" style="margin-top: 20px;">loading reviews…</div>`;
 
   const reviews = data.reviews || [];
@@ -132,7 +139,8 @@ export function ReviewsView({ data }) {
             <${ReviewCard}
               key=${r.id}
               review=${r}
-              expanded=${expanded[r.id] === true}
+              expanded=${expanded[r.id] ?? r.id === reviewId}
+              linked=${r.id === reviewId}
               onToggle=${() => setExpanded((e) => ({ ...e, [r.id]: !e[r.id] }))}
             />`)}
     </section>`;
