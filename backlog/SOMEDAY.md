@@ -60,6 +60,52 @@ to read from or write to an external service with a credential. Prerequisites
 already in the recommendations doc: typed operator asks (9) and role-scoped
 secret bindings (16).
 
+## Non-code deliverables: work products that live outside a repo
+
+**What.** Forge tasks whose output is not a commit: a rendered video, a PDF
+report, a slide deck, a dataset, a generated site. Today every Forge
+deliverable is a commit, a PR, a doc in the repo, or a review-ledger row, and
+git is the artifact store. A project that "produces a video" or "creates a
+report" has nowhere durable to put the result and no object that names it.
+
+**Why someday, not now.** No current project produces a non-repo deliverable.
+Logs, raw results and test output are diagnostics, not artifacts, and belong
+where they are. Screenshots and the per-task "what did this produce" link are
+covered by the cockpit recommendation in
+`docs/research/competitive/paperclip-forge-recommendations.md` without a new
+store.
+
+**What we would borrow when the time comes.** Paperclip's work-product model
+(`packages/db/src/schema/issue_work_products.ts` in the Paperclip repo;
+`doc/AGENT-ARTIFACTS.md`):
+
+- A typed work-product row per deliverable: kind, title, sha256, byte size,
+  `created_by_task`, `is_primary` (this is *the* deliverable), and a
+  provenance field. Written by the host at task finalize from a receipt, never
+  by the agent editing the store.
+- The `register_deliverable` receipt shape: the agent supplies a
+  workspace-relative path, content type, exact size and hash, and an
+  idempotency key; the host verifies the bytes, stores them, and returns the
+  receipt. A path claimed in `result.json` that does not exist is a validation
+  failure.
+- The rule "a local workspace path is not enough": a deliverable must be
+  registered before the task can report complete, and the final result must
+  link it. Workspace files that intentionally stay in a checkout are
+  signposts, not deliverables.
+- A per-task Artifacts tab that opens on arrival, and a project-wide index
+  filterable by kind.
+- Storage under `~/.forge/artifacts/<project_key>/` first; an object store
+  later if artifacts need to leave the host.
+
+**What we would not borrow.** Agent-initiated uploads through a control-plane
+API (containers never reach the host store, invariant 20), the document
+annotation and revision system, and `healthStatus` for deployed previews.
+
+**Trigger.** The first project whose brief names a deliverable that is not a
+commit. Prerequisites: typed operator asks (recommendation 9) if the agent
+needs to ask where a deliverable goes, and the cockpit's task-to-deliverable
+link so the new object has a place to appear.
+
 ## Governed tool gateway (MCP)
 
 **What.** A proxy between agents and third-party tool servers with profiles,
