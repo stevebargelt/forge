@@ -20,7 +20,7 @@ That content used to live in this file, where it had no maintenance owner and dr
 
 ## Session start: use `forge backlog`, don't read backlog files whole
 
-This repo is DB-authoritative: tickets live in `~/.forge/forge.db`, not in Markdown files. **Use the `forge backlog` CLI** (`list`, `show`, `file`, `edit`, `move`, `close`, …) for all ticket access. `backlog/notes.md` (session-handoff notes) and `backlog/PLAN.md` (operator sequencing) are retained on-disk files; the old `backlog/{stories,epics,ideas,done}/` ticket corpus was frozen at the DB cutover and has since been removed (FG-670).
+This repo is DB-authoritative: tickets live in `~/.forge/forge.db`, not in Markdown files. **Use the `forge backlog` CLI** (`list`, `show`, `file`, `edit`, `move`, `close`, …) for all ticket access. `backlog/notes.md` (session-handoff notes), `backlog/PLAN.md` (operator sequencing) and `backlog/SOMEDAY.md` (deferred ideas with their promotion triggers; never filed as tickets until a project needs them) are retained on-disk files; the old `backlog/{stories,epics,ideas,done}/` ticket corpus was frozen at the DB cutover and has since been removed (FG-670).
 
 Standard session-start sequence:
 ```
