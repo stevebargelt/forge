@@ -168,7 +168,8 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // retained under its neutral fallback), and the inbox and In-flight rows hold their order
   // across re-ranked polls until the idle or tab-visibility boundary; manual Refresh re-sorts
   // and adopts the freshly fetched order rather than the order already held.
-  "fg819-order-pinning.test.ts": 5,
+  // FG-692 (FG-819 RF-1) adds keyboard focus tabbing into the inbox as reader activity (5 -> 6).
+  "fg819-order-pinning.test.ts": 6,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

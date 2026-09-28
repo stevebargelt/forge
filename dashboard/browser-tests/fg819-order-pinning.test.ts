@@ -209,6 +209,38 @@ test("FG-819: a re-ranked read does not reorder rows mid-read; the idle boundary
   await page.close();
 });
 
+test("FG-819: keyboard focus tabbing into the inbox from outside it resets the idle window", async () => {
+  inboxRank = ["A", "B", "C"];
+  inFlightRank = ["A", "B", "C"];
+  const page = await openHome();
+  await waitForOrder(() => inboxOrder(page), ["A", "B", "C"], "inbox");
+  inboxRank = ["C", "B", "A"];
+  await letPollsLand(page, async () => true);
+  assert.deepEqual(await inboxOrder(page), ["A", "B", "C"], "inbox order held across polls");
+
+  // The Tab keydown fires on the Refresh button, which sits outside the list: only the
+  // focus arriving in the list can tell the pin a reader is there.
+  await page.clock.fastForward(ORDER_PIN_IDLE_MS - 20_000);
+  await page.getByRole("button", { name: "Refresh and re-sort the attention inbox" }).focus();
+  await page.keyboard.press("Tab");
+  assert.ok(
+    await page.evaluate(`document.activeElement?.closest("section.attention-inbox .inbox-list") != null`),
+    "Tab moved focus into the inbox list",
+  );
+  await page.clock.fastForward(ORDER_PIN_IDLE_MS - 20_000);
+  await page.waitForTimeout(2500);
+  assert.deepEqual(await inboxOrder(page), ["A", "B", "C"], "focus entering the inbox kept it pinned past the original idle boundary");
+  assert.ok(
+    await page.evaluate(`document.activeElement?.closest("section.attention-inbox .inbox-list") != null`),
+    "focus is still inside the list",
+  );
+
+  // Focus stays in the list but nothing else happens: the next full window re-sorts.
+  await page.clock.fastForward(ORDER_PIN_IDLE_MS);
+  await waitForOrder(() => inboxOrder(page), ["C", "B", "A"], "inbox after a full idle window with focus parked");
+  await page.close();
+});
+
 test("FG-819: the tab coming back from hidden re-sorts", async () => {
   inboxRank = ["A", "B", "C"];
   inFlightRank = ["A", "B", "C"];
