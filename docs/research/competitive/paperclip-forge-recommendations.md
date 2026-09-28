@@ -36,9 +36,10 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 10 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
 | 11 | One outbound safe-projection function for notifications | P3 | Small |
 | 12 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 13 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
-| 14 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 15 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 13 | Role-scoped secret bindings | P3 | Medium |
+| 14 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
+| 15 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 16 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
 
 ## P1 — Must
 
@@ -410,7 +411,9 @@ control-plane receipt. Size: small.
 **Risks.** Do not import Paperclip's gateway, profiles or policy engine. Its
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
-containers today.
+containers today, and when one arrives the credential half of it is already
+covered by role-scoped secret bindings (recommendation 13) — that should land
+before any gateway is considered.
 
 **Priority.** P2.
 
@@ -737,7 +740,7 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 14 lands.
+recommendation 15 lands.
 
 **Priority.** P3.
 
@@ -772,7 +775,132 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 13. Scheduled triggers that file and enqueue, never dispatch
+### 13. Role-scoped secret bindings
+
+**Pattern.** Paperclip resolves a secret into run env only when a binding row
+exists for the specific consumer and config path. `resolveSecretValueInternal`
+checks company match, scope, active secret status and active version status,
+then calls `assertBindingContext`, which looks up a `company_secret_bindings`
+row keyed on `(companyId, targetType, targetId, configPath)` — a unique index
+enforced at the schema level, not just in application code
+(`server/src/services/secrets.ts:1353-1460`;
+`packages/db/src/schema/company_secret_bindings.ts:5-31`; the binding target
+vocabulary, including `agent`, is `packages/shared/src/constants.ts:745-760`).
+A reserved-key list strips control-plane names such as `PAPERCLIP_API_KEY` out
+of run env before any binding can override them (`heartbeat.ts:1460-1471`).
+Every resolution writes a `secret_access_events` row, on both success and
+failure. The soft spots are as instructive as the pattern:
+`assertBindingContext` returns `null` — skipping the binding check entirely —
+when no context is passed at all (`secrets.ts:1137`); the local provider
+encrypts under one deployment-wide master key with no AAD binding ciphertext
+to secret, and stores an unsalted SHA-256 of the plaintext, indexed
+(`local-encrypted-provider.ts:98-107`); and the exact-value redaction registry
+covers only values an agent fetched through the `/value` endpoint or a
+proposal, so an env-bound secret echoed into a log with no recognizable shape
+passes through uncaught (`run-secret-redaction.ts:59-147`).
+
+**Why it fits Forge.** Forge's credential model is host-wide and mode-wide,
+never per-role. `detectCredsMode()` picks one of `bedrock`, `anthropic-oauth`
+or `anthropic-apikey` for the whole dispatch from env and `~/.aws/config`
+precedence (`src/util/creds.ts:26-67`), and the resolved runtime seed's
+`auth_strategy` (`seeds/runtimes/*.yml`) names which of those the container is
+built to expect — there is no notion of "this role gets this credential and
+that role doesn't" anywhere in that path. A project's other secrets — a
+database URL, a third-party API key — live in a single `.env` today, and
+workspace isolation's own contract is all-or-nothing at the mount, not
+per-secret: an isolated task workspace is committed content at the base SHA
+plus what Forge explicitly supplies, and "uncommitted, untracked and ignored
+files … do not reach it" by design (invariant 19) — a canonically gitignored
+`.env` is exactly the case that contract excludes, with `FORGE_NO_WORKTREES=1`
+as the documented escape when an ignored local input is genuinely required
+(`docs/concepts.md` → Workspace isolation). That escape is a blunt instrument:
+with isolation off, the container sees the *whole* project, `.env` included,
+regardless of which role is running. Either way — isolated and credential-less,
+or unisolated and credential-everything — no dispatch today gets a slice. And
+where a credential does reach a container, nothing records which one: the
+control-plane receipt (`src/v2/task-manifest.ts`) stamps the resolved
+`authStrategy` for the runtime, never which project secrets, if any, the
+container could see. The operator's stated need is concrete: restrict
+credentials to specific agent roles, so a db-admin role can receive Supabase
+credentials while a senior-engineer role on the same project does not — a
+binding-row-required resolution is exactly the shape that answers it. This is
+also the credential half of what Paperclip's MCP tool gateway does (lane B
+§6) — the gateway's job is governing which external *tools* a role can call
+once it is authenticated; role-scoped secret bindings is the half Forge would
+need *first*, before any tool gateway is worth considering, because a role
+cannot call an external service at all without a credential to call it with.
+
+**Proposed shape.**
+
+- **(a) Declaration.** A project-level `secrets:` block in `.forge/config.yml`
+  names each secret and its source — first a host-side file outside the repo
+  under `~/.forge/secrets/<project_key>/`, with an OS keychain or AWS Secrets
+  Manager as a later source, mirroring Paperclip's own local-vs-managed
+  provider split without its in-database ciphertext store. A `bindings:` block
+  maps role to secret names, optionally narrowed further per workflow step —
+  the role-to-secret edge the operator described (db-admin bound to Supabase
+  credentials, senior-engineer not bound to them).
+- **(b) Resolution at spawn.** Bindings resolve host-side when a task is
+  spawned: only the secrets bound to the resolved role are injected into that
+  container's env. The agent never fetches a secret itself — there is no
+  in-container call to a secret store, which keeps invariant 20 ("a container
+  never reaches the host store") true for secrets the same way it already is
+  for ticket data.
+- **(c) Pre-spawn refusal.** A workflow step that declares `requires_secrets:`
+  naming a secret the resolved role is not bound to refuses before the
+  container starts, as `secret_unbound`, in the same pre-spawn refusal list
+  recommendations 3 and 8 already cite (`src/v2/runNext.ts:4605-4657`, inside
+  `runContainer`) — a named refusal, not a container that starts and then
+  fails opaquely for lack of a credential.
+- **(d) Reserved-key strip.** A project secret can never override a
+  control-plane env name — `ANTHROPIC_*`, `CLAUDE_*`, `AWS_*`, `FORGE_*` are
+  reserved, the same discipline as Paperclip's `FORBIDDEN_ENV_BINDING_KEYS`
+  (`heartbeat.ts:1460-1471`).
+- **(e) Receipt and redaction.** The dispatch receipt records binding NAMES,
+  never values — the same "reference, not material" discipline the `auth`
+  block of `manifest.json` already applies to auth profiles
+  (`docs/redaction.md` → Manifest). Each resolution writes a `secret_access`
+  event, mirroring Paperclip's `secret_access_events` audit. Bound values are
+  registered with the existing redaction machinery — the FG-707 fail-closed
+  allowlist that already redacts everything not explicitly known-safe on the
+  durable launch record, and the FG-634 `redactSecrets` sweep
+  (`src/v2/host-readiness.ts`) already reused across the config graph and Run
+  Map/Explain surfaces — so logs, launch records and `result.json` cannot echo
+  a bound value even by accident.
+- **(f) Operator-only edits.** Bindings are edited only by the operator,
+  never proposed by an agent (invariant 15) — unlike Paperclip's
+  agent-submitted secret proposals for board approval
+  (`server/src/routes/secrets.ts:194-311`), which Forge has no board to route
+  through and no reason to add one for.
+
+Size: medium. Touches `.forge/config.yml`'s schema, the refusal list and spawn
+env assembly in `src/v2/runNext.ts`, the receipt shape in
+`src/v2/task-manifest.ts`, and a new binding-resolution module alongside
+`src/util/creds.ts`.
+
+**Risks and what not to copy.** Do not build an encrypted-in-database secret
+store with a deployment-wide master key — Forge's source is a host-side file
+or OS keychain the operator already controls, not a value forge itself
+encrypts and stores, so there is no master key to lose or rotate. Do not add
+Paperclip's agent-submitted secret-proposal flow. Do not add user-scoped
+secrets; Forge is single-operator by design
+(`src/v2/host-readiness.ts:236`), so there is no second human to scope a
+secret to. Do not copy Paperclip's context-optional resolution path — its own
+binding check is skipped outright when no context is passed at all
+(`secrets.ts:1137`); Forge's resolution must be mandatory on every path that
+injects a secret, never an implicit allow when a caller forgets to pass
+context. Do not carry the whole `.env` into a container as a substitute for
+per-role binding — that all-or-nothing mount is exactly the state this
+recommendation replaces. Keep isolation-on as the default so an unbound
+secret is not reachable through the mount either: with isolation off
+(`FORGE_NO_WORKTREES=1`), the container already sees the whole project
+including `.env`, and a binding layer sitting on top of a fully exposed mount
+enforces nothing.
+
+**Priority.** P3 — becomes P2 the moment any role is expected to call an
+external service with a credential.
+
+### 14. Scheduled triggers that file and enqueue, never dispatch
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -808,7 +936,7 @@ readiness assessment; the queue scan already refuses `readiness_ineligible`.
 
 **Priority.** P3.
 
-### 14. Answer operator asks from a phone with opaque expiring tokens
+### 15. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -838,7 +966,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 15. Policy evals: scenario × profile matrix with hard gates
+### 16. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -946,3 +1074,4 @@ events table has one writer, and it should stay that way.
 8. Add a pre-spawn `auth_routing_incompatible` refusal that compares `detectCredsMode()` against the resolved runtime seed's `auth_strategy`, and record the resolved creds mode in the control-plane receipt
 9. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
 10. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+11. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
