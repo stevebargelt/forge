@@ -37,15 +37,16 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 11 | Dashboard actions as named CLI verbs with previewed effect | P2 | Medium |
 | 12 | Attention Inbox with audited dismissal, snooze and inline resolution | P2 | Small-Medium |
 | 13 | A cockpit: one navigable object graph from ticket to evidence | P2 | Medium |
-| 14 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
-| 15 | Operator diagnostic skill for stalled work | P3 | Small |
-| 16 | One outbound safe-projection function for notifications | P3 | Small |
-| 17 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 18 | Role-scoped secret bindings | P3 | Medium |
-| 19 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 20 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
-| 21 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
-| 22 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
+| 14 | A Roles surface: every agent seed as a browsable, deep-linkable object | P2 | Medium |
+| 15 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
+| 16 | Operator diagnostic skill for stalled work | P3 | Small |
+| 17 | One outbound safe-projection function for notifications | P3 | Small |
+| 18 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 19 | Role-scoped secret bindings | P3 | Medium |
+| 20 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 21 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 22 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
+| 23 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
 
 ## P1 — Must
 
@@ -418,7 +419,7 @@ control-plane receipt. Size: small.
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
 containers today, and when one arrives the credential half of it is already
-covered by role-scoped secret bindings (recommendation 18) — that should land
+covered by role-scoped secret bindings (recommendation 19) — that should land
 before any gateway is considered.
 
 **Priority.** P2.
@@ -886,7 +887,94 @@ the cockpit is host-wide and project-scoped exactly as today.
 
 **Priority.** P2.
 
-### 14. Scheduled triggers that file and enqueue; the armed dispatcher runs them
+### 14. A Roles surface: every agent seed as a browsable, deep-linkable object
+
+**Pattern.** Paperclip's sidebar carries a dedicated Org → Agents entry
+listing every agent (lane E §1), and agent detail groups its tabs into
+Agent (Overview, Instructions, Skills), Runtime (Harness, Secrets, Tools,
+Channels) and Governance (Permissions/Trust, API Keys, Revisions), with
+runs, costs and budgets moved out into an agent-filtered Audit hub
+(`ui/src/pages/agent-detail-navigation.ts:18-47,66-79`; the older tab set
+still live at `AgentDetail.tsx:299-307` is Dashboard, Instructions, Skills,
+Configuration, Secrets, Tools, Runs, Audit, Budget). Overview shows a
+`LatestRunCard` plus Adapter, Model, Session and Last-run summary rows
+(`AgentDetail.tsx:1705-1769`). This is the operator's own stated favorite
+Paperclip surface: "I like that there is an 'Agents' navigation and it
+lists agents... especially the agent detail screens Overview,
+Instructions, Skills, etc."
+
+**Why it fits Forge.** Forge has no persistent agents, but it has roles —
+23 seed directories under `seeds/agents/<role>/` (`CLAUDE.md` plus
+`settings.json`), composed at dispatch with `seeds/constraints/*.md` and
+any project addendum. A role is exactly the actor every dispatch, route,
+receipt and usage row already names: `DEFAULT_ACTIVITY_BY_ROLE` maps role
+to activity (`src/v2/model-resolution.ts:101-117`), `model-policy.yml`
+maps activity to a resolved profile, the compiled routing policy names
+roles as responsible/consulted/followup, `tasks.agent_role`
+(`src/store/schema.ts:140`) already backs `forge usage --by role`
+(`src/cli/commands/usage.ts`) and the ops view's role toggle, and every
+dispatch receipt already carries `agentProtocol` — role, the protocol
+file's sha256, and the seed-generation path it was composed from
+(`src/v2/task-manifest.ts:168`). None of that is projected anywhere: the
+dashboard today has 13 flat tabs and not one of them is a role (lane F
+§1). An operator reading "why did the engineer run on Sonnet at low
+effort" has to read `model-policy.yml`, `model-resolution.ts` and the seed
+by hand. Everything the page below needs already exists in the store or
+the seed generation; this recommendation is a projection, not new data.
+
+**Proposed shape.** A Roles nav entry lists every seed in the current
+generation with its activity, resolved profile, mount mode and last-run
+time. A role page lives at `#roles/<role>/<tab>` — deep-linkable, per the
+cockpit recommendation (§13) — with tabs that each name their source:
+
+- **Overview** — the seed's description; the resolved model profile and
+  effort for the role's default activity; mount mode; the routes that
+  name the role from the compiled routing policy; the last N tasks; ops
+  success rate and median duration; the usage rollup; the current seed
+  generation and protocol sha.
+- **Instructions** — the composed `CLAUDE.md` exactly as the container
+  would receive it, with the constraints and project-addendum sections
+  marked, and a content hash.
+- **Skills** — host skills and the container skill mounted read-only.
+- **Configuration** — `settings.json`, the runtime seed bound by policy,
+  and the auth strategy.
+- **Secrets** — "none: containers receive no project secrets" until
+  role-scoped secret bindings (recommendation 19) land, then the
+  bindings themselves.
+- **Tools** — the `settings.json` tools list, flagged as
+  declared-but-unenforced (confirmed: nothing outside its own tests reads
+  `settings.tools`), and MCP: none.
+- **Tasks** — tasks filtered by `agent_role`, linking to task detail and
+  Explain.
+- **Receipts** — per-dispatch `agentProtocol` sha, seed-generation
+  history, and upgrade backups.
+- **Usage** — tokens by role today, ceilings once spend guardrails
+  (recommendation 3) land.
+
+Two read-only GETs serve it, `/api/roles` and `/api/roles/:role`, reading
+the current seed generation off disk and the store. There is no POST: a
+seed changes only through `forge upgrade`, which stays a CLI act — the
+atomic seed generation invariant 4 already names as forge's sole
+publisher, and the same discipline that keeps the dashboard a projection
+rather than a second authority (Patterns to avoid #11, "the UI as sole
+authority, framed as 'THE control plane'").
+
+**Risks and what not to copy.** Do not add editing of instructions from
+the dashboard: Paperclip's edit-instructions has no diff preview and no
+confirmation (lane E §3), and Forge's seeds are versioned generations, not
+editable rows — a seed generation is published atomically by `forge
+upgrade` (`src/v2/seed-generation.ts`), with FG-776 host-edit backups
+already covering the one case a human touches a seed directly. Do not
+model heartbeat schedules, per-agent budgets or sessions; none has a
+Forge analogue. Do not copy Paperclip's legacy/streamlined twin pages
+(Patterns to avoid #5). Keep the page split into addressable,
+individually testable views rather than one file (Patterns to avoid #9).
+
+**Priority.** P2. The operator asked for this surface directly, and it
+composes entirely from data the store and the seed generation already
+carry.
+
+### 15. Scheduled triggers that file and enqueue; the armed dispatcher runs them
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -1003,7 +1091,7 @@ this small to add on top of it.
 
 ## P3 — Could
 
-### 15. Operator diagnostic skill for stalled work
+### 16. Operator diagnostic skill for stalled work
 
 **Pattern.** Paperclip's `diagnose-why-work-stopped` skill
 (`.agents/skills/diagnose-why-work-stopped/SKILL.md`) is diagnostic-only: "No
@@ -1078,7 +1166,7 @@ them.
 
 **Priority.** P3.
 
-### 16. One outbound safe-projection function for notifications
+### 17. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -1094,11 +1182,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 19 lands.
+recommendation 20 lands.
 
 **Priority.** P3.
 
-### 17. Content-hash provenance and a static audit for skills and role seeds
+### 18. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -1129,7 +1217,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 18. Role-scoped secret bindings
+### 19. Role-scoped secret bindings
 
 **Pattern.** Paperclip resolves a secret into run env only when a binding row
 exists for the specific consumer and config path. `resolveSecretValueInternal`
@@ -1254,7 +1342,7 @@ enforces nothing.
 **Priority.** P3 — becomes P2 the moment any role is expected to call an
 external service with a credential.
 
-### 19. Answer operator asks from a phone with opaque expiring tokens
+### 20. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -1284,7 +1372,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 20. Policy evals: scenario × profile matrix with hard gates
+### 21. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -1312,7 +1400,7 @@ Size: large.
 
 **Priority.** P3.
 
-### 21. Honest freshness and recovery cards on the surfaces that already poll
+### 22. Honest freshness and recovery cards on the surfaces that already poll
 
 **Pattern.** Paperclip surfaces recovery where the work already lives: a
 stateful card cycling RECOVERY NEEDED → IN PROGRESS → ESCALATED → RESOLVED,
@@ -1358,7 +1446,7 @@ recover` or the registry from recommendation 11 doesn't already expose.
 
 **Priority.** P3.
 
-### 22. Status tokens and shared formatters as the only visual vocabulary
+### 23. Status tokens and shared formatters as the only visual vocabulary
 
 **Pattern.** Paperclip's palette logic is stated as a rule — "gray inert,
 blue liveness, amber queued, violet review, green done, red blocked" — and
@@ -1482,7 +1570,7 @@ and the competitive README's "keep authority separate from projections" put
 it: the store and the CLI are canonical, and the dashboard is a projection
 that triggers verbs the CLI still validates (lane F §2's closed
 `QUEUE_MUTATION_ROUTES`/`QUEUE_MUTATION_FORGE_VERBS` table is the existing
-proof this already holds). Recommendations 11-13 extend that projection's
+proof this already holds). Recommendations 11-14 extend that projection's
 reach; none of them make the dashboard itself an authority.
 
 ## Suggested First Tickets
@@ -1499,8 +1587,9 @@ reach; none of them make the dashboard itself an authority.
 10. Add a `--dry-run --json` mode to the fan-out CLI verbs (queue cancel, campaign stop) and have the dashboard render the returned effect before the commit call
 11. Add an `attention_dismissals` table and a `forge attention dismiss|snooze <item>` verb, wire it into the inbox's per-row resolving button, and complete `KIND_META`/CSS for `stale_verification` and `kanban_conflict`
 12. Add a run index page and link task detail and Explain to each other, each behind its own URL
-13. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-14. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
-15. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
-16. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
-17. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
+13. Add a Roles nav entry and a `#roles/<role>/<tab>` page backed by read-only `GET /api/roles` and `GET /api/roles/:role`, projecting the current seed generation and the store into Overview/Instructions/Skills/Configuration/Secrets/Tools/Tasks/Receipts/Usage tabs, with no write route (FG-817)
+14. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+15. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
+16. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+17. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
+18. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
