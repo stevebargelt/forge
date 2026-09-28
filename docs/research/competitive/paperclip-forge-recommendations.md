@@ -30,14 +30,15 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 4 | Status-domain guard for enum-as-convention columns | P2 | Small |
 | 5 | Lock the container MCP surface with `--strict-mcp-config` | P2 | Small |
 | 6 | Failure-history cooldown in the queue scan | P2 | Small |
-| 7 | Refuse contradictory auth routing at spawn (`auth_routing_incompatible`) | P2 | Small |
-| 8 | Typed operator asks with a declared continuation | P2 | Medium |
-| 9 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
-| 10 | One outbound safe-projection function for notifications | P3 | Small |
-| 11 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 12 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
-| 13 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 14 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 7 | Bounded automatic retry for infrastructure-classified failures | P2 | Small-Medium |
+| 8 | Refuse contradictory auth routing at spawn (`auth_routing_incompatible`) | P2 | Small |
+| 9 | Typed operator asks with a declared continuation | P2 | Medium |
+| 10 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
+| 11 | One outbound safe-projection function for notifications | P3 | Small |
+| 12 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 13 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
+| 14 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 15 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
 
 ## P1 — Must
 
@@ -122,10 +123,12 @@ evaluation table, `forge doctor`, a launchd template under `scripts/`, and the
 continuation drain over `src/store/continuations.ts` / `src/cli/commands/continue.ts`
 plus `src/cli/commands/notify.ts`.
 
-**Risks and what not to copy.** Paperclip's reaper can queue an automatic
-retry. Forge should not, because retry is manual by policy
-(`src/v2/retry-policy.ts`). The sweep may classify, record and surface in the
-Attention Inbox, but re-driving stays `forge recover --re-drive`. Keep
+**Risks and what not to copy.** Paperclip's reaper queues a bounded automatic
+retry; Forge's retry policy already classifies which failure kinds are safe to
+re-dispatch, and only the executor is manual today. The controller loop is the
+natural executor for the bounded automatic retry in recommendation 7 (the new
+entry below). The sweep may classify, record and surface in the Attention
+Inbox, but re-driving stays `forge recover --re-drive`. Keep
 reconcile's assumption that a container with unknown liveness is alive
 (`src/v2/reconcile.ts:1-20`); Paperclip's pid-probe split between detached
 and lost is the same stance. Do not build a general daemon that owns
@@ -409,7 +412,9 @@ field carries the streak and the next eligible time, as `ScanEntry.detail`
 already does for other reasons. When the streak crosses a threshold, raise an
 Attention Inbox item. An operator `forge queue retry <ticket>` clears the
 cooldown. Nothing is written on a scan, so the rule stays a pure derivation.
-Size: small.
+Automatic retry attempts from recommendation 7 count toward the streak like
+any other release, so the cooldown is what stops a bounded automatic retry
+from becoming an unbounded one. Size: small.
 
 **Risks.** Do not classify progress by reading model prose, as Paperclip's
 liveness classifier partly does (`server/src/services/run-liveness.ts:62-77`).
@@ -417,7 +422,127 @@ Use only structured release outcomes.
 
 **Priority.** P2.
 
-### 7. Refuse contradictory auth routing at spawn (`auth_routing_incompatible`)
+### 7. Bounded automatic retry for infrastructure-classified failures
+
+**Pattern.** Paperclip separates the *classification* of a failure from the
+*mechanics* of retrying it, and bounds every mechanical retry it runs
+automatically.
+
+- The heartbeat reaper's bounded transient retry uses a fixed two-step delay
+  schedule, `[30s, 30s]`, and records `retryOfRunId` so the new run's lineage
+  is queryable (`server/src/services/heartbeat.ts:790-800,15824-15840`).
+- Its process-loss retry is capped at exactly one attempt
+  (`process_loss_retry_count < 1`, `heartbeat.ts:18841-19330`).
+- The recovery service's continuation retry budgets differ by cause: three
+  attempts at a 60-second base backoff for transient infrastructure codes, one
+  attempt for everything else, and a one-hour backoff for provider quota
+  (`server/src/services/recovery/service.ts:522-527`). A budget-exhausted or
+  budget-blocked continuation is explicitly non-retryable
+  (`recovery/service.ts:490-496`).
+- Resource waits (a busy workspace, a busy AI connection) are accounted in a
+  separate lane from failure retries, so waiting for a resource never spends a
+  failure attempt (`server/src/services/execution-recovery-attempt.ts:34-99`).
+- A run whose side effects are uncertain — a legacy execution needing
+  reconciliation, an unresolved action-outcome ledger — is routed to operator
+  reconciliation rather than blindly retried
+  (`server/src/services/legacy-execution-recovery.ts:16-53`;
+  `execution-recovery-resolution.ts:26-41`).
+- Every adapter result carries a classified `errorFamily`
+  (`transient_upstream`, `provider_quota`, `model_refusal`, and the
+  refresh-token families; `packages/adapter-utils/src/types.ts:69-84`), so the
+  retry mechanics never have to parse a message to decide what kind of failure
+  they are looking at.
+
+**Why it fits Forge.** `src/v2/retry-policy.ts` already does the classification
+half of this. Its `POLICY` table gives every `FailureKind` a named
+`RetryDisposition`, and the kinds that would risk clobbering persisted work
+(`orphaned_work_may_persist`, `oom_killed`, `orphaned_needs_finalize`,
+`capture_failed`) and the judgment outcomes (`gate_rejected`, `red_blocked`,
+`agent_reported_failure`, `integration_failed`) are already marked
+`retryable: false`, each with its own advice. The infrastructure kinds
+(`pre_container_crash`, `container_crash`, `orphaned`, `result_missing`,
+`result_malformed`, `idle_timeout`, `model_error`, `tool_error`,
+`integration_gate_timeout`, `lane_taken_over`) are already `retryable: true`
+with no advice — nothing an operator needs to decide, just work that needs
+re-dispatching. What is missing is a bounded *executor*: today every one of
+those infrastructure kinds still waits for a human to type `forge retry`,
+because the only executor of `retryPolicy()`'s advice is the CLI command
+itself. On an unattended host — an armed dispatcher, a running campaign, a
+Bedrock host with no session-wake path — that means work stalls for hours over
+failures the policy already says are safe to re-run: a container crash, a lost
+result, a provider 5xx. The file's own `RE_DRIVABLE_FAILURE_KINDS` comment
+(`src/v2/retry-policy.ts:134-155`) draws the distinction this recommendation
+depends on: `retryPolicy()` is an advisory surface, so an unrecognized kind may
+default to `retryable: true` at no worse a cost than an imprecise sentence, but
+a mutation guard that reopens a settled row must fail closed and be typed as
+`Record<FailureKind, boolean>`, so adding a kind without deciding the question
+is a compile error, not a silent fall-through. An automatic-retry executor is
+exactly that second kind of guard, not the first.
+
+**Proposed shape.**
+
+1. A fail-closed eligibility guard, `AUTO_RETRYABLE_FAILURE_KINDS: Record<FailureKind,
+   boolean>` in `retry-policy.ts`, modeled on `RE_DRIVABLE_FAILURE_KINDS` so
+   that adding a `FailureKind` without deciding its auto-retryability is a
+   compile error. The initial `true` set: `pre_container_crash`,
+   `container_crash`, `orphaned`, `result_missing`, `result_malformed`,
+   `idle_timeout`, `integration_gate_timeout`, `lane_taken_over`,
+   `verification_environment_unavailable`, and `model_error` / `tool_error`
+   only when the task's `provider_failure_family` (recommendation 2) is
+   `transient_upstream` or `provider_quota`. Everything else is `false`:
+   persisted-work-at-risk kinds (`orphaned_work_may_persist`, `oom_killed`,
+   `orphaned_needs_finalize`, `capture_failed`), judgment outcomes
+   (`gate_rejected`, `red_blocked`, `agent_reported_failure`,
+   `integration_failed`), operator-precondition kinds (`auth_missing`,
+   `auth_expired`, `auth_injection_failed`, `dirty_publish_target`,
+   `publish_base_churn`, `publication_refused`), a `model_refusal`
+   `provider_failure_family`, and any `budget_exceeded` refusal from
+   recommendation 3.
+2. A declared budget, not an implicit one: `retry: { auto: true, max_attempts:
+   2, backoff: 60s..5m }` on the workflow step (`seeds/workflows/*.yml`), with
+   a model-policy default; `provider_quota` uses a longer backoff floor, as
+   Paperclip's own one-hour quota window does. Resource-wait retries
+   (`verification_environment_unavailable`) are accounted in a separate lane
+   from failure retries, as Paperclip's `execution-recovery-attempt.ts` does,
+   so a dependency-provisioning wait never spends a failure attempt.
+3. The executor is the controller loop from recommendation 1 (and the
+   dispatcher tick when armed). It re-dispatches the *same* task through the
+   existing `forge retry` path, so the previous-attempt carry
+   (`src/v2/previous-attempt.ts`) and the dispatch receipt apply unchanged. It
+   records `retry_of` and the attempt index so the lineage is queryable, as
+   Paperclip's `retryOfRunId` is.
+4. When the budget is spent, the ticket enters the `cooling_down` scan reason
+   from recommendation 6, and an Attention Inbox item names the streak and the
+   last failure kind. The operator's `forge retry --force` or `forge recover
+   --re-drive` remains the only way past that — the executor never escalates
+   its own budget.
+
+**Invariant reconciliation.** Invariant 23 says execution authority is an
+explicit, recorded act. An automatic retry satisfies this because it
+re-dispatches a task that was already authorized, under a budget declared in
+the workflow ahead of time, with every attempt recorded; it never dispatches
+new work or claims a ticket that was not already running. Invariant 14's rule
+that a terminal state a human chose is never reconciled away is satisfied
+because judgment outcomes and human dispositions are in the guard's `false`
+set — an automatic retry only ever acts on a state a human never decided.
+
+Size: small-medium. Touches `retry-policy.ts`, the workflow step schema, the
+controller loop from recommendation 1, and `src/v2/previous-attempt.ts`'s
+lineage fields.
+
+**Risks and what not to copy.** Do not use the advisory `retryPolicy()`
+default for the executor's eligibility check — its `??`-driven default to
+`retryable: true` is safe as prose and unsafe as a mutation trigger, for the
+same reason `RE_DRIVABLE_FAILURE_KINDS` fails closed where `retryPolicy()`
+does not. Do not auto-retry anything whose worktree may hold work. Do not let
+auto-retries bypass the readiness or budget admission tests recommendation 3
+adds. Do not copy Paperclip's `LIKE`-on-log-text detection of exhausted
+retries (`attention-exhausted-runs.ts:14-18`); use the structured attempt
+record instead.
+
+**Priority.** P2.
+
+### 8. Refuse contradictory auth routing at spawn (`auth_routing_incompatible`)
 
 **Pattern.** Paperclip refuses to launch an agent bound to a managed AI
 connection whose configured env also sets a provider-routing flag or a custom
@@ -461,7 +586,7 @@ it adds no new credential surface.
 
 **Priority.** P2.
 
-### 8. Typed operator asks with a declared continuation
+### 9. Typed operator asks with a declared continuation
 
 **Pattern.** Paperclip's `issue_thread_interactions` lets an agent attach a
 typed ask to its work item (`packages/db/src/schema/issue_thread_interactions.ts:16-80`;
@@ -516,7 +641,7 @@ never advances publication.
 
 **Priority.** P2.
 
-### 9. Typed recovery records with owner, attempts and outcome
+### 10. Typed recovery records with owner, attempts and outcome
 
 **Pattern.** Paperclip's `issue_recovery_actions` table
 (`packages/db/src/schema/issue_recovery_actions.ts:30-63`; `constants.ts:377-415`)
@@ -568,7 +693,7 @@ judgment-bearing owner.
 
 ## P3 — Could
 
-### 10. One outbound safe-projection function for notifications
+### 11. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -584,11 +709,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 13 lands.
+recommendation 14 lands.
 
 **Priority.** P3.
 
-### 11. Content-hash provenance and a static audit for skills and role seeds
+### 12. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -619,7 +744,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 12. Scheduled triggers that file and enqueue, never dispatch
+### 13. Scheduled triggers that file and enqueue, never dispatch
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -655,7 +780,7 @@ readiness assessment; the queue scan already refuses `readiness_ineligible`.
 
 **Priority.** P3.
 
-### 13. Answer operator asks from a phone with opaque expiring tokens
+### 14. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -670,7 +795,7 @@ or acknowledgement channel (lane D §6). The remote board already verifies
 identity at the transport and permits only `read | plan`
 (`dashboard/src/remote/identity.ts:1-44`).
 
-**Proposed shape.** Only after recommendation 8 exists, a notification for an
+**Proposed shape.** Only after recommendation 9 exists, a notification for an
 operator ask carries a link to the remote board. The link includes an opaque,
 single-use, short-lived token bound to the ask id and the expected answer
 domain. The remote board adds one capability, `answer_ask`, which shells out
@@ -685,7 +810,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 14. Policy evals: scenario × profile matrix with hard gates
+### 15. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -728,7 +853,7 @@ semantic operations. They include `create_task`, `hire_agent`,
 router, authorized by a run-scoped JWT (`doc/runner-api-tools.md`;
 `server/src/services/native-runtime/paperclip-runner-tool-authority.ts:81-88`).
 Forge containers never reach the host store (invariant 20), and all mutation
-goes through the Forge control plane (invariant 10). Recommendation 8 gets the
+goes through the Forge control plane (invariant 10). Recommendation 9 gets the
 useful half, structured requests from an agent, through the `result.json`
 contract without a callback channel.
 
@@ -773,7 +898,7 @@ canonical state.
 **Four approval mechanisms.** Approvals, execution stages, thread
 interactions and decisions overlap, with three notions of "changes requested"
 (lane A §4). Forge should keep gates plus the one ask type in recommendation
-8. The prior synthesis warns about exactly this vocabulary density.
+9. The prior synthesis warns about exactly this vocabulary density.
 
 **A writable audit log.** Paperclip lets board actors insert activity rows
 with a caller-chosen actor (`server/src/routes/activity.ts:92-100`). Forge's
@@ -789,6 +914,7 @@ events table has one writer, and it should stay that way.
 4. Add a unit-tier guard against raw status writes outside the store vocabulary accessors, and a `forge doctor` out-of-domain probe
 5. Prove with a test that a checked-in `.mcp.json` cannot load in agent containers, and pass `--strict-mcp-config` if it can
 6. Add a `cooling_down` queue scan reason after consecutive failed or launch_failed releases
-7. Add a pre-spawn `auth_routing_incompatible` refusal that compares `detectCredsMode()` against the resolved runtime seed's `auth_strategy`, and record the resolved creds mode in the control-plane receipt
-8. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-9. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+7. Add an `AUTO_RETRYABLE_FAILURE_KINDS` guard to `retry-policy.ts` and a bounded automatic-retry executor in the controller loop, with a declared per-step retry budget
+8. Add a pre-spawn `auth_routing_incompatible` refusal that compares `detectCredsMode()` against the resolved runtime seed's `auth_strategy`, and record the resolved creds mode in the control-plane receipt
+9. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+10. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
