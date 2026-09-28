@@ -38,13 +38,14 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 12 | Attention Inbox with audited dismissal, snooze and inline resolution | P2 | Small-Medium |
 | 13 | A cockpit: one navigable object graph from ticket to evidence | P2 | Medium |
 | 14 | Scheduled triggers that file and enqueue; the armed dispatcher runs them | P2 | Medium |
-| 15 | One outbound safe-projection function for notifications | P3 | Small |
-| 16 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 17 | Role-scoped secret bindings | P3 | Medium |
-| 18 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 19 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
-| 20 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
-| 21 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
+| 15 | Operator diagnostic skill for stalled work | P3 | Small |
+| 16 | One outbound safe-projection function for notifications | P3 | Small |
+| 17 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 18 | Role-scoped secret bindings | P3 | Medium |
+| 19 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 20 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 21 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
+| 22 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
 
 ## P1 — Must
 
@@ -417,7 +418,7 @@ control-plane receipt. Size: small.
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
 containers today, and when one arrives the credential half of it is already
-covered by role-scoped secret bindings (recommendation 17) — that should land
+covered by role-scoped secret bindings (recommendation 18) — that should land
 before any gateway is considered.
 
 **Priority.** P2.
@@ -546,7 +547,9 @@ exactly that second kind of guard, not the first.
    existing `forge retry` path, so the previous-attempt carry
    (`src/v2/previous-attempt.ts`) and the dispatch receipt apply unchanged. It
    records `retry_of` and the attempt index so the lineage is queryable, as
-   Paperclip's `retryOfRunId` is.
+   Paperclip's `retryOfRunId` is. The same delta-first package ordering from
+   recommendation 9 applies here too: the re-dispatched package leads with
+   what failed and what changed, ahead of the full brief.
 4. When the budget is spent, the ticket enters the `cooling_down` scan reason
    from recommendation 6, and an Attention Inbox item names the streak and the
    last failure kind. The operator's `forge retry --force` or `forge recover
@@ -663,7 +666,15 @@ prose. The Attention Inbox has closed kinds and no typed ask.
 - **Answering.** `forge ask answer <id> --value …` records the answer, then
   re-dispatches through the existing retry path. The answer goes into the task
   package's previous-attempt section (`src/v2/previous-attempt.ts`), next to
-  the carried `TASKS.md`.
+  the carried `TASKS.md`. When that re-dispatch's package is composed, it
+  should lead with the delta — the question, the operator's answer, and what
+  changed since the last attempt — ahead of the full brief, the way
+  Paperclip's Claude adapter builds a resume-delta prompt that carries only
+  new comments and state on a resumed session instead of re-injecting the
+  full bootstrap, because doing so "wastes 5-10K tokens per heartbeat"
+  (`packages/adapters/claude-local/src/server/execute.ts:852,898-901`). The
+  previous-attempt carry is already the vehicle for this; ordering the
+  package composer to put the delta first is wording, not a new mechanism.
 - **Surface.** Asks become an Attention Inbox source.
 
 Size: medium.
@@ -907,6 +918,21 @@ like any other queued ticket, with no session and no operator in the loop.
 The trigger's job is only to produce the ticket and put it in the queue; the
 dispatcher that is already running is what makes it execute unattended.
 
+The clearest concrete instance of this class is documentation hygiene itself.
+Paperclip's own `doc-maintenance` skill
+(`.agents/skills/doc-maintenance/SKILL.md`) is already built around exactly
+this shape: a `.doc-review-cursor` file holds the last-reviewed commit SHA,
+the skill classifies every commit since it into feature, breaking or
+structural work (ignoring refactors, test-only changes, CI config and
+dependency bumps, and doc-only commits), audits the named docs against what
+it finds, and advances the cursor in the same PR that carries the fix. A
+Forge trigger can file that same audit as a ticket instead of running it
+in-process: a weekly trigger files a "docs drift since `<sha>`" ticket from a
+template, the documentation-maintainer works it against the corpus, and the
+ticket's closing commit advances a committed cursor file the next weekly
+trigger reads — the canonical hygiene trigger this recommendation exists to
+support, not a hypothetical one.
+
 **Invariant reconciliation — why the trigger doesn't dispatch directly.**
 The question this has to answer is not "do we want triggered tickets to run
 unattended" — we do, that's the entire point of a trigger — it's "why does
@@ -977,7 +1003,82 @@ this small to add on top of it.
 
 ## P3 — Could
 
-### 15. One outbound safe-projection function for notifications
+### 15. Operator diagnostic skill for stalled work
+
+**Pattern.** Paperclip's `diagnose-why-work-stopped` skill
+(`.agents/skills/diagnose-why-work-stopped/SKILL.md`) is diagnostic-only: "No
+code changes leave this skill." It requires reading the execution-semantics
+contract before touching anything — "read `doc/execution-semantics.md` before
+diagnosing or proposing a new liveness/recovery rule" — and keeping its terms
+(live/waiting/recovery path, post-run disposition, bounded continuation,
+productivity review, pause-hold, watchdog) intact rather than inventing new
+ones. Its forensics step walks the tree node by node to find "the exact issue
++ state combination that stops the world," quoting run ids, comment
+timestamps and status transitions, and treats anything not directly evidenced
+as provisional: "'Inferred' is acceptable only when an API boundary blocks
+direct evidence — say so explicitly and mark the claim provisional." Before
+proposing a rule it surveys what shipped nearby: "review what already shipped
+this week in the same area... A new rule that contradicts code merged 48
+hours ago is rework, not improvement." Every proposed rule must hold three
+invariants together — productive work continues, only real blockers stop
+work, no infinite loops — "the user has restated them on at least four
+issues; treat them as load-bearing."
+
+**Why it fits Forge.** Forge has the raw material for this diagnosis
+scattered across verbs and docs, but no procedure that walks it end to end:
+`forge ops check` and `forge ops repair` surface and fix ledger incidents
+(`src/cli/commands/ops.ts`), reconcile and its orphan kinds classify a
+stranded run (`docs/concepts.md` → Orphaned task recovery),
+`awaiting_recovery` parks an unsettled publication whose disposition isn't
+yet decided (`docs/invariants.md` 14; `docs/concepts.md:922-930`),
+continuation state drives `forge continue` and its own recovery ledger is
+`forge lost-signals` (`src/cli/commands/continue.ts`;
+`src/cli/commands/fg565-docs-parity.test.ts:160-221`), `forge launch show`
+inspects a durable launch record (`src/cli/commands/launch.ts:204`), the
+Attention Inbox composes failure, park and readiness sources into one queue
+(`docs/concepts.md` → Attention inbox), and invariant 23's queue-membership-
+versus-execution-authority boundary (`docs/invariants.md:44`) is exactly the
+distinction a stall diagnosis has to reason against when a ticket "should"
+have run but didn't. Today an orchestrator session reconstructs a stall ad
+hoc from these pieces every time, and the standing feedback rule — evidence
+before causes, n=1 is not a cause — is held in memory rather than in a
+procedure a session can follow the same way twice.
+
+**Proposed shape.** A Forge operator-adapter skill — the same generated
+family as `/orient` and `/handoff`, a provider-neutral definition rendered
+per client (`docs/concepts.md` → Operator adapters) — named
+`/diagnose-stall <run-or-task-id>`.
+
+1. Read `docs/concepts.md`'s recovery and continuation sections (Orphaned
+   task recovery, Attention inbox) and `docs/invariants.md` 14 and 23 before
+   touching anything.
+2. Walk run → tasks → launches → continuations → CI-waits with `forge show`,
+   `forge launch show`, `forge ops check --json`, quoting ids and timestamps
+   at each step, and name the exact object-plus-state that stopped progress.
+3. Survey the last N merged commits touching the implicated subsystem, so a
+   proposed rule doesn't contradict work that already shipped.
+4. Produce a written root cause and, only if a genuine product-rule gap
+   exists, a proposed rule stated against the three invariants: productive
+   work continues, only real blockers stop work, no infinite loops.
+5. No mutation: the skill never runs `forge recover`, `forge retry`, `forge
+   gate` or `forge ops repair` — it recommends the verb and stops there.
+
+Size: small; it is a skill definition plus its adapter rendering, no new
+store shape or CLI verb.
+
+**Risks and what not to copy.** Do not let the skill act; a diagnosis that
+repairs is a repair with no record, and the whole value of the procedure is a
+legible trail an operator can check before anything mutates. Do not copy
+Paperclip's issue-link conventions (`[PAP-XXXX](/PAP/issues/PAP-XXXX)`) or its
+company-scoped API-boundary language ("your agent token returns 403") — Forge
+has neither issue links nor a multi-tenant API to route scoping around. Keep
+the three invariants verbatim as the acceptance test for any rule the skill
+proposes; restating them in Forge's own words risks quietly narrowing one of
+them.
+
+**Priority.** P3.
+
+### 16. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -993,11 +1094,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 18 lands.
+recommendation 19 lands.
 
 **Priority.** P3.
 
-### 16. Content-hash provenance and a static audit for skills and role seeds
+### 17. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -1028,7 +1129,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 17. Role-scoped secret bindings
+### 18. Role-scoped secret bindings
 
 **Pattern.** Paperclip resolves a secret into run env only when a binding row
 exists for the specific consumer and config path. `resolveSecretValueInternal`
@@ -1153,7 +1254,7 @@ enforces nothing.
 **Priority.** P3 — becomes P2 the moment any role is expected to call an
 external service with a credential.
 
-### 18. Answer operator asks from a phone with opaque expiring tokens
+### 19. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -1183,7 +1284,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 19. Policy evals: scenario × profile matrix with hard gates
+### 20. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -1211,7 +1312,7 @@ Size: large.
 
 **Priority.** P3.
 
-### 20. Honest freshness and recovery cards on the surfaces that already poll
+### 21. Honest freshness and recovery cards on the surfaces that already poll
 
 **Pattern.** Paperclip surfaces recovery where the work already lives: a
 stateful card cycling RECOVERY NEEDED → IN PROGRESS → ESCALATED → RESOLVED,
@@ -1257,7 +1358,7 @@ recover` or the registry from recommendation 11 doesn't already expose.
 
 **Priority.** P3.
 
-### 21. Status tokens and shared formatters as the only visual vocabulary
+### 22. Status tokens and shared formatters as the only visual vocabulary
 
 **Pattern.** Paperclip's palette logic is stated as a rule — "gray inert,
 blue liveness, amber queued, violet review, green done, red blocked" — and
@@ -1402,3 +1503,4 @@ reach; none of them make the dashboard itself an authority.
 14. Add a `triggers:` project-config block, a `forge triggers tick` verb (run by the controller loop) that files and enqueues due tickets for the armed dispatcher to run, an `origin_fingerprint` uniqueness guard, and a `forge doctor` check for triggers configured without an armed dispatcher
 15. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
 16. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
+17. Add a `/diagnose-stall <run-or-task-id>` operator skill that reads `docs/concepts.md`'s recovery/continuation sections and `docs/invariants.md` 14 and 23, walks run → tasks → launches → continuations with `forge show`/`forge launch show`/`forge ops check --json` to name the exact stop point, surveys recent merged work in the area before proposing any rule, and never itself calls `forge recover`/`forge retry`/`forge gate`/`forge ops repair`
