@@ -34,12 +34,17 @@ should follow the existing backlog discipline: gap-walk first, then file.
 | 8 | Refuse contradictory auth routing at spawn (`auth_routing_incompatible`) | P2 | Small |
 | 9 | Typed operator asks with a declared continuation | P2 | Medium |
 | 10 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
-| 11 | One outbound safe-projection function for notifications | P3 | Small |
-| 12 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 13 | Role-scoped secret bindings | P3 | Medium |
-| 14 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
-| 15 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 16 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 11 | Dashboard actions as named CLI verbs with previewed effect | P2 | Medium |
+| 12 | Attention Inbox with audited dismissal, snooze and inline resolution | P2 | Small-Medium |
+| 13 | A cockpit: one navigable object graph from ticket to evidence | P2 | Medium |
+| 14 | One outbound safe-projection function for notifications | P3 | Small |
+| 15 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 16 | Role-scoped secret bindings | P3 | Medium |
+| 17 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
+| 18 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 19 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 20 | Honest freshness and recovery cards on the surfaces that already poll | P3 | Small |
+| 21 | Status tokens and shared formatters as the only visual vocabulary | P3 | Small |
 
 ## P1 — Must
 
@@ -412,7 +417,7 @@ control-plane receipt. Size: small.
 first-match-by-priority semantics already contradict its own documentation
 (lane B §6). Forge has no use case for governed third-party tools in
 containers today, and when one arrives the credential half of it is already
-covered by role-scoped secret bindings (recommendation 13) — that should land
+covered by role-scoped secret bindings (recommendation 16) — that should land
 before any gateway is considered.
 
 **Priority.** P2.
@@ -722,9 +727,157 @@ judgment-bearing owner.
 
 **Priority.** P2.
 
+### 11. Dashboard actions as named CLI verbs with previewed effect
+
+**Pattern.** Paperclip's Decisions desk gives every attention row up to three
+verbs, the affirmative one rightmost, each shelling a single named action
+(lane E item 4; `AttentionQueueRow.tsx:447-507`). Before a destructive
+fan-out — pausing or cancelling a subtree — a preview endpoint returns the
+exact blast radius ("N tasks will be cancelled, wake N agents") and the
+operator confirms *that*, not the intent (lane E item 5;
+`TaskTreeControls.tsx:74-182`, `issue-tree-control.ts:65`). Typed
+confirmation — type the identifier to confirm — is reserved for the one
+irreversible bulk-cancel path (lane E item 6; `DecisionCard.tsx:524-548`),
+not spread across every button.
+
+**Why it fits Forge.** `dashboard/src/server.ts` exposes exactly two
+writable surfaces today — queue planning and `classify` (lane F §2) — behind
+a closed `QUEUE_MUTATION_ROUTES` table that shells one named `forge queue`
+verb per route (`dashboard/src/queue-mutation.ts:56-64`). FORGE-DEC-015
+designed gate buttons for this same shape; they shipped in the pre-#137
+bundled dashboard and were retired, and `dashboard/CLAUDE.md` still
+describes routes that no longer exist (lane F §2, §9 item 1). The registry
+pattern DEC-015 chose is sound; it was only ever applied to one capability.
+
+**Proposed shape.** Add a second small, closed action registry alongside
+`QUEUE_MUTATION_ROUTES`, one row per button, starting with the
+lowest-blast-radius verbs: `forge gate advance|reject|request-changes` on an
+`awaiting_gate` task, `forge retry` for the `FailureKind`s `retry-policy.ts`
+already marks `retryable: true`, `forge recover --re-drive`, and `forge
+attention dismiss|snooze` (recommendation 12). Each button is labeled with
+the verb it runs, matching lane E's "named buttons" rule. Any verb that fans
+out — a queue `cancel`, a campaign stop — gets a `--dry-run --json` mode
+added to the CLI, and the dashboard renders the returned effect before the
+commit call, mirroring lane E's server-computed preview. Typed confirmation
+is reserved for the one irreversible bulk-cancel action, not applied
+uniformly. State plainly, once, which model governs every dashboard-
+triggered mutation: shell the CLI verb, per invariant 10's letter — never
+the remote board's in-process store write (FORGE-DEC-035), which lane F §9 item 2
+flags as a fork this recommendation should not widen. Keep the existing
+guards unchanged: loopback bind, same-origin/non-simple-content-type, argv
+array with leading-dash rejection, and `--project` resolved server-side
+only.
+
+**Risks and what not to copy.** Not in the registry, ever: dispatcher
+arm/disarm and `--max-active-runs` — FG-591 D2 calls that "authority to run
+repo-writing containers unattended" and keeps it CLI-only — nor
+routing/RACI/model-policy apply or backlog edits. Lane E's own verdict on
+its UI is the risk to internalize: "this UI gate is the operator-facing
+guardrail, not the security boundary" (Patterns to avoid #11, "the UI as
+sole authority, framed as 'THE control plane'"). Forge's dashboard must stay
+the opposite: a projection that triggers verbs the CLI still validates,
+never a second authority.
+
+**Priority.** P2.
+
+### 12. Attention Inbox with audited dismissal, snooze and inline resolution
+
+**Pattern.** Paperclip's dismiss/snooze holds only while `dismissedAt >=
+activityAt`; new activity resurfaces the item, and snoozes carry a re-arm
+time. Every dismissal is server-side and audited (lane E item 2;
+`attention.ts:183-204`, `inbox-dismissals.ts:82,120`). While the operator is
+reading, row order is frozen — re-sorting happens only at "attention
+boundaries": mount, 150 seconds idle, a tab hidden and shown again, or a
+manual refresh (lane E item 3; `useInboxSortAttention.ts:3-22`).
+
+**Why it fits Forge.** The Attention Inbox is deliberately read-only: it
+"invents no chat semantics" and resolution today means copying
+`requestedAction` — a free-text CLI string — into a terminal (lane F §3, §9
+item 7). Two of its nine closed kinds, `stale_verification` and
+`kanban_conflict`, are missing from `KIND_META` and the CSS, so they fall
+back to a neutral "unknown" badge (lane F §3). The inbox already polls every
+2 seconds (lane F §5), so order pinning is directly applicable: nothing
+stops a row jumping mid-read today.
+
+**Proposed shape.** Add an `attention_dismissals` table, written only by a
+new `forge attention dismiss|snooze <item>` verb (recommendation 11's
+registry carries the button). A dismissal holds only while the item's own
+`startedAt`/activity timestamp does not advance past the dismissal time; new
+activity on the same source resurfaces it, exactly as Paperclip's rule does.
+Snooze records a re-arm time and clears itself when it passes. Give
+`stale_verification` and `kanban_conflict` their own `KIND_META` entries and
+badge styles so all nine kinds render consistently, closing the gap lane F
+names directly. Each inbox item's row carries its resolving verb as a
+button, sourced from recommendation 11's registry rather than free text. Add
+order pinning to the 2-second-poll client: freeze row order on mount and
+re-sort only on idle timeout, tab refocus, or manual refresh, matching
+Paperclip's boundary list.
+
+**Risks and what not to copy.** Never store a dismissal in `localStorage` —
+Patterns to avoid #2 names exactly this failure in Paperclip's own alert
+dismissals and non-issue read state, which are per-browser because they
+never reach the server (`lib/inbox.ts:21-22`). Forge's invariant 10 already
+requires state to live in the store, not the client; an `attention_dismissals`
+row written by the CLI verb is the only form this can take. Never let a
+dismissal hide an item whose underlying activity has advanced — that is the
+one behavior the resurfacing rule exists to prevent, and it is worth
+restating because a naive "hide until cleared" implementation is the easy
+version to ship by accident. Do not copy Paperclip's second, independent
+snooze mechanism (`DecisionTriageStrip.tsx`'s `snoozedUntil` alongside inbox
+dismissals) — one dismissal/snooze table is enough.
+
+**Priority.** P2.
+
+### 13. A cockpit: one navigable object graph from ticket to evidence
+
+**Pattern.** Every Paperclip screen is built to answer, in order: what is
+happening, does it need me, what do I do (lane E §1, item 1;
+`DESIGN.md:13`). The object graph backs that up with depth: company →
+agents → agent detail → run detail → events/log, and task → run ledger →
+live transcript → interactions → recovery cards → documents/diffs →
+subtree, all URL-addressable so a chain can be walked, and deep-linked, from
+one page (lane E §1).
+
+**Why it fits Forge.** The competitive README's standing goal is a
+navigable chain — backlog item → run/session → tasks and agents → files and
+diffs → review evidence → commit/PR — and says Forge "needs a better
+operator projection of their relationships," not new data. Lane F confirms
+the gap directly: there is no runs list or run page; a run is reached only
+from a feed card, an inbox row, or a hand-typed `#run-map/<id>` (lane F §1).
+Task detail and Explain are both reachable from a run, but not from each
+other, and neither is deep-linkable — both are modal overlays held in
+component state (lane F §1, §9 item 8). The competitive synthesis already
+named this: "no run index... task detail and Explain are not linked" (lane F
+§9 item 8).
+
+**Proposed shape.** Add a run index page listing runs (by project, ticket,
+status, start time) as a real, addressable list — the missing project → run
+level lane F names. Make task detail and Explain link to each other
+directly, and put both behind their own URL (not only a modal), so
+`#task/<id>` and `#task/<id>/explain` are shareable the way `#run-map/<id>`
+already is. Extend task detail's links to the review ledger entry for that
+task's run, and to any host verifications and launches it produced. Give
+each screen a header that states the three answers plainly and names the
+next verb, following lane E's screen contract. None of this needs new data:
+every relationship is projections over rows the store already has
+(`reviews`, `host_verifications`, `launch_observations`, and the manifest
+data Explain already computes).
+
+**Risks and what not to copy.** Do not grow one page into Paperclip's
+monolithic shape — `IssueDetail.tsx` alone is 8,320 lines, and Patterns to
+avoid #9 names run detail as "buried inside AgentDetail rather than
+addressable as its own object" as the direct consequence. Forge's `main.js`
+is already 2,708 lines (lane F §8); a cockpit should split into addressable,
+individually testable views (`*-render.js`/`*-view.js`, the pattern lane F
+already documents for the newer inbox and current-activity surfaces), not
+one larger file. Do not add a company/org scope layer Forge does not have;
+the cockpit is host-wide and project-scoped exactly as today.
+
+**Priority.** P2.
+
 ## P3 — Could
 
-### 11. One outbound safe-projection function for notifications
+### 14. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -740,11 +893,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 15 lands.
+recommendation 18 lands.
 
 **Priority.** P3.
 
-### 12. Content-hash provenance and a static audit for skills and role seeds
+### 15. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -775,7 +928,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 13. Role-scoped secret bindings
+### 16. Role-scoped secret bindings
 
 **Pattern.** Paperclip resolves a secret into run env only when a binding row
 exists for the specific consumer and config path. `resolveSecretValueInternal`
@@ -900,7 +1053,7 @@ enforces nothing.
 **Priority.** P3 — becomes P2 the moment any role is expected to call an
 external service with a credential.
 
-### 14. Scheduled triggers that file and enqueue, never dispatch
+### 17. Scheduled triggers that file and enqueue, never dispatch
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -936,7 +1089,7 @@ readiness assessment; the queue scan already refuses `readiness_ineligible`.
 
 **Priority.** P3.
 
-### 15. Answer operator asks from a phone with opaque expiring tokens
+### 18. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -966,7 +1119,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 16. Policy evals: scenario × profile matrix with hard gates
+### 19. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -991,6 +1144,100 @@ Size: large.
 
 **Risks.** This costs real money and time. It should wait until budgets
 (recommendation 3) can cap it. Keep results advisory, as §8 already requires.
+
+**Priority.** P3.
+
+### 20. Honest freshness and recovery cards on the surfaces that already poll
+
+**Pattern.** Paperclip surfaces recovery where the work already lives: a
+stateful card cycling RECOVERY NEEDED → IN PROGRESS → ESCALATED → RESOLVED,
+mounted in the task thread rather than only in a global log (lane E item 10;
+`IssueRecoveryActionCard.tsx:173-213`). Output silence is an informational,
+non-mutating badge at one and four hours — "suspicious" and "critical" —
+with operator snooze/false-positive decisions recorded (lane E item 12;
+`doc/SPEC-implementation.md:540-541`). Contextual-feedback rules keep this
+honest without noise: no toast for state already on screen, deduped
+outcomes, a five-minute historical cutoff comparing two server timestamps,
+and a neutral grey tone for expected cancellation (lane E item 8;
+`LiveUpdatesProvider.tsx:57,441-470,1081-1108,1595-1615`).
+
+**Why it fits Forge.** The Remote Board's freshness contract has a `stale`
+state that production never emits — `assembleRemoteBoard` is called without
+it, so a tab left open shows "updated HH:MM" labeled live indefinitely (lane
+F §6, §9 item 9). The local dashboard already does the honest-unknown half
+well: launches distinguish `fresh` from `unobserved`, and "a failed read IS
+the return value, never a linger of the last render" (lane F §5). What is
+missing is symmetric: the remote board never says stale, and there is no
+per-task recovery card — `forge recover` state is not surfaced as one
+object anywhere in the dashboard (lane F §4, §9 item 6).
+
+**Proposed shape.** Have the remote board emit `stale` when its projection
+is older than its own poll interval, closing lane F §9 item 9 directly. Add
+an "unobserved for N minutes" signal on In flight rows, derived from
+`launch_observations` freshness the way lane F documents (§4), informational
+only and never mutating — matching Paperclip's output-silence badge. Add a
+recovery card on task detail that renders `forge recover`'s current state
+and its one next verb, in the same place the operator is already looking,
+rather than only in Activity → Diagnostics. If a toast or notification
+layer is ever added to the dashboard, adopt the no-toast-for-visible-state
+rule up front rather than retrofitting it.
+
+**Risks and what not to copy.** Patterns to avoid #7, "governance by
+instruction rather than CI," is the reason to build this behind a test from
+the start: Paperclip wrote its token and motion gates as rules but never
+wired them into CI, and the debt that produced (3,115 hardcoded palette
+sites) is what unenforced design law costs. Do not let "informational only"
+slip into "mutating" — the output-silence signal and the recovery card both
+read state, and neither should gain a button that does anything `forge
+recover` or the registry from recommendation 11 doesn't already expose.
+
+**Priority.** P3.
+
+### 21. Status tokens and shared formatters as the only visual vocabulary
+
+**Pattern.** Paperclip's palette logic is stated as a rule — "gray inert,
+blue liveness, amber queued, violet review, green done, red blocked" — and
+applied through one canonical mapping layer for task status: chips, glyphs
+and charts all read the same token (lane E §6; `index.css:168-193`,
+`status-colors.ts:1-6,244-283`). Machine values render in mono through
+shared formatters — `formatCents`, `formatTokens`, `formatDurationMs`,
+`relativeTime`, `formatDateTime` — used identically wherever a number or
+timestamp appears (lane E item 13; `lib/utils.ts:36-104`). Governance is
+written down: `DESIGN.md` is the source of truth, changed first, with lint
+gates and a Storybook visual baseline meant to hold the rest of the UI to it
+(lane E §9).
+
+**Why it fits Forge.** Lane F's own read on Forge's status rendering shows
+the same shape Paperclip has, only smaller: task statuses map through one
+table in `shell.ts:320-327`, Run Map and Explain add non-color glyphs for
+accessibility, but "the main badges are color plus text only, so glyph use
+differs between screens" (lane F §7). The inbox's two unrendered kinds
+(recommendation 12) are exactly the failure mode a closed token map is
+meant to prevent: a status string with no token falls back to a raw label
+instead of failing a build.
+
+**Proposed shape.** Add one status token map in the dashboard shell, keyed
+to the store's own closed vocabularies — `tasks.status`, the attention
+inbox's nine kinds, launch outcomes — so a new value can only render through
+a token that already exists for it. Add one formatter module for ids, shas,
+durations and tokens; Forge already has `duration.js` (lane E item 13 names
+formalizing exactly this as the pattern worth taking). Add a unit-tier test
+that fails when a status string is rendered through anything other than the
+shared map, the same discipline `src/test-tiers.test.ts` already applies
+elsewhere in the repo.
+
+**Risks and what not to copy.** Do not adopt Paperclip's Storybook
+visual-snapshot pipeline wholesale — its baseline manifest is checked in
+empty (`snapshotCount: 0`) while `CHANGING-THE-UI.md` claims 510 images, and
+the workflow that would populate it runs only on a labeled PR, not as a
+required gate (lane E §9). A token map plus one unit test is the
+proportionate slice for a dashboard this size; a visual-regression pipeline
+nobody keeps green is worse than none. Patterns to avoid #6 is the
+cautionary case to keep in view: Paperclip's own token system holds for
+task status but not for runs or logs, which still use raw Tailwind palette
+classes and an idle dot that contradicts its own idle token color — proof
+that "tokenize everything" is the requirement, not "tokenize the first
+surface and stop."
 
 **Priority.** P3.
 
@@ -1062,6 +1309,17 @@ events table has one writer, and it should stay that way.
 
 **Zero-priced subscription usage.** See recommendation 2.
 
+**The dashboard as execution authority.** Paperclip's board *is* execution
+state: an issue transition is a UI write, and even its lightest-touch
+actions — approve, pause, terminate — mutate directly, most with no
+confirmation at all (lane E §3). Forge keeps authority where invariant 10
+and the competitive README's "keep authority separate from projections" put
+it: the store and the CLI are canonical, and the dashboard is a projection
+that triggers verbs the CLI still validates (lane F §2's closed
+`QUEUE_MUTATION_ROUTES`/`QUEUE_MUTATION_FORGE_VERBS` table is the existing
+proof this already holds). Recommendations 11-13 extend that projection's
+reach; none of them make the dashboard itself an authority.
+
 ## Suggested First Tickets
 
 1. Add a supervised `forge reconcile watch` loop over active runs and a `ready`-continuation drain, with a `forge notify milestone` on completion, a launchd template and a `forge doctor` check
@@ -1072,6 +1330,10 @@ events table has one writer, and it should stay that way.
 6. Add a `cooling_down` queue scan reason after consecutive failed or launch_failed releases
 7. Add an `AUTO_RETRYABLE_FAILURE_KINDS` guard to `retry-policy.ts` and a bounded automatic-retry executor in the controller loop, with a declared per-step retry budget
 8. Add a pre-spawn `auth_routing_incompatible` refusal that compares `detectCredsMode()` against the resolved runtime seed's `auth_strategy`, and record the resolved creds mode in the control-plane receipt
-9. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-10. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
-11. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
+9. Add a second closed dashboard action registry that shells `forge gate advance|reject|request-changes`, `forge retry`, and `forge recover --re-drive` on their lowest-blast-radius preconditions, each button labeled with the verb it runs
+10. Add a `--dry-run --json` mode to the fan-out CLI verbs (queue cancel, campaign stop) and have the dashboard render the returned effect before the commit call
+11. Add an `attention_dismissals` table and a `forge attention dismiss|snooze <item>` verb, wire it into the inbox's per-row resolving button, and complete `KIND_META`/CSS for `stale_verification` and `kanban_conflict`
+12. Add a run index page and link task detail and Explain to each other, each behind its own URL
+13. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+14. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+15. Add a `secrets:`/`bindings:` block to `.forge/config.yml`, a `secret_unbound` pre-spawn refusal, and host-side binding resolution at spawn that injects only a role's bound secrets into container env
