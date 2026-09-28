@@ -376,6 +376,7 @@ section.feed { margin-top: 24px; }
 }
 .app-shell > .app { min-width: 0; width: 100%; }
 .app:focus { outline: none; }
+.app:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .skip-link {
   position: absolute; left: 8px; top: -48px; z-index: 60;
   background: var(--bg-elev-2); color: var(--fg); border: 1px solid var(--accent);

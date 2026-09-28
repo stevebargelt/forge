@@ -139,6 +139,12 @@ test("FG-820: the column renders the five groups with their items as links, head
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => document.activeElement?.id), "main-content", "Skip to content moves focus to the content");
+  const ring = await page.evaluate(() => {
+    const cs = getComputedStyle(document.activeElement!);
+    return { style: cs.outlineStyle, width: parseFloat(cs.outlineWidth), shadow: cs.boxShadow };
+  });
+  assert.ok((ring.style !== "none" && ring.width > 0) || ring.shadow !== "none",
+    `the skip target shows a visible focus indicator (outline ${ring.style} ${ring.width}px, box-shadow ${ring.shadow})`);
   assert.equal(hashOf(page), "", "skipping does not navigate");
 
   await page.screenshot({ path: join(SHOTS, "fg820-desktop-column.png") });
