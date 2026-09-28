@@ -71,6 +71,14 @@ capacity limits and visible waiting. Forge's queue should combine operator
 stack rank with current capacity and safe parallelism rather than treating
 every eligible item as immediately runnable.
 
+### Bound unattended spend at admission
+
+Paperclip prices each run into a ledger and checks scoped spend policies
+before any new work is admitted. Forge records token usage but enforces no
+ceiling. As queue dispatch and campaigns run unattended for longer, spend
+limits should become admission tests with operator-only overrides. Usage that
+cannot be priced must read as unknown, never as free.
+
 ### Keep semantic retrieval derived and attributable
 
 Pinecone could help retrieve related decisions, incidents, tickets, and prior
@@ -90,6 +98,7 @@ support; its Codex subscription support comes from ChatGPT OAuth.
 | GasTown / GasCity | Yes — launches the authenticated Claude CLI | Yes — launches the authenticated Codex CLI | Yes — forwards AWS and Bedrock environment variables | Authentication belongs to the underlying CLI; GasTown does not turn API billing into subscription access. |
 | Agent Deck | Yes — uses authenticated host sessions and Claude profiles | Yes — uses authenticated host sessions and can share Codex auth with its sandbox | Yes on the host; limited in the Docker sandbox | The sandbox rejects a home-relative `.aws` mount, so AWS-profile or SSO-based Bedrock does not work there by default. |
 | agent-harness | No — reaches Anthropic as a direct `api.anthropic.com` API key (usage-billed), not subscription sign-in | No — no Codex/ChatGPT integration | No — not evidenced | A direct-to-API OpenAI-compatible/Anthropic client (plus local llama.cpp/Ollama, NVIDIA, OpenRouter, Fireworks); it launches no subscription CLI, so it certifies none of these modes. |
+| Paperclip | Yes — managed AI connection with subscription auth mapped to `CLAUDE_CODE_OAUTH_TOKEN` | Yes — managed AI connection with subscription auth mapped to `CODEX_HOME` | No — Bedrock/Vertex routing is refused by the AI-connection layer | The AI-connection layer also refuses custom base URLs and project-level auth overrides in `.claude/settings*.json` or `.codex/config.toml`, and writes refreshed subscription tokens back under row locks. |
 
 Primary evidence: [Codex authentication modes](https://learn.chatgpt.com/docs/auth)
 and [Claude Code setup](https://docs.anthropic.com/en/docs/claude-code/getting-started);
@@ -122,6 +131,7 @@ agent-harness on [provider base URLs and bearer-key auth](https://github.com/BA-
 | Claude Squad | Worktree-per-session as a compact default, plus a warning about shared host tmux ownership | [Assessment](claude-squad-forge-assessment.md) | [Source](https://github.com/smtg-ai/claude-squad) |
 | Cafe655 AI system and Session Manager | A read-only, project-scoped interactive-session projection over Forge's existing receipts, liveness, and lineage state | [Assessment](cafe655-ai-session-manager-forge-assessment.md) | [System architecture](https://cafe655.com/ai-field-notes/system-architecture) · [Session Manager spec](https://cafe655.com/ai-field-notes/ai-session-manager-builder) |
 | agent-harness | Provider-agnostic encrypted credential store with `secret://` `{env,file,cmd}` indirection, plus a local-first (llama.cpp/GGUF) default that runs with no API key | [Assessment](agent-harness-forge-assessment.md) | [Source](https://github.com/BA-CalderonMorales/agent-harness) |
+| Paperclip | Admission-time spend guardrails, a supervised reconcile tick, typed operator asks, and typed recovery records, without the persistent agent org | [Assessment](paperclip-forge-assessment.md) · [Recommendations](paperclip-forge-recommendations.md) | [Source](https://github.com/paperclipai/paperclip) |
 
 ## Standing Boundary
 
