@@ -24,76 +24,24 @@ should follow the existing backlog discipline: gap-walk first, then file.
 
 | # | Recommendation | Priority | Size |
 |---|---|---|---|
-| 1 | Typed usage semantics: cost status, usage basis, provider error family | P1 | Small |
-| 2 | Supervised reconcile tick for orphaned run tasks | P1 | Medium |
+| 1 | Supervised controller loop: reconcile sweep, continuation drain, milestone notify | P1 | Medium-Large |
+| 2 | Typed usage semantics: cost status, usage basis, provider error family | P1 | Small |
 | 3 | Spend guardrails as admission tests | P1 | Medium |
 | 4 | Status-domain guard for enum-as-convention columns | P2 | Small |
 | 5 | Lock the container MCP surface with `--strict-mcp-config` | P2 | Small |
 | 6 | Failure-history cooldown in the queue scan | P2 | Small |
-| 7 | Typed operator asks with a declared continuation | P2 | Medium |
-| 8 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
-| 9 | One outbound safe-projection function for notifications | P3 | Small |
-| 10 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
-| 11 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
-| 12 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
-| 13 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
+| 7 | Refuse contradictory auth routing at spawn (`auth_routing_incompatible`) | P2 | Small |
+| 8 | Typed operator asks with a declared continuation | P2 | Medium |
+| 9 | Typed recovery records with owner, attempts and outcome | P2 | Medium |
+| 10 | One outbound safe-projection function for notifications | P3 | Small |
+| 11 | Content-hash provenance and a static audit for skills and role seeds | P3 | Small |
+| 12 | Scheduled triggers that file and enqueue, never dispatch | P3 | Medium |
+| 13 | Answer operator asks from a phone with opaque expiring tokens | P3 | Medium |
+| 14 | Policy evals: scenario × profile matrix with hard gates | P3 | Large |
 
 ## P1 — Must
 
-### 1. Typed usage semantics: cost status, usage basis, provider error family
-
-**Pattern.** Paperclip adapters return usage as typed result fields rather
-than leaving the server to infer them from logs (`packages/adapter-utils/src/types.ts:69-117`):
-
-- `usageBasis` says whether a report is a per-run delta or a cumulative
-  session total.
-- `billingType` distinguishes metered API, subscription-included and
-  subscription-overage usage.
-- `costUsd` is carried where the provider reports it.
-- A classified `errorFamily` (`transient_upstream`, `provider_quota`,
-  `model_refusal`, …) accompanies failures.
-
-The server subtracts previous totals for cumulative adapters
-(`server/src/services/heartbeat.ts:11953-11981`) and marks usage without a
-price as `unpriced` rather than zero (`heartbeat.ts:5218-5229`). Its eval
-discipline states the rule plainly: "missing cost is unknown, not free"
-(`doc/evals.md:109-165`). Paperclip breaks that rule in its own budget path by
-forcing subscription usage to zero cents (`heartbeat.ts:5213`). Forge should
-not copy that part.
-
-**Why it fits Forge.** `model_calls` is token-only
-(`src/store/schema.ts:229-244`). The Claude stream-json `total_cost_usd` and
-pi's pre-computed cost are dropped (`src/store/model-calls.ts:222-232`).
-`forge usage` can offer only a unitless `weighted_tokens` proxy
-(`src/cli/commands/usage.ts:1-18`). Recommendation 3 cannot price anything
-without this. A failure taxonomy would also let the retry policy, the
-attention inbox and the dispatcher distinguish a quota wall from a model
-refusal without parsing log text.
-
-**Proposed shape.** Add these nullable columns to `model_calls` through
-`ADDITIVE_COLUMNS`:
-
-- `cost_usd_reported`
-- `cost_status` (`reported | derived | unpriced`)
-- `billing_mode` (`metered | subscription | unknown`, taken from the runtime's
-  `auth_strategy`)
-
-Each `log_format` parser fills them where the runtime reports cost. Add a
-`provider_failure_family` field to the task's failure evidence, populated from
-the same parsers, and keep its vocabulary closed in TypeScript, as FG-585
-requires for enum-as-convention columns. `forge usage` reports dollars only
-for `reported` rows and shows the `unpriced` token share separately, never
-summed as zero. Size: small. Touches the parsers in `src/store/model-calls.ts`,
-the columns, and the `forge usage` renderer.
-
-**Risks and what not to copy.** Do not zero subscription usage. A
-subscription run is `unpriced`, and its tokens stay the budget currency. Do
-not add Paperclip's second manual ingest path, which bypasses its own
-normalization (`server/src/routes/costs.ts:114-127`). Keep a single writer.
-
-**Priority.** P1.
-
-### 2. Supervised reconcile tick for orphaned run tasks
+### 1. Supervised controller loop: reconcile sweep, continuation drain, milestone notify
 
 **Pattern.** Paperclip's server drives recovery from a single scheduler.
 
@@ -122,23 +70,57 @@ run *tasks*: `reconcileRun` is called only from CLI commands and `src/ops/`.
 The dispatcher is also not restarted after a reboot (D9;
 `learnings/decisions/2026-08-06_queue-dispatch-capacity-and-authorization.md:95,148`).
 
-**Proposed shape.** Add a reconcile sweep to a supervised process.
+Separately, an orchestrator session's own continuation state is durable
+(`src/store/continuations.ts`): a continuation reaches `ready` the moment its
+awaited launch is observed terminal, and the row already carries the
+persisted `next_action` for the transition (`src/cli/commands/continue.ts`).
+Advancing a `ready` continuation is a lookup and a claim, not a judgment call.
+
+**Why this matters on Bedrock hosts.** The orchestrator seed admits that
+`Monitor` and `ScheduleWakeup` — the completion-driven wake path — are
+**not available on Amazon Bedrock / Claude-on-AWS / Google Cloud Agent
+Platform / Microsoft Foundry**, and that those hosts fall back to a
+fixed-cadence `/loop` or an operator re-prompt to resume a wait
+(`seeds/orchestrator-template.md:467-472`). Today that means a Bedrock-hosted
+orchestrator session holds a long blocking wait, or sits idle between `/loop`
+ticks, purely because nothing else advances its continuations. A controller
+loop changes that: mechanical transitions — a launch reaching terminal state,
+its persisted next action dispatching — advance with no session attached at
+all, and the orchestrator session only needs to drain whatever the loop
+already advanced on its next tick or `/loop` firing. The loop does not replace
+`Monitor`/`ScheduleWakeup` where they exist; it is what makes their absence on
+Bedrock/Vertex/Foundry survivable.
+
+**Proposed shape.** Add a reconcile sweep, a continuation drain, and a
+milestone notify to one supervised process.
 
 1. Add a `forge reconcile watch` loop. It calls the existing `reconcileRun`
    for every `active` run on the host at a bounded interval, and writes one
    evaluation row per sweep: runs examined, orphans classified, and actions
    taken. The row mirrors `dispatcher_evaluations`, so an idle sweep is still
    evidence.
-2. Let the dispatcher tick call the same sweep when it is armed, so hosts
+2. On the same tick, list every continuation in state `ready`
+   (`listContinuations({state: 'ready'})`) and run `forge continue
+   --continuation-id … --source-launch … --phase … --next-action …` for each,
+   using the row's own persisted phase and next action. This is exactly the
+   command the orchestrator session would otherwise have issued; the loop
+   supplies no new judgment, only the mechanical claim-and-dispatch.
+3. On a continuation's terminal advance, emit `forge notify milestone --run
+   <id> --kind batch_complete` (or the applicable kind) so the operator learns
+   the work moved without a session having to hold the wait open.
+4. Let the dispatcher tick call the same sweep when it is armed, so hosts
    running the dispatcher need no second process.
-3. Close D9 by shipping an optional launchd agent template for the watch loop.
+5. Close D9 by shipping an optional launchd agent template for the watch loop.
    Forge's orchestrator host is macOS-only for isolation. `forge doctor`
    reports whether the watch loop is supervised.
 
-The sweep uses only reconcile's existing actions. It never dispatches, so it
-needs no arming, and it does not touch invariant 23's authorization rule.
-Size: medium. Touches `src/v2/reconcile.ts` callers, a new CLI verb, a new
-evaluation table, `forge doctor`, and a launchd template under `scripts/`.
+The sweep uses only reconcile's and continuation-consumption's existing
+actions. It never dispatches new work on its own authority, so it needs no
+arming, and it does not touch invariant 23's authorization rule. Size:
+medium-large. Touches `src/v2/reconcile.ts` callers, a new CLI verb, a new
+evaluation table, `forge doctor`, a launchd template under `scripts/`, and the
+continuation drain over `src/store/continuations.ts` / `src/cli/commands/continue.ts`
+plus `src/cli/commands/notify.ts`.
 
 **Risks and what not to copy.** Paperclip's reaper can queue an automatic
 retry. Forge should not, because retry is manual by policy
@@ -147,7 +129,81 @@ Attention Inbox, but re-driving stays `forge recover --re-drive`. Keep
 reconcile's assumption that a container with unknown liveness is alive
 (`src/v2/reconcile.ts:1-20`); Paperclip's pid-probe split between detached
 and lost is the same stance. Do not build a general daemon that owns
-lifecycle. The loop is a supervised caller of existing verbs.
+lifecycle. The loop is a supervised caller of existing verbs, and its
+authority is strictly mechanical: it advances a `ready` continuation exactly
+as its persisted next action says, and reconciles a run exactly as
+`reconcileRun` already would. Any judgment-bearing step — reading a result,
+deciding a gate — still parks for the orchestrator; the loop drains the
+mechanical backlog so the orchestrator's next tick has less of it to do, it
+never makes the call itself.
+
+**Priority.** P1.
+
+### 2. Typed usage semantics: cost status, usage basis, provider error family
+
+**Pattern.** Paperclip adapters return usage as typed result fields rather
+than leaving the server to infer them from logs (`packages/adapter-utils/src/types.ts:69-117`):
+
+- `usageBasis` says whether a report is a per-run delta or a cumulative
+  session total.
+- `billingType` distinguishes metered API, subscription-included and
+  subscription-overage usage.
+- `costUsd` is carried where the provider reports it.
+- A classified `errorFamily` (`transient_upstream`, `provider_quota`,
+  `model_refusal`, …) accompanies failures.
+
+The server subtracts previous totals for cumulative adapters
+(`server/src/services/heartbeat.ts:11953-11981`) and marks usage without a
+price as `unpriced` rather than zero (`heartbeat.ts:5218-5229`). Its eval
+discipline states the rule plainly: "missing cost is unknown, not free"
+(`doc/evals.md:109-165`). Paperclip breaks that rule in its own budget path by
+forcing subscription usage to zero cents (`heartbeat.ts:5213`). Forge should
+not copy that part. Its own `resolveClaudeBillingType` is the precedent worth
+copying instead: it stamps a Claude run's billing type from the env the
+adapter actually launched with — Bedrock env maps to `metered_api`, an API key
+to `api`, anything else to `subscription`
+(`packages/adapters/claude-local/src/server/execute.ts:157-166`).
+
+**Why it fits Forge.** `model_calls` is token-only
+(`src/store/schema.ts:229-244`). The Claude stream-json `total_cost_usd` and
+pi's pre-computed cost are dropped (`src/store/model-calls.ts:222-232`).
+`forge usage` can offer only a unitless `weighted_tokens` proxy
+(`src/cli/commands/usage.ts:1-18`). Recommendation 3 cannot price anything
+without this. A failure taxonomy would also let the retry policy, the
+attention inbox and the dispatcher distinguish a quota wall from a model
+refusal without parsing log text.
+
+**Proposed shape.** Add these nullable columns to `model_calls` through
+`ADDITIVE_COLUMNS`:
+
+- `cost_usd_reported`
+- `cost_status` (`reported | derived | unpriced`)
+- `billing_mode` (`metered | subscription | unknown`)
+
+`billing_mode` is a rule, not a parsed detail: it is stamped at dispatch from
+the runtime seed's own `auth_strategy` — `aws-bedrock` → `metered`,
+`oauth-volume` → `subscription`, an API-key auth strategy → `metered`,
+anything else → `unknown` — never inferred from container env at parse time.
+Forge already declares the abstract category on the seed itself
+(`auth_strategy: aws-bedrock`, `seeds/runtimes/claude-bedrock.yml:21`;
+`auth_strategy: oauth-volume`, `seeds/runtimes/claude-oauth.yml:21`), so
+stamping `billing_mode` from `runtimeMeta.authStrategy` at the same point
+`runContainer` already resolves it (`src/v2/runNext.ts:5022`) is a lookup, not
+an inference, and it keeps the vocabulary closed to the three values above.
+
+Each `log_format` parser fills `cost_usd_reported` / `cost_status` where the
+runtime reports cost. Add a `provider_failure_family` field to the task's
+failure evidence, populated from the same parsers, and keep its vocabulary
+closed in TypeScript, as FG-585 requires for enum-as-convention columns.
+`forge usage` reports dollars only for `reported` rows and shows the
+`unpriced` token share separately, never summed as zero. Size: small. Touches
+the parsers in `src/store/model-calls.ts`, the columns, and the `forge usage`
+renderer.
+
+**Risks and what not to copy.** Do not zero subscription usage. A
+subscription run is `unpriced`, and its tokens stay the budget currency. Do
+not add Paperclip's second manual ingest path, which bypasses its own
+normalization (`server/src/routes/costs.ts:114-127`). Keep a single writer.
 
 **Priority.** P1.
 
@@ -209,7 +265,17 @@ agent act.
 - **Override.** `forge budget raise <policy> --amount --operator` records a
   RECORDED override. No agent path can call it.
 
-Size: medium. Depends on recommendation 1 for the dollar metric; the
+**Where dollars are enforceable today.** On `aws-bedrock` runtimes every token
+is metered, so a `usd_reported` ceiling is derivable from a price table the
+moment recommendation 2 lands `cost_status = derived`, even on a run where the
+CLI's own `total_cost_usd` is absent or not Bedrock-priced. On `oauth-volume`
+(subscription) runtimes there is no metered dollar figure at all; tokens stay
+the budget currency there, as they do today. So once recommendation 2 lands,
+`usd_reported` ceilings are enforceable on Bedrock hosts and `weighted_tokens`
+ceilings are enforceable everywhere — dollars are not a uniformly aspirational
+metric here, they are enforceable exactly where billing is metered.
+
+Size: medium. Depends on recommendation 2 for the dollar metric; the
 `weighted_tokens` metric works without it.
 
 **Risks and what not to copy.** Do not cancel running containers
@@ -321,7 +387,51 @@ Use only structured release outcomes.
 
 **Priority.** P2.
 
-### 7. Typed operator asks with a declared continuation
+### 7. Refuse contradictory auth routing at spawn (`auth_routing_incompatible`)
+
+**Pattern.** Paperclip refuses to launch an agent bound to a managed AI
+connection whose configured env also sets a provider-routing flag or a custom
+base URL — Bedrock/Vertex/Foundry switches, `ANTHROPIC_BASE_URL`, and the
+rest — raising `ai_connection_incompatible` before the run starts
+(`server/src/services/ai-connection-runtime.ts:213-227`). The rule exists
+because an injected, pre-validated credential must never be silently routed to
+a backend it was not validated against.
+
+**Why it fits Forge.** Forge has the same shape of risk without the same
+refusal. `detectCredsMode()` auto-selects Bedrock by precedence — an explicit
+`CLAUDE_CODE_USE_BEDROCK=1`, or, failing that, an `AWS_PROFILE` env var or an
+SSO `[default]` profile in `~/.aws/config` (`src/util/creds.ts:38-66`). That
+detection runs independently of which runtime seed a dispatch actually
+resolved. A host with `AWS_PROFILE` set in its shell env routes to Bedrock by
+this precedence even when the step's resolved runtime seed declares
+`auth_strategy: oauth-volume` — nothing in `runContainer` compares the two,
+and the control-plane receipt records the seed's declared `authStrategy`
+(`src/v2/runNext.ts:5022`) without recording which creds mode actually ran.
+The mismatch is invisible until someone reads a bill or a log line that
+doesn't match the seed they thought they dispatched under.
+
+**Proposed shape.** Add a pre-spawn refusal to the same refusal list
+recommendation 3 already cites (`src/v2/runNext.ts:4605-4657`, inside
+`runContainer`, ahead of the container launch): compare the resolved
+runtime's `auth_strategy` (`resolveRuntimeMetadata(runtime).authStrategy`)
+against `detectCredsMode()`'s result, mapped onto the same vocabulary, and
+refuse by name as `auth_routing_incompatible` on a mismatch — mirroring
+Paperclip's `ai_connection_incompatible` shape: a named, pre-spawn refusal,
+not a post-hoc log grep. Record the resolved creds mode alongside the seed's
+declared `authStrategy` in the control-plane receipt, so `forge show`/`forge
+explain` can show both values even when they agree. Size: small. Touches the
+refusal list in `src/v2/runNext.ts` and the receipt shape in
+`src/v2/task-manifest.ts`.
+
+**Risks.** Do not copy Paperclip's managed AI connections or its provider
+routing model — Forge has neither. Keep the OAuth volume and the env
+allowlist as the only credential model; this refusal only compares what
+already exists (the seed's declared strategy, `detectCredsMode()`'s result),
+it adds no new credential surface.
+
+**Priority.** P2.
+
+### 8. Typed operator asks with a declared continuation
 
 **Pattern.** Paperclip's `issue_thread_interactions` lets an agent attach a
 typed ask to its work item (`packages/db/src/schema/issue_thread_interactions.ts:16-80`;
@@ -376,7 +486,7 @@ never advances publication.
 
 **Priority.** P2.
 
-### 8. Typed recovery records with owner, attempts and outcome
+### 9. Typed recovery records with owner, attempts and outcome
 
 **Pattern.** Paperclip's `issue_recovery_actions` table
 (`packages/db/src/schema/issue_recovery_actions.ts:30-63`; `constants.ts:377-415`)
@@ -415,7 +525,7 @@ queryable facts.
 - `superseded_by`;
 - a partial unique index on the active record per task.
 
-`forge recover` and the reconcile sweep from recommendation 2 write the
+`forge recover` and the controller loop from recommendation 1 write the
 records. The Attention Inbox and the Run Map read them. Run this after the §3
 gap walk, not before it. Size: medium.
 
@@ -428,7 +538,7 @@ judgment-bearing owner.
 
 ## P3 — Could
 
-### 9. One outbound safe-projection function for notifications
+### 10. One outbound safe-projection function for notifications
 
 **Pattern.** `projectSafeChatPublicationText` is "the only text projection
 allowed to cross" out of Paperclip. It strips reasoning, tool and log content,
@@ -444,11 +554,11 @@ function. Add a unit test asserting that no transport module imports a
 formatter except through it. Size: small.
 
 **Risks.** None of note. Keep notifications outbound-only unless
-recommendation 12 lands.
+recommendation 13 lands.
 
 **Priority.** P3.
 
-### 10. Content-hash provenance and a static audit for skills and role seeds
+### 11. Content-hash provenance and a static audit for skills and role seeds
 
 **Pattern.** Paperclip records a `contentHash` for each catalog skill and an
 `originHash` for each installed skill. It holds updates when local edits are
@@ -479,7 +589,7 @@ versioning. Forge's unit is the seed file and its generation.
 
 **Priority.** P3.
 
-### 11. Scheduled triggers that file and enqueue, never dispatch
+### 12. Scheduled triggers that file and enqueue, never dispatch
 
 **Pattern.** Paperclip's routines materialize a schedule, webhook or API
 trigger into an ordinary issue (`server/src/services/routines.ts:1712-2050,3175-3294`).
@@ -502,8 +612,8 @@ directly.
 
 - A `triggers:` section in project config, with a cron expression, a ticket
   template path, a concurrency policy and a catch-up cap.
-- A `forge triggers tick` verb, run by the reconcile watch loop from
-  recommendation 2, that files and enqueues due tickets.
+- A `forge triggers tick` verb, run by the controller loop from
+  recommendation 1, that files and enqueues due tickets.
 - An `origin_fingerprint` column on `tickets` with a partial unique index on
   open tickets per trigger.
 
@@ -515,7 +625,7 @@ readiness assessment; the queue scan already refuses `readiness_ineligible`.
 
 **Priority.** P3.
 
-### 12. Answer operator asks from a phone with opaque expiring tokens
+### 13. Answer operator asks from a phone with opaque expiring tokens
 
 **Pattern.** Paperclip renders `ask_user_questions` and `request_confirmation`
 as native chat buttons behind opaque seven-day action tokens
@@ -530,7 +640,7 @@ or acknowledgement channel (lane D §6). The remote board already verifies
 identity at the transport and permits only `read | plan`
 (`dashboard/src/remote/identity.ts:1-44`).
 
-**Proposed shape.** Only after recommendation 7 exists, a notification for an
+**Proposed shape.** Only after recommendation 8 exists, a notification for an
 operator ask carries a link to the remote board. The link includes an opaque,
 single-use, short-lived token bound to the ask id and the expected answer
 domain. The remote board adds one capability, `answer_ask`, which shells out
@@ -545,7 +655,7 @@ no identity binding on SMS.
 
 **Priority.** P3.
 
-### 13. Policy evals: scenario × profile matrix with hard gates
+### 14. Policy evals: scenario × profile matrix with hard gates
 
 **Pattern.** Paperclip's eval kernel is 98 lines that run scenario × candidate
 cells: preflight, execute, score (`packages/paperclip-eval-kernel/src/index.ts:40-98`).
@@ -565,7 +675,7 @@ comparison rather than by production drift. Forge's per-test evidence parsing
 **Proposed shape.** A `forge eval run --scenarios <dir> --profiles a,b`. It
 dispatches each scenario through the normal pipeline per profile, scores each
 cell with hard gates (tests executed and passed, reds not failing) and then
-with usage from recommendation 1, and writes results to an `eval_cells` table.
+with usage from recommendation 2, and writes results to an `eval_cells` table.
 Size: large.
 
 **Risks.** This costs real money and time. It should wait until budgets
@@ -588,7 +698,7 @@ semantic operations. They include `create_task`, `hire_agent`,
 router, authorized by a run-scoped JWT (`doc/runner-api-tools.md`;
 `server/src/services/native-runtime/paperclip-runner-tool-authority.ts:81-88`).
 Forge containers never reach the host store (invariant 20), and all mutation
-goes through the Forge control plane (invariant 10). Recommendation 7 gets the
+goes through the Forge control plane (invariant 10). Recommendation 8 gets the
 useful half, structured requests from an agent, through the `result.json`
 contract without a callback channel.
 
@@ -633,21 +743,22 @@ canonical state.
 **Four approval mechanisms.** Approvals, execution stages, thread
 interactions and decisions overlap, with three notions of "changes requested"
 (lane A §4). Forge should keep gates plus the one ask type in recommendation
-7. The prior synthesis warns about exactly this vocabulary density.
+8. The prior synthesis warns about exactly this vocabulary density.
 
 **A writable audit log.** Paperclip lets board actors insert activity rows
 with a caller-chosen actor (`server/src/routes/activity.ts:92-100`). Forge's
 events table has one writer, and it should stay that way.
 
-**Zero-priced subscription usage.** See recommendation 1.
+**Zero-priced subscription usage.** See recommendation 2.
 
 ## Suggested First Tickets
 
-1. Record cost status, billing mode and reported USD in `model_calls`; show unpriced usage separately in `forge usage`
-2. Add a supervised `forge reconcile watch` sweep over active runs, with a launchd template and a `forge doctor` check
+1. Add a supervised `forge reconcile watch` loop over active runs and a `ready`-continuation drain, with a `forge notify milestone` on completion, a launchd template and a `forge doctor` check
+2. Record cost status, billing mode and reported USD in `model_calls`; show unpriced usage separately in `forge usage`
 3. Add spend guardrails from `model-policy.yml` as pre-spawn, queue-claim and campaign admission refusals, with Attention Inbox incidents
-4. Add a `cooling_down` queue scan reason after consecutive failed or launch_failed releases
+4. Add a unit-tier guard against raw status writes outside the store vocabulary accessors, and a `forge doctor` out-of-domain probe
 5. Prove with a test that a checked-in `.mcp.json` cannot load in agent containers, and pass `--strict-mcp-config` if it can
-6. Add a unit-tier guard against raw status writes outside the store vocabulary accessors, and a `forge doctor` out-of-domain probe
-7. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
-8. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
+6. Add a `cooling_down` queue scan reason after consecutive failed or launch_failed releases
+7. Add a pre-spawn `auth_routing_incompatible` refusal that compares `detectCredsMode()` against the resolved runtime seed's `auth_strategy`, and record the resolved creds mode in the control-plane receipt
+8. Correct the sudo description in `docs/repo-guide.md:69` and the other lane D doc/code drift items
+9. Add typed operator asks to the `result.json` contract, routed through `awaiting_gate` and the Attention Inbox
