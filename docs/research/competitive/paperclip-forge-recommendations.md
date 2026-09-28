@@ -177,6 +177,7 @@ refusal without parsing log text.
 `ADDITIVE_COLUMNS`:
 
 - `cost_usd_reported`
+- `cost_usd_estimated` (nullable)
 - `cost_status` (`reported | derived | unpriced`)
 - `billing_mode` (`metered | subscription | unknown`)
 
@@ -191,6 +192,17 @@ stamping `billing_mode` from `runtimeMeta.authStrategy` at the same point
 `runContainer` already resolves it (`src/v2/runNext.ts:5022`) is a lookup, not
 an inference, and it keeps the vocabulary closed to the three values above.
 
+`cost_usd_estimated` is informational only, never a spend figure. On a
+`subscription` run it holds the would-have-cost at API list rates: Claude
+Code's own `total_cost_usd` on OAuth already reports that estimate, and where
+a runtime's CLI does not, it is derived from a price table applied to the
+call's tokens. On a `metered` run it stays null, because `cost_usd_reported`
+(or a `derived` `cost_status`) already holds the real figure. It is never
+summed into spend and never evaluated by a budget policy; `forge usage`
+renders it in its own labeled column ("est. at API rates") so an operator can
+answer "what would this month have cost on the API" for subscription rigs
+without pretending it was spent.
+
 Each `log_format` parser fills `cost_usd_reported` / `cost_status` where the
 runtime reports cost. Add a `provider_failure_family` field to the task's
 failure evidence, populated from the same parsers, and keep its vocabulary
@@ -204,6 +216,21 @@ renderer.
 subscription run is `unpriced`, and its tokens stay the budget currency. Do
 not add Paperclip's second manual ingest path, which bypasses its own
 normalization (`server/src/routes/costs.ts:114-127`). Keep a single writer.
+The estimate must not become the enforcement metric by default: recommendation
+3's spend guardrails evaluate only `usd_reported`/`derived` on metered
+runtimes and `weighted_tokens` elsewhere, never `cost_usd_estimated`.
+
+Forge should not budget subscription runs in dollars, for the same reason
+recommendation 3 keeps them on `weighted_tokens`: a subscription seat has no
+marginal per-call cost, so a dollar ceiling there measures nothing real.
+Paperclip's own zero-cents path (`heartbeat.ts:5213`) hides this by forcing
+`subscription_included` usage to a cost of zero — a gap its own eval
+discipline calls "unknown, not free" (`doc/evals.md:109-165`), yet the budget
+path breaks that rule for subscription billing. The actual constraint on a
+subscription rig is the usage window, not a dollar figure, and treating
+`cost_usd_estimated` as spend would let two different currencies — a real
+metered dollar and a hypothetical subscription dollar — corrupt the same
+total.
 
 **Priority.** P1.
 
@@ -270,7 +297,10 @@ is metered, so a `usd_reported` ceiling is derivable from a price table the
 moment recommendation 2 lands `cost_status = derived`, even on a run where the
 CLI's own `total_cost_usd` is absent or not Bedrock-priced. On `oauth-volume`
 (subscription) runtimes there is no metered dollar figure at all; tokens stay
-the budget currency there, as they do today. So once recommendation 2 lands,
+the budget currency there, as they do today, though recommendation 2's
+`cost_usd_estimated` still reports what that usage would have cost at API
+rates, for operator visibility only, never for enforcement. So once
+recommendation 2 lands,
 `usd_reported` ceilings are enforceable on Bedrock hosts and `weighted_tokens`
 ceilings are enforceable everywhere — dollars are not a uniformly aspirational
 metric here, they are enforceable exactly where billing is metered.
