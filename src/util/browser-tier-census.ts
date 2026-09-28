@@ -163,11 +163,12 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // grid does not force a horizontal scroll on a 360px viewport, and its responsive
   // override collapses the row to a single column there (FG-402 RF-3).
   "fg402-attention-inbox-overflow.test.ts": 2,
-  // FG-819 adds `fg819-order-pinning` (4 tests): every store vocabulary kind travels through
+  // FG-819 adds `fg819-order-pinning` (5 tests): every store vocabulary kind travels through
   // the Home inbox route into a distinct real-browser badge (with an unknown future kind
   // retained under its neutral fallback), and the inbox and In-flight rows hold their order
-  // across re-ranked polls until the idle, tab-visibility, or manual-Refresh boundary.
-  "fg819-order-pinning.test.ts": 4,
+  // across re-ranked polls until the idle or tab-visibility boundary; manual Refresh re-sorts
+  // and adopts the freshly fetched order rather than the order already held.
+  "fg819-order-pinning.test.ts": 5,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,
