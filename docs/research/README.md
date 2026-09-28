@@ -16,6 +16,9 @@ or [`backlog/PLAN.md`](../../backlog/PLAN.md).
 - [JFrog Boost add-on experiment](jfrog-boost-addon-experiment-2026-08-04.md)
   — a non-production, operator-supplied evaluation plan for command-output
   compression without bundling Boost into Forge.
+- [Dashboard information architecture](dashboard-information-architecture.md)
+  — FG-818 nav groups, URL scheme, badge policy and mobile arrangement for
+  the left-column layout (FG-820) and cockpit (FG-821).
 
 Durable research belongs here. `notes/` is host-local working material and should
 not be cited as the only copy of project evidence.
