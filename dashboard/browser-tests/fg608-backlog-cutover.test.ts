@@ -204,7 +204,7 @@ async function newPage(): Promise<Page> {
 async function openBacklog(page: Page, project: "cutover" | "shadow" | "virgin"): Promise<void> {
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: `Open all ${labels[project]} checkouts` }).click();
-  await page.getByRole("button", { name: "backlog" }).click();
+  await page.getByRole("link", { name: "Backlog", exact: true }).click();
   await page.locator(".backlog-view").waitFor();
 }
 

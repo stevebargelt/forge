@@ -25,11 +25,13 @@ function attentionItemKinds(): string[] {
   return [...ATTENTION_ITEM_KINDS];
 }
 
-/** How many independently-read sources attentionInbox() actually composes, scraped from
+/** How many independently-read sources the inbox derivation actually composes, scraped from
  *  its composeInbox([...]) call so the documented count tracks the source rather than a
  *  copy that drifts (the exact RF-4 defect: the doc said three after a fourth was added). */
 function composedSourceCount(): number {
-  const src = read("dashboard/src/queries.ts");
+  // FG-820: the derivation moved to core (deriveAttentionInbox), which the dashboard's
+  // attentionInbox() and `forge attention list` both call.
+  const src = read("src/v2/attention-inbox.ts");
   const call = src.match(/return composeInbox\(\[([\s\S]*?)\],/);
   assert.ok(call, "attentionInbox must compose its sources via composeInbox([...])");
   return call![1]!.split(",").map((s) => s.trim()).filter(Boolean).length;

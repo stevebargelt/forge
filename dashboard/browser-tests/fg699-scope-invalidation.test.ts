@@ -151,7 +151,7 @@ after(async () => {
 async function openScopedOps(page: Page): Promise<void> {
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Atlas checkouts" }).click();
-  await page.getByRole("button", { name: "ops" }).click();
+  await page.getByRole("link", { name: "Ops", exact: true }).click();
   await page.getByRole("heading", { name: "Average agent runtime over time" }).waitFor();
 }
 
@@ -223,7 +223,7 @@ test("A slow leaving-scope failure that lands after the scope switch cannot repa
   delayByScope.set(`key:${PROJECT_KEY}`, 3_000);
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Atlas checkouts" }).click();
-  await page.getByRole("button", { name: "ops" }).click();
+  await page.getByRole("link", { name: "Ops", exact: true }).click();
   await page.getByRole("heading", { name: "Average agent runtime over time" }).waitFor();
 
   // Loading, not error: the leaving read has NOT resolved, so it is genuinely
@@ -268,7 +268,7 @@ test("Switching checkout scope clears the leaving scope's on-screen error (check
   statusByScope.set(`key:${PROJECT_KEY}`, 500);
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Atlas checkouts" }).click();
-  await page.getByRole("button", { name: "ops" }).click();
+  await page.getByRole("link", { name: "Ops", exact: true }).click();
   await page.getByRole("heading", { name: "Average agent runtime over time" }).waitFor();
 
   const error = page.locator(".runtime-error");
@@ -300,9 +300,9 @@ test("Choosing a project from Projects invalidates the retained COMPLETED-RUNS p
   assert.equal(await page.locator(".runs-total-num").innerText(), "9");
 
   delayByScope.set(`key:${PROJECT_KEY}`, 5_000);
-  await page.getByRole("button", { name: "projects" }).click();
+  await page.getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("button", { name: "Open all Atlas checkouts" }).click();
-  await page.getByRole("button", { name: "ops" }).click();
+  await page.getByRole("link", { name: "Ops", exact: true }).click();
 
   const loading = page.locator(".runtime-loading");
   await loading.waitFor();
@@ -348,7 +348,7 @@ test("Clearing the project filter drops DURATION data and clears the old scope's
   await errorPage.goto(`${baseUrl}/#projects`);
   await errorPage.locator(".project-dirs-toggle").click();
   await errorPage.getByRole("button", { name: "Open Atlas checkout main" }).click();
-  await errorPage.getByRole("button", { name: "ops" }).click();
+  await errorPage.getByRole("link", { name: "Ops", exact: true }).click();
   const error = errorPage.locator(".runtime-error");
   await error.waitFor();
   assert.match(await error.innerText(), /HTTP 500/);

@@ -170,6 +170,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // and adopts the freshly fetched order rather than the order already held.
   // FG-692 (FG-819 RF-1) adds keyboard focus tabbing into the inbox as reader activity (5 -> 6).
   "fg819-order-pinning.test.ts": 6,
+  // FG-820 adds `fg820-left-column-nav` (7 tests): the left column that replaced the tab
+  // strip — the five groups and their link items with Skip to content first; aria-current on
+  // the current item and on an object page's parent; a reloaded deep link restoring view and
+  // scope (sent to the server as ?projectKey/?projectDir, rewritten in place on change);
+  // alias/group-shaped/unknown hashes canonicalized; the Home badge read from the server's
+  // `counts` (danger, "?", partial, hidden-when-empty, 99+); and the 400px bottom bar with a
+  // focus-trapped drawer that Escape closes. Its fixture server listens on port 18824.
+  "fg820-left-column-nav.test.ts": 7,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

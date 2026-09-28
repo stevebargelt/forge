@@ -5,6 +5,7 @@ import { registerNext } from "./commands/next.js";
 import { registerGate } from "./commands/gate.js";
 import { registerShow } from "./commands/show.js";
 import { registerStatus } from "./commands/status.js";
+import { registerAttention } from "./commands/attention.js";
 import { registerAuth } from "./commands/auth.js";
 import { registerAuthProfile } from "./commands/auth-profile.js";
 import { registerAdvise } from "./commands/advise.js";
@@ -88,6 +89,7 @@ export function buildProgram(): Command {
   registerGate(program);
   registerShow(program);
   registerStatus(program);
+  registerAttention(program);
   registerAuth(program);
   registerAuthProfile(program);
   registerAdvise(program);

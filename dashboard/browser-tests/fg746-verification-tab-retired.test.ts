@@ -74,13 +74,13 @@ after(async () => {
 async function open(hash = ""): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
   await page.goto(`${baseUrl}/${hash}`);
-  await page.locator("nav.view-tabs").waitFor();
+  await page.locator(".nav-column nav.nav-groups").waitFor();
   return page;
 }
 
 test("FG-746 (AC1): the primary navigation has no `verification` tab", async () => {
   const page = await open();
-  const tabTexts = await page.locator("nav.view-tabs button.tab").allInnerTexts();
+  const tabTexts = await page.locator(".nav-column a.nav-item .nav-item-label").allInnerTexts();
   assert.ok(tabTexts.length > 0, "the nav rendered its tabs");
   assert.ok(
     !tabTexts.some((t) => t.trim().toLowerCase() === "verification"),

@@ -101,7 +101,7 @@ after(async () => {
   await new Promise<void>((closed) => server?.close(() => closed()));
 });
 
-const controlPlaneTab = (page: Page) => page.getByRole("button", { name: "control plane", exact: true });
+const controlPlaneTab = (page: Page) => page.getByRole("link", { name: "Config", exact: true });
 
 function checkoutScopeButton(page: Page, name: string) {
   return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(`^${name}$`) });

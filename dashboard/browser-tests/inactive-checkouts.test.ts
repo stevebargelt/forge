@@ -137,7 +137,7 @@ test("Checkout scope controls omit stale paths and label the missing one", async
   await page.goto(`${BASE}/#projects`);
   // Open the missing-but-active project (label 'Unknown repository') to scope by it.
   await page.getByRole("button", { name: /Open all Unknown repository checkouts/ }).click();
-  await page.getByRole("button", { name: "activity" }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
 
   const scope = page.locator(".project-scope-options");
   await scope.waitFor();
@@ -158,7 +158,7 @@ test("Forge scope selector — the project that HAD a stale scratchpad — offer
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: /Open all Forge checkouts/ }).click();
-  await page.getByRole("button", { name: "activity" }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
 
   const scope = page.locator(".project-scope-options");
   await scope.waitFor();

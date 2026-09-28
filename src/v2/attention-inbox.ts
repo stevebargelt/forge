@@ -1,0 +1,364 @@
+// FG-402: the Human Attention Inbox — CONTRACT + PURE HELPERS + THE ONE DERIVATION.
+//
+// This module is the SOURCE-AGNOSTIC external contract for the inbox. It defines the `AttentionItem` shape the dashboard and any future operator
+// surface (Stream Deck) consume, the `InboxEnvelope` that wraps them, and the pure
+// compose/sort/dedupe helpers, and (FG-820) `deriveAttentionInbox` — the single derivation
+// both the dashboard's GET /api/attention-inbox and `forge attention list` serve. It has NO
+// database access of its own (store reads arrive as injected readers) and imports no source enum:
+// internal source types (FailureKind, OperatorWaitSource, review verdicts) are mapped
+// INTO the `AttentionItemKind` union by the per-source mappers, never surfaced raw.
+// That one-way mapping is the invariant that lets an internal refactor rename a
+// FailureKind without breaking a client (protected_invariant #3).
+
+import type { KanbanConflict } from "../store/kanban-projection.js";
+import { waitAttentionItems, type WaitSources } from "./attention-inbox-waits.js";
+import type { SourceResult } from "./attention-inbox-readiness.js";
+import {
+  kanbanConflictsToAttentionItems,
+  staleVerificationAttentionItems,
+  type StaleVerificationRow,
+} from "./attention-inbox-sources.js";
+
+/** The item kinds the inbox surfaces. Deliberately a CLOSED, source-agnostic
+ *  vocabulary — the operator-facing categories from the ticket's Acceptance Criteria,
+ *  never the internal enum a source happens to record. A runtime array so the client's
+ *  render table can be checked against it (attention-inbox-render.test.ts). */
+export const ATTENTION_ITEM_KINDS = [
+  "waiting_gate",
+  "campaign_paused",
+  "blocked_by_red_or_reviewer",
+  "missing_acceptance_or_readiness",
+  "auth_setup",
+  "merge_conflict",
+  "integration_blocked_park",
+  // FG-746: a host/CI verification start that has gone STALE under still-active,
+  // nonterminal work — its finish event never arrived and the attempt is past
+  // its staleness bound, so a human must decide whether to re-run or clear it.
+  // A terminal-parent attempt (the FG-667 case) never reaches this kind: it is
+  // dropped by the shared terminal-authority predicate before classification.
+  "stale_verification",
+  // FG-785: an external kanban card was moved/deleted/edited on the provider board
+  // outside Forge, so the external state and Forge's one-way projection have diverged.
+  // The divergence is NEVER applied to Forge (outbound-only): it is recorded as an OPEN
+  // `kanban_conflicts` store row and surfaced here until an authorized host-operator
+  // resolution closes that row. The inbox holds no resolution state of its own — a
+  // resolved row simply stops producing this item on the next projection.
+  "kanban_conflict",
+] as const;
+export type AttentionItemKind = (typeof ATTENTION_ITEM_KINDS)[number];
+
+/** Known priority, or null when the source recorded none. Kept as a small named
+ *  vocabulary rather than a raw ordinal so a client renders a label, not a number. */
+export type AttentionSeverity = "high" | "medium" | "low";
+
+/** The inbox is an OPEN-ONLY projection (protected_invariant #2): every item it
+ *  carries is live/actionable now, derived from its source's current state. There is
+ *  no stored resolution flag — a resolved source simply stops producing its item — so
+ *  the only openState the contract needs is `open`. The field exists so the shape can
+ *  grow a `stale` reading later without a breaking change. */
+export type AttentionOpenState = "open";
+
+/** Every association id an item can carry, so a client can link to the run, task,
+ *  ticket, campaign, or control-plane surface without re-deriving anything. Every
+ *  field is nullable: an item links to exactly the surfaces its source knows about. */
+export type AttentionLinks = {
+  runId: string | null;
+  taskId: string | null;
+  ticketId: string | null;
+  campaignId: string | null;
+  itemId: string | null;
+  projectDir: string | null;
+  projectLabel: string | null;
+};
+
+export type AttentionItem = {
+  /** Stable identity for rendering (the row key) AND the default dedup key. Never
+   *  fabricated — built from the underlying source id (waitKey / task id / review id). */
+  id: string;
+  kind: AttentionItemKind;
+  severity: AttentionSeverity | null;
+  /** When the attention condition began (ISO), or null when the source recorded none.
+   *  Drives the age string; never fabricated from "now". */
+  startedAt: string | null;
+  /** WHY this needs a human, in the operator's terms. */
+  reason: string;
+  /** The named next action the operator must take. */
+  requestedAction: string;
+  openState: AttentionOpenState;
+  /** The kind of source object this was derived from — `task`, `campaign_item`,
+   *  `review`, `readiness`, `gate` — carried so a reader sees the provenance without
+   *  the internal enum leaking. */
+  source: string;
+  links: AttentionLinks;
+};
+
+export type InboxScope = {
+  runId: string | null;
+  projectDirs: string[] | null;
+};
+
+export type InboxEnvelope = {
+  generatedAt: string;
+  scope: InboxScope;
+  items: AttentionItem[];
+  /** True ONLY when every source read succeeded AND there are no open items — the calm
+   *  "no action needed" state. A zero-item read with ANY degraded source is NOT empty:
+   *  `empty` stays false and `degraded` names the failed source(s), so no consumer reads
+   *  a partial-read failure as a healthy empty inbox. A TOTAL failure never reaches this
+   *  envelope at all (the route returns an {error} body the client resolves to
+   *  unavailable). */
+  empty: boolean;
+  /** Per-source read failures absorbed while still returning the rest — a source that
+   *  a store predating its tables cannot answer names itself here rather than taking the
+   *  whole inbox down. A total failure is the route's {error} body, not this list. */
+  degraded: string[];
+  /** FG-820: server-computed totals over `items` (after dedup), so no client counts for
+   *  itself. `open` is every item; `high` is the items with severity "high". On a degraded
+   *  envelope they count only what the healthy sources returned — read them with
+   *  `degraded`, never as a complete total. */
+  counts: InboxCounts;
+};
+
+export type InboxCounts = { open: number; high: number };
+
+export function inboxCounts(items: readonly AttentionItem[]): InboxCounts {
+  return { open: items.length, high: items.filter((item) => item.severity === "high").length };
+}
+
+// ─── Severity ─────────────────────────────────────────────────────────────────
+
+const SEVERITY_RANK: Record<AttentionSeverity, number> = { high: 0, medium: 1, low: 2 };
+
+/** A sortable ordinal for a severity. A KNOWN severity ranks ahead of an unknown one
+ *  (null → a rank past every known value), so "severity known first" falls out of a
+ *  single numeric compare. */
+export function severityRank(severity: AttentionSeverity | null): number {
+  return severity === null ? SEVERITY_RANK.low + 1 : SEVERITY_RANK[severity];
+}
+
+// ─── Kind precedence (dedup tie-break) ──────────────────────────────────────────
+//
+// When two items collapse onto one underlying blocker, the more actionable/severe
+// kind wins. Lower index = higher precedence. A hard block (a red/reviewer wall, a
+// merge conflict, a park, an auth wall) outranks a readiness gap, which outranks the
+// softer "waiting on a decision" waits.
+const KIND_PRECEDENCE: AttentionItemKind[] = [
+  "blocked_by_red_or_reviewer",
+  "merge_conflict",
+  "integration_blocked_park",
+  "auth_setup",
+  "stale_verification",
+  // FG-785: an external-board divergence needing an authorized resolution. It never blocks
+  // a Forge lifecycle gate, so it ranks below the hard blocks and the stale-verification
+  // recovery, but above the softer readiness/decision waits.
+  "kanban_conflict",
+  "missing_acceptance_or_readiness",
+  "campaign_paused",
+  "waiting_gate",
+];
+
+export function kindPrecedence(kind: AttentionItemKind): number {
+  const idx = KIND_PRECEDENCE.indexOf(kind);
+  // An unknown kind sorts LAST rather than throwing — the contract stays forward
+  // tolerant of a kind a newer producer adds.
+  return idx === -1 ? KIND_PRECEDENCE.length : idx;
+}
+
+// ─── Sort ───────────────────────────────────────────────────────────────────────
+
+function startedAtMs(item: AttentionItem): number {
+  if (item.startedAt === null) return Number.POSITIVE_INFINITY; // unknown age sorts last
+  const ms = Date.parse(item.startedAt);
+  return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+}
+
+/** Severity-known-first, then by severity ordinal, then age-descending (oldest first).
+ *  A pure, total order: ties break on the stable id so the sort is deterministic. */
+export function sortAttentionItems(items: AttentionItem[]): AttentionItem[] {
+  return [...items].sort((a, b) => {
+    const bySeverity = severityRank(a.severity) - severityRank(b.severity);
+    if (bySeverity !== 0) return bySeverity;
+    const byAge = startedAtMs(a) - startedAtMs(b); // ascending ms = oldest first = age-desc
+    if (byAge !== 0) return byAge;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+// ─── Dedup ────────────────────────────────────────────────────────────────────
+//
+// One underlying blocker must surface as ONE row. A run carrying two concurrent
+// attention reasons — say a red-blocked task AND an open reviewer finding on the same
+// run — collapses to a single item by kind precedence. Items sharing no run collapse
+// only when they share their own id, so two distinct tickets' readiness gaps stay two
+// rows. This extends FG-734's waitKey convention: the wait's identity is its id, and a
+// run-scoped item's collapse key is its run.
+
+function dedupeKey(item: AttentionItem): string {
+  return item.links.runId !== null && item.links.runId !== "" ? `run:${item.links.runId}` : `id:${item.id}`;
+}
+
+/** Collapse items that share an underlying blocker, keeping the highest-precedence
+ *  kind (then the most severe, then the earliest id) for each. Pure and order-stable. */
+export function dedupeAttentionItems(items: AttentionItem[]): AttentionItem[] {
+  const winner = new Map<string, AttentionItem>();
+  for (const item of items) {
+    const key = dedupeKey(item);
+    const current = winner.get(key);
+    if (current === undefined) {
+      winner.set(key, item);
+      continue;
+    }
+    winner.set(key, preferItem(current, item));
+  }
+  return [...winner.values()];
+}
+
+function preferItem(a: AttentionItem, b: AttentionItem): AttentionItem {
+  const byKind = kindPrecedence(a.kind) - kindPrecedence(b.kind);
+  if (byKind !== 0) return byKind < 0 ? a : b;
+  const bySeverity = severityRank(a.severity) - severityRank(b.severity);
+  if (bySeverity !== 0) return bySeverity < 0 ? a : b;
+  return a.id.localeCompare(b.id) <= 0 ? a : b;
+}
+
+// ─── Compose ────────────────────────────────────────────────────────────────────
+
+export type ComposeMeta = {
+  generatedAt: string;
+  scope: InboxScope;
+  degraded?: string[];
+};
+
+/** The ONE assembly point: flatten every source's items, collapse duplicates, sort,
+ *  and wrap in the stable envelope. Pure — every input is already-derived data. */
+export function composeInbox(sources: AttentionItem[][], meta: ComposeMeta): InboxEnvelope {
+  const flattened = sources.flat();
+  const items = sortAttentionItems(dedupeAttentionItems(flattened));
+  const degraded = meta.degraded ?? [];
+  return {
+    generatedAt: meta.generatedAt,
+    scope: meta.scope,
+    items,
+    // `empty` is the operator-facing "no action needed" claim, so it is TRUE only when
+    // EVERY source read succeeded (no degraded markers) AND nothing was found. A zero-item
+    // read with any degraded source keeps `empty: false` and carries the markers, so a
+    // non-dashboard consumer (forge status, Stream Deck) never reads a failed read as a
+    // calm empty inbox (RF-3 / invariant #4).
+    empty: items.length === 0 && degraded.length === 0,
+    degraded,
+    counts: inboxCounts(items),
+  };
+}
+
+// ─── Derive (FG-820) ─────────────────────────────────────────────────────────────
+//
+// A source-agnostic, OPEN-ONLY projection over persisted Forge state. Each reader is a
+// store read the host surface supplies already bound to its resolved project scope; the
+// waits reader is the SAME `deriveCurrentActivity` output `forge status` renders, so the
+// inbox cannot drift from Current activity. Every reader failure is absorbed into
+// `degraded` so a store that predates one source's tables still returns the rest rather
+// than a blank/500. Pure persisted-state read: no git/gh/tmux/docker/CLI subprocess, no
+// mutation (protected_invariant #1).
+
+export type AttentionInboxReaders = {
+  operatorWaits: () => WaitSources;
+  failures: () => AttentionItem[];
+  readiness: () => SourceResult;
+  staleVerifications: () => StaleVerificationRow[];
+  openKanbanConflicts: () => readonly KanbanConflict[];
+};
+
+/** `scope.runId` non-null narrows the inbox to items linked to that run. */
+export function deriveAttentionInbox(readers: AttentionInboxReaders, meta: { generatedAt: string; scope: InboxScope }): InboxEnvelope {
+  const degraded: string[] = [];
+
+  let waitItems: AttentionItem[] = [];
+  try {
+    waitItems = waitAttentionItems(readers.operatorWaits());
+  } catch (err) {
+    degraded.push("waits");
+    console.error("attentionInbox: deriving operator/CI waits failed:", err);
+  }
+
+  let failureItems: AttentionItem[] = [];
+  try {
+    failureItems = readers.failures();
+  } catch (err) {
+    degraded.push("failures");
+    console.error("attentionInbox: reading failure/park items failed:", err);
+  }
+
+  let readinessItems: AttentionItem[] = [];
+  try {
+    const readiness = readers.readiness();
+    readinessItems = readiness.items;
+    // A per-source read failure names itself (e.g. "readiness", "review") rather than
+    // throwing; surface each marker so a partial failure renders as degraded, never as a
+    // calm empty inbox.
+    for (const marker of readiness.degraded) if (!degraded.includes(marker)) degraded.push(marker);
+  } catch (err) {
+    degraded.push("readiness");
+    console.error("attentionInbox: reading readiness/review items failed:", err);
+  }
+
+  let verificationItems: AttentionItem[] = [];
+  try {
+    verificationItems = staleVerificationAttentionItems(readers.staleVerifications());
+  } catch (err) {
+    degraded.push("verification");
+    console.error("attentionInbox: reading stale-verification items failed:", err);
+  }
+
+  // FG-785: open external-kanban conflicts. A store predating the kanban_conflicts table
+  // (or any other read failure) names itself in `degraded` rather than taking the inbox
+  // down — a partial read never renders as a calm empty inbox.
+  let kanbanConflictItems: AttentionItem[] = [];
+  try {
+    kanbanConflictItems = kanbanConflictsToAttentionItems(readers.openKanbanConflicts());
+  } catch (err) {
+    degraded.push("kanban_conflicts");
+    console.error("attentionInbox: reading kanban-conflict items failed:", err);
+  }
+
+  const runId = meta.scope.runId;
+  const onRun = (items: AttentionItem[]) => (runId === null ? items : items.filter((item) => item.links.runId === runId));
+  return composeInbox([onRun(waitItems), onRun(failureItems), onRun(readinessItems), onRun(verificationItems), onRun(kanbanConflictItems)], {
+    generatedAt: meta.generatedAt,
+    scope: meta.scope,
+    degraded,
+  });
+}
+
+// ─── Human render (FG-820: `forge attention list`) ───────────────────────────────
+
+const RENDER_TEXT_MAX = 72;
+
+function clampCell(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+/** A compact table (kind, severity, reason, requested action) with a one-line totals
+ *  footer read from the envelope's server-computed `counts`. */
+export function renderAttentionInboxLines(envelope: InboxEnvelope): string[] {
+  const lines: string[] = [];
+  const degradedNote = envelope.degraded.length > 0 ? ` · degraded: ${envelope.degraded.join(", ")} (partial read)` : "";
+  if (envelope.items.length === 0) {
+    lines.push(envelope.empty ? "No attention items — no action needed." : "No attention items read.");
+  } else {
+    const rows = envelope.items.map((item) => [
+      item.kind,
+      item.severity ?? "-",
+      clampCell(item.reason, RENDER_TEXT_MAX),
+      clampCell(item.requestedAction, RENDER_TEXT_MAX),
+    ]);
+    const header = ["KIND", "SEVERITY", "REASON", "REQUESTED ACTION"];
+    const widths = header.map((h, col) => Math.max(h.length, ...rows.map((row) => row[col]!.length)));
+    const format = (row: string[]) => row.map((cell, col) => (col === row.length - 1 ? cell : cell.padEnd(widths[col]!))).join("  ");
+    lines.push(format(header));
+    for (const row of rows) lines.push(format(row));
+  }
+  lines.push("");
+  lines.push(`${envelope.counts.open} open · ${envelope.counts.high} high${degradedNote}`);
+  return lines;
+}

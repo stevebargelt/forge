@@ -20,7 +20,9 @@ const html = htm.bind(h);
 
 // `orderedItems`/`listProps`/`onRefresh` are supplied by PinnedAttentionInboxSection
 // (FG-819 order pinning); without them the section renders the server order as-is.
-export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null }) {
+// `hrefFor` lets the host carry its current scope onto a row link (FG-820); the default
+// is the link as the render module decided it.
+export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null, hrefFor = (hash) => hash }) {
   const view = inboxView(load);
   const items = orderedItems ?? view.items;
   return html`
@@ -43,7 +45,7 @@ export function AttentionInboxSection({ load, now, onRetry, orderedItems = null,
                   ? html`<div class="inbox-degraded" role="status">Some sources could not be read: ${view.degraded.join(", ")}.</div>`
                   : null}
                 <div class="inbox-list" ...${listProps}>
-                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} />`)}
+                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} hrefFor=${hrefFor} />`)}
                 </div>
               `}
     </section>
@@ -52,7 +54,7 @@ export function AttentionInboxSection({ load, now, onRetry, orderedItems = null,
 
 /** The Home inbox: the section above, with its rows pinned to the order first shown until
  *  an idle, tab-visibility, or manual-refresh boundary (FG-819). */
-export function PinnedAttentionInboxSection({ load, now, onRetry }) {
+export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor }) {
   const view = inboxView(load);
   const pin = usePinnedOrder(view.phase === "ready" ? view.items : null, (summary) => summary.id);
   const refresh = () => pin.refresh(onRetry);
@@ -63,12 +65,13 @@ export function PinnedAttentionInboxSection({ load, now, onRetry }) {
     orderedItems=${pin.items}
     listProps=${pin.activityProps}
     onRefresh=${refresh}
+    hrefFor=${hrefFor}
   />`;
 }
 
 // One row: the kind badge, the severity, the identity (ticket/project), the reason and
 // requested action, the age, and the link to the relevant surface.
-function InboxItemRow({ summary, now }) {
+function InboxItemRow({ summary, now, hrefFor }) {
   return html`
     <div class="item inbox-row">
       <div class="inbox-row-badges">
@@ -89,7 +92,7 @@ function InboxItemRow({ summary, now }) {
         <div class="muted mono inbox-age" title="time since this attention item began">
           ${inboxItemAge({ startedAt: summary.startedAt }, now)}
         </div>
-        ${summary.link ? html`<a class="inbox-link" href=${summary.link.hash}>${summary.link.label}</a>` : null}
+        ${summary.link ? html`<a class="inbox-link" href=${hrefFor(summary.link.hash)}>${summary.link.label}</a>` : null}
       </div>
     </div>
   `;

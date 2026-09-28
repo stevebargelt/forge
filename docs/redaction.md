@@ -40,7 +40,7 @@ config references, not credential material.
 
 ## Control-plane config graph (FG-349)
 
-`forge config graph [--json]`, the dashboard's control-plane tab, and its
+`forge config graph [--json]`, the dashboard's Config view, and its
 `/api/config-graph` read path expose the same kind of provenance as the
 `controlPlane` manifest block above, but live (EFFECTIVE) rather than
 dispatch-time (RECORDED) — see `docs/concepts.md` and `docs/invariants.md` for
@@ -141,7 +141,7 @@ byte-intact.
 
 The dashboard's `/api/attention-inbox` route (`docs/concepts.md` → Attention inbox)
 builds its failure/park items from `retryPolicy`'s curated advice strings
-(`dashboard/src/attention-inbox-failures.ts`). Only the `auth_setup` kind is
+(`src/v2/attention-inbox-failures.ts`). Only the `auth_setup` kind is
 credential-adjacent — it is emitted for a task whose recorded `failure_kind` is
 `auth_missing`/`auth_expired`/`auth_injection_failed` — so ONLY its `reason` and
 `requestedAction` text is passed through the SAME `redactSecrets`
@@ -154,8 +154,9 @@ text is FG-734's own already-safe copy, neither of which is free-form command ou
 so neither is routed through redaction. The `kanban_conflict` kind (FG-785) is the
 exception: its `reason` embeds a bounded digest of both the Forge and external
 versions of a drifted card, and the external side is untrusted provider content, so
-`kanbanConflictsToAttentionItems` (`dashboard/src/queries.ts`) passes it through the
-SAME `redactRemoteFreeText` denylist the Remote Board free text below uses — not
+`kanbanConflictsToAttentionItems` (`src/v2/attention-inbox-sources.ts`, re-exported by
+`dashboard/src/queries.ts`) passes it through the
+SAME `redactRemoteFreeText` denylist (`src/v2/remote-free-text-redaction.ts`) the Remote Board free text below uses — not
 `redactSecrets` — before the item reaches the envelope. `requestedAction` for this
 kind carries only the opaque conflict id and static text, so it needs no redaction.
 

@@ -122,7 +122,7 @@ test("a deleted checkout's task remains project-scoped and carries its real proj
     response.url().includes(`/api/feed?projectKey=${encodeURIComponent(project.key)}`) && response.status() === 200,
   );
   await page.getByRole("button", { name: `Open all ${project.label} checkouts` }).click();
-  await page.getByRole("button", { name: "activity" }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
   const feed = await (await feedResponse).json() as Array<{ runId: string; projectLabel: string | null; projectColor: string | null }>;
   const deleted = feed.find((entry) => entry.runId === "run-fg663-deleted");
 

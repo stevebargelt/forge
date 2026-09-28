@@ -107,21 +107,6 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .row { display: flex; gap: 12px; align-items: baseline; }
 
-header.topbar {
-  display: flex; justify-content: space-between; align-items: center;
-  padding-bottom: 16px; border-bottom: 1px solid var(--border);
-}
-header.topbar h1 { display: flex; align-items: center; flex: 1 1 auto; gap: 10px; min-width: 0; }
-header.topbar > .muted { flex: 0 0 auto; margin-left: 12px; }
-header.topbar .brand-mark {
-  width: 32px; height: 32px;
-  flex: 0 0 auto;
-}
-header.topbar .status-dot {
-  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--ok); margin-right: 6px;
-  animation: pulse 2s ease-in-out infinite;
-}
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
 
 section.in-flight {
@@ -381,30 +366,102 @@ section.feed { margin-top: 24px; }
 .md a { color: var(--accent); }
 .md strong { color: var(--fg); }
 
-/* #154: top-level view tabs (activity / projects). */
-nav.view-tabs {
-  display: flex;
-  gap: 4px;
-  min-width: 0;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
+/* FG-820: the left-column navigation. Full column at >=720px; below it a fixed
+ * five-slot bottom bar and a drawer (a modal dialog) holding the same column. 720 is the
+ * nav breakpoint; the 520/600/640 rules elsewhere are content breakpoints. */
+.app-shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 100vh;
 }
-nav.view-tabs::-webkit-scrollbar { display: none; }
-nav.view-tabs .tab {
-  background: transparent;
-  border: none;
-  color: var(--fg-dim);
-  font: inherit;
-  font-size: 18px;
-  font-weight: 600;
-  padding: 4px 10px;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: color 0.1s, background 0.1s;
+.app-shell > .app { min-width: 0; width: 100%; }
+.app:focus { outline: none; }
+.app:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.skip-link {
+  position: absolute; left: 8px; top: -48px; z-index: 60;
+  background: var(--bg-elev-2); color: var(--fg); border: 1px solid var(--accent);
+  border-radius: 4px; padding: 6px 10px; text-decoration: none;
 }
-nav.view-tabs .tab:hover { color: var(--fg); background: var(--bg-elev); }
-nav.view-tabs .tab-active { color: var(--fg); }
+.skip-link:focus { top: 8px; }
+.nav-column {
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 20px 14px 16px;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+}
+.nav-brand { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; }
+.nav-brand .brand-mark { width: 28px; height: 28px; }
+.nav-scope { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.nav-scope-label { color: var(--fg-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+.nav-scope-select {
+  width: 100%; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 4px; font: inherit; font-size: 13px; padding: 5px 6px;
+}
+.nav-scope .clear-filter { align-self: flex-start; }
+.nav-groups { display: flex; flex-direction: column; gap: 14px; }
+.nav-group-heading { font-size: 10px; color: var(--fg-faint); margin: 0 0 4px 8px; }
+.nav-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.nav-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 8px; border-radius: 4px; color: var(--fg-dim); text-decoration: none; font-size: 14px;
+}
+.nav-item:hover { color: var(--fg); background: var(--bg-elev); }
+.nav-item-current { color: var(--fg); background: var(--bg-elev-2); box-shadow: inset 2px 0 0 var(--accent); }
+.nav-item:focus-visible, .bottom-bar-item:focus-visible, .skip-link:focus-visible,
+.nav-drawer-close:focus-visible, .nav-scope-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.nav-clock { margin-top: auto; font-size: 11px; padding-left: 8px; }
+.nav-badge {
+  display: inline-flex; align-items: center; min-width: 20px; justify-content: center;
+  padding: 0 6px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 18px;
+  background: rgba(122, 159, 255, 0.18); color: var(--accent);
+}
+.nav-badge-danger { background: rgba(248, 113, 113, 0.22); color: var(--err); }
+.nav-badge-unknown { background: rgba(154, 154, 163, 0.18); color: var(--fg-dim); }
+.nav-badge-mark { margin-left: 1px; }
+.nav-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.page-head { display: flex; align-items: baseline; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.page-kicker { color: var(--fg-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.route-notice { margin-top: 16px; }
+.placeholder-view a { color: var(--accent); }
+.mobile-head, .bottom-bar { display: none; }
+.nav-drawer-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 70; }
+.nav-drawer {
+  position: fixed; top: 0; bottom: 0; left: 0; z-index: 71;
+  width: min(300px, 86vw); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 14px 14px calc(16px + env(safe-area-inset-bottom));
+  background: var(--bg); border-right: 1px solid var(--border);
+}
+.nav-drawer-head { display: flex; align-items: center; justify-content: space-between; }
+.nav-drawer-close {
+  background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
+  border-radius: 4px; font: inherit; font-size: 16px; line-height: 1; padding: 4px 9px; cursor: pointer;
+}
+@media (max-width: 719.98px) {
+  .app-shell { display: block; }
+  .nav-column { display: none; }
+  .mobile-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px 0; font-size: 12px;
+  }
+  .app { padding-bottom: calc(96px + 56px + env(safe-area-inset-bottom)); }
+  .bottom-bar {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    padding: 0 max(4px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(4px, env(safe-area-inset-left));
+    background: var(--bg-elev); border-top: 1px solid var(--border);
+  }
+  .bottom-bar-item {
+    flex: 1 1 0; min-width: 0; min-height: 52px;
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+    background: transparent; border: none; color: var(--fg-dim); font: inherit; font-size: 12px;
+    text-decoration: none; cursor: pointer;
+  }
+  .bottom-bar-item-current { color: var(--fg); box-shadow: inset 0 2px 0 var(--accent); }
+}
 
 /* #154: filter banner shown when activity feed is scoped to one project. */
 .filter-banner {

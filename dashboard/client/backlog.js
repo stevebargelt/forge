@@ -4,7 +4,7 @@
 // `forge backlog list` via /api/backlog. No mutation paths.
 
 import { h } from "preact";
-import { useState, useMemo } from "preact/hooks";
+import { useState, useMemo, useEffect, useRef } from "preact/hooks";
 import htm from "htm";
 import { md } from "./renderers.js";
 import { backlogBoardState, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
@@ -23,12 +23,22 @@ function statusBadgeClass(status) {
   return "status-pending";
 }
 
-export function BacklogView({ data, projectFilter }) {
+// FG-820: `ticketId` comes from a #backlog/<ticketId> deep link (an inbox readiness row
+// links there); that ticket's detail opens once the backlog has loaded it.
+export function BacklogView({ data, projectFilter, ticketId = null }) {
   const [typeFilter, setTypeFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null);
   const [search, setSearch] = useState("");
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [selectedNote, setSelectedNote] = useState(null);
+  const openedFor = useRef(null);
+  useEffect(() => {
+    if (!ticketId || !data || openedFor.current === ticketId) return;
+    const ticket = (data.tickets || []).find((tk) => tk.id === ticketId);
+    if (!ticket) return;
+    openedFor.current = ticketId;
+    setSelectedTicket(ticket);
+  }, [ticketId, data]);
 
   if (!projectFilter) {
     return html`<div class="muted" style="margin-top: 20px;">Select a project to view its backlog.</div>`;

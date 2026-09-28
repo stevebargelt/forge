@@ -144,7 +144,7 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   await page.locator(".plan-service").first().waitFor();
   await page.locator("section.in-flight .item").first().waitFor();
 
-  assert.equal(await page.locator(".view-tabs .tab-active").innerText(), "home");
+  assert.equal(await page.locator('.nav-column a[aria-current="page"] .nav-item-label').innerText(), "Home");
   assert.equal(new URL(page.url()).hash, "");
   assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 1);
   assert.equal(await page.getByRole("heading", { name: "In flight" }).count(), 1);
@@ -168,7 +168,7 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   assert.equal(requestedApiPaths.includes("/api/usage/timeseries"), false, "Home must not fetch usage history");
   assert.equal(requestedApiPaths.includes("/api/usage/model-mix"), false, "Home must not fetch model mix");
 
-  await page.getByRole("button", { name: "activity" }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
   await page.getByRole("heading", { name: "Recent agent outputs" }).waitFor();
   assert.equal(new URL(page.url()).hash, "#activity");
   assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 0);
@@ -179,9 +179,9 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   assert.equal(await page.getByRole("heading", { name: "In flight" }).count(), 1);
   assert.equal(await page.locator("details.activity-diagnostics").getAttribute("open"), null);
 
-  await page.getByRole("button", { name: "home", exact: true }).click();
+  await page.getByRole("link", { name: /^Home\b/ }).click();
   await page.getByRole("heading", { name: "Plan limits & windows" }).waitFor();
-  assert.equal(new URL(page.url()).hash, "");
+  assert.equal(new URL(page.url()).hash, "#home");
   await page.close();
 });
 
@@ -196,7 +196,7 @@ test("Home stays contained and reflows in-flight work at a narrow width", async 
   await page.getByRole("heading", { name: "Operations" }).waitFor();
 
   const layout = await page.evaluate(() => {
-    const activeTab = document.querySelector(".view-tabs .tab-active")?.getBoundingClientRect();
+    const activeTab = document.querySelector(".bottom-bar .bottom-bar-item-current")?.getBoundingClientRect();
     const inFlightItem = document.querySelector("section.in-flight .item");
     const badge = inFlightItem?.querySelector(".badge")?.getBoundingClientRect();
     const main = inFlightItem?.children[1]?.getBoundingClientRect();
@@ -271,7 +271,7 @@ test("Backlog renders multi-checkout handoffs as compact list cards with one det
   const page = await newPage({ width: 1200, height: 900 });
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Forge checkouts" }).click();
-  await page.getByRole("button", { name: "backlog" }).click();
+  await page.getByRole("link", { name: "Backlog", exact: true }).click();
 
   const cards = page.locator(".backlog-note-card");
   await cards.first().waitFor();
@@ -366,7 +366,7 @@ test("Usage UI stays contained and keeps analytics visible at a narrow width", a
   await page.locator(".plan-service").first().waitFor();
 
   const layout = await page.evaluate(() => {
-    const activeTab = document.querySelector(".view-tabs .tab-active")?.getBoundingClientRect();
+    const activeTab = document.querySelector(".bottom-bar .bottom-bar-item-current")?.getBoundingClientRect();
     const services = Array.from(document.querySelectorAll(".plan-service"), (element) => element.getBoundingClientRect());
     return {
       innerWidth: window.innerWidth,

@@ -7,7 +7,7 @@
 // that the inbox cannot drift from `forge status` / Current activity, because both
 // render the SAME derived records (protected_invariant #4).
 
-import type { OperatorWaitActivity, CiWaitActivity } from "@forge/current-activity";
+import type { OperatorWaitActivity, CiWaitActivity } from "./current-activity.js";
 import type { AttentionItem, AttentionSeverity } from "./attention-inbox.js";
 
 export type WaitSources = {

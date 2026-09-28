@@ -158,7 +158,7 @@ after(async () => {
 async function openShipping(page: Page): Promise<void> {
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Forge checkouts" }).click();
-  await page.getByRole("button", { name: "shipping" }).click();
+  await page.getByRole("link", { name: "Shipping", exact: true }).click();
   await page.locator(".shipping-view").waitFor();
   await page.locator('[data-testid="audit-row"]').first().waitFor();
 }
@@ -296,7 +296,7 @@ test("FG-386: an unselected project renders the empty/unselected state, never a 
   const page = await newPage({ width: 1000, height: 800 });
   // Reach the shipping view WITHOUT opening a project — projectFilter stays null.
   await page.goto(`${baseUrl}/#projects`);
-  await page.getByRole("button", { name: "shipping" }).click();
+  await page.getByRole("link", { name: "Shipping", exact: true }).click();
   await page.locator(".shipping-view").waitFor();
   await page.locator('[data-testid="audit-no-project"]').waitFor();
   assert.equal(await page.locator('[data-testid="audit-no-project"]').count(), 1, "an unselected project shows the select-a-project state");

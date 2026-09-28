@@ -112,16 +112,16 @@ test("FG-580 AC-6: the RELEASE-served dashboard boots and renders offline — CD
   const csp = response?.headers()["content-security-policy"] ?? "";
   assert.match(csp, /script-src 'self'/, `the release-served HTML carries a script-src 'self' CSP (got: ${JSON.stringify(csp)})`);
 
-  // The primary page booted: the topbar + brand mark + view tabs rendered from the release's
+  // The primary page booted: the nav column's brand mark + nav links rendered from the release's
   // OWN vendored preact/htm graph. If it had failed to load, main.js would have thrown at
   // import and #app stayed empty — under the CSP a mis-nonced importmap would do the same.
-  await page.locator("header.topbar h1 img.brand-mark").waitFor();
-  assert.equal(await page.locator("header.topbar h1 img.brand-mark").getAttribute("alt"), "forge", "the topbar brand mark rendered from the vendored preact/htm graph");
-  assert.ok((await page.locator("nav.view-tabs .tab").count()) >= 4, "the view tabs rendered");
+  await page.locator(".nav-column .nav-brand img.brand-mark").waitFor();
+  assert.equal(await page.locator(".nav-column .nav-brand img.brand-mark").getAttribute("alt"), "forge", "the nav brand mark rendered from the vendored preact/htm graph");
+  assert.ok((await page.locator(".nav-column a.nav-item").count()) >= 4, "the nav links rendered");
 
   // Exercise a HOOKS-using view (usage) — a distinct component tree driven by useState —
   // to prove preact/hooks resolves through the import map in a subview, not just at boot.
-  await page.getByRole("button", { name: "usage" }).click();
+  await page.getByRole("link", { name: "Usage", exact: true }).click();
   await page.locator("section.usage-section, .plan-empty, .plan-services").first().waitFor();
 
   // Offline proof: NOTHING reached an external / CDN origin, and specifically no esm.sh.

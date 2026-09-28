@@ -103,7 +103,7 @@ test("real run rows flow through canonical scope, the completed-runs route, and 
   const page = await newPage({ width: 1440, height: 1200 });
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: /Open all .* checkouts/ }).first().click();
-  await page.getByRole("button", { name: "ops" }).click();
+  await page.getByRole("link", { name: "Ops", exact: true }).click();
   await page.getByRole("heading", { name: "Average agent runtime over time" }).waitFor();
 
   const response = page.waitForResponse((res) => res.url().includes("/api/completed-runs?") && res.status() === 200);
