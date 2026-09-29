@@ -486,6 +486,28 @@ details.action-refused ul { margin: 4px 0 0; padding-left: 16px; }
 .runs-id { font-size: 10px; }
 .runs-load-more { margin-top: 10px; }
 a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
+/* FG-817: the Roles list and role pages. Nine tabs wrap rather than scroll off a phone. */
+.role-page .object-tabs { flex-wrap: wrap; }
+.role-caption { font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.role-notice { margin: 8px 0; }
+.role-description { font-size: 12px; margin-top: 2px; }
+.role-h2 { font-size: 14px; margin: 16px 0 6px; }
+.role-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 10px 0; font-size: 13px; }
+.role-facts div { display: contents; }
+.role-facts dt { color: var(--fg-faint); }
+.role-facts dd { margin: 0; overflow-wrap: anywhere; }
+.role-list, .role-routes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; overflow-wrap: anywhere; }
+.role-list a, .role-routes a, .roles-table a { color: var(--accent); text-decoration: none; }
+.role-prompt-section { border-left: 3px solid var(--border); padding-left: 10px; margin: 8px 0; }
+.role-prompt-protocol { border-left-color: var(--accent); }
+.role-prompt-addendum, .role-prompt-constraint { border-left-color: var(--warn); }
+.role-prompt-label { font-size: 11px; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.role-prompt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 4px 0 0; }
+.role-flag { color: var(--warn); font-size: 13px; }
+@media (max-width: 519.98px) {
+  .role-facts { grid-template-columns: 1fr; }
+  .role-facts dd { margin-bottom: 6px; }
+}
 .mobile-head, .bottom-bar { display: none; }
 .nav-drawer-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 70; }
 .nav-drawer {

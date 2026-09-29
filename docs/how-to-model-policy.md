@@ -419,6 +419,14 @@ Every policy-mode task writes provider + model + auth + `resolvedBy` (plus the
 `manifest.json` and emits `model.profile_resolved` (or `model.profile_unavailable`
 when a gate fails — activity-unmapped, availability, or tool-capability).
 
+The dashboard's Roles list (`#roles`, FG-817) shows the same resolution without
+running a command: each installed role's profile/effort/model, as `resolveModel`
+resolves them for that role's *default* activity under the current seed
+generation — the resolution a dispatch with no explicit `--activity` gets. It is
+read live on every visit, so it reflects the on-disk policy immediately, the same
+as `forge model resolve`; a role the policy cannot resolve shows the resolution
+error inline instead. See [Roles surface](concepts.md#roles-surface-fg-817).
+
 ### Newer models can need a newer Claude Code CLI
 
 The API rejects a model that the `claude` CLI in the agent image is too old for

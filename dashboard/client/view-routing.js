@@ -12,7 +12,8 @@
 // extra parameters it owns (`params`: the run index's `status=`); any other key is dropped.
 //
 // FG-821: object tabs follow the Paperclip pattern — an unknown tab falls back to the
-// route's default (its first tab), which the canonical hash omits.
+// route's default (its first tab), which the canonical hash omits. FG-817: `#roles` is
+// the Roles list and `#roles/<role>[/<tab>]` a role page, with `overview` the default tab.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -35,7 +36,7 @@ export const ROUTES = Object.freeze({
   task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
-  roles: { group: "setup", label: "Roles", path: "#roles", scope: "none", object: "none", aliases: [] },
+  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "skills", "configuration", "secrets", "tools", "tasks", "receipts", "usage"], aliases: [] },
   routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", aliases: ["governance"] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },

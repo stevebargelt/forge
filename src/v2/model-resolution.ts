@@ -116,7 +116,7 @@ const DEFAULT_ACTIVITY_BY_ROLE: Record<string, string> = {
   designer: "design",
 };
 
-function defaultActivityForRole(role: string): string {
+export function defaultActivityForRole(role: string): string {
   return DEFAULT_ACTIVITY_BY_ROLE[role] ?? "default";
 }
 
