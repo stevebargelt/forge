@@ -752,7 +752,7 @@ function App() {
         : view === "roles"
         ? route.id
           ? html`<${RolePage} key=${route.id} role=${route.id} tab=${route.tab} project=${scope.project} />`
-          : html`<${RolesIndexView} />`
+          : html`<${RolesIndexView} params=${route.params} />`
         : view === "backlog"
         ? route.id
           ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`

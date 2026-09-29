@@ -240,6 +240,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // fg817-roles-pages keeps its 8 tests, rewritten for the ten tabs and the
   // configuration → harness alias. Fixture port 18831.
   "fg827-roles-second-pass.test.ts": 9,
+  // FG-828 adds `fg828-roles-sort` (6 tests): the Roles list's header buttons sort the one
+  // fetched payload (no refetch), ascending then flipped, with aria-sort and a direction
+  // glyph on the active column and missing values last; the #roles?sort=&dir= hash
+  // restored across a reload and a pasted link; Tab/Enter/Space operating a header
+  // (FG-692); and an unknown sort or dir dropped to role ascending. The verification
+  // additions prove every column's mixed missing-value/tie behavior, hash scope retention,
+  // and Last task keyboard sorting at 400px. Fixture port 18833.
+  "fg828-roles-sort.test.ts": 6,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

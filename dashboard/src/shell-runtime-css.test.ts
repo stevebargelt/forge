@@ -55,3 +55,29 @@ test("the queue-state (blocked-vs-waiting) detail text is not painted in the sub
   assert.match(body, /color: var\(--fg-dim\)/, "queue-state detail must use the AA-contrast token");
   assert.doesNotMatch(body, /color: var\(--fg-faint\)/, "queue-state detail is 2.74:1 on the card in --fg-faint");
 });
+
+function tokenHex(css: string, token: string): string {
+  const m = css.match(new RegExp(`${token}: (#[0-9a-fA-F]{6});`));
+  assert.ok(m?.[1], `no hex value for ${token}`);
+  return m[1];
+}
+
+function contrast(a: string, b: string): number {
+  const channel = (hex: string, i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const lum = (hex: string) => 0.2126 * channel(hex, 1) + 0.7152 * channel(hex, 3) + 0.0722 * channel(hex, 5);
+  return (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
+}
+
+test("the Roles list's inactive sort-header buttons are painted in a token with >= 4.5:1 contrast on --bg (FG-828 RF-1)", () => {
+  const shell = renderShell();
+  const body = ruleBody(shell, ".roles-table .sort-header");
+  const m = body.match(/color: var\((--[a-z-]+)\)/);
+  assert.ok(m?.[1], "the inactive sort header must set its own colour, not inherit the th's --fg-faint");
+  const ratio = contrast(tokenHex(shell, m[1]), tokenHex(shell, "--bg"));
+  assert.ok(ratio >= 4.5, `${m[1]} is ${ratio.toFixed(2)}:1 on --bg`);
+  assert.match(shell, /\.roles-table th\[aria-sort="ascending"\] \.sort-header, \.roles-table th\[aria-sort="descending"\] \.sort-header \{ color: var\(--fg\); \}/,
+    "the active header keeps the full --fg colour");
+});

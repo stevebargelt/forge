@@ -38,7 +38,7 @@ export const ROUTES = Object.freeze({
   task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
-  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, aliases: [] },
+  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["sort", "dir"], paramValues: { sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
   routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", aliases: ["governance"] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },
@@ -92,10 +92,11 @@ function safeDecode(segment) {
   }
 }
 
-function routeParams(route, params) {
-  if (!route.params || !params) return [];
+function routeParams(route, params, id) {
+  if (!route.params || !params || (route.object !== "none" && id)) return [];
   return route.params
     .filter((key) => typeof params[key] === "string" && params[key] !== "")
+    .filter((key) => !route.paramValues?.[key] || route.paramValues[key].includes(params[key]))
     .map((key) => `${key}=${encodeURIComponent(params[key])}`);
 }
 
@@ -112,7 +113,7 @@ export function hashFor({ view, id = null, tab = null, scope = null, params = nu
   const { project, checkout } = route.scope === "none" ? NO_SCOPE : normalizeScope(scope);
   if (project) query.push(`project=${encodeURIComponent(project)}`);
   if (checkout) query.push(`checkout=${encodeURIComponent(checkout)}`);
-  query.push(...routeParams(route, params));
+  query.push(...routeParams(route, params, route.object !== "none" ? id : null));
   return query.length > 0 ? `${path}?${query.join("&")}` : path;
 }
 
@@ -167,9 +168,12 @@ export function parseHash(hash) {
   }
 
   if (!carriesScope(view)) scope = NO_SCOPE;
-  for (const key of ROUTES[view].params ?? []) {
-    const value = params.get(key);
-    if (value) routeParamsIn[key] = value;
+  const owner = ROUTES[view];
+  if (!(owner.object !== "none" && id)) {
+    for (const key of owner.params ?? []) {
+      const value = params.get(key);
+      if (value && (!owner.paramValues?.[key] || owner.paramValues[key].includes(value))) routeParamsIn[key] = value;
+    }
   }
   const canonical = hashFor({ view, id, tab, scope, params: routeParamsIn });
   const rewrite = raw !== "" && `#${raw}` !== canonical;
