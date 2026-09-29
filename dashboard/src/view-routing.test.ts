@@ -24,9 +24,10 @@ test("FG-820: the nav column is the document's five groups in order, object page
       ["Health", ["usage", "ops"]],
     ],
   );
-  assert.equal(navItemFor("run-map"), "runs", "a run page highlights Runs");
+  assert.equal(navItemFor("run"), "runs", "a run page highlights Runs");
+  assert.equal(navItemFor("task"), "runs", "a task page highlights Runs");
   assert.equal(navItemFor("queue"), "queue");
-  assert.equal(groupOf("run-map"), "evidence");
+  assert.equal(groupOf("run"), "evidence");
 });
 
 test("home is the default for an empty hash, and needs no rewrite", () => {
@@ -102,34 +103,55 @@ test("relabels: #governance → #routing and #control-plane → #config, keeping
   assert.equal(parseHash("#config").rewrite, false);
 });
 
-test("the run map stays at #run-map/<id>; #run/<id> is an alias; object hashes carry no scope", () => {
-  const p = parseHash("#run-map/run-abc123");
-  assert.deepEqual([p.view, p.id, p.tab, p.rewrite], ["run-map", "run-abc123", "map", false]);
+test("FG-821: the run page is #run/<id>; #run-map/<id> is its permanent alias; object hashes carry no scope", () => {
+  const p = parseHash("#run/run-abc123");
+  assert.deepEqual([p.view, p.id, p.tab, p.rewrite], ["run", "run-abc123", "map", false]);
 
-  const alias = parseHash("#run/run-abc123");
-  assert.deepEqual([alias.view, alias.id, alias.canonical, alias.rewrite], ["run-map", "run-abc123", "#run-map/run-abc123", true]);
+  const alias = parseHash("#run-map/run-abc123");
+  assert.deepEqual([alias.view, alias.id, alias.tab, alias.canonical, alias.rewrite], ["run", "run-abc123", "map", "#run/run-abc123", true]);
 
-  const scoped = parseHash("#run-map/run-abc123?project=forge");
+  const scoped = parseHash("#run/run-abc123?project=forge");
   assert.deepEqual(scoped.scope, { project: null, checkout: null });
-  assert.equal(scoped.canonical, "#run-map/run-abc123");
+  assert.equal(scoped.canonical, "#run/run-abc123");
 
   const weird = "run/with spaces&?#";
-  assert.equal(parseHash(hashFor({ view: "run-map", id: weird })).id, weird);
+  assert.equal(parseHash(hashFor({ view: "run", id: weird })).id, weird);
 });
 
-test("an unknown run tab falls back to the default and is dropped from the canonical hash", () => {
+test("FG-821: run tabs are map (default, omitted) and evidence; an unknown tab falls back to map", () => {
+  const e = parseHash("#run/run-1/evidence");
+  assert.deepEqual([e.tab, e.canonical, e.rewrite], ["evidence", "#run/run-1/evidence", false]);
+  assert.equal(parseHash("#run/run-1/map").canonical, "#run/run-1");
   const p = parseHash("#run-map/run-1/nonsense");
-  assert.deepEqual([p.tab, p.canonical, p.rewrite], ["map", "#run-map/run-1", true]);
+  assert.deepEqual([p.view, p.tab, p.canonical, p.rewrite], ["run", "map", "#run/run-1", true]);
 });
 
-test("a bare #run-map (or #run) redirects to Activity with the open-a-run prompt", () => {
-  for (const hash of ["#run-map", "#run", "#run-map?project=forge"]) {
+test("FG-821: the task page is #task/<id> and its Explain page #task/<id>/explain", () => {
+  const t = parseHash("#task/task-1");
+  assert.deepEqual([t.view, t.id, t.tab, t.rewrite], ["task", "task-1", "detail", false]);
+  const x = parseHash("#task/task-1/explain?project=forge");
+  assert.deepEqual([x.view, x.id, x.tab, x.canonical], ["task", "task-1", "explain", "#task/task-1/explain"]);
+  assert.equal(hashFor({ view: "task", id: "task-1", tab: "explain" }), "#task/task-1/explain");
+  assert.equal(parseHash("#task/task-1/log").canonical, "#task/task-1", "an unknown task tab falls back to the detail");
+});
+
+test("FG-821: a bare object hash (#run-map, #run, #task) lands on the run index with a prompt", () => {
+  for (const [hash, noun] of [["#run-map", "run"], ["#run", "run"], ["#run-map?project=forge", "run"], ["#task", "task"]]) {
     const p = parseHash(hash);
-    assert.equal(p.view, "activity");
-    assert.equal(p.canonical, "#activity");
+    assert.equal(p.view, "runs");
+    assert.equal(p.canonical, "#runs");
     assert.equal(p.rewrite, true);
-    assert.match(p.notice ?? "", /Open a run from the activity feed/);
+    assert.match(p.notice ?? "", new RegExp(`Open a ${noun} from the run index`));
   }
+});
+
+test("FG-821: the run index carries scope and its own status= parameter; other keys are dropped", () => {
+  const p = parseHash("#runs?status=failed&project=forge&utm=x");
+  assert.deepEqual(p.params, { status: "failed" });
+  assert.equal(p.canonical, "#runs?project=forge&status=failed");
+  assert.equal(hashFor({ view: "runs", params: { status: "active" } }), "#runs?status=active");
+  assert.deepEqual(parseHash("#queue?status=failed&project=forge").params, {}, "status= belongs to the run index alone");
+  assert.equal(parseHash("#queue?status=failed&project=forge").canonical, "#queue?project=forge");
 });
 
 test("list views with an optional object id carry it; views without one drop extra segments", () => {

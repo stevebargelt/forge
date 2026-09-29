@@ -139,9 +139,9 @@ test("a deleted checkout's task remains project-scoped and carries its real proj
     response.url().endsWith("/api/task/task-run-fg663-deleted") && response.status() === 200,
   );
   await card.click();
-  const detail = page.locator(".detail-overlay");
+  const detail = page.locator(".task-page");
   await detail.waitFor();
-  await detail.getByText("deleted checkout remains attributed").waitFor();
+  await detail.getByText("deleted checkout remains attributed").first().waitFor();
   const taskDetail = await (await detailResponse).json() as { task: { projectLabel: string | null; projectColor: string | null } };
   assert.equal(taskDetail.task.projectLabel, project.label, "task detail resolves the same durable project presentation");
   assert.ok(taskDetail.task.projectColor, "task detail preserves the durable project color");

@@ -178,6 +178,17 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // `counts` (danger, "?", partial, hidden-when-empty, 99+); and the 400px bottom bar with a
   // focus-trapped drawer that Escape closes. Its fixture server listens on port 18824.
   "fg820-left-column-nav.test.ts": 7,
+  // FG-821 adds `fg821-cockpit-pages` (12 tests): the run index (rows, the hash-carried status
+  // filter, Load more over the server cursor); the Runs badge from GET /api/runs's activeCount
+  // (never danger, "?" when unreadable, hidden at 0, on the bottom bar too); the run page's map
+  // and evidence tabs and the permanent #run-map alias; the task page deep link across reload
+  // with its links row and its Explain page; the failed-task header's verb and advice; the same
+  // payload-built breadcrumb trail for an inbox click and a pasted link; Escape to the parent;
+  // the scoped ticket page; and a review by id. The verify regression walks ticket → run → task
+  // → Explain → review and proves each payload breadcrumb trail matches a cold deep link.
+  // FG-821 also rewrote fg820's run-map/placeholder
+  // cases and fg348's overlay cases for the pages (counts unchanged). Fixture port 18825.
+  "fg821-cockpit-pages.test.ts": 12,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,
@@ -200,6 +211,9 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // FG-743 adds `fg743-campaign-wait-lifecycle` (1 test): terminal historical campaign
   // waits are not rendered as live in-flight work.
   "fg743-campaign-wait-lifecycle.test.ts": 1,
+  // FG-821 turned the Explain overlay into the #task/<id>/explain page: the RF-2/RF-3 panel
+  // cases now pin Escape-to-parent and the absence of a modal, and the scope-invalidation case
+  // a run-to-run navigation guard (object pages read unscoped). Still 6.
   // FG-348 adds `fg348-run-map` (4 tests): the Run Map + task Explain browser view —
   // a run deep-linked via #run-map/<id> renders its graph and a node click opens the
   // "Why this task?" Explain panel, a checkout-scope change invalidates the map and a

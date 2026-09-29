@@ -4,7 +4,7 @@
 // by dependency; fanout phases render as a grouped, expandable node; red tasks
 // attach to the primary they reviewed. Fanout vs reds are distinguished by
 // SHAPE/BORDER + a text label, never color alone (a11y precedent: control-plane.js).
-// Clicking any node raises onSelect(taskId).
+// Every node is a link: `hrefFor(taskId)` names its page (FG-821: #task/<id>/explain).
 
 import { h } from "preact";
 import { useState } from "preact/hooks";
@@ -66,15 +66,15 @@ function layerPhases(phases, edges) {
   return layers.filter(Boolean);
 }
 
-function RedChip({ attachment, node, onSelect }) {
+function RedChip({ attachment, node, hrefFor }) {
   const status = node?.status ?? "unknown";
   const meta = statusMeta(status);
   // Reds are shape-distinguished from fanout: a solid left accent + the ◆ glyph +
   // an explicit "red" label. Never color-only.
   return html`
-    <button
+    <a
       class="rm-red"
-      onClick=${() => onSelect(attachment.redTaskId)}
+      href=${hrefFor(attachment.redTaskId)}
       title=${`red review via ${attachment.via}`}
       aria-label=${`red ${attachment.redRole}, ${meta.label}`}
     >
@@ -82,16 +82,16 @@ function RedChip({ attachment, node, onSelect }) {
       <span class="rm-red-role">red · ${attachment.redRole}</span>
       <${StatusBadge} status=${status} />
       <span class="rm-red-via">${attachment.via}</span>
-    </button>
+    </a>
   `;
 }
 
-function TaskNode({ node, reds, onSelect }) {
+function TaskNode({ node, reds, hrefFor }) {
   return html`
     <div class="rm-node-group">
-      <button
+      <a
         class=${"rm-node" + (node.inferred ? " rm-node-inferred" : "")}
-        onClick=${() => onSelect(node.taskId)}
+        href=${hrefFor(node.taskId)}
         aria-label=${`task ${node.role}, ${statusMeta(node.status).label}`}
       >
         <div class="rm-node-head">
@@ -105,17 +105,17 @@ function TaskNode({ node, reds, onSelect }) {
             ? html`<span class="rm-lineage">${node.lineage.replace(/_/g, " ")}</span>`
             : null}
         </div>
-      </button>
+      </a>
       ${reds.length
         ? html`<div class="rm-reds" role="group" aria-label="red reviews">
-            ${reds.map((r) => html`<${RedChip} key=${r.attachment.redTaskId} attachment=${r.attachment} node=${r.node} onSelect=${onSelect} />`)}
+            ${reds.map((r) => html`<${RedChip} key=${r.attachment.redTaskId} attachment=${r.attachment} node=${r.node} hrefFor=${hrefFor} />`)}
           </div>`
         : null}
     </div>
   `;
 }
 
-function FanoutGroup({ group, nodes, onSelect }) {
+function FanoutGroup({ group, nodes, hrefFor }) {
   const [open, setOpen] = useState(false);
   // Fanout is shape-distinguished from reds: a DASHED border + the ⑃ glyph + an
   // explicit "fanout" count label. Expandable so ~21 children never explode inline.
@@ -135,7 +135,7 @@ function FanoutGroup({ group, nodes, onSelect }) {
             ${group.childTaskIds.map((id) => {
               const node = nodes.get(id);
               if (!node) return null;
-              return html`<${TaskNode} key=${id} node=${node} reds=${[]} onSelect=${onSelect} />`;
+              return html`<${TaskNode} key=${id} node=${node} reds=${[]} hrefFor=${hrefFor} />`;
             })}
           </div>`
         : null}
@@ -143,7 +143,7 @@ function FanoutGroup({ group, nodes, onSelect }) {
   `;
 }
 
-function PhaseColumn({ phase, nodes, redsByPrimary, fanoutGroup, nodeById, onSelect }) {
+function PhaseColumn({ phase, nodes, redsByPrimary, fanoutGroup, nodeById, hrefFor }) {
   // Primary/attempt nodes for this phase (everything that isn't a fanout child).
   const primaries = nodes.filter((n) => n.lineage !== "fanout_child");
   return html`
@@ -166,15 +166,15 @@ function PhaseColumn({ phase, nodes, redsByPrimary, fanoutGroup, nodeById, onSel
           : null}
         ${primaries.map((n) => {
           const reds = (redsByPrimary.get(n.taskId) || []).map((a) => ({ attachment: a, node: nodeById.get(a.redTaskId) }));
-          return html`<${TaskNode} key=${n.taskId} node=${n} reds=${reds} onSelect=${onSelect} />`;
+          return html`<${TaskNode} key=${n.taskId} node=${n} reds=${reds} hrefFor=${hrefFor} />`;
         })}
-        ${fanoutGroup ? html`<${FanoutGroup} group=${fanoutGroup} nodes=${nodeById} onSelect=${onSelect} />` : null}
+        ${fanoutGroup ? html`<${FanoutGroup} group=${fanoutGroup} nodes=${nodeById} hrefFor=${hrefFor} />` : null}
       </div>
     </div>
   `;
 }
 
-export function RunMap({ graph, onSelect }) {
+export function RunMap({ graph, hrefFor }) {
   if (!graph) return html`<div class="muted">loading run map…</div>`;
 
   const nodeById = new Map(graph.nodes.map((n) => [n.taskId, n]));
@@ -225,7 +225,7 @@ export function RunMap({ graph, onSelect }) {
               redsByPrimary=${redsByPrimary}
               fanoutGroup=${fanoutByPhase.get(phase.id)}
               nodeById=${nodeById}
-              onSelect=${onSelect}
+              hrefFor=${hrefFor}
             />`)}
           </div>
           ${li < layers.length - 1 ? html`<div class="rm-arrow" aria-hidden="true">→</div>` : null}

@@ -7,6 +7,7 @@ export interface Route {
   object: "none" | "optional" | "required";
   parent?: string;
   tabs?: string[];
+  params?: string[];
   aliases: string[];
 }
 export interface HashScope {
@@ -19,6 +20,7 @@ export interface ParsedHash {
   id: string | null;
   tab: string | null;
   scope: HashScope;
+  params: Record<string, string>;
   canonical: string;
   rewrite: boolean;
   notice: string | null;
@@ -29,5 +31,5 @@ export const NAV_GROUPS: readonly { id: string; label: string; items: string[] }
 export function groupOf(view: string): string | null;
 export function navItemFor(view: string): string | null;
 export function carriesScope(view: string): boolean;
-export function hashFor(location: { view: string; id?: string | null; tab?: string | null; scope?: Partial<HashScope> | null }): string;
+export function hashFor(location: { view: string; id?: string | null; tab?: string | null; scope?: Partial<HashScope> | null; params?: Record<string, string> | null }): string;
 export function parseHash(hash?: string | null): ParsedHash;

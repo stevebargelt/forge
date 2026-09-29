@@ -1,4 +1,5 @@
-// FG-348 [H]: the "Why this task?" Explain panel. preact + htm. Consumes GET
+// FG-348 [H]: the "Why this task?" Explain content — since FG-821 the body of the
+// #task/<taskId>/explain page, no longer an overlay. preact + htm. Consumes GET
 // /api/task/:id/explain and renders every block (workflow source, model
 // resolution, runtime/auth, mount mode, gate, reds, upstream inputs, artifacts).
 // Degradation warnings render PROMINENTLY at the top. Read-only — no mutation
@@ -6,7 +7,7 @@
 // this panel presents ONLY the task's RECORDED resolution.
 
 import { h } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
 
 const html = htm.bind(h);
@@ -161,44 +162,11 @@ function VerificationEvidenceBlock({ evidence }) {
   </${Block}>`;
 }
 
-export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
+// FG-821: Explain is a page (#task/<taskId>/explain), not an overlay; this renders its
+// content. The page reads it unscoped — a task id is global.
+export function ExplainContent({ taskId }) {
   const [explain, setExplain] = useState(null);
   const [err, setErr] = useState(null);
-  const overlayRef = useRef(null);
-
-  // Dialog keyboard semantics (FG-348 RF-2): dismissable via Escape, focus moved into
-  // the panel on open and restored to the invoking control (the run-map node) on close —
-  // the backlog/campaign detail-overlay precedent.
-  // FG-692 RF-3: this dialog is aria-modal, so Tab and Shift+Tab are CONTAINED — focus
-  // cycles within the open panel and cannot land on a background control. Same lightweight
-  // trap as the campaigns overlay (FG-727), over the panel's own focusables.
-  const onKeyDown = (e) => {
-    if (e.key === "Escape") { onClose(); return; }
-    if (e.key !== "Tab") return;
-    const node = overlayRef.current;
-    if (!node) return;
-    const focusables = node.querySelectorAll(
-      'a[href], button:not([disabled]), input, textarea, select, [tabindex]:not([tabindex="-1"])',
-    );
-    if (focusables.length === 0) { e.preventDefault(); return; }
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    const active = document.activeElement;
-    if (e.shiftKey) {
-      if (active === first || !node.contains(active)) { e.preventDefault(); last.focus(); }
-    } else if (active === last || !node.contains(active)) {
-      e.preventDefault();
-      first.focus();
-    }
-  };
-  const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
-
-  useEffect(() => {
-    const opener = document.activeElement;
-    const node = overlayRef.current;
-    if (node) (node.querySelector(".close") ?? node).focus();
-    return () => { if (opener && typeof opener.focus === "function") opener.focus(); };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -206,7 +174,7 @@ export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
     setErr(null);
     (async () => {
       try {
-        const res = await fetch(`/api/task/${encodeURIComponent(taskId)}/explain${scopeQuery}`);
+        const res = await fetch(`/api/task/${encodeURIComponent(taskId)}/explain`);
         if (cancelled) return;
         if (!res.ok) {
           setErr(`request failed (${res.status})`);
@@ -222,40 +190,36 @@ export function RunExplainPanel({ taskId, scopeQuery = "", onClose }) {
     return () => {
       cancelled = true;
     };
-  }, [taskId, scopeQuery]);
+  }, [taskId]);
 
   return html`
-    <div class="detail-overlay" ref=${overlayRef} onClick=${onClose} onKeyDown=${onKeyDown}
-      role="dialog" aria-modal="true" aria-label=${`Why task ${taskId}`}>
-      <div class="detail rx-panel" onClick=${(e) => e.stopPropagation()}>
-        <span class="close" onClick=${onClose} role="button" tabIndex="0" aria-label="Close explain panel" onKeyDown=${onCloseKey}>×</span>
-        <h2 class="rx-heading">Why this task?</h2>
-        ${err ? html`<div class="card" style="color: var(--err);">${err}</div>` : null}
-        ${!explain && !err ? html`<div class="muted">loading explain…</div>` : null}
-        ${explain
-          ? html`
-              <div class="rx-identity mono">
-                <span>${explain.role}</span>
-                <span class="muted">${explain.taskId}</span>
-                <span class="muted">[${explain.status}]</span>
-              </div>
-              ${(explain.warnings || []).length
-                ? html`<div class="rx-warnings" role="alert" aria-label="explain warnings">
-                    ${explain.warnings.map((w, i) => html`<div class="rx-warning" key=${i}>⚠ ${w}</div>`)}
-                  </div>`
-                : null}
-              <${WorkflowBlock} block=${explain.workflowSource} />
-              <${ModelBlock} block=${explain.modelResolution} />
-              <${RuntimeBlock} block=${explain.runtime} />
-              <${MountBlock} block=${explain.mountMode} />
-              <${GateBlock} block=${explain.gate} />
-              <${RedsBlock} block=${explain.reds} />
-              <${UpstreamBlock} block=${explain.upstream} />
-              <${ArtifactsBlock} artifacts=${explain.artifacts} />
-              <${VerificationEvidenceBlock} evidence=${explain.verificationEvidence} />
-            `
-          : null}
-      </div>
-    </div>
+    <section class="rx-panel" aria-label=${`Why task ${taskId}`}>
+      <h2 class="rx-heading">Why this task?</h2>
+      ${err ? html`<div class="card" style="color: var(--err);">${err}</div>` : null}
+      ${!explain && !err ? html`<div class="muted">loading explain…</div>` : null}
+      ${explain
+        ? html`
+            <div class="rx-identity mono">
+              <span>${explain.role}</span>
+              <span class="muted">${explain.taskId}</span>
+              <span class="muted">[${explain.status}]</span>
+            </div>
+            ${(explain.warnings || []).length
+              ? html`<div class="rx-warnings" role="alert" aria-label="explain warnings">
+                  ${explain.warnings.map((w, i) => html`<div class="rx-warning" key=${i}>⚠ ${w}</div>`)}
+                </div>`
+              : null}
+            <${WorkflowBlock} block=${explain.workflowSource} />
+            <${ModelBlock} block=${explain.modelResolution} />
+            <${RuntimeBlock} block=${explain.runtime} />
+            <${MountBlock} block=${explain.mountMode} />
+            <${GateBlock} block=${explain.gate} />
+            <${RedsBlock} block=${explain.reds} />
+            <${UpstreamBlock} block=${explain.upstream} />
+            <${ArtifactsBlock} artifacts=${explain.artifacts} />
+            <${VerificationEvidenceBlock} evidence=${explain.verificationEvidence} />
+          `
+        : null}
+    </section>
   `;
 }

@@ -1,6 +1,7 @@
 // FG-820: the left-column navigation, the compact bottom bar and the drawer that holds
 // the column below the 720px nav breakpoint. It adds NO decisions: nav-render.js decides
-// the items, hrefs, current item and the Home badge; view-routing.js owns the hashes.
+// the items, hrefs, current item and the Home badge; runs-index-render.js decides the
+// Runs badge (FG-821); view-routing.js owns the hashes.
 //
 // Every nav item is an <a href="#…"> link, so Tab / Enter / open-in-new-tab work
 // natively; group headings are plain headings, not controls. The only buttons are the
@@ -11,6 +12,7 @@ import { useEffect, useRef } from "preact/hooks";
 import htm from "htm";
 import { BOTTOM_BAR_ITEMS, checkoutScopeLabel, homeBadge, navHref, navModel } from "./nav-render.js";
 import { ROUTES } from "./view-routing.js";
+import { runsBadge } from "./runs-index-render.js";
 
 const html = htm.bind(h);
 
@@ -67,8 +69,8 @@ function ScopeControl({ scope, projects, onScopeChange, idPrefix }) {
 }
 
 /** The full column: brand, scope control, the five groups, and the last-poll clock. */
-export function NavColumn({ view, scope, projects, onScopeChange, now, inboxLoad, idPrefix = "nav" }) {
-  const badge = homeBadge(inboxLoad);
+export function NavColumn({ view, scope, projects, onScopeChange, now, inboxLoad, runsLoad, idPrefix = "nav" }) {
+  const badges = { home: homeBadge(inboxLoad), runs: runsBadge(runsLoad) };
   return html`
     <div class="nav-brand">
       <img src="/client/logo-mark.svg" width="28" height="28" class="brand-mark" alt="forge" />
@@ -89,7 +91,7 @@ export function NavColumn({ view, scope, projects, onScopeChange, now, inboxLoad
                   data-view=${item.view}
                 >
                   <span class="nav-item-label">${item.label}</span>
-                  ${item.view === "home" ? html`<${NavBadge} badge=${badge} />` : null}
+                  <${NavBadge} badge=${badges[item.view] ?? null} />
                 </a>
               </li>
             `)}
@@ -102,8 +104,8 @@ export function NavColumn({ view, scope, projects, onScopeChange, now, inboxLoad
 }
 
 /** The five-slot bar below 720px: Home, Runs, Queue, Backlog, More. */
-export function BottomBar({ view, current, scope, inboxLoad, drawerOpen, onOpenDrawer, moreRef }) {
-  const badge = homeBadge(inboxLoad);
+export function BottomBar({ view, current, scope, inboxLoad, runsLoad, drawerOpen, onOpenDrawer, moreRef }) {
+  const badges = { home: homeBadge(inboxLoad), runs: runsBadge(runsLoad) };
   return html`
     <nav class="bottom-bar" aria-label="Dashboard shortcuts">
       ${BOTTOM_BAR_ITEMS.map((item) => html`
@@ -115,7 +117,7 @@ export function BottomBar({ view, current, scope, inboxLoad, drawerOpen, onOpenD
           data-view=${item}
         >
           <span class="nav-item-label">${ROUTES[item].label}</span>
-          ${item === "home" ? html`<${NavBadge} badge=${badge} />` : null}
+          <${NavBadge} badge=${badges[item] ?? null} />
         </a>
       `)}
       <button

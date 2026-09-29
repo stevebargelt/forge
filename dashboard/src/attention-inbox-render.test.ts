@@ -69,13 +69,13 @@ describe("inboxItemSummary — badge, severity, link per kind", () => {
     assert.equal(inboxItemBadge({ kind: "waiting_gate" }).label, "Waiting on gate");
     assert.equal(s.badgeClass, "inbox-kind-waiting_gate");
     assert.equal(s.severityLabel, "medium");
-    assert.deepEqual(s.link, { hash: "#run-map/run-1", label: "Open run" });
+    assert.deepEqual(s.link, { hash: "#run/run-1", label: "Open run" });
   });
 
   test("reviewer/red block", () => {
     const s = inboxItemSummary(makeItem({ id: "review:r1", kind: "blocked_by_red_or_reviewer", links: { runId: "run-2", taskId: "t2", ticketId: "FG-200", campaignId: null, itemId: null, projectDir: null, projectLabel: null } }));
     assert.equal(s.badgeClass, "inbox-kind-blocked_by_red_or_reviewer");
-    assert.equal(s.link!.hash, "#run-map/run-2");
+    assert.equal(s.link!.hash, "#run/run-2");
   });
 
   test("missing acceptance criteria links to the ticket in the backlog", () => {

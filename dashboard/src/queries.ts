@@ -582,7 +582,7 @@ function scopeIncludes(targets: ScopeTargets | undefined, row: RowProjectIdentit
 function forgeHome(): string {
   return process.env.FORGE_HOME ?? join(homedir(), ".forge");
 }
-function dbPath(): string {
+export function dbPath(): string {
   return join(forgeHome(), "forge.db");
 }
 function runsDir(): string {
@@ -862,8 +862,19 @@ export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightE
 }
 
 /** Full task detail including container log tails + verdicts + gates. */
+/** FG-821: the ids a task page links to. Projections over rows the store already
+ *  has — no new table. */
+export type TaskLinks = {
+  runId: string;
+  ticketId: string | null;
+  reviewIds: string[];
+  launchIds: string[];
+  hostVerificationIds: number[];
+};
+
 export type TaskDetail = {
   task: ActivityEntry;
+  links: TaskLinks;
   stdoutLog: string | null;  // bounded TAIL (last LOG_TAIL_BYTES), not the whole file
   stderrLog: string | null;
   stdoutBytes: number;       // true on-disk size, so the UI can label honestly
@@ -875,6 +886,133 @@ export type TaskDetail = {
   idle: IdleInfo | null;      // WALK-5: live activity, running tasks only
   resultSizeBytes: number | null; // raw result JSON byte length; null if no result
 };
+
+// The ticket a run was dispatched for, as the attention inbox's failure source reads
+// it (src/v2/attention-inbox-failures.ts): `inputs.ticketId`, else top-level `ticketId`.
+const RUN_TICKET_SQL = (alias: string) =>
+  `COALESCE(json_extract(${alias}.metadata, '$.inputs.ticketId'), json_extract(${alias}.metadata, '$.ticketId'))`;
+
+function runsHasMetadata(): boolean {
+  try {
+    return (db().prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).some((col) => col.name === "metadata");
+  } catch {
+    return false;
+  }
+}
+
+function runTicketId(runId: string): string | null {
+  const ticket = runsHasMetadata()
+    ? (db().prepare(`SELECT ${RUN_TICKET_SQL("r")} AS ticket_id FROM runs r WHERE r.id = ?`).get(runId) as
+        | { ticket_id: unknown }
+        | undefined)
+    : undefined;
+  return typeof ticket?.ticket_id === "string" && ticket.ticket_id !== "" ? ticket.ticket_id : null;
+}
+
+// Each source is read on its own: this read-only handle never migrates, so an aged
+// store may lack reviews / launch_observations / host_verifications, and a missing
+// table means "no links of that kind", never a failed task page.
+function taskLinks(taskId: string, runId: string): TaskLinks {
+  const ids = <T>(read: () => T[]): T[] => {
+    try {
+      return read();
+    } catch {
+      return [];
+    }
+  };
+  return {
+    runId,
+    ticketId: runTicketId(runId),
+    reviewIds: ids(() =>
+      (db().prepare(`SELECT id FROM reviews WHERE run_id = ? ORDER BY updated_at DESC, id DESC`).all(runId) as Array<{ id: string }>).map(
+        (r) => r.id,
+      ),
+    ),
+    launchIds: ids(() =>
+      (
+        db()
+          .prepare(`SELECT launch_id FROM launch_observations WHERE task_id = ? OR run_id = ? ORDER BY started_at DESC, launch_id DESC`)
+          .all(taskId, runId) as Array<{ launch_id: string }>
+      ).map((r) => r.launch_id),
+    ),
+    hostVerificationIds: ids(() => verificationEvidenceForTask(taskId).map((r) => r.id)),
+  };
+}
+
+/** FG-821: the evidence recorded for one run — the union of its tasks' links, read by
+ *  run: the same lookups taskLinks uses, with launches matched by the run or any of its
+ *  tasks. null when the run is unknown or outside `scope`. */
+export type RunEvidence = {
+  runId: string;
+  ticketId: string | null;
+  reviewIds: string[];
+  launchIds: string[];
+  hostVerificationIds: number[];
+};
+
+export function runEvidence(runId: string, scope?: ProjectScope): RunEvidence | null {
+  const project = scopeSql("runs", "r", scope);
+  const run = db().prepare(`SELECT r.id, r.project_dir FROM runs r WHERE r.id = ? ${project.clause}`).get(runId, ...project.params) as
+    | { id: string; project_dir: string | null }
+    | undefined;
+  if (!run) return null;
+  const ids = <T>(read: () => T[]): T[] => {
+    try {
+      return read();
+    } catch {
+      return [];
+    }
+  };
+  return {
+    runId,
+    ticketId: runTicketId(runId),
+    reviewIds: ids(() =>
+      (db().prepare(`SELECT id FROM reviews WHERE run_id = ? ORDER BY updated_at DESC, id DESC`).all(runId) as Array<{ id: string }>).map(
+        (r) => r.id,
+      ),
+    ),
+    launchIds: ids(() =>
+      (
+        db()
+          .prepare(
+            `SELECT launch_id FROM launch_observations
+              WHERE run_id = ? OR task_id IN (SELECT id FROM tasks WHERE run_id = ?)
+              ORDER BY started_at DESC, launch_id DESC`,
+          )
+          .all(runId, runId) as Array<{ launch_id: string }>
+      ).map((r) => r.launch_id),
+    ),
+    hostVerificationIds: ids(() => verificationEvidenceForRunRow(runId, run.project_dir).map((r) => r.id)),
+  };
+}
+
+/** FG-821: the runs dispatched for one ticket (the ticket page's runs list), newest
+ *  first, scoped like every list route. The ticket is read from run metadata the same
+ *  way the task links read it. */
+export type TicketRunEntry = { runId: string; status: string; title: string; startedAt: string };
+
+export function runsForTicket(ticketId: string, scope?: ProjectScope): TicketRunEntry[] {
+  if (!runsHasMetadata()) return [];
+  const project = scopeSql("runs", "r", scope);
+  const rows = db()
+    .prepare(
+      `SELECT r.id, r.status, r.title, r.created_at FROM runs r
+        WHERE ${RUN_TICKET_SQL("r")} = ? ${project.clause}
+        ORDER BY r.created_at DESC, r.id DESC`,
+    )
+    .all(ticketId, ...project.params) as Array<{ id: string; status: string; title: string; created_at: string }>;
+  return rows.map((r) => ({ runId: r.id, status: r.status, title: r.title, startedAt: r.created_at }));
+}
+
+/** FG-821: the ids of every run in scope, or null when unscoped (every run). The run
+ *  index filters core's queryRuns rows through this so it scopes exactly as every
+ *  other list route does. */
+export function runIdsInScope(scope: ProjectScope): Set<string> | null {
+  if (scope === undefined) return null;
+  const project = scopeSql("runs", "r", scope);
+  const rows = db().prepare(`SELECT r.id FROM runs r WHERE 1 = 1 ${project.clause}`).all(...project.params) as Array<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}
 
 // The dashboard polls running-task detail every 3s; reading whole multi-MB
 // stream-json logs each tick would undo the bounded-tail discipline elsewhere.
@@ -1090,6 +1228,7 @@ export function taskDetail(taskId: string): TaskDetail | null {
 
   return {
     task,
+    links: taskLinks(taskId, taskRow.run_id),
     stdoutLog: stdout.text,
     stderrLog: stderr.text,
     stdoutBytes: stdout.bytes,
@@ -3448,8 +3587,12 @@ export function verificationEvidenceForTask(taskId: string, scope?: ProjectScope
   ) {
     return [];
   }
+  return verificationEvidenceForRunRow(taskRow.run_id, taskRow.project_dir);
+}
 
-  const runId = taskRow.run_id;
+// Everything past the task's scope check depends only on its run: every task of a run
+// sees the same evidence, so GET /api/run/:id/evidence reads it once per run.
+function verificationEvidenceForRunRow(runId: string | null, projectDir: string | null): HostVerificationEvidenceRow[] {
   // The authoritative candidate: the run's review candidate_sha. `reviews`/its
   // candidate_sha column may be absent on a store predating the ledger — a
   // missing table/column is absorbed (the sidecar degrades to the run_id
@@ -3487,7 +3630,7 @@ export function verificationEvidenceForTask(taskId: string, scope?: ProjectScope
   // such guard — a run_id names exactly one run, hence one project — and is left
   // unscoped so a run whose evidence was written under a differently-spelled path
   // still attaches by its own id.
-  const owning = scopeSql("host_verifications", "host_verifications", taskRow.project_dir || undefined);
+  const owning = scopeSql("host_verifications", "host_verifications", projectDir || undefined);
   const binds: string[] = [];
   const bindParams: unknown[] = [];
   if (candidateSha && owning.clause) {
@@ -3656,6 +3799,25 @@ export function reviewLedger(scope?: ProjectScope, limit = 25): ReviewLedgerEntr
         LIMIT ?`,
     )
     .all(...project.params, limit) as ReviewDbRow[];
+  return reviewEntries(reviews);
+}
+
+/** FG-821: one review by id, findings embedded — the same entry shape as the ledger,
+ *  so a review link older than the ledger's window still resolves. Scoped exactly as
+ *  reviewLedger is; out of scope reads as absent (null). */
+export function reviewById(reviewId: string, scope?: ProjectScope): ReviewLedgerEntry | null {
+  const project = scopeSql("runs", "runs", scope);
+  const reviews = db()
+    .prepare(
+      `SELECT reviews.*, runs.project_dir AS project_dir
+         FROM reviews LEFT JOIN runs ON runs.id = reviews.run_id
+        WHERE reviews.id = ? ${project.clause}`,
+    )
+    .all(reviewId, ...project.params) as ReviewDbRow[];
+  return reviewEntries(reviews)[0] ?? null;
+}
+
+function reviewEntries(reviews: ReviewDbRow[]): ReviewLedgerEntry[] {
   if (reviews.length === 0) return [];
 
   const placeholders = reviews.map(() => "?").join(", ");

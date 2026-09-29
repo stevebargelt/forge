@@ -101,11 +101,12 @@ test("FG-692: interactive orchestrator rows announce button semantics and open t
     const detail = page.waitForResponse((response) => response.url().endsWith(`/api/task/${TASK_ID}`) && response.status() === 200);
     await page.keyboard.press(key);
     await detail;
-    // A response reaching the browser precedes Preact committing it; wait for the
-    // returned task ID rather than asserting the transient loading overlay. The id is a
-    // bare text node beside the copy-id button, so match it as a substring, not exact.
-    await page.locator(".detail-overlay").getByText(TASK_ID).first().waitFor();
-    assert.match(await page.locator(".detail-overlay").innerText(), new RegExp(TASK_ID));
+    // FG-821: the row opens the task PAGE. A response reaching the browser precedes
+    // Preact committing it; wait for the returned task ID on the page. The id is a bare
+    // text node beside the copy-id button, so match it as a substring, not exact.
+    assert.equal(new URL(page.url()).hash, `#task/${TASK_ID}`);
+    await page.locator(".task-page").getByText(TASK_ID).first().waitFor();
+    assert.match(await page.locator(".task-page").innerText(), new RegExp(TASK_ID));
     await page.close();
     assert.deepEqual(errors, [], `browser errors after ${JSON.stringify(key)}: ${errors.join("; ")}`);
   }
@@ -144,10 +145,10 @@ test("FG-692 (RF-2): Enter/Space on the nested remote-control link does NOT stea
     assert.equal(await link.evaluate((el) => el === document.activeElement), true, `${JSON.stringify(key)} focuses the nested link`);
 
     await page.keyboard.press(key);
-    // Give the (buggy) row handler its chance to fire and open the detail overlay.
+    // Give the (buggy) row handler its chance to fire and open the task page.
     await page.waitForTimeout(400);
     assert.equal(taskFetched, false, `${JSON.stringify(key)} on the link must not fetch the task detail`);
-    assert.equal(await page.locator(".detail-overlay").count(), 0, `${JSON.stringify(key)} on the link must not open the task detail overlay`);
+    assert.equal(await page.locator(".task-page").count(), 0, `${JSON.stringify(key)} on the link must not open the task page`);
     await page.close();
     assert.deepEqual(errors, [], `browser errors after ${JSON.stringify(key)}: ${errors.join("; ")}`);
   }

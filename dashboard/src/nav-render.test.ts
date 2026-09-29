@@ -43,7 +43,7 @@ test("FG-820: only empty: true removes the badge; loading shows none yet", () =>
 
 test("FG-820: nav hrefs carry scope on list views only, and the current item follows the parent rule", () => {
   const scope = { project: "forge", checkout: "/r/forge" };
-  const items = navModel("run-map", scope).flatMap((g) => g.items);
+  const items = navModel("run", scope).flatMap((g) => g.items);
   assert.deepEqual(items.filter((i) => i.current).map((i) => i.view), ["runs"]);
   assert.equal(items.find((i) => i.view === "queue")?.href, "#queue?project=forge&checkout=%2Fr%2Fforge");
   assert.equal(items.find((i) => i.view === "projects")?.href, "#projects");
@@ -55,7 +55,8 @@ test("FG-820: an in-app link keeps the current scope unless it names its own", (
   const scope = { project: "forge", checkout: null };
   assert.equal(scopedHref("#backlog/FG-9", scope), "#backlog/FG-9?project=forge");
   assert.equal(scopedHref("#backlog?project=other", scope), "#backlog?project=other");
-  assert.equal(scopedHref("#run-map/run-1", scope), "#run-map/run-1", "object pages carry no scope");
+  assert.equal(scopedHref("#run/run-1", scope), "#run/run-1", "object pages carry no scope");
+  assert.equal(scopedHref("#runs?status=failed", scope), "#runs?project=forge&status=failed", "the run index keeps its status filter");
   assert.equal(scopedHref("#config", { project: null, checkout: null }), "#config");
 });
 
