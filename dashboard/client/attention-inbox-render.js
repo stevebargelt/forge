@@ -167,7 +167,31 @@ export function isAttentionInboxPayload(value) {
   if (!isPlainObject(value)) return false;
   // An explicit {error} body from the degraded route is not a payload.
   if (typeof value.error === "string") return false;
-  return isArrayOf(value.items, isRenderableInboxItem);
+  // FG-823: `dismissed` is absent on a server that predates it (read as none held), but a
+  // present-and-malformed section is a failed read like any other.
+  return isArrayOf(value.items, isRenderableInboxItem) && (value.dismissed === undefined || isArrayOf(value.dismissed, isDismissedEntry));
+}
+
+/** FG-823: one held item — the item as the inbox would show it, plus how it is held. */
+export function isDismissedEntry(value) {
+  if (!isPlainObject(value) || !isRenderableInboxItem(value.item) || !isPlainObject(value.dismissal)) return false;
+  const d = value.dismissal;
+  return (d.state === "dismissed" || d.state === "snoozed") && isNonEmptyString(d.dismissedAt) && isNonEmptyString(d.actor);
+}
+
+/** FG-823: a held item's render decision — its row summary plus the one line saying how
+ *  it is held and what brings it back. */
+export function dismissedSummary(entry) {
+  const d = entry.dismissal;
+  const hold = d.state === "snoozed"
+    ? `Snoozed by ${d.actor} until ${d.snoozeUntil} — or until it shows new activity`
+    : `Dismissed by ${d.actor} — returns when it shows new activity`;
+  return {
+    ...inboxItemSummary(entry.item),
+    holdState: d.state,
+    holdLabel: hold,
+    rationale: typeof d.rationale === "string" && d.rationale !== "" ? d.rationale : null,
+  };
 }
 
 /** How a read FAILED. Kept structured so a 404 can name the one useful thing (the server
@@ -246,7 +270,7 @@ export function inboxUnavailableDetail(load) {
 export function inboxView(load) {
   const phase = inboxPhase(load);
   if (phase === "loading") {
-    return { phase, message: INBOX_LOADING_LABEL, items: [], empty: false, degraded: [] };
+    return { phase, message: INBOX_LOADING_LABEL, items: [], empty: false, degraded: [], dismissed: [] };
   }
   if (phase === "unavailable") {
     return {
@@ -257,10 +281,12 @@ export function inboxView(load) {
       items: [],
       empty: false,
       degraded: [],
+      dismissed: [],
     };
   }
   const envelope = load.envelope;
   const items = envelope.items.map(inboxItemSummary);
+  const dismissed = Array.isArray(envelope.dismissed) ? envelope.dismissed.map(dismissedSummary) : [];
   const degraded = Array.isArray(envelope.degraded) ? envelope.degraded : [];
   // Genuinely empty (all sources read OK, nothing to act on) is a DIFFERENT fact from a
   // partial-read failure that happened to return no items: only the former earns the calm
@@ -273,5 +299,6 @@ export function inboxView(load) {
     empty,
     message: empty ? INBOX_EMPTY_LABEL : null,
     degraded,
+    dismissed,
   };
 }

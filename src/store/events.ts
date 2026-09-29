@@ -458,7 +458,16 @@ export type EventType =
   // NOT NULL with no CHECK constraint, so this is additive to the TS union alone:
   // NO SCHEMA_SQL / ADDITIVE_COLUMNS change and NO migration against the shared
   // host DB.
-  | "ops.adjudicated";
+  | "ops.adjudicated"
+  // FG-823: the audit trail of attention_dismissals (src/store/attention-dismissals.ts),
+  // each written in the same transaction as the row it records. Payload: { dismissalId,
+  // itemKey, kind, projectKey, actor, rationale, dismissedAt, snoozeUntil, state } (+
+  // clearedBy on an undismiss). Additive to the TS union alone — event_type has no CHECK.
+  | "attention.dismissed"
+  | "attention.snoozed"
+  | "attention.undismissed"
+  | "attention.dismissal_superseded"
+  | "attention.snooze_expired";
 
 export type Event = {
   id: number;

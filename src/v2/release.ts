@@ -242,6 +242,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   // module makes the browser's module loader fail and the app never mounts.
   // Kept complete by release.test.ts, which walks main.js's static import graph.
   "dashboard/client/main.js",
+  "dashboard/client/attention-dismiss-render.js",
+  "dashboard/client/attention-dismiss-view.js",
   "dashboard/client/attention-inbox-render.js",
   "dashboard/client/attention-inbox-view.js",
   "dashboard/client/backlog-state.js",

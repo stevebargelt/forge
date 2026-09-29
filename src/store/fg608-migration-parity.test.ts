@@ -319,6 +319,25 @@ test("FG-783: both remote-planning tables reach fresh-vs-migrated parity and hol
   );
 });
 
+test("FG-823: attention_dismissals and its partial unique index reach fresh-vs-migrated parity", () => {
+  const fresh = freshDb();
+  const { db: migrated, stripped } = oldestShapeThenMigrated();
+  const table = "attention_dismissals";
+
+  assert.ok(tableNames(fresh).includes(table), "attention_dismissals must exist in a fresh DB");
+  for (const col of ["project_key", "run_id", "snooze_until", "rationale", "settled_at"]) {
+    assert.ok(stripped.includes(`${table}.${col}`), `the strip must remove the nullable ${table}.${col}`);
+  }
+  assert.deepEqual(shapeOf(migrated, table), shapeOf(fresh, table), `${table}: a migrated DB diverges from a fresh one`);
+  assert.deepEqual(constraintsOf(migrated, table), constraintsOf(fresh, table), `${table}: the CONSTRAINT shape diverges`);
+
+  const active = constraintsOf(fresh, table).indexes!.find((i) => i.startsWith("idx_attention_dismissals_active "));
+  assert.ok(active, "the partial unique index on the active row exists");
+  assert.match(active, /unique=1 origin=c partial=1 \(item_key\)/);
+  assert.match(active, /WHERE state = 'active'/);
+  assert.equal(migrated.pragma("user_version", { simple: true }), 0, "the new table never bumps user_version");
+});
+
 test("FG-783: re-execing SCHEMA_SQL on an aged DB never bumps user_version (BD-15)", () => {
   // The additive-only forward-gate contract: opening (and re-opening) a store that
   // predates FG-783 brings the two new tables forward via CREATE TABLE IF NOT EXISTS

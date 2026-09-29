@@ -249,6 +249,7 @@ export function createActivityReader(
 ): {
   poll(url: string): Promise<void> | null;
   retry(url: string): Promise<void>;
+  refresh(url: string): Promise<void>;
 };
 export function activityPhase(load: unknown): "loading" | "ready" | "unavailable";
 export function activityUnavailableDetail(load: unknown): string;

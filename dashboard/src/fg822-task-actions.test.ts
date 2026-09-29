@@ -101,10 +101,10 @@ test("FG-822: awaiting_gate offers the three gate decisions, each labeled with i
   }
 });
 
-test("FG-822: the registry is closed — three rows, three verbs, none of the CLI-only capabilities", () => {
-  assert.deepEqual(Object.keys(ACTION_ROUTES).sort(), ["gate", "recover-re-drive", "retry"]);
-  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["gate", "recover", "retry"]);
-  assert.deepEqual(Object.values(ACTION_ROUTES).map((r) => r.verb).sort(), [...ACTION_FORGE_VERBS].sort());
+test("FG-822: the registry is closed — three task rows and FG-823's three attention rows, four verbs, none of the CLI-only capabilities", () => {
+  assert.deepEqual(Object.keys(ACTION_ROUTES).sort(), ["attention-dismiss", "attention-snooze", "attention-undismiss", "gate", "recover-re-drive", "retry"]);
+  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "gate", "recover", "retry"]);
+  assert.deepEqual([...new Set(Object.values(ACTION_ROUTES).map((r) => r.verb))].sort(), [...ACTION_FORGE_VERBS].sort());
   const forbidden = ["dispatcher", "arm", "disarm", "max-active-runs", "cancel", "next", "route", "routing", "raci", "model-policy", "apply", "backlog", "--force"];
   for (const word of forbidden) {
     assert.ok(!(ACTION_FORGE_VERBS as readonly string[]).includes(word), `${word} is not an action verb`);

@@ -23,6 +23,12 @@
 //  * recover-re-drive — only a FAILED task whose kind RE_DRIVABLE_FAILURE_KINDS (the
 //                fail-closed guard `forge recover --re-drive` itself reads) accepts.
 //
+// ─── THE ATTENTION ROWS (FG-823) ─────────────────────────────────────────────
+// Dismiss, snooze and undismiss an Attention inbox item, each shelling `forge attention
+// dismiss|snooze|undismiss <item-key> --actor dashboard`. No preview: whether the item is
+// open (or already held) is the CLI's call against the same derivation the inbox serves,
+// and its refusal comes back verbatim. The dashboard stores no dismissal state itself.
+//
 // ─── WHAT IS NOT HERE, AND CANNOT BE REACHED FROM HERE ───────────────────────
 // Arming or disarming the dispatcher, max_active_runs, cancel, next, routing/RACI/
 // model-policy apply, backlog edits, and any `--force`. The verb set is a closed
@@ -34,6 +40,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isReDrivableFailureKind, recordedRetryDisposition, retryPolicy } from "@forge/retry-policy";
+import { isAttentionItemKey, parseSnoozeUntil } from "../../src/store/attention-dismissals.js";
 import type { TaskActionFacts } from "./queries.js";
 import {
   CHILD_TIMEOUT_MS,
@@ -53,18 +60,23 @@ import {
 
 // ─── the route table ─────────────────────────────────────────────────────────
 
-/** The task-action routes, as a CLOSED table: one row per action, each naming the
- *  ONE `forge` verb it shells. */
+/** The action routes, as a CLOSED table: one row per action, each naming the ONE `forge`
+ *  verb it shells — the three task actions, then the three attention-row actions. */
 export const ACTION_ROUTES = {
   gate: { path: "/api/task/:id/gate", verb: "gate" },
   retry: { path: "/api/task/:id/retry", verb: "retry" },
   "recover-re-drive": { path: "/api/task/:id/recover-re-drive", verb: "recover" },
+  "attention-dismiss": { path: "/api/attention/:itemKey/dismiss", verb: "attention" },
+  "attention-snooze": { path: "/api/attention/:itemKey/snooze", verb: "attention" },
+  "attention-undismiss": { path: "/api/attention/:itemKey/undismiss", verb: "attention" },
 } as const;
 
-export type TaskAction = keyof typeof ACTION_ROUTES;
+export type ActionRoute = keyof typeof ACTION_ROUTES;
+export type TaskAction = Extract<ActionRoute, "gate" | "retry" | "recover-re-drive">;
+export type AttentionAction = Exclude<ActionRoute, TaskAction>;
 
 /** The ONLY `forge` verbs this registry can ever spawn. */
-export const ACTION_FORGE_VERBS = ["gate", "retry", "recover"] as const;
+export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention"] as const;
 
 export type ActionForgeVerb = (typeof ACTION_FORGE_VERBS)[number];
 
@@ -77,6 +89,7 @@ export type GateDecision = (typeof GATE_DECISIONS)[number];
 export const ACTION_ACTOR = "dashboard";
 
 const ACTION_PATH = /^\/api\/task\/([^/]+)\/(gate|retry|recover-re-drive)$/;
+const ATTENTION_PATH = /^\/api\/attention\/([^/]+)\/(dismiss|snooze|undismiss)$/;
 const PREVIEW_PATH = /^\/api\/task\/([^/]+)\/actions$/;
 
 /** A task id: a charset that cannot express a leading `-`, a path separator, `..`, a
@@ -87,7 +100,7 @@ const MAX_RATIONALE_CHARS = 4000;
 const MAX_ACTION_BODY_BYTES = 16 * 1024;
 
 export function isActionMutationPath(path: string): boolean {
-  return ACTION_PATH.test(path);
+  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path);
 }
 
 /** The raw task-id segment of a preview path, or null. */
@@ -238,6 +251,14 @@ export function previewTaskActions(facts: Pick<TaskActionFacts, "taskId" | "stat
 
 // ─── the argv, before any of it reaches a child ──────────────────────────────
 
+function rationaleOperand(raw: string): string | MutationRefusal {
+  if (raw.length > MAX_RATIONALE_CHARS) return refuse(400, `rationale must be at most ${MAX_RATIONALE_CHARS} characters.`);
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(raw)) return refuse(400, "rationale must not contain control characters.");
+  const dash = assertOperand(raw.trimStart(), "rationale");
+  if (dash) return dash;
+  return raw;
+}
+
 export type BuiltAction = { ok: true; verb: ActionForgeVerb; argv: string[]; eligible: EligibleAction };
 
 /** THE ARGV BUILDER. The body is checked against the one shape each action takes,
@@ -269,11 +290,9 @@ export function buildActionArgv(
     if (typeof rawRationale !== "string" || rawRationale.trim() === "") {
       return refuse(400, "rationale is required for every gate decision: it is the human decision record.");
     }
-    if (rawRationale.length > MAX_RATIONALE_CHARS) return refuse(400, `rationale must be at most ${MAX_RATIONALE_CHARS} characters.`);
-    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(rawRationale)) return refuse(400, "rationale must not contain control characters.");
-    const dash = assertOperand(rawRationale.trimStart(), "rationale");
-    if (dash) return dash;
-    rationale = rawRationale;
+    const checked = rationaleOperand(rawRationale);
+    if (isRefusal(checked)) return checked;
+    rationale = checked;
   }
 
   const preview = previewTaskActions(facts);
@@ -286,6 +305,63 @@ export function buildActionArgv(
 
   const argv = argvFor(action, facts.taskId, decision, rationale);
   return { ok: true, verb: ACTION_ROUTES[action].verb, argv, eligible: match };
+}
+
+/** The decoded item-key segment of an attention path, validated as an inbox item id. */
+export function itemKeyOperand(raw: string): string | MutationRefusal {
+  let value: string;
+  try {
+    value = decodeURIComponent(raw);
+  } catch {
+    return refuse(400, "the item key is not valid URI encoding.");
+  }
+  const dash = assertOperand(value, "the item key");
+  if (dash) return dash;
+  if (!isAttentionItemKey(value)) return refuse(400, `the item key ${JSON.stringify(value)} is not an attention item id.`);
+  return value;
+}
+
+export type BuiltAttentionAction = { ok: true; verb: "attention"; argv: string[]; command: string };
+
+const ATTENTION_FIELDS: Record<AttentionAction, readonly string[]> = {
+  "attention-dismiss": ["rationale"],
+  "attention-snooze": ["until", "rationale"],
+  "attention-undismiss": [],
+};
+
+/** THE ATTENTION ARGV BUILDER: the body is checked against the one shape each action
+ *  takes, and the actor is always `dashboard`. */
+export function buildAttentionArgv(action: AttentionAction, itemKey: string, body: unknown, nowMs: number = Date.now()): BuiltAttentionAction | MutationRefusal {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return refuse(400, "the request body must be a JSON object.");
+  }
+  const input = body as Record<string, unknown>;
+  const allowed = ATTENTION_FIELDS[action];
+  const extra = Object.keys(input).filter((key) => !allowed.includes(key));
+  if (extra.length > 0) {
+    return refuse(400, `${ACTION_ROUTES[action].path} takes ${allowed.length ? allowed.join(" and ") : "no fields"}; refusing ${extra.join(", ")}.`);
+  }
+
+  const sub = action === "attention-dismiss" ? "dismiss" : action === "attention-snooze" ? "snooze" : "undismiss";
+  const argv = ["attention", sub, itemKey];
+  if (action === "attention-snooze") {
+    const until = input["until"];
+    if (typeof until !== "string") return refuse(400, "until is required: a duration (1h, 4h, 1d) or an ISO-8601 instant.");
+    const parsed = parseSnoozeUntil(until, nowMs);
+    if (!parsed.ok) return refuse(400, parsed.error);
+    argv.push("--until", until.trim());
+  }
+  argv.push("--actor", ACTION_ACTOR);
+  const rawRationale = input["rationale"];
+  if (rawRationale !== undefined && rawRationale !== null) {
+    if (typeof rawRationale !== "string") return refuse(400, "rationale must be a string.");
+    if (rawRationale.trim() !== "") {
+      const rationale = rationaleOperand(rawRationale);
+      if (isRefusal(rationale)) return rationale;
+      argv.push("--rationale", rationale);
+    }
+  }
+  return { ok: true, verb: "attention", argv, command: `forge attention ${sub} ${itemKey}` };
 }
 
 // ─── the handler ─────────────────────────────────────────────────────────────
@@ -306,6 +382,10 @@ export async function handleActionMutation(
   path: string,
   context: ActionMutationContext,
 ): Promise<void> {
+  if (ATTENTION_PATH.test(path)) {
+    await handleAttentionMutation(req, res, path);
+    return;
+  }
   const m = path.match(ACTION_PATH);
   if (!m) {
     send(res, 404, { ok: false, error: "not found" });
@@ -364,8 +444,57 @@ export async function handleActionMutation(
   // The run's own checkout (read from the store, never the request) when it still
   // exists; the dashboard's directory otherwise. These verbs resolve the task by id.
   const cwd = facts.projectDir && isAbsolute(facts.projectDir) && existsSync(facts.projectDir) ? facts.projectDir : DASHBOARD_DIR;
-  const verb = built.eligible.verb;
-  const result = await withMutationSlot(() => runForgeVerb(binary.path, built.argv, cwd));
+  await spawnAndReport(res, action, built.eligible.verb, binary.path, built.argv, cwd);
+}
+
+/** One POST to an attention-row route: the same guard order as the task actions — every
+ *  refusal before a subprocess is resolved. The verb works on the machine-wide store, so
+ *  it runs from the dashboard's own directory. */
+async function handleAttentionMutation(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+  const m = path.match(ATTENTION_PATH)!;
+  const action = `attention-${m[2]}` as AttentionAction;
+
+  const headerRefusal = guardMutationPost(req, "attention actions");
+  if (headerRefusal) {
+    send(res, headerRefusal.status, { ok: false, action, error: headerRefusal.error });
+    return;
+  }
+  const itemKey = itemKeyOperand(m[1]!);
+  if (isRefusal(itemKey)) {
+    send(res, itemKey.status, { ok: false, action, error: itemKey.error });
+    return;
+  }
+  const body = await readBody(req, MAX_ACTION_BODY_BYTES);
+  if (isRefusal(body)) {
+    send(res, body.status, { ok: false, action, error: body.error });
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = body.text.trim() === "" ? {} : JSON.parse(body.text);
+  } catch {
+    send(res, 400, { ok: false, action, error: "the request body is not valid JSON." });
+    return;
+  }
+  const built = buildAttentionArgv(action, itemKey, parsed);
+  if (isRefusal(built)) {
+    send(res, built.status, { ok: false, action, error: built.error });
+    return;
+  }
+  if (built.argv[0] !== ACTION_ROUTES[action].verb || built.argv.includes("--force")) {
+    send(res, 500, { ok: false, action, error: `refusing to spawn an unregistered action argv (${built.argv[0]}).` });
+    return;
+  }
+  const binary = resolveForgeBinary();
+  if (isRefusal(binary)) {
+    send(res, binary.status, { ok: false, action, error: binary.error });
+    return;
+  }
+  await spawnAndReport(res, action, built.command, binary.path, built.argv, DASHBOARD_DIR);
+}
+
+async function spawnAndReport(res: ServerResponse, action: ActionRoute, verb: string, binary: string, argv: string[], cwd: string): Promise<void> {
+  const result = await withMutationSlot(() => runForgeVerb(binary, argv, cwd));
   if (result === null) {
     send(res, 503, { ok: false, action, verb, error: `too many dashboard mutations in flight (${MAX_CONCURRENT_MUTATIONS}); retry in a moment.` });
     return;

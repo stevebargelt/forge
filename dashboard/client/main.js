@@ -202,6 +202,12 @@ function App() {
     return inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
   }, [projectFilter, checkoutFilter]);
 
+  // FG-823: after a dismiss/snooze/undismiss, re-read in place — the server has already
+  // moved the item between `items` and `dismissed`, and the Home badge follows its counts.
+  const refreshInbox = useCallback(() => {
+    return inboxReader.current.refresh(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
+  }, [projectFilter, checkoutFilter]);
+
   const pollPlanUsage = useCallback(async () => {
     setPlanUsageLoading(true);
     try {
@@ -715,6 +721,7 @@ function App() {
             onRetryActivity=${retryCurrentActivity}
             inboxLoad=${inboxLoad}
             onRetryInbox=${retryInbox}
+            onRefreshInbox=${refreshInbox}
             onRefreshInFlight=${poll}
             now=${now}
             orchCollapsed=${orchCollapsed}
@@ -851,7 +858,7 @@ function replaceHash(hash) {
   window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${hash}`);
 }
 
-function HomeView({ hrefFor, planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, onRefreshInFlight, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
+function HomeView({ hrefFor, planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, activityLoad, onRetryActivity, inboxLoad, onRetryInbox, onRefreshInbox, onRefreshInFlight, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
   return html`
     <section class="home-view" aria-label="Dashboard home">
       <${UsageLimits}
@@ -866,7 +873,8 @@ function HomeView({ hrefFor, planUsage, planUsageLoading, planUsageRefreshing, p
         now=${now}
         onRetry=${onRetryInbox}
         hrefFor=${hrefFor}
-        rowActions=${(summary, fallback) => html`<${TaskActions} key=${summary.taskId} taskId=${summary.taskId} compact=${true} fallback=${fallback} onChanged=${onRetryInbox} />`}
+        rowActions=${(summary, fallback, preview) => html`<${TaskActions} key=${summary.taskId} taskId=${summary.taskId} compact=${true} fallback=${fallback} onChanged=${onRetryInbox} ...${preview} />`}
+        onDismissChanged=${onRefreshInbox}
       />
       <div class="home-in-flight-group">
         <div class="home-section-heading">

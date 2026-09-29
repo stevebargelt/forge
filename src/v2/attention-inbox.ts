@@ -11,6 +11,7 @@
 // FailureKind without breaking a client (protected_invariant #3).
 
 import type { KanbanConflict } from "../store/kanban-projection.js";
+import type { AttentionDismissal, AttentionDismissalLapse } from "../store/attention-dismissals.js";
 import { waitAttentionItems, type WaitSources } from "./attention-inbox-waits.js";
 import type { SourceResult } from "./attention-inbox-readiness.js";
 import {
@@ -117,7 +118,24 @@ export type InboxEnvelope = {
    *  envelope they count only what the healthy sources returned — read them with
    *  `degraded`, never as a complete total. */
   counts: InboxCounts;
+  /** FG-823: the items an operator dismissed or snoozed that are still held, each with its
+   *  dismissal state. Kept OUT of `items` and `counts`, so no consumer counts a dismissed
+   *  item and none has to filter one out. */
+  dismissed: DismissedEntry[];
 };
+
+/** How a held item is held: `dismissed` until its activity advances, `snoozed` until
+ *  `snoozeUntil` passes (or its activity advances, whichever is first). */
+export type DismissalView = {
+  itemKey: string;
+  state: "dismissed" | "snoozed";
+  dismissedAt: string;
+  snoozeUntil: string | null;
+  actor: string;
+  rationale: string | null;
+};
+
+export type DismissedEntry = { item: AttentionItem; dismissal: DismissalView };
 
 export type InboxCounts = { open: number; high: number };
 
@@ -221,19 +239,85 @@ function preferItem(a: AttentionItem, b: AttentionItem): AttentionItem {
   return a.id.localeCompare(b.id) <= 0 ? a : b;
 }
 
+// ─── Dismissals (FG-823) ─────────────────────────────────────────────────────────
+//
+// A dismissal holds only while the item's activity timestamp (`startedAt`) has not
+// advanced past `dismissedAt`: new activity on the same source resurfaces the item. A
+// snooze additionally lapses once `snoozeUntil` passes. A row that no longer holds is
+// reported in `lapsed` — the derivation decides, the next `forge attention` write
+// persists the marking (every reader is read-only) — and is never deleted.
+
+function isoMs(value: string | null): number | null {
+  if (value === null) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export type DismissalOutcome = {
+  kept: AttentionItem[];
+  dismissed: DismissedEntry[];
+  lapsed: Array<{ id: string; itemKey: string; state: AttentionDismissalLapse }>;
+};
+
+/** PURE: split `items` into those still shown and those a live dismissal holds. */
+export function applyDismissals(items: readonly AttentionItem[], dismissals: readonly AttentionDismissal[], nowIso: string): DismissalOutcome {
+  const nowMs = isoMs(nowIso) ?? Date.now();
+  const byKey = new Map<string, AttentionDismissal>();
+  const lapsed: DismissalOutcome["lapsed"] = [];
+  for (const row of dismissals) {
+    const until = isoMs(row.snoozeUntil);
+    if (row.snoozeUntil !== null && (until === null || until <= nowMs)) {
+      lapsed.push({ id: row.id, itemKey: row.itemKey, state: "expired" });
+      continue;
+    }
+    byKey.set(row.itemKey, row);
+  }
+  const kept: AttentionItem[] = [];
+  const dismissed: DismissedEntry[] = [];
+  for (const item of items) {
+    const row = byKey.get(item.id);
+    if (row === undefined) {
+      kept.push(item);
+      continue;
+    }
+    const activity = isoMs(item.startedAt);
+    const dismissedMs = isoMs(row.dismissedAt);
+    if (activity !== null && dismissedMs !== null && activity > dismissedMs) {
+      lapsed.push({ id: row.id, itemKey: row.itemKey, state: "superseded" });
+      kept.push(item);
+      continue;
+    }
+    dismissed.push({
+      item,
+      dismissal: {
+        itemKey: row.itemKey,
+        state: row.snoozeUntil === null ? "dismissed" : "snoozed",
+        dismissedAt: row.dismissedAt,
+        snoozeUntil: row.snoozeUntil,
+        actor: row.actor,
+        rationale: row.rationale,
+      },
+    });
+  }
+  return { kept, dismissed, lapsed };
+}
+
 // ─── Compose ────────────────────────────────────────────────────────────────────
 
 export type ComposeMeta = {
   generatedAt: string;
   scope: InboxScope;
   degraded?: string[];
+  /** FG-823: the store's active dismissal rows; applied AFTER dedup, BEFORE counts. */
+  dismissals?: readonly AttentionDismissal[];
 };
 
 /** The ONE assembly point: flatten every source's items, collapse duplicates, sort,
  *  and wrap in the stable envelope. Pure — every input is already-derived data. */
 export function composeInbox(sources: AttentionItem[][], meta: ComposeMeta): InboxEnvelope {
   const flattened = sources.flat();
-  const items = sortAttentionItems(dedupeAttentionItems(flattened));
+  const { kept, dismissed } = applyDismissals(sortAttentionItems(dedupeAttentionItems(flattened)), meta.dismissals ?? [], meta.generatedAt);
+  const items = kept;
   const degraded = meta.degraded ?? [];
   return {
     generatedAt: meta.generatedAt,
@@ -247,6 +331,7 @@ export function composeInbox(sources: AttentionItem[][], meta: ComposeMeta): Inb
     empty: items.length === 0 && degraded.length === 0,
     degraded,
     counts: inboxCounts(items),
+    dismissed,
   };
 }
 
@@ -266,6 +351,8 @@ export type AttentionInboxReaders = {
   readiness: () => SourceResult;
   staleVerifications: () => StaleVerificationRow[];
   openKanbanConflicts: () => readonly KanbanConflict[];
+  /** FG-823: the active attention_dismissals rows. */
+  dismissals: () => readonly AttentionDismissal[];
 };
 
 /** `scope.runId` non-null narrows the inbox to items linked to that run. */
@@ -320,12 +407,23 @@ export function deriveAttentionInbox(readers: AttentionInboxReaders, meta: { gen
     console.error("attentionInbox: reading kanban-conflict items failed:", err);
   }
 
+  // FG-823: a failed dismissals read excludes nothing — every item shows, and the marker
+  // says why a dismissed item is back.
+  let dismissals: readonly AttentionDismissal[] = [];
+  try {
+    dismissals = readers.dismissals();
+  } catch (err) {
+    degraded.push("dismissals");
+    console.error("attentionInbox: reading attention dismissals failed:", err);
+  }
+
   const runId = meta.scope.runId;
   const onRun = (items: AttentionItem[]) => (runId === null ? items : items.filter((item) => item.links.runId === runId));
   return composeInbox([onRun(waitItems), onRun(failureItems), onRun(readinessItems), onRun(verificationItems), onRun(kanbanConflictItems)], {
     generatedAt: meta.generatedAt,
     scope: meta.scope,
     degraded,
+    dismissals,
   });
 }
 
@@ -339,8 +437,9 @@ function clampCell(text: string, max: number): string {
 }
 
 /** A compact table (kind, severity, reason, requested action) with a one-line totals
- *  footer read from the envelope's server-computed `counts`. */
-export function renderAttentionInboxLines(envelope: InboxEnvelope): string[] {
+ *  footer read from the envelope's server-computed `counts`. `includeDismissed` (FG-823)
+ *  adds the held items and their dismissal state; otherwise the footer only counts them. */
+export function renderAttentionInboxLines(envelope: InboxEnvelope, opts: { includeDismissed?: boolean } = {}): string[] {
   const lines: string[] = [];
   const degradedNote = envelope.degraded.length > 0 ? ` · degraded: ${envelope.degraded.join(", ")} (partial read)` : "";
   if (envelope.items.length === 0) {
@@ -358,7 +457,22 @@ export function renderAttentionInboxLines(envelope: InboxEnvelope): string[] {
     lines.push(format(header));
     for (const row of rows) lines.push(format(row));
   }
+  const held = envelope.dismissed ?? [];
+  if (opts.includeDismissed && held.length > 0) {
+    lines.push("");
+    lines.push(`Dismissed (${held.length}):`);
+    const rows = held.map(({ item, dismissal }) => [
+      item.id,
+      item.kind,
+      dismissal.state === "snoozed" ? `snoozed until ${dismissal.snoozeUntil}` : `dismissed ${dismissal.dismissedAt}`,
+      `by ${dismissal.actor}`,
+      clampCell(dismissal.rationale ?? item.reason, RENDER_TEXT_MAX),
+    ]);
+    const widths = rows[0]!.map((_, col) => Math.max(...rows.map((row) => row[col]!.length)));
+    for (const row of rows) lines.push(row.map((cell, col) => (col === row.length - 1 ? cell : cell.padEnd(widths[col]!))).join("  "));
+  }
+  const heldNote = held.length > 0 && !opts.includeDismissed ? ` · ${held.length} dismissed (--include-dismissed to list)` : "";
   lines.push("");
-  lines.push(`${envelope.counts.open} open · ${envelope.counts.high} high${degradedNote}`);
+  lines.push(`${envelope.counts.open} open · ${envelope.counts.high} high${heldNote}${degradedNote}`);
   return lines;
 }

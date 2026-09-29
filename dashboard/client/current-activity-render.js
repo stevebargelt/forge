@@ -499,6 +499,11 @@ export function createActivityReader(apply, read = readCurrentActivity) {
       apply(ACTIVITY_LOADING);
       return start(url);
     },
+    /** FG-823: a fresh read superseding anything in flight, WITHOUT dropping to `loading` —
+     *  after a write the operator just made, so the list updates in place. */
+    refresh(url) {
+      return start(url);
+    },
   };
 }
 

@@ -100,6 +100,7 @@ import {
 // mappers into the ONE stable external envelope.
 import { deriveAttentionInbox, type InboxEnvelope, type InboxScope } from "./attention-inbox.js";
 import { listOpenConflicts } from "@forge/kanban-projection";
+import { activeAttentionDismissals } from "../../src/store/attention-dismissals.js";
 import { failureAttentionItems } from "../../src/v2/attention-inbox-failures.js";
 import { readinessAttentionItems } from "../../src/v2/attention-inbox-readiness.js";
 import { type InProgressVerification, type StaleVerificationRow } from "../../src/v2/attention-inbox-sources.js";
@@ -4477,6 +4478,7 @@ export function attentionInbox(scope?: ProjectScope, nowMs: number = Date.now(),
       readiness: () => readinessAttentionItems(handle, scope, nowMs),
       staleVerifications: () => staleVerificationRows(scope, nowMs),
       openKanbanConflicts: () => listOpenConflicts(),
+      dismissals: () => activeAttentionDismissals(handle),
     },
     { generatedAt: new Date(nowMs).toISOString(), scope: inboxScope },
   );
