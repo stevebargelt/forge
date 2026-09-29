@@ -95,6 +95,21 @@ test("FG-694 (one source of truth): both browser-tier guards derive the count fr
   }
 });
 
+test("FG-822 (docs): the testing guide's current tier totals match the census", () => {
+  const doc = readFileSync(join(ROOT, "docs", "how-to-testing.md"), "utf8");
+  const ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+  const suites = tierFiles().length;
+  const suiteWords = tens[Math.floor(suites / 10)] + (suites % 10 ? "-" + ones[suites % 10] : "");
+  const intro = doc.match(/`dashboard\/browser-tests\/\*\.test\.ts` is ([a-z-]+) suites \/ (\d+) tests/);
+  assert.ok(intro, "docs/how-to-testing.md no longer opens the browser tier with its suite/test totals");
+  assert.equal(intro[1], suiteWords, "the tier intro's suite count is stale against the census");
+  assert.equal(Number(intro[2]), tierTestTotal(), "the tier intro's test count is stale against the census");
+  const failFirst = doc.match(/Chrome-less environment takes every one of the tier's tests \(`tierTestTotal\(\)`, (\d+) as of/);
+  assert.ok(failFirst, "the Chrome-less paragraph no longer names the census total");
+  assert.equal(Number(failFirst[1]), tierTestTotal(), "the Chrome-less paragraph's test count is stale against the census");
+});
+
 test("FG-642 (launch site): every chromium.launch() in the tier takes executablePath from the shared resolver", () => {
   for (const file of tierFiles()) {
     const src = tierSource(file);

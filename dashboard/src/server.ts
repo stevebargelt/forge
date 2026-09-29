@@ -65,9 +65,11 @@ import {
   guardBindAddress,
   guardMutationPost,
   isRefusal,
+  MAX_CONCURRENT_MUTATIONS,
   readBody,
   resolveForgeBinary,
   runForgeVerb,
+  withMutationSlot,
 } from "./mutation-guards.js";
 import { maybeStartRemoteBoardFromEnv } from "./remote/server.js";
 
@@ -1104,7 +1106,11 @@ async function handleProjectsClassify(req: IncomingMessage, res: ServerResponse)
     sendJson(res, binary.status, { ok: false, error: binary.error });
     return;
   }
-  const result = await runForgeVerb(binary.path, argv, dirname(HERE));
+  const result = await withMutationSlot(() => runForgeVerb(binary.path, argv, dirname(HERE)));
+  if (result === null) {
+    sendJson(res, 503, { ok: false, error: `too many dashboard mutations in flight (${MAX_CONCURRENT_MUTATIONS}); retry in a moment.` });
+    return;
+  }
   if (result.timedOut) {
     sendJson(res, 504, { ok: false, error: "`forge projects classify` did not finish in time." });
     return;

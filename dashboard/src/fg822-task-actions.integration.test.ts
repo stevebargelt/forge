@@ -75,6 +75,7 @@ writeFileSync(
   [
     "#!/bin/sh",
     `{ printf 'CALL\\t%s\\n' "$PWD"; for a in "$@"; do printf 'ARG\\t%s\\n' "$a"; done; } >> "${CALL_LOG}"`,
+    'if [ -n "$STUB_HOLD" ]; then while [ ! -e "$STUB_HOLD" ]; do sleep 0.02; done; fi',
     'if [ -n "$STUB_FAIL" ]; then printf \'%s\\n\' "$STUB_FAIL" >&2; exit 1; fi',
     "printf 'stub ran %s\\n' \"$1\"",
     "exit 0",
@@ -346,4 +347,39 @@ test("integ FG-822: unregistered action-shaped paths and operands cannot alter t
     cwd: canonicalProjectDir,
     argv: ["gate", "task-gate", "reject", "--rationale", "Recorded human decision.", "--decided-by", "dashboard"],
   }]);
+});
+
+test("integ FG-822: a project classification takes the same global mutation slot — refused by name while action mutations hold every slot, unchanged argv once they free", async () => {
+  const { MAX_CONCURRENT_MUTATIONS } = await import("./mutation-guards.js");
+  resetCalls();
+  const release = join(RIG, "release-slots");
+  process.env.STUB_HOLD = release;
+  const held: Array<Promise<{ status: number; body: Record<string, unknown> }>> = [];
+  try {
+    for (let i = 0; i < MAX_CONCURRENT_MUTATIONS; i += 1) {
+      held.push(post("/api/task/task-gate/gate", { body: { decision: "advance", rationale: `hold ${i}` } }));
+    }
+    const deadline = Date.now() + 10_000;
+    while (recordedCalls().length < MAX_CONCURRENT_MUTATIONS) {
+      if (Date.now() > deadline) throw new Error("the held action mutations never spawned");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    const refused = await post("/api/projects/classify", { body: { dir: "/tmp/fg822-classify", purpose: "operator" } });
+    assert.equal(refused.status, 503, JSON.stringify(refused.body));
+    assert.equal(refused.body["ok"], false);
+    assert.match(String(refused.body["error"]), new RegExp(`too many dashboard mutations in flight \\(${MAX_CONCURRENT_MUTATIONS}\\)`));
+    assert.equal(recordedCalls().length, MAX_CONCURRENT_MUTATIONS, "the refused classification spawned nothing");
+  } finally {
+    delete process.env.STUB_HOLD;
+    writeFileSync(release, "");
+  }
+  for (const response of await Promise.all(held)) assert.equal(response.status, 200, JSON.stringify(response.body));
+
+  resetCalls();
+  const admitted = await post("/api/projects/classify", { body: { dir: "/tmp/fg822-classify", purpose: "operator", run: "run-822" } });
+  assert.equal(admitted.status, 200, JSON.stringify(admitted.body));
+  assert.deepEqual(recordedCalls().map((call) => call.argv), [
+    ["projects", "classify", "/tmp/fg822-classify", "--purpose", "operator", "--actor", "dashboard", "--json", "--run", "run-822"],
+  ]);
 });
