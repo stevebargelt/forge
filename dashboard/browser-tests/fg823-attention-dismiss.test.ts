@@ -9,7 +9,8 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -22,7 +23,7 @@ import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js"
 const PORT = 18828;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(HERE, "..", "client");
-const SHOTS = process.env.FG823_SCREENSHOT_DIR ?? "/task/screenshots";
+const SHOTS = process.env.FG823_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "fg823-screenshots-"));
 mkdirSync(SHOTS, { recursive: true });
 
 const MAIN = "/repos/atlas-main";
