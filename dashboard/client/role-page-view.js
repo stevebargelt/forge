@@ -16,6 +16,8 @@ import { hashFor } from "./view-routing.js";
 import { ObjectHead, ObjectTabs, useEscapeTo } from "./object-page-view.js";
 import { formatDuration, formatTimestamp } from "./format.js";
 import { mountLabel } from "./roles-index-render.js";
+import { RoleTile } from "./role-glyph-view.js";
+import { TILE_SIZES } from "./role-glyph.js";
 import {
   DEFAULT_USAGE_PERIOD, HARNESS_COLUMNS, USAGE_PERIODS, authLabel, harnessRows, latestTaskCard, percent, relationLabel, roleHeader,
   roleTabLabel, roleTabs, shortSha, skillChips, skillSourceLabel, tabCaption, tokens, usageWindow,
@@ -52,7 +54,7 @@ export function RolePage({ role, tab, project = null }) {
   useEscapeTo(parentHash("role", null));
   return html`
     <section class="object-page role-page" data-role=${role}>
-      <${ObjectHead} crumbs=${roleTrail(role, roleTabLabel(current))} title=${role} header=${roleHeader(role, detail)} />
+      <${ObjectHead} crumbs=${roleTrail(role, roleTabLabel(current))} title=${html`<span class="role-title"><${RoleTile} role=${role} size=${TILE_SIZES.header} />${role}</span>`} header=${roleHeader(role, detail)} />
       <${ObjectTabs} id="role-views" label="Role views" tabs=${roleTabs(role, current)}>
         ${error ? html`<div class="card" style="color: var(--err);" role="alert">${error}</div>` : null}
         ${!detail && !error ? html`<div class="muted">loading ${role}…</div>` : null}

@@ -270,6 +270,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/renderers.js",
   "dashboard/client/review-ledger-render.js",
   "dashboard/client/reviews.js",
+  "dashboard/client/role-glyph.js",
+  "dashboard/client/role-glyph-view.js",
   "dashboard/client/role-page-render.js",
   "dashboard/client/role-page-view.js",
   "dashboard/client/roles-index-render.js",

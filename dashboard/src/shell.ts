@@ -519,6 +519,11 @@ details.action-refused ul { margin: 4px 0 0; padding-left: 16px; }
 a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
 /* FG-817: the Roles list and role pages. Nine tabs wrap rather than scroll off a phone. */
 .role-page .object-tabs { flex-wrap: wrap; }
+/* FG-829: the role glyph tile (client/role-glyph.js) — its colours ride the SVG's own
+   attributes; these rules only place it beside the role name it decorates. */
+.role-tile { flex: none; display: inline-block; vertical-align: middle; }
+.role-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.role-title { display: inline-flex; align-items: center; gap: 12px; min-width: 0; overflow-wrap: anywhere; }
 .role-caption { font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
 .role-notice { margin: 8px 0; }
 .role-description { font-size: 12px; margin-top: 2px; }

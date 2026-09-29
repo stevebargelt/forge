@@ -36,6 +36,8 @@ This is the same schema as `red-wide` — security-reviewer is a specialized red
 
 As soon as this directory exists, `security-reviewer` shows up in the dashboard's Roles list (`#roles`, under Setup) — there is no separate registration step. Its page composes the exact instructions a dispatch would receive (`#roles/security-reviewer/instructions`, with a content hash), so you can check the seed before wiring it into a workflow. See [Roles surface](concepts.md#roles-surface-fg-817).
 
+That row and page also carry a small glyph tile — colour by family, glyph by role (FG-829) — but nothing derives it automatically: add `security-reviewer` to `ROLE_FAMILY_OF` (pick the family its work resembles — a specialized red like this one takes `red`) and to `ROLE_GLYPHS` in `dashboard/client/role-glyph.js`. Skip it and the role still renders fine, just with the neutral tile and the generic "layers" glyph. `dashboard/src/fg829-role-glyph.test.ts` only enforces the two entries for a role shipped under `seeds/agents/`, not a project-local role like this example, so nothing will fail here if you forget — but the two lines are one-line each and keep the Roles list legible.
+
 ### Step 2: settings.json
 
 `~/.forge/agents/security-reviewer/settings.json`:

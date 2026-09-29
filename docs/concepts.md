@@ -488,6 +488,20 @@ Both 2-second Home lists — Attention inbox and In flight — freeze the row or
 
 Receipts is the seed's own audit trail: each of the role's recent dispatches' recorded `manifest.json` `agentProtocol` stamp (invariant 6 — written once at dispatch, never recomputed) and mount mode, resolved to the seed generation its source sits in; every published generation under `~/.forge/seed-generations` newest first, with the role's protocol sha in that generation's manifest; and any FG-776 host-edit backup holding `agents/<role>` from before an upgrade overwrote a local edit. Secrets is the literal `none: containers receive no project secrets` — the dispatch mount set never mounts or passes a project secret into a container. Tools lists `settings.json`'s `tools` flagged `declared, not enforced` (nothing outside tests reads that list today) with `mcp: "none"`; a seed with no `settings.json` reports `present: false`, never an error. There is no POST anywhere on this surface — a seed's `CLAUDE.md` and `settings.json` change only through `forge upgrade` (or a project addendum layered on top, FG-774), never a dashboard write. Schema: `docs/SCHEMA-CONTRACT.md` → `GET /api/roles`, `GET /api/roles/:role`. See `dashboard/CLAUDE.md` → Roles.
 
+**Role glyph tiles (FG-829).** Every role renders with a small tile: colour by family, glyph by role. The tile is a rounded square (radius a quarter of its side) with the family colour at ~13% alpha as its background, a 1px border at ~33% alpha and a line glyph stroked in the family colour — 20px beside the role name in the Roles list rows, in In flight rows (Home and Activity) and in Activity's Recent agent outputs rows, 36px beside the title on a role page. It is inline SVG drawn from a table in `dashboard/client/role-glyph.js`: no image request, no server route, no storage. Beside a visible role name it is `aria-hidden`; standing alone it is `role="img"` with the role name as its `aria-label`.
+
+| Family | Colour | Roles |
+|---|---|---|
+| red | `#e0574f` | red-wide, red-narrow, red-frontend, red-backend, red-security |
+| build | `#3b6cff` | engineer, agentic-platform-builder, backend-specialist, frontend-specialist, security-advisor |
+| test | `#39b86f` | test-engineer, manual-qa |
+| review | `#e59a2b` | shipping-reviewer, review-rechecker |
+| research | `#8e5cff` | research-framer, research-primary, research-skeptic, research-specialist, synthesizer |
+| plan | `#26bfb1` | architecture-advisor, tech-lead |
+| author | `#f5b400` | documentation-maintainer, prompt-author |
+
+Reds are red and nothing else is. A role neither table names (e.g. `orchestrator`) renders the neutral family — the FG-824 neutral token colour, `#9a9aa3` — with the generic "layers" glyph, never an error. **The rule for a new role:** add one line to `ROLE_FAMILY_OF` and one to `ROLE_GLYPHS` in `role-glyph.js`; `dashboard/src/fg829-role-glyph.test.ts` enumerates `seeds/agents/*` and fails for a seed missing either.
+
 ## Design corpus
 
 The per-project shared design directory (#67). Default location: `<project>/designs/` — version-controlled with the project, treated as a project artifact rather than a peer dir. Every design-touching workflow run (`ui-design`, `ui-design-revise`, `feature-ui-design-needed`) targets the SAME corpus, which grows monotonically across runs.
