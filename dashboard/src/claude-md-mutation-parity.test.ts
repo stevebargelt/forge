@@ -13,6 +13,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { QUEUE_MUTATION_ROUTES } from "./queue-mutation.js";
 import { ACTION_ROUTES } from "./action-mutation.js";
+import { SNOOZE_PRESETS } from "../client/attention-dismiss-render.js";
+import { parseSnoozeUntil } from "../../src/store/attention-dismissals.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const guide = readFileSync(resolve(HERE, "..", "CLAUDE.md"), "utf8");
@@ -99,4 +101,17 @@ test("dashboard/CLAUDE.md route contract lists every mutating route server.ts ow
   assert.ok(m, "the guide counts the mutating routes");
   assert.equal(NUMBER_WORDS[m[1]!], all.length, "the guide's route count matches server.ts");
   assert.match(guide, /There are no next, cancel or dispatcher routes/);
+});
+
+test("dashboard/CLAUDE.md snooze guidance names the inbox presets and the durations the route accepts", () => {
+  const bullet = guide.split("\n").find((line) => line.startsWith("- **Server-side, audited, never in the browser.**"));
+  assert.ok(bullet, "the guide carries the attention dismiss/snooze bullet");
+  const presets = bullet.match(/snooze presets ((?:`[^`]+`,? ?)+)/);
+  assert.ok(presets, "the bullet lists the inbox snooze presets");
+  assert.deepEqual([...presets[1]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]), [...SNOOZE_PRESETS], "the guide's presets match the client's SNOOZE_PRESETS");
+  const durations = bullet.match(/accept any duration — ((?:`[^`]+`,? ?)+)/);
+  assert.ok(durations, "the bullet lists example durations the route and CLI accept");
+  const named = [...durations[1]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+  assert.ok(named.includes("2w"), "the guide names the two-week duration");
+  for (const d of named) assert.equal(parseSnoozeUntil(d, Date.parse("2026-09-29T09:00:00Z")).ok, true, `parseSnoozeUntil accepts ${d}`);
 });
