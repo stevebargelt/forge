@@ -528,7 +528,7 @@ a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
 .role-facts dt { color: var(--fg-faint); }
 .role-facts dd { margin: 0; overflow-wrap: anywhere; }
 .role-list, .role-routes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; overflow-wrap: anywhere; }
-.roles-table .sort-header { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: baseline; color: inherit; font: inherit; }
+.roles-table .sort-header { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: baseline; font: inherit; color: var(--fg-dim); }
 .roles-table th[aria-sort="ascending"] .sort-header, .roles-table th[aria-sort="descending"] .sort-header { color: var(--fg); }
 .roles-table .sort-header:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sort-glyph { font-size: 9px; }
