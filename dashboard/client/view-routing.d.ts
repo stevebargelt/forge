@@ -9,6 +9,7 @@ export interface Route {
   tabs?: string[];
   tabAliases?: Record<string, string>;
   params?: string[];
+  paramValues?: Record<string, string[]>;
   aliases: string[];
 }
 export interface HashScope {

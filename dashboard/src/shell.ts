@@ -528,6 +528,10 @@ a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
 .role-facts dt { color: var(--fg-faint); }
 .role-facts dd { margin: 0; overflow-wrap: anywhere; }
 .role-list, .role-routes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; overflow-wrap: anywhere; }
+.roles-table .sort-header { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: baseline; color: inherit; font: inherit; }
+.roles-table th[aria-sort="ascending"] .sort-header, .roles-table th[aria-sort="descending"] .sort-header { color: var(--fg); }
+.roles-table .sort-header:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sort-glyph { font-size: 9px; }
 .role-list a, .role-routes a, .roles-table a { color: var(--accent); text-decoration: none; }
 .role-prompt-section { border-left: 3px solid var(--border); padding-left: 10px; margin: 8px 0; }
 .role-prompt-protocol { border-left-color: var(--accent); }
