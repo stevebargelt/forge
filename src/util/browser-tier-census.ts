@@ -210,7 +210,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // its default activity, resolved profile/effort, mount and last task; the FG-820
   // placeholder gone); a deep link to #roles/engineer/instructions restored across reload
   // with the composed prompt's sections marked and rendered byte for byte; every one of the
-  // nine tabs rendering with its source caption; the FG-692 tablist keyboard (arrow keys,
+  // ten tabs (FG-827) rendering with its source caption; the FG-692 tablist keyboard (arrow keys,
   // wrapping, roving tabindex); the Roles › <role> › <tab> trail; Escape to the list; a seed
   // missing settings.json saying so, an unknown tab landing on overview, an unknown role
   // named; and the 400px role page fitting the viewport. Fixture port 18830.
