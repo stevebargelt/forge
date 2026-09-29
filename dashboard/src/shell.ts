@@ -441,11 +441,11 @@ section.feed { margin-top: 24px; }
    verb's own result inline. Never badge-bearing. */
 .task-actions { margin: 8px 0 0; display: flex; flex-direction: column; gap: 8px; }
 .task-actions-compact { margin: 4px 0; }
-.action-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
-.action-btn { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; color: var(--fg); cursor: pointer; font-size: 12px; min-height: 28px; }
+.action-buttons, .inbox-hold-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.action-btn, .inbox-hold-btn { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; color: var(--fg); cursor: pointer; font-size: 12px; min-height: 28px; }
 .action-btn code { font-size: 12px; }
-.action-btn:hover, .action-btn-selected { border-color: var(--accent); }
-.action-btn:disabled { opacity: 0.6; cursor: default; }
+.action-btn:hover, .action-btn-selected, .inbox-hold-btn:hover, .inbox-hold-btn-selected { border-color: var(--accent); }
+.action-btn:disabled, .inbox-hold-btn:disabled { opacity: 0.6; cursor: default; }
 .action-preview { border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
 .action-preview-verb { font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
 .action-preview-reason, .action-note { font-size: 12px; }
@@ -1074,6 +1074,17 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .badge.inbox-sev-medium { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
 .badge.inbox-sev-low { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
 .badge.inbox-sev-unknown { background: rgba(154, 154, 163, 0.12); color: var(--fg-faint); }
+.inbox-dismiss { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.inbox-snooze-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.inbox-snooze-custom-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-dim); }
+.inbox-snooze-custom { font: inherit; font-size: 12px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; min-width: 0; width: 190px; max-width: 100%; }
+.inbox-hold-btn:focus-visible, .action-confirm:focus-visible, .action-cancel:focus-visible, .inbox-dismissed summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.inbox-dismissed { margin-top: 10px; font-size: 12px; }
+.inbox-dismissed summary { cursor: pointer; color: var(--fg-dim); padding: 4px 2px; }
+.inbox-dismissed-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.inbox-dismissed-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; }
+.inbox-dismissed-body { min-width: 0; }
+@media (max-width: 480px) { .inbox-dismissed-row { grid-template-columns: 1fr; gap: 6px; } }
 
 .plan-usage { margin-bottom: 34px; }
 .plan-usage-heading {

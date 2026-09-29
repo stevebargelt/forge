@@ -42,6 +42,7 @@ function readers(over: Partial<AttentionInboxReaders> = {}): AttentionInboxReade
     readiness: () => ({ items: [], degraded: [] }),
     staleVerifications: () => [],
     openKanbanConflicts: () => [],
+    dismissals: () => [],
     ...over,
   };
 }

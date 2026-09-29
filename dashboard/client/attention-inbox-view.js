@@ -11,20 +11,25 @@
 // pinned rows, FG-819) and the per-row link (navigates via the hash). A host may pass
 // `rowActions` (FG-822): for a row naming a task, it renders that task's eligible action
 // buttons in place of the copy-paste requestedAction — the eligibility is the server's
-// preview, never decided here. The inbox invents no chat semantics.
+// preview, never decided here. It is called as `rowActions(summary, fallback, preview)`,
+// where `preview` ({ previewOpen, onPreviewChange }) is the row's one-open-preview state.
+// The inbox invents no chat semantics.
 
 import { h } from "preact";
+import { useState } from "preact/hooks";
 import htm from "htm";
 import { inboxView, inboxItemAge } from "./attention-inbox-render.js";
 import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
+import { AttentionRowControls, DismissedDisclosure } from "./attention-dismiss-view.js";
 
 const html = htm.bind(h);
 
 // `orderedItems`/`listProps`/`onRefresh` are supplied by PinnedAttentionInboxSection
 // (FG-819 order pinning); without them the section renders the server order as-is.
 // `hrefFor` lets the host carry its current scope onto a row link (FG-820); the default
-// is the link as the render module decided it.
-export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null, hrefFor = (hash) => hash, rowActions = null }) {
+// is the link as the render module decided it. `onDismissChanged` (FG-823) turns on each
+// row's Dismiss/Snooze and the foot's "Dismissed" disclosure, and re-reads after a verb.
+export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null, hrefFor = (hash) => hash, rowActions = null, onDismissChanged = null }) {
   const view = inboxView(load);
   const items = orderedItems ?? view.items;
   return html`
@@ -47,16 +52,17 @@ export function AttentionInboxSection({ load, now, onRetry, orderedItems = null,
                   ? html`<div class="inbox-degraded" role="status">Some sources could not be read: ${view.degraded.join(", ")}.</div>`
                   : null}
                 <div class="inbox-list" ...${listProps}>
-                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} hrefFor=${hrefFor} rowActions=${rowActions} />`)}
+                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} hrefFor=${hrefFor} rowActions=${rowActions} onDismissChanged=${onDismissChanged} />`)}
                 </div>
               `}
+      ${view.phase === "ready" && onDismissChanged ? html`<${DismissedDisclosure} entries=${view.dismissed} onChanged=${onDismissChanged} />` : null}
     </section>
   `;
 }
 
 /** The Home inbox: the section above, with its rows pinned to the order first shown until
  *  an idle, tab-visibility, or manual-refresh boundary (FG-819). */
-export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor, rowActions = null }) {
+export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor, rowActions = null, onDismissChanged = null }) {
   const view = inboxView(load);
   const pin = usePinnedOrder(view.phase === "ready" ? view.items : null, (summary) => summary.id);
   const refresh = () => pin.refresh(onRetry);
@@ -69,13 +75,15 @@ export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor, rowAc
     onRefresh=${refresh}
     hrefFor=${hrefFor}
     rowActions=${rowActions}
+    onDismissChanged=${onDismissChanged}
   />`;
 }
 
 // One row: the kind badge, the severity, the identity (ticket/project), the reason and
 // requested action, the age, and the link to the relevant surface.
-function InboxItemRow({ summary, now, hrefFor, rowActions }) {
+function InboxItemRow({ summary, now, hrefFor, rowActions, onDismissChanged }) {
   const action = html`<div class="faint inbox-action">${summary.requestedAction}</div>`;
+  const hasActions = Boolean(summary.taskId && rowActions);
   return html`
     <div class="item inbox-row" data-item-id=${summary.id}>
       <div class="inbox-row-badges">
@@ -87,7 +95,9 @@ function InboxItemRow({ summary, now, hrefFor, rowActions }) {
           ${summary.ticketId ? html`<strong>${summary.ticketId}</strong><span class="faint"> · </span>` : null}
           <span class="inbox-reason">${summary.reason}</span>
         </div>
-        ${summary.taskId && rowActions ? rowActions(summary, action) : action}
+        ${hasActions || onDismissChanged
+          ? html`<${InboxRowControls} summary=${summary} action=${action} rowActions=${hasActions ? rowActions : null} onDismissChanged=${onDismissChanged} />`
+          : action}
         <div class="faint mono inbox-meta">
           ${summary.source}${summary.projectLabel ? ` · ${summary.projectLabel}` : ""}
         </div>
@@ -99,6 +109,20 @@ function InboxItemRow({ summary, now, hrefFor, rowActions }) {
         ${summary.link ? html`<a class="inbox-link" href=${hrefFor(summary.link.hash)}>${summary.link.label}</a>` : null}
       </div>
     </div>
+  `;
+}
+
+// A row shows at most one preview: opening the task-action preview closes the hold
+// preview, and the other way round.
+function InboxRowControls({ summary, action, rowActions, onDismissChanged }) {
+  const [openPreview, setOpenPreview] = useState(null);
+  const previewFor = (which) => ({
+    previewOpen: openPreview === which,
+    onPreviewChange: (open) => setOpenPreview((current) => (open ? which : current === which ? null : current)),
+  });
+  return html`
+    ${rowActions ? rowActions(summary, action, previewFor("action")) : action}
+    ${onDismissChanged ? html`<${AttentionRowControls} key=${summary.id} itemId=${summary.id} onChanged=${onDismissChanged} ...${previewFor("hold")} />` : null}
   `;
 }
 

@@ -1939,6 +1939,37 @@ CREATE TABLE IF NOT EXISTS ticket_planning_annotations (
 -- (non-restorable already), so no new UNDROPPABLE entry is introduced.
 CREATE INDEX IF NOT EXISTS idx_ticket_planning_annotations_ticket
   ON ticket_planning_annotations(project_key, ticket_id, created_at);
+
+-- FG-823: the Attention Inbox's audited dismissals and snoozes. A brand-new table arriving
+-- WHOLE via CREATE TABLE IF NOT EXISTS on the ordinary open path — the same additive-only
+-- BD-15 / FG-568 contract as every table above; user_version is NOT touched. Written ONLY
+-- through src/store/attention-dismissals.ts (the forge attention dismiss|snooze|undismiss
+-- verbs), each write paired with an events row so a dismissal is auditable.
+--
+-- item_key is the inbox item's stable id exactly as composeInbox emits it. A row is never
+-- deleted: state is 'active' | 'superseded' | 'expired' | 'cleared' (enum-as-convention,
+-- FG-585 — NO CHECK), and settled_at records when a row left 'active'. snooze_until NULL is
+-- a dismissal (holds until the item's activity advances past dismissed_at); non-NULL is a
+-- snooze (also clears itself once that instant passes). No FK to runs, deliberately: the
+-- audit row outlives its subject.
+CREATE TABLE IF NOT EXISTS attention_dismissals (
+  id            TEXT PRIMARY KEY,
+  item_key      TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  project_key   TEXT,
+  run_id        TEXT,
+  dismissed_at  TEXT NOT NULL,
+  snooze_until  TEXT,
+  actor         TEXT NOT NULL,
+  rationale     TEXT,
+  state         TEXT NOT NULL,
+  settled_at    TEXT,
+  created_at    TEXT NOT NULL
+);
+-- One LIVE dismissal/snooze per item. Both indexed columns are NOT NULL with no default
+-- (non-restorable), so the parity guard's UNDROPPABLE set is untouched.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attention_dismissals_active
+  ON attention_dismissals(item_key) WHERE state = 'active';
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -2548,6 +2579,14 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "remote_planning_commands", column: "result_summary", ddl: "ALTER TABLE remote_planning_commands ADD COLUMN result_summary TEXT" },
 
   { table: "ticket_planning_annotations", column: "request_id", ddl: "ALTER TABLE ticket_planning_annotations ADD COLUMN request_id TEXT" },
+
+  // FG-823: attention_dismissals arrives whole from its CREATE; only its nullable columns
+  // are restorable, so only they appear here.
+  { table: "attention_dismissals", column: "project_key", ddl: "ALTER TABLE attention_dismissals ADD COLUMN project_key TEXT" },
+  { table: "attention_dismissals", column: "run_id", ddl: "ALTER TABLE attention_dismissals ADD COLUMN run_id TEXT" },
+  { table: "attention_dismissals", column: "snooze_until", ddl: "ALTER TABLE attention_dismissals ADD COLUMN snooze_until TEXT" },
+  { table: "attention_dismissals", column: "rationale", ddl: "ALTER TABLE attention_dismissals ADD COLUMN rationale TEXT" },
+  { table: "attention_dismissals", column: "settled_at", ddl: "ALTER TABLE attention_dismissals ADD COLUMN settled_at TEXT" },
 ];
 
 // FG-693 — THE LOOKUP INDEXES THE CANONICAL COLUMNS NEED, declared as DATA for the

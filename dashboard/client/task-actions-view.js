@@ -5,7 +5,7 @@
 // Confirm; the verb's exit status and output render inline. Never badge-bearing.
 
 import { h } from "preact";
-import { useState, useEffect } from "preact/hooks";
+import { useState, useEffect, useLayoutEffect, useRef } from "preact/hooks";
 import htm from "htm";
 import {
   ACTIONS_UNAVAILABLE, actionsFromResponse, actionButtons, actionKey, previewCommand, confirmRequest, actionResult,
@@ -25,8 +25,11 @@ async function readActions(taskId) {
 }
 
 /** `compact` (an inbox row) shows only the buttons, and `fallback` when there are none.
- *  `onChanged` runs after a verb exits 0, so the host can re-read what it shows. */
-export function TaskActions({ taskId, compact = false, fallback = null, onChanged = null }) {
+ *  `onChanged` runs after a verb exits 0, so the host can re-read what it shows.
+ *  `previewOpen` / `onPreviewChange` let a host that shows other previews (an inbox row's
+ *  Dismiss/Snooze) keep one open at a time; when given, opening focuses the preview's first
+ *  control and Escape closes it. */
+export function TaskActions({ taskId, compact = false, fallback = null, onChanged = null, previewOpen = undefined, onPreviewChange = null }) {
   const [load, setLoad] = useState(null);
   const [tick, setTick] = useState(0);
   const [selected, setSelected] = useState(null);
@@ -34,6 +37,9 @@ export function TaskActions({ taskId, compact = false, fallback = null, onChange
   const [error, setError] = useState(null);
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState(null);
+  const previewRef = useRef(null);
+  const focusPending = useRef(false);
+  const controlled = previewOpen !== undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -42,10 +48,31 @@ export function TaskActions({ taskId, compact = false, fallback = null, onChange
   }, [taskId, tick]);
 
   const buttons = actionButtons(load);
-  const chosen = selected && load && load.phase === "ready" ? load.eligible.find((e) => actionKey(e) === selected) ?? null : null;
+  const shown = controlled && !previewOpen ? null : selected;
+  const chosen = shown && load && load.phase === "ready" ? load.eligible.find((e) => actionKey(e) === shown) ?? null : null;
 
-  const choose = (key) => { setSelected(key); setRationale(""); setError(null); setResult(null); };
-  const cancel = () => { setSelected(null); setError(null); };
+  useLayoutEffect(() => {
+    if (!chosen || !focusPending.current || !previewRef.current) return;
+    focusPending.current = false;
+    const first = previewRef.current.querySelector("textarea, input, button:not([disabled])");
+    if (first) first.focus();
+  }, [chosen]);
+
+  const choose = (key) => {
+    setSelected(key); setRationale(""); setError(null); setResult(null);
+    if (controlled) { focusPending.current = true; if (onPreviewChange) onPreviewChange(true); }
+  };
+  const cancel = () => {
+    setSelected(null); setError(null);
+    if (controlled && onPreviewChange) onPreviewChange(false);
+  };
+  const onPreviewKey = (e) => {
+    if (!controlled || e.key !== "Escape" || pending) return;
+    e.preventDefault();
+    const opener = previewRef.current?.parentElement?.querySelector(".action-btn-selected");
+    cancel();
+    if (opener) opener.focus();
+  };
   const confirm = async () => {
     const request = confirmRequest(chosen, rationale);
     if (!request.ok) { setError(request.error); return; }
@@ -64,6 +91,7 @@ export function TaskActions({ taskId, compact = false, fallback = null, onChange
     setPending(false);
     setResult(outcome);
     setSelected(null);
+    if (controlled && onPreviewChange) onPreviewChange(false);
     setTick((n) => n + 1);
     if (outcome.ok && onChanged) onChanged();
   };
@@ -93,17 +121,17 @@ export function TaskActions({ taskId, compact = false, fallback = null, onChange
           <button
             type="button"
             key=${b.key}
-            class=${"action-btn" + (selected === b.key ? " action-btn-selected" : "")}
+            class=${"action-btn" + (shown === b.key ? " action-btn-selected" : "")}
             data-action=${b.action}
             data-decision=${b.decision ?? ""}
-            aria-expanded=${selected === b.key ? "true" : "false"}
+            aria-expanded=${shown === b.key ? "true" : "false"}
             disabled=${pending}
             onClick=${() => choose(b.key)}
           ><code>${b.label}</code></button>
         `)}
       </div>
       ${chosen ? html`
-        <div class="action-preview" role="group" aria-label="Confirm action">
+        <div class="action-preview task-action-preview" role="group" aria-label="Confirm action" ref=${previewRef} onKeyDown=${onPreviewKey}>
           <div class="action-preview-head">Will run: <code class="action-preview-verb">${previewCommand(chosen, rationale)}</code></div>
           <div class="faint action-preview-reason">${chosen.reason}</div>
           ${chosen.requiresRationale ? html`

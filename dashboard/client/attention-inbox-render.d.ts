@@ -42,11 +42,25 @@ export type InboxEnvelope = {
   items: AttentionItem[];
   empty: boolean;
   degraded: string[];
+  counts?: { open: number; high: number };
+  dismissed?: DismissedEntry[];
 };
+
+export type DismissalView = {
+  itemKey: string;
+  state: "dismissed" | "snoozed";
+  dismissedAt: string;
+  snoozeUntil: string | null;
+  actor: string;
+  rationale: string | null;
+};
+
+export type DismissedEntry = { item: AttentionItem; dismissal: DismissalView };
 
 export const INBOX_UNAVAILABLE_LABEL: string;
 export const INBOX_LOADING_LABEL: string;
 export const INBOX_EMPTY_LABEL: string;
+export function inboxHeldLabel(count: number): string;
 export const INBOX_TIMEOUT_MS: number;
 export const INBOX_LOADING: { phase: "loading" };
 
@@ -74,6 +88,15 @@ export function inboxItemSummary(item: Partial<AttentionItem> | null | undefined
 export function inboxItemAge(item: Partial<AttentionItem> | null | undefined, now: number): string;
 export function isRenderableInboxItem(value: unknown): boolean;
 export function isAttentionInboxPayload(value: unknown): boolean;
+export function isDismissedEntry(value: unknown): boolean;
+
+export type DismissedSummary = InboxItemSummary & {
+  holdState: "dismissed" | "snoozed";
+  holdLabel: string;
+  rationale: string | null;
+};
+
+export function dismissedSummary(entry: DismissedEntry): DismissedSummary;
 
 export type InboxUnavailableReason = "http" | "malformed" | "timeout" | "network";
 
@@ -99,6 +122,7 @@ export type InboxView = {
   items: InboxItemSummary[];
   empty: boolean;
   degraded: string[];
+  dismissed: DismissedSummary[];
 };
 
 export function inboxView(load: unknown): InboxView;
