@@ -8,7 +8,7 @@ import { statusToken } from "./status-tokens.js";
 
 /** The failure kinds a lost container or a lost forge process leaves behind — the ones
  *  `forge recover` exists for. Checked against core's ORPHAN_EVIDENCE_KINDS and every
- *  orphan-named FailureKind by dashboard/src/fg824-recovery-card.test.ts. */
+ *  orphan-named FailureKind by dashboard/src/fg824-freshness-recovery.test.ts. */
 export const ORPHAN_FAILURE_KINDS = Object.freeze([
   "orphaned",
   "orphaned_work_may_persist",
@@ -45,12 +45,13 @@ export function lastRecoverOutcome(events) {
   return null;
 }
 
-/** The verb to name when the preview offers no button. */
+/** The verb to name when the preview offers no button. Never a --force form: that bypass is
+ *  the operator's own call at a terminal, and the policy's advice beneath says so in its words. */
 export function defaultRecoveryVerb(detail) {
   const task = detail.task;
   if (task.status === "awaiting_recovery") return `forge next ${task.runId}`;
   if (detail.failureKind === "fanout_wave_orphaned") return `forge recover ${task.taskId} --re-drive`;
-  if (detail.failureKind === "orphaned_needs_finalize") return `forge retry ${task.taskId} --force`;
+  if (detail.failureKind === "orphaned_needs_finalize") return `forge show ${task.taskId}, then forge recover ${task.taskId}`;
   return `forge recover ${task.taskId}`;
 }
 

@@ -51,6 +51,7 @@ function reset(): void {
       ],
     },
     "task-orphan": { status: "failed", failureKind: "orphaned_work_may_persist", events: [] },
+    "task-finalize": { status: "failed", failureKind: "orphaned_needs_finalize", events: [] },
     "task-park": { status: "awaiting_recovery", failureKind: null, events: [] },
     "task-done": { status: "complete", failureKind: null, events: [] },
   };
@@ -285,6 +286,17 @@ test("FG-824: the recovery card names the failure, the last forge recover and th
   assert.ok((await orphanCard.locator(".recovery-advice").innerText()).length > 0, "the retry policy's advice is shown");
   assert.equal(await orphanCard.locator(".recovery-last").innerText(), "none recorded");
   await orphan.page.close();
+
+  const finalize = await open("#task/task-finalize");
+  const finalizeCard = finalize.page.locator(".recovery-card");
+  await finalizeCard.locator(".recovery-verb").waitFor();
+  await finalize.page.waitForFunction(() => !document.querySelector(".recovery-card")?.textContent?.includes("reading the action preview"));
+  assert.equal(await finalizeCard.locator(".recovery-kind").innerText(), "orphaned_needs_finalize");
+  assert.equal(await finalizeCard.locator(".recovery-action").count(), 0, "a refused retry is never a button");
+  assert.equal(await finalizeCard.locator(".recovery-verb").innerText(), "forge show task-finalize, then forge recover task-finalize");
+  assert.doesNotMatch(await finalizeCard.locator(".recovery-verb").innerText(), /--force/, "the card never names --force as the next step");
+  assert.match(await finalizeCard.locator(".recovery-advice").innerText(), /forge show task-finalize/, "the policy's own advice sits beneath");
+  await finalize.page.close();
 
   const park = await open("#task/task-park");
   const parkCard = park.page.locator(".recovery-card");

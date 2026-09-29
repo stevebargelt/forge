@@ -12,7 +12,7 @@ import {
 } from "../client/current-activity-render.js";
 import { InFlightActivityWaits } from "../client/current-activity-view.js";
 import {
-  ORPHAN_FAILURE_KINDS, lastRecoverOutcome, needsRecoveryCard, recoveryCard, recoveryNext,
+  ORPHAN_FAILURE_KINDS, defaultRecoveryVerb, lastRecoverOutcome, needsRecoveryCard, recoveryCard, recoveryNext,
 } from "../client/recovery-card-render.js";
 import { actionsFromResponse } from "../client/task-actions-render.js";
 
@@ -157,6 +157,27 @@ describe("FG-824: the recovery card", () => {
     const down = recoveryNext(failed("container_crash"), { phase: "unavailable", detail: "HTTP 500" });
     assert.equal(down.mode, "advice");
     assert.match(down.advice ?? "", /HTTP 500/);
+  });
+
+  test("never names a --force verb for any failure kind, whatever the preview says", () => {
+    const kinds: Array<[string | null, string]> = [
+      ...Object.keys(RE_DRIVABLE_FAILURE_KINDS).map((k): [string, string] => [k, "failed"]),
+      [null, "awaiting_recovery"],
+    ];
+    for (const [kind, status] of kinds) {
+      assert.doesNotMatch(defaultRecoveryVerb(failed(kind, status)), /--force/, `${kind ?? status}`);
+      for (const load of [null, { phase: "unavailable", detail: "HTTP 500" }, preview(status, kind), preview(status, kind, false)]) {
+        assert.doesNotMatch(recoveryNext(failed(kind, status), load).verb, /--force/, `${kind ?? status}`);
+      }
+    }
+  });
+
+  test("orphaned_needs_finalize names the inspect-first verb and keeps the policy's advice beneath", () => {
+    assert.equal(defaultRecoveryVerb(failed("orphaned_needs_finalize")), "forge show task-9, then forge recover task-9");
+    const next = recoveryNext(failed("orphaned_needs_finalize"), preview("failed", "orphaned_needs_finalize"));
+    assert.equal(next.mode, "advice");
+    assert.equal(next.verb, "forge show task-9, then forge recover task-9");
+    assert.match(next.advice ?? "", /forge show task-9/);
   });
 
   test("the last forge recover outcome is read from the task's own timeline", () => {
