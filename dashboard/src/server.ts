@@ -17,6 +17,8 @@
 // - GET /api/runs                         the run index over core's queryRuns + the server-computed activeCount (?status, ?since, ?limit, ?cursor, ?projectKey|?projectDir, FG-821)
 // - GET /api/backlog/:id/runs             the runs dispatched for one ticket (?projectKey|?projectDir, FG-821)
 // - GET /api/run/:id/evidence             the run's review, launch and host-verification ids + ticket (?projectDir, FG-821)
+// - GET /api/roles                        every installed role seed: activity, resolved profile/effort, mount mode, last task (FG-817)
+// - GET /api/roles/:role                  one role's tabs: overview, composed instructions, skills, configuration, secrets, tools, tasks, receipts, usage (FG-817)
 // - GET /api/shipping-audit               per-ticket readiness + shipping-review + mechanical-check projection for ONE project, read-only (?projectKey|?projectDir, FG-386)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 // - GET /api/completed-runs               completed forge RUNS per bucket over the same window grid — a count, not a duration (FG-683)
@@ -48,6 +50,7 @@ import {
   reviewById, runsForTicket, runEvidence,
 } from "./queries.js";
 import { runIndex, RunIndexRequestError } from "./run-index.js";
+import { roleDetail, rolesIndex } from "./roles.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
 import { budgetedLivenessProbe, RECONCILE_FANOUT_BUDGET_MS } from "@forge/reconcile-candidate";
@@ -753,6 +756,35 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   // interval — see runIndex. activeCount is the Runs badge's only source. Built BEFORE
   // writeHead; a bad parameter is a 400, a thrown read a 503 carrying activeCount: null
   // so the badge reads "unknown", never 0.
+  // FG-817: read-only role pages. No POST: a seed changes only through `forge upgrade`.
+  if (path === "/api/roles") {
+    sendJson(res, 200, rolesIndex());
+    return;
+  }
+  const roleMatch = path.match(/^\/api\/roles\/([^/]+)$/);
+  if (roleMatch) {
+    const role = decodePathId(roleMatch[1]!);
+    // The project is named by its registry key and resolved through the dashboard's OWN
+    // registry; a caller-supplied path is never composed against.
+    const projectKey = url.searchParams.get("project");
+    let project: { key: string; dir: string } | undefined;
+    if (projectKey !== null) {
+      const record = projectKey === "" ? undefined : projectsForDashboard().find((entry) => entry.key === projectKey);
+      if (!record) {
+        sendJson(res, 400, { error: `project ${JSON.stringify(projectKey)} is not a registered project`, reason: "project_not_registered" });
+        return;
+      }
+      project = { key: record.key, dir: record.primaryCheckout };
+    }
+    const detail = roleDetail(role, project);
+    if (!detail) {
+      sendJson(res, 404, { error: `no role seed named ${role}` });
+      return;
+    }
+    sendJson(res, 200, detail);
+    return;
+  }
+
   if (path === "/api/runs") {
     const status = url.searchParams.get("status") ?? undefined;
     if (status !== undefined && !/^[a-z_]{1,32}$/.test(status)) {

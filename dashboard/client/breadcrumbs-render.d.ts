@@ -1,7 +1,7 @@
 import type { HashScope } from "./view-routing.js";
 
 export interface Crumb {
-  kind: "project" | "ticket" | "run" | "task" | "explain" | "review";
+  kind: "project" | "ticket" | "run" | "task" | "explain" | "review" | "roles" | "role" | "role-tab";
   label: string;
   href: string | null;
 }
@@ -20,8 +20,9 @@ export interface CrumbProject {
   label?: string;
   checkouts?: { projectDir: string }[];
 }
-export type ObjectPageKind = "run" | "task" | "explain" | "ticket" | "review";
+export type ObjectPageKind = "run" | "task" | "explain" | "ticket" | "review" | "role";
 export function projectForDir(projectDir: string | null | undefined, projects: CrumbProject[] | null | undefined): CrumbProject | null;
 export function projectCrumb(projectDir: string | null | undefined, projects: CrumbProject[] | null | undefined, projectKey?: string | null): Crumb;
 export function breadcrumbTrail(page: ObjectPageKind, payload: CrumbPayload | null | undefined, projects: CrumbProject[] | null | undefined): Crumb[];
 export function parentHash(page: ObjectPageKind, payload: CrumbPayload | null | undefined, scope?: Partial<HashScope> | null): string;
+export function roleTrail(role: string, tabLabel: string): Crumb[];

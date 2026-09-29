@@ -206,6 +206,15 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // names the held count instead of calm empty copy; and localStorage/sessionStorage stay empty
   // throughout. Fixture port 18828.
   "fg823-attention-dismiss.test.ts": 8,
+  // FG-817 adds `fg817-roles-pages` (8 tests): the Roles list under Setup (every seed with
+  // its default activity, resolved profile/effort, mount and last task; the FG-820
+  // placeholder gone); a deep link to #roles/engineer/instructions restored across reload
+  // with the composed prompt's sections marked and rendered byte for byte; every one of the
+  // nine tabs rendering with its source caption; the FG-692 tablist keyboard (arrow keys,
+  // wrapping, roving tabindex); the Roles › <role> › <tab> trail; Escape to the list; a seed
+  // missing settings.json saying so, an unknown tab landing on overview, an unknown role
+  // named; and the 400px role page fitting the viewport. Fixture port 18830.
+  "fg817-roles-pages.test.ts": 8,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

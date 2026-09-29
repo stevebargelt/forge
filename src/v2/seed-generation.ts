@@ -347,7 +347,7 @@ function manifestPath(genRoot: string): string {
   return join(genRoot, GENERATION_MANIFEST_NAME);
 }
 
-function readGenerationManifest(genRoot: string): SeedGenerationManifest | null {
+export function readGenerationManifest(genRoot: string): SeedGenerationManifest | null {
   const p = manifestPath(genRoot);
   if (!existsSync(p)) return null;
   try {

@@ -74,6 +74,16 @@ export function breadcrumbTrail(page, payload, projects) {
   return crumbs.map((crumb, i) => (i === crumbs.length - 1 ? { ...crumb, href: null } : crumb));
 }
 
+/** A role page's trail: Roles › <role> › <tab>. Role pages are global, so there is no
+ *  project crumb; the tab crumb is the page on screen. */
+export function roleTrail(role, tabLabel) {
+  return [
+    { kind: "roles", label: "Roles", href: hashFor({ view: "roles" }) },
+    { kind: "role", label: role, href: hashFor({ view: "roles", id: role }) },
+    { kind: "role-tab", label: tabLabel, href: null },
+  ];
+}
+
 /** Where Escape goes from an object page: its parent, one level up the same chain.
  *  A run's parent is the run index; a task's is its run; Explain's is its task. */
 export function parentHash(page, payload, scope = null) {
@@ -87,6 +97,8 @@ export function parentHash(page, payload, scope = null) {
       return hashFor({ view: "backlog", scope });
     case "review":
       return hashFor({ view: "reviews", scope });
+    case "role":
+      return hashFor({ view: "roles" });
     default:
       return hashFor({ view: "runs", scope });
   }

@@ -17,6 +17,8 @@ import { TaskPage, ModelBadge, CopyIdButton } from "./task-page-view.js";
 import { TicketPage } from "./ticket-page-view.js";
 import { ReviewPage } from "./reviews.js";
 import { RunsIndexView } from "./runs-index-view.js";
+import { RolesIndexView } from "./roles-index-view.js";
+import { RolePage } from "./role-page-view.js";
 import { RUNS_LOADING, RUNS_POLL_MS, readRuns, runsUrl } from "./runs-index-render.js";
 import { listHeader, runsIndexHeader } from "./screen-header-render.js";
 import { ScreenLine } from "./object-page-view.js";
@@ -747,7 +749,9 @@ function App() {
         : view === "runs"
         ? html`<${RunsIndexView} scope=${scope} status=${route.params?.status ?? null} projects=${projects} onLoad=${setRunsLoad} />`
         : view === "roles"
-        ? html`<div class="card muted placeholder-view" style="margin-top: 20px;">Role pages land in a later ticket. <a href=${hashFor({ view: "routing", scope })}>Routing</a> and <a href=${hashFor({ view: "config", scope })}>Config</a> explain how a role resolves today.</div>`
+        ? route.id
+          ? html`<${RolePage} key=${route.id} role=${route.id} tab=${route.tab} project=${scope.project} />`
+          : html`<${RolesIndexView} />`
         : view === "backlog"
         ? route.id
           ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`

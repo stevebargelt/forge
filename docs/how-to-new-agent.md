@@ -34,6 +34,8 @@ You read code diffs and identify security defects. You favor concrete evidence (
 
 This is the same schema as `red-wide` — security-reviewer is a specialized red.
 
+As soon as this directory exists, `security-reviewer` shows up in the dashboard's Roles list (`#roles`, under Setup) — there is no separate registration step. Its page composes the exact instructions a dispatch would receive (`#roles/security-reviewer/instructions`, with a content hash), so you can check the seed before wiring it into a workflow. See [Roles surface](concepts.md#roles-surface-fg-817).
+
 ### Step 2: settings.json
 
 `~/.forge/agents/security-reviewer/settings.json`:

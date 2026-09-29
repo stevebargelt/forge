@@ -131,7 +131,7 @@ const LIST_HEADERS = {
   campaigns: { happening: "Campaign progress and pauses", needs: "Pauses count on Home", todo: "Open a campaign for its items", verb: "forge campaign show" },
   reviews: { happening: "Review outcomes and open findings", needs: "Open fix_now findings count on Home", todo: "Record a disposition", verb: "forge review disposition" },
   shipping: { happening: "Whether each ticket can ship", needs: "Only when you are shipping", todo: "Read a ticket's readiness", verb: "forge readiness" },
-  roles: { happening: "What each role is and runs on", needs: NOTHING, todo: "Read Routing and Config for now", verb: "forge route explain" },
+  roles: { happening: "What each role is and runs on", needs: "A seed changes only through forge upgrade", todo: "Open a role for its instructions and receipts", verb: "forge model resolve <role>" },
   routing: { happening: "The effective routing policy", needs: NOTHING, todo: "Read why a role routes here", verb: "forge route governance" },
   config: { happening: "The effective config and its precedence", needs: NOTHING, todo: "Read where a value came from", verb: "forge config show" },
   projects: { happening: "The project and checkout registry", needs: "Only an unclassified project", todo: "Classify or pick a scope", verb: "forge projects classify" },

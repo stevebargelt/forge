@@ -6373,3 +6373,132 @@ export function scopedOrchestratorView(
     remoteControl: { available: withheldReason === null, withheldReason },
   };
 }
+
+// FG-817: the store half of the Roles surface — a role is `tasks.agent_role`, the key
+// `forge usage --by role` and the ops role toggle already group on. Read-only, like
+// everything here; the seed half lives in dashboard/src/roles.ts.
+
+/** The newest task's created_at per role, for the Roles list's "last task" column. */
+export function lastTaskAtByRole(): Map<string, string> {
+  const rows = db().prepare(`SELECT agent_role AS role, MAX(created_at) AS at FROM tasks GROUP BY agent_role`).all() as Array<{ role: string; at: string }>;
+  return new Map(rows.map((r) => [r.role, r.at]));
+}
+
+export type RoleTaskRow = {
+  taskId: string;
+  runId: string;
+  runTitle: string | null;
+  projectDir: string | null;
+  phase: string;
+  status: string;
+  agentModel: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+/** Tasks dispatched as `role`, newest first. */
+export function tasksForRole(role: string, limit: number): RoleTaskRow[] {
+  const rows = db().prepare(`
+    SELECT t.id, t.run_id, r.title AS run_title, r.project_dir, t.phase, t.status, t.agent_model, t.created_at, t.started_at, t.completed_at
+    FROM tasks t LEFT JOIN runs r ON r.id = t.run_id
+    WHERE t.agent_role = ?
+    ORDER BY t.created_at DESC, t.id DESC
+    LIMIT ?
+  `).all(role, limit) as Array<{
+    id: string; run_id: string; run_title: string | null; project_dir: string | null; phase: string; status: string;
+    agent_model: string | null; created_at: string; started_at: string | null; completed_at: string | null;
+  }>;
+  return rows.map((r) => ({
+    taskId: r.id, runId: r.run_id, runTitle: r.run_title, projectDir: r.project_dir, phase: r.phase, status: r.status,
+    agentModel: r.agent_model, createdAt: r.created_at, startedAt: r.started_at, completedAt: r.completed_at,
+  }));
+}
+
+export type RoleOps = { since: string; terminal: number; complete: number; failed: number; successRate: number | null; timed: number; medianMs: number | null };
+
+/** The role's task outcomes over a window: success rate over terminal tasks (complete vs
+ *  failed — an in-flight task has no outcome yet) and the median started→completed
+ *  duration, by the ops view's own median. */
+export function roleOps(role: string, since: string): RoleOps {
+  const cutoff = opsCutoff(since);
+  const rows = db().prepare(`
+    SELECT status, started_at, completed_at FROM tasks
+    WHERE agent_role = ? ${cutoff ? "AND created_at >= ?" : ""}
+  `).all(...(cutoff ? [role, cutoff] : [role])) as Array<{ status: string; started_at: string | null; completed_at: string | null }>;
+  const complete = rows.filter((r) => r.status === "complete").length;
+  const failed = rows.filter((r) => r.status === "failed").length;
+  const durations = rows
+    .filter((r) => r.started_at && r.completed_at)
+    .map((r) => new Date(r.completed_at!).getTime() - new Date(r.started_at!).getTime())
+    .filter((ms) => ms >= 0);
+  const terminal = complete + failed;
+  return {
+    since,
+    terminal,
+    complete,
+    failed,
+    successRate: terminal > 0 ? complete / terminal : null,
+    timed: durations.length,
+    medianMs: durations.length > 0 ? opsMedian(durations) : null,
+  };
+}
+
+export type RoleUsageWindow = { since: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; requests: number };
+
+/** Tokens by role from model_calls — usageRollup's `role` bucket, the row `forge usage
+ *  --by role` prints for this role — for each window. */
+export function roleUsage(role: string, windows: string[]): RoleUsageWindow[] {
+  return windows.map((since) => {
+    const row = usageRollup("role", since, undefined, 10_000).find((r) => r.bucket === role);
+    return {
+      since,
+      inputTokens: row?.inputTokens ?? 0,
+      outputTokens: row?.outputTokens ?? 0,
+      cacheReadTokens: row?.cacheReadTokens ?? 0,
+      cacheCreationTokens: row?.cacheCreationTokens ?? 0,
+      requests: row?.requests ?? 0,
+    };
+  });
+}
+
+export type RoleUsageByModel = { model: string; inputTokens: number; outputTokens: number; requests: number };
+
+export function roleUsageByModel(role: string): RoleUsageByModel[] {
+  const rows = db().prepare(`
+    SELECT COALESCE(mc.model, '(unknown model)') AS model, SUM(mc.input_tokens) AS in_tok, SUM(mc.output_tokens) AS out_tok, COUNT(*) AS n
+    FROM model_calls mc JOIN tasks t ON t.id = mc.task_id
+    WHERE t.agent_role = ?
+    GROUP BY model ORDER BY SUM(mc.input_tokens) + SUM(mc.output_tokens) DESC
+  `).all(role) as Array<{ model: string; in_tok: number; out_tok: number; n: number }>;
+  return rows.map((r) => ({ model: r.model, inputTokens: r.in_tok ?? 0, outputTokens: r.out_tok ?? 0, requests: r.n }));
+}
+
+export type RoleReceipt = {
+  taskId: string;
+  runId: string;
+  createdAt: string;
+  /** false when the task dir carries no manifest.json (pre-FG-350, or never dispatched). */
+  manifest: boolean;
+  mountMode: string | null;
+  protocol: { sha256: string; source: string } | null;
+  dispatchRefused: string | null;
+};
+
+/** The recorded agentProtocol receipt (and mount mode) of each of the role's recent
+ *  dispatches, read from each task's manifest.json — the dispatch-time record, never
+ *  recomputed (invariant 6). */
+export function roleReceipts(role: string, limit: number): RoleReceipt[] {
+  return tasksForRole(role, limit).map((t) => {
+    const m = readTaskManifest(join(runsDir(), t.runId, t.taskId));
+    return {
+      taskId: t.taskId,
+      runId: t.runId,
+      createdAt: t.createdAt,
+      manifest: m !== undefined,
+      mountMode: m?.controlPlane?.mountMode ?? null,
+      protocol: m?.agentProtocol ? { sha256: m.agentProtocol.sha256, source: m.agentProtocol.source } : null,
+      dispatchRefused: m?.dispatchRefused ? m.dispatchRefused.reason : null,
+    };
+  });
+}
