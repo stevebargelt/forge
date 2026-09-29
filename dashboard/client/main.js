@@ -31,6 +31,7 @@ import { CurrentActivitySection, InFlightActivityWaits } from "./current-activit
 import { INBOX_LOADING, readAttentionInbox } from "./attention-inbox-render.js";
 import { PinnedAttentionInboxSection } from "./attention-inbox-view.js";
 import { TaskActions } from "./task-actions-view.js";
+import { RoleTile } from "./role-glyph-view.js";
 import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
 import { formatDuration, formatRelativeTime, shortSha } from "./format.js";
 import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
@@ -2405,7 +2406,7 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
       <div>
         <div>
           <${ProjectChip} entry=${task} />
-          <a class="task-link" href=${hashFor({ view: "task", id: task.taskId })} onClick=${(e) => e.stopPropagation()}><strong>${task.agentRole}</strong></a>
+          <a class="task-link role-name" href=${hashFor({ view: "task", id: task.taskId })} onClick=${(e) => e.stopPropagation()}><${RoleTile} role=${task.agentRole} /><strong>${task.agentRole}</strong></a>
           <${ModelBadge} entry=${task} />
           <span class="faint"> ·</span> <span class="muted">${task.runTitle}</span>
         </div>
@@ -2425,7 +2426,7 @@ function FeedCard({ entry, onClick }) {
       <div class="head">
         <div>
           <${ProjectChip} entry=${entry} />
-          <a class="agent task-link" href=${hashFor({ view: "task", id: entry.taskId })} onClick=${(e) => e.stopPropagation()}>${entry.agentRole}</a>
+          <a class="agent task-link role-name" href=${hashFor({ view: "task", id: entry.taskId })} onClick=${(e) => e.stopPropagation()}><${RoleTile} role=${entry.agentRole} />${entry.agentRole}</a>
           <${ModelBadge} entry=${entry} />
           <span class="faint"> · </span>
           <span class="context">${entry.runTitle}</span>

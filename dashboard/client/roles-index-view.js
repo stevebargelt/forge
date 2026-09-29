@@ -8,6 +8,7 @@ import { h } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
 import { formatTimestamp } from "./format.js";
+import { RoleTile } from "./role-glyph-view.js";
 import { rolesIndexNotices, rolesIndexRows, rolesIndexSource, rolesSortHash, rolesSortState, sortRoles } from "./roles-index-render.js";
 
 const html = htm.bind(h);
@@ -62,7 +63,7 @@ export function RolesIndexView({ params = null }) {
             ${rows.map((r) => html`
               <tr key=${r.role} data-role=${r.role}>
                 <td>
-                  <a class="mono" href=${r.href}>${r.role}</a>
+                  <span class="role-name"><${RoleTile} role=${r.role} /><a class="mono" href=${r.href}>${r.role}</a></span>
                   ${r.settingsMissing ? html` <span class="faint">(no settings.json)</span>` : null}
                   <div class="muted role-description">${r.description}</div>
                 </td>

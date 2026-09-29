@@ -248,6 +248,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // additions prove every column's mixed missing-value/tie behavior, hash scope retention,
   // and Last task keyboard sorting at 400px. Fixture port 18833.
   "fg828-roles-sort.test.ts": 6,
+  // FG-829 adds `fg829-role-glyphs` (5 tests): every Roles list row carries a 20px role
+  // glyph tile painted (computed style) in its family colour — every red-* red and nothing
+  // else red, an unknown role neutral with the layers glyph — with no image request; a role
+  // page's title carries the 36px tile; Home's In flight rows and Activity's Recent agent
+  // outputs carry the 20px tile inside the role-name link; every tile beside a visible
+  // name is aria-hidden while the link's accessible name stays the role; and an actual
+  // Preact-rendered standalone tile exposes its labelled image semantics. Fixture port 18834.
+  "fg829-role-glyphs.test.ts": 5,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,
