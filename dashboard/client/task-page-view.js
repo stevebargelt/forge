@@ -85,13 +85,14 @@ export function TaskPage({ taskId, tab, projects }) {
   return html`
     <section class=${"object-page task-page" + (explain ? " explain-page" : "")} data-task-id=${taskId}>
       <${ObjectHead} crumbs=${crumbs} title=${title} header=${taskHeader(detail, inbox, { explain })} />
-      <${ObjectTabs} label="Task views" tabs=${tabs} />
-      ${err ? html`<div class="card" style="color: var(--err);" role="alert">${err}</div>` : null}
-      ${explain
-        ? html`<${ExplainContent} taskId=${taskId} />`
-        : detail
-        ? html`<${TaskLinks} detail=${detail} projects=${projects} /><${TaskDetailBody} detail=${detail} />`
-        : err ? null : html`<div class="muted">loading…</div>`}
+      <${ObjectTabs} id="task-views" label="Task views" tabs=${tabs}>
+        ${err ? html`<div class="card" style="color: var(--err);" role="alert">${err}</div>` : null}
+        ${explain
+          ? html`<${ExplainContent} taskId=${taskId} />`
+          : detail
+          ? html`<${TaskLinks} detail=${detail} projects=${projects} /><${TaskDetailBody} detail=${detail} />`
+          : err ? null : html`<div class="muted">loading…</div>`}
+      <//>
     </section>
   `;
 }

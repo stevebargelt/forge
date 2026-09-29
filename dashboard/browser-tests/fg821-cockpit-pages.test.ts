@@ -172,6 +172,18 @@ async function open(hash = "", width = 1280): Promise<{ page: Page; errors: stri
 const hashOf = (page: Page) => new URL(page.url()).hash;
 const crumbs = (page: Page) => page.locator(".breadcrumbs li").evaluateAll((items) =>
   items.map((li) => ({ label: li.textContent?.trim(), href: li.querySelector("a")?.getAttribute("href") ?? null })));
+// The tablist pattern (FG-692): every tab is role=tab with aria-selected, a roving tabindex
+// and aria-controls naming the one tabpanel, which is labelled by the selected tab.
+const tablist = (page: Page) => page.evaluate(() => {
+  const list = document.querySelector('.object-tabs[role="tablist"]');
+  const panel = document.querySelector('[role="tabpanel"]');
+  return {
+    tabs: Array.from(list?.children ?? []).map((t) => [t.getAttribute("role"), t.getAttribute("data-tab"), t.getAttribute("aria-selected"),
+      t.getAttribute("tabindex"), t.getAttribute("aria-controls") === panel?.id && !!panel?.id]),
+    labelledBy: panel ? document.getElementById(panel.getAttribute("aria-labelledby") ?? "")?.getAttribute("data-tab") ?? null : null,
+    panels: document.querySelectorAll('[role="tabpanel"]').length,
+  };
+});
 const runsBadgeText = (page: Page) => page.evaluate(() => document.querySelector('.nav-column a[data-view="runs"] .nav-badge')?.textContent ?? null);
 
 async function waitFor<T>(read: () => Promise<T>, expected: T, what: string): Promise<void> {
@@ -278,6 +290,12 @@ test("FG-821: #run/<id> renders the map tab by default and an evidence tab linki
   assert.equal(await page.locator(".page-title").innerText(), "Build the cockpit");
   assert.deepEqual(await page.locator('.nav-column a[aria-current="page"] .nav-item-label').allInnerTexts(), ["Runs"], "a run page highlights Runs");
   assert.equal(await page.locator('[role="tab"][aria-selected="true"]').innerText(), "Map");
+  assert.deepEqual(await tablist(page), {
+    tabs: [["tab", "map", "true", "0", true], ["tab", "evidence", "false", "-1", true]],
+    labelledBy: "map",
+    panels: 1,
+  });
+  assert.equal(await page.locator('[role="tabpanel"] .rm-node').count() > 0, true, "the map renders inside the tabpanel");
   assert.equal(await page.locator('.rm-node[href="#task/task-1/explain"]').count(), 1, "a map node links to its task's Explain page");
   assert.match(await page.locator(".screen-line").innerText(), /Needs you: engineer is waiting at its gate · Run: forge gate task-1$/);
 
@@ -293,6 +311,12 @@ test("FG-821: #run/<id> renders the map tab by default and an evidence tab linki
   assert.deepEqual(await page.locator('[data-evidence="launches"] li > a.mono').evaluateAll((as) => as.map((a) => a.getAttribute("href"))),
     ["/api/launches/launch-1", "/api/launches/launch-2"]);
   assert.equal(await page.locator('[role="tab"][aria-selected="true"]').innerText(), "Evidence");
+  assert.deepEqual(await tablist(page), {
+    tabs: [["tab", "map", "false", "-1", true], ["tab", "evidence", "true", "0", true]],
+    labelledBy: "evidence",
+    panels: 1,
+  });
+  assert.equal(await page.locator('[role="tabpanel"] .run-evidence').count(), 1, "the evidence renders inside the tabpanel");
   assert.ok(apiRequests.includes("/api/run/run-1/evidence"), "the evidence is read by run, unscoped");
   assert.ok(!apiRequests.some((u) => u.startsWith("/api/task/")), "the run page never fans out over its tasks");
   await page.screenshot({ path: join(SHOTS, "fg821-run-page-evidence.png"), fullPage: true });
@@ -338,10 +362,21 @@ test("FG-821: a task page deep link survives reload, links its run, ticket, revi
   assert.ok(!apiRequests.some((u) => u.startsWith("/api/task/task-1") && u.includes("project")), "an object page reads unscoped");
   await page.screenshot({ path: join(SHOTS, "fg821-task-page-breadcrumbs-links.png"), fullPage: true });
 
+  assert.deepEqual(await tablist(page), {
+    tabs: [["tab", "detail", "true", "0", true], ["tab", "explain", "false", "-1", true]],
+    labelledBy: "detail",
+    panels: 1,
+  });
+  assert.equal(await page.locator('[role="tabpanel"] .task-links').count(), 1, "the task body renders inside the tabpanel");
   await page.locator('[role="tab"][data-tab="explain"]').click();
   await page.waitForFunction(() => location.hash === "#task/task-1/explain");
   await page.locator(".rx-panel .rx-identity").waitFor();
   assert.equal(await page.locator(".page-title").innerText(), "Explain");
+  assert.deepEqual(await tablist(page), {
+    tabs: [["tab", "detail", "false", "-1", true], ["tab", "explain", "true", "0", true]],
+    labelledBy: "explain",
+    panels: 1,
+  });
   assert.equal(await page.locator(".detail-overlay").count(), 0, "Explain is a page, not an overlay");
   await page.screenshot({ path: join(SHOTS, "fg821-explain-page.png"), fullPage: true });
   await page.reload();

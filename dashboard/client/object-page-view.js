@@ -50,8 +50,9 @@ export function ObjectHead({ crumbs, title, header, children }) {
 }
 
 /** Object tabs: links (so reload and open-in-new-tab work) in the tablist pattern —
- *  arrow keys move between them. */
-export function ObjectTabs({ label, tabs }) {
+ *  arrow keys move between them. Only the current tab's content is rendered, so every tab
+ *  controls the one tabpanel, which is labelled by the current tab. */
+export function ObjectTabs({ id, label, tabs, children }) {
   const onKeyDown = (e) => {
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     const links = [...e.currentTarget.querySelectorAll("[role=tab]")];
@@ -62,19 +63,27 @@ export function ObjectTabs({ label, tabs }) {
     next.focus();
     next.click();
   };
+  const panelId = `${id}-panel`;
+  const tabId = (tab) => `${id}-tab-${tab.id}`;
+  const current = tabs.find((tab) => tab.current) ?? tabs[0];
   return html`
     <div class="object-tabs" role="tablist" aria-label=${label} onKeyDown=${onKeyDown}>
       ${tabs.map((tab) => html`
         <a
           key=${tab.id}
+          id=${tabId(tab)}
           role="tab"
           class=${"object-tab" + (tab.current ? " object-tab-current" : "")}
           href=${tab.href}
           aria-selected=${tab.current ? "true" : "false"}
+          aria-controls=${panelId}
           tabindex=${tab.current ? "0" : "-1"}
           data-tab=${tab.id}
         >${tab.label}</a>
       `)}
+    </div>
+    <div class="object-tabpanel" id=${panelId} role="tabpanel" aria-labelledby=${tabId(current)}>
+      ${children}
     </div>
   `;
 }

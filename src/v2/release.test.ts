@@ -5,9 +5,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import { renderEntry, readReleaseManifest, locateReleaseManifest, parseExecDescriptor, renderExecDescriptor, assertDashboardClosure, REQUIRED_DASHBOARD_FILES, REQUIRED_DASHBOARD_DEPS, RELEASE_LOADER_NAME, RELEASE_ENTRY_SOURCE, RELEASE_MANIFEST_NAME } from "./release.js";
 
 // FG-580: assertDashboardClosure is the pure predicate both buildRelease (refuse a torn
@@ -54,6 +55,26 @@ test("FG-580 assertDashboardClosure: a MISSING required dashboard file throws BY
       rmSync(root, { recursive: true, force: true });
     }
   }
+});
+
+// FG-821 RF-2: every module the browser loads from main.js must be required by name, or a
+// release missing a newly added module passes the closure and never mounts.
+test("FG-821 REQUIRED_DASHBOARD_FILES carries every module main.js transitively imports", () => {
+  const repo = fileURLToPath(new URL("../../", import.meta.url));
+  const specifier = /\b(?:import|export)\s*(?:[^'"]*?\bfrom\s*)?\(?\s*["'](\.{1,2}\/[^"']+)["']/g;
+  const reachable = new Set<string>();
+  const pending = ["dashboard/client/main.js"];
+  while (pending.length > 0) {
+    const rel = pending.pop()!;
+    if (reachable.has(rel)) continue;
+    reachable.add(rel);
+    for (const m of readFileSync(join(repo, rel), "utf8").matchAll(specifier)) {
+      pending.push(posix.join(posix.dirname(rel), m[1]!));
+    }
+  }
+  assert.ok(reachable.has("dashboard/client/object-page-view.js"), "the walk follows transitive imports");
+  const required = new Set<string>(REQUIRED_DASHBOARD_FILES);
+  assert.deepEqual([...reachable].filter((rel) => !required.has(rel)).sort(), []);
 });
 
 test("FG-580 assertDashboardClosure: a MISSING dashboard-relevant runtime dep throws BY NAME", () => {

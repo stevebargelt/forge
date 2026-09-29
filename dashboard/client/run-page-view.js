@@ -99,11 +99,12 @@ export function RunPage({ runId, tab, projects }) {
   return html`
     <section class="object-page run-page" data-run-id=${runId}>
       <${ObjectHead} crumbs=${breadcrumbTrail("run", payload, projects)} title=${graph?.run?.title || "Run"} header=${runHeader(graph, inbox)} />
-      <${ObjectTabs} label="Run views" tabs=${tabs} />
-      ${error ? html`<div class="card" style="color: var(--err);" role="alert">${error}</div>` : null}
-      ${evidence
-        ? html`<${RunEvidence} graph=${graph} evidence=${runEvidence} />`
-        : error && !graph ? null : html`<${RunMap} graph=${graph} hrefFor=${(taskId) => hashFor({ view: "task", id: taskId, tab: "explain" })} />`}
+      <${ObjectTabs} id="run-views" label="Run views" tabs=${tabs}>
+        ${error ? html`<div class="card" style="color: var(--err);" role="alert">${error}</div>` : null}
+        ${evidence
+          ? html`<${RunEvidence} graph=${graph} evidence=${runEvidence} />`
+          : error && !graph ? null : html`<${RunMap} graph=${graph} hrefFor=${(taskId) => hashFor({ view: "task", id: taskId, tab: "explain" })} />`}
+      <//>
     </section>
   `;
 }
