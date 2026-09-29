@@ -197,14 +197,15 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // FG-692 keyboard focus and Enter reach both task-header and inbox-row actions.
   // Fixture port 18826.
   "fg822-task-actions.test.ts": 5,
-  // FG-823 adds `fg823-attention-dismiss` (7 tests): the Home inbox's Dismiss and Snooze
+  // FG-823 adds `fg823-attention-dismiss` (8 tests): the Home inbox's Dismiss and Snooze
   // against the real core `composeInbox` — Dismiss hides the row and the Home badge drops on
   // the next read; new activity resurfaces it; a preset snooze holds, then returns once it
   // passes; Undismiss from the foot's "Dismissed" disclosure; every control operable by
   // keyboard; a row shows one preview at a time (hold or task action), opening one focuses
-  // its first control and Escape closes it; and localStorage/sessionStorage stay empty
+  // its first control and Escape closes it; an inbox holding only dismissed or snoozed items
+  // names the held count instead of calm empty copy; and localStorage/sessionStorage stay empty
   // throughout. Fixture port 18828.
-  "fg823-attention-dismiss.test.ts": 7,
+  "fg823-attention-dismiss.test.ts": 8,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,
