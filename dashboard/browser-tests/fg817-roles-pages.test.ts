@@ -1,5 +1,5 @@
 // FG-817: the Roles surface in a real browser — the Roles list under Setup, and a role
-// page at #roles/<role>/<tab> with nine source-captioned tabs, the FG-692 tablist
+// page at #roles/<role>/<tab> with ten (FG-827) source-captioned tabs, the FG-692 tablist
 // keyboard, the Roles › <role> › <tab> trail and Escape back to the list.
 //
 // The real client is booted against a fixture server answering GET /api/roles and
@@ -28,7 +28,7 @@ const HOUR = 3_600_000;
 const ago = (hours: number) => new Date(Date.now() - hours * HOUR).toISOString();
 const SHA = "3f".repeat(32);
 const GEN = { id: "gen-20260928T010203Z-ab12", root: "/h/seed-generations/gen-20260928T010203Z-ab12", sourceAssetRoot: "/h/releases/r1" };
-const TABS = ["overview", "instructions", "skills", "configuration", "secrets", "tools", "tasks", "receipts", "usage"];
+const TABS = ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"];
 
 const ROLES = {
   generatedAt: new Date().toISOString(),
@@ -86,10 +86,8 @@ function detail(role: string) {
       resolution: { activity: entry.defaultActivity, profile: entry.profile, effort: entry.effort, model: entry.model, provider: "anthropic", auth: "subscription", runtime: "claude-oauth", resolvedBy: entry.resolvedBy, mappingPath: "exact", error: null },
       modelPolicy: ROLES.modelPolicy,
       mountMode: { mode: entry.mountMode, source: entry.mountModeSource },
-      routingPolicy: { path: `${GEN.root}/routing-policy.yml`, available: true },
-      routes: role === "engineer"
-        ? [{ route: "feature", path: "workflow", relations: ["responsible"] }, { route: "plan-review", path: "invoke", relations: ["consulted", "followup"] }]
-        : [],
+      latestTask: tasks[0] ? { taskId: tasks[0].taskId, runId: tasks[0].runId, runTitle: tasks[0].runTitle, status: tasks[0].status, createdAt: tasks[0].createdAt, completedAt: tasks[0].completedAt } : null,
+      skills: ["browser-tools"],
       recentTasks: tasks,
       ops: { since: "30d", terminal: 2, complete: 1, failed: 1, successRate: 0.5, timed: 2, medianMs: 360_000 },
       usage: { since: "30d", inputTokens: 12_345, outputTokens: 678, cacheReadTokens: 0, cacheCreationTokens: 0, requests: 9 },
@@ -102,17 +100,46 @@ function detail(role: string) {
       prompt: PROMPT,
       sha256: "9c".repeat(32),
       sections: sections(),
+      files: [
+        { id: "protocol", label: `agent-protocols/${role}.md`, kind: "protocol", path: `${GEN.root}/agent-protocols/${role}.md`, markdown: PROTOCOL, bytes: PROTOCOL.length, edit: "published by forge upgrade" },
+        { id: "entry", label: "CLAUDE.md", kind: "entry", path: `/h/agents/${role}/CLAUDE.md`, markdown: `# ${role}\n\n${entry.description}\n`, bytes: 40, edit: "published by forge upgrade" },
+      ],
       protocol: { sha256: SHA, source: `${GEN.root}/agent-protocols/${role}.md` },
       constraintsSkipped: [],
     },
     skills: {
-      source: `host: /h/releases/r1/seeds/skills; container: the claude-oauth runtime's skill mounts (${GEN.root}/runtimes/claude-oauth.yml)`,
-      host: [{ name: "forge-backlog", path: "/h/releases/r1/seeds/skills/forge-backlog/SKILL.md" }],
-      container: [{ name: "browser-tools", host: "${FORGE_BROWSER_TOOLS_DIR:-~/pi-skills/browser-tools}", container: "/home/agent/.claude/skills/browser-tools", mode: "ro", optional: true }],
+      source: `container: the claude-oauth runtime's skill mounts (${GEN.root}/runtimes/claude-oauth.yml); host-only: /h/releases/r1/seeds/skills`,
+      mounted: [{ name: "browser-tools", description: "Drive a headless Chrome.", descriptionSource: "/h/pi-skills/browser-tools/SKILL.md", source: "host", host: "${FORGE_BROWSER_TOOLS_DIR:-~/pi-skills/browser-tools}", hostPath: "/h/pi-skills/browser-tools", present: true, container: "/home/agent/.claude/skills/browser-tools", mode: "ro", optional: true, referencedBySeed: role === "engineer" }],
+      hostOnly: [{ name: "forge-backlog", path: "/h/releases/r1/seeds/skills/forge-backlog/SKILL.md", description: "Read and manage backlog tickets." }],
+      available: [],
+      availableNote: "The skill registry (FG-797/FG-798) will list skills this role could mount but does not; until it lands this section is empty.",
       runtimeError: null,
     },
-    configuration: {
-      source: `/h/agents/${role}/settings.json; runtime ${GEN.root}/runtimes/claude-oauth.yml`,
+    capabilities: {
+      source: `model policy /h/model-policy.yml; routing policy ${GEN.root}/routing-policy.yml; /h/agents/${role}/CLAUDE.md § Output schema; constraints /h/constraints`,
+      activities: [{ activity: entry.defaultActivity, isDefault: true, profile: entry.profile, model: entry.model, dispatchable: true, resolvedBy: entry.resolvedBy, error: null }],
+      routingPolicy: { path: `${GEN.root}/routing-policy.yml`, available: true },
+      routes: role === "engineer"
+        ? [{ route: "feature", path: "workflow", relations: ["responsible"] }, { route: "plan-review", path: "invoke", relations: ["consulted", "followup"] }]
+        : [],
+      resultContract: { declared: true, fields: [{ name: "status", source: "x" }], source: "x", note: null },
+      mountMode: { mode: entry.mountMode, source: entry.mountModeSource },
+      constraints: [],
+      constraintsError: null,
+    },
+    harness: {
+      source: `forge model resolve ${role} --activity <a>; container facts from ${GEN.root}/runtimes/claude-oauth.yml`,
+      activities: [{ activity: entry.defaultActivity, isDefault: true, profile: entry.profile, provider: "anthropic", model: entry.model, auth: "subscription", runtime: "claude-oauth", image: "agent-dev-worker:latest", costTier: "standard", effort: entry.effort, resolvedBy: entry.resolvedBy, mapping: "exact", mappingPath: "exact", outcome: "resolved", dispatchable: true, error: null, resolve: {} }],
+      policyError: null,
+      container: {
+        source: `${GEN.root}/runtimes/claude-oauth.yml; src/v2/spawn.ts buildDockerArgs`,
+        mounts: [{ path: "/task", mode: "rw", source: "${TASK_DIR}", optional: false, caption: "runtime mounts[]" }, { path: "/project", mode: entry.mountMode, source: "${PROJECT_DIR}", optional: false, caption: "runtime mounts[]" }],
+        authVolume: { authMode: "oauth-volume", volume: "forge-claude-oauth-v2", path: "/home/agent", mode: "rw", source: "runtime auth.mode: oauth-volume" },
+        skillMounts: [],
+        idleTimeout: { seconds: 600, effectiveMs: 600000, override: null, source: "runtime container.idle_timeout_seconds" },
+        network: { mode: "docker default (bridge)", source: "spawn.ts passes no --network flag" },
+      },
+      edit: { settings: "seeds/agents/x/settings.json — published by forge upgrade", runtime: "seeds/runtimes/claude-oauth.yml — published by forge upgrade", policy: "model-policy.yml" },
       settings: settingsPresent
         ? { path: `/h/agents/${role}/settings.json`, present: true, text: '{\n  "tools": ["read", "edit", "write", "bash"]\n}\n', tools: ["read", "edit", "write", "bash"], error: null }
         : { path: `/h/agents/${role}/settings.json`, present: false, text: null, tools: null, error: null },
@@ -128,6 +155,12 @@ function detail(role: string) {
       enforced: false,
       note: "declared, not enforced: nothing outside tests reads settings.json's tools list",
       mcp: "none",
+      effective: {
+        mounts: [{ path: "/task", mode: "rw", optional: false }, { path: "/project", mode: entry.mountMode, optional: false }],
+        network: { mode: "docker default (bridge)", source: "spawn.ts" },
+        toolchain: { image: "agent-dev-worker:latest", source: null, entries: null, note: "unknown: this host carries no Dockerfile for image agent-dev-worker:latest" },
+        mcp: "none",
+      },
     },
     tasks: { source: "tasks WHERE agent_role = role, newest first, in forge.db", rows: tasks, limit: 50 },
     receipts: {
@@ -138,12 +171,12 @@ function detail(role: string) {
     },
     usage: {
       source: "model_calls joined to tasks by agent_role in forge.db (forge usage --by role)",
-      windows: [
-        { since: "7d", inputTokens: 12_345, outputTokens: 678, cacheReadTokens: 100, cacheCreationTokens: 5, requests: 9 },
-        { since: "30d", inputTokens: 12_345, outputTokens: 678, cacheReadTokens: 100, cacheCreationTokens: 5, requests: 9 },
-        { since: "all", inputTokens: 1_234_567, outputTokens: 9_876, cacheReadTokens: 100, cacheCreationTokens: 5, requests: 90 },
-      ],
-      byModel: [{ model: "claude-sonnet-5", inputTokens: 1_234_567, outputTokens: 9_876, requests: 90 }],
+      windows: ["1d", "7d", "30d", "all"].map((since) => ({
+        since, inputTokens: 12_345, outputTokens: 678, cacheReadTokens: 100, cacheCreationTokens: 5, requests: 9,
+        byModel: [{ model: "claude-sonnet-5", inputTokens: 12_345, outputTokens: 678, cacheReadTokens: 100, cacheCreationTokens: 5, requests: 9 }],
+        byProvider: [{ provider: "anthropic", auth: "subscription", inputTokens: 12_345, outputTokens: 678, cacheReadTokens: 100, cacheCreationTokens: 5, requests: 9, cost: null, costNote: "tokens only (subscription)" }],
+      })),
+      pricing: { source: null, note: "no pricing source on this host" },
       ceilings: "none: per-role spend ceilings are a future ticket",
     },
   };
@@ -228,7 +261,11 @@ test("FG-817: the Roles list renders every seed with its activity, resolved prof
 
 test("FG-817: a deep link to #roles/engineer/instructions restores the tab, across a reload", async () => {
   const { page, errors } = await open("#roles/engineer/instructions");
-  await page.locator(".role-prompt-section").first().waitFor();
+  const composed = async () => {
+    await page.locator('[data-mode="composed"]').click();
+    await page.locator(".role-prompt-section").first().waitFor();
+  };
+  await composed();
   for (let pass = 0; pass < 2; pass += 1) {
     assert.equal(hashOf(page), "#roles/engineer/instructions");
     assert.equal(await page.locator(".page-title").textContent(), "engineer");
@@ -241,7 +278,7 @@ test("FG-817: a deep link to #roles/engineer/instructions restores the tab, acro
     assert.equal(await page.locator('.nav-column a[data-view="roles"]').getAttribute("aria-current"), "page", "a role page highlights Roles");
     if (pass === 0) {
       await page.reload();
-      await page.locator(".role-prompt-section").first().waitFor();
+      await composed();
     }
   }
   await page.screenshot({ path: join(SHOTS, "fg817-instructions-tab.png"), fullPage: true });
@@ -260,15 +297,18 @@ test("FG-817: every tab renders with its source caption", async () => {
     assert.equal(hashOf(page), tab === "overview" ? "#roles/engineer" : `#roles/engineer/${tab}`);
     if (tab === "overview") {
       assert.match((await page.locator(".role-overview").textContent()) ?? "", /claude-subscription · claude-sonnet-5/);
-      assert.deepEqual(await page.locator(".role-routes li").evaluateAll((lis) => lis.map((li) => li.getAttribute("data-route"))), ["feature", "plan-review"]);
-      assert.match((await page.locator('.role-routes li[data-route="plan-review"]').textContent()) ?? "", /consulted, required follow-up/);
+      assert.equal(await page.locator(".role-routes").count(), 0, "FG-827: routes moved to Capabilities");
       assert.match((await page.locator(".role-overview").textContent()) ?? "", /50% of 2 finished/);
       await page.screenshot({ path: join(SHOTS, "fg817-engineer-overview.png"), fullPage: true });
+    }
+    if (tab === "capabilities") {
+      assert.deepEqual(await page.locator(".role-routes li").evaluateAll((lis) => lis.map((li) => li.getAttribute("data-route"))), ["feature", "plan-review"]);
+      assert.match((await page.locator('.role-routes li[data-route="plan-review"]').textContent()) ?? "", /consulted, required follow-up/);
     }
     if (tab === "secrets") assert.equal(await page.locator("[data-secrets]").textContent(), "none: containers receive no project secrets");
     if (tab === "tools") {
       assert.match((await page.locator("[data-tools-flag]").textContent()) ?? "", /^declared, not enforced/);
-      assert.match((await page.locator(".role-tools").textContent()) ?? "", /MCP: none/);
+      assert.equal(await page.locator("[data-mcp]").textContent(), "none");
     }
     if (tab === "skills") assert.equal(await page.locator('[data-skill="browser-tools"]').count(), 1);
     if (tab === "tasks") {
@@ -344,6 +384,9 @@ test("FG-817: Escape on a role page returns to the Roles list, and the list itse
 
 test("FG-817: a seed missing settings.json says so, an unknown tab lands on overview, an unknown role is named", async () => {
   const { page, errors } = await open("#roles/red-wide/configuration");
+  await page.locator("[data-raw-files]").waitFor();
+  assert.equal(hashOf(page), "#roles/red-wide/harness", "FG-827: the configuration alias lands on harness");
+  await page.locator("[data-raw-files] summary").click();
   await page.locator("[data-settings-missing]").waitFor();
   assert.match((await page.locator("[data-settings-missing]").textContent()) ?? "", /no settings\.json at \/h\/agents\/red-wide\/settings\.json/);
   await page.locator('[role="tab"][data-tab="tools"]').click();

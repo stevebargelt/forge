@@ -1,8 +1,10 @@
-// FG-817: a role page (#roles/<role>[/<tab>]) — nine tabs, each captioned with the
-// source it was read from: overview, instructions (the composed prompt a container
-// receives, sections marked, with its content hash), skills, configuration, secrets,
-// tools, tasks, receipts and usage. One read of GET /api/roles/:role per role. Read-only:
-// a seed changes only through `forge upgrade`, so the page offers no edit.
+// FG-817: a role page (#roles/<role>[/<tab>]) — ten tabs (FG-827), each captioned with
+// the source it was read from: overview, instructions (a Files panel over every
+// composition source with Read / Raw / Composed views), harness (one `forge model
+// resolve` row per activity, then the container), skills, capabilities, tools, secrets,
+// tasks, receipts and usage. One read of GET /api/roles/:role per role. Read-only: a seed
+// changes only through `forge upgrade`, so the page offers no edit — and a role is a
+// seed, not an agent, so it carries no status of its own.
 //
 // Breadcrumbs are Roles › <role> › <tab>; Escape returns to the Roles list.
 
@@ -15,8 +17,10 @@ import { ObjectHead, ObjectTabs, useEscapeTo } from "./object-page-view.js";
 import { formatDuration, formatTimestamp } from "./format.js";
 import { mountLabel } from "./roles-index-render.js";
 import {
-  instructionSections, percent, relationLabel, roleHeader, roleTabLabel, roleTabs, shortSha, tabCaption, tokens,
+  DEFAULT_USAGE_PERIOD, HARNESS_COLUMNS, USAGE_PERIODS, authLabel, harnessRows, latestTaskCard, percent, relationLabel, roleHeader,
+  roleTabLabel, roleTabs, shortSha, skillChips, skillSourceLabel, tabCaption, tokens, usageWindow,
 } from "./role-page-render.js";
+import { InstructionsPanel } from "./instructions-panel-view.js";
 
 const html = htm.bind(h);
 
@@ -64,9 +68,10 @@ export function RolePage({ role, tab, project = null }) {
 
 function RoleTab({ tab, detail }) {
   switch (tab) {
-    case "instructions": return html`<${InstructionsTab} i=${detail.instructions} />`;
+    case "instructions": return html`<${InstructionsPanel} key=${detail.instructions.sha256 ?? "refused"} i=${detail.instructions} />`;
+    case "harness": return html`<${HarnessTab} hn=${detail.harness} />`;
     case "skills": return html`<${SkillsTab} s=${detail.skills} />`;
-    case "configuration": return html`<${ConfigurationTab} c=${detail.configuration} />`;
+    case "capabilities": return html`<${CapabilitiesTab} c=${detail.capabilities} role=${detail.role} />`;
     case "secrets": return html`<p class="role-secrets" data-secrets>${detail.secrets.text}</p>`;
     case "tools": return html`<${ToolsTab} t=${detail.tools} />`;
     case "tasks": return html`<${TasksTab} rows=${detail.tasks.rows} />`;
@@ -93,9 +98,29 @@ function OverviewTab({ detail }) {
   const r = o.resolution;
   const profile = r.error ? html`<span style="color: var(--err);">unresolved: ${r.error}</span>`
     : r.profile ? `${r.profile} · ${r.model ?? "—"}${r.effort ? ` · effort ${r.effort}` : ""}` : `legacy (no model policy)${r.model ? ` · ${r.model}` : ""}`;
+  const latest = latestTaskCard(o);
+  const chips = skillChips(detail.role, o.skills);
   return html`
     <div class="role-overview">
       <p class="role-description-full">${o.description || "(the seed has no description paragraph)"}</p>
+      <div class="role-cards">
+        <section class="role-card role-latest" aria-label="Latest task" data-latest-task=${latest?.taskId ?? ""}>
+          <div class="role-card-label">Latest task</div>
+          ${latest ? html`
+            <div class="role-latest-row">
+              <span class=${`badge ${latest.token.class}`} data-token=${latest.token.tone}>${latest.token.label}</span>
+              <a class="mono" href=${latest.href}>${latest.taskId}</a>
+              <span class="faint" title=${latest.title} data-relative>${latest.when}</span>
+            </div>
+            <div class="faint role-latest-run">in <a href=${latest.runHref}>${latest.runLabel}</a></div>
+          ` : html`<div class="muted">No task recorded for this role.</div>`}
+        </section>
+        <section class="role-card role-skill-chips" aria-label="Skills">
+          <div class="role-card-label">Skills</div>
+          ${chips.length === 0 ? html`<div class="muted">No skill is mounted into this role's container.</div>`
+            : html`<div class="role-chips">${chips.map((c) => html`<a key=${c.name} class="role-chip mono" href=${c.href} data-chip=${c.name}>${c.name}</a>`)}</div>`}
+        </section>
+      </div>
       <${Facts} rows=${[
         ["Default activity", r.activity],
         ["Resolved profile", profile],
@@ -107,82 +132,188 @@ function OverviewTab({ detail }) {
         ["Median duration (30d)", o.ops && o.ops.medianMs !== null ? formatDuration(o.ops.medianMs) : "—"],
         ["Tokens (30d)", o.usage ? `${tokens(o.usage.inputTokens)} in · ${tokens(o.usage.outputTokens)} out · ${o.usage.requests} requests` : "—"],
       ]} />
-      <h2 class="role-h2">Routes naming ${detail.role}</h2>
-      ${!o.routingPolicy.available ? html`<div class="muted">No compiled routing policy in the seed generation.</div>`
-        : o.routes.length === 0 ? html`<div class="muted">No route names this role.</div>`
-        : html`<ul class="role-routes">${o.routes.map((rt) => html`<li key=${rt.route} data-route=${rt.route}><span class="mono">${rt.route}</span> <span class="faint">${rt.path}</span> — ${relationLabel(rt.relations)}</li>`)}</ul>`}
       <h2 class="role-h2">Recent tasks</h2>
       ${o.recentTasks.length === 0 ? html`<div class="muted">No task recorded for this role.</div>`
         : html`<ul class="role-list">${o.recentTasks.map((t) => html`<li key=${t.taskId}><${TaskLinks} taskId=${t.taskId} /> <span class="faint">${t.status} · ${when(t.createdAt)}</span></li>`)}</ul>`}
+      <p class="muted">Routes naming this role are on <a href=${hashFor({ view: "roles", id: detail.role, tab: "capabilities" })}>Capabilities</a>.</p>
     </div>
   `;
 }
 
-function InstructionsTab({ i }) {
-  if (!i.ok) {
-    return html`
-      <div class="role-instructions">
-        <p class="muted">Composed as ${i.context}.</p>
-        <div class="card" style="color: var(--err);" role="alert" data-refusal>Dispatch would refuse this role: ${i.refusal}</div>
-      </div>
-    `;
-  }
+function Caption({ children }) {
+  return html`<p class="role-source faint">${children}</p>`;
+}
+
+function HarnessTab({ hn }) {
+  const rows = harnessRows(hn);
+  const c = hn.container;
   return html`
-    <div class="role-instructions">
-      <p class="muted">Composed as ${i.context}. Content hash <span class="mono" data-prompt-sha>${i.sha256}</span>.</p>
-      ${i.constraintsSkipped.length > 0 ? html`<p class="muted">Constraints toggled off: ${i.constraintsSkipped.map((s) => `${s.id} (${s.reason})`).join(", ")}</p>` : null}
-      ${instructionSections(i).map((s, n) => html`
-        <section key=${n} class=${`role-prompt-section role-prompt-${s.kind}`} data-section=${s.kind} data-constraint=${s.id ?? undefined}>
-          <div class="role-prompt-label">${s.title}</div>
-          <pre class="role-prompt">${s.text}</pre>
-        </section>
-      `)}
+    <div class="role-harness">
+      <h2 class="role-h2">Resolution by activity</h2>
+      <${Caption}>Each row is <code class="screen-verb">${"forge model resolve <role> --activity <a> --json"}</code>, resolved by the same call.</${Caption}>
+      ${hn.policyError ? html`<div class="card" style="color: var(--err);" role="alert">Model policy unreadable: ${hn.policyError}</div>` : null}
+      <div class="runs-table-wrap">
+        <table class="runs-table role-harness-table">
+          <thead><tr>${HARNESS_COLUMNS.map(([, label]) => html`<th key=${label}>${label}</th>`)}</tr></thead>
+          <tbody>
+            ${rows.map((row) => html`
+              <tr key=${row.activity} data-activity=${row.activity}>
+                <td class="mono">${row.activity}${row.isDefault ? html` <span class="faint">(default)</span>` : null}</td>
+                ${row.error ? html`<td colspan=${HARNESS_COLUMNS.length - 1} style="color: var(--err);">${row.error}</td>`
+                  : HARNESS_COLUMNS.slice(1).map(([key]) => html`<td key=${key} data-col=${key} title=${key === "mapping" ? row.mappingSummary ?? undefined : undefined}>${row.cells[key]}</td>`)}
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </div>
+      <h2 class="role-h2">Container</h2>
+      <${Caption}>${c.source}</${Caption}>
+      <div class="runs-table-wrap">
+        <table class="runs-table role-mounts">
+          <thead><tr><th>Mount</th><th>Mode</th><th>Host</th><th>Source</th></tr></thead>
+          <tbody>
+            ${c.mounts.map((m) => html`
+              <tr key=${m.path} data-mount=${m.path}>
+                <td class="mono">${m.path}</td>
+                <td data-col="mode">${m.mode}${m.optional ? html` <span class="faint">optional</span>` : null}</td>
+                <td class="mono faint">${m.source}</td>
+                <td class="faint">${m.caption}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </div>
+      <${Facts} rows=${[
+        ["Auth volume", html`<span data-auth-volume>${c.authVolume.volume ? html`<span class="mono">${c.authVolume.volume}</span> → ${c.authVolume.path} (${c.authVolume.mode})` : `none (auth.mode ${c.authVolume.authMode ?? "unknown"})`}</span> <div class="faint">${c.authVolume.source}</div>`],
+        ["Skill mounts", html`${c.skillMounts.length === 0 ? "none" : c.skillMounts.map((m) => `${m.name} → ${m.container} (${m.mode}${m.optional ? ", optional" : ""})`).join("; ")} <div class="faint">the runtime's mounts under /.claude/skills/</div>`],
+        ["Idle timeout", html`<span data-idle-timeout>${c.idleTimeout.seconds ?? "—"} s${c.idleTimeout.override ? ` (overridden: ${c.idleTimeout.override} ms)` : ""}</span> <div class="faint">${c.idleTimeout.source}</div>`],
+        ["Network", html`${c.network.mode} <div class="faint">${c.network.source}</div>`],
+        ["Runtime bound by", hn.runtimeBoundBy],
+        ["Auth strategy", hn.authStrategy ?? "—"],
+      ]} />
+      <details class="role-raw" data-raw-files>
+        <summary>Raw settings.json and runtime YAML — published by forge upgrade</summary>
+        <p class="muted" data-edit-paths>Edit paths: ${hn.edit.settings}; ${hn.edit.runtime}; ${hn.edit.policy}.</p>
+        <h3>settings.json</h3>
+        ${!hn.settings.present ? html`<div class="card muted" role="status" data-settings-missing>This seed has no settings.json at ${hn.settings.path}: the generation forge upgraded from did not carry one.</div>`
+          : html`<pre class="role-prompt">${hn.settings.text}</pre>`}
+        ${hn.settings.error ? html`<div class="card" style="color: var(--err);" role="alert">${hn.settings.error}</div>` : null}
+        <h3>Runtime ${hn.runtime.name}</h3>
+        ${hn.runtime.error ? html`<div class="card" style="color: var(--err);" role="alert">${hn.runtime.error}</div>` : html`<pre class="role-prompt">${hn.runtime.text}</pre>`}
+      </details>
     </div>
+  `;
+}
+
+function SkillRow({ k, children }) {
+  return html`
+    <li class="role-skill" data-skill=${k.name}>
+      <div class="role-skill-head">
+        <span class="mono role-skill-name">${k.name}</span>
+        ${children}
+      </div>
+      <div class="role-skill-desc" data-description>${k.description ?? html`<span class="faint">no SKILL.md description</span>`}</div>
+    </li>
   `;
 }
 
 function SkillsTab({ s }) {
   return html`
     <div class="role-skills">
-      <h2 class="role-h2">Container skills (mounted read-only)</h2>
-      ${s.runtimeError ? html`<div class="card muted" role="status">Runtime unreadable: ${s.runtimeError}</div>` : null}
-      ${s.container.length === 0 ? html`<div class="muted">The bound runtime mounts no skill.</div>`
-        : html`<ul class="role-list">${s.container.map((m) => html`<li key=${m.container} data-skill=${m.name}><span class="mono">${m.name}</span> <span class="faint">${m.host} → ${m.container} (${m.mode}${m.optional ? ", optional" : ""})</span></li>`)}</ul>`}
-      <h2 class="role-h2">Host skills (the orchestrator session's; no container receives them)</h2>
-      ${s.host.length === 0 ? html`<div class="muted">No host skill ships with this release.</div>`
-        : html`<ul class="role-list">${s.host.map((k) => html`<li key=${k.name}><span class="mono">${k.name}</span></li>`)}</ul>`}
+      <section class="role-skill-group" data-group="mounted">
+        <div class="role-skill-group-head">Mounted into this role's container <span class="faint">${s.mounted.length}</span></div>
+        ${s.runtimeError ? html`<div class="card muted" role="status">Runtime unreadable: ${s.runtimeError}</div>` : null}
+        ${s.mounted.length === 0 ? html`<div class="muted role-skill-empty">The bound runtime mounts no skill.</div>` : html`
+          <ul class="role-skill-list">
+            ${s.mounted.map((k) => html`
+              <${SkillRow} key=${k.container} k=${k}>
+                <span class="role-badge" data-source=${k.source}>${skillSourceLabel(k.source)}</span>
+                ${k.optional ? html`<span class="role-badge" data-optional>optional</span>` : null}
+                <span class="role-badge" data-referenced=${k.referencedBySeed ? "yes" : "no"}>${k.referencedBySeed ? "referenced by seed" : "not referenced by seed"}</span>
+                ${!k.present ? html`<span class="role-badge role-badge-warn" data-absent>host path absent — skipped at dispatch</span>` : null}
+              <//>
+              <li class="role-skill-mount faint" key=${`${k.container}-mount`}>${k.hostPath ?? k.host} → ${k.container} (${k.mode})</li>
+            `)}
+          </ul>`}
+      </section>
+      <section class="role-skill-group" data-group="available">
+        <div class="role-skill-group-head">Available, not mounted <span class="faint">${s.available.length}</span></div>
+        <div class="muted role-skill-empty" data-available-note>${s.availableNote}</div>
+      </section>
+      <section class="role-skill-group" data-group="host-only">
+        <div class="role-skill-group-head">Host only — the orchestrator session's; no container receives them <span class="faint">${s.hostOnly.length}</span></div>
+        ${s.hostOnly.length === 0 ? html`<div class="muted role-skill-empty">No host skill ships with this release.</div>` : html`
+          <ul class="role-skill-list">
+            ${s.hostOnly.map((k) => html`<${SkillRow} key=${k.name} k=${k}><span class="role-badge" data-source="forge-bundled">Forge bundled</span><//>`)}
+          </ul>`}
+      </section>
     </div>
   `;
 }
 
-function ConfigurationTab({ c }) {
-  const rt = c.runtime;
+function CapabilitiesTab({ c, role }) {
   return html`
-    <div class="role-configuration">
-      <h2 class="role-h2">settings.json</h2>
-      ${!c.settings.present ? html`<div class="card muted" role="status" data-settings-missing>This seed has no settings.json at ${c.settings.path}: the generation forge upgraded from did not carry one.</div>`
-        : html`<pre class="role-prompt">${c.settings.text}</pre>`}
-      ${c.settings.error ? html`<div class="card" style="color: var(--err);" role="alert">${c.settings.error}</div>` : null}
-      <h2 class="role-h2">Runtime bound by policy</h2>
-      <${Facts} rows=${[
-        ["Runtime", html`<span class="mono">${rt.name}</span>`],
-        ["Bound by", c.runtimeBoundBy],
-        ["Auth strategy", c.authStrategy ?? "—"],
-        ["Image", rt.image ?? "—"],
-      ]} />
-      ${rt.error ? html`<div class="card" style="color: var(--err);" role="alert">${rt.error}</div>` : html`<pre class="role-prompt">${rt.text}</pre>`}
+    <div class="role-capabilities">
+      <section class="role-card role-access-card" aria-label="Effective access">
+        <div class="role-card-label">What ${role} may do — derived, not typed</div>
+        <${Facts} rows=${[
+          ["Mount", html`<span data-mount-mode>${mountLabel(c.mountMode.mode)}</span> <span class="faint">(${c.mountMode.source})</span>`],
+          ["Activities", html`<span data-activities>${c.activities.map((a) => a.activity).join(", ")}</span> <span class="faint">(model policy; see Harness / Runtime)</span>`],
+        ]} />
+      </section>
+      <h2 class="role-h2">Routes naming ${role}</h2>
+      <${Caption}>The compiled routing policy ${c.routingPolicy.path ?? "(none)"}, as forge route explain reads it.</${Caption}>
+      ${!c.routingPolicy.available ? html`<div class="muted">No compiled routing policy in the seed generation.</div>`
+        : c.routes.length === 0 ? html`<div class="muted">No route names this role.</div>`
+        : html`<ul class="role-routes">${c.routes.map((rt) => html`<li key=${rt.route} data-route=${rt.route}><span class="mono">${rt.route}</span> <span class="faint">${rt.path}</span> — ${relationLabel(rt.relations)}</li>`)}</ul>`}
+      <h2 class="role-h2">Result contract</h2>
+      <${Caption}>${c.resultContract.source ?? "the seed and protocol declare no output schema block"}</${Caption}>
+      ${!c.resultContract.declared ? html`<div class="muted" data-contract-undeclared>not declared</div>`
+        : html`<div class="role-chips" data-contract>${c.resultContract.fields.map((f) => html`<span key=${f.name} class="role-chip mono" title=${f.source} data-field=${f.name}>${f.name}</span>`)}</div>`}
+      <h2 class="role-h2">Constraints it runs under</h2>
+      <${Caption}>Host constraints and any project layer, as dispatch resolves them; force-level ones become each red's anti-prompt.</${Caption}>
+      ${c.constraintsError ? html`<div class="card" style="color: var(--err);" role="alert">${c.constraintsError}</div>` : null}
+      ${c.constraints.length === 0 ? html`<div class="muted">No constraint applies to this role.</div>` : html`
+        <ul class="role-list">
+          ${c.constraints.map((k) => html`
+            <li key=${k.id} data-constraint=${k.id} data-level=${k.level}>
+              <span class="role-badge">${k.level}</span> <span class="mono">${k.file ? k.file.split("/").pop() : k.id}</span>
+              ${k.heading ? html` — ${k.heading}` : null}
+              <span class="faint"> · ${k.scope}${k.active ? "" : ` · inactive: ${k.note}`}</span>
+            </li>
+          `)}
+        </ul>`}
     </div>
   `;
 }
 
 function ToolsTab({ t }) {
+  const e = t.effective;
   return html`
     <div class="role-tools">
-      <p class="role-flag" data-tools-flag>${t.note}</p>
-      ${!t.settingsPresent ? html`<div class="muted">No settings.json, so no tools are declared.</div>`
-        : t.declared === null ? html`<div class="muted">settings.json declares no tools list.</div>`
-        : html`<ul class="role-list">${t.declared.map((name) => html`<li key=${name} class="mono">${name}</li>`)}</ul>`}
-      <p>MCP: ${t.mcp}</p>
+      <div class="role-cards">
+        <section class="role-card" aria-label="Declared tools">
+          <div class="role-card-label">Declared (settings.json)</div>
+          <p class="role-flag" data-tools-flag>${t.note}</p>
+          ${!t.settingsPresent ? html`<div class="muted">No settings.json, so no tools are declared.</div>`
+            : t.declared === null ? html`<div class="muted">settings.json declares no tools list.</div>`
+            : html`<ul class="role-list">${t.declared.map((name) => html`<li key=${name} class="mono">${name}</li>`)}</ul>`}
+        </section>
+        <section class="role-card role-effective" aria-label="Effective access" data-effective>
+          <div class="role-card-label">Effective access</div>
+          <${Facts} rows=${[
+            ["Mounts", html`<ul class="role-list">${e.mounts.map((m) => html`<li key=${m.path} data-effective-mount=${m.path}><span class="mono">${m.path}</span> ${m.mode}${m.optional ? " (optional)" : ""}</li>`)}</ul>`],
+            ["Network", html`<span data-network>${e.network.mode}</span>`],
+            ["MCP", html`<span data-mcp>${e.mcp}</span>`],
+          ]} />
+        </section>
+      </div>
+      <h2 class="role-h2">Image toolchain <span class="mono faint">${e.toolchain.image ?? ""}</span></h2>
+      <${Caption}>${e.toolchain.source ? `${e.toolchain.source} — ${e.toolchain.note}` : e.toolchain.note}</${Caption}>
+      ${e.toolchain.entries === null ? html`<div class="muted" data-toolchain-unknown>unknown</div>` : html`
+        <div class="role-chips" data-toolchain>
+          ${e.toolchain.entries.map((x) => html`<span key=${x.name} class="role-chip mono" title=${x.via} data-tool=${x.name}>${x.name}${x.version ? ` ${x.version}` : ""}</span>`)}
+        </div>`}
     </div>
   `;
 }
@@ -239,17 +370,50 @@ function ReceiptsTab({ r }) {
 }
 
 function UsageTab({ u }) {
+  const [since, setSince] = useState(DEFAULT_USAGE_PERIOD);
+  const w = usageWindow(u, since);
   return html`
     <div class="role-usage">
-      <div class="runs-table-wrap">
-        <table class="runs-table">
-          <thead><tr><th>Window</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Requests</th></tr></thead>
-          <tbody>
-            ${u.windows.map((w) => html`<tr key=${w.since} data-window=${w.since}><td>${w.since}</td><td>${tokens(w.inputTokens)}</td><td>${tokens(w.outputTokens)}</td><td>${tokens(w.cacheReadTokens)}</td><td>${tokens(w.cacheCreationTokens)}</td><td>${w.requests}</td></tr>`)}
-          </tbody>
-        </table>
+      <div class="instr-modes role-periods" role="group" aria-label="Period">
+        ${USAGE_PERIODS.map((p) => html`<button key=${p} type="button" class=${"instr-mode" + (p === since ? " instr-mode-current" : "")} data-period=${p} aria-pressed=${p === since ? "true" : "false"} onClick=${() => setSince(p)}>${p}</button>`)}
       </div>
-      ${u.byModel.length > 0 ? html`<h2 class="role-h2">By model</h2><ul class="role-list">${u.byModel.map((m) => html`<li key=${m.model}><span class="mono">${m.model}</span> <span class="faint">${tokens(m.inputTokens)} in · ${tokens(m.outputTokens)} out · ${m.requests} requests</span></li>`)}</ul>` : null}
+      ${!w ? html`<div class="muted">No usage window ${since}.</div>` : html`
+        <div class="role-cards">
+          <section class="role-card" data-window=${w.since}>
+            <div class="role-card-label">Tokens (${w.since})</div>
+            <div class="role-usage-total">${tokens(w.inputTokens)} in · ${tokens(w.outputTokens)} out · ${tokens(w.cacheReadTokens)} cache read · ${tokens(w.cacheCreationTokens)} cache write</div>
+            <div class="faint">${w.requests} requests</div>
+          </section>
+        </div>
+        <h2 class="role-h2">By provider</h2>
+        <div class="runs-table-wrap">
+          <table class="runs-table role-usage-provider">
+            <thead><tr><th>Provider</th><th>Auth</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Cost</th></tr></thead>
+            <tbody>
+              ${w.byProvider.length === 0 ? html`<tr><td colspan="8" class="muted">No model call in this window.</td></tr>` : w.byProvider.map((p) => html`
+                <tr key=${`${p.provider}-${p.auth}`} data-provider=${p.provider ?? "unrecorded"}>
+                  <td class="mono">${p.provider ?? "(not recorded)"}</td><td>${authLabel(p.auth)}</td><td>${p.requests}</td>
+                  <td>${tokens(p.inputTokens)}</td><td>${tokens(p.outputTokens)}</td><td>${tokens(p.cacheReadTokens)}</td><td>${tokens(p.cacheCreationTokens)}</td>
+                  <td data-cost>${p.cost === null ? p.costNote : p.cost}</td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+        <h2 class="role-h2">By model</h2>
+        <div class="runs-table-wrap">
+          <table class="runs-table role-usage-model">
+            <thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th></tr></thead>
+            <tbody>
+              ${w.byModel.length === 0 ? html`<tr><td colspan="6" class="muted">No model call in this window.</td></tr>` : w.byModel.map((m) => html`
+                <tr key=${m.model} data-model=${m.model}>
+                  <td class="mono">${m.model}</td><td>${m.requests}</td><td>${tokens(m.inputTokens)}</td><td>${tokens(m.outputTokens)}</td><td>${tokens(m.cacheReadTokens)}</td><td>${tokens(m.cacheCreationTokens)}</td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>`}
+      <p class="muted" data-pricing>Cost: ${u.pricing.note}.</p>
       <p class="muted">Ceilings: ${u.ceilings}</p>
     </div>
   `;

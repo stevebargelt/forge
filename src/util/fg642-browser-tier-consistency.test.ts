@@ -29,7 +29,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   DECLARED_TIER_SUITES,
   DECLARED_TIER_TOTAL,
@@ -200,3 +200,15 @@ function sourceFiles(dir: string): string[] {
   }
   return out;
 }
+
+test("FG-827 (census prose): every role-tab count the census names matches the dashboard's ROLE_TABS", async () => {
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  const client = join(ROOT, "dashboard", "client", "role-page-render.js");
+  const { ROLE_TABS } = (await import(pathToFileURL(client).href)) as { ROLE_TABS: readonly unknown[] };
+  const src = readFileSync(join(ROOT, CENSUS), "utf8");
+  const named = [...src.matchAll(/\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:\/\/\s*)?tabs\b/g)].map((m) => m[1]);
+  assert.ok(named.length > 0, `${CENSUS} no longer names the Roles tab count anywhere`);
+  for (const word of named) {
+    assert.equal(word, words[ROLE_TABS.length], `${CENSUS} describes the Roles surface as ${word} tabs, but ROLE_TABS has ${ROLE_TABS.length}`);
+  }
+});

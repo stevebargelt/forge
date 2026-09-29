@@ -1,18 +1,21 @@
 // FG-817: a role page (#roles/<role>[/<tab>]), as data — the tab strip, the screen line,
 // each tab's source caption and the composed instructions split into their marked
-// sections. Pure; role-page-view.js renders it. Every value is read from
-// GET /api/roles/:role.
+// sections. FG-827 adds the Harness rows, the Skills badges, the Overview's Latest task
+// card and Skills chips, and the Usage periods. Pure; role-page-view.js renders it. Every
+// value is read from GET /api/roles/:role.
 
 import { hashFor, ROUTES } from "./view-routing.js";
-import { formatTokens, shortSha } from "./format.js";
+import { formatRelativeTime, formatTimestamp, formatTokens, shortSha } from "./format.js";
+import { statusToken } from "./status-tokens.js";
 
 const TAB_LABELS = {
   overview: "Overview",
   instructions: "Instructions",
+  harness: "Harness / Runtime",
   skills: "Skills",
-  configuration: "Configuration",
-  secrets: "Secrets",
+  capabilities: "Capabilities",
   tools: "Tools",
+  secrets: "Secrets",
   tasks: "Tasks",
   receipts: "Receipts",
   usage: "Usage",
@@ -67,3 +70,74 @@ export function relationLabel(relations) {
 }
 
 export { shortSha };
+
+const AUTH_LABELS = { subscription: "subscription", api: "API key", bedrock: "Bedrock" };
+
+/** The auth mode as the operator names it: subscription, API key or Bedrock. */
+export function authLabel(auth) {
+  if (auth === null || auth === undefined || auth === "") return "—";
+  return AUTH_LABELS[auth] ?? auth;
+}
+
+/** The Harness table: one row per activity, each cell a value `forge model resolve` printed. */
+export function harnessRows(harness) {
+  return (harness?.activities ?? []).map((r) => ({
+    activity: r.activity,
+    isDefault: r.isDefault === true,
+    error: r.error ?? null,
+    mappingSummary: r.mapping ?? null,
+    cells: {
+      profile: r.profile ?? "legacy",
+      provider: r.provider ?? "—",
+      model: r.model ?? "—",
+      auth: authLabel(r.auth),
+      runtime: r.runtime ?? "—",
+      image: r.image ?? "—",
+      costTier: r.costTier ?? "—",
+      effort: r.effort ?? "—",
+      resolvedBy: r.resolvedBy ?? "—",
+      mapping: r.mappingPath ?? "—",
+      dispatchable: r.dispatchable === true ? "yes" : r.dispatchable === false ? "no" : "—",
+    },
+  }));
+}
+
+export const HARNESS_COLUMNS = Object.freeze([
+  ["activity", "Activity"], ["profile", "Profile"], ["provider", "Provider"], ["model", "Model"], ["auth", "Auth"],
+  ["runtime", "Runtime"], ["image", "Image"], ["costTier", "Cost tier"], ["effort", "Effort"], ["resolvedBy", "Resolved by"],
+  ["mapping", "Mapping"], ["dispatchable", "Dispatchable"],
+]);
+
+const SKILL_SOURCES = { "forge-bundled": "Forge bundled", project: "Project", host: "Host path" };
+
+export function skillSourceLabel(source) {
+  return SKILL_SOURCES[source] ?? String(source ?? "unknown");
+}
+
+/** The Overview's Skills chips: each mounted skill, linking to the Skills tab. */
+export function skillChips(role, names) {
+  const href = hashFor({ view: "roles", id: role, tab: "skills" });
+  return (names ?? []).map((name) => ({ name, href }));
+}
+
+/** The Overview's Latest task card: the task's status token, its links and when. */
+export function latestTaskCard(overview, now = Date.now()) {
+  const t = overview?.latestTask;
+  if (!t) return null;
+  return {
+    taskId: t.taskId,
+    href: hashFor({ view: "task", id: t.taskId }),
+    runHref: hashFor({ view: "run", id: t.runId }),
+    runLabel: t.runTitle || t.runId,
+    token: statusToken("task", t.status),
+    when: formatRelativeTime(t.createdAt, now),
+    title: formatTimestamp(t.createdAt),
+  };
+}
+
+export const USAGE_PERIODS = Object.freeze(["1d", "7d", "30d", "all"]);
+export const DEFAULT_USAGE_PERIOD = "30d";
+
+export function usageWindow(usage, since) {
+  return (usage?.windows ?? []).find((w) => w.since === since) ?? null;
+}

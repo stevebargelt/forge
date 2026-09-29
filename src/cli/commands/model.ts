@@ -1,22 +1,8 @@
 import type { Command } from "commander";
 import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
-import {
-  resolveModel,
-  isActivityUnmapped,
-  activityUnmappedMessage,
-  type ModelResolution,
-} from "../../v2/model-resolution.js";
-import {
-  mappingPathSummary,
-  buildActivityUnmappedDetail,
-  renderActivityUnmapped,
-  type ActivityUnmappedDetail,
-} from "../../v2/model-provenance.js";
-import { probeAuth, type AuthProbe } from "../../v2/provider-doctor.js";
-import { loadRuntime, loadModelPolicyWithSource } from "../../v2/loader.js";
-import { effortRecord, resolveRuntimeEffort, resolveRuntimeMetadata } from "../../v2/schema.js";
-import { requiresStructuredResult } from "../../v2/role-capabilities.js";
+import { renderActivityUnmapped } from "../../v2/model-provenance.js";
+import { modelResolveReport } from "../../v2/model-resolve-report.js";
 
 export function registerModel(program: Command): void {
   const model = program
@@ -43,93 +29,23 @@ export function registerModel(program: Command): void {
         ensureForgeDirs();
         const projectDir = resolve(opts.project ?? process.cwd());
 
-        let resolution: ModelResolution;
-        try {
-          resolution = resolveModel({
-            agentRole: agent,
-            stepAlias: opts.activity,
-            cliProfile: opts.profile,
-            runtimeName: "claude",
-            ctx: { projectDir },
-          });
-        } catch (e) {
+        const report = modelResolveReport(agent, {
+          activity: opts.activity,
+          profile: opts.profile,
+          check: opts.check,
+          ctx: { projectDir },
+        });
+        if (!report.ok) {
           // Fail-loud resolution errors (unknown --profile, unmapped capability).
-          const msg = (e as Error).message;
-          if (opts.json) console.log(JSON.stringify({ error: msg }, null, 2));
-          else console.error(`✗ resolution failed: ${msg}`);
+          if (opts.json) console.log(JSON.stringify({ error: report.error }, null, 2));
+          else console.error(`✗ resolution failed: ${report.error}`);
           process.exitCode = 1;
           return;
         }
-
-        const probe: AuthProbe | undefined =
-          opts.check && resolution.auth ? probeAuth(resolution.provider, resolution.auth) : undefined;
-
-        const legacy = resolution.resolvedBy === "legacy";
-
-        // FG-560: the mapping-path axis (exact vs default-fallback) is SEPARATE
-        // from resolvedBy (profile selection). In policy mode surface it on both
-        // human + JSON; when the resolution is the activity_unmapped refusal, build
-        // the full machine-readable detail — the available mappings and the policy
-        // path come from the SAME policy load the resolver used, so a script can
-        // read the refusal without re-resolving.
-        const mappingSummary = legacy
-          ? undefined
-          : mappingPathSummary(resolution.mappingPath, resolution.capabilitySource);
-        let unmapped: ActivityUnmappedDetail | undefined;
-        if (!legacy && isActivityUnmapped(resolution)) {
-          let availableMappings: string[] = [];
-          let policyPath: string | null = null;
-          try {
-            const loaded = loadModelPolicyWithSource({ projectDir });
-            if (loaded.policy && resolution.profile) {
-              availableMappings = Object.keys(loaded.policy.model_profiles[resolution.profile]?.map ?? {});
-            }
-            if (loaded.policy) policyPath = loaded.path;
-          } catch {
-            // A policy that fails to load is reported by the resolution path itself;
-            // the refusal detail simply omits the mappings/path it could not read.
-          }
-          unmapped = buildActivityUnmappedDetail({
-            agent,
-            activity: resolution.alias ?? opts.activity ?? "",
-            profile: resolution.profile ?? "",
-            resolutionSource: resolution.resolvedBy,
-            availableMappings,
-            diagnosticDefaultModel: resolution.model,
-            policyPath,
-            message: activityUnmappedMessage(resolution) ?? "",
-          });
-        }
-
-        // FG-339: compute tool capability and dispatchability for policy-mode resolutions.
-        let effectiveToolCapable: boolean | undefined;
-        let dispatchable: boolean | undefined;
-        let toolCapabilityNote: string | undefined;
-        let effort: string | undefined;
-        if (!legacy) {
-          try {
-            const rt = loadRuntime(resolution.runtime);
-            effort = effortRecord(resolveRuntimeEffort(rt, resolution.effort));
-            const runtimeMeta = resolveRuntimeMetadata(rt);
-            effectiveToolCapable = resolution.toolCapable ?? (runtimeMeta.runtimeKind !== "pi");
-            dispatchable = !requiresStructuredResult(agent) || effectiveToolCapable;
-          } catch {
-            toolCapabilityNote = `(could not resolve runtime '${resolution.runtime}' — tool capability unknown)`;
-          }
-        }
+        const { resolution, legacy, mappingSummary, unmapped, probe, effort, effectiveToolCapable, dispatchable, toolCapabilityNote } = report;
 
         if (opts.json) {
-          console.log(JSON.stringify({
-            // `resolution` already carries mappingPath / capabilitySource / outcome
-            // (the two provenance axes + the refusal outcome); spread verbatim.
-            ...resolution,
-            ...(probe ? { availability: probe } : {}),
-            ...(effort ? { effectiveEffort: effort } : {}),
-            ...(!legacy && effectiveToolCapable !== undefined ? { toolCapable: resolution.toolCapable, effectiveToolCapable, dispatchable } : {}),
-            // FG-560: the activity_unmapped refusal as a structured block a script
-            // can branch on — present ONLY when the resolution is that refusal.
-            ...(unmapped ? { activityUnmapped: unmapped } : {}),
-          }, null, 2));
+          console.log(JSON.stringify(report.json, null, 2));
           return;
         }
 
@@ -161,7 +77,9 @@ export function registerModel(program: Command): void {
             line("tool capable:", capableStr);
             const dispStr = dispatchable
               ? "yes"
-              : `no (fix: set tool_capable: true on the capability entry, or use a non-pi profile)`;
+              : unmapped
+                ? "no (activity_unmapped — see below)"
+                : `no (fix: set tool_capable: true on the capability entry, or use a non-pi profile)`;
             line("dispatchable:", dispStr);
           }
         }

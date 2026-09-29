@@ -164,17 +164,19 @@ test("GET /api/roles/engineer: overview from the seed, model policy, compiled ro
   assert.equal(o.description, "You implement the plan, one step at a time.");
   assert.deepEqual([o.resolution.activity, o.resolution.profile, o.resolution.resolvedBy, o.resolution.runtime], ["default", "claude-subscription", "defaults.profile", "claude-oauth"]);
   assert.equal(o.mountMode.mode, "rw");
-  assert.equal(o.routingPolicy.available, true);
-  assert.ok(o.routes.length > 0, "the shipped RACI names the engineer");
-  assert.ok(o.routes.some((r: any) => r.relations.includes("responsible")));
-  for (const r of o.routes) assert.ok(r.relations.every((rel: string) => ["responsible", "consulted", "followup"].includes(rel)));
+  assert.equal(o.routes, undefined, "FG-827: routes moved to Capabilities");
+  const c = body.capabilities;
+  assert.equal(c.routingPolicy.available, true);
+  assert.ok(c.routes.length > 0, "the shipped RACI names the engineer");
+  assert.ok(c.routes.some((r: any) => r.relations.includes("responsible")));
+  for (const r of c.routes) assert.ok(r.relations.every((rel: string) => ["responsible", "consulted", "followup"].includes(rel)));
   assert.deepEqual(o.recentTasks.map((t: any) => t.taskId), ["task-e3", "task-e2", "task-e1"]);
   assert.deepEqual([o.ops.terminal, o.ops.complete, o.ops.failed, o.ops.medianMs], [3, 2, 1, 120_000]);
   assert.equal(o.ops.successRate, 2 / 3);
   assert.equal(o.usage.inputTokens, 300);
   assert.equal(o.protocolSha, protocolSha);
   assert.equal(body.generation.id, GEN_ID);
-  for (const tab of ["overview", "instructions", "skills", "configuration", "secrets", "tools", "tasks", "receipts", "usage"]) {
+  for (const tab of ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"]) {
     assert.equal(typeof body[tab].source, "string", `${tab} names its source`);
     assert.ok(body[tab].source.length > 0);
   }
@@ -226,14 +228,15 @@ test("GET /api/roles/engineer?project=<unregistered>: 400 with a named reason; a
   }
 });
 
-test("GET /api/roles/engineer: skills, configuration, secrets, tools, tasks, receipts and usage", async () => {
+test("GET /api/roles/engineer: skills, harness, secrets, tools, tasks, receipts and usage", async () => {
   const { body } = await get("/api/roles/engineer");
-  assert.ok(body.skills.host.length > 0, "the release's host skills");
-  assert.deepEqual(body.skills.container.map((s: any) => [s.name, s.mode]), [["browser-tools", "ro"]]);
-  assert.equal(body.configuration.settings.present, true);
-  assert.equal(body.configuration.runtime.name, "claude-oauth");
-  assert.equal(realpathSync(body.configuration.runtime.path), realpathSync(join(gen.root, "runtimes", "claude-oauth.yml")));
-  assert.equal(body.configuration.authStrategy, "oauth-volume");
+  assert.ok(body.skills.hostOnly.length > 0, "the release's host skills");
+  assert.deepEqual(body.skills.mounted.map((s: any) => [s.name, s.mode]), [["browser-tools", "ro"]]);
+  assert.equal(body.configuration, undefined, "FG-827: configuration is now harness");
+  assert.equal(body.harness.settings.present, true);
+  assert.equal(body.harness.runtime.name, "claude-oauth");
+  assert.equal(realpathSync(body.harness.runtime.path), realpathSync(join(gen.root, "runtimes", "claude-oauth.yml")));
+  assert.equal(body.harness.authStrategy, "oauth-volume");
   assert.equal(body.secrets.text, "none: containers receive no project secrets");
   assert.deepEqual(body.tools.declared, ["read", "edit", "bash"]);
   assert.equal(body.tools.enforced, false);
@@ -245,15 +248,15 @@ test("GET /api/roles/engineer: skills, configuration, secrets, tools, tasks, rec
   assert.equal(receipts["task-e2"].manifest, false);
   assert.deepEqual(body.receipts.generations.map((g: any) => [g.id, g.current, g.protocolSha]), [[GEN_ID, true, protocolSha]]);
   assert.deepEqual(body.receipts.backups.map((b: any) => b.files), [["agents/engineer/CLAUDE.md"]]);
-  assert.deepEqual(body.usage.windows.map((w: any) => [w.since, w.inputTokens, w.requests]), [["7d", 300, 2], ["30d", 300, 2], ["all", 300, 2]]);
-  assert.deepEqual(body.usage.byModel.map((m: any) => m.model), ["claude-sonnet-5"]);
+  assert.deepEqual(body.usage.windows.map((w: any) => [w.since, w.inputTokens, w.requests]), [["1d", 300, 2], ["7d", 300, 2], ["30d", 300, 2], ["all", 300, 2]]);
+  assert.deepEqual(body.usage.windows.find((w: any) => w.since === "all").byModel.map((m: any) => m.model), ["claude-sonnet-5"]);
 });
 
 test("GET /api/roles/red-wide: a seed without settings.json says so instead of failing", async () => {
   const { status, body } = await get("/api/roles/red-wide");
   assert.equal(status, 200, JSON.stringify(body));
-  assert.equal(body.configuration.settings.present, false);
-  assert.equal(body.configuration.settings.text, null);
+  assert.equal(body.harness.settings.present, false);
+  assert.equal(body.harness.settings.text, null);
   assert.equal(body.tools.settingsPresent, false);
   assert.equal(body.tools.declared, null);
   assert.equal(body.overview.mountMode.mode, "ro");

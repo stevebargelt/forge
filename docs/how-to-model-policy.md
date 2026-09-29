@@ -425,7 +425,13 @@ resolves them for that role's *default* activity under the current seed
 generation — the resolution a dispatch with no explicit `--activity` gets. It is
 read live on every visit, so it reflects the on-disk policy immediately, the same
 as `forge model resolve`; a role the policy cannot resolve shows the resolution
-error inline instead. See [Roles surface](concepts.md#roles-surface-fg-817).
+error inline instead. A role page's Harness / Runtime tab (`#roles/<role>/harness`,
+FG-827) goes further: one row per activity the role can be dispatched with, each
+the exact report `forge model resolve <role> --activity <a> --json` prints — built
+by the same `modelResolveReport` the CLI itself now calls — so every activity's
+profile, provider, model, auth, cost tier, effort and dispatchability is visible
+without running the command once per activity. See
+[Roles surface](concepts.md#roles-surface-fg-817).
 
 ### Newer models can need a newer Claude Code CLI
 
