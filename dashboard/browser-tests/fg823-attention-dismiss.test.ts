@@ -324,6 +324,26 @@ test("FG-823: opening a row preview focuses its first control, and Escape closes
   await page.close();
 });
 
+test("FG-823: an inbox holding only dismissed or snoozed items names the held count, never 'No human action is currently needed'", async () => {
+  reset();
+  write("task:task-auth", "dismiss", {});
+  write("wait:gate-1", "snooze", { until: "1d" });
+  write("readiness:FG-7", "dismiss", {});
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${baseUrl}/#home`);
+  const status = page.locator(".attention-inbox .inbox-empty");
+  await status.waitFor();
+  assert.equal(await status.innerText(), "No open items — 3 held (dismissed or snoozed)");
+  assert.doesNotMatch(await page.locator(".attention-inbox").innerText(), /No human action is currently needed/);
+  assert.equal(await page.locator(".inbox-row").count(), 0);
+  assert.equal(await page.locator(".inbox-dismissed summary").innerText(), "Dismissed (3)");
+  await page.locator(".attention-inbox").screenshot({ path: join(SHOTS, "fg823-all-held.png") });
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
 function createFixtureServer(): Server {
   return createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");

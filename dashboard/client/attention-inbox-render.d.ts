@@ -60,6 +60,7 @@ export type DismissedEntry = { item: AttentionItem; dismissal: DismissalView };
 export const INBOX_UNAVAILABLE_LABEL: string;
 export const INBOX_LOADING_LABEL: string;
 export const INBOX_EMPTY_LABEL: string;
+export function inboxHeldLabel(count: number): string;
 export const INBOX_TIMEOUT_MS: number;
 export const INBOX_LOADING: { phase: "loading" };
 

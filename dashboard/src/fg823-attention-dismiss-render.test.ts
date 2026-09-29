@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SNOOZE_PRESETS, attentionCommand, attentionRequest, attentionResult, attentionRoute } from "../client/attention-dismiss-render.js";
-import { dismissedSummary, inboxFromBody, inboxView, isAttentionInboxPayload } from "../client/attention-inbox-render.js";
+import { INBOX_EMPTY_LABEL, dismissedSummary, inboxFromBody, inboxHeldLabel, inboxView, isAttentionInboxPayload } from "../client/attention-inbox-render.js";
 
 const ITEM = {
   id: "task:task-1",
@@ -70,11 +70,15 @@ test("FG-823: the dismissed section is validated like items; absent reads as non
   }
 });
 
-test("FG-823: the view carries held items for the disclosure, never in `items`, and an all-held inbox is calm", () => {
+test("FG-823: the view carries held items for the disclosure, never in `items`, and an all-held inbox names its held count", () => {
   const view = inboxView(inboxFromBody(envelope()));
   assert.equal(view.phase, "ready");
   assert.deepEqual(view.items, []);
   assert.equal(view.empty, true);
+  assert.equal(view.message, "No open items — 1 held (dismissed or snoozed)");
+  assert.equal(view.message, inboxHeldLabel(1));
+  assert.notEqual(view.message, INBOX_EMPTY_LABEL, "held items still want the operator: never the calm no-action copy");
+  assert.equal(inboxView(inboxFromBody(envelope({ dismissed: [] }))).message, INBOX_EMPTY_LABEL);
   assert.equal(view.dismissed.length, 1);
   const summary = dismissedSummary(HELD as never);
   assert.equal(summary.id, "task:task-1");

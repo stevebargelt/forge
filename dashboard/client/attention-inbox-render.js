@@ -18,6 +18,11 @@ export const INBOX_LOADING_LABEL = "Loading attention inbox…";
 /** The one calm statement for a SUCCESSFUL read that found nothing to act on. Reachable
  *  only from a payload we actually parsed and validated. */
 export const INBOX_EMPTY_LABEL = "No human action is currently needed";
+/** No open items, but some are held by a dismissal or snooze: those are still the
+ *  operator's to act on (Undismiss), so the calm copy would be a false claim. */
+export function inboxHeldLabel(count) {
+  return `No open items — ${count} held (dismissed or snoozed)`;
+}
 
 /** Per-kind badge label + class, keyed on the STRUCTURED kind (never a substring of any
  *  rendered text) so a theme change never re-derives meaning. */
@@ -297,7 +302,7 @@ export function inboxView(load) {
     phase,
     items,
     empty,
-    message: empty ? INBOX_EMPTY_LABEL : null,
+    message: !empty ? null : dismissed.length > 0 ? inboxHeldLabel(dismissed.length) : INBOX_EMPTY_LABEL,
     degraded,
     dismissed,
   };
