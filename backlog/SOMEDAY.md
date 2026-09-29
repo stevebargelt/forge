@@ -148,3 +148,7 @@ second way to do the same thing.
 
 **Trigger.** A team, not a person, needs to answer asks, or ntfy plus the
 remote board proves insufficient in practice.
+
+## Per-role budgets (usage ceilings)
+
+Paperclip's Budgets page sets hard-stop spend limits per agent and per project, with incidents, override approvals, and paused agents. Forge has no per-role ceiling: usage is tokens by role (dollars only make sense for API-key providers; subscription runs are quota windows, not spend). Promote when a role or project needs a hard stop rather than a report — the Roles page then gets a Budgets tab and the dispatcher a refuse-on-ceiling check. Deferred 2026-09-29 from the Roles second-pass ticket.
