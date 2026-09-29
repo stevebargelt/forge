@@ -11,7 +11,7 @@
 
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RE_DRIVABLE_FAILURE_KINDS, recordedRetryDisposition, retryPolicy } from "@forge/retry-policy";
@@ -34,6 +34,7 @@ const { getDb, writeTransaction } = await import("../../src/store/db.js");
 
 const AT = "2026-09-29T09:00:00Z";
 const projectDir = mkdtempSync(join(tmpdir(), "fg822-proj-"));
+const canonicalProjectDir = realpathSync(projectDir);
 const WORKFLOW_STEP = JSON.stringify({ dispatchSource: "workflow" });
 const POLICY_KINDS: FailureKind[] = [
   "cancelled", "orphaned", "orphaned_work_may_persist", "oom_killed", "fanout_wave_orphaned", "orphaned_needs_finalize",
@@ -183,7 +184,7 @@ test("integ FG-822: a gate decision spawns exactly `forge gate <id> <decision> -
   assert.equal(res.body["verb"], "forge gate task-gate request-changes");
   assert.equal(res.body["stdout"], "stub ran gate");
   assert.deepEqual(recordedCalls(), [{
-    cwd: projectDir,
+    cwd: canonicalProjectDir,
     argv: ["gate", "task-gate", "request-changes", "--rationale", "Tighten the test first.", "--decided-by", "dashboard"],
   }]);
 });
@@ -342,7 +343,7 @@ test("integ FG-822: unregistered action-shaped paths and operands cannot alter t
   assert.equal((await post("/api/task/task-crash/retry", { body: { force: true, id: "other", operand: "--force" } })).status, 400);
   assert.equal((await post("/api/task/task-gate/gate", { body: { decision: "reject", rationale: "Recorded human decision." } })).status, 200);
   assert.deepEqual(recordedCalls(), [{
-    cwd: projectDir,
+    cwd: canonicalProjectDir,
     argv: ["gate", "task-gate", "reject", "--rationale", "Recorded human decision.", "--decided-by", "dashboard"],
   }]);
 });
