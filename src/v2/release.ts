@@ -225,12 +225,13 @@ const DASHBOARD_TRACKED_PATHS = [
 // assets + import map, and scripts/vendor-dashboard-libs.mjs.
 export const REQUIRED_DASHBOARD_FILES = [
   // Server runtime source — server.ts's own local import graph (./queries, ./shell,
-  // ./plan-usage, ./http-error). A missing one aborts `forge dashboard start` at import.
+  // ./plan-usage, ./http-error, ./run-index). A missing one aborts `forge dashboard start` at import.
   "dashboard/src/server.ts",
   "dashboard/src/queries.ts",
   "dashboard/src/shell.ts",
   "dashboard/src/plan-usage.ts",
   "dashboard/src/http-error.ts",
+  "dashboard/src/run-index.ts",
   "dashboard/package.json",
   "dashboard/tsconfig.json",
   // Client ES-module graph — main.js and everything it (transitively) imports. A missing

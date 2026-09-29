@@ -134,8 +134,9 @@ async function openTicket(page: Page): Promise<void> {
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: `Open all ${projectLabel} checkouts` }).click();
   await page.getByRole("link", { name: "Backlog", exact: true }).click();
-  await page.getByRole("button", { name: `Open story ${TICKET_ID}: Raw hostile Markdown` }).click();
-  await page.getByRole("dialog", { name: `Ticket ${TICKET_ID}` }).waitFor();
+  // FG-821: a ticket opens its page, #backlog/<ticketId>.
+  await page.getByRole("link", { name: `Open story ${TICKET_ID}: Raw hostile Markdown` }).click();
+  await page.locator(`.ticket-page[data-ticket-id="${TICKET_ID}"] .ticket-body`).waitFor();
 }
 
 test("raw hostile ticket content remains stored but is inert in the real dashboard", async () => {
@@ -160,7 +161,7 @@ test("raw hostile ticket content remains stored but is inert in the real dashboa
     assert.ok(url.startsWith(BASE + "/"), `navigation stayed on the dashboard origin, got: ${url}`);
     assert.ok(!/^\s*(javascript|data|vbscript):/i.test(url), `no hostile-scheme navigation, got: ${url}`);
   }
-  assert.deepEqual(await page.locator(".detail .md").evaluate((node) => ({
+  assert.deepEqual(await page.locator(".ticket-page .md").evaluate((node) => ({
     scripts: node.querySelectorAll("script").length,
     handlers: node.querySelectorAll("[onerror], [onload]").length,
     javascriptLinks: node.querySelectorAll('a[href^="javascript:"]').length,
@@ -179,9 +180,9 @@ test("raw hostile ticket content remains stored but is inert in the real dashboa
   });
 
   // A safe control from that exact stored field still passes through Markdown.
-  assert.equal(await page.locator(".detail .md h1").innerText(), "Benign heading");
-  assert.equal(await page.locator(".detail .md strong").innerText(), "bold");
-  assert.equal(await page.locator('.detail .md a[href="https://example.com/ok"]').count(), 1);
+  assert.equal(await page.locator(".ticket-page .md h1").innerText(), "Benign heading");
+  assert.equal(await page.locator(".ticket-page .md strong").innerText(), "bold");
+  assert.equal(await page.locator('.ticket-page .md a[href="https://example.com/ok"]').count(), 1);
 
   const storedAfter = (await backlog()).tickets.find((entry) => entry.id === TICKET_ID)?.body;
   assert.equal(storedAfter, storedBefore, "rendering sanitizes output only; it never mutates stored ticket bytes");

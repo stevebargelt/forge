@@ -56,6 +56,33 @@ export function runMatchesFilters(run: Run, f: Pick<RunFilters, "status" | "work
   return true;
 }
 
+/** The ticket a run was dispatched for, read as the attention inbox and the dashboard's
+ *  ticket routes read it: COALESCE(metadata.inputs.ticketId, metadata.ticketId). */
+function runTicketId(run: Run): string | null {
+  const inputs = run.metadata?.["inputs"];
+  const nested = inputs && typeof inputs === "object" ? (inputs as Record<string, unknown>)["ticketId"] : undefined;
+  const ticketId = nested ?? run.metadata?.["ticketId"];
+  return typeof ticketId === "string" && ticketId !== "" ? ticketId : null;
+}
+
+/** The wire form of one row — `forge runs query --json` and the dashboard's
+ *  GET /api/runs both emit exactly this. */
+export function runQueryRowJson(r: RunQueryRow) {
+  return {
+    runId: r.run.id,
+    status: r.run.status,
+    workflow: r.run.workflow,
+    title: r.run.title,
+    projectDir: r.run.projectDir ?? null,
+    ticketId: runTicketId(r.run),
+    createdAt: r.run.createdAt,
+    completedAt: r.run.completedAt ?? null,
+    taskCount: r.taskCount,
+    failedCount: r.failedCount,
+    failureKinds: r.failureKinds,
+  };
+}
+
 export function queryRuns(filters: RunFilters): RunQueryRow[] {
   const rows: RunQueryRow[] = [];
   for (const run of listRuns()) {

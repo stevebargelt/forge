@@ -7,8 +7,12 @@
 // URL can disagree with the view it names.
 //
 // Scope (`?project=<projectKey>[&checkout=<URI-encoded projectDir>]`) rides only on
-// views whose scope requirement is not `none`. Object pages (`#run-map/<runId>`) are
-// addressed by a global id and carry no scope. Any other parameter key is dropped.
+// views whose scope requirement is not `none`. Object pages (`#run/<runId>`,
+// `#task/<taskId>`) are addressed by a global id and carry no scope. A route may name
+// extra parameters it owns (`params`: the run index's `status=`); any other key is dropped.
+//
+// FG-821: object tabs follow the Paperclip pattern — an unknown tab falls back to the
+// route's default (its first tab), which the canonical hash omits.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -26,8 +30,9 @@ export const ROUTES = Object.freeze({
   backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", aliases: [] },
   queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", aliases: [] },
   campaigns: { group: "plan", label: "Campaigns", path: "#campaigns[/<campaignId>]", scope: "optional", object: "optional", aliases: [] },
-  runs: { group: "evidence", label: "Runs", path: "#runs", scope: "optional", object: "none", aliases: [] },
-  "run-map": { group: "evidence", label: "Run Map", path: "#run-map/<runId>[/<tab>]", scope: "none", object: "required", parent: "runs", tabs: ["map"], aliases: ["run"] },
+  runs: { group: "evidence", label: "Runs", path: "#runs", scope: "optional", object: "none", params: ["status"], aliases: [] },
+  run: { group: "evidence", label: "Run", path: "#run/<runId>[/<tab>]", scope: "none", object: "required", parent: "runs", tabs: ["map", "evidence"], aliases: ["run-map"] },
+  task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
   roles: { group: "setup", label: "Roles", path: "#roles", scope: "none", object: "none", aliases: [] },
@@ -84,8 +89,15 @@ function safeDecode(segment) {
   }
 }
 
+function routeParams(route, params) {
+  if (!route.params || !params) return [];
+  return route.params
+    .filter((key) => typeof params[key] === "string" && params[key] !== "")
+    .map((key) => `${key}=${encodeURIComponent(params[key])}`);
+}
+
 /** The canonical hash for a location. Unscoped home is `#home`. */
-export function hashFor({ view, id = null, tab = null, scope = null }) {
+export function hashFor({ view, id = null, tab = null, scope = null, params = null }) {
   const route = ROUTES[view] ?? ROUTES.home;
   const name = ROUTES[view] ? view : "home";
   let path = `#${name}`;
@@ -93,16 +105,16 @@ export function hashFor({ view, id = null, tab = null, scope = null }) {
     path += `/${encodeURIComponent(id)}`;
     if (route.tabs && tab && tab !== route.tabs[0] && route.tabs.includes(tab)) path += `/${encodeURIComponent(tab)}`;
   }
-  if (route.scope === "none") return path;
-  const { project, checkout } = normalizeScope(scope);
-  if (!project) return path;
-  path += `?project=${encodeURIComponent(project)}`;
-  if (checkout) path += `&checkout=${encodeURIComponent(checkout)}`;
-  return path;
+  const query = [];
+  const { project, checkout } = route.scope === "none" ? NO_SCOPE : normalizeScope(scope);
+  if (project) query.push(`project=${encodeURIComponent(project)}`);
+  if (checkout) query.push(`checkout=${encodeURIComponent(checkout)}`);
+  query.push(...routeParams(route, params));
+  return query.length > 0 ? `${path}?${query.join("&")}` : path;
 }
 
 /**
- * Parse a location hash into { view, group, id, tab, scope, canonical, rewrite, notice }.
+ * Parse a location hash into { view, group, id, tab, scope, params, canonical, rewrite, notice }.
  *
  * `rewrite` is true when the hash is not already canonical — the caller replaces it with
  * `canonical` via history.replaceState. `notice` is a one-line operator message when the
@@ -123,6 +135,7 @@ export function parseHash(hash) {
   let id = null;
   let tab = null;
   let scope = scopeIn;
+  const routeParamsIn = {};
 
   if (segments.length === 0) {
     view = "home";
@@ -138,16 +151,20 @@ export function parseHash(hash) {
       if (route.object !== "none" && segments[1]) id = safeDecode(segments[1]);
       if (route.tabs) tab = segments[2] && route.tabs.includes(safeDecode(segments[2])) ? safeDecode(segments[2]) : route.tabs[0];
       if (route.object === "required" && !id) {
-        view = "activity";
+        notice = `Open a ${ROUTES[view].label.toLowerCase()} from the run index to see it.`;
+        view = "runs";
         tab = null;
         scope = NO_SCOPE;
-        notice = "Open a run from the activity feed to see its Run Map.";
       }
     }
   }
 
   if (!carriesScope(view)) scope = NO_SCOPE;
-  const canonical = hashFor({ view, id, tab, scope });
+  for (const key of ROUTES[view].params ?? []) {
+    const value = params.get(key);
+    if (value) routeParamsIn[key] = value;
+  }
+  const canonical = hashFor({ view, id, tab, scope, params: routeParamsIn });
   const rewrite = raw !== "" && `#${raw}` !== canonical;
-  return { view, group: groupOf(view), id, tab, scope, canonical, rewrite, notice };
+  return { view, group: groupOf(view), id, tab, scope, params: routeParamsIn, canonical, rewrite, notice };
 }

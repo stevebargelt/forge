@@ -436,7 +436,7 @@ The envelope is `{generatedAt, scope, items, empty, degraded, counts}`. `counts`
 
 ### Surface
 
-Pure persisted-state read: no git/gh/tmux/docker/CLI subprocess, and no mutation. Rendered as its own `AttentionInboxSection` on the dashboard Home view, above the In-flight group, polled with the same own-your-own-outcome discipline as Current activity (one read per URL in flight; a failed read IS the return value, never a linger of the last render). Each row links to the relevant surface by kind — an `auth_setup` row to Config, `campaign_paused` to Campaigns, `missing_acceptance_or_readiness` to the ticket in Backlog, a run/task blocker to its Run Map — or renders with no link when the item carries no id the target needs. Schema: `docs/SCHEMA-CONTRACT.md` → `/api/attention-inbox`.
+Pure persisted-state read: no git/gh/tmux/docker/CLI subprocess, and no mutation. Rendered as its own `AttentionInboxSection` on the dashboard Home view, above the In-flight group, polled with the same own-your-own-outcome discipline as Current activity (one read per URL in flight; a failed read IS the return value, never a linger of the last render). Each row links to the relevant surface by kind — an `auth_setup` row to Config, `campaign_paused` to Campaigns, `missing_acceptance_or_readiness` to the ticket in Backlog, a run/task blocker to its run page (FG-821; `#run/<runId>`, defaulting to the map tab) — or renders with no link when the item carries no id the target needs. Schema: `docs/SCHEMA-CONTRACT.md` → `/api/attention-inbox`.
 
 On Home, this list's row order is additionally pinned per [Row order pinning](#row-order-pinning-fg-819) below — the same client-side behavior In flight uses, so a poll cannot reorder a row out from under an operator mid-read.
 

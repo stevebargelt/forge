@@ -5,7 +5,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
 import { logEvent } from "../store/events.js";
-import { queryRuns, parseSince } from "./runs-query.js";
+import { queryRuns, parseSince, runQueryRowJson } from "./runs-query.js";
 import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -103,4 +103,14 @@ test("queryRuns: failure_kind scan ignores failed CHILD tasks (top-level only)",
   logEvent("task.failed", { runId: "run-child", taskId: "task-c", payload: { failure_kind: "tool_error" } });
   assert.equal(queryRuns({ failureKind: "tool_error" }).length, 0, "child failures don't match");
   assert.equal(queryRuns({})[0]!.failedCount, 0, "child not counted as a top-level failure");
+});
+
+test("runQueryRowJson: ticketId reads inputs.ticketId, then top-level ticketId, else null (FG-821)", () => {
+  insertRun(mkRun("run-inputs", { createdAt: "2026-05-03T00:00:00Z", metadata: { inputs: { ticketId: "FG-1" }, ticketId: "FG-OTHER" } }));
+  insertRun(mkRun("run-top", { createdAt: "2026-05-02T00:00:00Z", metadata: { ticketId: "FG-2" } }));
+  insertRun(mkRun("run-none", { createdAt: "2026-05-01T00:00:00Z" }));
+  assert.deepEqual(
+    queryRuns({}).map((r) => [r.run.id, runQueryRowJson(r).ticketId]),
+    [["run-inputs", "FG-1"], ["run-top", "FG-2"], ["run-none", null]],
+  );
 });

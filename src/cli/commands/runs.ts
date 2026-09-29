@@ -2,25 +2,10 @@ import type { Command } from "commander";
 import { getDb } from "../../store/db.js";
 import { renderedEmptyStore } from "../no-store.js";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { queryRuns, parseSince, type RunFilters, type RunQueryRow } from "../../v2/runs-query.js";
+import { queryRuns, parseSince, runQueryRowJson, type RunFilters } from "../../v2/runs-query.js";
 
 // RUN-1: `forge runs query` — search historical runs by status, failure_kind,
 // project, age. Read-only; cross-project by default (like the dashboard).
-
-function toJson(r: RunQueryRow) {
-  return {
-    runId: r.run.id,
-    status: r.run.status,
-    workflow: r.run.workflow,
-    title: r.run.title,
-    projectDir: r.run.projectDir ?? null,
-    createdAt: r.run.createdAt,
-    completedAt: r.run.completedAt ?? null,
-    taskCount: r.taskCount,
-    failedCount: r.failedCount,
-    failureKinds: r.failureKinds,
-  };
-}
 
 export function registerRuns(program: Command): void {
   const runs = program.command("runs").description("Query historical runs");
@@ -50,7 +35,7 @@ export function registerRuns(program: Command): void {
       const rows = queryRuns(filters);
 
       if (opts.json) {
-        console.log(JSON.stringify(rows.map(toJson), null, 2));
+        console.log(JSON.stringify(rows.map(runQueryRowJson), null, 2));
         return;
       }
 

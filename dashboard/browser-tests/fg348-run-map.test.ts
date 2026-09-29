@@ -1,12 +1,11 @@
 // FG-348 [J]: the Run Map + Explain browser tier. Driven in a real Chrome against
-// the real shell + client, with /api/run/:id/map and /api/task/:id/explain
-// branched on the scope query so a scope change is a genuinely different read that
-// can be left pending. Four obligations:
-//   1. A run is deep-linkable via #run-map/<runId>, renders the graph, and clicking
-//      a node opens the "Why this task?" Explain panel.
-//   2. Changing the checkout scope invalidates the map on screen (drops to loading)
-//      AND a late leaving-scope response cannot repaint it (the runMapSeq guard) —
-//      the fg349/fg699 precedent applied to the run map.
+// the real shell + client, with /api/run/:id/map delayed per run so a navigation is a
+// genuinely different read that can be left pending. Four obligations:
+//   1. A run is deep-linkable via #run-map/<runId> (FG-821: an alias of #run/<runId>),
+//      renders the graph, and a node links to its task's "Why this task?" Explain page.
+//   2. Navigating to another run invalidates the map on screen (drops to loading) AND a
+//      late response for the run left behind cannot repaint it (the run page's sequence
+//      guard). FG-821: the run page reads by global id, never with the scope in hand.
 //   3. A legacy/degraded run (unloadable workflow → workflowResolved:false) renders
 //      inferred labels + its degradation warning WITHOUT a page error.
 //   4. Offline/CSP closure: the run-map view boots with no external/CDN fetch and a
@@ -75,10 +74,10 @@ const feedFixture = [
 
 // A minimal-but-valid RunMapGraph whose run.title is the fingerprint of which
 // scope the map is showing (run-map.js renders it in the header).
-function graphFor(title: string) {
+function graphFor(title: string, runId = RUN_ID) {
   return {
     version: 1,
-    run: { runId: RUN_ID, workflow: "feature", title, status: "complete", createdAt: "2026-06-10T12:00:00.000Z" },
+    run: { runId, workflow: "feature", title, status: "complete", createdAt: "2026-06-10T12:00:00.000Z" },
     workflowResolved: true,
     phases: [
       { id: "plan", label: "plan", role: "tech-lead", gate: "auto", dependsOn: [], fanout: false, manual: false, reds: [] },
@@ -129,15 +128,8 @@ function explainFor(taskId: string) {
   };
 }
 
-function scopeKey(url: URL): string {
-  const dir = url.searchParams.get("projectDir");
-  if (dir) return `dir:${dir}`;
-  const key = url.searchParams.get("projectKey");
-  if (key) return `key:${key}`;
-  return "unscoped";
-}
-
-const delayByScope = new Map<string, number>();
+const delayByRun = new Map<string, number>();
+const mapRequests: string[] = [];
 
 let server: Server;
 let browser: Browser;
@@ -160,134 +152,125 @@ after(async () => {
 
 const rmTitle = (page: Page) => page.locator(".rm-header .mono").first();
 
-function checkoutScopeButton(page: Page, name: string) {
-  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(`^${name}$`) });
-}
-
-test("A run is deep-linkable, renders the graph, and clicking a node opens the Explain panel", async () => {
-  delayByScope.clear();
+test("A run is deep-linkable, renders the graph, and clicking a node opens its Explain page", async () => {
+  delayByRun.clear();
   const page = await newPage({ width: 1440, height: 1200 });
 
   await page.goto(`${baseUrl}/#run-map/${RUN_ID}`);
+  await page.waitForFunction((id) => location.hash === `#run/${id}`, RUN_ID);
   await page.locator(".rm-view").waitFor();
   // Phase + task nodes rendered.
   assert.ok((await page.locator(".rm-node").count()) >= 2, "the run map rendered its task nodes");
   // A red is attached to its primary (shape-distinguished chip).
   assert.equal(await page.locator(".rm-red").count(), 1, "the red is attached to its reviewed primary");
 
-  // Click a node → the "Why this task?" Explain panel opens and renders blocks.
+  // Click a node → the task's "Why this task?" Explain page renders its blocks.
   await page.locator(".rm-node").first().click();
+  await page.waitForFunction(() => location.hash === "#task/t-plan/explain");
   await page.locator(".rx-panel").waitFor();
   assert.match(await page.locator(".rx-heading").innerText(), /why this task/i);
   // The recorded warning is shown prominently.
   await page.getByText("Project workflow override is active.").waitFor();
+  assert.equal(await page.locator(".detail-overlay").count(), 0, "Explain is a page, not an overlay");
   await page.close();
 });
 
-test("FG-692 RF-2: the Explain panel opens by keyboard, dismisses on Escape, and restores focus to the invoking node", async () => {
-  delayByScope.clear();
+test("FG-692 RF-2 (FG-821): a map node opens Explain by keyboard, Escape goes up to the task, and Back returns focus-reachable to the map", async () => {
+  delayByRun.clear();
   const page = await newPage({ width: 1440, height: 1200 });
 
-  await page.goto(`${baseUrl}/#run-map/${RUN_ID}`);
+  await page.goto(`${baseUrl}/#run/${RUN_ID}`);
   await page.locator(".rm-view").waitFor();
 
-  // Open the panel from the keyboard: focus a run-map node and activate it.
+  // A node is a link: Enter on it navigates.
   const node = page.locator(".rm-node").first();
   await node.focus();
   await node.press("Enter");
   await page.locator(".rx-panel").waitFor();
-  // Focus moved into the dialog (onto its close control) — waits out the mount effect.
-  await page.waitForFunction(() => document.activeElement?.classList.contains("close"));
+  assert.equal(new URL(page.url()).hash, "#task/t-plan/explain");
 
-  // Escape dismisses it — no mouse needed.
+  // Escape goes to the parent object — the task page — with no mouse.
   await page.keyboard.press("Escape");
-  await page.locator(".rx-panel").waitFor({ state: "detached" });
-  // Focus returns to the run-map node that opened it.
-  await page.waitForFunction(() => document.activeElement?.classList.contains("rm-node"));
-  await page.close();
-});
-
-test("FG-692 RF-3: the aria-modal Explain panel contains Tab focus — it cannot escape to a background control", async () => {
-  delayByScope.clear();
-  const page = await newPage({ width: 1440, height: 1200 });
-
-  await page.goto(`${baseUrl}/#run-map/${RUN_ID}`);
+  await page.waitForFunction(() => location.hash === "#task/t-plan");
+  // And Back returns to the Explain page, then the map, whose nodes are links again.
+  await page.goBack();
+  await page.waitForFunction(() => location.hash === "#task/t-plan/explain");
+  await page.goBack();
   await page.locator(".rm-view").waitFor();
-  assert.ok((await page.locator(".rm-node").count()) >= 2, "background run-map nodes exist to escape TO");
-
-  const node = page.locator(".rm-node").first();
-  await node.focus();
-  await node.press("Enter");
-  await page.locator(".rx-panel").waitFor();
-  await page.waitForFunction(() => document.activeElement?.classList.contains("close"));
-
-  // Tab and Shift+Tab from within the modal must keep focus inside the panel; a
-  // pre-fix panel (Escape-only, no containment) let Tab land on a background .rm-node.
-  const inPanel = () => page.evaluate(() => !!document.activeElement?.closest(".detail-overlay"));
-  for (const combo of ["Tab", "Shift+Tab", "Tab"]) {
-    await page.keyboard.press(combo);
-    assert.equal(await inPanel(), true, `after ${combo}, focus is still contained within the Explain panel`);
-    assert.equal(
-      await page.evaluate(() => !!document.activeElement?.classList.contains("rm-node")),
-      false,
-      `after ${combo}, focus has NOT escaped to a background run-map node`,
-    );
-  }
+  assert.equal(await page.locator(".rm-node").first().evaluate((el) => el.tagName), "A");
   await page.close();
 });
 
-test("Switching checkout scope invalidates the run map and a late leaving-scope response cannot repaint it (seq guard)", async () => {
-  delayByScope.clear();
+test("FG-692 RF-3 (FG-821): Explain is a page, not an aria-modal — nothing traps Tab, and its tabs link back to the task", async () => {
+  delayByRun.clear();
   const page = await newPage({ width: 1440, height: 1200 });
 
-  // Open the project scoped to main, then open the run map from the feed.
+  await page.goto(`${baseUrl}/#task/t-build/explain`);
+  await page.locator(".rx-panel").waitFor();
+  assert.equal(await page.locator("[aria-modal='true']").count(), 0, "no modal dialog is open over the page");
+  const back = page.locator('[role="tab"][data-tab="detail"]');
+  assert.equal(await back.getAttribute("href"), "#task/t-build");
+  assert.equal(await page.locator('[role="tab"][data-tab="explain"]').getAttribute("aria-selected"), "true");
+  // Tab walks out of the content into the rest of the page: focus is not contained.
+  await page.locator(".skip-link").focus();
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => !!document.activeElement?.closest(".nav-column")), true, "Tab reaches the navigation");
+  await page.close();
+});
+
+test("Navigating to another run invalidates the map and a late response for the run left behind cannot repaint it (seq guard); the read is unscoped", async () => {
+  delayByRun.clear();
+  mapRequests.length = 0;
+  const page = await newPage({ width: 1440, height: 1200 });
+
+  // Scope to the main checkout, then open the run from the feed.
   await page.goto(`${baseUrl}/#projects`);
   await page.locator(".project-dirs-toggle").click();
   await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
   await page.locator(".rm-open-btn").first().waitFor();
 
-  // The main-scope run-map read is slow: it is still in flight when we narrow to
-  // the feature checkout, and only lands afterwards.
-  delayByScope.set(`dir:${CHECKOUT_MAIN}`, 3_000);
+  // The first run's map read is slow: it is still in flight when we move to another
+  // run, and only lands afterwards.
+  delayByRun.set(RUN_ID, 3_000);
+  // Arm the waits for the leaving run's own request and late response BEFORE either happens.
+  const leavingSent = page.waitForRequest((req) => req.url().includes(`/api/run/${RUN_ID}/map`));
+  const leavingLate = page.waitForResponse((res) => res.url().includes(`/api/run/${RUN_ID}/map`));
   await page.locator(".rm-open-btn").first().click();
+  await page.waitForFunction((id) => location.hash === `#run/${id}`, RUN_ID);
 
-  // The map is genuinely pending (loading), not the previous scope's graph.
+  // The map is genuinely pending (loading), not a previous graph, and its read is in flight.
   await page.getByText("loading run map…").waitFor();
+  await leavingSent;
   assert.equal(await page.locator(".rm-view").count(), 0, "the map is pending, not yet resolved");
 
-  // Arm the wait for the leaving scope's own late response BEFORE switching.
-  const leavingLate = page.waitForResponse(
-    (res) => res.url().includes(`/api/run/${RUN_ID}/map`) && res.url().includes(`projectDir=${encodeURIComponent(CHECKOUT_MAIN)}`),
-  );
-
-  // Narrow to the fast feature checkout while main's read is in flight.
-  await checkoutScopeButton(page, "feature").click();
+  await page.evaluate(() => { location.hash = "#run/run-other"; });
   await page.locator(".rm-view").waitFor();
-  assert.equal(await rmTitle(page).innerText(), CHECKOUT_FEATURE, "the new scope's own map is shown");
+  assert.equal(await rmTitle(page).innerText(), "Other run", "the new run's own map is shown");
 
-  // The retired main response lands. Its seq is stale, so the guard drops it.
+  // The retired response lands. Its seq is stale, so the guard drops it.
   await leavingLate;
   await page.waitForTimeout(100);
-  assert.equal(await rmTitle(page).innerText(), CHECKOUT_FEATURE,
-    "a late leaving-scope map cannot repaint the abandoned checkout");
+  assert.equal(await rmTitle(page).innerText(), "Other run", "a late response for the run left behind cannot repaint the map");
+  assert.ok(mapRequests.length > 0);
+  assert.deepEqual(mapRequests.filter((q) => q.includes("project")), [], "an object page reads by global id, not with the scope in hand");
   await page.close();
 });
 
 test("A legacy/degraded run renders inferred labels without a page error", async () => {
-  delayByScope.clear();
+  delayByRun.clear();
   const page = await newPage({ width: 1440, height: 1200 });
 
   await page.goto(`${baseUrl}/#run-map/run-legacy`);
   await page.locator(".rm-view").waitFor();
   await page.locator(".rm-degraded").waitFor();
   await page.getByText(/Workflow definition could not be loaded/).waitFor();
-  // The inferred node still renders and is still clickable (opens the panel).
+  // The inferred node still renders and is still a link (to its Explain page).
   assert.ok((await page.locator(".rm-node").count()) >= 1, "the degraded graph still renders its execution nodes");
   await page.close();
 });
 
 test("The run-map view boots offline — no external/CDN fetch, script-src 'self' CSP, no new un-vendored dependency", async () => {
-  delayByScope.clear();
+  delayByRun.clear();
   const external: string[] = [];
   const pageErrors: string[] = [];
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -353,13 +336,12 @@ function createFixtureServer(): Server {
     const mapMatch = url.pathname.match(/^\/api\/run\/([^/]+)\/map$/);
     if (mapMatch) {
       const runId = mapMatch[1]!;
-      const scope = scopeKey(url);
-      const delay = delayByScope.get(scope) ?? 0;
+      mapRequests.push(url.search);
+      const delay = delayByRun.get(runId) ?? 0;
       if (delay) await new Promise((wait) => setTimeout(wait, delay));
       const body = runId === "run-legacy"
         ? JSON.stringify(degradedGraph())
-        // Fingerprint the scope in the run title so the scope test can read it.
-        : JSON.stringify(graphFor(scope.startsWith("dir:") ? scope.slice("dir:".length) : "Atlas feature"));
+        : JSON.stringify(runId === RUN_ID ? graphFor("Atlas feature") : graphFor("Other run", runId));
       res.writeHead(200, { "Content-Type": "application/json" }).end(body);
       return;
     }

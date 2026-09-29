@@ -1,7 +1,7 @@
 // FG-746 (C5/AC6): run/task Explain renders the candidate-bound verification evidence.
 //
 // The /api/task/:id/explain payload carries a `verificationEvidence` sidecar alongside
-// the (unmodified) TaskExplain. RunExplainPanel renders a "Verification evidence" block
+// the (unmodified) TaskExplain. ExplainContent (the Explain page's body since FG-821) renders a "Verification evidence" block
 // listing commit, command/gate, source (host|ci), outcome, and timestamp — and degrades
 // to nothing when the sidecar is absent/empty. This mounts the panel directly (via the
 // same vendored import map the shell uses) so the block is under test without driving the
@@ -40,7 +40,7 @@ function explainPayload(taskId: string, withEvidence: boolean): unknown {
 }
 
 function mountPage(taskId: string): string {
-  // A minimal page that mounts RunExplainPanel via the SAME vendored bare specifiers the
+  // A minimal page that mounts ExplainContent via the SAME vendored bare specifiers the
   // shell's import map wires up. No CSP here (this is a test fixture), so the inline
   // module is admitted directly.
   return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
@@ -49,9 +49,9 @@ function mountPage(taskId: string): string {
 <script type="module">
 import { h, render } from "preact";
 import htm from "htm";
-import { RunExplainPanel } from "/client/run-explain-panel.js";
+import { ExplainContent } from "/client/run-explain-panel.js";
 const html = htm.bind(h);
-render(html\`<\${RunExplainPanel} taskId=${JSON.stringify(taskId)} onClose=\${() => {}} />\`, document.getElementById("root"));
+render(html\`<\${ExplainContent} taskId=${JSON.stringify(taskId)} />\`, document.getElementById("root"));
 </script></body></html>`;
 }
 

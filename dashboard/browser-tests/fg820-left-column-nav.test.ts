@@ -163,13 +163,16 @@ test("FG-820: the current item carries aria-current, and an object page highligh
   assert.deepEqual(await currentItems(page), ["Routing"]);
   assert.equal(hashOf(page), "#routing");
 
-  await page.goto(`${baseUrl}/#run-map/run-1`);
-  await page.locator(".page-title", { hasText: "Run Map" }).waitFor();
+  await page.goto(`${baseUrl}/#run/run-1`);
+  await page.locator(".object-head .page-title", { hasText: "Run" }).waitFor();
   assert.deepEqual(await currentItems(page), ["Runs"], "a run page highlights Runs");
 
-  await column(page).getByRole("link", { name: "Runs", exact: true }).click();
-  await page.getByText("The run index lands in FG-821").waitFor();
-  assert.equal(await page.locator(".placeholder-view a", { hasText: "Activity" }).getAttribute("href"), "#activity");
+  // FG-821 replaced the placeholder with the run index.
+  // The Runs item's accessible name carries its badge ("?" here: this fixture serves no
+  // /api/runs), so select it by view.
+  await column(page).locator('a[data-view="runs"]').click();
+  await page.locator("section.runs-index").waitFor();
+  assert.equal(hashOf(page), "#runs");
   await page.close();
 });
 
@@ -217,9 +220,9 @@ test("FG-820: alias, group-shaped and unknown hashes redirect to their canonical
   const cases: [string, string, string][] = [
     ["#governance", "#routing", "Routing"],
     ["#control-plane?project=atlas", "#config?project=atlas", "Config"],
-    ["#run/run-1", "#run-map/run-1", "Runs"],
+    ["#run-map/run-1", "#run/run-1", "Runs"],
     ["#plan/queue?group=health&project=atlas&utm=x", "#queue?project=atlas", "Queue"],
-    ["#run-map", "#activity", "Activity"],
+    ["#run-map", "#runs", "Runs"],
     ["#nope", "#home", "Home"],
   ];
   const page = await open();
@@ -230,7 +233,7 @@ test("FG-820: alias, group-shaped and unknown hashes redirect to their canonical
   }
   // The last two carry their one-line notices.
   await page.goto(`${baseUrl}/#run-map`);
-  await page.locator(".route-notice", { hasText: "Open a run from the activity feed" }).waitFor();
+  await page.locator(".route-notice", { hasText: "Open a run from the run index" }).waitFor();
   await page.goto(`${baseUrl}/#nope`);
   await page.locator(".route-notice", { hasText: "No view named “nope”" }).waitFor();
   assert.equal(await page.locator("section.home-view").count(), 1);
@@ -362,7 +365,7 @@ test("FG-820: every legacy hash reaches its rendered heading, and keyboard order
     ["#activity", "Activity"], ["#projects", "Projects"], ["#usage", "Usage"], ["#ops", "Ops"],
     ["#governance", "Routing"], ["#backlog", "Backlog"], ["#reviews", "Reviews"], ["#queue?project=atlas", "Queue"],
     ["#shipping?project=atlas", "Shipping"], ["#campaigns", "Campaigns"], ["#control-plane", "Config"],
-    ["#run-map/run-1", "Run Map"], ["#run/run-1", "Run Map"],
+    ["#run-map/run-1", "Run"], ["#run/run-1", "Run"],
   ];
   for (const [hash, heading] of legacy) {
     await page.goto(`${baseUrl}/${hash}`);

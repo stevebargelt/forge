@@ -1,7 +1,8 @@
 // FG-820: pure decisions for the left-column navigation, split from nav-view.js so they
 // are unit-testable without a DOM (the attention-inbox-render.js pattern).
 //
-// THE BADGE RULE: the browser counts nothing. The Home badge is the attention envelope's
+// THE BADGE RULE: the browser counts nothing. (The Runs badge follows the same rule from
+// GET /api/runs's activeCount — runs-index-render.js, FG-821.) The Home badge is the attention envelope's
 // server-computed `counts` — never `items.length`, never a tally of a filtered list, never
 // anything remembered from an earlier read or kept in storage. A read that failed, or an
 // envelope with no readable `counts`, shows "?" rather than a number.
@@ -64,7 +65,7 @@ export function navHref(view, scope) {
 export function scopedHref(hash, scope) {
   const parsed = parseHash(hash);
   if (parsed.notice) return hash;
-  return hashFor({ view: parsed.view, id: parsed.id, tab: parsed.tab, scope: parsed.scope.project ? parsed.scope : scope });
+  return hashFor({ view: parsed.view, id: parsed.id, tab: parsed.tab, params: parsed.params, scope: parsed.scope.project ? parsed.scope : scope });
 }
 
 /** The whole column as data: groups, their items, hrefs and which one is current. */

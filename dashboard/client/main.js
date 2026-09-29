@@ -3,7 +3,6 @@
 import { h, render } from "preact";
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "preact/hooks";
 import htm from "htm";
-import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";
 import { GovernanceView } from "./governance.js";
@@ -13,15 +12,18 @@ import { ReviewsView } from "./reviews.js";
 import { ShippingAuditView } from "./shipping-audit.js";
 import { CampaignsView } from "./campaigns.js";
 import { ControlPlaneView } from "./control-plane.js";
-import { RunMap } from "./run-map.js";
-import { RunExplainPanel } from "./run-explain-panel.js";
+import { RunPage } from "./run-page-view.js";
+import { TaskPage, ModelBadge, CopyIdButton } from "./task-page-view.js";
+import { TicketPage } from "./ticket-page-view.js";
+import { ReviewPage } from "./reviews.js";
+import { RunsIndexView } from "./runs-index-view.js";
+import { RUNS_LOADING, RUNS_POLL_MS, readRuns, runsUrl } from "./runs-index-render.js";
+import { listHeader, runsIndexHeader } from "./screen-header-render.js";
+import { ScreenLine } from "./object-page-view.js";
 import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, navItemFor } from "./view-routing.js";
 import { NavColumn, BottomBar, NavDrawer } from "./nav-view.js";
 import { scopeSummary, scopedHref } from "./nav-render.js";
-import {
-  eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
-  verificationRowBadge,
-} from "./verification-render.js";
+import { verificationRowBadge } from "./verification-render.js";
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
 import { INBOX_LOADING, readAttentionInbox } from "./attention-inbox-render.js";
@@ -60,7 +62,7 @@ function App() {
   // scope (view-routing.js). Scope-less views and object pages leave the scope in hand
   // untouched, so moving between list views keeps it. Never persisted anywhere else.
   const [initialRoute] = useState(() => parseHash(window.location.hash));
-  const [route, setRoute] = useState(() => ({ view: initialRoute.view, id: initialRoute.id, tab: initialRoute.tab }));
+  const [route, setRoute] = useState(() => ({ view: initialRoute.view, id: initialRoute.id, tab: initialRoute.tab, params: initialRoute.params }));
   const [scope, setScope] = useState(() => initialRoute.scope);
   const [routeNotice, setRouteNotice] = useState(() => initialRoute.notice);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -76,7 +78,6 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [orchCollapsed, setOrchCollapsed] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedTaskId, setSelectedTaskId] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [usageRollup, setUsageRollup] = useState([]);
   const [usageTimeSeries, setUsageTimeSeries] = useState([]);
@@ -108,14 +109,10 @@ function App() {
   // Scope token for the control-plane read — see pollControlPlane. A response
   // for the old scope must never overwrite the graph just switched to.
   const controlPlaneSeq = useRef(0);
-  // FG-348: the Run Map graph for the currently-selected run + the Explain panel's
-  // open task. selectedRunId is deep-linkable via #run-map/<runId>.
-  const selectedRunId = view === "run-map" ? route.id : null;
-  const [runMapGraph, setRunMapGraph] = useState(null);
-  // Scope+run token for the run-map read: a response for a scope/run we have
-  // navigated away from must never repaint the graph now on screen.
-  const runMapSeq = useRef(0);
-  const [selectedExplainTaskId, setSelectedExplainTaskId] = useState(null);
+  // FG-821: the Runs badge's load — GET /api/runs's server-computed activeCount, read on
+  // every view (like the inbox) so the badge is live everywhere. The run index hands up
+  // its own first-page reads too, so on #runs the badge is the list's own response.
+  const [runsLoad, setRunsLoad] = useState(RUNS_LOADING);
   const [backlog, setBacklog] = useState(null);
   const [queue, setQueue] = useState(null);
   // Sequence token for the queue read — see pollQueue.
@@ -461,43 +458,16 @@ function App() {
     return () => clearInterval(id);
   }, [pollControlPlane, view]);
 
-  // FG-348: the run-map read carries the SAME scope + seq-guard discipline as
-  // pollControlPlane — a response for a scope/run left behind must never repaint.
-  const pollRunMap = useCallback(async () => {
-    const seq = (runMapSeq.current += 1);
-    if (!selectedRunId) { setRunMapGraph(null); return; }
-    try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
-      const res = await fetch(`/api/run/${encodeURIComponent(selectedRunId)}/map${q}`);
-      if (seq !== runMapSeq.current) return;
-      if (res.ok) {
-        // Re-check AFTER the body decode too: a scope/run change during
-        // res.json() must not render the retired graph.
-        const graph = await res.json();
-        if (seq !== runMapSeq.current) return;
-        setRunMapGraph(graph);
-      }
-      setNow(Date.now());
-    } catch (e) {
-      if (seq !== runMapSeq.current) return;
-      setError(String(e));
-    }
-  }, [selectedRunId, projectFilter, checkoutFilter]);
-
-  // Invalidate the on-screen map the instant the scope OR the selected run
-  // changes, so a previous scope/run's graph is never shown under the new one
-  // while its request is in flight.
   useEffect(() => {
-    runMapSeq.current += 1;
-    setRunMapGraph(null);
-  }, [selectedRunId, projectFilter, checkoutFilter]);
-
-  useEffect(() => {
-    if (view !== "run-map") return;
-    pollRunMap();
-    const id = setInterval(pollRunMap, POLL_MS);
-    return () => clearInterval(id);
-  }, [pollRunMap, view]);
+    let cancelled = false;
+    const read = async () => {
+      const load = await readRuns(runsUrl({ scope: { project: scope.project, checkout: scope.checkout }, limit: 1 }));
+      if (!cancelled) setRunsLoad(load);
+    };
+    read();
+    const id = setInterval(read, RUNS_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [scope.project, scope.checkout]);
 
   const pollReviews = useCallback(async () => {
     try {
@@ -654,9 +624,9 @@ function App() {
       const parsed = parseHash(window.location.hash);
       if (parsed.rewrite) replaceHash(parsed.canonical);
       if (carriesScope(parsed.view)) adoptScope(parsed.scope);
-      // FG-348: the selected run follows the hash, so a deep link (#run-map/<runId>)
+      // FG-348: the selected run follows the hash, so a deep link (#run/<runId>)
       // and the back button both land on the right run.
-      setRoute({ view: parsed.view, id: parsed.id, tab: parsed.tab });
+      setRoute({ view: parsed.view, id: parsed.id, tab: parsed.tab, params: parsed.params });
       setRouteNotice(parsed.notice);
       setDrawerOpen(false);
     };
@@ -677,8 +647,9 @@ function App() {
     window.location.hash = hashFor({ ...location, scope: location.scope ?? scopeRef.current });
   };
 
-  // FG-348: open the Run Map for a specific run (from the activity/in-flight feed).
-  const openRunMap = (runId) => navigate({ view: "run-map", id: runId });
+  // FG-821: every task entry point (feed card, in-flight row, orchestrator row, current
+  // activity) opens the task PAGE — a hash change, so it is linkable and Back returns.
+  const openTask = (taskId) => navigate({ view: "task", id: taskId });
 
   // A project card (or one of its checkouts) scopes the dashboard and opens Activity.
   const filterByProject = (project, checkoutDir = null) => {
@@ -691,6 +662,9 @@ function App() {
   };
 
   const currentRoute = ROUTES[view];
+  // Object pages (run, task, ticket, review) render their own head: a breadcrumb trail
+  // from their payload in place of the group kicker (FG-821).
+  const objectPage = currentRoute.object === "required" || (currentRoute.object === "optional" && route.id && view !== "campaigns");
   const currentGroup = GROUPS.find((g) => g.id === currentRoute.group);
   const scopedProject = scope.project ? projects.find((p) => p.key === scope.project) ?? null : null;
   const navColumn = (idPrefix) => html`<${NavColumn}
@@ -700,6 +674,7 @@ function App() {
     onScopeChange=${changeScope}
     now=${now}
     inboxLoad=${inboxLoad}
+    runsLoad=${runsLoad}
     idPrefix=${idPrefix}
   />`;
 
@@ -712,10 +687,13 @@ function App() {
         <span class="mobile-head-scope muted">${scopeSummary(scope, scopedProject)}</span>
       </header>
       <main id="main-content" class="app" tabindex="-1" ref=${mainRef}>
-      <div class="page-head">
-        <span class="page-kicker">${currentGroup?.label}</span>
-        <h1 class="page-title">${currentRoute.label}</h1>
-      </div>
+      ${objectPage ? null : html`
+        <div class="page-head">
+          <span class="page-kicker">${currentGroup?.label}</span>
+          <h1 class="page-title">${currentRoute.label}</h1>
+        </div>
+        <${ScreenLine} header=${view === "runs" ? runsIndexHeader(runsLoad) : listHeader(view)} />
+      `}
 
       ${routeNotice ? html`<div class="card route-notice muted" role="status">${routeNotice}</div>` : null}
 
@@ -740,7 +718,7 @@ function App() {
             now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
-            onTaskClick=${(id) => setSelectedTaskId(id)}
+            onTaskClick=${openTask}
             ops=${ops}
             opsSince=${opsSince}
           />`
@@ -754,14 +732,18 @@ function App() {
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">The config graph is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
           : html`<${ControlPlaneView} data=${controlPlane} />`
-        : view === "run-map"
-        ? html`<${RunMap} graph=${runMapGraph} onSelect=${(taskId) => setSelectedExplainTaskId(taskId)} />`
+        : view === "run"
+        ? html`<${RunPage} key=${route.id} runId=${route.id} tab=${route.tab} projects=${projects} />`
+        : view === "task"
+        ? html`<${TaskPage} key=${route.id} taskId=${route.id} tab=${route.tab} projects=${projects} />`
         : view === "runs"
-        ? html`<div class="card muted placeholder-view" style="margin-top: 20px;">The run index lands in FG-821. Until then, open a run from <a href=${hashFor({ view: "activity", scope })}>Activity</a>.</div>`
+        ? html`<${RunsIndexView} scope=${scope} status=${route.params?.status ?? null} projects=${projects} onLoad=${setRunsLoad} />`
         : view === "roles"
         ? html`<div class="card muted placeholder-view" style="margin-top: 20px;">Role pages land in a later ticket. <a href=${hashFor({ view: "routing", scope })}>Routing</a> and <a href=${hashFor({ view: "config", scope })}>Config</a> explain how a role resolves today.</div>`
         : view === "backlog"
-        ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} ticketId=${route.id} />`
+        ? route.id
+          ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`
+          : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} />`
         : view === "queue"
         ? html`<${QueueBoardView}
             data=${queue}
@@ -770,7 +752,9 @@ function App() {
             onReload=${pollQueue}
           />`
         : view === "reviews"
-        ? html`<${ReviewsView} data=${reviews} reviewId=${route.id} />`
+        ? route.id
+          ? html`<${ReviewPage} key=${route.id} reviewId=${route.id} projects=${projects} scope=${scope} />`
+          : html`<${ReviewsView} data=${reviews} />`
         : view === "shipping"
         ? html`<${ShippingAuditView} data=${shippingAudit} />`
         : view === "campaigns"
@@ -819,7 +803,7 @@ function App() {
             now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
-            onTaskClick=${(id) => setSelectedTaskId(id)}
+            onTaskClick=${openTask}
             activityLoad=${activityLoad}
             onRetryActivity=${retryCurrentActivity}
             onRefresh=${poll}
@@ -827,11 +811,11 @@ function App() {
 
           <details class="activity-diagnostics">
             <summary>Diagnostics</summary>
-            <${OrchestratorSection} data=${orchestrators} onTaskClick=${(id) => setSelectedTaskId(id)} />
+            <${OrchestratorSection} data=${orchestrators} onTaskClick=${openTask} />
             <${CurrentActivitySection}
               load=${activityLoad}
               now=${now}
-              onTaskClick=${(id) => setSelectedTaskId(id)}
+              onTaskClick=${openTask}
               onRetry=${retryCurrentActivity}
             />
           </details>
@@ -840,24 +824,19 @@ function App() {
             <h2>Recent agent outputs</h2>
             ${feed.length === 0
               ? html`<div class="muted">No completed agent outputs yet.</div>`
-              : feed.map((e) => html`<${FeedCard} key=${e.taskId} entry=${e} onClick=${() => setSelectedTaskId(e.taskId)} onOpenRunMap=${openRunMap} />`)
+              : feed.map((e) => html`<${FeedCard} key=${e.taskId} entry=${e} onClick=${() => openTask(e.taskId)} />`)
             }
           </section>
         `
       }
 
-      ${selectedTaskId ? html`<${TaskDetail} taskId=${selectedTaskId} onClose=${() => setSelectedTaskId(null)} />` : null}
-      ${selectedExplainTaskId ? html`<${RunExplainPanel}
-        taskId=${selectedExplainTaskId}
-        scopeQuery=${projectScopeQuery(projectFilter, checkoutFilter)}
-        onClose=${() => setSelectedExplainTaskId(null)}
-      />` : null}
       </main>
       <${BottomBar}
         view=${view}
         current=${navItemFor(view)}
         scope=${scope}
         inboxLoad=${inboxLoad}
+        runsLoad=${runsLoad}
         drawerOpen=${drawerOpen}
         onOpenDrawer=${() => setDrawerOpen(true)}
         moreRef=${moreRef}
@@ -2157,39 +2136,6 @@ function ProjectChip({ entry }) {
   `;
 }
 
-// FG-560: the per-task model badge, with mapping-path provenance made VISIBLE.
-// The mapping-path axis (exact vs default-fallback) is SEPARATE from the profile-
-// selection provenance — an exact activity mapping and a map.default fallback must
-// be distinguishable at a glance. BOTH carry a visible text marker ("exact" /
-// "default") plus a tooltip: colour and hover are never the ONLY signal, so the
-// state is perceivable by keyboard, touch and assistive-tech users, not just by a
-// mouse hover (RF-1). A default fallback additionally gets a distinct class and a
-// tooltip saying the activity was NOT mapped. A legacy task (no policy →
-// mappingPath null) renders exactly as before: a plain badge, no marker, no
-// provenance tooltip. Shared across every task surface so they agree.
-function ModelBadge({ entry }) {
-  if (!entry.agentModel) return null;
-  const mappingPath = entry.mappingPath;
-  const explicit = entry.capabilitySource === "explicit";
-  if (mappingPath === "default-fallback") {
-    // A default fallback. When the activity was EXPLICIT this is the shape dispatch
-    // refuses (activity_unmapped) — flag it more loudly; otherwise it is a benign
-    // role-derived catch-all, still marked distinct from an exact hit.
-    const title = explicit
-      ? "map.default fallback — the EXPLICIT activity is NOT mapped in this profile (activity_unmapped)"
-      : "map.default fallback — no activity-specific mapping for this task";
-    return html`<span
-      class=${"model-badge model-badge-default-fallback" + (explicit ? " model-badge-unmapped" : "")}
-      title=${title}
-    >${entry.agentModel}<span class="model-badge-tag">default</span></span>`;
-  }
-  if (mappingPath === "exact") {
-    return html`<span class="model-badge model-badge-exact" title="exact activity mapping — the activity is mapped directly in this profile">${entry.agentModel}<span class="model-badge-tag">exact</span></span>`;
-  }
-  // Legacy / pre-policy task: no mapping-path provenance. Unchanged rendering.
-  return html`<span class="model-badge">${entry.agentModel}</span>`;
-}
-
 // FG-576 (AC7/AC11) — the project-scoped interactive orchestrator panel.
 //
 // Each row is a receipt JOINED to the launcher-owned liveness record, so it says
@@ -2452,7 +2398,7 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
       <div>
         <div>
           <${ProjectChip} entry=${task} />
-          <strong>${task.agentRole}</strong>
+          <a class="task-link" href=${hashFor({ view: "task", id: task.taskId })} onClick=${(e) => e.stopPropagation()}><strong>${task.agentRole}</strong></a>
           <${ModelBadge} entry=${task} />
           <span class="faint"> ·</span> <span class="muted">${task.runTitle}</span>
         </div>
@@ -2466,23 +2412,24 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
   `;
 }
 
-function FeedCard({ entry, onClick, onOpenRunMap }) {
+function FeedCard({ entry, onClick }) {
   return html`
     <div class="card" onClick=${onClick}>
       <div class="head">
         <div>
           <${ProjectChip} entry=${entry} />
-          <span class="agent">${entry.agentRole}</span>
+          <a class="agent task-link" href=${hashFor({ view: "task", id: entry.taskId })} onClick=${(e) => e.stopPropagation()}>${entry.agentRole}</a>
           <${ModelBadge} entry=${entry} />
           <span class="faint"> · </span>
           <span class="context">${entry.runTitle}</span>
         </div>
         <div class="row">
-          ${onOpenRunMap ? html`<button
+          <a
             class="rm-open-btn"
-            title="open the run map"
-            onClick=${(e) => { e.stopPropagation(); onOpenRunMap(entry.runId); }}
-          >run map</button>` : null}
+            title="open the run"
+            href=${hashFor({ view: "run", id: entry.runId })}
+            onClick=${(e) => e.stopPropagation()}
+          >run</a>
           <span class="badge status-${entry.status}">${entry.status.replace(/_/g, " ")}</span>
           ${entry.durationMs != null ? html`<span class="muted mono" style="font-size: 11px;" title="run-time (started → completed)">⏱ ${formatDuration(entry.durationMs)}</span>` : null}
           <span class="muted mono" style="font-size: 11px;">${formatRelativeTime(entry.completedAt)}</span>
@@ -2525,156 +2472,6 @@ function renderPreview(entry) {
   return html`<div class="preview">${text.toString().slice(0, 400)}</div>`;
 }
 
-// Copies a value (e.g. a task id) to the clipboard. Falls back to a hidden
-// textarea + execCommand for non-secure contexts; localhost is secure so the
-// clipboard API path is the norm. stopPropagation so clicking it inside a
-// clickable row/overlay doesn't also trigger the row.
-function CopyIdButton({ value }) {
-  const [copied, setCopied] = useState(false);
-  const onCopy = useCallback(async (e) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = value;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand("copy"); } catch { /* best effort */ }
-      document.body.removeChild(ta);
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
-  }, [value]);
-  return html`<button
-    class="copy-id ${copied ? "copied" : ""}"
-    title="Copy task id"
-    aria-label=${`Copy task id ${value}`}
-    onClick=${onCopy}
-  >${copied ? "copied!" : "copy id"}</button>`;
-}
-
-function TaskDetail({ taskId, onClose }) {
-  const [detail, setDetail] = useState(null);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer = null;
-    const load = async () => {
-      try {
-        const res = await fetch(`/api/task/${encodeURIComponent(taskId)}`);
-        if (!res.ok) { if (!cancelled) setErr("not found"); return; }
-        const d = await res.json();
-        if (cancelled) return;
-        setDetail(d);
-        // WALK-5: poll while the task is running so the timeline + idle
-        // countdown stay live; stop once it reaches a terminal state.
-        if (d.task && d.task.status === "running") timer = setTimeout(load, 3000);
-      } catch (e) { if (!cancelled) setErr(String(e)); }
-    };
-    load();
-    return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [taskId]);
-
-  if (!detail) {
-    return html`
-      <div class="detail-overlay" onClick=${onClose}>
-        <div class="detail" onClick=${(e) => e.stopPropagation()}>
-          <span class="close" onClick=${onClose}>×</span>
-          <div class="muted">${err ?? "loading..."}</div>
-        </div>
-      </div>
-    `;
-  }
-
-  const rendered = renderResultByAgent(detail.task.agentRole, detail.task.result);
-
-  return html`
-    <div class="detail-overlay" onClick=${onClose}>
-      <div class="detail" onClick=${(e) => e.stopPropagation()}>
-        <span class="close" onClick=${onClose}>×</span>
-        <h1>
-          ${detail.task.agentRole}
-          <${ModelBadge} entry=${detail.task} />
-          <span class="muted"> ·</span> <span class="muted">${detail.task.runTitle}</span>
-        </h1>
-        <div class="faint mono" style="font-size: 11px; margin: 8px 0 16px;">
-          ${detail.task.taskId}
-          <${CopyIdButton} value=${detail.task.taskId} />
-          · ${detail.task.phase} · ${detail.task.status}
-          ${detail.failureKind ? html`<span class="badge status-failed" style="margin-left: 6px;">${detail.failureKind}</span>` : null}
-        </div>
-
-        ${detail.idle ? html`
-          <div class="subcard" style="margin-bottom: 16px;">
-            <div class="row" style="gap: 14px; align-items: center;">
-              <span><span class="status-dot"></span><strong>live</strong></span>
-              <span class="muted mono" style="font-size: 11px;">forge-${detail.task.taskId}</span>
-            </div>
-            <div class="muted ${detail.idle.expired ? "" : ""}" style="font-size: 12px; margin-top: 6px;">
-              ${idleLine(detail.idle)}
-            </div>
-          </div>
-        ` : null}
-
-        <h3>Result</h3>
-        ${rendered ?? html`<pre>${JSON.stringify(detail.task.result, null, 2)}</pre>`}
-
-        ${detail.verdicts.length > 0 ? html`
-          <h3>Verdicts (${detail.verdicts.length})</h3>
-          ${detail.verdicts.map((v) => html`
-            <div class="subcard">
-              <strong>${v.redRole}</strong>
-              <span class="badge status-${v.verdict === "pass" ? "complete" : v.verdict === "fail" ? "failed" : "pending"}">${v.verdict}</span>
-              <span class="muted">authority: ${v.authority}</span>
-              <span class="muted">confidence: ${v.confidence.toFixed(2)}</span>
-              ${v.findings && v.findings.length > 0 ? html`
-                <pre style="margin-top: 8px;">${JSON.stringify(v.findings, null, 2)}</pre>
-              ` : null}
-            </div>
-          `)}
-        ` : null}
-
-        ${detail.gates.length > 0 ? html`
-          <h3>Gates (${detail.gates.length})</h3>
-          ${detail.gates.map((g) => html`
-            <div class="subcard">
-              <strong>${g.decision}</strong> by ${g.decidedBy} at ${g.decidedAt}
-              ${g.rationale ? html`<div class="md" style="margin-top: 6px;" dangerouslySetInnerHTML=${{ __html: md(g.rationale) }}></div>` : null}
-            </div>
-          `)}
-        ` : null}
-
-        ${detail.events && detail.events.length > 0 ? html`
-          <h3>Timeline (${detail.events.length})</h3>
-          <div class="timeline">
-            ${detail.events.map((e, i) => html`
-              <div class="row" key=${i} style="gap: 8px; padding: 2px 0; align-items: baseline;">
-                <span class="muted mono" style="font-size: 11px; min-width: 76px;">${formatClock(e.createdAt)}</span>
-                <span class="badge ${eventBadgeClass(e)}">${eventBadgeText(e)}</span>
-                ${eventDetail(e) ? html`<span class="muted" style="font-size: 12px;">${eventDetail(e)}</span>` : null}
-              </div>
-            `)}
-          </div>
-        ` : null}
-
-        ${detail.stdoutLog ? html`
-          <h3>Container stdout (${logSizeLabel(detail.stdoutBytes, detail.stdoutLog)})</h3>
-          <pre class="log">${tailChars(detail.stdoutLog, 8000)}</pre>
-        ` : null}
-
-        ${detail.stderrLog && detail.stderrLog.trim().length > 0 ? html`
-          <h3>Container stderr (${logSizeLabel(detail.stderrBytes, detail.stderrLog)})</h3>
-          <pre class="log">${tailChars(detail.stderrLog, 8000)}</pre>
-        ` : null}
-      </div>
-    </div>
-  `;
-}
-
 function formatRelativeTime(iso) {
   if (!iso) return "—";
   const then = new Date(iso).getTime();
@@ -2687,62 +2484,6 @@ function formatRelativeTime(iso) {
   if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
-}
-
-// Wall-clock run-time of a finished task — `formatDuration`, imported from
-// duration.js since FG-694 so the Current-activity view shares the one format.
-
-function truncate(s, max) {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + `\n... (${s.length - max} more chars)`;
-}
-
-// Server now sends a bounded tail (last 64KB), not the whole log. Show the most
-// recent slice and label with the true on-disk size.
-function tailChars(s, max) {
-  if (s.length <= max) return s;
-  return `... (earlier output omitted)\n` + s.slice(s.length - max);
-}
-function logSizeLabel(bytes, received) {
-  const kb = (bytes / 1024).toFixed(1);
-  // received is a tail; if the file is bigger than what we got, say so.
-  if (typeof bytes === "number" && bytes > received.length) return `last ${(received.length / 1024).toFixed(0)} KB of ${kb} KB`;
-  return `${kb} KB`;
-}
-
-// WALK-5 helpers for the task timeline + live activity panel.
-function formatDurMs(ms) {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60), rm = m % 60;
-  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
-}
-function formatClock(iso) {
-  try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
-}
-// FG-487: review_loop.verification_* / campaign_item.host_gate_* are the new
-// host-side verification phase-boundary events (events.ts) — eventBadgeClass/
-// reviewLoopVerificationDetail/hostGateDetail live in verification-render.js
-// so their decision logic is unit-testable.
-function eventDetail(e) {
-  const p = e.payload;
-  if (!p || typeof p !== "object") return "";
-  if (/verification_started|verification_finished/.test(e.eventType)) return reviewLoopVerificationDetail(p);
-  if (/host_gate_started|host_gate_finished/.test(e.eventType)) return hostGateDetail(p);
-  if (typeof p.failure_kind === "string") return p.failure_kind;
-  if (typeof p.message === "string") return p.message;
-  if (typeof p.exitCode === "number") return `exit ${p.exitCode}`;
-  if (typeof p.from === "string" && typeof p.to === "string") return `${p.from} → ${p.to}`;
-  if (typeof p.containerName === "string") return p.containerName;
-  return "";
-}
-function idleLine(idle) {
-  if (idle.measured === false) return `awaiting start · timeout ${formatDurMs(idle.idleTimeoutMs)}`;
-  const note = idle.hasOutput ? "" : ", no output yet";
-  const tail = idle.expired ? "(idle budget exhausted)" : `(${formatDurMs(idle.remainingMs)} left)`;
-  return `idle ${formatDurMs(idle.idleMs)}${note} · timeout ${formatDurMs(idle.idleTimeoutMs)} ${tail}`;
 }
 
 render(h(App), document.getElementById("app"));

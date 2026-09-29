@@ -13,6 +13,10 @@
 //   ?campaignId=&ticketId= for one campaign item, or ?campaignId= alone for ALL of a campaign's items keyed by ticketId (FG-746/RF-2 batch)
 //   (FG-746: the unscoped /api/host-verifications/recent feed was retired with the standalone Verification tab)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
+// - GET /api/review/:id                   one review + its findings by id, past the ledger window (?projectDir, FG-821)
+// - GET /api/runs                         the run index over core's queryRuns + the server-computed activeCount (?status, ?since, ?limit, ?cursor, ?projectKey|?projectDir, FG-821)
+// - GET /api/backlog/:id/runs             the runs dispatched for one ticket (?projectKey|?projectDir, FG-821)
+// - GET /api/run/:id/evidence             the run's review, launch and host-verification ids + ticket (?projectDir, FG-821)
 // - GET /api/shipping-audit               per-ticket readiness + shipping-review + mechanical-check projection for ONE project, read-only (?projectKey|?projectDir, FG-386)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 // - GET /api/completed-runs               completed forge RUNS per bucket over the same window grid — a count, not a duration (FG-683)
@@ -39,7 +43,9 @@ import {
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
   runMap, taskExplain, verificationEvidenceForTask, attentionInboxFor,
+  reviewById, runsForTicket, runEvidence,
 } from "./queries.js";
+import { runIndex, RunIndexRequestError } from "./run-index.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
 import { budgetedLivenessProbe, RECONCILE_FANOUT_BUDGET_MS } from "@forge/reconcile-candidate";
@@ -218,7 +224,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   // definition src/v2/launch.ts's launchDir enforces.
   const launchLogMatch = path.match(/^\/api\/launches\/([^/]+)\/log$/);
   if (launchLogMatch) {
-    const id = decodeLaunchId(launchLogMatch[1]!);
+    const id = decodePathId(launchLogMatch[1]!);
     if (!isLaunchId(id)) {
       res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid launch id" }));
       return;
@@ -234,7 +240,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   const launchMatch = path.match(/^\/api\/launches\/([^/]+)$/);
   if (launchMatch) {
-    const id = decodeLaunchId(launchMatch[1]!);
+    const id = decodePathId(launchMatch[1]!);
     if (!isLaunchId(id)) {
       res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid launch id" }));
       return;
@@ -728,6 +734,122 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
 
+  // FG-821: the run index. Rows are core's queryRuns (what `forge runs query` prints),
+  // scoped like every list route and memoized per (scope, status, since) for one poll
+  // interval — see runIndex. activeCount is the Runs badge's only source. Built BEFORE
+  // writeHead; a bad parameter is a 400, a thrown read a 503 carrying activeCount: null
+  // so the badge reads "unknown", never 0.
+  if (path === "/api/runs") {
+    const status = url.searchParams.get("status") ?? undefined;
+    if (status !== undefined && !/^[a-z_]{1,32}$/.test(status)) {
+      sendJson(res, 400, { error: "invalid status" });
+      return;
+    }
+    const rawLimit = Number(url.searchParams.get("limit") ?? 50);
+    const limit = clamp(Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 50, 1, 200);
+    let payload: string;
+    try {
+      payload = JSON.stringify(
+        runIndex({
+          scope: scopeFromUrl(url),
+          ...(status ? { status } : {}),
+          ...(url.searchParams.has("since") ? { since: url.searchParams.get("since")! } : {}),
+          ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+          limit,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof RunIndexRequestError) {
+        sendJson(res, 400, { error: err.message });
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/runs: reading the run index failed:", err);
+      sendJson(res, 503, { runs: [], activeCount: null, nextCursor: null, error: message });
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  // FG-821: one review by id, so a review link older than the ledger's 25-row window
+  // resolves. An object route: the run map's scope rule (projectKey alone is 409,
+  // unscoped works); out of scope or unknown is 404.
+  const reviewMatch = path.match(/^\/api\/review\/([^/]+)$/);
+  if (reviewMatch) {
+    if (url.searchParams.has("projectKey") && !url.searchParams.get("projectDir")) {
+      sendJson(res, 409, { error: "Select an exact checkout for the review." });
+      return;
+    }
+    const id = decodePathId(reviewMatch[1]!);
+    let review: ReturnType<typeof reviewById>;
+    try {
+      review = reviewById(id, scopeFromUrl(url));
+    } catch (err) {
+      // A store predating FG-638 has no reviews table (a read-only open never migrates).
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`/api/review/${id}: reading the review failed:`, err);
+      sendJson(res, 503, { error: message });
+      return;
+    }
+    if (!review) {
+      sendJson(res, 404, { error: `review ${id} not found` });
+      return;
+    }
+    sendJson(res, 200, review);
+    return;
+  }
+
+  // FG-821: the ticket page's runs — runs whose metadata names this ticket. A list over
+  // the ticket, so it takes the list scope (projectKey or projectDir); unscoped lists
+  // every project's runs for that id.
+  const ticketRunsMatch = path.match(/^\/api\/backlog\/([^/]+)\/runs$/);
+  if (ticketRunsMatch) {
+    const ticketId = decodePathId(ticketRunsMatch[1]!);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ticketId)) {
+      sendJson(res, 400, { error: "invalid ticket id" });
+      return;
+    }
+    let payload: string;
+    try {
+      payload = JSON.stringify({ ticketId, runs: runsForTicket(ticketId, scopeFromUrl(url)) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`/api/backlog/${ticketId}/runs: reading the ticket's runs failed:`, err);
+      sendJson(res, 503, { ticketId, runs: [], error: message });
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
+    return;
+  }
+
+  // FG-821: the run page's Evidence tab — its tasks' links, unioned server-side in one
+  // read. An object route: the review route's scope rule (projectKey alone is 409,
+  // unscoped works); out of scope or unknown is 404.
+  const runEvidenceMatch = path.match(/^\/api\/run\/([^/]+)\/evidence$/);
+  if (runEvidenceMatch) {
+    if (url.searchParams.has("projectKey") && !url.searchParams.get("projectDir")) {
+      sendJson(res, 409, { error: "Select an exact checkout for the run's evidence." });
+      return;
+    }
+    const runId = decodePathId(runEvidenceMatch[1]!);
+    let evidence: ReturnType<typeof runEvidence>;
+    try {
+      evidence = runEvidence(runId, scopeFromUrl(url));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`/api/run/${runId}/evidence: reading the run's evidence failed:`, err);
+      sendJson(res, 503, { error: message });
+      return;
+    }
+    if (!evidence) {
+      sendJson(res, 404, { error: `run ${runId} not found` });
+      return;
+    }
+    sendJson(res, 200, evidence);
+    return;
+  }
+
   // FG-348: read-only Run Map graph for a run. Pure GET, no subprocess, no
   // mutation. Scope-gated like /api/config-graph (a projectKey without an exact
   // projectDir is refused). Built BEFORE writeHead so a degraded read never
@@ -819,14 +941,15 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-/** Percent-decode a captured launch id, or return a sentinel `isLaunchId` refuses.
+/** Percent-decode a captured launch (or review/ticket) id, or return "" — a sentinel
+ *  every id guard refuses.
  *
  *  `decodeURIComponent` THROWS on a malformed encoding — `/api/launches/%`,
  *  `/api/launches/%E0%A4%A` — and an uncaught throw here became a 500 instead of the
  *  4xx an identity-addressed surface owes a bad identity (BD-10). A bad id is a bad
  *  request whether or not it happens to be decodable, so an undecodable one is refused
  *  through the SAME charset guard as everything else rather than a second code path. */
-function decodeLaunchId(raw: string): string {
+function decodePathId(raw: string): string {
   try {
     return decodeURIComponent(raw);
   } catch {

@@ -54,7 +54,7 @@ export function inboxSeverityBadge(item) {
     : { class: "inbox-sev-unknown", label: "priority unknown" };
 }
 
-/** Where a row links, by kind: run/task blockers → the run map; a ticket readiness gap →
+/** Where a row links, by kind: run/task blockers → the run page (FG-821); a ticket readiness gap →
  *  that ticket in the backlog; a campaign pause → campaigns; an auth/setup wall → Config.
  *  Returns null when the item carries no id the target needs (so the row renders with no
  *  link rather than a dead one). */
@@ -74,11 +74,11 @@ export function inboxItemLink(item) {
     case "blocked_by_red_or_reviewer":
     case "merge_conflict":
     case "integration_blocked_park":
-      if (runId) return { hash: `#run-map/${encodeURIComponent(runId)}`, label: "Open run" };
+      if (runId) return { hash: `#run/${encodeURIComponent(runId)}`, label: "Open run" };
       if (ticketId) return { hash: ticketHash(ticketId), label: `Open ${ticketId}` };
       return null;
     default:
-      if (runId) return { hash: `#run-map/${encodeURIComponent(runId)}`, label: "Open run" };
+      if (runId) return { hash: `#run/${encodeURIComponent(runId)}`, label: "Open run" };
       if (ticketId) return { hash: ticketHash(ticketId), label: `Open ${ticketId}` };
       return null;
   }

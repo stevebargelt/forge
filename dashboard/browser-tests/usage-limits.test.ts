@@ -231,7 +231,7 @@ test("In-flight rows copy their task id without opening task detail", async () =
   await copy.waitFor();
   await copy.click();
   await assertEventually(async () => (await copy.innerText()) === "copied!");
-  assert.equal(await page.locator(".detail-overlay").count(), 0);
+  assert.doesNotMatch(new URL(page.url()).hash, /^#task\//, "copying the id does not open the task page");
   await page.close();
 });
 
@@ -263,7 +263,7 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   const copy = page.getByRole("button", { name: "Copy task id task-feed" });
   await copy.click();
   await assertEventually(async () => (await copy.innerText()) === "copied!");
-  assert.equal(await page.locator(".detail-overlay").count(), 0);
+  assert.doesNotMatch(new URL(page.url()).hash, /^#task\//, "copying the id does not open the task page");
   await page.close();
 });
 

@@ -427,6 +427,39 @@ section.feed { margin-top: 24px; }
 .page-kicker { color: var(--fg-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .route-notice { margin-top: 16px; }
 .placeholder-view a { color: var(--accent); }
+/* FG-821: object pages — breadcrumbs, the one-line screen contract, object tabs. */
+.object-head { flex-direction: column; align-items: flex-start; gap: 4px; }
+.breadcrumbs ol { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; font-size: 12px; color: var(--fg-dim); }
+.breadcrumbs li + li::before { content: "›"; margin-right: 4px; color: var(--fg-faint); }
+.breadcrumbs a { color: var(--accent); text-decoration: none; }
+.breadcrumbs a:hover { text-decoration: underline; }
+.breadcrumbs [aria-current="page"] { color: var(--fg); }
+.screen-line { margin: 10px 0 0; font-size: 13px; color: var(--fg-dim); }
+.screen-line-needs { color: var(--warn); }
+.screen-verb { font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; color: var(--fg); }
+.object-tabs { display: flex; gap: 4px; margin: 14px 0 10px; border-bottom: 1px solid var(--border); }
+.object-tab { padding: 6px 12px; color: var(--fg-dim); text-decoration: none; border-bottom: 2px solid transparent; font-size: 13px; }
+.object-tab:hover { color: var(--fg); }
+.object-tab-current { color: var(--fg); border-bottom-color: var(--accent); }
+.object-tab:focus-visible, .breadcrumbs a:focus-visible, .task-links a:focus-visible, .runs-table a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.task-links { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 4px 0 8px; font-size: 12px; }
+.task-links div { display: flex; gap: 6px; align-items: baseline; }
+.task-links dt { color: var(--fg-faint); }
+.task-links dd { margin: 0; }
+.task-links a, .run-evidence a, .ticket-run-list a, .runs-table a, .task-link { color: var(--accent); text-decoration: none; }
+.task-links a:hover, .run-evidence a:hover, .ticket-run-list a:hover, .runs-table a:hover, .task-link:hover { text-decoration: underline; }
+.run-evidence-group h2, .ticket-runs h2 { font-size: 14px; margin: 16px 0 6px; }
+.run-evidence-list, .ticket-run-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ticket-run-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.runs-filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 14px 0 10px; font-size: 12px; }
+.runs-filters a { text-decoration: none; }
+.runs-table-wrap { overflow-x: auto; }
+.runs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.runs-table th { text-align: left; color: var(--fg-faint); font-weight: 500; font-size: 11px; padding: 4px 8px; }
+.runs-table td { padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+.runs-id { font-size: 10px; }
+.runs-load-more { margin-top: 10px; }
+a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
 .mobile-head, .bottom-bar { display: none; }
 .nav-drawer-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 70; }
 .nav-drawer {
@@ -1575,6 +1608,7 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .rm-nodes { display: flex; flex-direction: column; gap: 8px; }
 .rm-node-group { display: flex; flex-direction: column; gap: 4px; }
 .rm-node {
+  display: block; text-decoration: none; box-sizing: border-box;
   text-align: left; width: 100%;
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px;
   padding: 8px 10px; cursor: pointer; color: var(--fg); font: inherit;
@@ -1596,7 +1630,7 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 /* Reds attach under their primary, shape-distinguished (◆ + solid left accent). */
 .rm-reds { display: flex; flex-direction: column; gap: 4px; margin-left: 16px; }
 .rm-red {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; text-decoration: none; box-sizing: border-box;
   text-align: left; width: 100%;
   background: var(--bg-elev); border: 1px solid var(--border);
   border-left: 3px solid var(--magenta); border-radius: 4px;
@@ -1617,12 +1651,13 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .rm-fanout-children { display: flex; flex-direction: column; gap: 8px; padding: 0 8px 8px; }
 .rm-empty { font-size: 12px; padding: 4px 0; }
 .rm-open-btn {
+  text-decoration: none;
   background: transparent; border: 1px solid var(--border); border-radius: 4px;
   color: var(--accent); font: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .rm-open-btn:hover { border-color: var(--accent); }
 
-/* Explain panel — reuses .detail-overlay/.detail. */
+/* Explain page content (FG-821: a page, no longer an overlay). */
 .rx-panel { max-width: 720px; }
 .rx-heading { margin: 0 0 12px; font-size: 18px; }
 .rx-identity { display: flex; gap: 10px; align-items: baseline; margin-bottom: 12px; font-size: 13px; }

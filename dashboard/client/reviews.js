@@ -18,6 +18,9 @@ import {
   sourceLabels,
   anchorText,
 } from "./review-ledger-render.js";
+import { breadcrumbTrail, parentHash } from "./breadcrumbs-render.js";
+import { reviewHeader } from "./screen-header-render.js";
+import { ObjectHead, useEscapeTo } from "./object-page-view.js";
 
 const html = htm.bind(h);
 
@@ -91,10 +94,10 @@ function ReviewCard({ review, expanded, onToggle, linked = false }) {
       <div class="row" style="justify-content: space-between; align-items: baseline;">
         <div>
           <span class="badge ${reviewStateBadgeClass(review.state)}">${review.state}</span>
-          <strong class="mono" style="margin-left: 8px;">${review.id}</strong>
+          <a class="mono review-id-link" style="margin-left: 8px;" href=${`#reviews/${encodeURIComponent(review.id)}`}><strong>${review.id}</strong></a>
           ${review.ticketId ? html`<span class="muted" style="margin-left: 8px;">${review.ticketId}</span>` : null}
         </div>
-        <button class="tab" onClick=${onToggle}>${expanded ? "hide findings" : `findings (${review.findings.length})`}</button>
+        ${onToggle ? html`<button class="tab" onClick=${onToggle}>${expanded ? "hide findings" : `findings (${review.findings.length})`}</button>` : null}
       </div>
 
       <div class="review-summary-grid">
@@ -114,15 +117,9 @@ function ReviewCard({ review, expanded, onToggle, linked = false }) {
     </div>`;
 }
 
-// FG-820: `reviewId` comes from a #reviews/<reviewId> deep link; that review opens
-// expanded and scrolls into view. A review outside the loaded ledger window stays unfound.
-export function ReviewsView({ data, reviewId = null }) {
+// The ledger: the last 25 reviews in scope. A review opens its own page (ReviewPage).
+export function ReviewsView({ data }) {
   const [expanded, setExpanded] = useState({});
-  const linkedLoaded = Boolean(reviewId && data && (data.reviews || []).some((r) => r.id === reviewId));
-  useEffect(() => {
-    if (!linkedLoaded) return;
-    document.querySelector(`[data-review-id="${CSS.escape(reviewId)}"]`)?.scrollIntoView({ block: "start" });
-  }, [reviewId, linkedLoaded]);
   if (!data) return html`<div class="muted" style="margin-top: 20px;">loading reviews…</div>`;
 
   const reviews = data.reviews || [];
@@ -139,9 +136,42 @@ export function ReviewsView({ data, reviewId = null }) {
             <${ReviewCard}
               key=${r.id}
               review=${r}
-              expanded=${expanded[r.id] ?? r.id === reviewId}
-              linked=${r.id === reviewId}
+              expanded=${expanded[r.id] ?? false}
               onToggle=${() => setExpanded((e) => ({ ...e, [r.id]: !e[r.id] }))}
             />`)}
+    </section>`;
+}
+
+// FG-821: #reviews/<reviewId> — one review read by id (GET /api/review/:id), so a link
+// older than the ledger's 25-row window still resolves. Read unscoped: a review id is
+// global, like a run's.
+export function ReviewPage({ reviewId, projects, scope }) {
+  const [load, setLoad] = useState({ id: null, review: null, error: null });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/review/${encodeURIComponent(reviewId)}`);
+        const body = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (!res.ok || !body) setLoad({ id: reviewId, review: null, error: res.status === 404 ? `No review ${reviewId}.` : body?.error ?? `HTTP ${res.status}` });
+        else setLoad({ id: reviewId, review: body, error: null });
+      } catch (e) {
+        if (!cancelled) setLoad({ id: reviewId, review: null, error: String(e) });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [reviewId]);
+  const current = load.id === reviewId ? load : { review: null, error: null };
+  const review = current.review;
+  const payload = { projectDir: review?.projectDir ?? null, ticketId: review?.ticketId ?? null, runId: review?.runId ?? null, reviewId };
+  useEscapeTo(parentHash("review", payload, scope));
+  return html`
+    <section class="object-page review-page" data-review-id=${reviewId}>
+      <${ObjectHead} crumbs=${breadcrumbTrail("review", payload, projects)} title=${`Review ${reviewId}`} header=${reviewHeader(review, review ? nextRequiredAction(review) : null)} />
+      ${current.error ? html`<div class="card" style="color: var(--err);" role="alert">${current.error}</div>` : null}
+      ${review
+        ? html`<${ReviewCard} review=${review} expanded=${true} linked=${true} onToggle=${null} />`
+        : current.error ? null : html`<div class="muted">loading review…</div>`}
     </section>`;
 }

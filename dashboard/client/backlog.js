@@ -4,10 +4,11 @@
 // `forge backlog list` via /api/backlog. No mutation paths.
 
 import { h } from "preact";
-import { useState, useMemo, useEffect, useRef } from "preact/hooks";
+import { useState, useMemo } from "preact/hooks";
 import htm from "htm";
 import { md } from "./renderers.js";
 import { backlogBoardState, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
+import { hashFor } from "./view-routing.js";
 
 const html = htm.bind(h);
 
@@ -23,22 +24,13 @@ function statusBadgeClass(status) {
   return "status-pending";
 }
 
-// FG-820: `ticketId` comes from a #backlog/<ticketId> deep link (an inbox readiness row
-// links there); that ticket's detail opens once the backlog has loaded it.
-export function BacklogView({ data, projectFilter, ticketId = null }) {
+// FG-821: a ticket opens its page, #backlog/<ticketId> (ticket-page-view.js), keeping
+// the scope in hand — ticket ids are per project.
+export function BacklogView({ data, projectFilter, scope }) {
   const [typeFilter, setTypeFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null);
   const [search, setSearch] = useState("");
-  const [selectedTicket, setSelectedTicket] = useState(null);
   const [selectedNote, setSelectedNote] = useState(null);
-  const openedFor = useRef(null);
-  useEffect(() => {
-    if (!ticketId || !data || openedFor.current === ticketId) return;
-    const ticket = (data.tickets || []).find((tk) => tk.id === ticketId);
-    if (!ticket) return;
-    openedFor.current = ticketId;
-    setSelectedTicket(ticket);
-  }, [ticketId, data]);
 
   if (!projectFilter) {
     return html`<div class="muted" style="margin-top: 20px;">Select a project to view its backlog.</div>`;
@@ -170,7 +162,7 @@ export function BacklogView({ data, projectFilter, ticketId = null }) {
                     key=${`${tk.checkoutDir || ""}:${tk.id}`}
                     ticket=${tk}
                     epic=${tk.epic ? epicsById[`${tk.checkoutDir || ""}:${tk.epic}`] : null}
-                    onClick=${() => setSelectedTicket(tk)}
+                    href=${hashFor({ view: "backlog", id: tk.id, scope })}
                   />
                 `)}
               </section>
@@ -178,13 +170,6 @@ export function BacklogView({ data, projectFilter, ticketId = null }) {
           })
       }
 
-      ${selectedTicket ? html`
-        <${TicketDetail}
-          ticket=${selectedTicket}
-          epic=${selectedTicket.epic ? epicsById[`${selectedTicket.checkoutDir || ""}:${selectedTicket.epic}`] : null}
-          onClose=${() => setSelectedTicket(null)}
-        />
-      ` : null}
       ${selectedNote ? html`
         <${NoteDetail} entry=${selectedNote} onClose=${() => setSelectedNote(null)} />
       ` : null}
@@ -249,15 +234,11 @@ function NoteDetail({ entry, onClose }) {
   `;
 }
 
-function TicketCard({ ticket, epic, onClick }) {
-  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } };
+function TicketCard({ ticket, epic, href }) {
   return html`
-    <div
+    <a
       class="card backlog-ticket-card"
-      onClick=${onClick}
-      role="button"
-      tabIndex="0"
-      onKeyDown=${onKey}
+      href=${href}
       aria-label=${"Open " + ticket.type + " " + ticket.id + ": " + ticket.title}
     >
       <div class="head">
@@ -272,47 +253,6 @@ function TicketCard({ ticket, epic, onClick }) {
       ${ticket.body && ticket.body.trim() ? html`
         <div class="preview muted">${ticket.body.trim().slice(0, 200)}</div>
       ` : null}
-    </div>
-  `;
-}
-
-function TicketDetail({ ticket, epic, onClose }) {
-  const onKey = (e) => { if (e.key === "Escape") onClose(); };
-  const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
-  return html`
-    <div class="detail-overlay" onClick=${onClose} onKeyDown=${onKey} role="dialog" aria-modal="true" aria-label=${"Ticket " + ticket.id}>
-      <div class="detail" onClick=${(e) => e.stopPropagation()}>
-        <span
-          class="close"
-          onClick=${onClose}
-          role="button"
-          tabIndex="0"
-          aria-label="Close ticket detail"
-          onKeyDown=${onCloseKey}
-        >×</span>
-
-        <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: baseline;">
-          <span class="badge ${statusBadgeClass(ticket.status)}" aria-label=${"Status: " + ticket.status}>${ticket.status}</span>
-          <span class="badge backlog-type-badge">${ticket.type}</span>
-          <span class="mono faint" style="font-size: 12px;">${ticket.id}</span>
-          ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}
-        </div>
-
-        <h1 style="margin-bottom: 12px;">${ticket.title}</h1>
-
-        <div class="subcard" style="margin-bottom: 16px; font-size: 12px;">
-          <div class="row" style="gap: 16px; flex-wrap: wrap;">
-            ${epic ? html`<span><span class="muted">epic:</span> ${epic.title || ticket.epic} <span class="faint mono">(${ticket.epic})</span></span>` : null}
-            ${ticket.created ? html`<span><span class="muted">created:</span> ${ticket.created}</span>` : null}
-            ${ticket.closed ? html`<span><span class="muted">closed:</span> ${ticket.closed}</span>` : null}
-            ${ticket.related && ticket.related.length ? html`<span><span class="muted">related:</span> ${ticket.related.join(", ")}</span>` : null}
-          </div>
-        </div>
-
-        ${ticket.body && ticket.body.trim()
-          ? html`<div class="md" dangerouslySetInnerHTML=${{ __html: md(ticket.body) }}></div>`
-          : html`<div class="muted faint">No body content.</div>`}
-      </div>
-    </div>
+    </a>
   `;
 }
