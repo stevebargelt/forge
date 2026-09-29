@@ -37,8 +37,9 @@ export function ScreenLine({ header }) {
   `;
 }
 
-/** An object page's head: the trail, then the title, then the screen line. */
-export function ObjectHead({ crumbs, title, header, children }) {
+/** An object page's head: the trail, then the title, then the screen line — with the
+ *  page's action buttons (FG-822), when it has any, on the "what do I do" line. */
+export function ObjectHead({ crumbs, title, header, actions = null, children }) {
   return html`
     <div class="page-head object-head">
       <${Breadcrumbs} crumbs=${crumbs} />
@@ -46,6 +47,7 @@ export function ObjectHead({ crumbs, title, header, children }) {
       ${children}
     </div>
     <${ScreenLine} header=${header} />
+    ${actions}
   `;
 }
 

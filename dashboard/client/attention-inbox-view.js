@@ -7,9 +7,11 @@
 // `Attention inbox unavailable` + Retry, and NEVER the calm empty copy — because that
 // copy is reachable only from a validated payload.
 //
-// READ-ONLY: the only controls are Retry / Refresh (re-read; Refresh also re-sorts the
-// pinned rows, FG-819) and the per-row link (navigates via the hash). There is no advance/reject/mutation here — the inbox renders existing Forge
-// state and typed attention records; it invents no chat semantics.
+// The section's own controls are Retry / Refresh (re-read; Refresh also re-sorts the
+// pinned rows, FG-819) and the per-row link (navigates via the hash). A host may pass
+// `rowActions` (FG-822): for a row naming a task, it renders that task's eligible action
+// buttons in place of the copy-paste requestedAction — the eligibility is the server's
+// preview, never decided here. The inbox invents no chat semantics.
 
 import { h } from "preact";
 import htm from "htm";
@@ -22,7 +24,7 @@ const html = htm.bind(h);
 // (FG-819 order pinning); without them the section renders the server order as-is.
 // `hrefFor` lets the host carry its current scope onto a row link (FG-820); the default
 // is the link as the render module decided it.
-export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null, hrefFor = (hash) => hash }) {
+export function AttentionInboxSection({ load, now, onRetry, orderedItems = null, listProps = {}, onRefresh = null, hrefFor = (hash) => hash, rowActions = null }) {
   const view = inboxView(load);
   const items = orderedItems ?? view.items;
   return html`
@@ -45,7 +47,7 @@ export function AttentionInboxSection({ load, now, onRetry, orderedItems = null,
                   ? html`<div class="inbox-degraded" role="status">Some sources could not be read: ${view.degraded.join(", ")}.</div>`
                   : null}
                 <div class="inbox-list" ...${listProps}>
-                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} hrefFor=${hrefFor} />`)}
+                  ${items.map((summary) => html`<${InboxItemRow} key=${summary.id} summary=${summary} now=${now} hrefFor=${hrefFor} rowActions=${rowActions} />`)}
                 </div>
               `}
     </section>
@@ -54,7 +56,7 @@ export function AttentionInboxSection({ load, now, onRetry, orderedItems = null,
 
 /** The Home inbox: the section above, with its rows pinned to the order first shown until
  *  an idle, tab-visibility, or manual-refresh boundary (FG-819). */
-export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor }) {
+export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor, rowActions = null }) {
   const view = inboxView(load);
   const pin = usePinnedOrder(view.phase === "ready" ? view.items : null, (summary) => summary.id);
   const refresh = () => pin.refresh(onRetry);
@@ -66,14 +68,16 @@ export function PinnedAttentionInboxSection({ load, now, onRetry, hrefFor }) {
     listProps=${pin.activityProps}
     onRefresh=${refresh}
     hrefFor=${hrefFor}
+    rowActions=${rowActions}
   />`;
 }
 
 // One row: the kind badge, the severity, the identity (ticket/project), the reason and
 // requested action, the age, and the link to the relevant surface.
-function InboxItemRow({ summary, now, hrefFor }) {
+function InboxItemRow({ summary, now, hrefFor, rowActions }) {
+  const action = html`<div class="faint inbox-action">${summary.requestedAction}</div>`;
   return html`
-    <div class="item inbox-row">
+    <div class="item inbox-row" data-item-id=${summary.id}>
       <div class="inbox-row-badges">
         <span class="badge ${summary.badgeClass}">${summary.badgeLabel}</span>
         <span class="badge inbox-sev ${summary.severityClass}">${summary.severityLabel}</span>
@@ -83,7 +87,7 @@ function InboxItemRow({ summary, now, hrefFor }) {
           ${summary.ticketId ? html`<strong>${summary.ticketId}</strong><span class="faint"> · </span>` : null}
           <span class="inbox-reason">${summary.reason}</span>
         </div>
-        <div class="faint inbox-action">${summary.requestedAction}</div>
+        ${summary.taskId && rowActions ? rowActions(summary, action) : action}
         <div class="faint mono inbox-meta">
           ${summary.source}${summary.projectLabel ? ` · ${summary.projectLabel}` : ""}
         </div>

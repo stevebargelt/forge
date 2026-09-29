@@ -131,6 +131,16 @@ export function retryPolicy(failureKind: string | undefined, taskId?: string): R
   return { ...disposition, advice: disposition.advice.replaceAll("<id>", taskId) };
 }
 
+/**
+ * FG-822: POLICY's own row for a kind, or undefined for no kind or a kind this
+ * build does not know. The dashboard's retry route is a MUTATION surface, so it
+ * reads this rather than retryPolicy(), whose permissive default is advisory.
+ */
+export function recordedRetryDisposition(failureKind: string | undefined | null): RetryDisposition | undefined {
+  if (failureKind === undefined || failureKind === null) return undefined;
+  return Object.hasOwn(POLICY, failureKind) ? POLICY[failureKind as FailureKind] : undefined;
+}
+
 // ── FG-688: which failure kinds an adopt-preserving re-drive may act on ──
 //
 // The ONE enumeration. `forge recover <parent> --re-drive`'s mutation guard and
