@@ -41,7 +41,7 @@ test("item lifecycle badges resolve the campaign item states", () => {
   assert.equal(itemLifecycleBadgeClass("blocked_by_red"), "status-blocked_by_red");
   assert.equal(itemLifecycleBadgeClass("awaiting_recovery"), "status-awaiting_recovery");
   assert.equal(itemLifecycleBadgeClass("complete"), "status-complete");
-  assert.equal(itemLifecycleBadgeClass("nonsense"), "status-pending");
+  assert.equal(itemLifecycleBadgeClass("nonsense"), "status-unknown");
 });
 
 test("shortSha truncates and names the empty commit", () => {

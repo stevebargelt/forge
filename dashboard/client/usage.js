@@ -4,6 +4,7 @@ import { h } from "preact";
 import { useState } from "preact/hooks";
 import htm from "htm";
 import { UsageLimits } from "./usage-limits.js";
+import { formatTokens } from "./format.js";
 
 const html = htm.bind(h);
 
@@ -15,13 +16,6 @@ function weighted(row) {
     + 1.25 * (row.cacheCreationTokens ?? 0)
     + 0.1  * (row.cacheReadTokens ?? 0)
     + 5    * (row.outputTokens ?? 0);
-}
-
-function fmtK(n) {
-  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2).replace(/\.?0+$/, "") + "B";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
-  return String(Math.round(n));
 }
 
 // "2026-05-27" -> "5/27". String-split, no Date parsing (avoids UTC/local drift).
@@ -95,7 +89,7 @@ export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChan
       <div class="usage-headline">
         <div class="usage-headline-card">
           <div class="usage-headline-label">weighted tokens (${since})</div>
-          <div class="usage-headline-value" title="input + 1.25× cache_create + 0.1× cache_read + 5× output_tokens">${fmtK(sumN)}</div>
+          <div class="usage-headline-value" title="input + 1.25× cache_create + 0.1× cache_read + 5× output_tokens">${formatTokens(sumN)}</div>
           ${deltaEl}
         </div>
         <div class="usage-headline-card">
@@ -105,7 +99,7 @@ export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChan
         </div>
         <div class="usage-headline-card">
           <div class="usage-headline-label">requests (${since})</div>
-          <div class="usage-headline-value">${fmtK(totalReqsN)}</div>
+          <div class="usage-headline-value">${formatTokens(totalReqsN)}</div>
         </div>
       </div>
 
@@ -236,7 +230,7 @@ function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
           <span style="margin-right: 4px; font-size: 10px;">${isExpanded ? "▾" : "▸"}</span>${label}
         </div>
         <div class="usage-bar-wrap">
-          <div class="usage-bar" style=${{ width: barPct + "%" }} title=${`${fmtK(w)} weighted tokens`}></div>
+          <div class="usage-bar" style=${{ width: barPct + "%" }} title=${`${formatTokens(w)} weighted tokens`}></div>
         </div>
         <div>
           <span class=${"usage-cache-badge " + cacheClass} title=${`Cache hit rate: ${hitRate.toFixed(0)}% of input tokens served from cache`}>${hitRate.toFixed(0)}% cache</span>
@@ -244,7 +238,7 @@ function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
             ? html`<span class="usage-reuse-warn" title=${`Low cache reuse: ${reuseRatio.toFixed(1)}× reads per cache creation (healthy ≥ 5×)`}>⚠ ${reuseRatio.toFixed(1)}x reuse</span>`
             : null}
         </div>
-        <div class="usage-req-count">${fmtK(row.requests)} requests</div>
+        <div class="usage-req-count">${formatTokens(row.requests)} requests</div>
       </div>
       <div class="usage-detail" style=${{ maxHeight: isExpanded ? "400px" : "0" }}>
         <div style="padding: 8px 0 4px;">
@@ -257,7 +251,7 @@ function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
                 <div class="usage-bar-wrap" style="flex: 1;">
                   <div class="usage-bar" style=${{ width: pct + "%", background: t.color }}></div>
                 </div>
-                <div style="font-size: 11px; color: var(--fg-faint); white-space: nowrap; flex-shrink: 0;">${fmtK(t.raw)} tokens → ${fmtK(contrib)} weighted</div>
+                <div style="font-size: 11px; color: var(--fg-faint); white-space: nowrap; flex-shrink: 0;">${formatTokens(t.raw)} tokens → ${formatTokens(contrib)} weighted</div>
               </div>
             `;
           })}
@@ -281,7 +275,7 @@ function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
                 const total = modelModels.reduce((s, m) => s + m.weightedTokens, 0);
                 return modelModels.map((m, i) => html`
                   <span>
-                    <span style=${{ color: modelColor(m.model) }}>${shortModel(m.model)}</span>: ${total > 0 ? ((m.weightedTokens / total) * 100).toFixed(0) : 0}% (${fmtK(m.requests)} req)${i < modelModels.length - 1 ? " · " : ""}
+                    <span style=${{ color: modelColor(m.model) }}>${shortModel(m.model)}</span>: ${total > 0 ? ((m.weightedTokens / total) * 100).toFixed(0) : 0}% (${formatTokens(m.requests)} req)${i < modelModels.length - 1 ? " · " : ""}
                   </span>
                 `);
               })()}
@@ -360,7 +354,7 @@ function SparkLine({ data, since }) {
         <path d=${areaPath} fill="rgba(122,159,255,0.12)" />
         <path d=${linePath} fill="none" stroke="var(--accent)" stroke-width="1.5" />
         ${dashPath ? html`<path d=${dashPath} fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.7" />` : null}
-        <text x="4" y=${PAD_TOP - 2} text-anchor="start" font-size="10" fill="var(--fg-faint)">peak: ${fmtK(maxV)}</text>
+        <text x="4" y=${PAD_TOP - 2} text-anchor="start" font-size="10" fill="var(--fg-faint)">peak: ${formatTokens(maxV)}</text>
         ${labels.map(l => {
           const anchor = l.x < VW * 0.15 ? "start" : l.x > VW * 0.85 ? "end" : "middle";
           return html`
@@ -369,7 +363,7 @@ function SparkLine({ data, since }) {
               stroke="var(--accent)" stroke-width=${l.isPartial ? 1.5 : 0} />
             <text x=${l.x} y=${VH - 4} text-anchor=${anchor} font-size="11" fill="var(--fg-faint)">${l.date}</text>
             ${l.showValue
-              ? html`<text x=${l.x} y=${l.y - 7} text-anchor=${anchor} font-size="11" fill=${l.isPeak ? "var(--accent)" : "var(--fg-faint)"}>${fmtK(l.value)}</text>`
+              ? html`<text x=${l.x} y=${l.y - 7} text-anchor=${anchor} font-size="11" fill=${l.isPeak ? "var(--accent)" : "var(--fg-faint)"}>${formatTokens(l.value)}</text>`
               : null
             }
           `;

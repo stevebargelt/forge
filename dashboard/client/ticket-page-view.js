@@ -8,6 +8,8 @@
 import { h } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
+import { formatTimestamp } from "./format.js";
+import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
 import { md } from "./renderers.js";
 import { breadcrumbTrail, parentHash } from "./breadcrumbs-render.js";
 import { ticketHeader } from "./screen-header-render.js";
@@ -51,12 +53,6 @@ function useTicketRuns(ticketId, scope) {
   return load.url === url ? load : { url, runs: null, error: null };
 }
 
-function statusBadgeClass(status) {
-  if (status === "active") return "status-complete";
-  if (status === "blocked") return "status-failed";
-  return "status-pending";
-}
-
 export function TicketPage({ ticketId, data, scope, projects }) {
   const runsLoad = useTicketRuns(ticketId, scope);
   const tickets = data && Array.isArray(data.tickets) ? data.tickets : [];
@@ -87,10 +83,10 @@ export function TicketPage({ ticketId, data, scope, projects }) {
             <ul class="ticket-run-list">
               ${runsLoad.runs.map((run) => html`
                 <li key=${run.runId} class="ticket-run-row">
-                  <span class=${"badge status-" + (run.status === "active" ? "running" : run.status)}>${run.status}</span>
+                  <span class=${badgeClass("run", run.status)}>${statusLabel("run", run.status)}</span>
                   <a href=${hashFor({ view: "run", id: run.runId })}>${run.title || run.runId}</a>
                   <span class="faint mono">${run.runId}</span>
-                  <span class="muted mono" title=${run.startedAt}>${new Date(run.startedAt).toLocaleString()}</span>
+                  <span class="muted mono" title=${run.startedAt}>${formatTimestamp(run.startedAt)}</span>
                 </li>
               `)}
             </ul>
@@ -104,7 +100,7 @@ function TicketFields({ ticket, epic }) {
   return html`
     <div class="ticket-fields">
       <div class="row" style="gap: 8px; flex-wrap: wrap; margin: 12px 0; align-items: baseline;">
-        <span class="badge ${statusBadgeClass(ticket.status)}" aria-label=${"Status: " + ticket.status}>${ticket.status}</span>
+        <span class="badge ${statusClass("ticket", ticket.status)}" aria-label=${"Status: " + ticket.status}>${statusLabel("ticket", ticket.status)}</span>
         <span class="badge backlog-type-badge">${ticket.type}</span>
         <span class="mono faint" style="font-size: 12px;">${ticket.id}</span>
         ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}

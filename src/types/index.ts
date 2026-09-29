@@ -89,15 +89,16 @@ export type AgentResult = {
   error?: string;
 };
 
-export type RunStatus = "active" | "complete" | "failed" | "abandoned";
-export type TaskStatus =
-  | "pending"
-  | "running"
-  | "awaiting_gate"
-  | "awaiting_red"
-  | "complete"
-  | "failed"
-  | "blocked_by_red"
+export const RUN_STATUSES = ["active", "complete", "failed", "abandoned"] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
+export const TASK_STATUSES = [
+  "pending",
+  "running",
+  "awaiting_gate",
+  "awaiting_red",
+  "complete",
+  "failed",
+  "blocked_by_red",
   // FG-425 (AC5): the task's publication attempt advanced the target ref and then
   // lost the publication window before its disposition could be settled. NON-TERMINAL
   // and RECOVERABLE: the attempt is still `publishing`, so no terminal claim about it
@@ -105,7 +106,9 @@ export type TaskStatus =
   // invite a retry of work that already landed. `forge next` converges the attempt
   // (AD-5) and reconciles this task onto the truth; `forge publish recover <attemptId>`
   // does it by hand.
-  | "awaiting_recovery";
+  "awaiting_recovery",
+] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export type Run = {
   id: string;

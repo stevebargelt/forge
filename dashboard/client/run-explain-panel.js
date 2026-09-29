@@ -9,6 +9,8 @@
 import { h } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
+import { shortSha } from "./format.js";
+import { badgeClass } from "./status-tokens.js";
 
 const html = htm.bind(h);
 
@@ -149,13 +151,13 @@ function VerificationEvidenceBlock({ evidence }) {
     <div class="rx-verif" data-testid="rx-verification-evidence">
       ${evidence.map((e) => html`
         <div class="rx-verif-row" data-testid="rx-verif-row" key=${e.id ?? `${e.commitSha}-${e.gateName}`}>
-          <span class=${"badge " + (e.exitCode === 0 ? "status-complete" : "status-failed")}>${e.exitCode === 0 ? "pass" : `exit ${e.exitCode}`}</span>
+          <span class=${badgeClass("task", e.exitCode === 0 ? "complete" : "failed")}>${e.exitCode === 0 ? "pass" : `exit ${e.exitCode}`}</span>
           <span>${e.gateName}</span>
           <span class="rx-verif-source">${e.source}</span>
           ${e.command ? html`<code class="mono faint">${e.command}</code>` : null}
           ${e.ciUrl
-            ? html`<a class="mono" href=${e.ciUrl} target="_blank" rel="noreferrer noopener">${e.commitSha ? e.commitSha.slice(0, 10) : "—"}</a>`
-            : html`<span class="mono faint">${e.commitSha ? e.commitSha.slice(0, 10) : "—"}</span>`}
+            ? html`<a class="mono" href=${e.ciUrl} target="_blank" rel="noreferrer noopener">${shortSha(e.commitSha, 10)}</a>`
+            : html`<span class="mono faint">${shortSha(e.commitSha, 10)}</span>`}
           <span class="muted mono rx-verif-time">${e.recordedAt ?? "—"}</span>
         </div>`)}
     </div>

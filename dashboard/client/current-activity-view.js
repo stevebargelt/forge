@@ -36,11 +36,12 @@
 import { h } from "preact";
 import htm from "htm";
 import {
-  launchBadge, launchAssociationLabel, launchIdentityLine,
+  launchBadge, launchAssociationLabel, launchIdentityLine, launchFreshness,
   launchRetentionLabel, launchRetentionClass,
   ciContextRows, caElapsedText, homeActivityView,
   homeInFlightActivity, launchWaitIdentity,
 } from "./current-activity-render.js";
+import { badgeClass, statusLabel } from "./status-tokens.js";
 
 const html = htm.bind(h);
 
@@ -78,6 +79,7 @@ export function CurrentActivitySection({ load, now, onTaskClick, onRetry }) {
                 key=${section.kind}
                 section=${section}
                 now=${now}
+                generatedAt=${view.generatedAt}
                 onTaskClick=${onTaskClick}
               />
             `)}
@@ -97,7 +99,7 @@ export function InFlightActivityWaits({ load, now, onRetry }) {
   if (waits.message !== null) {
     return html`
       <div class="item ca-wait-row ca-wait-unavailable" role="status">
-        <span class="badge launch-state-unknown">waits unavailable</span>
+        <span class=${badgeClass("launch", "unknown")}>waits unavailable</span>
         <div>
           <div>${waits.message}</div>
           <div class="faint" style="font-size: 11px;">${waits.detail}</div>
@@ -114,10 +116,16 @@ export function InFlightActivityWaits({ load, now, onRetry }) {
   ) return null;
   return html`
     ${waits.operatorWaits.map((summary) => html`<${OperatorWaitRow} key=${summary.waitKey} summary=${summary} now=${now} />`)}
-    ${waits.hostVerification.map((entry) => html`<${HostWaitRow} key=${entry.launchId} entry=${entry} now=${now} />`)}
+    ${waits.hostVerification.map((entry) => html`<${HostWaitRow} key=${entry.launchId} entry=${entry} now=${now} generatedAt=${waits.generatedAt} />`)}
     ${waits.ci.map((summary) => html`<${CiWaitRow} key=${ciWaitKey(summary)} summary=${summary} />`)}
     ${waits.ciWaits.map((summary) => html`<${RegisteredCiWaitRow} key=${summary.waitId} summary=${summary} now=${now} />`)}
   `;
+}
+
+// FG-824: the observer's silence, stated on the row. Text, not colour alone.
+function Freshness({ freshness }) {
+  if (!freshness) return null;
+  return html`<span class=${freshness.class} data-freshness=${freshness.level} title=${freshness.title}>${freshness.text}</span>`;
 }
 
 function ciWaitKey(summary) {
@@ -133,12 +141,13 @@ function ciWaitKey(summary) {
 // submitter associated with current work, so a badge here could only ever say the same
 // thing twice. The label still renders on the Activity view, where unassociated launches
 // still appear.
-function HostWaitRow({ entry, now }) {
+function HostWaitRow({ entry, now, generatedAt }) {
   return html`
-    <div class="item ca-wait-row ca-host-wait-row">
-      <span class="badge launch-state-running">host verification</span>
+    <div class="item ca-wait-row ca-host-wait-row" data-launch-id=${entry.launchId}>
+      <span class=${badgeClass("launch", "running")}>host verification</span>
       <div>
         <strong>${launchWaitIdentity(entry)}</strong>
+        <${Freshness} freshness=${launchFreshness(entry, generatedAt)} />
       </div>
       <div class="muted mono" style="font-size: 11px;" title="time since the launch started">
         ${caElapsedText(entry.startedAt, now)}
@@ -225,7 +234,7 @@ function CurrentActivityUnavailable({ view, onRetry }) {
   `;
 }
 
-function CurrentActivityBlock({ section, now, onTaskClick }) {
+function CurrentActivityBlock({ section, now, generatedAt, onTaskClick }) {
   const headingId = `ca-${section.kind}-heading`;
   return html`
     <section class="ca-section" aria-labelledby=${headingId}>
@@ -245,7 +254,7 @@ function CurrentActivityBlock({ section, now, onTaskClick }) {
             ? section.entries.map((summary) => html`<${RegisteredCiWaitRow} key=${summary.waitId} summary=${summary} now=${now} />`)
             : section.kind === "operatorWaits"
               ? section.entries.map((summary) => html`<${OperatorWaitRow} key=${summary.waitKey} summary=${summary} now=${now} />`)
-              : section.entries.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} />`)}
+              : section.entries.map((l) => html`<${LaunchRow} key=${l.launchId} entry=${l} now=${now} generatedAt=${generatedAt} />`)}
     </section>
   `;
 }
@@ -266,7 +275,7 @@ function AgentRow({ entry, now, onTaskClick }) {
       onClick=${open}
       onKeyDown=${(event) => caRowKey(event, open)}
     >
-      <span class="badge status-${entry.status}">${entry.status.replace(/_/g, " ")}</span>
+      <span class=${badgeClass("task", entry.status)}>${statusLabel("task", entry.status)}</span>
       <div>
         <div><strong>${entry.agentRole}</strong> <span class="faint"> ·</span> <span class="muted">${entry.runTitle}</span></div>
         <div class="faint mono" style="font-size: 11px;">${entry.phase} · ${entry.taskId}${entry.projectLabel ? ` · ${entry.projectLabel}` : ""}</div>
@@ -281,8 +290,9 @@ function AgentRow({ entry, now, onTaskClick }) {
 // owner-gone and unknown are FOUR DIFFERENT FACTS and none of them is a generic
 // `failed` (BD-4); a stale observation reads `unobserved since <t>` and is never
 // dressed up as `running` or as terminal (BD-12).
-function LaunchRow({ entry, now }) {
+function LaunchRow({ entry, now, generatedAt }) {
   const badge = launchBadge(entry);
+  const freshness = launchFreshness(entry, generatedAt);
   const assoc = launchAssociationLabel(entry);
   // FG-590 (RF-9): render the server-computed retention disposition through the SHARED
   // decision functions, so a retained-for-investigation launch reads distinctly from an
@@ -297,6 +307,7 @@ function LaunchRow({ entry, now }) {
           <strong class="mono">${entry.name || entry.launchId}</strong>
           ${assoc ? html`<span class="ca-assoc-badge">${assoc}</span>` : null}
           ${retentionLabel && retentionClass ? html`<span class=${retentionClass}>${retentionLabel}</span>` : null}
+          <${Freshness} freshness=${freshness} />
         </div>
         <div class="faint mono" style="font-size: 11px;">${entry.commandLine}</div>
         <div class="faint mono" style="font-size: 11px;">${launchIdentityLine(entry)}</div>

@@ -125,6 +125,8 @@ section.in-flight .item {
   cursor: pointer;
 }
 section.in-flight .item:last-child { border-bottom: none; }
+/* FG-824: an unrecognized status reads as "<value> (unrecognized)"; keep it inside its column. */
+section.in-flight .item > .badge { min-width: 0; overflow-wrap: anywhere; }
 section.in-flight .item:hover { background: var(--bg-elev-2); }
 section.in-flight .empty { color: var(--fg-faint); font-style: italic; }
 
@@ -321,6 +323,35 @@ section.feed { margin-top: 24px; }
 }
 /* #290: a running task whose container is gone — stale DB row, needs reconcile. */
 .badge.status-reconcile_candidate { background: rgba(250, 204, 21, 0.18); color: var(--warn); }
+/* FG-824: the rest of the status token map (client/status-tokens.js). Every token class has
+   a rule here; an unrecognized value takes its vocabulary's neutral, italic fallback. */
+.badge.status-unknown { background: rgba(154, 154, 163, 0.12); color: var(--fg-dim); font-style: italic; }
+.badge.run-status-active { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.badge.run-status-complete { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.badge.run-status-failed { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.run-status-abandoned { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.run-status-unknown { background: rgba(154, 154, 163, 0.12); color: var(--fg-dim); font-style: italic; }
+.badge.claim-state-live { background: rgba(192, 132, 252, 0.14); color: var(--magenta); }
+.badge.claim-state-released { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.claim-state-unknown { background: rgba(154, 154, 163, 0.12); color: var(--fg-dim); font-style: italic; }
+.tone-accent-ok { border-left: 3px solid var(--ok); }
+.tone-accent-err { border-left: 3px solid var(--err); }
+.tone-accent-warn { border-left: 3px solid var(--warn); }
+.tone-accent-info { border-left: 3px solid var(--info); }
+.tone-accent-magenta { border-left: 3px solid var(--magenta); }
+.tone-accent-neutral { border-left: 3px solid var(--fg-faint); }
+/* FG-824: "unobserved for N min" on an in-flight launch row — informational, never a
+   state change. Suspicious at 15 min, critical at 60. */
+.freshness { font-size: 11px; margin-left: 8px; white-space: nowrap; }
+.freshness-suspicious { color: var(--warn); }
+.freshness-critical { color: var(--err); font-weight: 600; }
+/* FG-824: the task page's recovery card. */
+.recovery-card { margin: 12px 0 16px; padding: 12px 14px; }
+.recovery-card h3 { margin: 0 0 8px; font-size: 13px; }
+.recovery-card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 10px; font-size: 12px; }
+.recovery-card dt { color: var(--fg-dim); }
+.recovery-card dd { margin: 0; }
+.recovery-next-verb { font-size: 12px; }
 
 .detail-overlay {
   position: fixed; inset: 0;
@@ -442,10 +473,10 @@ section.feed { margin-top: 24px; }
 .task-actions { margin: 8px 0 0; display: flex; flex-direction: column; gap: 8px; }
 .task-actions-compact { margin: 4px 0; }
 .action-buttons, .inbox-hold-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
-.action-btn, .inbox-hold-btn { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; color: var(--fg); cursor: pointer; font-size: 12px; min-height: 28px; }
-.action-btn code { font-size: 12px; }
-.action-btn:hover, .action-btn-selected, .inbox-hold-btn:hover, .inbox-hold-btn-selected { border-color: var(--accent); }
-.action-btn:disabled, .inbox-hold-btn:disabled { opacity: 0.6; cursor: default; }
+.action-btn, .inbox-hold-btn, .recovery-action { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; color: var(--fg); cursor: pointer; font-size: 12px; min-height: 28px; }
+.action-btn code, .recovery-action code { font-size: 12px; }
+.action-btn:hover, .action-btn-selected, .inbox-hold-btn:hover, .inbox-hold-btn-selected, .recovery-action:hover, .recovery-action-selected { border-color: var(--accent); }
+.action-btn:disabled, .inbox-hold-btn:disabled, .recovery-action:disabled { opacity: 0.6; cursor: default; }
 .action-preview { border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
 .action-preview-verb { font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
 .action-preview-reason, .action-note { font-size: 12px; }
@@ -1090,7 +1121,7 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .badge.inbox-kind-missing_acceptance_or_readiness { background: rgba(96, 165, 250, 0.15); color: var(--info); }
 .badge.inbox-kind-stale_verification { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
 .badge.inbox-kind-kanban_conflict { background: rgba(192, 132, 252, 0.18); color: var(--magenta); }
-.badge.inbox-kind-unknown { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.inbox-kind-unknown { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); font-style: italic; }
 .badge.inbox-sev { font-size: 10px; }
 .badge.inbox-sev-high { background: rgba(248, 113, 113, 0.18); color: var(--err); }
 .badge.inbox-sev-medium { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
@@ -1686,6 +1717,7 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .rm-status-failed, .rm-status-blocked_by_red { color: var(--err); }
 .rm-status-running { color: var(--info); }
 .rm-status-awaiting_gate, .rm-status-awaiting_red, .rm-status-awaiting_recovery { color: var(--warn); }
+.rm-status-pending, .rm-status-unknown { color: var(--fg-dim); }
 /* Reds attach under their primary, shape-distinguished (◆ + solid left accent). */
 .rm-reds { display: flex; flex-direction: column; gap: 4px; margin-left: 16px; }
 .rm-red {

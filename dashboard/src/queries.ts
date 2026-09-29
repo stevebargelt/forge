@@ -6050,14 +6050,16 @@ function formatMs(ms: number): string {
 /** What a SURFACE may say about a receipt. Deliberately NOT the receipt's own state
  *  vocabulary: `running` here is a joined claim about the world, while the receipt's
  *  `running` is a claim about the moment it was written. */
-export type OrchestratorPresentation =
-  | "running"
-  | "orphaned"
-  | "unverified"
-  | "pending"
-  | "exited"
-  | "spawn_failed"
-  | "unrecognized";
+export const ORCHESTRATOR_PRESENTATIONS = [
+  "running",
+  "orphaned",
+  "unverified",
+  "pending",
+  "exited",
+  "spawn_failed",
+  "unrecognized",
+] as const;
+export type OrchestratorPresentation = (typeof ORCHESTRATOR_PRESENTATIONS)[number];
 
 export type OrchestratorLiveness = {
   presentation: OrchestratorPresentation;

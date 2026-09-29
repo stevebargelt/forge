@@ -85,7 +85,7 @@ function InboxItemRow({ summary, now, hrefFor, rowActions, onDismissChanged }) {
   const action = html`<div class="faint inbox-action">${summary.requestedAction}</div>`;
   const hasActions = Boolean(summary.taskId && rowActions);
   return html`
-    <div class="item inbox-row" data-item-id=${summary.id}>
+    <div class=${"item inbox-row " + summary.accentClass} data-item-id=${summary.id}>
       <div class="inbox-row-badges">
         <span class="badge ${summary.badgeClass}">${summary.badgeLabel}</span>
         <span class="badge inbox-sev ${summary.severityClass}">${summary.severityLabel}</span>

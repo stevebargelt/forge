@@ -1,5 +1,6 @@
 import { h } from "preact";
 import htm from "htm";
+import { formatClock, formatTimestamp } from "./format.js";
 
 const html = htm.bind(h);
 
@@ -154,7 +155,7 @@ function WindowBar({ window }) {
           ${window.pacePct != null ? html`<span class="plan-pace">pace ${window.pacePct}%</span>` : null}
         </div>
       </div>
-      <div class="plan-window-track" title=${window.resetsAt ? `Resets ${new Date(window.resetsAt).toLocaleString()}` : undefined}>
+      <div class="plan-window-track" title=${window.resetsAt ? `Resets ${formatTimestamp(window.resetsAt)}` : undefined}>
         <div class="plan-window-fill" style=${{ width: `${used}%` }}></div>
         <i></i><i></i><i></i>
       </div>
@@ -171,8 +172,7 @@ function authLabel(mode) {
 }
 
 function shortTime(iso) {
-  const date = new Date(iso);
-  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown";
+  return formatClock(iso, { hour: "2-digit", minute: "2-digit" }, "unknown");
 }
 
 function relativeTime(iso) {

@@ -6,6 +6,7 @@
 import { h } from "preact";
 import { useState, useMemo } from "preact/hooks";
 import htm from "htm";
+import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
 import { md } from "./renderers.js";
 import { backlogBoardState, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
 import { hashFor } from "./view-routing.js";
@@ -16,13 +17,6 @@ const TYPE_LABELS = { idea: "Idea", epic: "Epic", story: "Story" };
 const STATUS_LABELS = { active: "Active", done: "Done", blocked: "Blocked", deferred: "Deferred" };
 const TYPES = ["epic", "story", "idea"];
 const STATUSES = ["active", "blocked", "deferred", "done"];
-
-function statusBadgeClass(status) {
-  if (status === "active") return "status-complete";
-  if (status === "blocked") return "status-failed";
-  if (status === "done" || status === "deferred") return "status-pending";
-  return "status-pending";
-}
 
 // FG-821: a ticket opens its page, #backlog/<ticketId> (ticket-page-view.js), keeping
 // the scope in hand — ticket ids are per project.
@@ -77,7 +71,7 @@ export function BacklogView({ data, projectFilter, scope }) {
       ` : null}
       ${board.shadow ? html`
         <div class="muted backlog-shadow-badge" title=${SHADOW_BADGE_TITLE} style="margin-top: 16px; font-size: 12px;">
-          <span class="badge status-pending">import shadow — not authoritative</span>
+          <span class=${badgeClass("task", "pending")}>import shadow — not authoritative</span>
           ${" "}markdown mode: <code>backlog/*.md</code> in the checkout is this project's ticket truth.
         </div>
       ` : null}
@@ -243,7 +237,7 @@ function TicketCard({ ticket, epic, href }) {
     >
       <div class="head">
         <div>
-          <span class="badge ${statusBadgeClass(ticket.status)}" aria-label=${"Status: " + ticket.status}>${ticket.status}</span>
+          <span class="badge ${statusClass("ticket", ticket.status)}" aria-label=${"Status: " + ticket.status}>${statusLabel("ticket", ticket.status)}</span>
           <span class="backlog-id mono faint" style="font-size: 11px; margin: 0 6px;">${ticket.id}</span>
           <strong>${ticket.title}</strong>
           ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}

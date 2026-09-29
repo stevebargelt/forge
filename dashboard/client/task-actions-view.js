@@ -13,7 +13,7 @@ import {
 
 const html = htm.bind(h);
 
-async function readActions(taskId) {
+export async function readActions(taskId) {
   try {
     const res = await fetch(`/api/task/${encodeURIComponent(taskId)}/actions`);
     let body = null;

@@ -169,6 +169,18 @@ export type LaunchStatus =
   // evidence (host reboot, tmux server killed). Never guessed further.
   | { state: "unknown" };
 
+/** Every `LaunchStatus.state`, as a runtime list — the vocabulary the dashboard's status
+ *  tokens are checked against. */
+export const LAUNCH_STATES = [
+  "running",
+  "exited_ok",
+  "exited_error",
+  "signaled",
+  "terminated_unattributed",
+  "owner_gone",
+  "unknown",
+] as const satisfies ReadonlyArray<LaunchStatus["state"]>;
+
 /** What the wrapper writes to the exit file. `signal` is the kernel's verdict,
  *  not an inference from `code`; exactly one of the two is set. */
 export type ExitRecord = { code: number | null; signal: string | null };
