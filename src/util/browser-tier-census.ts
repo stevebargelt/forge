@@ -225,6 +225,21 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // otherwise; and FG-692 Tab/Enter reach the recovery button, its preview and Confirm.
   // The sixth test pins the 14m59s/15m/59m59s/60m injected-clock boundaries. Fixture port 18832.
   "fg824-status-tokens.test.ts": 6,
+  // FG-827 adds `fg827-roles-second-pass` (9 tests), rendering the REAL roles.ts roleDetail
+  // over a scratch FORGE_HOME: the Instructions Files panel in composition order with the
+  // seed CLAUDE.md marked ENTRY, Read rendering Markdown and Raw the exact file bytes; the
+  // Composed view byte for byte with its sha256 and the selected file's section marked; the
+  // Harness / Runtime table (one row per activity) with captioned container facts and raw
+  // files behind a closed disclosure; Skills rows with description, source badge, optional
+  // and seed-reference flags beside the empty "available, not mounted" and host-only groups;
+  // the Capabilities card, routes, result-contract fields and constraints; Tools' effective
+  // access and image toolchain; Usage's 1d/7d/30d/all periods by provider and model; and the
+  // Overview's Latest task card and Skills chips with no status pill on any role tab or the
+  // Roles list. The ninth covers tab reload/alias canonicalization, Files keyboard and copy,
+  // hostile Markdown as text rather than DOM, and the 400px panel/viewer layout.
+  // fg817-roles-pages keeps its 8 tests, rewritten for the ten tabs and the
+  // configuration → harness alias. Fixture port 18831.
+  "fg827-roles-second-pass.test.ts": 9,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

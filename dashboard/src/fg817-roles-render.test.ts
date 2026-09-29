@@ -58,13 +58,23 @@ test("the role route: #roles is the list, #roles/<role>/<tab> a deep-linkable pa
   assert.equal(navItemFor("roles"), "roles");
 });
 
-test("roleTabs: the nine tabs in order, overview's href the bare role, the current one marked", () => {
-  assert.deepEqual(ROLE_TABS.map((t) => t.id), ["overview", "instructions", "skills", "configuration", "secrets", "tools", "tasks", "receipts", "usage"]);
+test("roleTabs: the ten tabs in order (FG-827), overview's href the bare role, the current one marked", () => {
+  assert.deepEqual(ROLE_TABS.map((t) => t.id), ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"]);
+  assert.equal(roleTabLabel("harness"), "Harness / Runtime");
   const tabs = roleTabs("engineer", "tasks");
   assert.deepEqual(tabs.filter((t) => t.current).map((t) => t.id), ["tasks"]);
   assert.equal(tabs[0]!.href, "#roles/engineer");
-  assert.equal(tabs[6]!.href, "#roles/engineer/tasks");
+  assert.equal(tabs[7]!.href, "#roles/engineer/tasks");
   assert.equal(roleTabLabel("bogus"), "Overview");
+});
+
+test("FG-827: #roles/<role>/configuration is an alias that lands on harness, canonicalized", () => {
+  const legacy = parseHash("#roles/engineer/configuration");
+  assert.deepEqual([legacy.view, legacy.id, legacy.tab, legacy.canonical, legacy.rewrite], ["roles", "engineer", "harness", "#roles/engineer/harness", true]);
+  const current = parseHash("#roles/engineer/harness");
+  assert.deepEqual([current.tab, current.rewrite], ["harness", false]);
+  assert.equal(parseHash("#roles/engineer/capabilities").tab, "capabilities");
+  assert.equal(hashFor({ view: "roles", id: "engineer", tab: "configuration" }), "#roles/engineer", "the retired name is never emitted");
 });
 
 test("roleTrail is Roles › <role> › <tab>, and Escape goes to the Roles list", () => {

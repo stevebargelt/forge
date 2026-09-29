@@ -8,14 +8,31 @@
 // sanitize-html.js for the allowlist and threat model). Sanitization is a pure
 // output transform; the stored text is never altered.
 
-import { marked } from "marked";
+import { marked, Marked } from "marked";
 import { sanitizeHtml } from "./sanitize-html.js";
 
-/** Render a block of Markdown to sanitized, inert HTML. */
-export function md(s) {
+// FG-827: seed text is data. With `{ html: "text" }`, raw HTML in the source and links to a
+// scriptable scheme are shown as the literal source text instead of being dropped by the
+// sanitizer, so a reader sees exactly what the file says.
+const literal = new Marked();
+literal.use({
+  renderer: {
+    html(token) {
+      if (!token.block) return escapeText(token.text);
+      return `<p>${escapeText(token.text.replace(/\n+$/, "")).replace(/\n/g, "<br>")}</p>\n`;
+    },
+    link(token) {
+      return /^[a-z][a-z0-9+.-]*:/i.test(token.href) && !/^(https?|mailto):/i.test(token.href) ? escapeText(token.raw) : false;
+    },
+  },
+});
+
+/** Render a block of Markdown to sanitized, inert HTML. `opts.html === "text"` shows raw
+ *  HTML (and scriptable-scheme links) as visible literal text rather than stripping it. */
+export function md(s, opts) {
   if (typeof s !== "string") return "";
   let raw;
-  try { raw = marked.parse(s, { breaks: true, gfm: true }); }
+  try { raw = (opts?.html === "text" ? literal : marked).parse(s, { breaks: true, gfm: true }); }
   catch { return sanitizeHtml(escapeFallback(s)); }
   return sanitizeHtml(raw);
 }
@@ -33,4 +50,8 @@ export function mdInline(s) {
 // plain text and run it through the same sanitizer for a single exit path.
 function escapeFallback(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeText(s) {
+  return escapeFallback(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }

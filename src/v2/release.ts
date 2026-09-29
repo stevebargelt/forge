@@ -257,6 +257,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/current-activity-view.js",
   "dashboard/client/format.js",
   "dashboard/client/governance.js",
+  "dashboard/client/instructions-panel-render.js",
+  "dashboard/client/instructions-panel-view.js",
   "dashboard/client/markdown.js",
   "dashboard/client/nav-render.js",
   "dashboard/client/nav-view.js",

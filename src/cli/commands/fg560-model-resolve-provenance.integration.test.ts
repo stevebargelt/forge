@@ -165,6 +165,7 @@ test("policy default-fallback (explicit) --json: the refusal is machine-readable
     capabilitySource: string;
     outcome: string;
     resolvedBy: string;
+    dispatchable?: boolean;
     activityUnmapped?: {
       reason: string;
       agent: string;
@@ -180,6 +181,7 @@ test("policy default-fallback (explicit) --json: the refusal is machine-readable
   assert.equal(parsed.mappingPath, "default-fallback");
   assert.equal(parsed.capabilitySource, "explicit");
   assert.equal(parsed.outcome, "activity_unmapped");
+  assert.equal(parsed.dispatchable, false, "FG-827: dispatch refuses this resolution, so --json must not call it dispatchable");
   const u = parsed.activityUnmapped;
   assert.ok(u, "--json must carry a structured activityUnmapped block");
   assert.equal(u!.reason, "activity_unmapped");

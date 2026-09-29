@@ -6464,16 +6464,40 @@ export function roleUsage(role: string, windows: string[]): RoleUsageWindow[] {
   });
 }
 
-export type RoleUsageByModel = { model: string; inputTokens: number; outputTokens: number; requests: number };
+export type RoleUsageTokens = { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; requests: number };
+export type RoleUsageByModel = RoleUsageTokens & { model: string };
+export type RoleUsageByProvider = RoleUsageTokens & { provider: string | null; auth: string | null };
 
-export function roleUsageByModel(role: string): RoleUsageByModel[] {
-  const rows = db().prepare(`
-    SELECT COALESCE(mc.model, '(unknown model)') AS model, SUM(mc.input_tokens) AS in_tok, SUM(mc.output_tokens) AS out_tok, COUNT(*) AS n
-    FROM model_calls mc JOIN tasks t ON t.id = mc.task_id
-    WHERE t.agent_role = ?
-    GROUP BY model ORDER BY SUM(mc.input_tokens) + SUM(mc.output_tokens) DESC
-  `).all(role) as Array<{ model: string; in_tok: number; out_tok: number; n: number }>;
-  return rows.map((r) => ({ model: r.model, inputTokens: r.in_tok ?? 0, outputTokens: r.out_tok ?? 0, requests: r.n }));
+function usageCutoff(since: string): string | null {
+  const m = since.match(/^(\d+)d$/);
+  return m?.[1] ? new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString() : null;
+}
+
+type TokenRow = { in_tok: number | null; out_tok: number | null; read_tok: number | null; create_tok: number | null; n: number };
+const tokensOf = (r: TokenRow): RoleUsageTokens => ({
+  inputTokens: r.in_tok ?? 0, outputTokens: r.out_tok ?? 0, cacheReadTokens: r.read_tok ?? 0, cacheCreationTokens: r.create_tok ?? 0, requests: r.n,
+});
+
+/** FG-827: the role's model_calls over a window split by model, and by the provider/auth
+ *  its task was dispatched under (tasks.resolved_provider / resolved_auth — model_calls
+ *  carries no provider of its own; a legacy-mode task records none). */
+export function roleUsageBreakdown(role: string, since: string): { byModel: RoleUsageByModel[]; byProvider: RoleUsageByProvider[] } {
+  const cutoff = usageCutoff(since);
+  const where = `WHERE t.agent_role = ? ${cutoff ? "AND mc.created_at >= ?" : ""}`;
+  const args = cutoff ? [role, cutoff] : [role];
+  const sums = `SUM(mc.input_tokens) AS in_tok, SUM(mc.output_tokens) AS out_tok, SUM(mc.cache_read_tokens) AS read_tok, SUM(mc.cache_creation_tokens) AS create_tok, COUNT(*) AS n`;
+  const order = `ORDER BY SUM(mc.input_tokens) + SUM(mc.cache_creation_tokens) + SUM(mc.cache_read_tokens) + SUM(mc.output_tokens) DESC`;
+  const byModel = (db().prepare(`
+    SELECT COALESCE(mc.model, '(unknown model)') AS model, ${sums}
+    FROM model_calls mc JOIN tasks t ON t.id = mc.task_id ${where}
+    GROUP BY model ${order}
+  `).all(...args) as Array<TokenRow & { model: string }>).map((r) => ({ model: r.model, ...tokensOf(r) }));
+  const byProvider = (db().prepare(`
+    SELECT t.resolved_provider AS provider, t.resolved_auth AS auth, ${sums}
+    FROM model_calls mc JOIN tasks t ON t.id = mc.task_id ${where}
+    GROUP BY t.resolved_provider, t.resolved_auth ${order}
+  `).all(...args) as Array<TokenRow & { provider: string | null; auth: string | null }>).map((r) => ({ provider: r.provider, auth: r.auth, ...tokensOf(r) }));
+  return { byModel, byProvider };
 }
 
 export type RoleReceipt = {

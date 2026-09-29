@@ -18,7 +18,7 @@
 // - GET /api/backlog/:id/runs             the runs dispatched for one ticket (?projectKey|?projectDir, FG-821)
 // - GET /api/run/:id/evidence             the run's review, launch and host-verification ids + ticket (?projectDir, FG-821)
 // - GET /api/roles                        every installed role seed: activity, resolved profile/effort, mount mode, last task (FG-817)
-// - GET /api/roles/:role                  one role's tabs: overview, composed instructions, skills, configuration, secrets, tools, tasks, receipts, usage (FG-817)
+// - GET /api/roles/:role                  one role's tabs: overview, instructions (+ files), harness, skills, capabilities, tools, secrets, tasks, receipts, usage (FG-817, FG-827)
 // - GET /api/shipping-audit               per-ticket readiness + shipping-review + mechanical-check projection for ONE project, read-only (?projectKey|?projectDir, FG-386)
 // - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 // - GET /api/completed-runs               completed forge RUNS per bucket over the same window grid — a count, not a duration (FG-683)

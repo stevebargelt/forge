@@ -7,6 +7,7 @@ export interface Route {
   object: "none" | "optional" | "required";
   parent?: string;
   tabs?: string[];
+  tabAliases?: Record<string, string>;
   params?: string[];
   aliases: string[];
 }

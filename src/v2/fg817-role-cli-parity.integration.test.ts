@@ -23,7 +23,7 @@ function forge(home: string, args: string[]): unknown {
   }));
 }
 
-test("FG-817: each role route on the page is the real forge route explain policy result", () => {
+test("FG-817/FG-827: each route on the role's Capabilities tab is the real forge route explain policy result", () => {
   const home = mkdtempSync(join(tmpdir(), "forge-fg817-cli-routes-"));
   const gen = publishTestGeneration(home, {
     assetsParent: home,
@@ -48,7 +48,7 @@ test("FG-817: each role route on the page is the real forge route explain policy
       ];
       return { route, path: r.path, relations };
     }).sort((a, b) => a.route.localeCompare(b.route));
-    assert.deepEqual(dashboard, explained, `${role}'s overview is exactly forge route explain over the published policy`);
+    assert.deepEqual(dashboard, explained, `${role}'s Capabilities routes are exactly forge route explain over the published policy`);
   }
 });
 
@@ -59,6 +59,8 @@ test("FG-817: the promoted dashboard closure includes every Roles server and cli
     "dashboard/client/roles-index-view.js",
     "dashboard/client/role-page-render.js",
     "dashboard/client/role-page-view.js",
+    "dashboard/client/instructions-panel-render.js",
+    "dashboard/client/instructions-panel-view.js",
   ] as const;
   for (const module of rolesModules) assert.ok(REQUIRED_DASHBOARD_FILES.includes(module), `${module} is release-required`);
   assert.equal(new Set(REQUIRED_DASHBOARD_FILES).size, REQUIRED_DASHBOARD_FILES.length, "the release closure has no duplicate entries");

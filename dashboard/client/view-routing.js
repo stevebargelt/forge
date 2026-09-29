@@ -14,6 +14,8 @@
 // FG-821: object tabs follow the Paperclip pattern — an unknown tab falls back to the
 // route's default (its first tab), which the canonical hash omits. FG-817: `#roles` is
 // the Roles list and `#roles/<role>[/<tab>]` a role page, with `overview` the default tab.
+// `tabAliases` maps a retired tab name onto its successor (FG-827: `configuration` is now
+// `harness`), so a saved link lands on the renamed tab and is canonicalized to it.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -36,7 +38,7 @@ export const ROUTES = Object.freeze({
   task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
-  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "skills", "configuration", "secrets", "tools", "tasks", "receipts", "usage"], aliases: [] },
+  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, aliases: [] },
   routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", aliases: ["governance"] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },
@@ -150,7 +152,11 @@ export function parseHash(hash) {
     } else {
       const route = ROUTES[view];
       if (route.object !== "none" && segments[1]) id = safeDecode(segments[1]);
-      if (route.tabs) tab = segments[2] && route.tabs.includes(safeDecode(segments[2])) ? safeDecode(segments[2]) : route.tabs[0];
+      if (route.tabs) {
+        const named = segments[2] ? safeDecode(segments[2]) : null;
+        const resolved = named !== null ? route.tabAliases?.[named] ?? named : null;
+        tab = resolved !== null && route.tabs.includes(resolved) ? resolved : route.tabs[0];
+      }
       if (route.object === "required" && !id) {
         notice = `Open a ${ROUTES[view].label.toLowerCase()} from the run index to see it.`;
         view = "runs";
