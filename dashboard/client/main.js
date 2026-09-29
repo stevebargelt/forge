@@ -32,7 +32,8 @@ import { INBOX_LOADING, readAttentionInbox } from "./attention-inbox-render.js";
 import { PinnedAttentionInboxSection } from "./attention-inbox-view.js";
 import { TaskActions } from "./task-actions-view.js";
 import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
-import { formatDuration } from "./duration.js";
+import { formatDuration, formatRelativeTime, shortSha } from "./format.js";
+import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -2181,19 +2182,6 @@ function OrchestratorSection({ data, onTaskClick }) {
   `;
 }
 
-// The presentation vocabulary is its OWN vocabulary (running / orphaned /
-// unverified / pending / …), not a task status — so it borrows the badge class
-// whose colour already means the same thing rather than inventing a status value.
-const ORCH_BADGE_CLASS = {
-  running: "status-running",
-  orphaned: "launch-state-owner_gone",
-  unverified: "launch-state-unknown",
-  pending: "status-pending",
-  exited: "launch-state-exited_ok",
-  spawn_failed: "status-failed",
-  unrecognized: "launch-state-unknown",
-};
-
 const ORCH_BADGE_TITLE = {
   running: "the launcher is provably alive by process identity",
   orphaned: "the launcher is provably gone — this asserts launcher loss only, not that the session exited",
@@ -2205,7 +2193,7 @@ const ORCH_BADGE_TITLE = {
 };
 
 function OrchestratorRow({ entry, onTaskClick }) {
-  const badgeClass = ORCH_BADGE_CLASS[entry.presentation] || "launch-state-unknown";
+  const orchBadgeClass = statusClass("receipt", entry.presentation);
   // The row opens the task's explain surface when it carries a taskId. Because the row
   // can ALSO contain an independently interactive remote-control link, the open action
   // is a real <button> stretched over the row (orch-row-open) rather than a role=button
@@ -2225,7 +2213,7 @@ function OrchestratorRow({ entry, onTaskClick }) {
             onClick=${onClick}
           ></button>`
         : null}
-      <span class=${"badge " + badgeClass} title=${ORCH_BADGE_TITLE[entry.presentation] || ""}>${entry.presentation}</span>
+      <span class=${"badge " + orchBadgeClass} title=${ORCH_BADGE_TITLE[entry.presentation] || ""}>${statusLabel("receipt", entry.presentation)}</span>
       <div>
         <div>
           <${ProjectChip} entry=${entry} />
@@ -2379,7 +2367,7 @@ function VerificationRow({ v, now }) {
           ${v.itemId ? html`<span class="faint"> · ${v.itemId}</span>` : null}
           <span class="faint"> ·</span> <span class="muted">${isGate ? (v.gate ?? v.command ?? "reconcile gate") : "review-loop"}</span>
         </div>
-        <div class="faint mono" style="font-size: 11px;">${v.sha ? v.sha.slice(0, 12) : ""}${v.runId ? ` · run ${v.runId}` : ""}${v.command ? ` · ${v.command}` : ""}</div>
+        <div class="faint mono" style="font-size: 11px;">${v.sha ? shortSha(v.sha) : ""}${v.runId ? ` · run ${v.runId}` : ""}${v.command ? ` · ${v.command}` : ""}</div>
       </div>
       <div class="muted mono" style="font-size: 11px;" title="time since verification started">${elapsed != null ? html`⏱ ${formatDuration(elapsed)}` : formatRelativeTime(v.startedAt)}</div>
     </div>
@@ -2406,14 +2394,14 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
         // liveness record says otherwise, and the record is what decides. Badge the
         // joined answer rather than the stale status.
         ? html`<span
-            class=${"badge " + (ORCH_BADGE_CLASS[task.orchestrator.presentation] || "launch-state-unknown")}
+            class=${badgeClass("receipt", task.orchestrator.presentation)}
             title=${ORCH_BADGE_TITLE[task.orchestrator.presentation] || ""}
-          >${task.orchestrator.presentation}</span>`
+          >${statusLabel("receipt", task.orchestrator.presentation)}</span>`
         : task.reconcile
-        ? html`<span class="badge status-reconcile_candidate" title=${reconcileTitle}>reconcile candidate</span>`
+        ? html`<span class=${badgeClass("marker", "reconcile_candidate")} title=${reconcileTitle}>${statusLabel("marker", "reconcile_candidate")}</span>`
         : reviewLoopPhase
-        ? html`<span class="badge status-${task.status}" title=${"review-loop phase: " + reviewLoopPhase}>${reviewLoopPhase}</span>`
-        : html`<span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>`}
+        ? html`<span class=${badgeClass("task", task.status)} title=${"review-loop phase: " + reviewLoopPhase}>${reviewLoopPhase}</span>`
+        : html`<span class=${badgeClass("task", task.status)}>${statusLabel("task", task.status)}</span>`}
       <div>
         <div>
           <${ProjectChip} entry=${task} />
@@ -2449,7 +2437,7 @@ function FeedCard({ entry, onClick }) {
             href=${hashFor({ view: "run", id: entry.runId })}
             onClick=${(e) => e.stopPropagation()}
           >run</a>
-          <span class="badge status-${entry.status}">${entry.status.replace(/_/g, " ")}</span>
+          <span class=${badgeClass("task", entry.status)}>${statusLabel("task", entry.status)}</span>
           ${entry.durationMs != null ? html`<span class="muted mono" style="font-size: 11px;" title="run-time (started → completed)">⏱ ${formatDuration(entry.durationMs)}</span>` : null}
           <span class="muted mono" style="font-size: 11px;">${formatRelativeTime(entry.completedAt)}</span>
         </div>
@@ -2489,20 +2477,6 @@ function renderPreview(entry) {
     text = r.diff_summary ?? r.summary ?? r.notes ?? JSON.stringify(r).slice(0, 400);
   }
   return html`<div class="preview">${text.toString().slice(0, 400)}</div>`;
-}
-
-function formatRelativeTime(iso) {
-  if (!iso) return "—";
-  const then = new Date(iso).getTime();
-  const now = Date.now();
-  const sec = Math.floor((now - then) / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  return `${day}d ago`;
 }
 
 render(h(App), document.getElementById("app"));

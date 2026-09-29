@@ -6,37 +6,40 @@
 // is a read surface for an authority model — rendering "settled" over an untriaged
 // finding would be a lie, not a cosmetic bug.
 
-const DISPOSITION_BADGES = {
-  untriaged: "status-awaiting_gate",
-  fix_now: "status-blocked_by_red",
-  accepted_risk: "status-pending",
-  deferred: "status-pending",
-  rejected_premise: "status-complete",
-  duplicate: "status-pending",
-  architecture_question: "status-awaiting_red",
+import { statusClass } from "./status-tokens.js";
+
+// Each value borrows the task status whose token already carries its meaning.
+const DISPOSITION_AS_TASK = {
+  untriaged: "awaiting_gate",
+  fix_now: "blocked_by_red",
+  accepted_risk: "pending",
+  deferred: "pending",
+  rejected_premise: "complete",
+  duplicate: "pending",
+  architecture_question: "awaiting_red",
 };
 
-const SEVERITY_BADGES = {
-  critical: "status-failed",
-  high: "status-failed",
-  medium: "status-awaiting_gate",
-  low: "status-pending",
+const SEVERITY_AS_TASK = {
+  critical: "failed",
+  high: "failed",
+  medium: "awaiting_gate",
+  low: "pending",
 };
 
 export function dispositionBadgeClass(disposition) {
-  return DISPOSITION_BADGES[disposition] ?? "status-pending";
+  return statusClass("task", DISPOSITION_AS_TASK[disposition] ?? "pending");
 }
 
 export function severityBadgeClass(severity) {
-  return SEVERITY_BADGES[String(severity ?? "").toLowerCase()] ?? "status-pending";
+  return statusClass("task", SEVERITY_AS_TASK[String(severity ?? "").toLowerCase()] ?? "pending");
 }
 
 export function reviewStateBadgeClass(state) {
-  if (state === "settled") return "status-complete";
-  if (state === "failed") return "status-failed";
-  if (state === "blocked_environment") return "status-environment_unavailable";
-  if (state === "awaiting_disposition") return "status-awaiting_gate";
-  return "status-running";
+  if (state === "settled") return statusClass("task", "complete");
+  if (state === "failed") return statusClass("task", "failed");
+  if (state === "blocked_environment") return statusClass("marker", "environment_unavailable");
+  if (state === "awaiting_disposition") return statusClass("task", "awaiting_gate");
+  return statusClass("task", "running");
 }
 
 /** "fix_now 2, untriaged 1" — deterministic order so two renders of one review

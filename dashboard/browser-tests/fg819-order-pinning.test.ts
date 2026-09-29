@@ -164,7 +164,7 @@ test("FG-819: every store kind renders through /api/attention-inbox with its own
   const stale = page.locator(".badge.inbox-kind-stale_verification");
   const unknown = page.locator(".badge.inbox-kind-unknown");
   assert.equal(await unknown.count(), 1, "a future server kind is rendered instead of rejecting the whole inbox");
-  assert.equal(await unknown.innerText(), KINDS.U, "the future kind remains intelligible to the operator");
+  assert.equal(await unknown.innerText(), `${KINDS.U} (unrecognized)`, "the future kind remains intelligible to the operator, never passing as a known kind (FG-824)");
   const staleColor = await stale.evaluate((el) => getComputedStyle(el).color);
   const unknownColor = await unknown.evaluate((el) => getComputedStyle(el).color);
   assert.notEqual(staleColor, unknownColor, "the new kinds carry a toned rule, not the neutral one");

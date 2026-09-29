@@ -10,6 +10,7 @@
 import { h } from "preact";
 import { useEffect, useRef } from "preact/hooks";
 import htm from "htm";
+import { formatClock } from "./format.js";
 import { BOTTOM_BAR_ITEMS, checkoutScopeLabel, homeBadge, navHref, navModel } from "./nav-render.js";
 import { ROUTES } from "./view-routing.js";
 import { runsBadge } from "./runs-index-render.js";
@@ -99,7 +100,7 @@ export function NavColumn({ view, scope, projects, onScopeChange, now, inboxLoad
         </section>
       `)}
     </nav>
-    <div class="nav-clock muted mono" title="Last poll">${new Date(now).toLocaleTimeString()}</div>
+    <div class="nav-clock muted mono" title="Last poll">${formatClock(now)}</div>
   `;
 }
 

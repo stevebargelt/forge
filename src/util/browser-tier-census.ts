@@ -215,6 +215,16 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // missing settings.json saying so, an unknown tab landing on overview, an unknown role
   // named; and the 400px role page fitting the viewport. Fixture port 18830.
   "fg817-roles-pages.test.ts": 8,
+  // FG-824 adds `fg824-status-tokens` (6 tests): every attention-inbox kind and every task
+  // status paints through the status token map (class, label, tone accent and computed colour),
+  // an unknown kind or status paints the neutral fallback labeled "(unrecognized)"; a launch row
+  // reads "unobserved for N min" at the 15-min suspicious and 60-min critical thresholds,
+  // measured by the payload's generatedAt (the injected clock) and never on a terminal outcome;
+  // the task page's recovery card names the failure kind, the last forge recover and the next
+  // verb — a button through the FG-822 preview for an eligible re-drive, the policy's advice
+  // otherwise; and FG-692 Tab/Enter reach the recovery button, its preview and Confirm.
+  // The sixth test pins the 14m59s/15m/59m59s/60m injected-clock boundaries. Fixture port 18832.
+  "fg824-status-tokens.test.ts": 6,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

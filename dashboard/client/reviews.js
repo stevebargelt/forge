@@ -9,6 +9,7 @@
 import { h } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
+import { shortSha } from "./format.js";
 import {
   dispositionBadgeClass,
   severityBadgeClass,
@@ -28,10 +29,6 @@ const html = htm.bind(h);
 // <finding-id> would be read as a tag and an escaped one would render as
 // "&lt;finding-id&gt;" on screen.
 const DISPOSITION_COMMAND = 'forge review disposition <finding-id> <decision> --rationale "…"';
-
-function shortSha(sha) {
-  return sha ? String(sha).slice(0, 12) : "—";
-}
 
 function FindingsTable({ findings }) {
   if (findings.length === 0) {

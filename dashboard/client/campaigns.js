@@ -20,6 +20,7 @@ import {
   campaignStatusBadgeClass, verdictBadgeClass, verdictLabel, itemLifecycleBadgeClass,
   shortSha, formatItemCounts, gitEvidence, itemActionText,
 } from "./campaigns-render.js";
+import { badgeClass, statusLabel } from "./status-tokens.js";
 
 const html = htm.bind(h);
 
@@ -239,7 +240,7 @@ function ReconcileEvidence({ rows }) {
               <tr key=${r.id ?? i} style="border-top: 1px solid var(--border);" data-testid="reconcile-evidence-row">
                 <td style="padding: 3px 6px;" title=${r.command ?? ""}>${r.gateName ?? "—"}</td>
                 <td style="padding: 3px 6px;">${r.source ?? "host"}</td>
-                <td style="padding: 3px 6px;"><span class="badge ${r.exitCode === 0 ? "status-complete" : "status-failed"}">${r.exitCode === 0 ? "pass" : `exit ${r.exitCode}`}</span></td>
+                <td style="padding: 3px 6px;"><span class=${badgeClass("task", r.exitCode === 0 ? "complete" : "failed")}>${r.exitCode === 0 ? "pass" : `exit ${r.exitCode}`}</span></td>
                 ${r.ciUrl
                   ? html`<td style="padding: 3px 6px;"><a class="mono" href=${r.ciUrl} target="_blank" rel="noreferrer noopener">${shortSha(r.commitSha)}</a></td>`
                   : html`<td style="padding: 3px 6px;" class="mono faint">${shortSha(r.commitSha)}</td>`}
@@ -260,7 +261,7 @@ function ItemCard({ item, reconcileRows }) {
     <div class="card campaign-item" data-testid="campaign-item" data-ticket=${item.ticketId}>
       <div class="row campaign-item-head">
         <div>
-          <span class="badge ${itemLifecycleBadgeClass(item.lifecycleStatus)}">${item.lifecycleStatus}</span>
+          <span class="badge ${itemLifecycleBadgeClass(item.lifecycleStatus)}">${statusLabel("task", item.lifecycleStatus)}</span>
           ${item.outcome ? html`<span class="muted" style="margin-left: 6px;">outcome=${item.outcome}</span>` : null}
           <strong class="mono" style="margin-left: 8px;">${item.ticketId}</strong>
           ${item.title ? html`<span class="muted" style="margin-left: 6px;">${item.title}</span>` : null}
@@ -285,7 +286,7 @@ function ItemCard({ item, reconcileRows }) {
 
       ${(item.reason || item.blockerKind || action) ? html`
         <div class="subcard campaign-item-blocker" data-testid="campaign-item-blocker">
-          ${item.blockerKind ? html`<span class="badge status-blocked_by_red">blocker: ${item.blockerKind}</span>` : null}
+          ${item.blockerKind ? html`<span class=${badgeClass("task", "blocked_by_red")}>blocker: ${item.blockerKind}</span>` : null}
           ${item.reason ? html`<div style="margin-top: 4px;">${item.reason}</div>` : null}
           ${action ? html`<div class="campaign-item-action" data-testid="campaign-item-action"><span class="audit-axis-label">action</span> ${action}</div>` : null}
         </div>` : null}
@@ -296,7 +297,7 @@ function ItemCard({ item, reconcileRows }) {
       ${audit ? html`
         <div class="campaign-item-axis" data-testid="campaign-item-audit">
           <span class="audit-axis-label">done-audit</span>
-          <span class="badge ${audit.outcome === "pass" ? "status-complete" : "status-failed"}">${audit.outcome}</span>
+          <span class=${badgeClass("task", audit.outcome === "pass" ? "complete" : "failed")}>${audit.outcome}</span>
           ${item.hostVerificationDetail ? html`<span class="muted" style="margin-left: 6px;">${item.hostVerificationDetail}</span>` : null}
           ${audit.outcome !== "pass" && audit.gaps && audit.gaps.length > 0 ? html`<div class="muted" style="margin-top: 2px;">gaps: ${audit.gaps.join("; ")}</div>` : null}
         </div>` : null}
@@ -322,7 +323,7 @@ function GitEvidenceBlock({ git }) {
         : html`<span class="muted" data-testid="campaign-git-unmanaged">not a Forge-managed worktree</span>`}
       <span class="mono" style="margin-left: 8px;">commit ${git.commitShort ?? "—"}</span>
       <span class="badge audit-not_observed" style="margin-left: 8px;" data-testid="campaign-pr-state">${git.prLabel}</span>
-      <span class="badge ${git.pushState === "pushed" ? "status-complete" : git.pushState === "not_pushed" ? "status-failed" : "audit-not_observed"}" style="margin-left: 6px;" data-testid="campaign-push-state">${git.pushLabel}</span>
+      <span class=${git.pushState === "pushed" ? badgeClass("task", "complete") : git.pushState === "not_pushed" ? badgeClass("task", "failed") : "badge audit-not_observed"} style="margin-left: 6px;" data-testid="campaign-push-state">${git.pushLabel}</span>
       ${git.pushActionHint ? html`<div class="campaign-item-action" data-testid="campaign-push-action"><span class="audit-axis-label">action</span> ${git.pushActionHint}</div>` : null}
     </div>`;
 }

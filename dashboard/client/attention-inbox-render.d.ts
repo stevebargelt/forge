@@ -64,7 +64,7 @@ export function inboxHeldLabel(count: number): string;
 export const INBOX_TIMEOUT_MS: number;
 export const INBOX_LOADING: { phase: "loading" };
 
-export function inboxItemBadge(item: Partial<AttentionItem> | null | undefined): { class: string; label: string };
+export function inboxItemBadge(item: Partial<AttentionItem> | null | undefined): { class: string; label: string; tone: string };
 export function inboxSeverityBadge(item: Partial<AttentionItem> | null | undefined): { class: string; label: string };
 export function inboxItemLink(item: Partial<AttentionItem> | null | undefined): { hash: string; label: string } | null;
 
@@ -73,6 +73,7 @@ export type InboxItemSummary = {
   kind: string | undefined;
   badgeClass: string;
   badgeLabel: string;
+  accentClass: string;
   severityClass: string;
   severityLabel: string;
   reason: string;

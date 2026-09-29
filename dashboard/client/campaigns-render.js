@@ -11,26 +11,29 @@
 // Every value read here already lives on the ReportItemRow the campaign report
 // contract produces (src/campaign/report.ts). Nothing is recomputed from SQL.
 
-// Campaign lifecycle status → an existing shell.ts .badge.status-* class. Reusing
-// the shared badge palette keeps campaigns visually consistent with the queue /
-// reviews surfaces rather than introducing a parallel colour vocabulary.
-const CAMPAIGN_STATUS_BADGES = {
-  planned: "status-pending",
-  running: "status-running",
-  paused: "status-awaiting_gate",
-  complete: "status-complete",
-  failed: "status-failed",
-  abandoned: "status-pending",
+import { statusClass } from "./status-tokens.js";
+import { shortSha } from "./format.js";
+
+// Campaign lifecycle status → the task status whose token (status-tokens.js) already
+// means the same thing. Borrowing the shared palette keeps campaigns visually consistent
+// with the queue / reviews surfaces rather than introducing a parallel colour vocabulary.
+const CAMPAIGN_STATUS_AS_TASK = {
+  planned: "pending",
+  running: "running",
+  paused: "awaiting_gate",
+  complete: "complete",
+  failed: "failed",
+  abandoned: "pending",
 };
 
 export function campaignStatusBadgeClass(status) {
-  return CAMPAIGN_STATUS_BADGES[status] ?? "status-pending";
+  return statusClass("task", CAMPAIGN_STATUS_AS_TASK[status] ?? "pending");
 }
 
-const VERDICT_BADGES = {
-  all_shipped: "status-complete",
-  complete_with_issues: "status-awaiting_gate",
-  not_complete: "status-pending",
+const VERDICT_AS_TASK = {
+  all_shipped: "complete",
+  complete_with_issues: "awaiting_gate",
+  not_complete: "pending",
 };
 
 const VERDICT_LABELS = {
@@ -40,32 +43,20 @@ const VERDICT_LABELS = {
 };
 
 export function verdictBadgeClass(verdict) {
-  return VERDICT_BADGES[verdict] ?? "status-pending";
+  return statusClass("task", VERDICT_AS_TASK[verdict] ?? "pending");
 }
 
 export function verdictLabel(verdict) {
   return VERDICT_LABELS[verdict] ?? String(verdict ?? "—");
 }
 
-// Per-item lifecycle status → badge. The campaign item lifecycle uses the same
-// state names the queue/task surfaces already style, so they resolve directly.
-const ITEM_LIFECYCLE_BADGES = {
-  pending: "status-pending",
-  running: "status-running",
-  awaiting_gate: "status-awaiting_gate",
-  blocked_by_red: "status-blocked_by_red",
-  awaiting_recovery: "status-awaiting_recovery",
-  complete: "status-complete",
-  failed: "status-failed",
-};
-
+// Per-item lifecycle status → badge. The campaign item lifecycle uses the task status
+// names, so they resolve directly; an unrecognized one takes the neutral fallback.
 export function itemLifecycleBadgeClass(lifecycleStatus) {
-  return ITEM_LIFECYCLE_BADGES[lifecycleStatus] ?? "status-pending";
+  return statusClass("task", lifecycleStatus);
 }
 
-export function shortSha(sha) {
-  return sha ? String(sha).slice(0, 12) : "—";
-}
+export { shortSha };
 
 // The five outcome buckets the report groups into, as a compact "shipped 3 · blocked 1"
 // count line. A zero bucket is omitted so the line reads at a glance; "no items" names

@@ -12,7 +12,7 @@ import htm from "htm";
 import { parentHash, roleTrail } from "./breadcrumbs-render.js";
 import { hashFor } from "./view-routing.js";
 import { ObjectHead, ObjectTabs, useEscapeTo } from "./object-page-view.js";
-import { formatDuration } from "./duration.js";
+import { formatDuration, formatTimestamp } from "./format.js";
 import { mountLabel } from "./roles-index-render.js";
 import {
   instructionSections, percent, relationLabel, roleHeader, roleTabLabel, roleTabs, shortSha, tabCaption, tokens,
@@ -21,7 +21,7 @@ import {
 const html = htm.bind(h);
 
 function when(iso) {
-  return iso ? new Date(iso).toLocaleString() : "—";
+  return formatTimestamp(iso);
 }
 
 function useRoleDetail(role, project) {

@@ -7,6 +7,7 @@
 // the producer never emits; tier/checkContexts/reused never set) hid behind
 // a green suite.
 import { verificationRowLabel } from "./verification-label.js";
+import { statusClass } from "./status-tokens.js";
 
 // review_loop.verification_finished carries `ok` (src/cli/commands/review-loop.ts's
 // verifyWithEvents); campaign_item.host_gate_finished carries `exitCode`
@@ -18,18 +19,21 @@ import { verificationRowLabel } from "./verification-label.js";
 // as a genuine test failure and left the distinction to a muted detail span
 // nobody scans. Checked BEFORE `ok` for exactly that reason. A payload with no
 // readiness field (every pre-FG-566 event) reaches none of this.
-export const ENVIRONMENT_UNAVAILABLE_CLASS = "status-environment_unavailable";
+export const ENVIRONMENT_UNAVAILABLE_CLASS = statusClass("marker", "environment_unavailable");
+
+// Timeline log markers borrow the task status whose token already carries their meaning.
+const marker = (taskStatus) => statusClass("task", taskStatus);
 
 export function isReadinessRefusal(p) {
   return Boolean(p && typeof p === "object" && p.readiness && typeof p.readiness === "object" && p.readiness.outcome === "refused");
 }
 
 export function verificationOutcomeClass(p) {
-  if (!p || typeof p !== "object") return "status-pending";
+  if (!p || typeof p !== "object") return marker("pending");
   if (isReadinessRefusal(p)) return ENVIRONMENT_UNAVAILABLE_CLASS;
-  if (typeof p.exitCode === "number") return p.exitCode === 0 ? "status-complete" : "status-failed";
-  if (typeof p.ok === "boolean") return p.ok ? "status-complete" : "status-failed";
-  return "status-pending";
+  if (typeof p.exitCode === "number") return p.exitCode === 0 ? marker("complete") : marker("failed");
+  if (typeof p.ok === "boolean") return p.ok ? marker("complete") : marker("failed");
+  return marker("pending");
 }
 
 /** The timeline badge's TEXT. The event type alone is byte-identical for a
@@ -43,7 +47,7 @@ export function eventBadgeText(e) {
 
 export function eventBadgeClass(e) {
   const type = e.eventType;
-  if (/verification_started|host_gate_started/.test(type)) return "status-running";
+  if (/verification_started|host_gate_started/.test(type)) return marker("running");
   if (/verification_finished|host_gate_finished/.test(type)) return verificationOutcomeClass(e.payload);
   // FG-425's publisher events are TERMINAL but match none of the generic patterns
   // below — "published", "refused" and "parked" contain no "complete" and no
@@ -55,22 +59,22 @@ export function eventBadgeClass(e) {
   // payload (published | refused | parked | validation_failed | merge_failed) — the
   // event fires whatever happened, so the badge must read the payload, not the name.
   if (type === "integration.published") {
-    return e.payload && e.payload.outcome === "published" ? "status-complete" : "status-failed";
+    return e.payload && e.payload.outcome === "published" ? marker("complete") : marker("failed");
   }
-  if (type === "publication.published") return "status-complete";
-  if (type === "publication.refused" || type === "publication.parked") return "status-failed";
-  if (type === "publication.recovered") return "status-complete";
+  if (type === "publication.published") return marker("complete");
+  if (type === "publication.refused" || type === "publication.parked") return marker("failed");
+  if (type === "publication.recovered") return marker("complete");
   // FG-566: the readiness preflight's terminal events match none of the generic
   // patterns below either — "ready" contains no "complete", "refused" no
   // "failed" — so both fell through to the dim in-flight grey. A refusal is a
   // TERMINAL environment fault that stopped the path before it ran; it must not
   // read as pending.
-  if (type === "host_readiness.ready") return "status-complete";
-  if (type === "host_readiness.refused") return "status-failed";
-  if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return "status-failed";
-  if (/completed|complete/.test(type)) return "status-complete";
-  if (/awaiting/.test(type)) return "status-awaiting_gate";
-  return "status-pending";
+  if (type === "host_readiness.ready") return marker("complete");
+  if (type === "host_readiness.refused") return marker("failed");
+  if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return marker("failed");
+  if (/completed|complete/.test(type)) return marker("complete");
+  if (/awaiting/.test(type)) return marker("awaiting_gate");
+  return marker("pending");
 }
 
 // FG-566: the readiness preflight's classified outcome, carried on
@@ -150,6 +154,6 @@ export function hostGateDetail(p) {
 export function verificationRowBadge(v) {
   const label = verificationRowLabel(v);
   return v.stale
-    ? { class: "status-failed", text: `stale · ${label}` }
-    : { class: "status-running", text: label };
+    ? { class: marker("failed"), text: `stale · ${label}` }
+    : { class: marker("running"), text: label };
 }

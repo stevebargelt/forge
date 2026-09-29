@@ -323,6 +323,8 @@ export type HomeActivityView = {
   sections: Array<{ kind: string; heading: string; entries: unknown[] }>;
   ci: CiCompactSummary[] | null;
   empty: boolean;
+  /** FG-824: the payload's own generatedAt, when ready — the freshness signal's clock. */
+  generatedAt?: string | null;
 };
 
 export function homeActivityView(load: unknown): HomeActivityView;
@@ -342,6 +344,8 @@ export function launchWaitIdentity(entry: Partial<HostLaunchEntry> | null | unde
 
 export type HomeInFlightActivity = {
   phase: "loading" | "ready" | "unavailable";
+  /** FG-824: the payload's own generatedAt, when ready — the freshness signal's clock. */
+  generatedAt?: string | null;
   /** Only launches that are associated with current work, observed and running. */
   hostVerification: HostLaunchEntry[];
   /** Only candidates whose required checks are still pending. */
@@ -360,3 +364,17 @@ export type HomeInFlightActivity = {
  *  from /api/in-flight, and reading them here is the duplication this removes. Never
  *  the host-level `unassociated` bucket either — that is diagnostic activity. */
 export function homeInFlightActivity(load: unknown): HomeInFlightActivity;
+
+// ───────── FG-824: the freshness signal on in-flight launch rows ─────────
+
+export const FRESHNESS_SUSPICIOUS_MIN: number;
+export const FRESHNESS_CRITICAL_MIN: number;
+export type LaunchFreshness = {
+  minutes: number;
+  level: "suspicious" | "critical";
+  text: string;
+  class: string;
+  title: string;
+};
+/** Null for a terminal launch, an unreadable clock, or under the suspicious threshold. */
+export function launchFreshness(entry: unknown, generatedAt: string | null | undefined): LaunchFreshness | null;

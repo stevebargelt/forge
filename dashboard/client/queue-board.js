@@ -17,6 +17,8 @@
 import { h } from "preact";
 import { useState, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
+import { formatDuration } from "./format.js";
+import { badgeClass, statusLabel } from "./status-tokens.js";
 import {
   BOARD_COLUMNS,
   DEQUEUE_NOTE,
@@ -34,14 +36,7 @@ const html = htm.bind(h);
 
 const EXECUTION_LABELS = { idle: "idle", launching: "launching", running: "running" };
 
-function fmtDuration(ms) {
-  if (typeof ms !== "number" || !Number.isFinite(ms)) return "—";
-  const abs = Math.abs(ms);
-  if (abs < 1000) return `${Math.round(abs)}ms`;
-  if (abs < 60_000) return `${Math.round(abs / 1000)}s`;
-  if (abs < 3_600_000) return `${Math.round(abs / 60_000)}m`;
-  return `${(abs / 3_600_000).toFixed(1)}h`;
-}
+const elapsed = (ms) => (typeof ms === "number" && Number.isFinite(ms) ? formatDuration(Math.abs(ms)) : "—");
 
 /** The scope every mutation POST carries — the SAME resolution /api/queue used, so a
  *  board cannot write to a project other than the one it is showing. */
@@ -377,7 +372,7 @@ function QueueCard({
 
       ${row.reservation
         ? html`<div class="faint queue-reservation" title="The RESERVATION half. queue_claims is authoritative for the reservation, the run record for the execution — never joined.">
-            reserved by <span class="mono">${row.reservation.owner}</span> gen ${row.reservation.generation}
+            <span class=${badgeClass("claim", "live")}>${statusLabel("claim", "live")}</span>${" "}reserved by <span class="mono">${row.reservation.owner}</span> gen ${row.reservation.generation}
             ${row.reservation.launchId ? html` · launch <span class="mono">${row.reservation.launchId}</span>` : null}
             ${row.reservation.leaseExpired ? html` · <span class="queue-lease-expired">lease expired — recoverable by takeover</span>` : null}
           </div>`
@@ -430,7 +425,7 @@ function DispatcherPanel({ dispatcher, capacity }) {
         </div>
         <div>
           <span class="muted" title="How long since the owner was last actually alive. 'Nothing to do' and 'the dispatcher died hours ago' must never read the same.">last heartbeat</span>
-          <span class="mono">${dispatcher.leaseStaleness === null ? "—" : `${fmtDuration(dispatcher.leaseStaleness)} ago`}</span>
+          <span class="mono">${dispatcher.leaseStaleness === null ? "—" : `${elapsed(dispatcher.leaseStaleness)} ago`}</span>
         </div>
         <div>
           <span class="muted">next watchdog</span>
@@ -439,7 +434,7 @@ function DispatcherPanel({ dispatcher, capacity }) {
               ? "—"
               : dispatcher.nextWatchdogInMs <= 0
                 ? "due"
-                : `in ${fmtDuration(dispatcher.nextWatchdogInMs)}`}
+                : `in ${elapsed(dispatcher.nextWatchdogInMs)}`}
           </span>
         </div>
         <div><span class="muted">pending wakes</span> <span class="mono">${dispatcher.pendingWakes}</span></div>
@@ -452,7 +447,7 @@ function DispatcherPanel({ dispatcher, capacity }) {
             <span class="mono">${dispatcher.lastEvaluation.reason}</span>
             <span class="faint">
               ${dispatcher.lastEvaluation.evaluatedAt}
-              ${dispatcher.lastEvaluationAgeMs === null ? null : ` (${fmtDuration(dispatcher.lastEvaluationAgeMs)} ago)`}
+              ${dispatcher.lastEvaluationAgeMs === null ? null : ` (${elapsed(dispatcher.lastEvaluationAgeMs)} ago)`}
             </span>
             ${dispatcher.lastEvaluation.detail
               ? html`<div class="muted queue-dispatcher-eval-detail">${dispatcher.lastEvaluation.detail}</div>`

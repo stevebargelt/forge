@@ -60,7 +60,8 @@ const UNKNOWN_STATUS = "not_a_task_status";
  *  status: the verification environment could not be established, so nothing ran
  *  and no task changed state. Every other `.badge.status-X` rule must name a real
  *  status — that is what keeps a phantom's CSS from creeping back in. */
-const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate", "environment_unavailable"]);
+// `unknown` is the status token map's neutral fallback for a value it does not know (FG-824).
+const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate", "environment_unavailable", "unknown"]);
 
 {
   const db = new Database(join(tmpHome, "forge.db"));

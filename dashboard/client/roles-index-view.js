@@ -5,12 +5,13 @@
 import { h } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
+import { formatTimestamp } from "./format.js";
 import { rolesIndexNotices, rolesIndexRows, rolesIndexSource } from "./roles-index-render.js";
 
 const html = htm.bind(h);
 
 function when(iso) {
-  return iso ? new Date(iso).toLocaleString() : "never";
+  return formatTimestamp(iso, "never");
 }
 
 export function RolesIndexView() {

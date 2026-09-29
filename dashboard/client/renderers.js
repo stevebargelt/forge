@@ -10,26 +10,20 @@ import htm from "htm";
 // markdown.js. Re-exported so existing `import { md } from "./renderers.js"`
 // consumers keep working while going through the sanitizer.
 import { md, mdInline } from "./markdown.js";
+import { badgeClass } from "./status-tokens.js";
 
 const html = htm.bind(h);
 
 export { md, mdInline };
 
 // ---- badges ----
+const SEVERITY_AS_TASK = { high: "failed", medium: "awaiting_gate", low: "awaiting_red" };
+const VERDICT_AS_TASK = { pass: "complete", fail: "failed" };
 function sevBadge(sev) {
-  const cls =
-    sev === "high" ? "status-failed" :
-    sev === "medium" ? "status-awaiting_gate" :
-    sev === "low" ? "status-awaiting_red" :
-    "status-pending";
-  return html`<span class="badge ${cls}">${sev}</span>`;
+  return html`<span class=${badgeClass("task", SEVERITY_AS_TASK[sev] ?? "pending")}>${sev}</span>`;
 }
 function verdictBadge(v) {
-  const cls =
-    v === "pass" ? "status-complete" :
-    v === "fail" ? "status-failed" :
-    "status-pending";
-  return html`<span class="badge ${cls}">${v}</span>`;
+  return html`<span class=${badgeClass("task", VERDICT_AS_TASK[v] ?? "pending")}>${v}</span>`;
 }
 
 // Helper: render markdown into a span via dangerouslySetInnerHTML. Each branch

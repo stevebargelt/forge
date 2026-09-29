@@ -1140,8 +1140,8 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       // `unassociated`, and is legitimately ABSENT from a server that predates FG-700 —
       // so it is declared guarded rather than required. The payload validator still
       // rejects a `launches` that is present and holds a malformed entry.
-      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches", "ciWaits", "operatorWaits"] },
-      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: ["ciWaits", "operatorWaits"] },
+      { file: "current-activity-render.js", fn: "homeActivityView", receiver: "activity", kind: "payload", guarded: ["launches", "ciWaits", "operatorWaits", "generatedAt"] },
+      { file: "current-activity-render.js", fn: "homeInFlightActivity", receiver: "activity", kind: "payload", guarded: ["ciWaits", "operatorWaits", "generatedAt"] },
       { file: "current-activity-render.js", fn: "launchIsAssociatedWait", receiver: "entry", kind: "launch",
         guarded: ["runId", "taskId", "ticketId"] },
       { file: "current-activity-render.js", fn: "launchIsCurrentWait", receiver: "entry", kind: "launch",
@@ -1149,6 +1149,9 @@ describe("FG-694 AC7 — every failure mode renders the unavailable state and NO
       { file: "current-activity-render.js", fn: "launchWaitIdentity", receiver: "e", kind: "launch",
         guarded: ["ticketId", "name"] },
       { file: "current-activity-view.js", fn: "HostWaitRow", receiver: "entry", kind: "launch", guarded: ["startedAt"] },
+      // FG-824: the freshness signal reads the row through typeof guards; a missing clock is no signal.
+      { file: "current-activity-render.js", fn: "launchFreshness", receiver: "entry", kind: "launch",
+        guarded: ["recordedStatus", "status", "observedAt"] },
     ];
 
     test("every field the render path dereferences is either validated by the contract or declared guarded", () => {

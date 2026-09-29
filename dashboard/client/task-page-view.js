@@ -8,6 +8,8 @@
 import { h } from "preact";
 import { useState, useEffect, useCallback } from "preact/hooks";
 import htm from "htm";
+import { badgeClass, statusLabel } from "./status-tokens.js";
+import { formatClock, formatDuration } from "./format.js";
 import { renderResultByAgent, md } from "./renderers.js";
 import { eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail } from "./verification-render.js";
 import { readAttentionInbox } from "./attention-inbox-render.js";
@@ -17,6 +19,7 @@ import { hashFor } from "./view-routing.js";
 import { ExplainContent } from "./run-explain-panel.js";
 import { ObjectHead, ObjectTabs, useEscapeTo } from "./object-page-view.js";
 import { TaskActions } from "./task-actions-view.js";
+import { RecoveryCard } from "./recovery-card-view.js";
 
 const html = htm.bind(h);
 
@@ -97,7 +100,7 @@ export function TaskPage({ taskId, tab, projects }) {
         ${explain
           ? html`<${ExplainContent} taskId=${taskId} />`
           : detail
-          ? html`<${TaskLinks} detail=${detail} projects=${projects} /><${TaskDetailBody} detail=${detail} />`
+          ? html`<${TaskLinks} detail=${detail} projects=${projects} /><${RecoveryCard} key=${taskId} detail=${detail} onChanged=${() => setReload((n) => n + 1)} /><${TaskDetailBody} detail=${detail} />`
           : err ? null : html`<div class="muted">loading…</div>`}
       <//>
     </section>
@@ -134,8 +137,8 @@ function TaskDetailBody({ detail }) {
         <${ModelBadge} entry=${detail.task} />
         ${detail.task.taskId}
         <${CopyIdButton} value=${detail.task.taskId} />
-        · ${detail.task.phase} · ${detail.task.status}
-        ${detail.failureKind ? html`<span class="badge status-failed" style="margin-left: 6px;">${detail.failureKind}</span>` : null}
+        · ${detail.task.phase} · ${statusLabel("task", detail.task.status)}
+        ${detail.failureKind ? html`<span class=${badgeClass("task", "failed")} style="margin-left: 6px;">${detail.failureKind}</span>` : null}
       </div>
 
       ${detail.idle ? html`
@@ -158,7 +161,7 @@ function TaskDetailBody({ detail }) {
         ${detail.verdicts.map((v) => html`
           <div class="subcard">
             <strong>${v.redRole}</strong>
-            <span class="badge status-${v.verdict === "pass" ? "complete" : v.verdict === "fail" ? "failed" : "pending"}">${v.verdict}</span>
+            <span class=${badgeClass("task", v.verdict === "pass" ? "complete" : v.verdict === "fail" ? "failed" : "pending")}>${v.verdict}</span>
             <span class="muted">authority: ${v.authority}</span>
             <span class="muted">confidence: ${v.confidence.toFixed(2)}</span>
             ${v.findings && v.findings.length > 0 ? html`
@@ -183,7 +186,7 @@ function TaskDetailBody({ detail }) {
         <div class="timeline">
           ${detail.events.map((e, i) => html`
             <div class="row" key=${i} style="gap: 8px; padding: 2px 0; align-items: baseline;">
-              <span class="muted mono" style="font-size: 11px; min-width: 76px;">${formatClock(e.createdAt)}</span>
+              <span class="muted mono" style="font-size: 11px; min-width: 76px;">${formatClock(e.createdAt, undefined, e.createdAt)}</span>
               <span class="badge ${eventBadgeClass(e)}">${eventBadgeText(e)}</span>
               ${eventDetail(e) ? html`<span class="muted" style="font-size: 12px;">${eventDetail(e)}</span>` : null}
             </div>
@@ -282,17 +285,6 @@ function logSizeLabel(bytes, received) {
 }
 
 // WALK-5 helpers for the task timeline + live activity panel.
-function formatDurMs(ms) {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60), rm = m % 60;
-  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
-}
-function formatClock(iso) {
-  try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
-}
 // FG-487: review_loop.verification_* / campaign_item.host_gate_* are the new
 // host-side verification phase-boundary events (events.ts) — eventBadgeClass/
 // reviewLoopVerificationDetail/hostGateDetail live in verification-render.js
@@ -310,8 +302,8 @@ function eventDetail(e) {
   return "";
 }
 function idleLine(idle) {
-  if (idle.measured === false) return `awaiting start · timeout ${formatDurMs(idle.idleTimeoutMs)}`;
+  if (idle.measured === false) return `awaiting start · timeout ${formatDuration(idle.idleTimeoutMs)}`;
   const note = idle.hasOutput ? "" : ", no output yet";
-  const tail = idle.expired ? "(idle budget exhausted)" : `(${formatDurMs(idle.remainingMs)} left)`;
-  return `idle ${formatDurMs(idle.idleMs)}${note} · timeout ${formatDurMs(idle.idleTimeoutMs)} ${tail}`;
+  const tail = idle.expired ? "(idle budget exhausted)" : `(${formatDuration(idle.remainingMs)} left)`;
+  return `idle ${formatDuration(idle.idleMs)}${note} · timeout ${formatDuration(idle.idleTimeoutMs)} ${tail}`;
 }

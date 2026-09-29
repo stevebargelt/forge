@@ -164,7 +164,8 @@ export const TAKEOVER_OUTCOME = "taken_over_after_lease_expiry";
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
-export type ClaimState = "live" | "released";
+export const QUEUE_CLAIM_STATES = ["live", "released"] as const;
+export type ClaimState = (typeof QUEUE_CLAIM_STATES)[number];
 
 /** WHAT THE CAPACITY CEILING COUNTS. Required, with NO DEFAULT — the two answers
  *  have materially different operational consequences and the choice belongs to

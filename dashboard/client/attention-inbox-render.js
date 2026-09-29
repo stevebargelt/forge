@@ -11,6 +11,7 @@
 // a Retry, never to the calm empty copy.
 
 import { caElapsedText } from "./current-activity-render.js";
+import { statusToken, toneAccentClass } from "./status-tokens.js";
 
 /** Surface-level copy. Deliberately about the SURFACE, never about the work. */
 export const INBOX_UNAVAILABLE_LABEL = "Attention inbox unavailable";
@@ -24,29 +25,15 @@ export function inboxHeldLabel(count) {
   return `No open items — ${count} held (dismissed or snoozed)`;
 }
 
-/** Per-kind badge label + class, keyed on the STRUCTURED kind (never a substring of any
- *  rendered text) so a theme change never re-derives meaning. */
-const KIND_META = {
-  waiting_gate: { label: "Waiting on gate", class: "inbox-kind-waiting_gate" },
-  campaign_paused: { label: "Campaign paused", class: "inbox-kind-campaign_paused" },
-  blocked_by_red_or_reviewer: { label: "Blocked by review", class: "inbox-kind-blocked_by_red_or_reviewer" },
-  missing_acceptance_or_readiness: { label: "Readiness gap", class: "inbox-kind-missing_acceptance_or_readiness" },
-  auth_setup: { label: "Auth / setup", class: "inbox-kind-auth_setup" },
-  merge_conflict: { label: "Merge conflict", class: "inbox-kind-merge_conflict" },
-  integration_blocked_park: { label: "Integration parked", class: "inbox-kind-integration_blocked_park" },
-  stale_verification: { label: "Stale verification", class: "inbox-kind-stale_verification" },
-  kanban_conflict: { label: "Kanban conflict", class: "inbox-kind-kanban_conflict" },
-};
-
 const SEVERITY_LABELS = { high: "high", medium: "medium", low: "low" };
 
-/** The badge (class + label) for an item's kind. An unrecognized kind reads as itself
- *  under a neutral class rather than throwing — forward tolerant of a kind a newer
- *  server adds. */
+/** The badge (class + label) for an item's kind, from the status token map (keyed on the
+ *  STRUCTURED kind, never a substring of rendered text). An unrecognized kind reads as
+ *  itself, marked unrecognized, under the neutral class rather than throwing — forward
+ *  tolerant of a kind a newer server adds. */
 export function inboxItemBadge(item) {
-  const kind = item && typeof item === "object" ? item.kind : undefined;
-  const meta = (typeof kind === "string" && KIND_META[kind]) || null;
-  return meta ? { class: meta.class, label: meta.label } : { class: "inbox-kind-unknown", label: typeof kind === "string" && kind !== "" ? kind : "attention" };
+  const token = statusToken("inbox", item && typeof item === "object" ? item.kind : undefined);
+  return { class: token.class, label: token.label, tone: token.tone };
 }
 
 /** The severity label + class. A known severity reads as its word; an unknown/absent one
@@ -105,6 +92,7 @@ export function inboxItemSummary(item) {
     kind: item && typeof item === "object" ? item.kind : undefined,
     badgeClass: badge.class,
     badgeLabel: badge.label,
+    accentClass: toneAccentClass(badge.tone),
     severityClass: severity.class,
     severityLabel: severity.label,
     reason: item && typeof item.reason === "string" ? item.reason : "",

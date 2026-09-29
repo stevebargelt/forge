@@ -9,29 +9,26 @@
 import { h } from "preact";
 import { useState } from "preact/hooks";
 import htm from "htm";
+import { runMapStatusClass, statusLabel } from "./status-tokens.js";
 
 const html = htm.bind(h);
 
 // Non-color status symbols — every task status gets a DISTINCT glyph so a node is
-// legible without color (FG-123 a11y precedent).
-const STATUS_META = {
-  complete: { symbol: "✓", label: "complete" },
-  failed: { symbol: "✗", label: "failed" },
-  running: { symbol: "⟳", label: "running" },
-  pending: { symbol: "◌", label: "pending" },
-  awaiting_gate: { symbol: "⏸", label: "awaiting gate" },
-  awaiting_red: { symbol: "⏳", label: "awaiting red" },
-  blocked_by_red: { symbol: "⛔", label: "blocked by red" },
-  awaiting_recovery: { symbol: "↻", label: "awaiting recovery" },
+// legible without color (FG-123 a11y precedent). Label and colour come from the token map.
+const STATUS_SYMBOL = {
+  complete: "✓",
+  failed: "✗",
+  running: "⟳",
+  pending: "◌",
+  awaiting_gate: "⏸",
+  awaiting_red: "⏳",
+  blocked_by_red: "⛔",
+  awaiting_recovery: "↻",
 };
 
-function statusMeta(status) {
-  return STATUS_META[status] ?? { symbol: "•", label: status || "unknown" };
-}
-
 function StatusBadge({ status }) {
-  const meta = statusMeta(status);
-  return html`<span class=${"rm-status rm-status-" + (status || "unknown")} aria-label=${"status: " + meta.label}>${meta.symbol} ${meta.label}</span>`;
+  const label = statusLabel("task", status);
+  return html`<span class=${runMapStatusClass(status)} aria-label=${"status: " + label}>${STATUS_SYMBOL[status] ?? "•"} ${label}</span>`;
 }
 
 function ModelBadge({ model }) {
@@ -67,8 +64,7 @@ function layerPhases(phases, edges) {
 }
 
 function RedChip({ attachment, node, hrefFor }) {
-  const status = node?.status ?? "unknown";
-  const meta = statusMeta(status);
+  const status = node?.status;
   // Reds are shape-distinguished from fanout: a solid left accent + the ◆ glyph +
   // an explicit "red" label. Never color-only.
   return html`
@@ -76,7 +72,7 @@ function RedChip({ attachment, node, hrefFor }) {
       class="rm-red"
       href=${hrefFor(attachment.redTaskId)}
       title=${`red review via ${attachment.via}`}
-      aria-label=${`red ${attachment.redRole}, ${meta.label}`}
+      aria-label=${`red ${attachment.redRole}, ${statusLabel("task", status)}`}
     >
       <span class="rm-red-mark" aria-hidden="true">◆</span>
       <span class="rm-red-role">red · ${attachment.redRole}</span>
@@ -92,7 +88,7 @@ function TaskNode({ node, reds, hrefFor }) {
       <a
         class=${"rm-node" + (node.inferred ? " rm-node-inferred" : "")}
         href=${hrefFor(node.taskId)}
-        aria-label=${`task ${node.role}, ${statusMeta(node.status).label}`}
+        aria-label=${`task ${node.role}, ${statusLabel("task", node.status)}`}
       >
         <div class="rm-node-head">
           <span class="rm-role">${node.role}</span>

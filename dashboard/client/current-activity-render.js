@@ -16,24 +16,45 @@
 // prohibited — which is also why the CSS classes below are keyed on the structured
 // state and none of them is named `failed`.
 
-import { formatDuration } from "./duration.js";
+import { formatDuration, shortSha } from "./format.js";
+import { statusClass } from "./status-tokens.js";
 
 /** Badge class for a host-verification launch. Keyed on the STRUCTURED state, never
  *  on a substring of the rendered label, and deliberately never `status-failed`:
  *  the four terminal-ish dispositions are four different facts, not one failure. */
 export function launchBadgeClass(entry) {
-  if (!entry || typeof entry !== "object") return "launch-state-unknown";
-  if (entry.observation === "unobserved") return "launch-state-unobserved";
+  if (!entry || typeof entry !== "object") return statusClass("launch", "unknown");
+  if (entry.observation === "unobserved") return statusClass("launch", "unobserved");
   const state = entry.status && entry.status.state;
-  switch (state) {
-    case "running": return "launch-state-running";
-    case "exited_ok": return "launch-state-exited_ok";
-    case "exited_error": return "launch-state-exited_error";
-    case "signaled": return "launch-state-signaled";
-    case "terminated_unattributed": return "launch-state-terminated_unattributed";
-    case "owner_gone": return "launch-state-owner_gone";
-    default: return "launch-state-unknown";
-  }
+  return statusClass("launch", state === "unobserved" ? "unknown" : state);
+}
+
+/** FG-824: how long an in-flight launch has gone unobserved, and how worried to be. */
+export const FRESHNESS_SUSPICIOUS_MIN = 15;
+export const FRESHNESS_CRITICAL_MIN = 60;
+
+/** "unobserved for N min" for a launch the store last saw RUNNING, measured as the
+ *  payload's own `generatedAt` minus the row's `observedAt` — the server's clock on both
+ *  sides, never the browser's. Informational only: it changes nothing about the row's
+ *  status or membership. A terminal outcome does not decay, so it never carries one; under
+ *  the suspicious threshold there is nothing to say (null). */
+export function launchFreshness(entry, generatedAt) {
+  if (!entry || typeof entry !== "object") return null;
+  const recorded = entry.recordedStatus && typeof entry.recordedStatus === "object" ? entry.recordedStatus : entry.status;
+  if (!recorded || recorded.state !== "running") return null;
+  const observedMs = typeof entry.observedAt === "string" ? Date.parse(entry.observedAt) : NaN;
+  const generatedMs = typeof generatedAt === "string" ? Date.parse(generatedAt) : NaN;
+  if (!Number.isFinite(observedMs) || !Number.isFinite(generatedMs)) return null;
+  const minutes = Math.floor((generatedMs - observedMs) / 60_000);
+  if (minutes < FRESHNESS_SUSPICIOUS_MIN) return null;
+  const level = minutes >= FRESHNESS_CRITICAL_MIN ? "critical" : "suspicious";
+  return {
+    minutes,
+    level,
+    text: `unobserved for ${minutes} min`,
+    class: `freshness freshness-${level}`,
+    title: `last observed ${entry.observedAt}; this read was generated ${generatedAt}. Nothing has been changed — it only says the observer has not looked since.`,
+  };
 }
 
 /** The badge TEXT. Always the server-rendered `statusLabel`, verbatim. An entry with
@@ -556,7 +577,7 @@ export function ciCandidateLabel(observation) {
   const ticket = observation.ticketId;
   if (typeof ticket === "string" && ticket !== "") return ticket;
   const sha = observation.candidateSha;
-  return typeof sha === "string" && sha !== "" ? sha.slice(0, 7) : null;
+  return typeof sha === "string" && sha !== "" ? shortSha(sha, 7) : null;
 }
 
 function contextNameList(rows) {
@@ -813,6 +834,7 @@ export function homeInFlightActivity(load) {
   const operatorWaits = (Array.isArray(activity.operatorWaits) ? activity.operatorWaits : []).map(operatorWaitCompactSummary);
   return {
     phase,
+    generatedAt: typeof activity.generatedAt === "string" ? activity.generatedAt : null,
     hostVerification: activity.hostVerification.filter(launchIsCurrentWait),
     ci: (homeCiSummaries(activity.requiredCi) ?? []).filter((s) => s.state === "running"),
     ciWaits,
@@ -864,6 +886,7 @@ export function homeActivityView(load) {
   if (unassociated.length > 0) sections.push({ kind: "unassociated", heading: "Unassociated activity", entries: unassociated });
   return {
     phase,
+    generatedAt: typeof activity.generatedAt === "string" ? activity.generatedAt : null,
     sections,
     ci,
     empty: sections.length === 0,

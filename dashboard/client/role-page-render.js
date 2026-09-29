@@ -4,6 +4,7 @@
 // GET /api/roles/:role.
 
 import { hashFor, ROUTES } from "./view-routing.js";
+import { formatTokens, shortSha } from "./format.js";
 
 const TAB_LABELS = {
   overview: "Overview",
@@ -59,17 +60,10 @@ export function percent(rate) {
   return typeof rate === "number" ? `${Math.round(rate * 100)}%` : "—";
 }
 
-export function tokens(n) {
-  if (typeof n !== "number") return "—";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
+export { formatTokens as tokens };
 
 export function relationLabel(relations) {
   return (relations ?? []).map((r) => (r === "followup" ? "required follow-up" : r)).join(", ");
 }
 
-export function shortSha(sha) {
-  return typeof sha === "string" && sha.length > 12 ? sha.slice(0, 12) : sha ?? "—";
-}
+export { shortSha };

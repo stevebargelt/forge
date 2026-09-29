@@ -8,6 +8,8 @@
 import { h } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
+import { MONO_CLASS, formatTimestamp } from "./format.js";
+import { badgeClass, statusLabel } from "./status-tokens.js";
 import { RUNS_MAX_LIMIT, RUNS_PAGE_SIZE, RUNS_POLL_MS, readRuns, runRow, runsUrl, statusFilters } from "./runs-index-render.js";
 
 const html = htm.bind(h);
@@ -94,8 +96,8 @@ export function RunsIndexView({ scope, status, projects, onLoad }) {
                       <td><a href=${row.href}>${row.title}</a><div class="faint mono runs-id">${row.runId}</div></td>
                       <td><a href=${row.project.href}>${row.project.label}</a></td>
                       <td>${row.ticket ? html`<a href=${row.ticket.href}>${row.ticket.label}</a>` : html`<span class="faint">—</span>`}</td>
-                      <td><span class=${"badge status-" + (row.status === "active" ? "running" : row.status)}>${row.status}</span></td>
-                      <td class="mono" title=${row.startedAt}>${new Date(row.startedAt).toLocaleString()}</td>
+                      <td><span class=${badgeClass("run", row.status)}>${statusLabel("run", row.status)}</span></td>
+                      <td class=${MONO_CLASS} title=${row.startedAt}>${formatTimestamp(row.startedAt)}</td>
                       <td class="mono">${row.duration}</td>
                     </tr>
                   `;

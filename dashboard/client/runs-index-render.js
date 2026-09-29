@@ -10,7 +10,7 @@
 import { BADGE_CAP } from "./nav-render.js";
 import { projectCrumb, projectForDir } from "./breadcrumbs-render.js";
 import { hashFor } from "./view-routing.js";
-import { formatDuration } from "./duration.js";
+import { formatDuration } from "./format.js";
 
 export const RUNS_POLL_MS = 30000;
 export const RUNS_PAGE_SIZE = 50;

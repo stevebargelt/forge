@@ -6,6 +6,8 @@
 // never render absence as a pass, so the not_observed → dim-neutral mapping in
 // particular is pinned here.
 
+import { shortSha } from "./format.js";
+
 const AUDIT_STATUS_BADGES = {
   passed: "audit-passed",
   failed: "audit-failed",
@@ -32,9 +34,7 @@ export function auditStatusLabel(status) {
   return AUDIT_STATUS_LABELS[status] ?? "not observed";
 }
 
-export function shortSha(sha) {
-  return sha ? String(sha).slice(0, 12) : "—";
-}
+export { shortSha };
 
 /** The actionable failure message for a FAILED mechanical shipping check, or null for a
  *  passing one. The store keeps no freeform log, so the message is composed from the
