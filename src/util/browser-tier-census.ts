@@ -189,6 +189,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // FG-821 also rewrote fg820's run-map/placeholder
   // cases and fg348's overlay cases for the pages (counts unchanged). Fixture port 18825.
   "fg821-cockpit-pages.test.ts": 12,
+  // FG-822 adds `fg822-task-actions` (5 tests): the task page's action buttons on its screen
+  // line, labeled with their verb, with a refused action's advice instead of a button (and
+  // no buttons when the bind refuses mutations); the gate's preview-before-confirm and its
+  // required rationale; the verb's exit status and output inline, success and CLI refusal;
+  // and an inbox row whose verb button replaces the requestedAction and acts in place;
+  // FG-692 keyboard focus and Enter reach both task-header and inbox-row actions.
+  // Fixture port 18826.
+  "fg822-task-actions.test.ts": 5,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

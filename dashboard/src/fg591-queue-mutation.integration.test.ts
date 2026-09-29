@@ -38,7 +38,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -89,6 +89,7 @@ function fixtureCheckout(): string {
 }
 
 const projectDir = fixtureCheckout();
+const canonicalProjectDir = realpathSync(projectDir);
 
 // ── the fixture, written through the real store modules ─────────────────────
 {
@@ -500,7 +501,7 @@ test("integ FG-591: each route spawns EXACTLY ONE named `forge queue` verb with 
     const calls = recordedCalls();
     assert.equal(calls.length, 1, `${testCase.path} must spawn exactly one process, saw ${calls.length}`);
     assert.deepEqual(calls[0]!.argv, testCase.argv, `${testCase.path} argv`);
-    assert.equal(calls[0]!.cwd, projectDir, "the child runs in the REGISTERED checkout, never the dashboard's cwd");
+    assert.equal(calls[0]!.cwd, canonicalProjectDir, "the child runs in the registered checkout's canonical path, never the dashboard's cwd");
   }
 });
 

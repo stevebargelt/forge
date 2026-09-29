@@ -1066,6 +1066,43 @@ function deriveFailureKind(events: TaskEventEntry[]): string | null {
   return null;
 }
 
+/** FG-822: what the task-action preview decides on — status, recorded failure kind, the
+ *  runner's dispatch marker, and the run's checkout. One task row and its lifecycle
+ *  events; no logs, no manifest. */
+export type TaskActionFacts = {
+  taskId: string;
+  runId: string;
+  status: string;
+  failureKind: string | null;
+  dispatchSource: string | null;
+  projectDir: string | null;
+};
+
+export function taskActionFacts(taskId: string): TaskActionFacts | null {
+  const row = db().prepare(`
+    SELECT t.id, t.run_id, t.status, t.task_package, r.project_dir
+    FROM tasks t
+    JOIN runs r ON r.id = t.run_id
+    WHERE t.id = ?
+  `).get(taskId) as { id: string; run_id: string; status: string; task_package: string | null; project_dir: string | null } | undefined;
+  if (!row) return null;
+  const events = db().prepare(`
+    SELECT event_type, payload, created_at FROM events
+    WHERE task_id = ? AND event_type IN ('task.completed', 'task.failed')
+    ORDER BY created_at ASC, id ASC
+  `).all(taskId) as Array<{ event_type: string; payload: string | null; created_at: string }>;
+  const failureKind = deriveFailureKind(events.map((e) => ({
+    eventType: e.event_type,
+    payload: e.payload ? safeJsonParse(e.payload) : null,
+    createdAt: e.created_at,
+  })));
+  const pkg = row.task_package ? safeJsonParse(row.task_package) : null;
+  const dispatchSource = pkg && typeof pkg === "object" && typeof (pkg as Record<string, unknown>)["dispatchSource"] === "string"
+    ? (pkg as Record<string, string>)["dispatchSource"]!
+    : null;
+  return { taskId: row.id, runId: row.run_id, status: row.status, failureKind, dispatchSource, projectDir: row.project_dir };
+}
+
 function computeIdle(runId: string, taskId: string, status: string, startedAt: string | null): IdleInfo | null {
   if (status !== "running") return null;
   const dir = join(runsDir(), runId, taskId);

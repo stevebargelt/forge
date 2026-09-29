@@ -16,6 +16,7 @@ import { taskHeader } from "./screen-header-render.js";
 import { hashFor } from "./view-routing.js";
 import { ExplainContent } from "./run-explain-panel.js";
 import { ObjectHead, ObjectTabs, useEscapeTo } from "./object-page-view.js";
+import { TaskActions } from "./task-actions-view.js";
 
 const html = htm.bind(h);
 
@@ -37,12 +38,13 @@ export function TaskPage({ taskId, tab, projects }) {
   const [detail, setDetail] = useState(null);
   const [err, setErr] = useState(null);
   const [inbox, setInbox] = useState(null);
+  const [reload, setReload] = useState(0);
   const explain = tab === "explain";
 
   useEffect(() => {
     let cancelled = false;
     let timer = null;
-    setDetail(null);
+    if (reload === 0) setDetail(null);
     setErr(null);
     const load = async () => {
       try {
@@ -59,7 +61,7 @@ export function TaskPage({ taskId, tab, projects }) {
     };
     load();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [taskId]);
+  }, [taskId, reload]);
 
   // The run's attention items carry the server's reason and requested action (for a
   // failed task, the retry policy's advice) for the screen line.
@@ -84,7 +86,12 @@ export function TaskPage({ taskId, tab, projects }) {
 
   return html`
     <section class=${"object-page task-page" + (explain ? " explain-page" : "")} data-task-id=${taskId}>
-      <${ObjectHead} crumbs=${crumbs} title=${title} header=${taskHeader(detail, inbox, { explain })} />
+      <${ObjectHead}
+        crumbs=${crumbs}
+        title=${title}
+        header=${taskHeader(detail, inbox, { explain })}
+        actions=${!explain && detail ? html`<${TaskActions} key=${taskId} taskId=${taskId} onChanged=${() => setReload((n) => n + 1)} />` : null}
+      />
       <${ObjectTabs} id="task-views" label="Task views" tabs=${tabs}>
         ${err ? html`<div class="card" style="color: var(--err);" role="alert">${err}</div>` : null}
         ${explain

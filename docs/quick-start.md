@@ -330,7 +330,7 @@ forge queue list                              # the board, with the reason each 
 
 `forge queue list` renders five projections over durable fields — **Backlog**, **Queued**, **In progress**, **Blocked**, **Done**. The last three are derived on every read and are never toggled by hand. Read the per-item line carefully: a `blocked:` item needs *you* to clear something, while a `waiting (scheduling):` item is a temporary scheduling incompatibility ("waiting for FG-123 to finish") that clears itself when the active set changes. They are deliberately different words for different facts.
 
-**Authorize the dispatch.** Queueing is planning intent — it starts nothing. Arming is the separate act that authorizes unattended containers, and it is CLI-only (the dashboard board can rank and enqueue, and can do nothing else).
+**Authorize the dispatch.** Queueing is planning intent — it starts nothing. Arming is the separate act that authorizes unattended containers, and it is CLI-only (the dashboard can rank, enqueue, classify a project, and resolve a task's gate/retry/recover-re-drive actions — arming, disarming and dispatch stay off that surface).
 
 ```bash
 forge queue dispatcher set --max-active-runs 2 --workflow feature   # capacity + launch policy

@@ -25,13 +25,15 @@
 //
 // - POST /api/queue/enqueue|dequeue|rank|reorder   the operator's QUEUE PLANNING writes (FG-591)
 // - POST /api/projects/classify                    records a legacy workspace's purpose (FG-745)
+// - GET  /api/task/:id/actions                     the task-action preview: eligible actions with their verb + argv, refused ones with the policy's advice (FG-822)
+// - POST /api/task/:id/gate|retry|recover-re-drive the operator's TASK ACTIONS (FG-822)
 //
-// Every GET is a read. The five POSTs above — four queue verbs plus classify — are the
-// ONLY mutating routes on this surface, and they do not write the DB either: each shells
-// exactly one named `forge queue` / `forge projects classify` verb (FORGE-DEC-015),
-// guarded same-origin and behind a non-simple content type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
+// Every GET is a read. The eight POSTs above — four queue verbs, classify, and three task
+// actions — are the ONLY mutating routes on this surface, and they do not write the DB
+// either: each shells exactly one named `forge` verb (FORGE-DEC-015), guarded same-origin
+// and behind a non-simple content type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
 // exposed here (FG-591 D2) — that is authority to run repo-writing containers
-// unattended, and it stays CLI-only. See queue-mutation.ts.
+// unattended, and it stays CLI-only. See queue-mutation.ts and action-mutation.ts.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
@@ -42,7 +44,7 @@ import {
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, hostVerificationsForCampaignTicket, hostVerificationsForCampaign,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
-  runMap, taskExplain, verificationEvidenceForTask, attentionInboxFor,
+  runMap, taskExplain, verificationEvidenceForTask, attentionInboxFor, taskActionFacts,
   reviewById, runsForTicket, runEvidence,
 } from "./queries.js";
 import { runIndex, RunIndexRequestError } from "./run-index.js";
@@ -58,12 +60,17 @@ import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest, degradedGraphErrorPayload } from "./http-error.js";
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
+import { actionPreviewTaskId, handleActionMutation, isActionMutationPath, previewTaskActions, taskIdOperand } from "./action-mutation.js";
 import {
   guardBindAddress,
-  guardMutationRequest,
+  guardMutationPost,
+  isRefusal,
+  MAX_CONCURRENT_MUTATIONS,
+  readBody,
   resolveForgeBinary,
   runForgeVerb,
-} from "./queue-mutation.js";
+  withMutationSlot,
+} from "./mutation-guards.js";
 import { maybeStartRemoteBoardFromEnv } from "./remote/server.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
@@ -118,6 +125,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   // and writes no DB row itself — behind the same bind-address + cross-origin guards.
   if (req.method === "POST" && path === PROJECTS_CLASSIFY_PATH) {
     await handleProjectsClassify(req, res);
+    return;
+  }
+
+  // FG-822: the task actions — a second closed registry (action-mutation.ts), behind the
+  // same guards. The task is looked up only after every header guard has passed.
+  if (req.method === "POST" && isActionMutationPath(path)) {
+    await handleActionMutation(req, res, path, { lookupTask: taskActionFacts });
     return;
   }
 
@@ -907,6 +921,26 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
 
+  // FG-822: the task-action preview. A read — it decides which actions this task admits
+  // and says why the others are refused; the POST routes re-run the same decision.
+  // Registered before /api/task/:id (greedy (.+)).
+  const previewId = actionPreviewTaskId(path);
+  if (previewId !== null) {
+    const taskId = taskIdOperand(previewId);
+    if (isRefusal(taskId)) {
+      sendJson(res, taskId.status, { error: taskId.error });
+      return;
+    }
+    const facts = taskActionFacts(taskId);
+    if (!facts) {
+      sendJson(res, 404, { error: `no task ${taskId}` });
+      return;
+    }
+    const bind = guardBindAddress(process.env, "task actions");
+    sendJson(res, 200, { ...previewTaskActions(facts), mutations: { available: bind === null, reason: bind?.error ?? null } });
+    return;
+  }
+
   const taskMatch = path.match(/^\/api\/task\/(.+)$/);
   if (taskMatch) {
     const detail = taskDetail(taskMatch[1]!);
@@ -1005,34 +1039,10 @@ const MAX_CLASSIFY_BODY_BYTES = 16 * 1024;
  *  `-`, a path separator, `..`, a shell metacharacter, or whitespace. */
 const OWNER_OPERAND = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-function classifyHeader(req: IncomingMessage, name: string): string | undefined {
-  const value = req.headers[name];
-  return Array.isArray(value) ? value[0] : value;
-}
-
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res
     .writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" })
     .end(JSON.stringify(payload));
-}
-
-async function readClassifyBody(req: IncomingMessage): Promise<{ ok: true; text: string } | { ok: false; status: number; error: string }> {
-  let total = 0;
-  const chunks: Buffer[] = [];
-  try {
-    for await (const chunk of req) {
-      const buf = chunk as Buffer;
-      total += buf.length;
-      if (total > MAX_CLASSIFY_BODY_BYTES) {
-        req.destroy();
-        return { ok: false, status: 413, error: `the request body exceeds ${MAX_CLASSIFY_BODY_BYTES} bytes.` };
-      }
-      chunks.push(buf);
-    }
-  } catch {
-    return { ok: false, status: 400, error: "the request body could not be read." };
-  }
-  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
 }
 
 /** Handle POST /api/projects/classify. The ORDER is the security property: every
@@ -1041,24 +1051,14 @@ async function readClassifyBody(req: IncomingMessage): Promise<{ ok: true; text:
  *  non-flag operand; the `forge projects classify` claim it delegates to only records
  *  a purpose row — it never deletes a workspace or rewrites a run. */
 async function handleProjectsClassify(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const bindRefusal = guardBindAddress();
-  if (bindRefusal) {
-    sendJson(res, bindRefusal.status, { ok: false, error: bindRefusal.error });
-    return;
-  }
-  const headerRefusal = guardMutationRequest({
-    contentType: classifyHeader(req, "content-type"),
-    origin: classifyHeader(req, "origin"),
-    secFetchSite: classifyHeader(req, "sec-fetch-site"),
-    host: classifyHeader(req, "host"),
-  });
+  const headerRefusal = guardMutationPost(req, "project classifications");
   if (headerRefusal) {
     sendJson(res, headerRefusal.status, { ok: false, error: headerRefusal.error });
     return;
   }
 
-  const body = await readClassifyBody(req);
-  if (!body.ok) {
+  const body = await readBody(req, MAX_CLASSIFY_BODY_BYTES);
+  if (isRefusal(body)) {
     sendJson(res, body.status, { ok: false, error: body.error });
     return;
   }
@@ -1102,11 +1102,15 @@ async function handleProjectsClassify(req: IncomingMessage, res: ServerResponse)
   }
 
   const binary = resolveForgeBinary();
-  if ("ok" in binary && binary.ok === false) {
+  if (isRefusal(binary)) {
     sendJson(res, binary.status, { ok: false, error: binary.error });
     return;
   }
-  const result = await runForgeVerb((binary as { path: string }).path, argv, dirname(HERE));
+  const result = await withMutationSlot(() => runForgeVerb(binary.path, argv, dirname(HERE)));
+  if (result === null) {
+    sendJson(res, 503, { ok: false, error: `too many dashboard mutations in flight (${MAX_CONCURRENT_MUTATIONS}); retry in a moment.` });
+    return;
+  }
   if (result.timedOut) {
     sendJson(res, 504, { ok: false, error: "`forge projects classify` did not finish in time." });
     return;
@@ -1146,7 +1150,7 @@ server.listen(PORT, HOST, () => {
     console.error(
       `forge-dashboard: bound to ${HOST}, NOT loopback. This surface has no authentication and serves ` +
         `raw, unredacted output of host commands (/api/launches/<id>/log). Any peer that can reach ${HOST}:${PORT} can read it. ` +
-        `The queue-planning POST routes (/api/queue/*) FAIL CLOSED off loopback for that reason — set ` +
+        `The mutating POST routes (/api/queue/*, /api/task/:id/<action>) FAIL CLOSED off loopback for that reason — set ` +
         `FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS=1 only if this dashboard is fronted by your own authentication.`,
     );
   }

@@ -28,6 +28,7 @@ import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
 import { INBOX_LOADING, readAttentionInbox } from "./attention-inbox-render.js";
 import { PinnedAttentionInboxSection } from "./attention-inbox-view.js";
+import { TaskActions } from "./task-actions-view.js";
 import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
 import { formatDuration } from "./duration.js";
 
@@ -860,7 +861,13 @@ function HomeView({ hrefFor, planUsage, planUsageLoading, planUsageRefreshing, p
         refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
-      <${PinnedAttentionInboxSection} load=${inboxLoad} now=${now} onRetry=${onRetryInbox} hrefFor=${hrefFor} />
+      <${PinnedAttentionInboxSection}
+        load=${inboxLoad}
+        now=${now}
+        onRetry=${onRetryInbox}
+        hrefFor=${hrefFor}
+        rowActions=${(summary, fallback) => html`<${TaskActions} key=${summary.taskId} taskId=${summary.taskId} compact=${true} fallback=${fallback} onChanged=${onRetryInbox} />`}
+      />
       <div class="home-in-flight-group">
         <div class="home-section-heading">
           <div>

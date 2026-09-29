@@ -437,6 +437,32 @@ section.feed { margin-top: 24px; }
 .screen-line { margin: 10px 0 0; font-size: 13px; color: var(--fg-dim); }
 .screen-line-needs { color: var(--warn); }
 .screen-verb { font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; color: var(--fg); }
+/* FG-822: task actions — buttons labeled with their verb, a preview before Confirm, the
+   verb's own result inline. Never badge-bearing. */
+.task-actions { margin: 8px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.task-actions-compact { margin: 4px 0; }
+.action-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.action-btn { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; color: var(--fg); cursor: pointer; font-size: 12px; min-height: 28px; }
+.action-btn code { font-size: 12px; }
+.action-btn:hover, .action-btn-selected { border-color: var(--accent); }
+.action-btn:disabled { opacity: 0.6; cursor: default; }
+.action-preview { border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
+.action-preview-verb { font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+.action-preview-reason, .action-note { font-size: 12px; }
+.action-rationale-label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg-dim); }
+.action-rationale { font: inherit; font-size: 13px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; resize: vertical; }
+.action-preview-controls { display: flex; gap: 8px; }
+.action-confirm, .action-cancel { border-radius: 4px; padding: 3px 12px; min-height: 28px; cursor: pointer; font-size: 12px; border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--fg); }
+.action-confirm { border-color: var(--accent); }
+.action-error { color: var(--err); font-size: 12px; }
+.action-result { border-left: 3px solid var(--border); padding: 4px 10px; font-size: 12px; max-width: 720px; }
+.action-result-ok { border-left-color: var(--ok); }
+.action-result-fail { border-left-color: var(--err); }
+.action-result-output { margin: 4px 0 0; max-height: 200px; overflow: auto; font-size: 11px; white-space: pre-wrap; }
+.action-refused { font-size: 12px; margin: 0; padding-left: 16px; }
+details.action-refused { padding-left: 0; }
+details.action-refused ul { margin: 4px 0 0; padding-left: 16px; }
+.action-advice { color: var(--fg-dim); margin-top: 2px; }
 .object-tabs { display: flex; gap: 4px; margin: 14px 0 10px; border-bottom: 1px solid var(--border); }
 .object-tab { padding: 6px 12px; color: var(--fg-dim); text-decoration: none; border-bottom: 2px solid transparent; font-size: 13px; }
 .object-tab:hover { color: var(--fg); }

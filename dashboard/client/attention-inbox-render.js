@@ -107,6 +107,7 @@ export function inboxItemSummary(item) {
     startedAt: item && typeof item === "object" ? item.startedAt ?? null : null,
     source: item && typeof item.source === "string" ? item.source : "",
     ticketId: typeof links.ticketId === "string" && links.ticketId !== "" ? links.ticketId : null,
+    taskId: typeof links.taskId === "string" && links.taskId !== "" ? links.taskId : null,
     projectLabel: typeof links.projectLabel === "string" && links.projectLabel !== "" ? links.projectLabel : null,
     link: inboxItemLink(item),
   };
