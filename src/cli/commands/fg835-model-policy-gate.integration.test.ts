@@ -6,12 +6,13 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { Command } from "commander";
 import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
+import { applyModelPolicy, policyTarget } from "../../v2/model-policy-gate.js";
 import { registerModel } from "./model.js";
 
 const runtime = (name: string) => `
@@ -128,6 +129,8 @@ type Json = {
   auditLog?: string;
   findings: Array<{ code: string; message: string }>;
   allowedUndispatchable: string[];
+  detail?: string;
+  targetSha256: string | null;
   candidate: { sha256: string };
   rows: Array<{ role: string; activity: string; isDefault: boolean; changed: Array<{ field: string; before: string | null; after: string | null }>; becomesUndispatchable: boolean }>;
 };
@@ -298,4 +301,146 @@ test("--project targeting: apply writes <project>/.forge/model-policy.yml with i
   // The project diff is against the project's effective policy — now the project file.
   const again = JSON.parse((await run(["propose", candidate(text), "--project", projectDir, "--json"])).out) as Json;
   assert.ok(again.rows.every((r) => r.changed.length === 0));
+});
+
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const auditLines = (dir: string) => {
+  const log = join(dir, "model-policy-audit.log");
+  return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { outcome: string; error?: string; target_sha256_before: string | null; candidate_sha256: string }) : [];
+};
+
+test("RF-1: a rename failure leaves the policy unchanged and audits outcome failed — never an applied entry", () => {
+  const text = policy({ defaultModel: "claude-opus-5-5" });
+  assert.throws(
+    () =>
+      applyModelPolicy(text, {
+        target: policyTarget(),
+        candidateLabel: "c.yml",
+        confirm: true,
+        writeFile: () => {
+          throw new Error("EXDEV: injected rename failure");
+        },
+      }),
+    /injected rename failure/,
+  );
+  assert.equal(hostPolicy(), CURRENT);
+  const lines = auditLines(homeDir);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0]!.outcome, "failed");
+  assert.match(lines[0]!.error!, /injected rename failure/);
+  assert.equal(lines.some((l) => l.outcome === "applied"), false);
+
+  const ok = applyModelPolicy(text, { target: policyTarget(), candidateLabel: "c.yml", confirm: true });
+  assert.equal(ok.written, true);
+  const after = auditLines(homeDir);
+  assert.equal(after.length, 2);
+  assert.equal(after[1]!.outcome, "applied");
+  assert.equal(after[1]!.target_sha256_before, sha(CURRENT));
+  assert.equal(hostPolicy(), text);
+});
+
+test("RF-2: an apply that lands between another apply's gate and its write makes that write refuse target_changed", () => {
+  const first = policy({ defaultModel: "claude-opus-5-5" });
+  const second = policy({ defaultModel: "claude-haiku-4-5" });
+  let inner: ReturnType<typeof applyModelPolicy> | undefined;
+  const outer = applyModelPolicy(first, {
+    target: policyTarget(),
+    candidateLabel: "first.yml",
+    confirm: true,
+    // Runs after the outer gate validated against CURRENT and before it takes the lock.
+    now: () => {
+      inner = applyModelPolicy(second, { target: policyTarget(), candidateLabel: "second.yml", confirm: true });
+      return new Date();
+    },
+  });
+  assert.equal(inner!.written, true);
+  assert.equal(outer.written, false);
+  assert.equal(outer.reason, "target_changed");
+  assert.equal(hostPolicy(), second, "the earlier-landed apply is not silently overwritten");
+  const lines = auditLines(homeDir);
+  assert.deepEqual(lines.map((l) => [l.outcome, l.candidate_sha256]), [["applied", sha(second)]]);
+  assert.deepEqual(readdirSync(homeDir).filter((n) => n.endsWith(".lock")), [], "the lock is released");
+});
+
+test("RF-2: apply --expect-sha256 from a stale propose --json is refused target_changed; a fresh one applies", async () => {
+  const mine = candidate(policy({ defaultModel: "claude-opus-5-5" }));
+  const proposed = JSON.parse((await run(["propose", mine, "--json"])).out) as Json;
+  assert.equal(proposed.targetSha256, sha(CURRENT));
+
+  const theirs = policy({ defaultModel: "claude-haiku-4-5" });
+  assert.equal((await run(["apply", candidate(theirs), "--confirm", "--json"])).exitCode, undefined);
+
+  const stale = await run(["apply", mine, "--confirm", "--expect-sha256", proposed.targetSha256!, "--json"]);
+  assert.equal(stale.exitCode, 1);
+  const sj = JSON.parse(stale.out) as Json;
+  assert.equal(sj.written, false);
+  assert.equal(sj.reason, "target_changed");
+  assert.equal(hostPolicy(), theirs);
+  assert.equal(auditLines(homeDir).length, 1);
+
+  const fresh = JSON.parse((await run(["propose", mine, "--json"])).out) as Json;
+  const res = await run(["apply", mine, "--confirm", "--expect-sha256", fresh.targetSha256!, "--json"]);
+  assert.equal(res.exitCode, undefined, res.out);
+  assert.equal(auditLines(homeDir)[1]!.target_sha256_before, sha(theirs));
+});
+
+test("RF-2: a target lock held by a live process refuses target_locked; a dead holder's lock is stolen", async () => {
+  const c = candidate(policy({ defaultModel: "claude-opus-5-5" }));
+  const lock = join(homeDir, "model-policy.yml.lock");
+  writeFileSync(lock, String(process.pid));
+  const held = await run(["apply", c, "--confirm", "--json"]);
+  assert.equal(held.exitCode, 1);
+  assert.equal((JSON.parse(held.out) as Json).reason, "target_locked");
+  assert.equal(hostPolicy(), CURRENT);
+  assert.equal(existsSync(lock), true, "a refused apply never removes another holder's lock");
+
+  writeFileSync(lock, "2147483646");
+  const stolen = await run(["apply", c, "--confirm", "--json"]);
+  assert.equal(stolen.exitCode, undefined, stolen.out);
+  assert.equal(existsSync(lock), false);
+});
+
+test("RF-3: a project whose .forge symlinks to the host FORGE_HOME is refused target_escapes_project; host file, backups and audit untouched", async () => {
+  symlinkSync(homeDir, join(projectDir, ".forge"));
+  const before = readdirSync(homeDir).sort();
+  const res = await run(["apply", candidate(policy({ defaultModel: "claude-haiku-4-5" })), "--project", projectDir, "--confirm", "--json"]);
+  assert.equal(res.exitCode, 1);
+  const j = JSON.parse(res.out) as Json;
+  assert.equal(j.written, false);
+  assert.equal(j.reason, "target_escapes_project");
+  assert.equal(hostPolicy(), CURRENT);
+  assert.deepEqual(readdirSync(homeDir).sort(), before, "no backup, audit log or lock appears in the host dir");
+  assert.equal(existsSync(join(homeDir, "model-policy-audit.log")), false);
+
+  const human = await run(["apply", candidate(policy({ defaultModel: "claude-haiku-4-5" })), "--project", projectDir, "--confirm"]);
+  assert.match(human.out, /Not applied — target_escapes_project: .*symlink/);
+});
+
+test("RF-3: a symlinked project target file or audit log is refused, and --project at the host dir itself is refused", async () => {
+  mkdirSync(join(projectDir, ".forge"));
+  symlinkSync(join(homeDir, "model-policy.yml"), join(projectDir, ".forge", "model-policy.yml"));
+  const c = candidate(policy({ defaultModel: "claude-haiku-4-5" }));
+  const file = JSON.parse((await run(["apply", c, "--project", projectDir, "--confirm", "--json"])).out) as Json;
+  assert.equal(file.reason, "target_escapes_project");
+  rmSync(join(projectDir, ".forge", "model-policy.yml"));
+
+  symlinkSync(join(homeDir, "model-policy-audit.log"), join(projectDir, ".forge", "model-policy-audit.log"));
+  const log = JSON.parse((await run(["apply", c, "--project", projectDir, "--confirm", "--json"])).out) as Json;
+  assert.equal(log.reason, "target_escapes_project");
+  assert.equal(existsSync(join(homeDir, "model-policy-audit.log")), false);
+
+  const hostParent = mkdtempSync(join(tmpdir(), "fg835-hostparent-"));
+  try {
+    const home = join(hostParent, ".forge");
+    cpSync(homeDir, home, { recursive: true, verbatimSymlinks: true });
+    process.env.FORGE_HOME = home;
+    const r = applyModelPolicy(CURRENT, { target: policyTarget(hostParent), candidateLabel: "c", confirm: true, roles: [] });
+    assert.equal(r.reason, "target_escapes_project", JSON.stringify(r.proposal.findings));
+    assert.match(r.detail!, /host model policy/);
+    assert.equal(auditLines(home).length, 0);
+  } finally {
+    process.env.FORGE_HOME = homeDir;
+    rmSync(hostParent, { recursive: true, force: true });
+  }
+  assert.equal(hostPolicy(), CURRENT);
 });

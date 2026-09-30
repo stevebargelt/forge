@@ -112,7 +112,7 @@ export function registerModel(program: Command): void {
     .command("policy")
     .description("Propose / apply a replacement model-policy.yml through the validation gate (FG-835)");
 
-  type PolicyOpts = { project?: string; json?: boolean; confirm?: boolean; by?: string; allowUndispatchable?: boolean };
+  type PolicyOpts = { project?: string; json?: boolean; confirm?: boolean; by?: string; allowUndispatchable?: boolean; expectSha256?: string };
 
   const runPolicyGate = (verb: "propose" | "apply", candidateArg: string, opts: PolicyOpts) => {
     const candidatePath = resolve(candidateArg);
@@ -130,6 +130,7 @@ export function registerModel(program: Command): void {
         allowUndispatchable: opts.allowUndispatchable ?? false,
         confirm: verb === "apply" && (opts.confirm ?? false),
         by: opts.by,
+        expectTargetSha256: opts.expectSha256,
       });
     } catch (e) {
       process.stderr.write(`forge model policy ${verb}: failed to write (policy not replaced): ${(e as Error).message}\n`);
@@ -138,7 +139,7 @@ export function registerModel(program: Command): void {
     }
 
     if (opts.json) {
-      console.log(JSON.stringify({ written: result.written, reason: result.reason, backup: result.backup, auditLog: result.auditLog, audit: result.audit, ...result.proposal }, null, 2));
+      console.log(JSON.stringify({ written: result.written, reason: result.reason, detail: result.detail, backup: result.backup, auditLog: result.auditLog, audit: result.audit, ...result.proposal }, null, 2));
     } else {
       console.log(`forge model policy ${verb}`);
       console.log(renderPolicyProposal(result.proposal));
@@ -149,12 +150,14 @@ export function registerModel(program: Command): void {
           console.log(`Audited to ${result.auditLog}. Takes effect on the next dispatch.`);
         } else if (result.reason === "not_confirmed") {
           console.log("Not applied — gate passed. Re-run with --confirm to write.");
+        } else if (result.reason !== "validation_failed") {
+          console.log(`Not applied — ${result.reason}: ${result.detail}. Nothing was written.`);
         } else {
           console.log("Not applied — gate FAILED. Fix the findings above; nothing was written.");
         }
       }
     }
-    if (result.reason === "validation_failed") process.exitCode = 1;
+    if (!result.written && result.reason !== "not_confirmed") process.exitCode = 1;
   };
 
   policy
@@ -174,6 +177,7 @@ export function registerModel(program: Command): void {
     .option("--project <dir>", "replace the project's .forge/model-policy.yml (default: the host ~/.forge/model-policy.yml)")
     .option("--confirm", "actually write (without it, behaves exactly as propose)")
     .option("--by <who>", "who is applying, recorded in the audit log (default: the OS user)")
+    .option("--expect-sha256 <sha>", "refuse (target_changed) unless the target still carries these bytes — the targetSha256 of a reviewed `propose --json` (\"absent\" for no file)")
     .option("--allow-undispatchable", "accept a candidate that leaves an installed role undispatchable for its default activity")
     .option("--json", "emit the structured apply result as JSON")
     .description(

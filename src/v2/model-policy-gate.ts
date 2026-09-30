@@ -10,7 +10,18 @@
 // A candidate is refused exactly as loading would refuse it (parseModelPolicyText), so
 // apply can never install a legacy/newer-schema file — it replaces, it never migrates.
 
-import { appendFileSync, copyFileSync, constants as fsConstants, existsSync, mkdirSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -21,8 +32,9 @@ import { probeAuth } from "./provider-doctor.js";
 import { listSeedRoles, roleActivities } from "./role-surface.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import type { ModelPolicy } from "./schema.js";
-import { sha256OfString } from "../util/content-digest.js";
+import { sha256OfBytes, sha256OfString } from "../util/content-digest.js";
 import { writeFileAtomic } from "../util/atomic-write.js";
+import { describeIdentity, provenPhysical, provenSameOnly } from "../util/path-identity.js";
 
 function forgeHome(): string {
   return process.env.FORGE_HOME ?? join(homedir(), ".forge");
@@ -206,6 +218,9 @@ function parseFindings(text: string, label: string): { policy?: ModelPolicy; fin
 export type PolicyProposal = {
   ok: boolean;
   target: PolicyTarget;
+  /** sha256 of the target file's bytes as the gate saw them (null: absent). apply refuses
+   *  `target_changed` if the file no longer carries these bytes when it takes the lock. */
+  targetSha256: string | null;
   current: { source: "host" | "project" | "absent"; path: string | null; error: string | null };
   candidate: { label: string; sha256: string };
   findings: GateFinding[];
@@ -226,6 +241,8 @@ export type ProposeOpts = {
 /** The gate. Never writes. `ok` is false when any finding is present. */
 export function proposeModelPolicy(candidateText: string, opts: ProposeOpts): PolicyProposal {
   const { target } = opts;
+  // Read BEFORE the policy is loaded, so the baseline can never be newer than what the gate saw.
+  const targetSha256 = targetSha(target);
   const gen = resolveSeedGeneration(forgeHome());
   const currentCtx: LoadContext = { seedGeneration: gen, ...(target.projectDir ? { projectDir: target.projectDir } : {}) };
   const runtimeCtx: LoadContext = { seedGeneration: gen };
@@ -242,6 +259,7 @@ export function proposeModelPolicy(candidateText: string, opts: ProposeOpts): Po
 
   const base = {
     target,
+    targetSha256,
     current,
     candidate: { label: opts.candidateLabel, sha256: sha256OfString(candidateText) },
     allowedUndispatchable: [] as string[],
@@ -284,12 +302,21 @@ export function proposeModelPolicy(candidateText: string, opts: ProposeOpts): Po
   return { ok: findings.length === 0, ...base, allowedUndispatchable, findings, rows };
 }
 
+function targetSha(target: PolicyTarget): string | null {
+  return existsSync(target.path) ? sha256OfBytes(target.path) : null;
+}
+
 export type ModelPolicyAuditEntry = {
   timestamp: string;
   action: "apply";
+  /** "applied" is appended only after the rename landed; "failed" names why it did not. */
+  outcome: "applied" | "failed";
+  error?: string;
   by: string;
   target: string;
   target_kind: "host" | "project";
+  /** The target bytes this apply validated against and replaced (null: absent). */
+  target_sha256_before: string | null;
   candidate: string;
   candidate_sha256: string;
   backup: string | null;
@@ -298,10 +325,14 @@ export type ModelPolicyAuditEntry = {
   diff: Array<Pick<ResolutionDiffRow, "role" | "activity" | "isDefault" | "changed" | "becomesUnmapped" | "becomesUndispatchable">>;
 };
 
+export type PolicyApplyRefusal = "validation_failed" | "not_confirmed" | "target_escapes_project" | "target_locked" | "target_changed";
+
 export type PolicyApplyResult = {
   proposal: PolicyProposal;
   written: boolean;
-  reason?: "validation_failed" | "not_confirmed";
+  reason?: PolicyApplyRefusal;
+  /** Human detail for a refusal past the gate (escape / lock / changed). */
+  detail?: string;
   backup?: string | null;
   auditLog?: string;
   audit?: ModelPolicyAuditEntry;
@@ -315,47 +346,151 @@ export function defaultApplier(): string {
   }
 }
 
-/** Re-runs the gate and, when it passes AND `confirm`, backs up the current file, appends
- *  the audit line, then atomically replaces the target. Without `confirm` it is propose. */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** A project must not be able to redirect a --project write: `.forge`, the target and its
+ *  audit log must be real (non-symlink) entries under the canonical project dir, and the
+ *  target must not be the host policy. Creates `.forge` as a real directory when absent.
+ *  Returns the refusal detail, or null when the target is contained. */
+export function projectTargetEscape(target: PolicyTarget): string | null {
+  if (target.kind !== "project" || !target.projectDir) return null;
+  const projectReal = provenPhysical(target.projectDir);
+  if (!projectReal) return `project dir ${describeIdentity(target.projectDir)} does not resolve`;
+  const forgeDir = dirname(target.path);
+  if (isSymlink(forgeDir)) return `${forgeDir} is a symlink`;
+  if (!existsSync(forgeDir)) mkdirSync(forgeDir);
+  if (!lstatSync(forgeDir).isDirectory()) return `${forgeDir} is not a directory`;
+  for (const p of [target.path, auditLogPath(target), `${target.path}.lock`]) {
+    if (isSymlink(p)) return `${p} is a symlink`;
+  }
+  const forgeReal = provenPhysical(forgeDir);
+  if (!forgeReal || dirname(forgeReal) !== projectReal) {
+    return `${forgeDir} resolves to ${describeIdentity(forgeDir)}, outside the project ${projectReal}`;
+  }
+  if (provenSameOnly(dirname(policyTarget().path), forgeDir)) return `${target.path} is the host model policy`;
+  return null;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Advisory O_EXCL sidecar lock on the target. A lock whose holder pid is gone is stolen
+ *  once, so a crashed apply never wedges the file. Returns null when a live holder has it. */
+function acquireTargetLock(lockPath: string): (() => void) | null {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o644);
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return () => unlinkSync(lockPath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      let holder = NaN;
+      try {
+        holder = Number(readFileSync(lockPath, "utf8"));
+      } catch {
+        continue;
+      }
+      if (Number.isInteger(holder) && holder > 0 && pidAlive(holder)) return null;
+      unlinkSync(lockPath);
+    }
+  }
+  return null;
+}
+
+/** Re-runs the gate and, when it passes AND `confirm`, takes the target lock, refuses if the
+ *  target moved since the gate read it, backs up the current file, atomically replaces it and
+ *  only then appends the "applied" audit line. Without `confirm` it is propose. */
 export function applyModelPolicy(
   candidateText: string,
-  opts: ProposeOpts & { confirm: boolean; by?: string; now?: () => Date },
+  opts: ProposeOpts & {
+    confirm: boolean;
+    by?: string;
+    now?: () => Date;
+    /** The target sha a caller already reviewed (e.g. a `propose --json` targetSha256;
+     *  "absent" for no file). Refused `target_changed` when the file no longer matches. */
+    expectTargetSha256?: string;
+    writeFile?: (path: string, data: string) => void;
+  },
 ): PolicyApplyResult {
   const proposal = proposeModelPolicy(candidateText, opts);
   if (!proposal.ok) return { proposal, written: false, reason: "validation_failed" };
   if (!opts.confirm) return { proposal, written: false, reason: "not_confirmed" };
 
   const { target } = opts;
+  const escape = projectTargetEscape(target);
+  if (escape) return { proposal, written: false, reason: "target_escapes_project", detail: escape };
+
   const timestamp = (opts.now ?? (() => new Date()))().toISOString();
   mkdirSync(dirname(target.path), { recursive: true });
 
-  let backup: string | null = null;
-  if (existsSync(target.path)) {
-    backup = `${target.path}.bak-${timestamp}`;
-    copyFileSync(target.path, backup, fsConstants.COPYFILE_EXCL);
-  }
+  const release = acquireTargetLock(`${target.path}.lock`);
+  if (!release) return { proposal, written: false, reason: "target_locked", detail: `${target.path}.lock is held by a running apply` };
+  try {
+    const now = targetSha(target);
+    const expected = opts.expectTargetSha256 === "absent" ? null : opts.expectTargetSha256;
+    if (now !== proposal.targetSha256 || (opts.expectTargetSha256 !== undefined && now !== expected)) {
+      return {
+        proposal,
+        written: false,
+        reason: "target_changed",
+        detail: `${target.path} is ${now ?? "absent"}, not the ${opts.expectTargetSha256 !== undefined ? expected ?? "absent" : proposal.targetSha256 ?? "absent"} this apply validated against`,
+      };
+    }
 
-  const audit: ModelPolicyAuditEntry = {
-    timestamp,
-    action: "apply",
-    by: opts.by ?? defaultApplier(),
-    target: target.path,
-    target_kind: target.kind,
-    candidate: opts.candidateLabel,
-    candidate_sha256: proposal.candidate.sha256,
-    backup,
-    allow_undispatchable: opts.allowUndispatchable ?? false,
-    allowed_undispatchable: proposal.allowedUndispatchable,
-    diff: proposal.rows.filter(rowIsChange).map(({ role, activity, isDefault, changed, becomesUnmapped, becomesUndispatchable }) => ({
-      role, activity, isDefault, changed, becomesUnmapped, becomesUndispatchable,
-    })),
-  };
-  // Audit-first, as `forge raci apply`: an unwritable audit log throws before the policy
-  // is replaced, so apply never lands a change it cannot record.
-  const log = auditLogPath(target);
-  appendFileSync(log, JSON.stringify(audit) + "\n");
-  writeFileAtomic(target.path, candidateText);
-  return { proposal, written: true, backup, auditLog: log, audit };
+    // Opened before anything is written: an unwritable audit log fails closed here.
+    const log = auditLogPath(target);
+    const logFd = openSync(log, "a", 0o644);
+    try {
+      let backup: string | null = null;
+      const audit: ModelPolicyAuditEntry = {
+        timestamp,
+        action: "apply",
+        outcome: "applied",
+        by: opts.by ?? defaultApplier(),
+        target: target.path,
+        target_kind: target.kind,
+        target_sha256_before: now,
+        candidate: opts.candidateLabel,
+        candidate_sha256: proposal.candidate.sha256,
+        backup,
+        allow_undispatchable: opts.allowUndispatchable ?? false,
+        allowed_undispatchable: proposal.allowedUndispatchable,
+        diff: proposal.rows.filter(rowIsChange).map(({ role, activity, isDefault, changed, becomesUnmapped, becomesUndispatchable }) => ({
+          role, activity, isDefault, changed, becomesUnmapped, becomesUndispatchable,
+        })),
+      };
+      try {
+        if (now !== null) {
+          backup = `${target.path}.bak-${timestamp}`;
+          copyFileSync(target.path, backup, fsConstants.COPYFILE_EXCL);
+          audit.backup = backup;
+        }
+        (opts.writeFile ?? writeFileAtomic)(target.path, candidateText);
+      } catch (e) {
+        writeSync(logFd, JSON.stringify({ ...audit, outcome: "failed", error: (e as Error).message }) + "\n");
+        throw e;
+      }
+      writeSync(logFd, JSON.stringify(audit) + "\n");
+      return { proposal, written: true, backup, auditLog: log, audit };
+    } finally {
+      closeSync(logFd);
+    }
+  } finally {
+    release();
+  }
 }
 
 function fmt(v: string | null): string {
