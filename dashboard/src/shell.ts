@@ -705,15 +705,14 @@ a.notes-row { display: block; color: inherit; text-decoration: none; }
 .roles-table th.roles-col-activity { width: 140px; }
 .roles-table th.roles-col-lastTask { width: 108px; }
 .roles-table th.roles-col-mount { width: 116px; text-align: right; }
-.roles-table tbody tr { position: relative; }
 .roles-table tbody tr + tr td { border-top: 1px solid var(--border); }
+.roles-table tbody tr[data-row-href] { cursor: pointer; }
 .roles-table tbody tr[data-role]:hover { background: var(--bg-elev-2); }
 .roles-table td { padding: 12px 16px; vertical-align: middle; min-width: 0; }
 .roles-ident { display: grid; grid-template-columns: 36px auto minmax(0, 1fr); align-items: center; column-gap: 16px; row-gap: 2px; }
 .roles-ident .role-name { display: contents; }
 .roles-ident .role-tile { grid-row: 1 / 3; grid-column: 1; }
 .roles-ident a { grid-row: 1; grid-column: 2; color: var(--fg); font-weight: 600; text-decoration: none; white-space: nowrap; }
-.roles-ident a::after { content: ""; position: absolute; inset: 0; }
 .roles-ident a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @supports selector(:has(a)) {
   .roles-table tbody tr[data-role]:has(a:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }

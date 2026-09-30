@@ -5,9 +5,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
-  ROLE_FAMILY_ALL, filterRolesByFamily, profileLine, roleSubtitle, rolesCountLabel, rolesFamilyHash, rolesFamilyState, rolesFamilyTabs,
-  rolesIndexRows, rolesSortHash, rolesSortLabel, type RoleIndexEntry,
+  ROLE_FAMILY_ALL, ROLE_ROW_CONTROLS, filterRolesByFamily, profileLine, roleSubtitle, rolesCountLabel, rolesFamilyHash, rolesFamilyState, rolesFamilyTabs,
+  roleRowClickHref, rolesIndexRows, rolesSortHash, rolesSortLabel, type RoleIndexEntry,
 } from "../client/roles-index-render.js";
 import { ROLE_TABS, ROLE_TAB_GROUPS, overviewCards, recentTaskRows, roleMeta, roleSubnav } from "../client/role-page-render.js";
 import { parseHash } from "../client/view-routing.js";
@@ -148,4 +150,38 @@ test("role header meta and Overview cards read only the payload", () => {
   const unresolved = overviewCards({ ...detail, overview: { ...detail.overview, resolution: { error: "no mapping" } } }, "build");
   assert.deepEqual(unresolved.harness.rows, [["Resolution", "unresolved: no mapping", "err"]]);
   assert.deepEqual(recentTaskRows(detail.overview).map((t) => [t.taskId, t.title, t.meta]), [["task-1", "FG-829 role glyph tiles", "complete · 3h ago"]]);
+});
+
+// FG-849: the row's click target is a handler on the <tr>, never a stretched ::after
+// overlay anchored on a positioned <tr> (WebKit ignores it; the last row took every click).
+test("FG-849: the Roles row opens through a row handler — no ::after overlay on the link, no positioned <tr>", async () => {
+  const { renderShell } = await import("./shell.js");
+  const shell = renderShell();
+  assert.doesNotMatch(shell, /\.roles-ident a::after/, "the stretched-link overlay is gone");
+  assert.doesNotMatch(shell, /\.roles-table tbody tr \{[^}]*position:/, "nothing depends on a positioned <tr> as a containing block");
+  assert.doesNotMatch(shell, /\.roles-[\w-]+[^{}]*::after \{[^}]*inset: 0/, "no Roles overlay pseudo-element anywhere");
+  assert.match(shell, /\.roles-table tbody tr\[data-row-href\] \{ cursor: pointer; \}/);
+  assert.match(shell, /\.roles-table tbody tr\[data-role\]:hover \{ background: var\(--bg-elev-2\); \}/);
+  const view = readFileSync(fileURLToPath(new URL("../client/roles-index-view.js", import.meta.url)), "utf8");
+  const row = view.match(/<tr key=\$\{r\.role\}[^>]*>/)?.[0] ?? "";
+  assert.match(row, /data-row-href=\$\{r\.href\}/, "the row carries its own role's hash");
+  assert.match(row, /onClick=\$\{openRoleRow\}/, "the row is activated by its own handler");
+  assert.doesNotMatch(row, /tabindex/i, "one tab stop per row — the link (FG-692)");
+});
+
+test("FG-849: roleRowClickHref decision table preserves controls and browser gestures", () => {
+  const plain = { button: 0, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, defaultPrevented: false };
+  const cell = { closest: () => null };
+  const control = (name: string) => ({ closest: (selector: string) => selector === ROLE_ROW_CONTROLS && selector.split(", ").includes(name) ? {} : null });
+  assert.equal(roleRowClickHref({ ...plain, target: cell }, "#roles/architecture-advisor"), "#roles/architecture-advisor");
+  for (const name of ["a", "button", "input", "[role=button]"]) {
+    assert.equal(roleRowClickHref({ ...plain, target: control(name) }, "#roles/engineer"), null, `${name} keeps its native behaviour`);
+  }
+  for (const mod of ["ctrlKey", "metaKey", "shiftKey", "altKey"] as const) {
+    assert.equal(roleRowClickHref({ ...plain, [mod]: true, target: cell }, "#roles/engineer"), null, mod);
+  }
+  for (const button of [1, 2]) assert.equal(roleRowClickHref({ ...plain, button, target: cell }, "#roles/engineer"), null, `button ${button}`);
+  assert.equal(roleRowClickHref({ ...plain, defaultPrevented: true, target: cell }, "#roles/engineer"), null);
+  assert.equal(roleRowClickHref({ ...plain, target: cell }, "#roles/engineer", "selected text"), null, "a text selection is not a click");
+  assert.equal(roleRowClickHref({ ...plain, target: cell }, undefined), null, "a row without data-row-href does not navigate");
 });

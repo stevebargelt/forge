@@ -271,6 +271,52 @@ test("FG-837: every list row has the mock's shape — 36px tile, name over a one
   await waitFor(async () => hashOf(page), "#roles/manual-qa", "a click anywhere on the row opens it");
   await page.evaluate(() => history.back());
   await page.locator(".roles-table tbody tr[data-role]").first().waitFor();
+  // FG-849: a non-link point of the FIRST row opens the first row's role, not the last row's
+  // (a stretched overlay escaping the <tr> handed every click to the last row in WebKit).
+  const [first] = await order(page);
+  assert.equal(first, "agentic-platform-builder");
+  const firstRow = page.locator(".roles-table tbody tr[data-role]").first();
+  assert.equal(await firstRow.evaluate((tr) => getComputedStyle(tr).cursor), "pointer");
+  assert.equal(await firstRow.getAttribute("tabindex"), null, "one tab stop per row — the link");
+  const servedShell = await page.evaluate(() => fetch("/").then((response) => response.text()));
+  assert.doesNotMatch(servedShell, /\.roles-ident a::after/, "the served shell has no stretched-link CSS");
+  assert.doesNotMatch(servedShell, /\.roles-table tbody tr \{[^}]*position:/, "the served shell does not position Roles rows");
+  await firstRow.locator('[data-col="profile"]').click();
+  await waitFor(async () => hashOf(page), `#roles/${first}`, "a click on the first row's profile cell opens the first row");
+  await page.evaluate(() => history.back());
+  await page.locator(".roles-table tbody tr[data-role]").first().waitFor();
+  await page.locator(".roles-table tbody tr[data-role]").first().locator('[data-col="activity"]').click();
+  await waitFor(async () => hashOf(page), `#roles/${first}`, "a click on the first row's activity text opens the first row");
+  await page.evaluate(() => history.back());
+  await page.locator(".roles-table tbody tr[data-role]").first().waitFor();
+  const roleRows = page.locator(".roles-table tbody tr[data-role]");
+  const rowCount = await roleRows.count();
+  const middleRow = roleRows.nth(Math.floor(rowCount / 2));
+  const middleRole = await middleRow.getAttribute("data-role");
+  assert.ok(middleRole, "the fixture has a middle role row");
+  await middleRow.locator('[data-col="profile"]').click();
+  await waitFor(async () => hashOf(page), `#roles/${middleRole}`, "a middle-row non-link cell opens its own role");
+  await page.evaluate(() => history.back());
+  await page.locator(".roles-table tbody tr[data-role]").first().waitFor();
+  const lastRow = page.locator(".roles-table tbody tr[data-role]").last();
+  const lastRole = await lastRow.getAttribute("data-role");
+  assert.ok(lastRole, "the fixture has a last role row");
+  await lastRow.locator('[data-col="profile"]').click();
+  await waitFor(async () => hashOf(page), `#roles/${lastRole}`, "a last-row non-link cell opens its own role");
+  await page.evaluate(() => history.back());
+  await page.locator(".roles-table tbody tr[data-role]").first().waitFor();
+  // A modifier or middle click on the row is left to the browser: no navigation.
+  for (const modifiers of [["Meta"], ["Control"], ["Alt"]] as const) {
+    await page.locator(".roles-table tbody tr[data-role]").first().locator('[data-col="profile"]').click({ modifiers: [...modifiers] });
+  }
+  await page.locator(".roles-table tbody tr[data-role]").first().locator('[data-col="profile"]').click({ button: "middle" });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(hashOf(page), "#roles", "a modifier or middle click on the row does not navigate");
+  // The link itself keeps its default behaviour.
+  await page.locator('tr[data-role="engineer"] .roles-ident a').click();
+  await waitFor(async () => hashOf(page), "#roles/engineer", "the row's link opens its role");
+  await page.evaluate(() => history.back());
+  await page.locator(".roles-table tbody tr[data-role]").first().waitFor();
   await page.screenshot({ path: join(SHOTS, "fg837-roles-list-1200.png"), fullPage: true });
   assert.deepEqual(errors, []);
   await page.close();
@@ -396,6 +442,14 @@ test("FG-837: keyboard — Tab walks the family tabs into the sort headers, Ente
   });
   assert.ok(ringRules.some((r) => r.supports === null && r.outline.includes("solid")), "the link's own focus outline is unconditional, so a browser without :has() still shows focus");
   assert.ok(ringRules.every((r) => r.outline !== "none" || (r.supports ?? "").includes(":has(")), "the link outline is only dropped where :has() carries the row outline");
+  // FG-849 / FG-692: starting on the last family filter tab, Tab crosses the five headers
+  // and reaches the first row's link — the row handler itself adds no tab stop.
+  const [firstRole] = await order(page);
+  await page.locator('.roles-family-tab[data-family="author"]').focus();
+  for (let i = 0; i < 6; i += 1) await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement).matches(".roles-ident a") && document.activeElement!.closest("tr")!.getAttribute("data-role")), firstRole, "Tab from the family filter reaches the first row link");
+  await page.keyboard.press("Enter");
+  await waitFor(async () => hashOf(page), `#roles/${firstRole}`, "Enter on the first row link opens that row");
   assert.deepEqual(errors, []);
   await page.close();
 });
