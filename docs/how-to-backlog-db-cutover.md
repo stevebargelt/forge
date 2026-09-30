@@ -16,6 +16,8 @@ Concepts: `docs/concepts.md` → **Backlog storage mode**. Command reference: `f
 
 **1. Settle the project's identity.** The registry keys a project on its *repository evidence*, which is source-dependent: a repository registered while it had no remote gets a different evidence key the moment `git remote add origin` runs. `migrate` is what first commits a `project_key`, so this refusal only becomes reachable at cutover.
 
+That commit is a line-wise edit of `.forge/config.yml`: it appends (or replaces) only the top-level `project_key:` line, and every other byte — comments, blank lines, key order, quoting — survives untouched. The same edit heals `forge backlog mode --set db|markdown` the first time either command runs against a project with no `project_key` yet. If the existing `.forge/config.yml` can't be edited that way (unparseable YAML, a duplicate top-level key, a flow-style mapping, a block scalar), both commands refuse by name — naming the file and the reason, with the storage mode left unchanged and the file byte-identical — rather than "healing" it by overwriting the file.
+
 ```bash
 forge backlog mode          # should report a mode + project_key, not a refusal
 ```

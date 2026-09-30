@@ -845,3 +845,44 @@ test("integ FG-253: `forge init` reports the generic surface honestly — no fil
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// FG-851: `forge init --prefix` edits an operator's .forge/config.yml line-wise, and
+// refuses — naming the file and the reason, writing NOTHING — one it cannot edit.
+test("integ FG-851: forge init --prefix keeps the operator's config bytes and rewrites only the prefix line", () => {
+  const config = "# operator notes\n\nproject_key: pk-keep   # committed\nbacklog:\n  prefix: 'OLD'  # was\n  format: structured\n";
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.yml"), config);
+  execSync("git init -q", { cwd: projectDir });
+  const res = runForge(["init", "--project", projectDir, "--prefix", "NEW"]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(readFileSync(join(projectDir, ".forge", "config.yml"), "utf8"), config.replace("prefix: 'OLD'", "prefix: NEW"));
+  assert.ok(existsSync(join(projectDir, "CLAUDE.md")), "init continues with the normal project scaffold");
+  assert.ok(existsSync(join(projectDir, "backlog", "notes.md")), "init writes the backlog scaffold");
+  assert.ok(existsSync(join(projectDir, ".git", "hooks", "commit-msg")), "init installs its hook after the safe config edit");
+});
+
+test("integ FG-851: forge init --prefix on an unparseable config refuses by name and writes nothing", () => {
+  const configPath = join(projectDir, ".forge", "config.yml");
+  const broken = "# operator notes\nbacklog: : : :\n  bad";
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(configPath, broken);
+  execSync("git init -q", { cwd: projectDir });
+  const before = lstatSync(configPath);
+
+  const dry = runForge(["init", "--project", projectDir, "--prefix", "NEW", "--dry-run"]);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /config\.yml: +WOULD REFUSE — forge: refusing to rewrite .*not valid YAML/);
+  assert.equal(readFileSync(configPath, "utf8"), broken, "dry-run must not edit the unreadable config");
+  assert.equal(lstatSync(configPath).mtimeMs, before.mtimeMs, "dry-run must not touch the config mtime");
+
+  const res = runForge(["init", "--project", projectDir, "--prefix", "NEW"]);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /refusing to rewrite .*config\.yml — it is not valid YAML.*\(forge init wrote nothing\)/s);
+  assert.ok(res.stderr.includes(configPath), res.stderr);
+  assert.equal(readFileSync(configPath, "utf8"), broken);
+  assert.equal(lstatSync(configPath).mtimeMs, before.mtimeMs, "the refusal must not touch the config mtime");
+  assert.equal(existsSync(join(projectDir, "CLAUDE.md")), false);
+  assert.equal(existsSync(join(projectDir, "backlog")), false);
+  assert.equal(existsSync(join(projectDir, ".git", "hooks", "commit-msg")), false);
+  assert.deepEqual(readdirSync(join(projectDir, ".forge")), ["config.yml"], "no seed was written before the refusal");
+});

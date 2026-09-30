@@ -137,7 +137,8 @@ test("writeProjectKey: refuses when .forge itself is a symlink", () => {
 test("atomic write: a symlink at the OLD predictable temp path is NOT followed; write round-trips", () => {
   const dir = tmp();
   mkdirSync(join(dir, ".forge"));
-  writeFileSync(join(dir, ".forge", "config.yml"), "unrelated:\n  keep: me\nbacklog:\n  prefix: FG\n");
+  const config = "# preserved by a line edit\nunrelated:\n  keep: me\nbacklog:\n  prefix: FG\n";
+  writeFileSync(join(dir, ".forge", "config.yml"), config);
   const victim = join(dir, "victim-temp-target.txt");
   writeFileSync(victim, "outside data\n");
   symlinkSync(victim, join(dir, ".forge", `config.yml.tmp-${process.pid}`));
@@ -145,6 +146,11 @@ test("atomic write: a symlink at the OLD predictable temp path is NOT followed; 
   writeProjectKey(dir, "pk-safe");
 
   assert.equal(readFileSync(victim, "utf8"), "outside data\n", "planted temp symlink not followed");
+  assert.equal(
+    readFileSync(join(dir, ".forge", "config.yml"), "utf8"),
+    `${config}project_key: pk-safe\n`,
+    "the atomic replacement exposes the complete line-edited file, never a partial write",
+  );
   const raw = parseYaml(readFileSync(join(dir, ".forge", "config.yml"), "utf8")) as Record<string, unknown>;
   assert.equal(raw["project_key"], "pk-safe");
   assert.deepEqual(raw["unrelated"], { keep: "me" });
@@ -241,4 +247,178 @@ test("FG-845 editTopLevelConfigText: refuses edits that would not resolve as int
   assert.throws(() => editTopLevelConfigText("c.yml", "- a\n", "k", "y"), /not a mapping/);
   assert.throws(() => editTopLevelConfigText("c.yml", "k: |\n  x\n", "k", "y"), /refusing to rewrite/);
   assert.throws(() => editTopLevelConfigText("c.yml", "a: 1\n", "k", "y", () => false), /would not resolve 'k' to 'y'/);
+});
+
+// ── FG-851: writeBacklogConfig / writeProjectKey edit the file line-wise ──
+
+import { assertBacklogConfigWritable, assertConfigWritable, ConfigWriteRefusal, editBacklogPrefixText } from "./config.js";
+
+const FG851_FIXTURE =
+  "# operator notes — keep me\n" +
+  "\n" +
+  "name: 'my project'   # quoted, with a comment\n" +
+  "ai_attribution: off\n" +
+  "\n" +
+  "# the backlog block\n" +
+  "backlog:\n" +
+  "    # nested comment\n" +
+  "    prefix: \"MG\"   # the old prefix\n" +
+  "    format: structured\n" +
+  "\n" +
+  "retention:\n" +
+  "  successMs: 1000\n";
+
+function fg851Dir(contents: string | null): { dir: string; path: string } {
+  const dir = tmp();
+  const path = join(dir, ".forge", "config.yml");
+  if (contents !== null) {
+    mkdirSync(join(dir, ".forge"));
+    writeFileSync(path, contents);
+  }
+  return { dir, path };
+}
+
+test("FG-851 writeProjectKey: create-key path appends exactly one line, every other byte untouched", () => {
+  const { dir, path } = fg851Dir(FG851_FIXTURE);
+  writeProjectKey(dir, "pk-deadbeef");
+  assert.equal(readFileSync(path, "utf8"), `${FG851_FIXTURE}project_key: pk-deadbeef\n`);
+});
+
+test("FG-851 writeProjectKey: replace-key path rewrites only the project_key line, keeping its comment", () => {
+  const withKey = FG851_FIXTURE.replace("ai_attribution: off\n", "ai_attribution: off\nproject_key: 'pk-old'  # committed\n");
+  const { dir, path } = fg851Dir(withKey);
+  writeProjectKey(dir, "pk-new");
+  assert.equal(
+    readFileSync(path, "utf8"),
+    FG851_FIXTURE.replace("ai_attribution: off\n", "ai_attribution: off\nproject_key: pk-new  # committed\n"),
+  );
+});
+
+test("FG-851 writeProjectKey: an absent file is created with the one line", () => {
+  const { dir, path } = fg851Dir(null);
+  writeProjectKey(dir, "pk-fresh");
+  assert.equal(readFileSync(path, "utf8"), "project_key: pk-fresh\n");
+});
+
+test("FG-851 writeBacklogConfig: replace-prefix path rewrites only the nested prefix line, at its indent", () => {
+  const { dir, path } = fg851Dir(FG851_FIXTURE);
+  writeBacklogConfig(dir, { prefix: "ZZ" });
+  assert.equal(readFileSync(path, "utf8"), FG851_FIXTURE.replace('    prefix: "MG"   # the old prefix\n', "    prefix: ZZ   # the old prefix\n"));
+});
+
+test("FG-851 writeBacklogConfig: create-prefix path inserts one line under an existing backlog block, at its indent", () => {
+  const noPrefix = FG851_FIXTURE.replace('    prefix: "MG"   # the old prefix\n', "");
+  const { dir, path } = fg851Dir(noPrefix);
+  writeBacklogConfig(dir, { prefix: "ZZ" });
+  assert.equal(readFileSync(path, "utf8"), noPrefix.replace("backlog:\n", "backlog:\n    prefix: ZZ\n"));
+});
+
+test("FG-851 writeBacklogConfig: no backlog block appends a two-line block; an empty backlog: gets one child line", () => {
+  const noBlock = "# top\nname: x  # c\n\n";
+  const a = fg851Dir(noBlock);
+  writeBacklogConfig(a.dir, { prefix: "FG" });
+  assert.equal(readFileSync(a.path, "utf8"), `${noBlock}backlog:\n  prefix: FG\n`);
+
+  const empty = "backlog:   # to fill\nname: x\n";
+  const b = fg851Dir(empty);
+  writeBacklogConfig(b.dir, { prefix: "FG" });
+  assert.equal(readFileSync(b.path, "utf8"), "backlog:   # to fill\n  prefix: FG\nname: x\n");
+});
+
+test("FG-851 writeBacklogConfig: prefix null writes `prefix: null`; an absent file is created", () => {
+  const { dir, path } = fg851Dir(null);
+  writeBacklogConfig(dir, { prefix: null });
+  assert.equal(readFileSync(path, "utf8"), "backlog:\n  prefix: null\n");
+  assert.equal(readBacklogConfig(dir).prefix, null);
+
+  const c = fg851Dir(FG851_FIXTURE);
+  writeBacklogConfig(c.dir, { prefix: null });
+  assert.equal(readFileSync(c.path, "utf8"), FG851_FIXTURE.replace('prefix: "MG"', "prefix: null"));
+});
+
+test("FG-851 writeBacklogConfig: projectKey goes through the top-level edit; an unrelated write never touches it", () => {
+  const withKey = `project_key: pk-keep  # committed\n${FG851_FIXTURE}`;
+  const a = fg851Dir(withKey);
+  writeBacklogConfig(a.dir, { prefix: "ZZ" });
+  assert.equal(readFileSync(a.path, "utf8"), withKey.replace('prefix: "MG"', "prefix: ZZ"));
+
+  writeBacklogConfig(a.dir, { prefix: "ZZ", projectKey: "pk-other" });
+  assert.equal(
+    readFileSync(a.path, "utf8"),
+    withKey.replace('prefix: "MG"', "prefix: ZZ").replace("pk-keep", "pk-other"),
+  );
+
+  const b = fg851Dir(FG851_FIXTURE);
+  writeBacklogConfig(b.dir, { prefix: "MG", projectKey: "pk-new" });
+  assert.equal(readFileSync(b.path, "utf8"), `${FG851_FIXTURE.replace('prefix: "MG"', "prefix: MG")}project_key: pk-new\n`);
+});
+
+test("FG-851 writeBacklogConfig: projectKey null removes its line and reads null before and after", () => {
+  const withNull = `# operator note\nproject_key: null  # no identity yet\n${FG851_FIXTURE.replace('prefix: "MG"', "prefix: MG")}`;
+  const { dir, path } = fg851Dir(withNull);
+  assert.equal(readBacklogConfig(dir).projectKey, null, "YAML null reads as no project identity before the edit");
+
+  writeBacklogConfig(dir, { prefix: "MG", projectKey: null });
+
+  assert.equal(readFileSync(path, "utf8"), withNull.replace("project_key: null  # no identity yet\n", ""));
+  assert.equal(readBacklogConfig(dir).projectKey, null, "an absent line also reads as no project identity");
+});
+
+test("FG-851 writers: a value YAML would not read back bare is double-quoted", () => {
+  const { dir, path } = fg851Dir("a: 1\n");
+  writeBacklogConfig(dir, { prefix: "123" });
+  assert.equal(readFileSync(path, "utf8"), 'a: 1\nbacklog:\n  prefix: "123"\n');
+  assert.equal(readBacklogConfig(dir).prefix, "123");
+});
+
+const FG851_REFUSALS: { name: string; text: string; reason: RegExp }[] = [
+  { name: "unparseable", text: "# notes\nbacklog: : : :\n  bad", reason: /not valid YAML/ },
+  { name: "duplicate top-level key", text: "# c\nproject_key: a\nbacklog:\n  prefix: FG\nproject_key: b\n", reason: /not valid YAML \(Map keys must be unique/ },
+  { name: "flow mapping top level", text: "{project_key: a, backlog: {prefix: FG}}\n", reason: /refusing to rewrite/ },
+];
+
+for (const { name, text, reason } of FG851_REFUSALS) {
+  test(`FG-851 refusal (${name}): both writers refuse by name and leave the file byte-identical`, () => {
+    const { dir, path } = fg851Dir(text);
+    for (const write of [
+      () => writeProjectKey(dir, "pk-x"),
+      () => writeBacklogConfig(dir, { prefix: "ZZ" }),
+      () => writeBacklogConfig(dir, { prefix: "ZZ", projectKey: "pk-x" }),
+      () => assertConfigWritable(dir),
+      () => assertBacklogConfigWritable(dir, { prefix: "ZZ" }),
+    ]) {
+      assert.throws(write, (e: unknown) => e instanceof ConfigWriteRefusal && reason.test(e.message) && e.message.includes(path));
+      assert.equal(readFileSync(path, "utf8"), text);
+    }
+    assert.deepEqual(readdirSync(join(dir, ".forge")), ["config.yml"]);
+  });
+}
+
+test("FG-851 refusal: unexpressible shapes (flow/inline backlog, block-scalar values) write nothing", () => {
+  const cases: { text: string; write: (dir: string) => void; reason: RegExp }[] = [
+    { text: "backlog: {prefix: FG}\n", write: (d) => writeBacklogConfig(d, { prefix: "ZZ" }), reason: /'backlog' value is written inline/ },
+    { text: "backlog: FG\n", write: (d) => writeBacklogConfig(d, { prefix: "ZZ" }), reason: /'backlog' value is not a mapping/ },
+    { text: "backlog:\n  - FG\n", write: (d) => writeBacklogConfig(d, { prefix: "ZZ" }), reason: /'backlog' value is not a mapping/ },
+    { text: "backlog:\n  prefix: |\n    FG\n", write: (d) => writeBacklogConfig(d, { prefix: "ZZ" }), reason: /'prefix' value is a block scalar/ },
+    { text: "backlog:\n  prefix: [FG]\n", write: (d) => writeBacklogConfig(d, { prefix: "ZZ" }), reason: /'prefix' value is a flow collection/ },
+    { text: "project_key: >\n  pk-a\n", write: (d) => writeProjectKey(d, "pk-b"), reason: /'project_key' value is a block scalar/ },
+    { text: "project_key: {a: 1}\n", write: (d) => writeProjectKey(d, "pk-b"), reason: /'project_key' value is a flow collection/ },
+  ];
+  for (const { text, write, reason } of cases) {
+    const { dir, path } = fg851Dir(text);
+    assert.throws(() => write(dir), (e: unknown) => e instanceof ConfigWriteRefusal && reason.test(e.message), text);
+    assert.equal(readFileSync(path, "utf8"), text);
+  }
+});
+
+test("FG-851 editBacklogPrefixText: CRLF and nested maps under backlog are respected", () => {
+  assert.equal(
+    editBacklogPrefixText("c.yml", "backlog:\r\n  opts:\r\n    prefix: deep\r\n  prefix: FG\r\n", "ZZ"),
+    "backlog:\r\n  opts:\r\n    prefix: deep\r\n  prefix: ZZ\r\n",
+  );
+  assert.equal(
+    editBacklogPrefixText("c.yml", "backlog:\r\n  opts:\r\n    prefix: deep\r\n", "ZZ"),
+    "backlog:\r\n  prefix: ZZ\r\n  opts:\r\n    prefix: deep\r\n",
+  );
+  assert.equal(editBacklogPrefixText("c.yml", "a: 1", "ZZ"), "a: 1\nbacklog:\n  prefix: ZZ\n");
 });

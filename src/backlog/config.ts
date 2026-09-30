@@ -14,7 +14,8 @@ import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { describeIdentity, identify } from "../util/path-identity.js";
 import { stripComment } from "../v2/ai-attribution-parse.js";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { isDeepStrictEqual } from "node:util";
+import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import type { RetentionOverrides } from "../v2/retention-policy.js";
 
@@ -36,6 +37,15 @@ export type BacklogConfig = {
   projectKey: string | null;
 };
 
+// FG-851: every refusal to write .forge/config.yml (or the host config) — named,
+// carrying the path and the reason, with nothing written.
+export class ConfigWriteRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigWriteRefusal";
+  }
+}
+
 // FG-606 security: the project_key / backlog config write path must never follow a
 // repo-controlled SYMLINK. A hostile `.forge/config.yml` (or a symlinked `.forge`
 // dir) could redirect the write at an arbitrary file outside the project and
@@ -53,7 +63,7 @@ function safeConfigPath(projectDir: string): string {
       continue; // absent — nothing to follow
     }
     if (st.isSymbolicLink()) {
-      throw new Error(
+      throw new ConfigWriteRefusal(
         `forge: refusing to write ${configPath} — ${target} is a symlink. A symlinked ` +
           `.forge config can redirect the write outside the project; replace it with a real ` +
           `file and retry.`,
@@ -74,7 +84,7 @@ function safeConfigPath(projectDir: string): string {
     const forgeIdentity = identify(forgeDir);
     const projectIdentity = identify(projectDir);
     if (forgeIdentity.kind !== "resolved" || projectIdentity.kind !== "resolved") {
-      throw new Error(
+      throw new ConfigWriteRefusal(
         `forge: refusing to write ${configPath} — ` +
           `${forgeIdentity.kind !== "resolved" ? describeIdentity(forgeIdentity) : describeIdentity(projectIdentity)} ` +
           `does not resolve, so containment inside the project cannot be established.`,
@@ -83,7 +93,7 @@ function safeConfigPath(projectDir: string): string {
     const realForge = forgeIdentity.physical;
     const realExpected = join(projectIdentity.physical, ".forge");
     if (realForge !== realExpected) {
-      throw new Error(
+      throw new ConfigWriteRefusal(
         `forge: refusing to write ${configPath} — resolved .forge dir '${realForge}' is ` +
           `outside the project '${realExpected}'.`,
       );
@@ -97,8 +107,12 @@ function safeConfigPath(projectDir: string): string {
 // whole transaction back (zero DB changes). Pre-flight that same guard BEFORE the
 // transaction opens so an import that WILL heal config fails closed before it
 // claims a registry identity. Kept redundantly at write time (below) for TOCTOU.
+// FG-851: the pre-flight also runs the project_key line edit (with a placeholder
+// key, nothing written), so an unparseable or unexpressible file is refused here
+// rather than inside the transaction.
 export function assertConfigWritable(projectDir: string): void {
-  safeConfigPath(projectDir);
+  const configPath = safeConfigPath(projectDir);
+  editTopLevelConfigText(configPath, readIfPresent(configPath) ?? "", "project_key", "pk-preflight");
 }
 
 // A single short atomic replacement: write an UNPREDICTABLE temp file inside the
@@ -122,7 +136,7 @@ function atomicWriteConfig(projectDir: string, contents: string): void {
   // never a lexical guess we then open a file descriptor against.
   const forgeIdentity = identify(join(projectDir, ".forge"));
   if (forgeIdentity.kind !== "resolved") {
-    throw new Error(
+    throw new ConfigWriteRefusal(
       `forge: refusing to write ${join(projectDir, ".forge", "config.yml")} — ` +
         `${describeIdentity(forgeIdentity)}; the .forge dir must resolve immediately before the write.`,
     );
@@ -155,50 +169,46 @@ function atomicReplaceInDir(realDir: string, basename: string, contents: string)
   }
 }
 
+// FG-851: backlog.prefix (and, when the caller supplies one, the top-level
+// project_key) are edited LINE-wise like every other config write — the operator's
+// comments, blank lines, key order and quoting survive, and a file forge cannot edit
+// safely is refused with nothing written, never "healed" by overwrite. An unrelated
+// write never clears a committed project_key; projectKey: null removes the line.
 export function writeBacklogConfig(
   projectDir: string,
   config: { prefix: string | null; projectKey?: string | null },
 ): void {
   const configPath = safeConfigPath(projectDir);
+  const next = backlogConfigText(configPath, readIfPresent(configPath) ?? "", config);
   mkdirSync(join(projectDir, ".forge"), { recursive: true });
-
-  let existing: Record<string, unknown> = {};
-  if (existsSync(configPath)) {
-    try {
-      existing = (parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown>) ?? {};
-    } catch {
-      // malformed — overwrite cleanly
-    }
-  }
-  existing["backlog"] = { ...(existing["backlog"] as Record<string, unknown> ?? {}), prefix: config.prefix };
-  // Only touch the top-level project_key when the caller explicitly supplies one;
-  // an unrelated write (e.g. `forge init` setting the prefix) must PRESERVE any
-  // committed key, never clear it.
-  if (config.projectKey !== undefined) {
-    existing["project_key"] = config.projectKey;
-  }
-  atomicWriteConfig(projectDir, stringifyYaml(existing));
+  atomicWriteConfig(projectDir, next);
 }
 
-// FG-606: persist the durable project_key at the TOP LEVEL, preserving every
-// unrelated top-level YAML key and the entire backlog subtree (including
-// backlog.prefix) untouched — mirroring writeBacklogConfig's spread-existing
-// precedent. This is the single write path the import orchestrator uses to heal
-// a config that has no key yet (ladder rungs 2 and 4).
-export function writeProjectKey(projectDir: string, projectKey: string): void {
+// FG-851: the same guard and edit as writeBacklogConfig with nothing written, so a
+// caller can refuse BEFORE it has changed anything else.
+export function assertBacklogConfigWritable(
+  projectDir: string,
+  config: { prefix: string | null; projectKey?: string | null },
+): void {
   const configPath = safeConfigPath(projectDir);
-  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  backlogConfigText(configPath, readIfPresent(configPath) ?? "", config);
+}
 
-  let existing: Record<string, unknown> = {};
-  if (existsSync(configPath)) {
-    try {
-      existing = (parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown>) ?? {};
-    } catch {
-      // malformed — overwrite cleanly
-    }
-  }
-  existing["project_key"] = projectKey;
-  atomicWriteConfig(projectDir, stringifyYaml(existing));
+function backlogConfigText(
+  configPath: string,
+  text: string,
+  config: { prefix: string | null; projectKey?: string | null },
+): string {
+  const next = editBacklogPrefixText(configPath, text, config.prefix);
+  if (config.projectKey === undefined) return next;
+  return editTopLevelConfigText(configPath, next, "project_key", config.projectKey) ?? next;
+}
+
+// FG-606: persist the durable project_key at the TOP LEVEL. This is the single write
+// path the heal ladder uses for a config that has no key yet. FG-851: through the
+// shared line-oriented top-level edit — every other byte of the file is untouched.
+export function writeProjectKey(projectDir: string, projectKey: string): void {
+  writeTopLevelConfigKey(projectDir, "project_key", projectKey);
 }
 
 // FG-590: read the OPTIONAL `retention` override block from .forge/config.yml.
@@ -235,15 +245,11 @@ export function editTopLevelConfigText(
 
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split("\n");
-  const keyLines: { i: number; indent: string; key: string; rest: string }[] = [];
-  lines.forEach((raw, i) => {
-    const m = raw.replace(/\r$/, "").match(/^(\s*)([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$/);
-    if (m) keyLines.push({ i, indent: m[1] ?? "", key: m[2] ?? "", rest: m[3] ?? "" });
-  });
+  const keyLines = scanKeyLines(lines);
   const minIndent = keyLines.length === 0 ? 0 : Math.min(...keyLines.map((k) => k.indent.length));
   const hits = keyLines.filter((k) => k.indent.length === minIndent && k.key === key);
   if (hits.length > 1) {
-    throw new Error(`forge: refusing to rewrite ${configPath} — it carries more than one top-level '${key}' line`);
+    throw new ConfigWriteRefusal(`forge: refusing to rewrite ${configPath} — it carries more than one top-level '${key}' line`);
   }
   const hit = hits[0];
 
@@ -251,17 +257,127 @@ export function editTopLevelConfigText(
     if (!hit) return null;
     lines.splice(hit.i, 1);
   } else if (hit) {
-    const cr = lines[hit.i]!.endsWith("\r") ? "\r" : "";
-    const body = stripComment(hit.rest);
-    const comment = hit.rest.slice(body.length);
-    const spacer = comment ? (body.match(/\s*$/)?.[0] || " ") : "";
-    lines[hit.i] = `${hit.indent}${key}: ${value}${spacer}${comment}${cr}`;
+    lines[hit.i] = replacedValueLine(configPath, lines[hit.i]!, hit, key, renderScalar(value));
   } else {
     const indent = keyLines.find((k) => k.indent.length === minIndent)?.indent ?? "";
     const sep = text.length === 0 || text.endsWith("\n") ? "" : eol;
-    return checked(configPath, `${text}${sep}${indent}${key}: ${value}${eol}`, key, value, verify);
+    return checked(configPath, `${text}${sep}${indent}${key}: ${renderScalar(value)}${eol}`, key, value, verify);
   }
   return checked(configPath, lines.join("\n"), key, value, verify);
+}
+
+type KeyLine = { i: number; indent: string; key: string; rest: string };
+
+function scanKeyLines(lines: string[]): KeyLine[] {
+  const keyLines: KeyLine[] = [];
+  lines.forEach((raw, i) => {
+    const m = raw.replace(/\r$/, "").match(/^(\s*)([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$/);
+    if (m) keyLines.push({ i, indent: m[1] ?? "", key: m[2] ?? "", rest: m[3] ?? "" });
+  });
+  return keyLines;
+}
+
+// Replace the value on one `key: value` line, keeping its indentation, trailing
+// comment and line ending. A value that spans lines (block scalar) or is a flow
+// collection cannot be replaced by rewriting one line, so it is refused by name.
+function replacedValueLine(configPath: string, raw: string, hit: KeyLine, key: string, rendered: string): string {
+  const cr = raw.endsWith("\r") ? "\r" : "";
+  const body = stripComment(hit.rest);
+  const current = body.trim();
+  if (/^[|>]/.test(current) || /^[[{]/.test(current)) {
+    const shape = /^[|>]/.test(current) ? "a block scalar" : "a flow collection";
+    throw new ConfigWriteRefusal(
+      `forge: refusing to rewrite ${configPath} — its '${key}' value is ${shape}, which a line edit cannot ` +
+        `replace safely; edit the file by hand`,
+    );
+  }
+  const comment = hit.rest.slice(body.length);
+  const spacer = comment ? (body.match(/\s*$/)?.[0] || " ") : "";
+  return `${hit.indent}${key}: ${rendered}${spacer}${comment}${cr}`;
+}
+
+// A value is written bare when YAML reads it back as exactly that string, and
+// double-quoted (JSON is valid YAML) otherwise.
+function renderScalar(value: string): string {
+  try {
+    const parsed = parseYaml(`k: ${value}`) as Record<string, unknown> | null;
+    if (parsed?.["k"] === value) return value;
+  } catch {
+    // not expressible bare
+  }
+  return JSON.stringify(value);
+}
+
+// FG-851: set `prefix` inside the top-level `backlog:` block mapping — replace its
+// line in place, or insert one line directly under `backlog:` at the block's own
+// indent — or append a two-line block when there is none. Every other byte is
+// untouched, and the edited file must parse to exactly the original mapping with
+// only backlog.prefix changed; anything else is a refusal that writes nothing.
+export function editBacklogPrefixText(configPath: string, text: string, prefix: string | null): string {
+  const before = parseMappingOrRefuse(configPath, text);
+  const block = before["backlog"];
+  if (block != null && (typeof block !== "object" || Array.isArray(block))) {
+    throw new ConfigWriteRefusal(`forge: refusing to rewrite ${configPath} — its 'backlog' value is not a mapping; edit the file by hand`);
+  }
+  const rendered = prefix === null ? "null" : renderScalar(prefix);
+
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const cr = eol === "\r\n" ? "\r" : "";
+  const lines = text.split("\n");
+  const keyLines = scanKeyLines(lines);
+  const minIndent = keyLines.length === 0 ? 0 : Math.min(...keyLines.map((k) => k.indent.length));
+  const heads = keyLines.filter((k) => k.indent.length === minIndent && k.key === "backlog");
+  if (heads.length > 1) {
+    throw new ConfigWriteRefusal(`forge: refusing to rewrite ${configPath} — it carries more than one top-level 'backlog' line`);
+  }
+  const head = heads[0];
+
+  let next: string;
+  if (!head) {
+    const indent = keyLines.find((k) => k.indent.length === minIndent)?.indent ?? "";
+    const sep = text.length === 0 || text.endsWith("\n") ? "" : eol;
+    next = `${text}${sep}${indent}backlog:${eol}${indent}  prefix: ${rendered}${eol}`;
+  } else {
+    const inline = stripComment(head.rest).trim();
+    if (inline !== "") {
+      throw new ConfigWriteRefusal(
+        `forge: refusing to rewrite ${configPath} — its 'backlog' value is written inline (${inline}), ` +
+          `not as a block mapping a line edit can extend; edit the file by hand`,
+      );
+    }
+    let end = head.i + 1;
+    let childIndent: string | undefined;
+    for (let j = head.i + 1; j < lines.length; j++) {
+      const line = lines[j]!.replace(/\r$/, "");
+      const trimmed = line.trim();
+      if (trimmed === "" || trimmed.startsWith("#")) continue;
+      const indent = line.match(/^\s*/)?.[0] ?? "";
+      if (indent.length <= head.indent.length) break;
+      childIndent ??= indent;
+      end = j + 1;
+    }
+    const hits = keyLines.filter((k) => k.i > head.i && k.i < end && k.indent === childIndent && k.key === "prefix");
+    if (hits.length > 1) {
+      throw new ConfigWriteRefusal(`forge: refusing to rewrite ${configPath} — its 'backlog' block carries more than one 'prefix' line`);
+    }
+    const hit = hits[0];
+    if (hit) {
+      lines[hit.i] = replacedValueLine(configPath, lines[hit.i]!, hit, "prefix", rendered);
+    } else {
+      lines.splice(head.i + 1, 0, `${childIndent ?? `${head.indent}  `}prefix: ${rendered}${cr}`);
+    }
+    next = lines.join("\n");
+  }
+
+  const after = parseMappingOrRefuse(configPath, next, "the edited file");
+  const expected = { ...before, backlog: { ...((block as Record<string, unknown> | null) ?? {}), prefix } };
+  if (!isDeepStrictEqual(after, expected)) {
+    throw new ConfigWriteRefusal(
+      `forge: refusing to rewrite ${configPath} — editing the 'backlog.prefix' line would not resolve it to ` +
+        `${prefix === null ? "null" : `'${prefix}'`} with everything else unchanged; edit the file by hand`,
+    );
+  }
+  return next;
 }
 
 function checked(configPath: string, next: string, key: string, value: string | null, verify?: TopLevelEditVerify): string {
@@ -269,7 +385,7 @@ function checked(configPath: string, next: string, key: string, value: string | 
   const has = Object.prototype.hasOwnProperty.call(map, key);
   const ok = value === null ? !has : map[key] === value;
   if (!ok || (verify && !verify(next))) {
-    throw new Error(
+    throw new ConfigWriteRefusal(
       `forge: refusing to rewrite ${configPath} — editing the top-level '${key}' line would not ` +
         (value === null ? `remove '${key}'` : `resolve '${key}' to '${value}'`) +
         `; edit the file by hand`,
@@ -283,11 +399,11 @@ function parseMappingOrRefuse(configPath: string, text: string, what = "it"): Re
   try {
     parsed = parseYaml(text);
   } catch (err) {
-    throw new Error(`forge: refusing to rewrite ${configPath} — ${what} is not valid YAML (${(err as Error).message})`);
+    throw new ConfigWriteRefusal(`forge: refusing to rewrite ${configPath} — ${what} is not valid YAML (${(err as Error).message})`);
   }
   if (parsed == null) return {};
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`forge: refusing to rewrite ${configPath} — ${what === "it" ? "its" : `${what}'s`} top level is not a mapping`);
+    throw new ConfigWriteRefusal(`forge: refusing to rewrite ${configPath} — ${what === "it" ? "its" : `${what}'s`} top level is not a mapping`);
   }
   return parsed as Record<string, unknown>;
 }
@@ -330,12 +446,12 @@ export function writeHostConfigKey(configPath: string, key: string, value: strin
   } catch {
     // absent — nothing to follow
   }
-  if (isLink) throw new Error(`forge: refusing to write ${configPath} — it is a symlink.`);
+  if (isLink) throw new ConfigWriteRefusal(`forge: refusing to write ${configPath} — it is a symlink.`);
   const next = editTopLevelConfigText(configPath, readIfPresent(configPath) ?? "", key, value, verify);
   mkdirSync(dir, { recursive: true });
   const dirIdentity = identify(dir);
   if (dirIdentity.kind !== "resolved") {
-    throw new Error(`forge: refusing to write ${configPath} — ${describeIdentity(dirIdentity)}.`);
+    throw new ConfigWriteRefusal(`forge: refusing to write ${configPath} — ${describeIdentity(dirIdentity)}.`);
   }
   atomicReplaceInDir(dirIdentity.physical, basename(configPath), next!);
 }
