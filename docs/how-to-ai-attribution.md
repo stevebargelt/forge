@@ -61,6 +61,9 @@ nothing is wrong:
   `suppress` or `allow` — misspelled, empty, a list) fails closed to `suppress` at that
   level. A **nested** `ai_attribution` (under some other top-level key) doesn't count as
   present at all — the level is absent and resolution falls through to the next one.
+- **Duplicated** (more than one top-level `ai_attribution:` line — malformed YAML, and
+  which one "wins" is ambiguous) fails closed to `suppress` at that level, whatever the
+  values are.
 
 When a level fails closed, `forge config show` / `forge doctor` print the reason and the
 file that stopped it instead of a `file:` line:

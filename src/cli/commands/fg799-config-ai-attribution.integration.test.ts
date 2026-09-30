@@ -303,3 +303,19 @@ test("FG-845 (AC2): malformed project stops before an allow host default", () =>
   });
   assert.match(json.aiAttribution.reason, /unrecognized ai_attribution value/);
 });
+
+test("FG-845 (RF-1): a duplicated project ai_attribution key stops before an allow host default, naming the duplicate", () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(configPath(), "ai_attribution: allow\nai_attribution: suppress\n");
+  writeFileSync(hostConfigPath(), "ai_attribution: allow\n");
+  const show = runForge(["config", "show", "--project", projectDir]);
+  assert.equal(show.status, 0, show.stderr);
+  assert.match(show.stdout, /ai attribution: suppress \(default\)/);
+  assert.match(show.stdout, /more than one top-level ai_attribution key.*failing closed to suppress/);
+  const json = JSON.parse(runForge(["config", "show", "--project", projectDir, "--json"]).stdout);
+  assert.equal(json.aiAttribution.mode, "suppress");
+  assert.equal(json.aiAttribution.source, "default");
+  assert.equal(json.aiAttribution.file, configPath());
+  assert.match(json.aiAttribution.reason, /more than one top-level ai_attribution key/);
+  assert.match(runForge(["doctor"]).stdout, /ai attribution: suppress \(default\)/);
+});

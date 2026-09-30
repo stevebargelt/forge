@@ -75,8 +75,10 @@ function parseAiAttributionConfig(text) {
   if (keyLines.length === 0) return NONE;
 
   const minIndent = Math.min(...keyLines.map((k) => k.indent));
-  const top = keyLines.find((k) => k.indent === minIndent && k.key === "ai_attribution");
+  const tops = keyLines.filter((k) => k.indent === minIndent && k.key === "ai_attribution");
+  const top = tops[0];
   if (!top) return NONE;
+  if (tops.length > 1) return { mode: "suppress", recognized: false, present: true, duplicate: true };
 
   const value = scalarValue(top.rest);
   if (value === "allow" || value === "suppress") return { mode: value, recognized: true, present: true };
@@ -115,6 +117,7 @@ function resolveAiAttributionLevels(project, host) {
     if (read.kind === "unreadable") return { mode: "suppress", source: "default", failed: { level, why: "unreadable" } };
     const parsed = parseAiAttributionConfig(read.text);
     if (!parsed.present) continue;
+    if (parsed.duplicate) return { mode: "suppress", source: "default", failed: { level, why: "duplicate" } };
     if (!parsed.recognized) return { mode: "suppress", source: "default", failed: { level, why: "unrecognized" } };
     return { mode: parsed.mode, source: level };
   }

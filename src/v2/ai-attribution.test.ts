@@ -29,7 +29,7 @@ import {
 // the reader's CLI block is guarded by an import.meta.url check, so importing it here
 // has no side effect.
 type ParseHelpers = {
-  parseAiAttributionConfig(text: string | null): { mode: "allow" | "suppress"; recognized: boolean; present: boolean };
+  parseAiAttributionConfig(text: string | null): { mode: "allow" | "suppress"; recognized: boolean; present: boolean; duplicate?: true };
   scalarValue(rest: string): string;
   stripComment(s: string): string;
   resolveAiAttributionLevels: typeof resolveAiAttributionLevels;
@@ -68,6 +68,8 @@ export const AI_ATTRIBUTION_TABLE: Row[] = [
   { label: "nested key (RF-1)", config: "nested:\n  ai_attribution: allow\n", mode: "suppress" },
   { label: "mismatched quotes (RF-6)", config: 'ai_attribution: "allow\'\n', mode: "suppress" },
   { label: "unknown value", config: "ai_attribution: banana\n", mode: "suppress" },
+  { label: "duplicate top-level key (FG-845 RF-1)", config: "ai_attribution: allow\nai_attribution: suppress\n", mode: "suppress" },
+  { label: "duplicate top-level key, allow twice", config: "ai_attribution: allow\nai_attribution: allow\n", mode: "suppress" },
   { label: "unreadable file", config: "unreadable", mode: "suppress" },
 ];
 
@@ -208,8 +210,9 @@ test("readAiAttribution: quoted and trailing-comment allow forms read as allow (
 // FG-845 (AC1): project → host → default, every combination. Each level is one of:
 // absent (no file), no-key (a file without the toggle), allow, suppress, unknown
 // (present, unrecognized value), mismatched quotes, unreadable (config.yml is a dir).
-type Level = "absent" | "no-key" | "allow" | "suppress" | "unknown" | "mismatched" | "unreadable";
-const LEVELS: Level[] = ["absent", "no-key", "allow", "suppress", "unknown", "mismatched", "unreadable"];
+// duplicate: the key appears twice at the top level (FG-845 RF-1) — malformed, fails closed.
+type Level = "absent" | "no-key" | "allow" | "suppress" | "unknown" | "mismatched" | "duplicate" | "unreadable";
+const LEVELS: Level[] = ["absent", "no-key", "allow", "suppress", "unknown", "mismatched", "duplicate", "unreadable"];
 
 function placeLevel(configPath: string, level: Level): void {
   mkdirSync(join(configPath, ".."), { recursive: true });
@@ -228,6 +231,9 @@ function placeLevel(configPath: string, level: Level): void {
       return;
     case "mismatched":
       writeFileSync(configPath, 'ai_attribution: "allow\'\n');
+      return;
+    case "duplicate":
+      writeFileSync(configPath, "ai_attribution: allow\nother: 1\nai_attribution: suppress\n");
       return;
     case "unreadable":
       mkdirSync(configPath, { recursive: true });
@@ -292,6 +298,39 @@ test("FG-845: a malformed host value never reads as allow and never masks a proj
   rmSync(home, { recursive: true, force: true });
 });
 
+test("FG-845 (RF-1): a duplicated top-level ai_attribution key fails closed at its level with a named reason, never falling through", () => {
+  const dup = "ai_attribution: allow\nai_attribution: suppress\n";
+  assert.deepEqual(parseAiAttributionConfig(dup), { mode: "suppress", recognized: false, present: true, duplicate: true });
+  assert.deepEqual(hookReader.parseAiAttributionConfig(dup), parseAiAttributionConfig(dup));
+  // a nested second key is not a duplicate of the top-level one
+  assert.deepEqual(parseAiAttributionConfig("ai_attribution: allow\nx:\n  ai_attribution: suppress\n"), {
+    mode: "allow",
+    recognized: true,
+    present: true,
+  });
+  const text = (t: string): AiAttributionLevelRead => ({ kind: "text", text: t });
+  const allowHost = text("ai_attribution: allow\n");
+  assert.deepEqual(resolveAiAttributionLevels(text(dup), allowHost), {
+    mode: "suppress",
+    source: "default",
+    failed: { level: "project", why: "duplicate" },
+  });
+  assert.deepEqual(hookReader.resolveAiAttributionLevels(text(dup), allowHost), resolveAiAttributionLevels(text(dup), allowHost));
+
+  const dir = tmpProject();
+  const home = tmpProject();
+  writeConfig(dir, dup);
+  writeFileSync(join(home, "config.yml"), "ai_attribution: allow\n");
+  const r = readAiAttribution(dir, { forgeHome: home });
+  assert.equal(r.mode, "suppress");
+  assert.equal(r.source, "default");
+  assert.equal(r.file, cfg(dir));
+  assert.match(r.reason ?? "", /carries more than one top-level ai_attribution key.*failing closed to suppress/);
+  assert.equal(hookReader.readMode(dir, join(home, "config.yml")), "suppress");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("FG-845: the host file defaults to $FORGE_HOME/config.yml, resolved at call time", () => {
   const dir = tmpProject();
   const home = tmpProject();
@@ -315,6 +354,7 @@ const LEVEL_READS: AiAttributionLevelRead[] = [
   { kind: "text", text: "ai_attribution: allow\n" },
   { kind: "text", text: "ai_attribution: suppress\n" },
   { kind: "text", text: "ai_attribution: banana\n" },
+  { kind: "text", text: "ai_attribution: allow\nai_attribution: suppress\n" },
 ];
 
 test("FG-845: the hook reader's level resolution returns byte-identical values to the TS copy", () => {

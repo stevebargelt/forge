@@ -14,7 +14,7 @@
 //
 // FG-845: a host default sits beneath the project value — $FORGE_HOME/config.yml
 // may carry the same key. Resolution is project → host → built-in suppress
-// (resolveAiAttributionLevels); a level that is unreadable or unrecognized fails
+// (resolveAiAttributionLevels); a level that is unreadable, unrecognized or duplicated fails
 // closed where it stands rather than falling through to the next.
 
 import { readFileSync } from "node:fs";
@@ -74,7 +74,12 @@ export function readAiAttribution(projectDir: string, opts: { forgeHome?: string
   const r = resolveAiAttributionLevels(projectRead, hostRead);
   if (r.failed) {
     const file = files[r.failed.level];
-    const problem = r.failed.why === "unreadable" ? "could not be read" : "carries an unrecognized ai_attribution value";
+    const problem =
+      r.failed.why === "unreadable"
+        ? "could not be read"
+        : r.failed.why === "duplicate"
+          ? "carries more than one top-level ai_attribution key"
+          : "carries an unrecognized ai_attribution value";
     return {
       mode: "suppress",
       source: "default",
