@@ -37,14 +37,14 @@ export function tabCaption(detail, tab) {
   return typeof source === "string" && source !== "" ? `Source: ${source}` : "Source: unavailable";
 }
 
-/** The screen line: what the role is doing lately, whether it needs you (a seed never
- *  does — it changes only through forge upgrade), and the verb that explains it. */
+/** The screen line: what the role is doing lately, that it does not need you (a seed
+ *  changes only through forge upgrade), and the verb that explains where it runs. */
 export function roleHeader(role, detail) {
   const verb = `forge model resolve ${role}`;
   if (!detail) return { happening: `Loading ${role}`, needsYou: false, needs: "", todo: "", verb: null };
   const last = detail.overview?.recentTasks?.[0];
   const happening = last ? `${role} last ran ${last.status === "running" ? "and is running" : `(${last.status})`}` : `${role} has no recorded task`;
-  return { happening, needsYou: false, needs: "A seed changes only through forge upgrade", todo: "Read why it runs where it does", verb };
+  return { happening, needsYou: false, needs: "Nothing needs you", todo: "", verb };
 }
 
 /** The composed prompt cut at its section bounds, each with its kind and title. The

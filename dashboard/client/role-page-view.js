@@ -59,9 +59,9 @@ export function RolePage({ role, tab, project = null }) {
         ${error ? html`<div class="card" style="color: var(--err);" role="alert">${error}</div>` : null}
         ${!detail && !error ? html`<div class="muted">loading ${role}…</div>` : null}
         ${detail ? html`
-          <p class="role-caption muted" data-caption=${current}>${tabCaption(detail, current)}</p>
           ${detail.storeError ? html`<div class="card muted role-notice" role="status">Store unreadable: ${detail.storeError}</div>` : null}
           <${RoleTab} tab=${current} detail=${detail} />
+          <p class="role-caption role-footer faint" data-caption=${current}>${tabCaption(detail, current)}</p>
         ` : null}
       <//>
     </section>

@@ -106,7 +106,7 @@ test("instructionSections cuts the prompt at the server's bounds without losing 
 
 test("roleHeader: never needs you, names forge model resolve; relationLabel spells follow-up out", () => {
   const header = roleHeader("engineer", { overview: { recentTasks: [{ status: "complete" }] } });
-  assert.equal(screenLineText(header), "engineer last ran (complete) · A seed changes only through forge upgrade · Read why it runs where it does: forge model resolve engineer");
+  assert.equal(screenLineText(header), "engineer last ran (complete) · Nothing needs you: forge model resolve engineer");
   assert.equal(header.needsYou, false);
   assert.equal(relationLabel(["consulted", "followup"]), "consulted, required follow-up");
 });

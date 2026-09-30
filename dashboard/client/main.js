@@ -21,7 +21,8 @@ import { RunsIndexView } from "./runs-index-view.js";
 import { RolesIndexView } from "./roles-index-view.js";
 import { RolePage } from "./role-page-view.js";
 import { RUNS_LOADING, RUNS_POLL_MS, readRuns, runsUrl } from "./runs-index-render.js";
-import { listHeader, runsIndexHeader } from "./screen-header-render.js";
+import { listScreenLine } from "./screen-header-render.js";
+import { InfoTip } from "./info-tip.js";
 import { ScreenLine } from "./object-page-view.js";
 import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, navItemFor } from "./view-routing.js";
 import { NavColumn, BottomBar, NavDrawer } from "./nav-view.js";
@@ -705,8 +706,9 @@ function App() {
         <div class="page-head">
           <span class="page-kicker">${currentGroup?.label}</span>
           <h1 class="page-title">${currentRoute.label}</h1>
+          <${InfoTip} view=${view} title=${currentRoute.label} />
         </div>
-        <${ScreenLine} header=${view === "runs" ? runsIndexHeader(runsLoad) : listHeader(view)} />
+        <${ScreenLine} header=${listScreenLine(view, runsLoad)} />
       `}
 
       ${routeNotice ? html`<div class="card route-notice muted" role="status">${routeNotice}</div>` : null}

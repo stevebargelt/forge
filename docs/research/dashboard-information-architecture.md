@@ -251,6 +251,8 @@ The local dashboard binds loopback, so "mobile" here mostly means a narrow windo
 6. **Filtering history out of the actor page** instead of duplicating it (lane E §1, the Audit hub; `agent-detail-navigation.ts:66-79`). A role's Tasks tab links to `#runs?role=<role>`.
 7. **Everything URL-addressable**, so the chain can be walked and shared (lane E §1).
 8. **The screen contract as the test for every nav item** (lane E Patterns worth borrowing 1).
+
+   **Note, 2026-09-30 (FG-838): live facts in the header, contract in the tip.** FG-821 printed the three-question line under every title. On list views that line never changed with state, so it was documentation repeated on every visit, and the operator read it as noise. A list view's header is now its title plus any live count (Runs' "N runs are active"). The three answers and the CLI verb moved into an info tip beside the title: a "?" button whose popover can be opened by keyboard. Object pages keep a header line only for facts read from the payload. The contract is still the test for every nav item, but it now lives in the tip rather than on screen.
 9. **Order pinning on the 2-second lists beneath the Home badge** (lane E Patterns worth borrowing 3; `useInboxSortAttention.ts:3-22`).
 
 **Declined:**

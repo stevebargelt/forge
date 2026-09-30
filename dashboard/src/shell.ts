@@ -468,6 +468,34 @@ section.feed { margin-top: 24px; }
 .screen-line { margin: 10px 0 0; font-size: 13px; color: var(--fg-dim); }
 .screen-line-needs { color: var(--warn); }
 .screen-verb { font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; color: var(--fg); }
+/* FG-838: a list view's contract behind a "?" beside its title — tooltip on hover/focus,
+   popover on click/Enter/Space. Positioned against .page-head so it fits a 400px screen. */
+.page-head { position: relative; }
+.info-tip-button {
+  align-self: center; width: 20px; height: 20px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--fg-faint); background: transparent; color: var(--fg-faint);
+  font-size: 12px; line-height: 18px; cursor: pointer;
+}
+.info-tip-button:hover, .info-tip-button[aria-expanded="true"] { color: var(--fg); border-color: var(--fg-dim); }
+.info-tip-button:focus-visible, .info-tip-copy:focus-visible, .info-tip-popover:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.info-tip-tooltip {
+  display: none; position: absolute; top: 100%; left: 0; z-index: 30; margin-top: 4px; max-width: 100%;
+  padding: 4px 8px; border-radius: 4px; background: var(--bg-elev-2); border: 1px solid var(--border);
+  color: var(--fg); font-size: 12px;
+}
+.info-tip-button:hover:not([aria-expanded="true"]) ~ .info-tip-tooltip,
+.info-tip-button:focus-visible:not([aria-expanded="true"]) ~ .info-tip-tooltip { display: block; }
+.info-tip-popover {
+  position: absolute; top: 100%; left: 0; z-index: 31; margin-top: 4px; width: min(420px, 100%); box-sizing: border-box;
+  padding: 10px 12px; border-radius: 6px; background: var(--bg-elev); border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); font-size: 13px; color: var(--fg);
+}
+.info-tip-popover[hidden] { display: none; }
+.info-tip-answers { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 10px; }
+.info-tip-answers dt { color: var(--fg-faint); font-size: 12px; }
+.info-tip-answers dd { margin: 0; }
+.info-tip-verb { margin: 8px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.info-tip-copy { font-size: 12px; padding: 1px 8px; border-radius: 3px; border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--fg); cursor: pointer; }
 /* FG-822: task actions — buttons labeled with their verb, a preview before Confirm, the
    verb's own result inline. Never badge-bearing. */
 .task-actions { margin: 8px 0 0; display: flex; flex-direction: column; gap: 8px; }
@@ -535,6 +563,7 @@ a.notes-row { display: block; color: inherit; text-decoration: none; }
 .role-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .role-title { display: inline-flex; align-items: center; gap: 12px; min-width: 0; overflow-wrap: anywhere; }
 .role-caption { font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.role-footer { margin-top: 16px; }
 .role-notice { margin: 8px 0; }
 .role-description { font-size: 12px; margin-top: 2px; }
 .role-h2 { font-size: 14px; margin: 16px 0 6px; }

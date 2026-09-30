@@ -54,7 +54,6 @@ export function RolesIndexView({ params = null }) {
   const rows = sortRoles(rolesIndexRows(load.body), sort.column, sort.dir);
   return html`
     <section class="roles-index">
-      <p class="role-caption muted" data-caption="roles">${rolesIndexSource(load.body)}</p>
       ${rolesIndexNotices(load.body).map((n) => html`<div class="card muted role-notice" role="status">${n}</div>`)}
       <div class="runs-table-wrap">
         <table class="runs-table roles-table">
@@ -76,6 +75,7 @@ export function RolesIndexView({ params = null }) {
           </tbody>
         </table>
       </div>
+      <p class="role-caption role-footer faint" data-caption="roles">${rolesIndexSource(load.body)}</p>
     </section>
   `;
 }

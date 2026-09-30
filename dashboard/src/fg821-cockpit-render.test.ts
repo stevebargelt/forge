@@ -99,11 +99,11 @@ test("FG-821: the run header reads the run's own attention item, and the runs in
   assert.equal(screenLineText(runHeader(graph, inbox([prose]))), "Run active · Needs you: waiting at a gate · inspect the failed task: forge show task-1");
   assert.equal(runsIndexHeader({ phase: "ready", body: { runs: [], activeCount: 3 } }).happening, "3 runs are active");
   assert.equal(runsIndexHeader({ phase: "ready", body: { runs: [], activeCount: 1 } }).happening, "1 run is active");
-  assert.equal(runsIndexHeader({ phase: "unavailable", body: null }).happening, "What ran and what is running");
-  assert.equal(runsIndexHeader(null).verb, "forge runs query");
+  assert.equal(runsIndexHeader({ phase: "unavailable", body: null }).happening, "", "no count read, no line (FG-838)");
+  assert.equal(listHeader("runs")?.verb, "forge runs query", "the verb is in the info tip (FG-838)");
 });
 
-test("FG-821: ticket and review headers, and every list view states the three answers in one line", () => {
+test("FG-821: ticket and review headers, and every list view's tip states the three answers in one line", () => {
   assert.equal(ticketHeader("FG-9", { status: "active" }, { runs: [] }).verb, "forge queue enqueue FG-9");
   assert.equal(ticketHeader("FG-9", { status: "active" }, { runs: [{}] }).verb, "forge backlog show FG-9");
   assert.equal(reviewHeader({ id: "rv-1", state: "settled" }, null).needsYou, false);
