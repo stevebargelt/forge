@@ -380,6 +380,7 @@ test("FG-837: family tabs filter client-side, ride the hash beside sort/dir, com
 
   await page.goto(`${baseUrl}/#roles?family=wizards&sort=role`);
   await waitFor(async () => hashOf(page), "#roles?sort=role", "an unknown family is dropped");
+  await waitFor(() => pressedFamily(page), "all", "the fallback selects All");
   assert.equal(await pressedFamily(page), "all");
 
   fixtureRoles = TWO_FAMILIES;
