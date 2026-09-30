@@ -745,6 +745,8 @@ function App() {
             projectFilter=${projectFilter}
             checkoutFilter=${checkoutFilter}
             onReload=${pollQueue}
+            lane=${route.params?.lane ?? null}
+            scope=${scope}
           />`
         : view === "reviews"
         ? route.id

@@ -135,6 +135,13 @@ export declare function queueBoardState(
   options?: { projectSelected?: boolean },
 ): QueueBoardUiState;
 export declare function waitBadge(row: any): WaitBadge | null;
+export declare const COMPACT_CARD_THRESHOLD: number;
+export declare function laneIsCompact(count: unknown): boolean;
+export declare function compactStatusLine(row: any): string;
+export declare function selectedLane(
+  columns: ReadonlyArray<{ view: string; count: number }> | null | undefined,
+  requested: string | null | undefined,
+): string;
 export declare function isBlockerWait(row: any): boolean;
 export declare function isSchedulingWait(row: any): boolean;
 export declare function dispatcherSummary(panel: any, nowMs?: number | null): DispatcherSummary;

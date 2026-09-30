@@ -19,8 +19,12 @@ import { useState, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
 import { formatDuration } from "./format.js";
 import { badgeClass, statusLabel } from "./status-tokens.js";
+import { hashFor } from "./view-routing.js";
 import {
   BOARD_COLUMNS,
+  laneIsCompact,
+  compactStatusLine,
+  selectedLane,
   DEQUEUE_NOTE,
   queueBoardState,
   waitBadge,
@@ -48,7 +52,7 @@ function scopeQuery(projectFilter, checkoutFilter) {
   return q ? `?${q}` : "";
 }
 
-export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload }) {
+export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, lane = null, scope = null }) {
   const [pending, setPending] = useState(null);
   const [outcome, setOutcome] = useState(null);
   const [enqueueId, setEnqueueId] = useState("");
@@ -171,12 +175,14 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload }
             ${state.kind === "empty"
               ? html`<div class="muted queue-empty">${state.message}</div>`
               : html`
-                  <div class="queue-columns">
+                  <${LaneStrip} columns=${state.columns} selected=${selectedLane(state.columns, lane)} scope=${scope} />
+                  <div class="queue-columns" tabindex="0" role="region" aria-label="Queue lanes (scrolls sideways)">
                     ${BOARD_COLUMNS.map((def) => {
                       const column = state.columns.find((c) => c.view === def.view);
                       return html`<${BoardColumn}
                         key=${def.view}
                         column=${column}
+                        selected=${selectedLane(state.columns, lane) === def.view}
                         state=${state}
                         grabbed=${grabbed}
                         pending=${pending}
@@ -224,9 +230,42 @@ function QueueControls({ state, enqueueId, onEnqueueIdChange, onEnqueue, pending
   `;
 }
 
-function BoardColumn({ column, state, grabbed, pending, onGrab, onMove, onDequeue, onEnqueue, dragging }) {
+/** FG-844: under 900px the board shows one lane at a time; this strip picks it. The tabs
+ *  are links, so the lane rides the hash (`#queue?lane=`) and survives a reload. Hidden at
+ *  900px and up, where every lane is on screen. */
+function LaneStrip({ columns, selected, scope }) {
+  const onKeyDown = (e) => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const links = [...e.currentTarget.querySelectorAll("[role=tab]")];
+    const at = links.indexOf(document.activeElement);
+    if (at === -1) return;
+    e.preventDefault();
+    const next = links[(at + (e.key === "ArrowRight" ? 1 : links.length - 1)) % links.length];
+    next.focus();
+    next.click();
+  };
+  return html`
+    <div class="queue-lane-strip" role="tablist" aria-label="Queue lane" onKeyDown=${onKeyDown}>
+      ${columns.map((column) => html`
+        <a
+          key=${column.view}
+          role="tab"
+          class=${"queue-lane-tab" + (column.view === selected ? " queue-lane-tab-current" : "")}
+          href=${hashFor({ view: "queue", scope, params: { lane: column.view } })}
+          aria-selected=${column.view === selected ? "true" : "false"}
+          aria-controls=${`queue-lane-${column.view}`}
+          tabindex=${column.view === selected ? "0" : "-1"}
+          data-lane=${column.view}
+        >${column.title} <span class="queue-lane-tab-count">${column.count}</span></a>
+      `)}
+    </div>
+  `;
+}
+
+function BoardColumn({ column, selected, state, grabbed, pending, onGrab, onMove, onDequeue, onEnqueue, dragging }) {
   if (!column) return null;
   const reorderable = column.view === "queued";
+  const compact = laneIsCompact(column.rows.length);
 
   const onDrop = (e, index) => {
     e.preventDefault();
@@ -236,17 +275,22 @@ function BoardColumn({ column, state, grabbed, pending, onGrab, onMove, onDequeu
   };
 
   return html`
-    <section class=${`queue-column queue-column-${column.view}`} aria-label=${`${column.title} (${column.count})`}>
+    <section
+      id=${`queue-lane-${column.view}`}
+      class=${`queue-column queue-column-${column.view}${selected ? " queue-column-selected" : ""}${compact ? " queue-column-compact" : ""}`}
+      aria-label=${`${column.title} (${column.count})`}
+    >
       <header class="queue-column-head">
         <h2 class="queue-column-title">
-          ${column.title}
-          <span class="queue-column-count" aria-hidden="true">${column.count}</span>
+          <span class="queue-column-name">${column.title}</span>
           ${column.derived
             ? html`<span class="badge queue-derived-badge" title="Derived from run/readiness evidence on every read. Never stored and never manually toggled.">derived</span>`
             : null}
+          <span class="queue-column-count" aria-hidden="true">${column.count}</span>
         </h2>
-        <p class="muted queue-column-hint">${column.hint}</p>
       </header>
+      <div class="queue-lane-scroll">
+      <p class="muted queue-column-hint">${column.hint}</p>
       ${column.missing.length > 0
         ? html`<div class="muted queue-column-missing" role="status">
             ${column.missing.length} item(s) in this column had no row in the payload: <span class="mono">${column.missing.join(", ")}</span>
@@ -260,6 +304,7 @@ function BoardColumn({ column, state, grabbed, pending, onGrab, onMove, onDequeu
                 key=${row.ticketId}
                 row=${row}
                 index=${index}
+                compact=${compact}
                 reorderable=${reorderable}
                 grabbed=${grabbed === row.ticketId}
                 disabled=${Boolean(pending)}
@@ -273,6 +318,7 @@ function BoardColumn({ column, state, grabbed, pending, onGrab, onMove, onDequeu
               />
             `)}
       </ul>
+      </div>
     </section>
   `;
 }
@@ -280,6 +326,7 @@ function BoardColumn({ column, state, grabbed, pending, onGrab, onMove, onDequeu
 function QueueCard({
   row,
   index,
+  compact,
   reorderable,
   grabbed,
   disabled,
@@ -292,11 +339,13 @@ function QueueCard({
   onDropAt,
 }) {
   const badge = waitBadge(row);
+  const [expanded, setExpanded] = useState(false);
 
   // KEYBOARD REORDER. Same plan, same submission, same version as the drag path —
   // a reorder that only a mouse can perform is a queue only a mouse can plan.
+  // Keys pressed on a button inside the card belong to that button.
   const onKeyDown = (e) => {
-    if (!reorderable) return;
+    if (!reorderable || e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       onGrab(grabbed ? null : row.ticketId);
@@ -319,7 +368,7 @@ function QueueCard({
 
   return html`
     <li
-      class=${`card queue-card queue-card-${row.view}${grabbed ? " queue-card-grabbed" : ""}`}
+      class=${`card queue-card queue-card-${row.view}${grabbed ? " queue-card-grabbed" : ""}${compact ? " queue-card-compact" : ""}${compact && expanded ? " queue-card-expanded" : ""}`}
       draggable=${reorderable && !disabled ? "true" : "false"}
       onDragStart=${(e) => {
         if (!reorderable) return;
@@ -333,14 +382,31 @@ function QueueCard({
       aria-grabbed=${reorderable ? String(Boolean(grabbed)) : undefined}
       aria-label=${`${row.ticketId} ${row.title}${row.rank === null ? ", unranked" : `, rank ${row.rank}`}`}
     >
-      <div class="queue-card-head">
-        <span class="mono queue-card-rank" title=${row.rank === null ? "Unranked. Null rank is a valid backlog item, not a deprioritized one." : "Canonical stack rank"}>
-          ${row.rank === null ? "—" : `#${row.rank}`}
-        </span>
-        <span class="mono queue-card-id">${row.ticketId}</span>
-        <strong class="queue-card-title">${row.title}</strong>
-      </div>
+      ${compact
+        ? html`<div class="queue-card-head">
+              <strong class="queue-card-title">${row.title}</strong>
+              <button
+                type="button"
+                class="queue-card-toggle"
+                aria-expanded=${expanded ? "true" : "false"}
+                aria-label=${`${expanded ? "Hide" : "Show"} details for ${row.ticketId}`}
+                onClick=${() => setExpanded(!expanded)}
+              >${expanded ? "▾" : "▸"}</button>
+            </div>
+            <div class="queue-card-meta">
+              <span class="mono queue-card-rank">${row.rank === null ? "—" : `#${row.rank}`}</span>
+              <span class="mono queue-card-id">${row.ticketId}</span>
+              <span class="muted queue-card-status">${compactStatusLine(row)}</span>
+            </div>`
+        : html`<div class="queue-card-head">
+              <span class="mono queue-card-rank" title=${row.rank === null ? "Unranked. Null rank is a valid backlog item, not a deprioritized one." : "Canonical stack rank"}>
+                ${row.rank === null ? "—" : `#${row.rank}`}
+              </span>
+              <span class="mono queue-card-id">${row.ticketId}</span>
+              <strong class="queue-card-title">${row.title}</strong>
+            </div>`}
 
+      <div class="queue-card-detail">
       <div class="queue-card-facts muted">
         <span title="Lifecycle status, verbatim — not a projection.">${row.status}</span>
         ${row.queued ? html`<span class="badge queue-member-badge">queued</span>` : null}
@@ -385,6 +451,7 @@ function QueueCard({
         ${reorderable
           ? html`<span class="faint queue-card-reorder-hint">drag, or focus and press Enter then ↑/↓</span>`
           : null}
+      </div>
       </div>
     </li>
   `;

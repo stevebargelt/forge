@@ -366,6 +366,15 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // link opening the Harness tab under the scope the row was resolved at (project override
   // scoped, host file unscoped).
   "fg835-models-editor.test.ts": 8,
+  // FG-844 adds `fg844-queue-board` (6 tests) against a fixture queue with a 200-card Queued
+  // lane, a 20-card Blocked lane and a 21-card Done lane: at 1400, 1200 and 1000px every lane header on one line with
+  // the document bounded by the viewport plus the controls above the board; the long lane
+  // scrolling inside itself while every other header and the page stay put; compact cards past
+  // 20 expanding on focus, hover and an aria-expanded toggle; the under-900px lane strip with
+  // `#queue?lane=` surviving a reload and an unknown lane falling back to the first with
+  // cards; and Tab through the focusable sideways scroller reaching every lane in board order
+  // with no stop in a header. `fg591-queue-board` keeps its 6. Fixture port 18851.
+  "fg844-queue-board.test.ts": 6,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

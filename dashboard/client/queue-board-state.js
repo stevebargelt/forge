@@ -71,6 +71,35 @@ export const BOARD_COLUMNS = [
 
 export const BOARD_VIEWS = BOARD_COLUMNS.map((column) => column.view);
 
+// ─── FG-844: the board's layout decisions ────────────────────────────────────
+
+/** A lane holding MORE than this many cards renders them compact (title, id, one
+ *  status line), so a 55-card Queued lane reads as a list rather than a wall. */
+export const COMPACT_CARD_THRESHOLD = 20;
+
+export function laneIsCompact(count) {
+  return Number.isInteger(count) && count > COMPACT_CARD_THRESHOLD;
+}
+
+/** The compact card's one status line: the lifecycle status, then the wait label or
+ *  execution state that says why the card is where it is. */
+export function compactStatusLine(row) {
+  const parts = [typeof row?.status === "string" && row.status ? row.status : "unknown"];
+  const badge = waitBadge(row);
+  if (badge) parts.push(badge.label);
+  else if (row?.executionState && row.executionState !== "idle") parts.push(row.executionState);
+  if (row?.readiness?.stale) parts.push("readiness stale");
+  return parts.join(" · ");
+}
+
+/** The lane the under-900px strip shows: the one the hash names when it is a board lane,
+ *  else the first lane with cards, else the first lane. */
+export function selectedLane(columns, requested) {
+  const list = Array.isArray(columns) ? columns : [];
+  if (typeof requested === "string" && list.some((column) => column.view === requested)) return requested;
+  return (list.find((column) => column.count > 0) ?? list[0])?.view ?? BOARD_VIEWS[0];
+}
+
 /** How each wait kind is presented. The two entries that matter most are `blocker`
  *  and `scheduling`: distinct label, distinct tone, distinct prose about DURABILITY,
  *  because the operator action differs (clear the blocker vs. wait a cycle). */

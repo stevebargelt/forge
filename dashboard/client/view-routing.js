@@ -27,6 +27,9 @@
 // that is unique and stable across label changes.
 // FG-835: `#models?mode=edit&target=host|project` is the model-policy editor; `target`
 // omitted means the scoped project's override when it has one, else the host file.
+// FG-844: `#queue?lane=<view>` names the lane the under-900px strip shows (the values are
+// queue-board-state.js's BOARD_VIEWS); an unknown lane is dropped, and the board then shows
+// its first lane with cards.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -43,7 +46,7 @@ export const ROUTES = Object.freeze({
   activity: { group: "now", label: "Activity", path: "#activity", scope: "optional", object: "none", aliases: [] },
   backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", params: ["type", "status"], paramValues: { type: ["epic", "story", "idea"], status: ["all", "blocked", "deferred", "done"] }, aliases: [] },
   notes: { group: "plan", label: "Notes", path: "#notes[/<checkout>]", scope: "optional", object: "optional", aliases: [] },
-  queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", aliases: [] },
+  queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", params: ["lane"], paramValues: { lane: ["backlog", "queued", "in_progress", "blocked", "done", "executing_not_queued"] }, aliases: [] },
   campaigns: { group: "plan", label: "Campaigns", path: "#campaigns[/<campaignId>]", scope: "optional", object: "optional", aliases: [] },
   runs: { group: "evidence", label: "Runs", path: "#runs", scope: "optional", object: "none", params: ["status"], aliases: [] },
   run: { group: "evidence", label: "Run", path: "#run/<runId>[/<tab>]", scope: "none", object: "required", parent: "runs", tabs: ["map", "evidence"], aliases: ["run-map"] },
