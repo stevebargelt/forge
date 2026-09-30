@@ -177,7 +177,8 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // alias/group-shaped/unknown hashes canonicalized; the Home badge read from the server's
   // `counts` (danger, "?", partial, hidden-when-empty, 99+); and the 400px bottom bar with a
   // focus-trapped drawer that Escape closes. Its fixture server listens on port 18824.
-  "fg820-left-column-nav.test.ts": 7,
+  // FG-840 extends Routing coverage with scoped-project and unscoped-host audit-source captions.
+  "fg820-left-column-nav.test.ts": 8,
   // FG-821 adds `fg821-cockpit-pages` (12 tests): the run index (rows, the hash-carried status
   // filter, Load more over the server cursor); the Runs badge from GET /api/runs's activeCount
   // (never danger, "?" when unreadable, hidden at 0, on the bottom bar too); the run page's map

@@ -10,15 +10,14 @@
 import { h } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
-import { GovernanceView, SourceSection } from "./governance.js";
+import { GovernanceView, RecordedAudit, SourceSection } from "./governance.js";
 import { badgeClass, statusLabel } from "./status-tokens.js";
-import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
+import { MONO_CLASS, shortSha } from "./format.js";
 import {
   RACI_SECTIONS,
   appliedResult,
   applyBody,
   applyReadiness,
-  auditRows,
   beginApply,
   beginDryRun,
   beginPropose,
@@ -134,7 +133,6 @@ export function RoutingView({ governance, scope, params, onRefresh }) {
     data=${governance}
     sourceActions=${html`${note}${editButton}`}
     afterSource=${applied ? html`<${AppliedCard} applied=${applied} />` : null}
-    recorded=${project ? html`<${RecordedTable} read=${read} />` : null}
   />`;
 }
 
@@ -149,36 +147,6 @@ function AppliedCard({ applied }) {
         <pre class="raci-output">${applied.output}</pre>
         ${applied.verb ? html`<div class="hint">shelled <code class=${MONO_CLASS}>${applied.verb}</code></div>` : null}
       </div>
-    </section>
-  `;
-}
-
-function RecordedTable({ read }) {
-  const label = html`<h2 class="workbench-section-label">RECORDED</h2>`;
-  if (read.error) return html`<section class="workbench-section" aria-label="RECORDED — RACI audit log">${label}<div class="raci-error">the audit tail could not be read: ${read.error}</div></section>`;
-  if (!read.data) return html`<section class="workbench-section" aria-label="RECORDED — RACI audit log">${label}<div class="muted">loading the audit tail…</div></section>`;
-  const rows = auditRows(read.data.audit.entries);
-  return html`
-    <section class="workbench-section raci-recorded" role="region" aria-label="RECORDED — RACI audit log">
-      ${label}
-      ${rows.length === 0
-        ? html`<div class="muted">No RACI changes recorded for this checkout yet.</div>`
-        : html`<div class="card raci-table-card">
-            <table class="raci-table raci-audit" aria-label="RACI audit log, newest first">
-              <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">Change</th><th scope="col">Rationale</th><th scope="col">Candidate</th></tr></thead>
-              <tbody>
-                ${rows.map((r) => html`<tr>
-                  <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
-                  <td>${r.who}</td>
-                  <td><span class="raci-chip">${r.action}</span></td>
-                  <td>${r.change}</td>
-                  <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
-                  <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>
-                </tr>`)}
-              </tbody>
-            </table>
-          </div>`}
-      ${read.data.audit.skippedLines > 0 ? html`<div class="hint">${read.data.audit.skippedLines} unreadable audit line(s) skipped</div>` : null}
     </section>
   `;
 }
@@ -301,7 +269,7 @@ function RaciEditor({ read, governance, onView, onApplied }) {
       </div>
       ${state.proposal || state.proposeError ? html`<${ProposalSection} state=${state} now=${now} read=${read} />` : null}
       ${state.proposal ? html`<${ApplySection} state=${state} now=${now} project=${project} setState=${setState} onApply=${apply} />` : null}
-      <${RecordedTable} read=${{ data: read, error: null }} />
+      <${RecordedAudit} audit=${read.audit} />
     </section>
   `;
 }

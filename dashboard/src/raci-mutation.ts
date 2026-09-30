@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ProjectRecord, WorkbenchPanel } from "./queries.js";
+import { raciAuditTail, type RaciAuditTail } from "./raci-audit.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
 import {
   CHILD_TIMEOUT_MS,
@@ -62,8 +63,6 @@ export const MAX_RATIONALE_CHARS = 2000;
 
 export const PROPOSAL_WINDOW_MS = 15 * 60 * 1000;
 const MAX_PROPOSALS = 256;
-
-export const AUDIT_TAIL_LINES = 20;
 
 export type RaciRefusalCode = "candidate_not_proposed" | "candidate_changed" | "confirm_key_mismatch" | "rationale_required" | "rationale_invalid" | "gate_failed";
 
@@ -446,36 +445,16 @@ export async function handleRaciMutation(
 
 // ─── GET /api/raci ───────────────────────────────────────────────────────────
 
-export type RaciAuditLine = Record<string, unknown>;
-
 export type RaciReadModel = {
   project: { key: string; label: string; checkoutDir: string };
   source: { kind: "project" | "host"; path: string; text: string | null };
   /** The host default, so the editor can reset to it even when an override is in force. */
   host: { path: string; text: string | null };
   governance: WorkbenchPanel;
-  audit: { path: string; entries: RaciAuditLine[]; skippedLines: number };
+  audit: RaciAuditTail;
   proposalWindowMs: number;
   maxCandidateBytes: number;
 };
-
-/** The last `limit` parseable lines of a JSONL audit log, newest first. */
-export function readAuditTail(path: string, limit: number = AUDIT_TAIL_LINES): { entries: RaciAuditLine[]; skippedLines: number } {
-  if (!existsSync(path)) return { entries: [], skippedLines: 0 };
-  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim() !== "").slice(-limit);
-  const entries: RaciAuditLine[] = [];
-  let skippedLines = 0;
-  for (const line of lines) {
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) entries.push(parsed as RaciAuditLine);
-      else skippedLines += 1;
-    } catch {
-      skippedLines += 1;
-    }
-  }
-  return { entries: entries.reverse(), skippedLines };
-}
 
 /** READ-ONLY: the effective RACI source for one checkout (project override if present,
  *  else the host default the editor starts from), the host default itself, the governance panel, and the
@@ -483,14 +462,13 @@ export function readAuditTail(path: string, limit: number = AUDIT_TAIL_LINES): {
 export function raciReadModel(owner: ProjectRecord, checkoutDir: string, governance: WorkbenchPanel): RaciReadModel {
   const kind = governance.source.kind;
   const path = governance.source.raciPath;
-  const auditPath = join(checkoutDir, ".forge", "raci-audit.log");
   const hostPath = join(forgeHome(), "forge-raci.md");
   return {
     project: { key: owner.key, label: owner.label, checkoutDir },
     source: { kind, path, text: existsSync(path) ? readFileSync(path, "utf8") : null },
     host: { path: hostPath, text: existsSync(hostPath) ? readFileSync(hostPath, "utf8") : null },
     governance,
-    audit: { path: auditPath, ...readAuditTail(auditPath) },
+    audit: raciAuditTail(checkoutDir),
     proposalWindowMs: PROPOSAL_WINDOW_MS,
     maxCandidateBytes: MAX_RACI_CANDIDATE_BYTES,
   };

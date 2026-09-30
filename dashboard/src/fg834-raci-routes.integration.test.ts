@@ -146,6 +146,11 @@ async function getRaci(query: string): Promise<{ status: number; body: Record<st
   return { status: res.status, body: (await res.json()) as Record<string, any> };
 }
 
+async function getGovernance(query: string): Promise<{ status: number; body: Record<string, any> }> {
+  const res = await fetch(`${BASE}/api/governance${query}`);
+  return { status: res.status, body: (await res.json()) as Record<string, any> };
+}
+
 const applyBody = (candidate: string, over: Record<string, unknown> = {}) => ({
   projectKey: PROJECT_KEY,
   candidate,
@@ -164,7 +169,7 @@ test("integ FG-834: GET /api/raci — host default as the starting source, gover
   assert.equal(res.body["source"].text, HOST_RACI);
   assert.deepEqual(res.body["host"], { path: join(tmpHome, "forge-raci.md"), text: HOST_RACI });
   assert.ok(res.body["governance"].derived, "the governance panel is embedded");
-  assert.deepEqual(res.body["audit"], { path: join(checkoutDir, ".forge", "raci-audit.log"), entries: [], skippedLines: 0 });
+  assert.deepEqual(res.body["audit"], { source: "project", path: join(checkoutDir, ".forge", "raci-audit.log"), entries: [], skippedLines: 0 });
   assert.equal(res.body["proposalWindowMs"], 15 * 60 * 1000);
   assert.equal(res.body["maxCandidateBytes"], 256 * 1024);
 
@@ -355,6 +360,15 @@ test("integ FG-834: green propose → apply through the real CLI writes the over
   assert.equal(view.body["source"].text, CANDIDATE);
   assert.equal(view.body["audit"].entries.length, 1);
   assert.equal(view.body["audit"].entries[0].actor, "dashboard");
+  assert.equal(view.body["audit"].entries[0].source, "dashboard");
   assert.match(JSON.stringify(view.body["governance"].effective.routes["implementation_quick"]), /frontend-specialist/,
     "the governance view re-reads the applied route");
+
+  const governance = await getGovernance(`?projectKey=${encodeURIComponent(PROJECT_KEY)}&projectDir=${encodeURIComponent(checkoutDir)}`);
+  assert.equal(governance.status, 200, JSON.stringify(governance.body));
+  assert.equal(
+    JSON.stringify(governance.body["recorded"].entries),
+    JSON.stringify(view.body["audit"].entries),
+    "after one real forge raci apply, both API reads expose byte-for-byte identical audit entries",
+  );
 });
