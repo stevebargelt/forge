@@ -94,6 +94,8 @@ The column has a scope control at the top ("All projects", a project, or project
 | Health | Usage | `#usage[?scope]` | H: spend, model mix, plan pace | none | `/api/usage*`, `/api/usage/limits` |
 | Health | Ops | `#ops[?scope]` | H: success rate, failure mix, durations | none | `/api/ops`, `/api/agent-runtime`, `/api/completed-runs` |
 
+**Note, 2026-09-30 (FG-830): Notes moved out of Backlog.** The Backlog view used to render a "Notes / Session handoff" section above its tickets, one entry per registered checkout. For Forge on 2026-09-29 that made the page about 108,000 px tall and pushed the tickets below the fold. The notes are now their own Plan item after Backlog: `#notes[/<checkout>][?scope]` (project-optional). It lists one row per checkout that has a note, newest session first, and the note itself opens on a page with the FG-821 trail. Its source is `/api/backlog`'s `notesByCheckout`, and it has no badge. The Backlog item keeps the same route and source but renders tickets only. This adds a fifteenth item to the column.
+
 **Order.** The groups descend through the screen contract:
 
 - **Now** answers "needs me" and "happening", so every visit starts there.

@@ -119,7 +119,7 @@ test("FG-820: the column renders the five groups with their items as links, head
   );
   assert.deepEqual(groups, [
     { heading: "Now", items: ["Home", "Activity"] },
-    { heading: "Plan", items: ["Backlog", "Queue", "Campaigns"] },
+    { heading: "Plan", items: ["Backlog", "Notes", "Queue", "Campaigns"] },
     { heading: "Evidence", items: ["Runs", "Reviews", "Shipping"] },
     { heading: "Setup", items: ["Roles", "Routing", "Config", "Projects"] },
     { heading: "Health", items: ["Usage", "Ops"] },
@@ -347,7 +347,7 @@ test("FG-820: every legacy hash reaches its rendered heading, and keyboard order
   await page.goto(`${baseUrl}/`);
   await page.locator("section.home-view").waitFor();
   const tabStops: string[] = [];
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < 17; i++) {
     await page.keyboard.press("Tab");
     tabStops.push(await page.evaluate(() => {
       const active = document.activeElement;
@@ -357,7 +357,7 @@ test("FG-820: every legacy hash reaches its rendered heading, and keyboard order
     }));
   }
   assert.deepEqual(tabStops, [
-    "Skip to content", "Scope", "home", "activity", "backlog", "queue", "campaigns", "runs", "reviews", "shipping",
+    "Skip to content", "Scope", "home", "activity", "backlog", "notes", "queue", "campaigns", "runs", "reviews", "shipping",
     "roles", "routing", "config", "projects", "usage", "ops",
   ]);
 

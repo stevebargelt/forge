@@ -18,6 +18,8 @@
 // the Roles list and `#roles/<role>[/<tab>]` a role page, with `overview` the default tab.
 // `tabAliases` maps a retired tab name onto its successor (FG-827: `configuration` is now
 // `harness`), so a saved link lands on the renamed tab and is canonicalized to it.
+// FG-830: `#notes/<checkout>` names a checkout by its URI-encoded directory, the one id
+// that is unique and stable across label changes.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -33,6 +35,7 @@ export const ROUTES = Object.freeze({
   home: { group: "now", label: "Home", path: "#home", scope: "optional", object: "none", aliases: [] },
   activity: { group: "now", label: "Activity", path: "#activity", scope: "optional", object: "none", aliases: [] },
   backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", params: ["type", "status"], paramValues: { type: ["epic", "story", "idea"], status: ["all", "blocked", "deferred", "done"] }, aliases: [] },
+  notes: { group: "plan", label: "Notes", path: "#notes[/<checkout>]", scope: "optional", object: "optional", aliases: [] },
   queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", aliases: [] },
   campaigns: { group: "plan", label: "Campaigns", path: "#campaigns[/<campaignId>]", scope: "optional", object: "optional", aliases: [] },
   runs: { group: "evidence", label: "Runs", path: "#runs", scope: "optional", object: "none", params: ["status"], aliases: [] },

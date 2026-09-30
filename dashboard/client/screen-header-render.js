@@ -101,6 +101,13 @@ export function ticketHeader(ticketId, ticket, runsLoad) {
   return { happening, needsYou: false, needs: NOTHING, todo: "Read it", verb: `forge backlog show ${ticketId}` };
 }
 
+/** Header for one checkout's session-handoff note (FG-830). Read-only: the verb is the
+ *  CLI read, run in that checkout. */
+export function noteHeader(row) {
+  if (!row) return { happening: "No note for this checkout", needsYou: false, needs: NOTHING, todo: "Pick a checkout from Notes", verb: "forge backlog notes show" };
+  return { happening: `The handoff ${row.label} left for the next session`, needsYou: false, needs: NOTHING, todo: "Read it", verb: "forge backlog notes show" };
+}
+
 /** Header for a review opened by id. `nextAction` is review-ledger-render's
  *  nextRequiredAction(review), passed in so this module stays dependency-free. */
 export function reviewHeader(review, nextAction) {
@@ -127,6 +134,7 @@ const LIST_HEADERS = {
   home: { happening: "What needs you, then what is running", needs: "The Needs you list is exactly what needs you", todo: "Act on each item's command", verb: "forge attention list" },
   activity: { happening: "What finished and what is running", needs: "Home owns what needs you", todo: "Open an output to read it", verb: "forge status" },
   backlog: { happening: "What is filed, in what state", needs: "Readiness gaps count on Home", todo: "Open a ticket for its runs", verb: "forge backlog list" },
+  notes: { happening: "Where each checkout's last session left off", needs: NOTHING, todo: "Open a checkout's note to read it", verb: "forge backlog notes show" },
   queue: { happening: "What runs next", needs: "Only if you are planning", todo: "Rank, enqueue or dequeue", verb: "forge queue" },
   campaigns: { happening: "Campaign progress and pauses", needs: "Pauses count on Home", todo: "Open a campaign for its items", verb: "forge campaign show" },
   reviews: { happening: "Review outcomes and open findings", needs: "Open fix_now findings count on Home", todo: "Record a disposition", verb: "forge review disposition" },

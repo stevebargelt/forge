@@ -38,7 +38,7 @@
 // unattended, and it stays CLI-only. See queue-mutation.ts and action-mutation.ts.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -343,11 +343,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       );
       return;
     }
-    const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }> = [];
+    // FG-830: `modifiedAt` is the Notes view's fallback session date when the note
+    // itself carries no "Last session ended" line.
+    const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string; modifiedAt: string | null }> = [];
     for (const checkout of checkouts) {
       const notesPath = join(checkout.projectDir, "backlog", "notes.md");
       const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
-      if (notes.trim()) notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes });
+      if (notes.trim()) {
+        const modifiedAt = statSync(notesPath, { throwIfNoEntry: false })?.mtime.toISOString() ?? null;
+        notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes, modifiedAt });
+      }
     }
 
     // FG-608: ticket truth is HOST-WIDE, keyed by project_key — the same rows for

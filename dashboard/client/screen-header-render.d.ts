@@ -11,6 +11,7 @@ export function taskHeader(detail: unknown, load: unknown, options?: { explain?:
 export function runHeader(graph: unknown, load: unknown): ScreenHeader;
 export function ticketHeader(ticketId: string, ticket: { status: string } | null, runsLoad: { runs: unknown[] | null } | null): ScreenHeader;
 export function reviewHeader(review: { id: string; state: string } | null, nextAction: string | null): ScreenHeader;
+export function noteHeader(row: { label: string } | null): ScreenHeader;
 export function runsIndexHeader(load: unknown): ScreenHeader;
 export function listHeader(view: string): ScreenHeader | null;
 export function screenLineText(header: ScreenHeader | null): string;

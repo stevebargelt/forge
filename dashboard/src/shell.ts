@@ -517,6 +517,16 @@ details.action-refused ul { margin: 4px 0 0; padding-left: 16px; }
 .runs-id, .runs-checkout { font-size: 10px; }
 .runs-load-more { margin-top: 10px; }
 a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
+/* FG-830: the Notes view — one compact row per checkout, the note on its own page. */
+.notes-list { list-style: none; margin: 16px 0 0; padding: 0; }
+a.notes-row { display: block; color: inherit; text-decoration: none; }
+.notes-row-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+.notes-label { overflow-wrap: anywhere; }
+.notes-session { font-size: 11px; margin-left: auto; }
+.notes-preview { font-size: 13px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.notes-primary { background: rgba(192, 132, 252, 0.14); color: var(--magenta); }
+.notes-meta { gap: 8px; flex-wrap: wrap; align-items: baseline; margin: 12px 0; }
+.notes-path { font-size: 11px; margin-bottom: 16px; overflow-wrap: anywhere; }
 /* FG-817: the Roles list and role pages. Nine tabs wrap rather than scroll off a phone. */
 .role-page .object-tabs { flex-wrap: wrap; }
 /* FG-829: the role glyph tile (client/role-glyph.js) — its colours ride the SVG's own
@@ -1872,14 +1882,6 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 
 /* #FG-363: backlog view */
 .backlog-view { margin-top: 16px; }
-.backlog-notes { margin-bottom: 20px; }
-.backlog-notes-body { cursor: default; }
-.backlog-note-card { cursor: pointer; }
-.backlog-note-card:focus,
-.backlog-note-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.backlog-note-badge { background: rgba(192, 132, 252, 0.14); color: var(--magenta); margin-right: 8px; }
-.backlog-note-action { font-size: 10px; white-space: nowrap; }
-.backlog-note-path { font-size: 11px; margin-bottom: 16px; overflow-wrap: anywhere; }
 .backlog-controls { margin-bottom: 4px; }
 .backlog-search {
   background: var(--bg-elev);

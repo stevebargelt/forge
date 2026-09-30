@@ -84,6 +84,17 @@ export function roleTrail(role, tabLabel) {
   ];
 }
 
+/** A checkout's note page (FG-830): Project › Notes › <checkout label>. The Notes crumb
+ *  keeps the scope the page was opened under. */
+export function noteTrail(checkoutLabel, scope, projects) {
+  const project = scope && scope.project ? scope.project : null;
+  return [
+    projectCrumb(null, projects, project),
+    { kind: "notes", label: "Notes", href: hashFor({ view: "notes", scope }) },
+    { kind: "note", label: checkoutLabel, href: null },
+  ];
+}
+
 /** Where Escape goes from an object page: its parent, one level up the same chain.
  *  A run's parent is the run index; a task's is its run; Explain's is its task. */
 export function parentHash(page, payload, scope = null) {
@@ -97,6 +108,8 @@ export function parentHash(page, payload, scope = null) {
       return hashFor({ view: "backlog", scope });
     case "review":
       return hashFor({ view: "reviews", scope });
+    case "note":
+      return hashFor({ view: "notes", scope });
     case "role":
       return hashFor({ view: "roles" });
     default:
