@@ -138,19 +138,17 @@ export function registerInit(program: Command): void {
       const adaptersPlan: OperatorAdaptersPlan = installHooks ? planOperatorAdapters(projectDir) : { action: "skipped" as const };
       const gitignorePlan = installHooks ? planGitignoreEntries(projectDir) : { action: "skipped" as const };
 
-      // FG-851: a --prefix write into a .forge/config.yml forge cannot edit in place
-      // is refused BEFORE anything else is written — never healed by overwrite.
-      let configRefusal: string | null = null;
-      if (options.prefix) {
-        try {
-          assertBacklogConfigWritable(projectDir, { prefix: options.prefix });
-        } catch (e) {
-          if (!(e instanceof ConfigWriteRefusal)) throw e;
-          configRefusal = e.message;
-        }
-      }
-
       if (options.dryRun) {
+        // FG-851: the dry run forecasts the refusal the live run's write would raise.
+        let configRefusal: string | null = null;
+        if (options.prefix) {
+          try {
+            assertBacklogConfigWritable(projectDir, { prefix: options.prefix });
+          } catch (e) {
+            if (!(e instanceof ConfigWriteRefusal)) throw e;
+            configRefusal = e.message;
+          }
+        }
         console.log(`forge init (dry-run) in ${projectDir}`);
         console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${blockStatus(blockResult.action, !!existing)}`);
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
@@ -183,8 +181,17 @@ export function registerInit(program: Command): void {
         return;
       }
 
-      if (configRefusal) {
-        throw new Error(`${configRefusal} (forge init wrote nothing)`);
+      // FG-851: a --prefix write into a .forge/config.yml forge cannot edit in place
+      // is refused, never healed by overwrite. The write itself is the FIRST mutation
+      // — not a pre-flight followed by a second read — so its refusal, whatever
+      // raised it, lands before CLAUDE.md, backlog/ or any hook exists.
+      if (options.prefix) {
+        try {
+          writeBacklogConfig(projectDir, { prefix: options.prefix });
+        } catch (e) {
+          if (!(e instanceof ConfigWriteRefusal)) throw e;
+          throw new Error(`${e.message} (forge init wrote nothing)`);
+        }
       }
       if (willWrite) {
         writeFileSync(claudeMdPath, next);
@@ -193,9 +200,6 @@ export function registerInit(program: Command): void {
         mkdirSync(forgeProjectDir, { recursive: true });
       }
       const backlogScaffoldResult = scaffoldBacklogDirs(projectDir);
-      if (options.prefix) {
-        writeBacklogConfig(projectDir, { prefix: options.prefix });
-      }
       // FG-796: forge init no longer provisions a PROJECT-level model-policy.yml. A
       // project policy is a deliberate operator override that fully replaces the host
       // policy; seeding it silently installs the subscription-default + codex-pin shape

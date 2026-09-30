@@ -886,3 +886,26 @@ test("integ FG-851: forge init --prefix on an unparseable config refuses by name
   assert.equal(existsSync(join(projectDir, ".git", "hooks", "commit-msg")), false);
   assert.deepEqual(readdirSync(join(projectDir, ".forge")), ["config.yml"], "no seed was written before the refusal");
 });
+
+test("integ FG-851: forge init --prefix refused by the config write itself leaves no scaffold behind", () => {
+  const outside = mkdtempSync(join(tmpdir(), "forge-init-outside-"));
+  try {
+    const target = join(outside, "config.yml");
+    writeFileSync(target, "backlog:\n  prefix: OLD\n");
+    mkdirSync(join(projectDir, ".forge"), { recursive: true });
+    symlinkSync(target, join(projectDir, ".forge", "config.yml"));
+    execSync("git init -q", { cwd: projectDir });
+
+    const res = runForge(["init", "--project", projectDir, "--prefix", "NEW"]);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /refusing to write .*config\.yml — .* is a symlink.*\(forge init wrote nothing\)/s);
+    assert.equal(readFileSync(target, "utf8"), "backlog:\n  prefix: OLD\n");
+    assert.equal(existsSync(join(projectDir, "CLAUDE.md")), false);
+    assert.equal(existsSync(join(projectDir, "backlog")), false);
+    assert.equal(existsSync(join(projectDir, ".git", "hooks", "commit-msg")), false);
+    assert.equal(existsSync(join(projectDir, ".claude")), false);
+    assert.deepEqual(readdirSync(join(projectDir, ".forge")), ["config.yml"]);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
