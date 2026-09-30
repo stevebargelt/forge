@@ -236,7 +236,10 @@ migrates, or reinterprets the file:
   forge never downgrades or reinterprets a newer file as an older schema.
 
 **`forge upgrade` is the SOLE migration authority.** It is the only thing that
-ever rewrites your `model-policy.yml`. The migration:
+ever migrates your `model-policy.yml`. (`forge model policy apply` — see
+[Change the policy through the gate](#change-the-policy-through-the-gate-propose--apply)
+— *replaces* the file with a candidate you wrote, but refuses any candidate that
+is not already at the current `schema_version`, so it never migrates.) The migration:
 
 - Copies `reasoning` → `spec-writer` and `fast` → `fast-orchestrator` in
   `defaults.activity` and in each profile's `map`, wherever the destination
@@ -344,6 +347,105 @@ mapping-path axis on every resolved task, distinctly from `resolvedBy`, so a
 default-fallback is never displayed as though it satisfied an explicit
 activity. Fix it by adding the activity to the profile's map, or by dropping
 the explicit `activity:` to accept the profile default.
+
+## Change the policy through the gate (propose / apply)
+
+Hand-editing `model-policy.yml` still works, but `forge model policy` (FG-835)
+checks a candidate first and records what changed:
+
+```bash
+forge model policy propose candidate.yml [--project <dir>] [--json]
+forge model policy apply   candidate.yml --confirm [--by <who>] [--project <dir>] [--allow-undispatchable] [--expect-sha256 <sha>]
+```
+
+The safe sequence is **propose, read the diff, then apply --confirm**: `propose` never
+writes, so run it first and check the findings and the resolution diff before
+touching the effective file; `apply` re-runs the exact same gate immediately
+before writing (it never trusts an earlier `propose`), and without `--confirm`
+it behaves exactly as `propose` — so `apply` with no `--confirm` is itself a
+safe way to preview what applying would do.
+
+**Target.** With `--project <dir>` the target is `<dir>/.forge/model-policy.yml`.
+Without it, the target is the host `~/.forge/model-policy.yml`.
+
+**The gate** (`propose` runs it; `apply` re-runs it right before writing and
+never relies on an earlier propose). A candidate fails when:
+
+- its `schema_version` is missing or older (`schema_version`, naming
+  `forge upgrade`) or newer than this forge supports (naming "upgrade Forge").
+  Normal loading refuses these files the same way.
+- it fails the schema (`schema_invalid`). Profile, activity and
+  `overrides.agents` role names must match `[A-Za-z0-9][A-Za-z0-9_-]*`
+  (`grammar`).
+- a profile's runtime is missing from the current seed generation
+  (`runtime_missing`). The runtime is the explicit `runtime:`, or else the one
+  bound from `(provider, auth)`. `no_generation` means no generation is published
+  at all. A `(provider, auth)` pair with no bound runtime fails as `auth_unbound`.
+- a profile's auth, with `auto` resolved, probes `unavailable` on this host
+  (`auth_unavailable`). This is the same probe as `forge providers doctor`, and
+  an `unknown` probe does not fail the gate.
+- an installed role (a seed under `~/.forge/agents/`) loses dispatchability
+  for its **default** activity (`default_undispatchable`). That covers a
+  resolution error, `activity_unmapped`, or a failed tool-capability check.
+  `--allow-undispatchable` accepts this. The dashboard never passes that flag.
+
+**The resolution diff.** The gate resolves every installed role × activity
+against both the current effective policy and the candidate. The activities
+come from the role's default, the `defaults.activity` keys of both policies,
+and `default`. The default-activity row is resolved role-derived, the way a
+dispatch without an explicit activity resolves it. `propose` prints the rows
+that change as `before → after` for profile, provider, model, auth, runtime
+and cost tier. It also marks rows that become `activity_unmapped` or
+undispatchable. `--json` returns every row, changed or not, plus the findings,
+the candidate's sha256, and `targetSha256` — the sha256 of the target file's
+bytes as the gate saw them (`null` when the file is absent). Pass that value
+back to `apply --expect-sha256` (see below) to pin the write to the exact
+bytes you reviewed.
+
+**Concurrent-write safety.** Once the gate passes and `--confirm` is set,
+`apply` checks, in order: a `--project` target is contained — `.forge`, the
+target file, its audit log and its lock must all be real (non-symlink)
+entries under the project directory, and the target must not be the host
+policy — refusing `target_escapes_project` before anything else is touched;
+then it takes an advisory lock (`<target>.lock`), refusing `target_locked`
+when a live apply already holds it (a lock whose holder process is no longer
+running is stolen automatically, so a crashed apply never wedges the file);
+then, under the lock, it re-checks the target's bytes and refuses
+`target_changed` if they no longer match what the gate just validated against
+— or, with `--expect-sha256 <sha>` (`absent` for no file), if they don't match
+that explicit value, so a caller can pin the write to the exact `targetSha256`
+of a `propose --json` it reviewed earlier and be refused if someone else's
+apply landed in between.
+
+**Exit codes.** `propose` exits 1 when the gate fails or the candidate file is
+missing, and 0 otherwise. It never writes. `apply` without `--confirm` does
+exactly what `propose` does; with `--confirm` it additionally exits 1 for
+`target_escapes_project`, `target_locked`, or `target_changed`, and only exits
+0 once the write actually lands.
+
+**What `apply --confirm` writes**, and only after the gate passes and the lock
+and target checks above clear:
+
+1. A backup of the current file beside it,
+   `model-policy.yml.bak-<ISO timestamp>`. None is written if no file existed.
+2. The candidate's exact bytes, written to a temp file and renamed over the
+   target. A reader sees either the old file or the new one, never a partial
+   write.
+3. One JSONL line appended to `model-policy-audit.log` in the same directory:
+   `outcome` (`applied` or `failed`), `by` (`--by`, default the OS user),
+   `timestamp`, `target`, `target_kind`, `target_sha256_before` (the bytes
+   this apply validated against and replaced, `null` when absent), `candidate`,
+   `candidate_sha256`, `backup`, `allow_undispatchable`, and `diff` (only the
+   rows that change). The audit log is opened for append — and an unwritable
+   log refuses closed — before the backup or write is attempted, but the line
+   itself is appended only after: a successful backup-and-rename appends
+   `outcome: "applied"`; a failure at either step appends `outcome: "failed"`
+   with an `error` message instead and leaves the target unchanged. Either way
+   every attempt is recorded, but the recording follows the write rather than
+   preceding it.
+
+To restore a backup, run `propose`/`apply` with the backup file as the
+candidate.
 
 ## When a policy edit takes effect
 

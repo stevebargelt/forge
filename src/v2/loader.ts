@@ -78,6 +78,10 @@ export type LoadContext = {
    *  load then REFUSES rather than reading the pre-migration flat layout. A resolved
    *  generation pins this invocation. */
   seedGeneration?: SeedGeneration | null;
+  /** FG-835: an in-memory model policy standing in for the on-disk effective file, so
+   *  `forge model policy propose` can resolve against a candidate without writing it.
+   *  Honored by loadModelPolicy / loadModelPolicyWithSource only. */
+  modelPolicy?: { policy: ModelPolicy; source: "host" | "project"; path: string };
 };
 
 /** THE single dispatch-side resolve point for the forge-owned, dispatch-coupled seed
@@ -374,7 +378,7 @@ function detectRuntimeName(_ctx: LoadContext): string {
  *
  *  A non-object document is left to Zod so the existing schema-validation error
  *  surfaces unchanged (it is a malformed policy, not a version problem). */
-function assertCurrentModelPolicyVersion(parsed: unknown, path: string): void {
+export function assertCurrentModelPolicyVersion(parsed: unknown, path: string): void {
   // Not a mapping → not a version question. Let ModelPolicySchema produce the
   // usual validation error rather than mislabeling it as a legacy-version refusal.
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
@@ -433,20 +437,13 @@ function assertCurrentModelPolicyVersion(parsed: unknown, path: string): void {
  *  precedence (project > user > forge-default) is applied by the resolver that
  *  consumes this, not here. */
 export function loadModelPolicy(ctx: LoadContext = {}): ModelPolicy | undefined {
-  const projectPath = ctx.projectDir
-    ? join(ctx.projectDir, ".forge", "model-policy.yml")
-    : undefined;
-  const workspacePath = join(forgeHome(), "model-policy.yml");
+  return loadModelPolicyWithSource(ctx).policy;
+}
 
-  const path =
-    projectPath && existsSync(projectPath)
-      ? projectPath
-      : existsSync(workspacePath)
-        ? workspacePath
-        : undefined;
-  if (!path) return undefined; // no policy → legacy resolution, behavior unchanged
-
-  const raw = readFileSync(path, "utf8");
+/** Parse + version-gate + validate model-policy YAML text. `path` labels errors. The
+ *  single parse path shared by the loaders and the FG-835 propose/apply gate, so a
+ *  candidate is refused exactly as loading would refuse it. */
+export function parseModelPolicyText(raw: string, path: string): ModelPolicy {
   let parsed: unknown;
   try {
     parsed = parseYaml(raw);
@@ -577,6 +574,7 @@ export type ModelPolicyWithSource =
   | { source: "absent"; policy: undefined };
 
 export function loadModelPolicyWithSource(ctx: LoadContext = {}): ModelPolicyWithSource {
+  if (ctx.modelPolicy) return { ...ctx.modelPolicy };
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "model-policy.yml")
     : undefined;
@@ -591,19 +589,8 @@ export function loadModelPolicyWithSource(ctx: LoadContext = {}): ModelPolicyWit
 
   if (!path) return { source: "absent", policy: undefined };
 
-  const raw = readFileSync(path, "utf8");
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(raw);
-  } catch (e) {
-    throw new Error(`model-policy (${path}): YAML parse error — ${(e as Error).message}`);
-  }
-  assertCurrentModelPolicyVersion(parsed, path);
-  const result = ModelPolicySchema.safeParse(parsed);
-  if (!result.success) {
-    throw new Error(formatZodError(`model-policy (${path})`, result.error));
-  }
-  return { source: isProject ? "project" : "host", path, policy: result.data };
+  const policy = parseModelPolicyText(readFileSync(path, "utf8"), path);
+  return { source: isProject ? "project" : "host", path, policy };
 }
 
 function formatZodError(prefix: string, err: import("zod").ZodError): string {

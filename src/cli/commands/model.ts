@@ -1,8 +1,15 @@
 import type { Command } from "commander";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { renderActivityUnmapped } from "../../v2/model-provenance.js";
 import { modelResolveReport } from "../../v2/model-resolve-report.js";
+import {
+  applyModelPolicy,
+  policyTarget,
+  renderPolicyProposal,
+  type PolicyApplyResult,
+} from "../../v2/model-policy-gate.js";
 
 export function registerModel(program: Command): void {
   const model = program
@@ -97,4 +104,84 @@ export function registerModel(program: Command): void {
         }
       }
     );
+
+  // FG-835: the model-policy write gate. propose never writes; apply without --confirm
+  // is propose. Both run the SAME gate (applyModelPolicy) so a green propose and apply's
+  // re-run cannot disagree on identical bytes and host state.
+  const policy = model
+    .command("policy")
+    .description("Propose / apply a replacement model-policy.yml through the validation gate (FG-835)");
+
+  type PolicyOpts = { project?: string; json?: boolean; confirm?: boolean; by?: string; allowUndispatchable?: boolean; expectSha256?: string };
+
+  const runPolicyGate = (verb: "propose" | "apply", candidateArg: string, opts: PolicyOpts) => {
+    const candidatePath = resolve(candidateArg);
+    if (!existsSync(candidatePath)) {
+      process.stderr.write(`forge model policy ${verb}: candidate not found: ${candidatePath}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    const target = policyTarget(opts.project ? resolve(opts.project) : undefined);
+    let result: PolicyApplyResult;
+    try {
+      result = applyModelPolicy(readFileSync(candidatePath, "utf8"), {
+        target,
+        candidateLabel: candidatePath,
+        allowUndispatchable: opts.allowUndispatchable ?? false,
+        confirm: verb === "apply" && (opts.confirm ?? false),
+        by: opts.by,
+        expectTargetSha256: opts.expectSha256,
+      });
+    } catch (e) {
+      process.stderr.write(`forge model policy ${verb}: failed to write (policy not replaced): ${(e as Error).message}\n`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify({ written: result.written, reason: result.reason, detail: result.detail, backup: result.backup, auditLog: result.auditLog, audit: result.audit, ...result.proposal }, null, 2));
+    } else {
+      console.log(`forge model policy ${verb}`);
+      console.log(renderPolicyProposal(result.proposal));
+      if (verb === "apply") {
+        console.log("");
+        if (result.written) {
+          console.log(`Applied -> ${target.path}${result.backup ? ` (previous file backed up to ${result.backup})` : ""}.`);
+          console.log(`Audited to ${result.auditLog}. Takes effect on the next dispatch.`);
+        } else if (result.reason === "not_confirmed") {
+          console.log("Not applied — gate passed. Re-run with --confirm to write.");
+        } else if (result.reason !== "validation_failed") {
+          console.log(`Not applied — ${result.reason}: ${result.detail}. Nothing was written.`);
+        } else {
+          console.log("Not applied — gate FAILED. Fix the findings above; nothing was written.");
+        }
+      }
+    }
+    if (!result.written && result.reason !== "not_confirmed") process.exitCode = 1;
+  };
+
+  policy
+    .command("propose")
+    .argument("<candidate>", "candidate model-policy.yml")
+    .option("--project <dir>", "gate against the project's .forge/model-policy.yml (default: the host ~/.forge/model-policy.yml)")
+    .option("--allow-undispatchable", "accept a candidate that leaves an installed role undispatchable for its default activity")
+    .option("--json", "emit the structured proposal as JSON")
+    .description(
+      "Validate a candidate model policy (schema_version, name grammar, runtime seeds in the current generation, host-satisfiable auth) and print the resolution diff for every installed role × activity. Never writes; exits 1 when the gate fails."
+    )
+    .action((candidate: string, opts: PolicyOpts) => runPolicyGate("propose", candidate, opts));
+
+  policy
+    .command("apply")
+    .argument("<candidate>", "candidate model-policy.yml")
+    .option("--project <dir>", "replace the project's .forge/model-policy.yml (default: the host ~/.forge/model-policy.yml)")
+    .option("--confirm", "actually write (without it, behaves exactly as propose)")
+    .option("--by <who>", "who is applying, recorded in the audit log (default: the OS user)")
+    .option("--expect-sha256 <sha>", "refuse (target_changed) unless the target still carries these bytes — the targetSha256 of a reviewed `propose --json` (\"absent\" for no file)")
+    .option("--allow-undispatchable", "accept a candidate that leaves an installed role undispatchable for its default activity")
+    .option("--json", "emit the structured apply result as JSON")
+    .description(
+      "Re-run the propose gate and, with --confirm, atomically replace the effective model-policy.yml, keeping a timestamped backup beside it and appending a JSONL line to model-policy-audit.log."
+    )
+    .action((candidate: string, opts: PolicyOpts) => runPolicyGate("apply", candidate, opts));
 }
