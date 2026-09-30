@@ -13,7 +13,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
@@ -126,7 +126,7 @@ before(async () => {
   });
 
   // The host file's history, from a terminal: a first file, then the starting policy
-  // applied over it — one backup and one `cli` audit line before the page ever opens.
+  // applied over it — one backup and one audit line (the OS user, no source) before the page ever opens.
   writeFileSync(join(forgeHome, "model-policy.yml"), FIRST);
   const seedFile = join(home, "start.yml");
   writeFileSync(seedFile, START);
@@ -197,7 +197,9 @@ test("FG-835: quick edit one profile's model → the resolution diff → Apply r
   assert.match(source, /schema_version 2 · 3 profiles · \d+ roles resolved/);
   assert.match(source, /target of an apply from here:\s*host/);
   assert.match(await resolutionRow(page, "architecture-advisor", "reasoning").innerText(), /spec-writer\s+claude-opus-5-5/);
-  assert.match(await page.locator(".mp-recorded tbody tr").first().innerText(), /\bcli\b/);
+  const terminalLine = await page.locator(".mp-recorded tbody tr").first().innerText();
+  assert.ok(terminalLine.includes(`${userInfo().username} (claimed)`), "a terminal apply is attributed to the OS user it recorded");
+  assert.doesNotMatch(terminalLine, /\bvia\b/, "the line recorded no source, so none is shown");
   assert.equal(await page.locator(".mp-backups tbody tr").count(), 1);
   assert.equal(await textarea(page).count(), 0, "view mode has no editor");
 
