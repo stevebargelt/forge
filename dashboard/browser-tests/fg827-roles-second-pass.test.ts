@@ -247,7 +247,7 @@ test("FG-827: Overview — a Latest task card with its status token and relative
   await page.waitForFunction(() => location.hash === "#roles/engineer/skills");
   await page.locator('[data-group="mounted"]').waitFor();
   for (const tab of ["harness", "skills", "capabilities", "tools", "usage"]) {
-    await page.locator(`[role="tab"][data-tab="${tab}"]`).click();
+    await page.locator(`nav.role-subnav a[data-tab="${tab}"]`).click(); // FG-837: the sub-nav at 1280px
     await page.waitForFunction((t) => document.querySelector(".role-caption")?.getAttribute("data-caption") === t, tab);
     assert.equal(await page.locator(".role-page .badge").count(), 0, `${tab} carries no status pill`);
   }

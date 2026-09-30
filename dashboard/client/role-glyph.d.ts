@@ -6,7 +6,7 @@ export const GLYPHS: Readonly<Record<string, GlyphShape[]>>;
 export const ROLE_GLYPHS: Readonly<Record<string, string>>;
 export const UNKNOWN_FAMILY: "neutral";
 export const UNKNOWN_GLYPH: "layers";
-export const TILE_SIZES: Readonly<{ row: 20; header: 36 }>;
+export const TILE_SIZES: Readonly<{ row: 20; header: 36; list: 36; page: 48 }>;
 export interface RoleTileOptions { standalone?: boolean }
 export interface RoleTileSpec {
   role: string;

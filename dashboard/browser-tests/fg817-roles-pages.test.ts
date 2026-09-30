@@ -239,7 +239,8 @@ test("FG-817: the Roles list renders every seed with its activity, resolved prof
     role: tr.getAttribute("data-role"),
     href: tr.querySelector("a")?.getAttribute("href"),
     activity: tr.querySelector('[data-col="activity"]')?.textContent?.trim(),
-    profile: tr.querySelector('[data-col="profile"]')?.textContent?.trim(),
+    // FG-837: the model on the first line, the profile (and effort) under it.
+    profile: [tr.querySelector(".role-profile")?.textContent?.split(" · ")[0], tr.querySelector(".role-model")?.textContent, ...(tr.querySelector(".role-profile")?.textContent?.split(" · ").slice(1) ?? [])].join(" · "),
     mount: tr.querySelector('[data-col="mount"]')?.textContent?.trim(),
     lastTask: tr.querySelector('[data-col="last-task"]')?.textContent?.trim(),
   })));
@@ -269,7 +270,7 @@ test("FG-817: a deep link to #roles/engineer/instructions restores the tab, acro
   for (let pass = 0; pass < 2; pass += 1) {
     assert.equal(hashOf(page), "#roles/engineer/instructions");
     assert.equal(await page.locator(".page-title").textContent(), "engineer");
-    assert.equal(await page.locator('[role="tab"][aria-selected="true"]').getAttribute("data-tab"), "instructions");
+    assert.equal(await page.locator('nav.role-subnav [aria-current="page"]').getAttribute("data-tab"), "instructions"); // FG-837: the sub-nav at 1280px
     const marks = await page.locator(".role-prompt-section").evaluateAll((els) => els.map((el) => [el.getAttribute("data-section"), el.getAttribute("data-constraint")]));
     assert.deepEqual(marks, [["protocol", null], ["base", null], ["workflow", null], ["constraint", "personal-coding-conventions"], ["framing", null]]);
     const text = await page.locator(".role-prompt").evaluateAll((els) => els.map((el) => el.textContent ?? "").join(""));
@@ -291,12 +292,13 @@ test("FG-817: every tab renders with its source caption", async () => {
   await page.locator(".role-overview").waitFor();
   const body = detail("engineer") as unknown as Record<string, { source: string }>;
   for (const tab of TABS) {
-    await page.locator(`[role="tab"][data-tab="${tab}"]`).click();
+    await page.locator(`nav.role-subnav a[data-tab="${tab}"]`).click(); // FG-837: the sub-nav at 1280px
     await waitFor(() => page.locator(".role-caption").getAttribute("data-caption"), tab, `${tab} is on screen`);
     assert.equal(await caption(page), `Source: ${body[tab]!.source}`, `${tab} names its source`);
     assert.equal(hashOf(page), tab === "overview" ? "#roles/engineer" : `#roles/engineer/${tab}`);
     if (tab === "overview") {
-      assert.match((await page.locator(".role-overview").textContent()) ?? "", /claude-subscription · claude-sonnet-5/);
+      // FG-837: the Harness / Runtime card lists profile and model as separate rows.
+      assert.match((await page.locator(".role-card-harness").textContent()) ?? "", /Profileclaude-subscription.*Modelclaude-sonnet-5/);
       assert.equal(await page.locator(".role-routes").count(), 0, "FG-827: routes moved to Capabilities");
       assert.match((await page.locator(".role-overview").textContent()) ?? "", /50% of 2 finished/);
       await page.screenshot({ path: join(SHOTS, "fg817-engineer-overview.png"), fullPage: true });
@@ -325,7 +327,8 @@ test("FG-817: every tab renders with its source caption", async () => {
 });
 
 test("FG-817: the role tabs are a tablist (FG-692) — arrow keys move between them, wrapping", async () => {
-  const { page, errors } = await open("#roles/engineer");
+  // FG-837: the tablist is the role page's tab control under 900px; wider, a grouped sub-nav.
+  const { page, errors } = await open("#roles/engineer", 820);
   await page.locator(".role-overview").waitFor();
   const shape = await tablist(page);
   assert.deepEqual(shape.tabs.map((t) => t[1]), TABS);
@@ -389,7 +392,7 @@ test("FG-817: a seed missing settings.json says so, an unknown tab lands on over
   await page.locator("[data-raw-files] summary").click();
   await page.locator("[data-settings-missing]").waitFor();
   assert.match((await page.locator("[data-settings-missing]").textContent()) ?? "", /no settings\.json at \/h\/agents\/red-wide\/settings\.json/);
-  await page.locator('[role="tab"][data-tab="tools"]').click();
+  await page.locator('nav.role-subnav a[data-tab="tools"]').click(); // FG-837: the sub-nav at 1280px
   await page.locator(".role-tools").waitFor();
   assert.match((await page.locator(".role-tools").textContent()) ?? "", /No settings\.json, so no tools are declared/);
 
