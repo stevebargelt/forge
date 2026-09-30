@@ -9,7 +9,8 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -19,8 +20,8 @@ import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js"
 const PORT = 18836;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = realpathSync(resolve(HERE, "..", "client"));
-const SHOTS = process.env.FG832_SCREENSHOT_DIR ?? "/task/screenshots";
-mkdirSync(SHOTS, { recursive: true });
+const SHOTS = process.env.FG832_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "fg832-screenshots-"));
+if (process.env.FG832_SCREENSHOT_DIR) mkdirSync(SHOTS, { recursive: true });
 
 const projectsFixture = [{
   key: "repo-forge",
