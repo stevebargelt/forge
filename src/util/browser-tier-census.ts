@@ -265,6 +265,17 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // carry its selected label unchanged into the Runs row. `inactive-checkouts` keeps its 3 tests,
   // re-pointed at the missing affordance. Fixture port 18835.
   "fg831-checkout-labels.test.ts": 4,
+  // FG-832 adds `fg832-backlog-filter` (5 tests): a fresh #backlog?project= shows only
+  // active tickets with type All and status Active pressed and "N of M tickets"; choosing
+  // Done shows the done tickets, writes `&status=done`, and a reload restores type and
+  // status; a pasted link restores its filter, unknown values fall back silently to the
+  // bare hash, and a #backlog/<id> deep link drops the filter params; Tab/Enter/Space
+  // operate the grouped controls (FG-692). `backlog-count` and `fg608-backlog-cutover`
+  // keep their counts, choosing "all" statuses where they need every ticket. Fixture
+  // port 18836. Verification also adds a complete type × status fixture proving the
+  // active default covers every type, scoped clicks preserve FG-820's project and do
+  // not re-fetch the already-loaded payload, and a future Backlog badge agrees with it.
+  "fg832-backlog-filter.test.ts": 5,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

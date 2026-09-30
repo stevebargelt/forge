@@ -759,7 +759,7 @@ function App() {
         : view === "backlog"
         ? route.id
           ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`
-          : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} projects=${projects} />`
+          : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} projects=${projects} params=${route.params} />`
         : view === "queue"
         ? html`<${QueueBoardView}
             data=${queue}

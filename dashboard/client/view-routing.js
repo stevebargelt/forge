@@ -10,6 +10,8 @@
 // views whose scope requirement is not `none`. Object pages (`#run/<runId>`,
 // `#task/<taskId>`) are addressed by a global id and carry no scope. A route may name
 // extra parameters it owns (`params`: the run index's `status=`); any other key is dropped.
+// FG-832: the backlog's `type=`/`status=` omit their defaults (all, active), so
+// `#backlog?status=active` canonicalizes to `#backlog`.
 //
 // FG-821: object tabs follow the Paperclip pattern — an unknown tab falls back to the
 // route's default (its first tab), which the canonical hash omits. FG-817: `#roles` is
@@ -30,7 +32,7 @@ export const GROUPS = Object.freeze([
 export const ROUTES = Object.freeze({
   home: { group: "now", label: "Home", path: "#home", scope: "optional", object: "none", aliases: [] },
   activity: { group: "now", label: "Activity", path: "#activity", scope: "optional", object: "none", aliases: [] },
-  backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", aliases: [] },
+  backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", params: ["type", "status"], paramValues: { type: ["epic", "story", "idea"], status: ["all", "blocked", "deferred", "done"] }, aliases: [] },
   queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", aliases: [] },
   campaigns: { group: "plan", label: "Campaigns", path: "#campaigns[/<campaignId>]", scope: "optional", object: "optional", aliases: [] },
   runs: { group: "evidence", label: "Runs", path: "#runs", scope: "optional", object: "none", params: ["status"], aliases: [] },

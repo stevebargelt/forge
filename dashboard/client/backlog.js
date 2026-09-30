@@ -8,7 +8,7 @@ import { useState, useMemo } from "preact/hooks";
 import htm from "htm";
 import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
 import { md } from "./renderers.js";
-import { backlogBoardState, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
+import { backlogBoardState, backlogCountLabel, backlogFilterHash, backlogFilterState, filterBacklogTickets, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
 import { hashFor } from "./view-routing.js";
 import { checkoutLabelForDir } from "./checkout-label.js";
 
@@ -20,10 +20,10 @@ const TYPES = ["epic", "story", "idea"];
 const STATUSES = ["active", "blocked", "deferred", "done"];
 
 // FG-821: a ticket opens its page, #backlog/<ticketId> (ticket-page-view.js), keeping
-// the scope in hand — ticket ids are per project.
-export function BacklogView({ data, projectFilter, scope, projects = [] }) {
-  const [typeFilter, setTypeFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
+// the scope in hand — ticket ids are per project. FG-832: the type/status filter is the
+// hash's (`#backlog?type=&status=`), defaulting to every type, active only.
+export function BacklogView({ data, projectFilter, scope, projects = [], params = null }) {
+  const filter = backlogFilterState(params);
   const [search, setSearch] = useState("");
   const [selectedNote, setSelectedNote] = useState(null);
 
@@ -34,15 +34,13 @@ export function BacklogView({ data, projectFilter, scope, projects = [] }) {
   if (!data) return html`<div class="muted" style="margin-top: 20px;">loading backlog…</div>`;
 
   const filtered = useMemo(() => {
-    let t = data.tickets || [];
-    if (typeFilter) t = t.filter((tk) => tk.type === typeFilter);
-    if (statusFilter) t = t.filter((tk) => tk.status === statusFilter);
+    let t = filterBacklogTickets(data.tickets, filter);
     if (search.trim()) {
       const q = search.toLowerCase();
       t = t.filter((tk) => tk.title.toLowerCase().includes(q) || (tk.body || "").toLowerCase().includes(q));
     }
     return t;
-  }, [data.tickets, typeFilter, statusFilter, search]);
+  }, [data.tickets, filter.type, filter.status, search]);
 
   const byType = useMemo(() => {
     const groups = {};
@@ -110,31 +108,32 @@ export function BacklogView({ data, projectFilter, scope, projects = [] }) {
           />
         </div>
         <div class="row" style="gap: 6px; flex-wrap: wrap; margin-bottom: 16px; align-items: center;">
-          <span class="muted" style="font-size: 12px;">type:</span>
-          ${[null, ...TYPES].map((t) => html`
-            <button
-              key=${t ?? "all-type"}
-              class=${"usage-dim-btn" + (typeFilter === t ? " usage-dim-btn-active" : "")}
-              onClick=${() => setTypeFilter(t)}
-              aria-pressed=${typeFilter === t}
-              aria-label=${t ? `Filter by type: ${TYPE_LABELS[t]}` : "Show all types"}
-            >${t ? TYPE_LABELS[t] : "all"}</button>
-          `)}
-          <span class="muted" style="font-size: 12px; margin-left: 8px;">status:</span>
-          ${[null, ...STATUSES].map((s) => html`
-            <button
-              key=${s ?? "all-status"}
-              class=${"usage-dim-btn" + (statusFilter === s ? " usage-dim-btn-active" : "")}
-              onClick=${() => setStatusFilter(s)}
-              aria-pressed=${statusFilter === s}
-              aria-label=${s ? `Filter by status: ${STATUS_LABELS[s]}` : "Show all statuses"}
-            >${s ? STATUS_LABELS[s] : "all"}</button>
-          `)}
+          <span class="muted" style="font-size: 12px;" id="backlog-type-label">type:</span>
+          <span class="row" style="gap: 6px; flex-wrap: wrap;" role="group" aria-labelledby="backlog-type-label">
+            ${["all", ...TYPES].map((t) => html`
+              <${FilterButton}
+                key=${t}
+                pressed=${filter.type === t}
+                href=${backlogFilterHash(scope, { ...filter, type: t })}
+                label=${t === "all" ? "Show all types" : `Filter by type: ${TYPE_LABELS[t]}`}
+              >${t === "all" ? "All" : TYPE_LABELS[t]}</${FilterButton}>
+            `)}
+          </span>
+          <span class="muted" style="font-size: 12px; margin-left: 8px;" id="backlog-status-label">status:</span>
+          <span class="row" style="gap: 6px; flex-wrap: wrap;" role="group" aria-labelledby="backlog-status-label">
+            ${["all", ...STATUSES].map((st) => html`
+              <${FilterButton}
+                key=${st}
+                pressed=${filter.status === st}
+                href=${backlogFilterHash(scope, { ...filter, status: st })}
+                label=${st === "all" ? "Show all statuses" : `Filter by status: ${STATUS_LABELS[st]}`}
+              >${st === "all" ? "All" : STATUS_LABELS[st]}</${FilterButton}>
+            `)}
+          </span>
         </div>
         ${totalTickets > 0 ? html`
           <div class="backlog-result-count muted" style="font-size: 12px; margin-bottom: 12px;" aria-live="polite">
-            ${filtered.length} ${filtered.length === 1 ? "result" : "results"}${
-              (typeFilter || statusFilter || search.trim()) ? ` of ${totalTickets}` : ""}
+            ${backlogCountLabel(filtered.length, totalTickets)}
           </div>
         ` : null}
       </section>
@@ -171,6 +170,18 @@ export function BacklogView({ data, projectFilter, scope, projects = [] }) {
         <${NoteDetail} entry=${selectedNote} projects=${projects} onClose=${() => setSelectedNote(null)} />
       ` : null}
     </div>
+  `;
+}
+
+function FilterButton({ pressed, href, label, children }) {
+  return html`
+    <button
+      type="button"
+      class=${"usage-dim-btn" + (pressed ? " usage-dim-btn-active" : "")}
+      onClick=${() => { window.location.hash = href; }}
+      aria-pressed=${pressed ? "true" : "false"}
+      aria-label=${label}
+    >${children}</button>
   `;
 }
 
