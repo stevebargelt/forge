@@ -323,6 +323,20 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // the two independent readers cannot overwrite each other's captions while one is slow,
   // and retain `since` across a project-scope change while the newer scoped read wins.
   "fg836-ops-window.test.ts": 13,
+  // FG-834 part 2 adds `fg834-raci-editor` (5 tests), against the REAL server (GET /api/raci,
+  // POST /api/raci/propose|apply) over a scratch FORGE_HOME whose checkout carries an override,
+  // with a recording `forge` shim that execs the real CLI: Edit RACI opens by keyboard on the
+  // override; editing review_backend shows the dry-run's "changed (was red-backend)" row;
+  // Propose renders the diff, the ~1 changed summary and the gate pill; Apply stays disabled
+  // (and the server refuses confirm_key_mismatch) without the typed key, then applies with it,
+  // shells the exact argv, re-reads the routes and the RECORDED tail; a validation error is
+  // shown by line with Propose disabled; a reload keeps edit mode but not the draft, with no
+  // browser storage, and the section chips work by keyboard; Reset to host default proposes
+  // and applies the host text (the override rewritten, never deleted); and a CLI gate refusal
+  // on apply (a weakened host force rule) is shown, with any later edit superseding the
+  // proposal. The refusal case continues through the complete authoring route with keyboard
+  // only at 400px and verifies that neither browser storage area is used after Apply. Fixture port 18841.
+  "fg834-raci-editor.test.ts": 5,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

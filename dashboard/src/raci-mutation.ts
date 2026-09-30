@@ -451,6 +451,8 @@ export type RaciAuditLine = Record<string, unknown>;
 export type RaciReadModel = {
   project: { key: string; label: string; checkoutDir: string };
   source: { kind: "project" | "host"; path: string; text: string | null };
+  /** The host default, so the editor can reset to it even when an override is in force. */
+  host: { path: string; text: string | null };
   governance: WorkbenchPanel;
   audit: { path: string; entries: RaciAuditLine[]; skippedLines: number };
   proposalWindowMs: number;
@@ -476,15 +478,17 @@ export function readAuditTail(path: string, limit: number = AUDIT_TAIL_LINES): {
 }
 
 /** READ-ONLY: the effective RACI source for one checkout (project override if present,
- *  else the host default the editor starts from), the governance panel, and the
+ *  else the host default the editor starts from), the host default itself, the governance panel, and the
  *  checkout's own `raci-audit.log` tail. No subprocess. */
 export function raciReadModel(owner: ProjectRecord, checkoutDir: string, governance: WorkbenchPanel): RaciReadModel {
   const kind = governance.source.kind;
   const path = governance.source.raciPath;
   const auditPath = join(checkoutDir, ".forge", "raci-audit.log");
+  const hostPath = join(forgeHome(), "forge-raci.md");
   return {
     project: { key: owner.key, label: owner.label, checkoutDir },
     source: { kind, path, text: existsSync(path) ? readFileSync(path, "utf8") : null },
+    host: { path: hostPath, text: existsSync(hostPath) ? readFileSync(hostPath, "utf8") : null },
     governance,
     audit: { path: auditPath, ...readAuditTail(auditPath) },
     proposalWindowMs: PROPOSAL_WINDOW_MS,

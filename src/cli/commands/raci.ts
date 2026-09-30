@@ -246,6 +246,16 @@ export function renderProposal(p: RaciProposal): string {
   return lines.join("\n");
 }
 
+/** The candidate's compiled routes for `propose --json` (the dashboard editor's dry-run
+ *  table, FG-834), or null when it does not compile — the findings already say why. */
+function compiledRoutes(candidate: string): RoutingPolicy["routes"] | null {
+  try {
+    return compileRaciDocument(candidate).routes;
+  } catch {
+    return null;
+  }
+}
+
 export function registerRaci(program: Command): void {
   const raci = program.command("raci").description("Work with the RACI routing source (authoring view).");
 
@@ -292,7 +302,7 @@ export function registerRaci(program: Command): void {
       const proposal = proposeRaciChange(current, candidate, realHost);
 
       if (opts.json) {
-        console.log(JSON.stringify({ candidate: candidatePath, current: projectRaci, ...proposal }, null, 2));
+        console.log(JSON.stringify({ candidate: candidatePath, current: projectRaci, ...proposal, candidateRoutes: compiledRoutes(candidate) }, null, 2));
       } else {
         console.log(renderProposal(proposal));
       }

@@ -5,7 +5,7 @@ import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, use
 import htm from "htm";
 import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";
-import { GovernanceView } from "./governance.js";
+import { RoutingView } from "./raci-editor-view.js";
 import { BacklogView } from "./backlog.js";
 import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
@@ -713,7 +713,7 @@ function App() {
         : view === "routing"
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
-          : html`<${GovernanceView} data=${governance} />`
+          : html`<${RoutingView} governance=${governance} scope=${scope} params=${route.params} onRefresh=${pollGovernance} />`
         : view === "config"
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">The config graph is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`

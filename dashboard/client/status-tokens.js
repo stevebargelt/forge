@@ -84,6 +84,23 @@ const VOCABULARIES = {
     deferred: t("deferred", "neutral", "status-pending"),
     done: t("done", "neutral", "status-pending"),
   },
+  // FG-834: the Edit RACI mode's states — not stored anywhere; each borrows the task badge
+  // whose colour already means the same thing.
+  raci: {
+    unedited: t("not edited", "neutral", "status-pending"),
+    edited: t("edited · not proposed", "warn", "status-awaiting_gate"),
+    checking: t("checking", "info", "status-running"),
+    dry_run_ok: t("dry-run ok", "ok", "status-complete"),
+    invalid: t("invalid", "err", "status-failed"),
+    unavailable: t("dry-run unavailable", "warn", "status-awaiting_gate"),
+    proposed: t("proposed", "ok", "status-complete"),
+    superseded: t("edited since this proposal", "warn", "status-awaiting_gate"),
+    gate_passed: t("gate passed", "ok", "status-complete"),
+    gate_failed: t("gate failed", "err", "status-failed"),
+    expired: t("proposal expired", "warn", "status-awaiting_gate"),
+    applied: t("applied", "ok", "status-complete"),
+    apply_failed: t("apply refused", "err", "status-failed"),
+  },
   marker: {
     reconcile_candidate: t("reconcile candidate", "warn", "status-reconcile_candidate"),
     environment_unavailable: t("environment unavailable", "warn", "status-environment_unavailable"),
@@ -98,6 +115,7 @@ const FALLBACK_CLASS = {
   claim: "claim-state-unknown",
   receipt: "launch-state-unknown",
   ticket: "status-pending",
+  raci: "status-pending",
   marker: "status-unknown",
 };
 

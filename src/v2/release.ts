@@ -272,6 +272,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/order-pin-view.js",
   "dashboard/client/queue-board-state.js",
   "dashboard/client/queue-board.js",
+  "dashboard/client/raci-editor-state.js",
+  "dashboard/client/raci-editor-view.js",
   "dashboard/client/renderers.js",
   "dashboard/client/review-ledger-render.js",
   "dashboard/client/reviews.js",

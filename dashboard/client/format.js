@@ -81,6 +81,13 @@ export function formatClock(iso, options = undefined, fallback = "—") {
   return ms === null ? fallback : new Date(ms).toLocaleTimeString([], options);
 }
 
+/** A UTC instant to the minute, "2026-09-30 06:41Z" — for an audit line, where the
+ *  moment matters more than how long ago it was. */
+export function formatUtcMinute(iso, fallback = "—") {
+  const ms = parseTime(iso);
+  return ms === null ? fallback : `${new Date(ms).toISOString().replace("T", " ").substring(0, 16)}Z`;
+}
+
 /** A timestamp as it renders: relative text, absolute title. */
 export function timestampDisplay(iso, now = Date.now()) {
   return { text: formatRelativeTime(iso, now), title: formatTimestamp(iso, ""), class: MONO_CLASS };

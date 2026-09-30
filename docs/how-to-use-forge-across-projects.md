@@ -91,8 +91,9 @@ Both modes write to the same `~/.forge/forge.db` and the same `~/.forge/runs/<ru
 | `~/.claude/skills/forge-*/`, `~/.claude/skills/status/` | Host/orchestrator workflow and status skills | Host-global; not seen by container agents |
 | `<project>/CLAUDE.md` | Orchestrator block (installed by `forge init`) | Per-project |
 | `<project>/.forge/workflows/*.yml` | Per-project workflow override | Per-project |
+| `<project>/.forge/forge-raci.md`, `routing-policy.yml`, `raci-audit.log` | Per-project RACI override, its compiled policy and its audit log (see below) | Per-project |
 
-Per-project state is intentionally minimal: just the orchestrator block and an optional workflow override. Everything else is one install for the whole machine.
+Per-project state is intentionally minimal: the orchestrator block, an optional workflow override, and an optional RACI override with its compiled policy and audit log. Everything else is one install for the whole machine.
 
 ## Per-project workflow overrides
 
@@ -108,6 +109,21 @@ forge new feature "X" --brief "..." --ticket FG-42
 ```
 
 The loader logs which YAML it picked, so you can confirm the override is taking effect.
+
+## Per-project RACI overrides
+
+A project may specialize its routing with `<project>/.forge/forge-raci.md` (it may add or retarget routes; it can never weaken a host force rule). There are two ways to author one, and both go through the same CLI gate, write the same override, recompile `<project>/.forge/routing-policy.yml` and append the same `<project>/.forge/raci-audit.log` line:
+
+- **From a terminal.** Copy the effective source, edit it, then gate and apply it:
+
+  ```bash
+  cp ~/.forge/forge-raci.md /tmp/candidate.md     # or the project's own .forge/forge-raci.md
+  # edit /tmp/candidate.md
+  forge raci propose /tmp/candidate.md --project ~/code/my-app            # diff + route changes; writes nothing
+  forge raci apply /tmp/candidate.md --project ~/code/my-app --confirm    # re-runs the gate, then writes
+  ```
+
+- **From the dashboard.** Select the project's checkout in the scope control, open Setup › Routing and press **Edit RACI** (`#routing?mode=edit`). Edit the source; every change is dry-run and errors show by line beside the effective route table. **Propose** shows the diff and the route-change summary; **Apply** needs the project key typed back and a rationale, and shells `forge raci apply <candidate> --project <dir> --confirm --by dashboard --source dashboard --rationale <text>`. **Reset to host default** proposes and applies the host text the same way (it rewrites the override; it does not delete it). The RECORDED table on the page is the project's audit log tail. Unsaved edits are not kept across a reload.
 
 ## One forge.db, many projects
 
