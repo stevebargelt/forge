@@ -1,4 +1,5 @@
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
@@ -93,11 +94,22 @@ export type RaciAuditEntry = {
   timestamp: string;
   action: "apply";
   current_raci: string;
+  /** The candidate's path as given to apply. It may be a scratch file that no longer
+   *  exists (the dashboard stages candidates and removes them) — `candidate_sha256` is
+   *  the durable identity. */
   candidate: string;
+  /** sha256 of the candidate bytes as written to the project raci. */
+  candidate_sha256: string;
   routes_added: string[];
   routes_removed: string[];
   routes_modified: string[];
   validation: { raci: boolean; route: boolean };
+  /** FG-834: who confirmed the apply (`--by`), attribution only — the gate is unchanged. */
+  actor?: string;
+  /** FG-834: why (`--rationale`), recorded verbatim — attribution only. */
+  rationale?: string;
+  /** FG-834: the surface the apply came through (`--source`); absent from a terminal. */
+  source?: "dashboard";
 };
 
 export type ApplyResult = {
@@ -146,6 +158,9 @@ export function applyRaciChange(
     host?: HostEnv;
     targets: ApplyTargets;
     now?: () => Date;
+    actor?: string;
+    rationale?: string;
+    source?: "dashboard";
   },
 ): ApplyResult {
   const host = opts.host ?? realHost;
@@ -168,10 +183,14 @@ export function applyRaciChange(
     action: "apply",
     current_raci: targets.raciPath,
     candidate: opts.candidateLabel,
+    candidate_sha256: createHash("sha256").update(candidate, "utf8").digest("hex"),
     routes_added: proposal.routeChanges.added,
     routes_removed: proposal.routeChanges.removed,
     routes_modified: proposal.routeChanges.modified.map((m) => m.route),
     validation: { raci: proposal.validation.raci.ok, route: proposal.validation.route.ok },
+    ...(opts.actor ? { actor: opts.actor } : {}),
+    ...(opts.rationale ? { rationale: opts.rationale } : {}),
+    ...(opts.source ? { source: opts.source } : {}),
   };
 
   // FG-778: ensure <project>/.forge/ exists before any write (mkdir -p). A fresh
@@ -285,11 +304,14 @@ export function registerRaci(program: Command): void {
     .argument("<candidate>", "candidate RACI file to write as the project source")
     .option("--project <dir>", "project whose RACI override to write (default: cwd)")
     .option("--confirm", "actually write the change (without it, behaves like propose)")
+    .option("--by <actor>", "who confirmed the change, recorded in the audit entry (attribution only)")
+    .option("--rationale <text>", "why the change is being made, recorded verbatim in the audit entry (attribution only)")
+    .addOption(new Option("--source <surface>", "the surface the apply came through, recorded in the audit entry").choices(["dashboard"]))
     .option("--json", "emit the structured apply result as JSON")
     .description(
       "Re-run the full gate and, with --confirm, install the candidate RACI as the PROJECT override (<project>/.forge/forge-raci.md), recompile the project routing policy, and append a per-project JSONL audit entry. The gate is re-run immediately before writing.",
     )
-    .action((candidateArg: string, opts: { project?: string; confirm?: boolean; json?: boolean }) => {
+    .action((candidateArg: string, opts: { project?: string; confirm?: boolean; by?: string; rationale?: string; source?: "dashboard"; json?: boolean }) => {
       const candidatePath = resolve(candidateArg);
       if (!existsSync(candidatePath)) {
         process.stderr.write(`forge raci apply: candidate not found: ${candidatePath}\n`);
@@ -302,7 +324,14 @@ export function registerRaci(program: Command): void {
       const current = readCurrentRaci(targets.raciPath);
       let result: ApplyResult;
       try {
-        result = applyRaciChange(current, candidate, { confirm: opts.confirm ?? false, candidateLabel: candidatePath, targets });
+        result = applyRaciChange(current, candidate, {
+          confirm: opts.confirm ?? false,
+          candidateLabel: candidatePath,
+          targets,
+          actor: opts.by?.trim() || undefined,
+          rationale: opts.rationale?.trim() ? opts.rationale : undefined,
+          source: opts.source,
+        });
       } catch (e) {
         process.stderr.write(`forge raci apply: failed to write change (nothing applied): ${(e as Error).message}\n`);
         process.exit(1);

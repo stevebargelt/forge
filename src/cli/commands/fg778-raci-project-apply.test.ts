@@ -7,6 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -199,4 +200,52 @@ test("readCurrentRaci reads the PROJECT override when present, empty when a fres
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("FG-834: apply records the confirming actor in the audit entry when --by is given, and omits it otherwise", () => {
+  const dir = project();
+  try {
+    const targets = applyTargets(dir);
+    const candidate = seed().replace(IQ_ANCHOR, CANDIDATE_EDIT);
+    applyRaciChange("", candidate, { confirm: true, candidateLabel: "cand.md", host: all, targets, actor: "dashboard" });
+    applyRaciChange(candidate, seed(), { confirm: true, candidateLabel: "cand.md", host: all, targets });
+    const [first, second] = readFileSync(projectRaciAuditPath(dir), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(first.actor, "dashboard");
+    assert.equal("actor" in second, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-834: the audit entry carries the candidate sha256, and the rationale and source verbatim when given", () => {
+  const dir = project();
+  try {
+    const targets = applyTargets(dir);
+    const candidate = seed().replace(IQ_ANCHOR, CANDIDATE_EDIT);
+    const rationale = "  route quick work to the frontend specialist\n(see FG-834)";
+    applyRaciChange("", candidate, { confirm: true, candidateLabel: "/scratch/c-1/forge-raci.md", host: all, targets, actor: "dashboard", rationale, source: "dashboard" });
+    applyRaciChange(candidate, seed(), { confirm: true, candidateLabel: "cand.md", host: all, targets });
+    const [first, second] = readFileSync(projectRaciAuditPath(dir), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(first.candidate, "/scratch/c-1/forge-raci.md");
+    assert.equal(first.candidate_sha256, createHash("sha256").update(candidate, "utf8").digest("hex"));
+    assert.equal(first.rationale, rationale);
+    assert.equal(first.source, "dashboard");
+    assert.equal(second.candidate_sha256, createHash("sha256").update(seed(), "utf8").digest("hex"));
+    assert.equal(second.candidate_sha256, createHash("sha256").update(readFileSync(targets.raciPath)).digest("hex"), "the sha is of the bytes written");
+    assert.equal("rationale" in second, false);
+    assert.equal("source" in second, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-834: `raci apply` takes an optional --rationale <text> and --source limited to dashboard", () => {
+  const program = new Command();
+  registerRaci(program);
+  const apply = program.commands.find((c) => c.name() === "raci")!.commands.find((c) => c.name() === "apply")!;
+  const rationale = apply.options.find((o) => o.long === "--rationale")!;
+  assert.ok(rationale, "`raci apply` must accept --rationale");
+  assert.equal(rationale.required, true, "--rationale takes a value");
+  assert.equal(rationale.mandatory, false, "a terminal operator may omit it");
+  assert.deepEqual(apply.options.find((o) => o.long === "--source")?.argChoices, ["dashboard"]);
 });

@@ -29,9 +29,15 @@
 // open (or already held) is the CLI's call against the same derivation the inbox serves,
 // and its refusal comes back verbatim. The dashboard stores no dismissal state itself.
 //
+// ─── THE RACI ROWS (FG-834) ───────────────────────────────────────────────────
+// Propose and apply a project RACI change, each shelling `forge raci propose|apply` over a
+// scratch copy of the candidate text, with `--project` from the registry and apply behind
+// a hash-checked green propose, a typed project-key confirmation and a rationale. The
+// CLI's gate is the authority; raci-mutation.ts carries the rest.
+//
 // ─── WHAT IS NOT HERE, AND CANNOT BE REACHED FROM HERE ───────────────────────
-// Arming or disarming the dispatcher, max_active_runs, cancel, next, routing/RACI/
-// model-policy apply, backlog edits, and any `--force`. The verb set is a closed
+// Arming or disarming the dispatcher, max_active_runs, cancel, next, route compile/
+// validate, model-policy apply, backlog edits, and any `--force`. The verb set is a closed
 // exported constant, the argv builder can emit nothing outside it, and a test asserts
 // both over the table rather than trusting this comment.
 
@@ -41,7 +47,8 @@ import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isReDrivableFailureKind, recordedRetryDisposition, retryPolicy } from "@forge/retry-policy";
 import { isAttentionItemKey, parseSnoozeUntil } from "../../src/store/attention-dismissals.js";
-import type { TaskActionFacts } from "./queries.js";
+import type { ProjectRecord, TaskActionFacts } from "./queries.js";
+import { RACI_PATH, handleRaciMutation } from "./raci-mutation.js";
 import {
   CHILD_TIMEOUT_MS,
   MAX_CONCURRENT_MUTATIONS,
@@ -61,7 +68,8 @@ import {
 // ─── the route table ─────────────────────────────────────────────────────────
 
 /** The action routes, as a CLOSED table: one row per action, each naming the ONE `forge`
- *  verb it shells — the three task actions, then the three attention-row actions. */
+ *  verb it shells — the three task actions, the three attention-row actions, then the
+ *  two RACI rows. */
 export const ACTION_ROUTES = {
   gate: { path: "/api/task/:id/gate", verb: "gate" },
   retry: { path: "/api/task/:id/retry", verb: "retry" },
@@ -69,14 +77,16 @@ export const ACTION_ROUTES = {
   "attention-dismiss": { path: "/api/attention/:itemKey/dismiss", verb: "attention" },
   "attention-snooze": { path: "/api/attention/:itemKey/snooze", verb: "attention" },
   "attention-undismiss": { path: "/api/attention/:itemKey/undismiss", verb: "attention" },
+  "raci-propose": { path: "/api/raci/propose", verb: "raci" },
+  "raci-apply": { path: "/api/raci/apply", verb: "raci" },
 } as const;
 
 export type ActionRoute = keyof typeof ACTION_ROUTES;
 export type TaskAction = Extract<ActionRoute, "gate" | "retry" | "recover-re-drive">;
-export type AttentionAction = Exclude<ActionRoute, TaskAction>;
+export type AttentionAction = Extract<ActionRoute, "attention-dismiss" | "attention-snooze" | "attention-undismiss">;
 
 /** The ONLY `forge` verbs this registry can ever spawn. */
-export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention"] as const;
+export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention", "raci"] as const;
 
 export type ActionForgeVerb = (typeof ACTION_FORGE_VERBS)[number];
 
@@ -100,7 +110,7 @@ const MAX_RATIONALE_CHARS = 4000;
 const MAX_ACTION_BODY_BYTES = 16 * 1024;
 
 export function isActionMutationPath(path: string): boolean {
-  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path);
+  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path) || RACI_PATH.test(path);
 }
 
 /** The raw task-id segment of a preview path, or null. */
@@ -372,6 +382,8 @@ const DASHBOARD_DIR = resolve(HERE, "..");
 export type ActionMutationContext = {
   /** Resolved only after every header guard has passed. */
   lookupTask: (taskId: string) => TaskActionFacts | null;
+  /** The RACI rows' project, by registry key — resolved only after every guard. */
+  resolveProject: (projectKey: string) => ProjectRecord | undefined;
 };
 
 /** Handle one POST to a task-action route. The ORDER is the security property: every
@@ -384,6 +396,10 @@ export async function handleActionMutation(
 ): Promise<void> {
   if (ATTENTION_PATH.test(path)) {
     await handleAttentionMutation(req, res, path);
+    return;
+  }
+  if (RACI_PATH.test(path)) {
+    await handleRaciMutation(req, res, path, { resolveProject: context.resolveProject, actor: ACTION_ACTOR });
     return;
   }
   const m = path.match(ACTION_PATH);
