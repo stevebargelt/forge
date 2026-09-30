@@ -1351,7 +1351,13 @@ function opsMedian(values: number[]): number {
   return s.length % 2 === 0 ? Math.round((s[mid - 1]! + s[mid]!) / 2) : s[mid]!;
 }
 
-export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
+// FG-836: every statement opsMetrics runs, built once so the budget test can hold
+// each one to an EXPLAIN QUERY PLAN with exactly the SQL and params the endpoint
+// executes. Each is set-based: no statement carries a correlated subquery, so none
+// is re-evaluated per run or per task row.
+export type OpsStatement = { name: string; sql: string; params: unknown[] };
+
+export function opsMetricsStatements(since: string, scope?: ProjectScope): Record<"runs" | "taskCount" | "failedKinds" | "durations" | "counts", OpsStatement> {
   const cutoff = opsCutoff(since);
   // FG-693: resolved ONCE for the whole roll-up, not once per sub-query. The scope
   // predicate now touches the filesystem (it resolves the operator's spellings) and
@@ -1369,15 +1375,95 @@ export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
     return { clause, params };
   };
 
+  const rw = win();
+  const tw = win();
+  const fw = win();
+  const dw = win();
+  const cw = win();
+  return {
+    // FG-836: the failed top-level task count per run, aggregated once and joined
+    // back rather than a COUNT subquery evaluated per run row — which SQLite served
+    // from idx_tasks_status, re-reading every failed task in the store for each run.
+    runs: {
+      name: "runs",
+      sql: `
+        WITH failedByRun AS (
+          SELECT t.run_id AS runId, COUNT(*) AS failed
+          FROM tasks t WHERE t.parent_id IS NULL AND t.status = 'failed'
+          GROUP BY t.run_id
+        )
+        SELECT r.id, r.status AS status, COALESCE(f.failed, 0) AS failed
+        FROM runs r LEFT JOIN failedByRun f ON f.runId = r.id
+        WHERE 1 = 1 ${rw.clause}
+      `,
+      params: rw.params,
+    },
+    taskCount: {
+      name: "taskCount",
+      sql: `
+        SELECT COUNT(*) AS c FROM tasks t JOIN runs r ON r.id = t.run_id
+        WHERE t.parent_id IS NULL ${tw.clause}
+      `,
+      params: tw.params,
+    },
+    // FG-836: the latest task.failed per failed top-level task, as ONE pass over the
+    // window's failed tasks joined to their task.failed events, with the per-task
+    // MAX(created_at) pre-aggregated from that same set instead of re-selected by a
+    // correlated subquery for every candidate event. CROSS JOIN keeps the window's
+    // tasks as the driver (see agentRuntimeRowsSql); likelihood() only tells the
+    // planner the type test is unselective within one task's stream, so a store
+    // that predates idx_events_task_type_created probes idx_events_task per task
+    // rather than walking every task.failed ever logged for each one. Same
+    // selection as before: every task.failed row whose created_at equals its
+    // task's maximum, ties included.
+    failedKinds: {
+      name: "failedKinds",
+      sql: `
+        WITH failed AS MATERIALIZED (
+          SELECT e.task_id AS task_id, e.created_at AS created_at, e.payload AS payload
+          FROM tasks t
+          JOIN runs r ON r.id = t.run_id
+          CROSS JOIN events e ON e.task_id = t.id AND likelihood(e.event_type = 'task.failed', 0.9)
+          WHERE t.parent_id IS NULL AND t.status = 'failed' ${fw.clause}
+        ),
+        latest AS (
+          SELECT task_id, MAX(created_at) AS created_at FROM failed GROUP BY task_id
+        )
+        SELECT f.payload AS payload
+        FROM failed f JOIN latest l ON l.task_id = f.task_id AND l.created_at = f.created_at
+      `,
+      params: fw.params,
+    },
+    durations: {
+      name: "durations",
+      sql: `
+        SELECT t.phase AS phase, t.started_at AS started, t.completed_at AS completed
+        FROM tasks t JOIN runs r ON r.id = t.run_id
+        WHERE t.parent_id IS NULL AND t.started_at IS NOT NULL AND t.completed_at IS NOT NULL ${dw.clause}
+      `,
+      params: dw.params,
+    },
+    counts: {
+      name: "counts",
+      sql: `
+        SELECT e.event_type AS et, COUNT(*) AS c
+        FROM events e JOIN runs r ON r.id = e.run_id
+        WHERE e.event_type IN ('task.cancelled','run.cancelled','task.retried','task.blocked_by_red') ${cw.clause}
+        GROUP BY e.event_type
+      `,
+      params: cw.params,
+    },
+  };
+}
+
+export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
+  const statements = opsMetricsStatements(since, scope);
+  const all = (s: OpsStatement) => db().prepare(s.sql).all(...s.params);
+
   // Success rate is terminal-only: an active (in-flight) run has no outcome yet,
   // so counting it as clean would inflate the KPI while long work is running.
   // clean = completed with no failed top-level task.
-  const rw = win();
-  const runRows = db().prepare(`
-    SELECT r.id, r.status AS status,
-      (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id AND t.parent_id IS NULL AND t.status = 'failed') AS failed
-    FROM runs r WHERE 1 = 1 ${rw.clause}
-  `).all(...rw.params) as Array<{ id: string; status: string; failed: number }>;
+  const runRows = all(statements.runs) as Array<{ id: string; status: string; failed: number }>;
   const total = runRows.length;
   const terminalRows = runRows.filter(
     (r) => r.status === "complete" || r.status === "failed" || r.status === "abandoned",
@@ -1387,24 +1473,10 @@ export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
   const clean = terminalRows.filter((r) => r.status === "complete" && r.failed === 0).length;
   const withFailures = terminal - clean;
 
-  const tw = win();
-  const taskCount = (db().prepare(`
-    SELECT COUNT(*) AS c FROM tasks t JOIN runs r ON r.id = t.run_id
-    WHERE t.parent_id IS NULL ${tw.clause}
-  `).get(...tw.params) as { c: number }).c;
+  const taskCount = (db().prepare(statements.taskCount.sql).get(...statements.taskCount.params) as { c: number }).c;
 
   // Latest failure_kind per failed top-level task in the window.
-  const fw = win();
-  const failedKindRows = db().prepare(`
-    SELECT e.payload AS payload
-    FROM events e
-    JOIN tasks t ON t.id = e.task_id
-    JOIN runs  r ON r.id = t.run_id
-    WHERE e.event_type = 'task.failed'
-      AND t.parent_id IS NULL AND t.status = 'failed'
-      AND e.created_at = (SELECT MAX(e2.created_at) FROM events e2 WHERE e2.task_id = e.task_id AND e2.event_type = 'task.failed')
-      ${fw.clause}
-  `).all(...fw.params) as Array<{ payload: string | null }>;
+  const failedKindRows = all(statements.failedKinds) as Array<{ payload: string | null }>;
   const kindCounts = new Map<string, number>();
   for (const row of failedKindRows) {
     let kind = "unknown";
@@ -1414,12 +1486,7 @@ export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
   const failureKinds = [...kindCounts.entries()].map(([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count);
 
   // Median task duration by phase.
-  const dw = win();
-  const durRows = db().prepare(`
-    SELECT t.phase AS phase, t.started_at AS started, t.completed_at AS completed
-    FROM tasks t JOIN runs r ON r.id = t.run_id
-    WHERE t.parent_id IS NULL AND t.started_at IS NOT NULL AND t.completed_at IS NOT NULL ${dw.clause}
-  `).all(...dw.params) as Array<{ phase: string; started: string; completed: string }>;
+  const durRows = all(statements.durations) as Array<{ phase: string; started: string; completed: string }>;
   const byPhase = new Map<string, number[]>();
   for (const r of durRows) {
     const ms = new Date(r.completed).getTime() - new Date(r.started).getTime();
@@ -1428,13 +1495,7 @@ export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
   const durations = [...byPhase.entries()].map(([dimension, arr]) => ({ dimension, count: arr.length, medianMs: opsMedian(arr) })).sort((a, b) => b.count - a.count);
 
   // Operational counts from the event stream.
-  const cw = win();
-  const countRows = db().prepare(`
-    SELECT e.event_type AS et, COUNT(*) AS c
-    FROM events e JOIN runs r ON r.id = e.run_id
-    WHERE e.event_type IN ('task.cancelled','run.cancelled','task.retried','task.blocked_by_red') ${cw.clause}
-    GROUP BY e.event_type
-  `).all(...cw.params) as Array<{ et: string; c: number }>;
+  const countRows = all(statements.counts) as Array<{ et: string; c: number }>;
   const countOf = (t: string) => countRows.find((r) => r.et === t)?.c ?? 0;
   const counts = {
     idleKills: failureKinds.find((f) => f.kind === "idle_timeout")?.count ?? 0,
@@ -1544,7 +1605,7 @@ const ADMINISTRATIVE_TERMINAL_KINDS = new Set([
   "verification_environment_unavailable", // v2/reconcile.ts
 ]);
 
-type AgentRuntimeRow = {
+export type AgentRuntimeRow = {
   role: string;
   started: string;
   completed: string;
@@ -1677,19 +1738,26 @@ function agentObservedEndMs(row: AgentRuntimeRow): number | null {
   return Number.isFinite(completedMs) ? completedMs : null;
 }
 
-export function agentRuntimeTrends(
-  window: AgentRuntimeWindow,
-  scope?: ProjectScope,
-  nowMs: number = Date.now(),
-): AgentRuntimeTrends {
-  const resolution = AGENT_RUNTIME_RESOLUTION[window];
-  const bucketMs = RESOLUTION_MS[resolution];
-  const floor = (ms: number) => floorToResolution(ms, resolution);
+/** FG-836: the window predicate every agent-runtime row is filtered on — the
+ *  bucket-aligned cutoff, the now bound and the project scope, applied to a
+ *  `tasks t JOIN runs r` pair. */
+export type AgentRuntimeRowFilter = { cutoffStart: number | null; clause: string; params: unknown[] };
 
+/** FG-836: where agentRuntimeTrends reads its per-task rows from. Production reads
+ *  agentRuntimeRowsStatement; the golden comparison test substitutes the frozen
+ *  pre-FG-836 correlated-subquery form to prove the derivation is unchanged. */
+export type AgentRuntimeRowSource = (filter: AgentRuntimeRowFilter) => AgentRuntimeRow[];
+
+function agentRuntimeRowFilter(
+  window: AgentRuntimeWindow,
+  scope: ProjectScope | undefined,
+  nowMs: number,
+): AgentRuntimeRowFilter {
+  const resolution = AGENT_RUNTIME_RESOLUTION[window];
   // The window cutoff is the aligned start of the bucket the raw cutoff falls
   // in, so the leading bucket covers a whole period rather than a truncated one.
   const windowDays = window === "all" ? null : parseInt(window, 10);
-  const cutoffStart = windowDays === null ? null : floor(nowMs - windowDays * 86_400_000);
+  const cutoffStart = windowDays === null ? null : floorToResolution(nowMs - windowDays * 86_400_000, resolution);
 
   const params: unknown[] = [];
   let clause = "";
@@ -1706,74 +1774,149 @@ export function agentRuntimeTrends(
   const project = scopeSql("runs", "r", scope);
   clause += ` ${project.clause}`;
   params.push(...project.params);
+  return { cutoffStart, clause, params };
+}
 
-  // `t.phase IS 'session'` — SQLite's null-safe equality. With plain `=` a NULL
-  // phase makes the whole NOT(...) NULL, which drops the row instead of keeping it.
-  // FG-662: `agentExit`, `failedPayload` and `reconciledPayloads` are correlated
-  // subqueries in the shape opsMetrics already uses for its failure-kind mix — the
-  // earliest attached-exit event of the attempt being measured, the payload of its
-  // latest task.failed, and every task.reconciled audit row it carries.
-  // `markTaskRunning` re-dispatches a task IN PLACE: started_at moves to the new
-  // attempt while the previous attempt's events stay on the stream, so each
-  // subquery is bounded at or after started_at rather than taken globally —
-  // a prior attempt's exit is not this attempt's end, and a prior attempt's
-  // task.failed does not classify this attempt's terminal. Ordering on julianday
-  // rather than the raw TEXT also drops an unparseable created_at (NULL, so the
-  // comparison is never true) instead of letting it sort below — or, for a
-  // latest-wins pick, above — a valid sibling and mask it.
-  // FG-690: the start evidence layer 1 requires is correlated to the exit it
-  // authorizes rather than selected beside it — bounded below by started_at, as
-  // everything else here is, so a PRIOR attempt's container.started cannot vouch
-  // for this one, and above by the candidate exit, so a start recorded AFTER an
-  // exit cannot vouch for it either and a stale exit that lands after this
-  // attempt's started_at is passed over for the next exit a start does precede.
-  // Existence is all that is asked of the start event; the duration still runs
-  // from started_at, never from the start. `attachedExit` is the separate
-  // question of whether the attempt logged any exit at all — see
-  // agentObservedEndMs for why an unauthorized exit must not fall to layer 2.
+/** FG-836: the ONE statement agentRuntimeTrends runs, exported so the budget test
+ *  can EXPLAIN exactly what the endpoint executes. */
+export function agentRuntimeRowsStatement(
+  window: AgentRuntimeWindow,
+  scope?: ProjectScope,
+  nowMs: number = Date.now(),
+): OpsStatement {
+  return agentRuntimeRowsSql(agentRuntimeRowFilter(window, scope, nowMs));
+}
+
+// `t.phase IS 'session'` — SQLite's null-safe equality. With plain `=` a NULL
+// phase makes the whole NOT(...) NULL, which drops the row instead of keeping it.
+//
+// FG-836: one set-based pass. `win` is the window's tasks; `ev` is every event
+// the derivation reads for exactly those tasks, fetched once through the
+// (task_id, event_type, created_at) index — CROSS JOIN pins that order, since
+// without statistics SQLite would otherwise drive from idx_events_type_created
+// and read every exit/start/failure event the store has ever logged, whatever
+// the window. Each per-task fact below is a GROUP BY or window function over
+// `ev`, LEFT JOINed back to `win`. Before FG-836 each fact was a correlated
+// subquery evaluated per task row — the hasChildren probe alone
+// scanned the whole tasks table per row — which is what made an aged store take
+// most of a minute. The facts, and their FG-662 / FG-690 / FG-725 meaning, are
+// unchanged:
+//
+// - Every event fact is bounded at or after the attempt's started_at (the `ev`
+//   predicate). `markTaskRunning` re-dispatches a task IN PLACE: started_at moves
+//   to the new attempt while the previous attempt's events stay on the stream, so
+//   a prior attempt's exit is not this attempt's end, and a prior attempt's
+//   task.failed does not classify this attempt's terminal. Comparing on julianday
+//   rather than the raw TEXT also drops an unparseable created_at (NULL, so the
+//   comparison is never true) instead of letting it sort below — or, for a
+//   latest-wins pick, above — a valid sibling and mask it.
+// - `agentExit` (FG-690) is the earliest attached-exit event that start evidence
+//   authorizes: a container.started at or after started_at and at or before the
+//   exit. Some start in [started_at, exit] exists exactly when the attempt's
+//   EARLIEST start (itself >= started_at) is <= the exit, so the correlated
+//   EXISTS became a comparison against the per-task `firstStart`: a start
+//   recorded after an exit vouches for nothing, and a stale exit no start precedes
+//   is passed over for the next one a start does. Ties order on the event id.
+//   Existence is all that is asked of the start event; the duration still runs
+//   from started_at, never from the start.
+// - `attachedExit` is whether the attempt logged any exit at all — see
+//   agentObservedEndMs for why an unauthorized exit must not fall to layer 2.
+// - `hasChildren` (FG-725) is the fanout signal — a child sets parent_id to its
+//   parent's task id (schema.ts:138) — and `containerStarted` whether THIS
+//   attempt ran a container of its own, bounded by started_at like every other
+//   event fact: a task that is a fanout parent this attempt but ran a real
+//   container in a PRIOR attempt would, taken globally, slip the coordinator gate.
+//   A genuine coordinator has no container.started in ANY attempt, so the bound
+//   does not affect it.
+// - `failedPayload` is the attempt's latest task.failed; `reconciledPayloads`
+//   every task.reconciled audit row it carries.
+function agentRuntimeRowsSql(filter: AgentRuntimeRowFilter): OpsStatement {
   const exitEvents = AGENT_OBSERVED_EXIT_EVENTS.map((e) => `'${e}'`).join(",");
-  const rows = db().prepare(`
-    SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed, t.status AS status,
-      (SELECT x.created_at FROM events x
-        WHERE x.task_id = t.id AND x.event_type IN (${exitEvents})
-          AND julianday(x.created_at) >= julianday(t.started_at)
-          AND EXISTS (SELECT 1 FROM events s
-            WHERE s.task_id = t.id AND s.event_type = 'container.started'
-              AND julianday(s.created_at) >= julianday(t.started_at)
-              AND julianday(s.created_at) <= julianday(x.created_at))
-        ORDER BY julianday(x.created_at), x.id LIMIT 1) AS agentExit,
-      EXISTS (SELECT 1 FROM events e
-        WHERE e.task_id = t.id AND e.event_type IN (${exitEvents})
-          AND julianday(e.created_at) >= julianday(t.started_at)) AS attachedExit,
-      -- FG-725: the coordinator-parent discriminator. hasChildren is the
-      -- fanout signal -- a child sets parent_id to its parent's task id
-      -- (schema.ts:138) -- and containerStarted is whether THIS attempt ran a
-      -- container of its own. A row with children and no container of its own is
-      -- the non-container coordinator agentObservedEndMs drops. Bounded below by
-      -- started_at like every sibling subquery here: markTaskRunning
-      -- re-dispatches in place, so a task that is a fanout parent this attempt
-      -- but ran a real container in a PRIOR attempt would, taken globally, report
-      -- containerStarted=1 off that stale start and slip the coordinator gate --
-      -- reintroducing its multi-day gate wait as runtime. A genuine coordinator
-      -- has no container.started in ANY attempt, so the bound does not affect it.
-      EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id) AS hasChildren,
-      EXISTS (SELECT 1 FROM events cs
-        WHERE cs.task_id = t.id AND cs.event_type = 'container.started'
-          AND julianday(cs.created_at) >= julianday(t.started_at)) AS containerStarted,
-      (SELECT f.payload FROM events f
-        WHERE f.task_id = t.id AND f.event_type = 'task.failed'
-          AND julianday(f.created_at) >= julianday(t.started_at)
-        ORDER BY julianday(f.created_at) DESC, f.id DESC LIMIT 1) AS failedPayload,
-      (SELECT group_concat(c.payload, char(30)) FROM events c
-        WHERE c.task_id = t.id AND c.event_type = 'task.reconciled'
-          AND julianday(c.created_at) >= julianday(t.started_at)) AS reconciledPayloads
-    FROM tasks t JOIN runs r ON r.id = t.run_id
-    WHERE t.agent_role IS NOT NULL
-      AND t.started_at IS NOT NULL
-      AND t.completed_at IS NOT NULL
-      AND NOT (t.agent_role = 'orchestrator' AND t.phase IS 'session')
-      ${clause}
-  `).all(...params) as AgentRuntimeRow[];
+  const sql = `
+    WITH win AS MATERIALIZED (
+      SELECT t.id AS id, t.agent_role AS role, t.started_at AS started, t.completed_at AS completed,
+        t.status AS status, julianday(t.started_at) AS startedJd
+      FROM tasks t JOIN runs r ON r.id = t.run_id
+      WHERE t.agent_role IS NOT NULL
+        AND t.started_at IS NOT NULL
+        AND t.completed_at IS NOT NULL
+        AND NOT (t.agent_role = 'orchestrator' AND t.phase IS 'session')
+        ${filter.clause}
+    ),
+    ev AS MATERIALIZED (
+      SELECT e.task_id AS taskId, e.id AS id, e.event_type AS type, e.created_at AS createdAt,
+        e.payload AS payload, julianday(e.created_at) AS jd
+      FROM win w CROSS JOIN events e ON e.task_id = w.id
+      WHERE e.event_type IN (${exitEvents}, 'container.started', 'task.failed', 'task.reconciled')
+        AND julianday(e.created_at) >= w.startedJd
+    ),
+    starts AS (
+      SELECT taskId, MIN(jd) AS firstStart FROM ev WHERE type = 'container.started' GROUP BY taskId
+    ),
+    authorizedExits AS (
+      SELECT ev.taskId AS taskId, ev.createdAt AS createdAt,
+        ROW_NUMBER() OVER (PARTITION BY ev.taskId ORDER BY ev.jd, ev.id) AS rank
+      FROM ev JOIN starts s ON s.taskId = ev.taskId
+      WHERE ev.type IN (${exitEvents}) AND ev.jd >= s.firstStart
+    ),
+    attached AS (
+      SELECT DISTINCT taskId FROM ev WHERE type IN (${exitEvents})
+    ),
+    failed AS (
+      SELECT taskId, payload, ROW_NUMBER() OVER (PARTITION BY taskId ORDER BY jd DESC, id DESC) AS rank
+      FROM ev WHERE type = 'task.failed'
+    ),
+    reconciled AS (
+      SELECT taskId, group_concat(payload, char(30)) AS payloads
+      FROM ev WHERE type = 'task.reconciled' GROUP BY taskId
+    ),
+    parents AS (
+      SELECT DISTINCT c.parent_id AS id FROM tasks c WHERE c.parent_id IS NOT NULL
+    )
+    SELECT w.role AS role, w.started AS started, w.completed AS completed, w.status AS status,
+      a.createdAt AS agentExit,
+      (x.taskId IS NOT NULL) AS attachedExit,
+      (p.id IS NOT NULL) AS hasChildren,
+      (s.taskId IS NOT NULL) AS containerStarted,
+      f.payload AS failedPayload,
+      rc.payloads AS reconciledPayloads
+    FROM win w
+    LEFT JOIN authorizedExits a ON a.taskId = w.id AND a.rank = 1
+    LEFT JOIN attached x ON x.taskId = w.id
+    LEFT JOIN parents p ON p.id = w.id
+    LEFT JOIN starts s ON s.taskId = w.id
+    LEFT JOIN failed f ON f.taskId = w.id AND f.rank = 1
+    LEFT JOIN reconciled rc ON rc.taskId = w.id
+  `;
+  return { name: "agentRuntimeRows", sql, params: filter.params };
+}
+
+function selectAgentRuntimeRows(filter: AgentRuntimeRowFilter): AgentRuntimeRow[] {
+  const statement = agentRuntimeRowsSql(filter);
+  return db().prepare(statement.sql).all(...statement.params) as AgentRuntimeRow[];
+}
+
+export function agentRuntimeTrends(
+  window: AgentRuntimeWindow,
+  scope?: ProjectScope,
+  nowMs: number = Date.now(),
+): AgentRuntimeTrends {
+  return agentRuntimeTrendsFrom(selectAgentRuntimeRows, window, scope, nowMs);
+}
+
+export function agentRuntimeTrendsFrom(
+  source: AgentRuntimeRowSource,
+  window: AgentRuntimeWindow,
+  scope?: ProjectScope,
+  nowMs: number = Date.now(),
+): AgentRuntimeTrends {
+  const resolution = AGENT_RUNTIME_RESOLUTION[window];
+  const bucketMs = RESOLUTION_MS[resolution];
+  const floor = (ms: number) => floorToResolution(ms, resolution);
+
+  const filter = agentRuntimeRowFilter(window, scope, nowMs);
+  const cutoffStart = filter.cutoffStart;
+  const rows = source(filter);
 
   type Observation = { role: string; completedMs: number; durationMs: number };
   const observations: Observation[] = [];

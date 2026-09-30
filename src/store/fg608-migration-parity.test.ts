@@ -415,3 +415,43 @@ test("FG-608: re-running applyMigrations on a migrated DB is a no-op", () => {
   }
   assert.equal(migrated.pragma("user_version", { simple: true }), 0, "additive migrations never bump user_version");
 });
+
+test("FG-836: a store that predates idx_events_task_type_created gains it on open, additively", () => {
+  const indexDdl = "CREATE INDEX IF NOT EXISTS idx_events_task_type_created ON events(task_id, event_type, created_at);";
+  assert.ok(SCHEMA_SQL.includes(indexDdl), "keep this old-schema fixture aligned with the FG-836 DDL");
+  const preFg836Schema = SCHEMA_SQL.replace(indexDdl, "");
+
+  // The operator's aged store: every table present, events carrying rows, no index.
+  const migrated = new Database(":memory:");
+  migrated.exec(preFg836Schema);
+  applyMigrations(migrated);
+  migrated
+    .prepare("INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?,?,?,?,?)")
+    .run("r1", "t1", "container.exited", "{}", "2026-09-29T00:00:00.000Z");
+  assert.equal(
+    migrated.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_task_type_created'").get(),
+    undefined,
+    "the fixture must really be a store created before the index existed",
+  );
+
+  // An ordinary open by the newer binary.
+  migrated.exec(SCHEMA_SQL);
+  applyMigrations(migrated);
+  const fresh = freshDb();
+  assert.deepEqual(constraintsOf(migrated, "events"), constraintsOf(fresh, "events"));
+  assert.ok(
+    constraintsOf(fresh, "events").indexes!.some((i) =>
+      i.startsWith("idx_events_task_type_created unique=0 origin=c partial=0 (task_id, event_type, created_at)"),
+    ),
+    "the index covers (task_id, event_type, created_at) in that order",
+  );
+  assert.equal(migrated.pragma("user_version", { simple: true }), 0, "an additive index must not stamp a one-way boundary");
+  assert.equal((migrated.prepare("SELECT COUNT(*) AS c FROM events").get() as { c: number }).c, 1, "no data pass");
+
+  // An older binary still execs only its own schema on the upgraded store: it opens
+  // cleanly, and the index it does not know about is left in place.
+  migrated.exec(preFg836Schema);
+  applyMigrations(migrated);
+  assert.deepEqual(constraintsOf(migrated, "events"), constraintsOf(fresh, "events"));
+  assert.equal(migrated.pragma("user_version", { simple: true }), 0);
+});
