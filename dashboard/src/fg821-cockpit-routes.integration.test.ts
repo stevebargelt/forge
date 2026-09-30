@@ -10,6 +10,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureFetch } from "./test-support/fixture-fetch.js";
 
 const TEST_PORT = 18821;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -90,7 +91,7 @@ async function get(path: string): Promise<{ status: number; body: any }> {
   const deadline = Date.now() + 4000;
   for (;;) {
     try {
-      const res = await fetch(`${BASE}${path}`);
+      const res = await fixtureFetch(`${BASE}${path}`);
       return { status: res.status, body: await res.json() };
     } catch (err) {
       if (Date.now() > deadline) throw err;

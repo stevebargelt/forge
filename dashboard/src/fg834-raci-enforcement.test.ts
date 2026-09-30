@@ -99,6 +99,14 @@ function leftovers(): string[] {
   return existsSync(raciScratchRoot()) ? readdirSync(raciScratchRoot()) : [];
 }
 
+async function waitForCalls(expected: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (calls().length < expected) {
+    if (Date.now() >= deadline) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 async function post(path: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await fetch(`${BASE}${path}`, {
     method: "POST",
@@ -188,7 +196,7 @@ test("FG-834 enforcement: both routes run the shared guards before spawn and the
   const hold = join(rig, "release-children");
   process.env.STUB_HOLD = hold;
   const active = Array.from({ length: 4 }, (_, index) => post("/api/raci/propose", { projectKey: "project-a", candidate: `${candidate}slot-${now}-${index}` }));
-  for (let attempt = 0; attempt < 100 && calls().length < 4; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  await waitForCalls(4);
   assert.equal(calls().length, 4, "four shared mutation slots are occupied");
   const rejected = await post("/api/raci/propose", { projectKey: "project-a", candidate: `${candidate}slot-overflow-${now}` });
   assert.equal(rejected.status, 503);

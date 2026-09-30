@@ -13,8 +13,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureFetch } from "./test-support/fixture-fetch.js";
 
-const TEST_PORT = 18829;
+// The default remains unique in the tier; an explicit override lets the FG-841 stress
+// loop run beside one full integration tier without competing with that tier's fixture.
+const TEST_PORT = Number(process.env.FG823_TEST_PORT ?? "18829");
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg823-cli-"));
@@ -58,7 +61,7 @@ async function waitForServer(ms = 4000): Promise<void> {
   const deadline = Date.now() + ms;
   for (;;) {
     try {
-      const response = await fetch(`${BASE}/api/attention-inbox`);
+      const response = await fixtureFetch(`${BASE}/api/attention-inbox`);
       if (response.ok) return;
       throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
     } catch (err) {
@@ -74,7 +77,7 @@ async function route(): Promise<Record<string, any>> {
   const deadline = Date.now() + 4000;
   for (;;) {
     try {
-      return (await (await fetch(`${BASE}/api/attention-inbox`)).json()) as Record<string, any>;
+      return (await (await fixtureFetch(`${BASE}/api/attention-inbox`)).json()) as Record<string, any>;
     } catch (err) {
       if (Date.now() > deadline) throw err;
       await new Promise((r) => setTimeout(r, 40));
@@ -206,7 +209,7 @@ test("integ FG-823: undismiss clears the row (kept) with an attention.undismisse
 });
 
 test("integ FG-823: the dashboard route drives the SAME real CLI — actor dashboard, and the next GET excludes the item", async () => {
-  const res = await fetch(`${BASE}/api/attention/${encodeURIComponent("task:task-merge")}/snooze`, {
+  const res = await fixtureFetch(`${BASE}/api/attention/${encodeURIComponent("task:task-merge")}/snooze`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: BASE },
     body: JSON.stringify({ until: "1d", rationale: "rebasing after lunch" }),
