@@ -21,7 +21,7 @@ import { createCampaign, addCampaignItem, updateCampaignItem, updateCampaignStat
 import { setDoneAuditMapForTest } from "../../src/campaign/report.js";
 import type { DoneAuditResult } from "../../src/done-audit/done-audit.js";
 
-const TEST_PORT = 18795;
+const TEST_PORT = 19012;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-campaigns-route-"));
 

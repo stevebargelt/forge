@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const TEST_PORT = 18834;
+const TEST_PORT = 19016;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const SAME_ORIGIN = BASE;
 const HERE = dirname(fileURLToPath(import.meta.url));

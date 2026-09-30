@@ -22,7 +22,7 @@ import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { applyMigrations } from "../../src/store/db.js";
 
-const TEST_PORT = 18836;
+const TEST_PORT = 19017;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const BUDGET_MS = 500;
 const SAMPLES = 20;

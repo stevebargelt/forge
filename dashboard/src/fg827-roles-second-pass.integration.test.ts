@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const TEST_PORT = 18827;
+const TEST_PORT = 19002;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 

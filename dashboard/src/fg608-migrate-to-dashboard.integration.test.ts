@@ -44,7 +44,7 @@ const CLI_ENTRY = join(REPO_ROOT, "src", "cli", "index.ts");
 const LOCAL_TSX = join(REPO_ROOT, "node_modules", ".bin", "tsx");
 const TSX = existsSync(LOCAL_TSX) ? LOCAL_TSX : "tsx";
 
-const TEST_PORT = 18781;
+const TEST_PORT = 19005;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const testHome = mkdtempSync(join(tmpdir(), "fg608-migrate-dash-"));
 const forgeHome = join(testHome, ".forge");

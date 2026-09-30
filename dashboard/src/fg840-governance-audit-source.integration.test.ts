@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const TEST_PORT = 18841;
+const TEST_PORT = 19019;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg840-home-"));

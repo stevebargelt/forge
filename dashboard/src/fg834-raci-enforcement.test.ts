@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import type { ProjectRecord } from "./queries.js";
 import { ProposalWindow, handleRaciMutation, raciScratchRoot } from "./raci-mutation.js";
 
-const PORT = 18835;
+const PORT = 19003;
 const BASE = `http://127.0.0.1:${PORT}`;
 const home = mkdtempSync(join(tmpdir(), "fg834-enforcement-home-"));
 const projectA = mkdtempSync(join(tmpdir(), "fg834-enforcement-a-"));

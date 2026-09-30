@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
-const TEST_PORT = 18795;
+const TEST_PORT = 19011;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const testHome = mkdtempSync(join(tmpdir(), "forge-runtime-recon-route-"));
 const forgeHome = join(testHome, ".forge");

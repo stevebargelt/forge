@@ -19,15 +19,17 @@
 //         mkdirSync(SHOTS, { recursive: true });
 //       plus paths derived from tmpdir()/mkdtempSync(), and a bare `process.env.X` only
 //       under an `if (X)` guard;
-//   (c) two suites declaring the same fixture `*PORT` constant value.
+//   (c) two source or browser suites declaring the same fixture `*PORT` constant value.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
 import { tierSource, tierSuites } from "./browser-tier-census.js";
 
-const TIER = join("dashboard", "browser-tests");
+const BROWSER_TIER = join("dashboard", "browser-tests");
+const DASHBOARD_SRC = join("dashboard", "src");
 
 interface Suite {
   file: string;
@@ -243,7 +245,7 @@ function portCollisions(ports: PortDecl[]): string[] {
     .filter(([, decls]) => new Set(decls.map((d) => d.file)).size > 1)
     .map(
       ([value, decls]) =>
-        `fixture port ${value} is declared by more than one browser suite — ${decls.map((d) => `${d.file}:${d.line} (${d.name})`).join(", ")}; suites run concurrently, so pick an unused port`
+        `fixture port ${value} is declared by more than one dashboard test suite — ${decls.map((d) => `${d.file}:${d.line} (${d.name})`).join(", ")}; suites run concurrently, so pick an unused port or let the OS assign port 0`
     );
 }
 
@@ -253,12 +255,27 @@ function guardTier(suites: Suite[]): { findings: string[]; ports: PortDecl[] } {
   return { findings: [...scanned.flatMap((s) => s.findings), ...portCollisions(ports)], ports };
 }
 
-const fixture = (name: string, source: string): Suite => ({ file: join(TIER, name), source });
+const fixture = (name: string, source: string): Suite => ({ file: join(BROWSER_TIER, name), source });
 
-test("FG-839: every dashboard/browser-tests suite passes the content guard", () => {
-  const suites = tierSuites().map((name) => fixture(name, tierSource(name)));
-  assert.ok(suites.length > 0, `no suites found under ${TIER}`);
-  const { findings, ports } = guardTier(suites);
+function dashboardSourceSuites(dir = DASHBOARD_SRC): Suite[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry): Suite[] => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return dashboardSourceSuites(path);
+    return entry.isFile() && entry.name.endsWith(".test.ts") ? [{ file: path, source: readFileSync(path, "utf8") }] : [];
+  });
+}
+
+test("FG-842: every dashboard source and browser suite passes the content and fixture-port guard", () => {
+  const browserSuites = tierSuites().map((name) => fixture(name, tierSource(name)));
+  const sourceSuites = dashboardSourceSuites();
+  assert.ok(browserSuites.length > 0 && sourceSuites.length > 0, `no suites found under ${DASHBOARD_SRC} or ${BROWSER_TIER}`);
+  // FG-839's import-loadability checks are intentionally browser-tier-specific. FG-842
+  // extends only the port namespace, so existing source fixtures are not retrofitted to
+  // screenshot-directory conventions they do not use.
+  const { findings, ports: browserPorts } = guardTier(browserSuites);
+  const sourcePorts = sourceSuites.flatMap(scanSuite).flatMap((suite) => suite.ports);
+  const ports = [...sourcePorts, ...browserPorts];
+  findings.push(...portCollisions(ports));
   assert.ok(ports.length > 1, "the guard found no fixture PORT constants — the port rule would be vacuous");
   assert.deepEqual(findings, [], `browser-tier content guard (src/util/fg839-browser-tier-content-guard.test.ts):\n${findings.join("\n")}`);
 });
@@ -272,7 +289,7 @@ test("FG-839 (a): a `/task/` default on ?? or || is caught with file and line (t
     fixture("or-shape.test.ts", `const OUT = process.env.OUT_DIR || join("/task/out", "shots");\n`),
     fixture("template-shape.test.ts", "\n\nconst SHOTS = process.env.X_SCREENSHOT_DIR ?? `/task/screenshots`;\n"),
   ]);
-  const file = (name: string, line: number) => `${join(TIER, name)}:${line}: `;
+  const file = (name: string, line: number) => `${join(BROWSER_TIER, name)}:${line}: `;
   assert.ok(findings.some((f) => f.startsWith(file("fg832-shape.test.ts", 2)) && f.includes("/task/screenshots")), findings.join("\n"));
   assert.ok(findings.some((f) => f.startsWith(file("fg832-shape.test.ts", 3)) && f.includes("module-scope mkdirSync(SHOTS)")), findings.join("\n"));
   assert.ok(findings.some((f) => f.startsWith(file("or-shape.test.ts", 1)) && f.includes("/task/out")), findings.join("\n"));
@@ -284,8 +301,8 @@ test("FG-839 (a): a `/task/` path passed to mkdirSync or writeFileSync is caught
     fixture("write.test.ts", `writeFileSync("/task/result.json", "{}");\n`),
     fixture("hook.test.ts", `before(() => {\n  mkdirSync("/task/screenshots", { recursive: true });\n});\n`),
   ]);
-  assert.ok(findings.some((f) => f.startsWith(`${join(TIER, "write.test.ts")}:1: writeFileSync`)), findings.join("\n"));
-  assert.ok(findings.some((f) => f.startsWith(`${join(TIER, "hook.test.ts")}:2: mkdirSync`)), findings.join("\n"));
+  assert.ok(findings.some((f) => f.startsWith(`${join(BROWSER_TIER, "write.test.ts")}:1: writeFileSync`)), findings.join("\n"));
+  assert.ok(findings.some((f) => f.startsWith(`${join(BROWSER_TIER, "hook.test.ts")}:2: mkdirSync`)), findings.join("\n"));
 });
 
 test("FG-839 (b): a module-scope mkdirSync on a literal, an unguarded env var, or a non-temp root is caught", () => {
@@ -306,23 +323,23 @@ test("FG-839 (b): a module-scope mkdirSync on a literal, an unguarded env var, o
     ["loop.test.ts", 3],
   ] as const) {
     assert.ok(
-      findings.some((f) => f.startsWith(`${join(TIER, name)}:${line}: module-scope mkdirSync`)),
+      findings.some((f) => f.startsWith(`${join(BROWSER_TIER, name)}:${line}: module-scope mkdirSync`)),
       `expected a module-scope mkdirSync finding at ${name}:${line}:\n${findings.join("\n")}`
     );
   }
 });
 
-test("FG-839 (c): two suites declaring the same fixture PORT value are caught, naming both", () => {
+test("FG-842: a duplicate literal fixture port across source and browser suites is caught, naming both", () => {
   const { findings } = guardTier([
-    fixture("one.test.ts", `import { test } from "node:test";\nconst PORT = 18836;\n`),
+    { file: join(DASHBOARD_SRC, "one.test.ts"), source: `import { test } from "node:test";\nconst PORT = 18836;\n` },
     fixture("two.test.ts", `const TEST_PORT = 18836;\n`),
-    fixture("three.test.ts", `const PORT = 18837;\n`),
+    { file: join(DASHBOARD_SRC, "three.test.ts"), source: `const PORT = 18837;\n` },
   ]);
   assert.equal(findings.length, 1, findings.join("\n"));
   const [collision = ""] = findings;
   assert.match(collision, /fixture port 18836/);
-  assert.ok(collision.includes(`${join(TIER, "one.test.ts")}:2 (PORT)`), collision);
-  assert.ok(collision.includes(`${join(TIER, "two.test.ts")}:1 (TEST_PORT)`), collision);
+  assert.ok(collision.includes(`${join(DASHBOARD_SRC, "one.test.ts")}:2 (PORT)`), collision);
+  assert.ok(collision.includes(`${join(BROWSER_TIER, "two.test.ts")}:1 (TEST_PORT)`), collision);
   assert.ok(!collision.includes("three.test.ts"), collision);
 });
 
