@@ -5,7 +5,9 @@
 // the full historical projectDirs array so projectKey-scoped feed/usage/run
 // queries still reach every historical path. A missing checkout that still has
 // active work stays visible; a fully inactive missing standalone project is
-// omitted entirely.
+// omitted entirely. FG-831 amends the grouped case: a missing checkout of a
+// project that still has an on-disk checkout is carried through exists:false so
+// the client withholds it behind "show N missing" rather than dropping it.
 
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,6 +16,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { lexicalResolutionOf, provenPhysical } from "../../src/util/path-identity.js";
 import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
@@ -43,7 +46,7 @@ git(forgeDir, ["remote", "add", "origin", "git@github.com:stevebargelt/forge.git
 
 // A deleted scratchpad encodes its source checkout as an exact encoded
 // path segment; two of them, both pointing back at the Forge checkout, are the
-// grouped-but-gone checkouts that must be suppressed.
+// grouped-but-gone checkouts that must be withheld (FG-831).
 const forgeSegment = forgeDir.replaceAll("/", "-");
 const scratchA = join(testHome, "claude-1", forgeSegment, "sess-a", "scratchpad", "wt-a");
 const scratchB = join(testHome, "claude-2", forgeSegment, "sess-b", "scratchpad", "wt-b");
@@ -105,6 +108,7 @@ const ghostLive = join(testHome, "tmp", "ghost-live");
 }
 
 const { server } = await import("./server.js");
+const { checkoutOptions } = await import("../client/checkout-label.js");
 after(() => {
   server.closeAllConnections?.();
   server.close();
@@ -132,24 +136,40 @@ type Project = {
   checkouts: Checkout[];
 };
 
+// The registry emits checkout roots through FG-693's canonicalizer: the proven physical
+// path for an existing checkout (macOS: /var/... → /private/var/...), the lexical
+// resolution for a gone one. Expected roots are derived the same way.
+function registryRoot(path: string): string {
+  return provenPhysical(path) ?? lexicalResolutionOf(path);
+}
+
 async function getJson(path: string): Promise<unknown> {
   const response = await fetch(`${BASE}${path}`);
   assert.equal(response.status, 200);
   return response.json();
 }
 
-test("existing Forge checkout with deleted scratchpads: scratchpads suppressed, aggregate + projectDirs preserved", async () => {
+test("existing Forge checkout with deleted scratchpads: scratchpads carried missing and withheld, aggregate + projectDirs preserved", async () => {
   const projects = (await getJson("/api/projects")) as Project[];
   const forge = projects.find((p) => p.label === "Forge");
   assert.ok(forge, "Forge project is present");
 
-  // Only the on-disk main checkout survives; both deleted scratchpads are hidden.
+  // FG-831: the deleted scratchpads stay in the registry flagged missing so the
+  // client can count them behind "show N missing" and still render their runs.
+  const byDir = new Map(forge.checkouts.map((c) => [c.projectDir, c]));
+  assert.equal(byDir.get(registryRoot(forgeDir))?.exists, true, "the on-disk main checkout is present and exists");
+  assert.equal(byDir.get(registryRoot(scratchA))?.exists, false, "deleted scratchpad A is carried through flagged missing");
+  assert.equal(byDir.get(registryRoot(scratchB))?.exists, false, "deleted scratchpad B is carried through flagged missing");
+  assert.equal(forge.checkouts.length, 3);
+
+  // By default the scope bar offers only the on-disk checkout; the scratchpads are withheld.
+  const { options, missingCount } = checkoutOptions(forge);
   assert.deepEqual(
-    forge.checkouts.map((c) => c.branch ?? null),
-    ["main"],
-    "deleted scratchpad checkouts are suppressed from the presentation registry",
+    options.map((o: { projectDir: string }) => o.projectDir),
+    [registryRoot(forgeDir)],
+    "deleted scratchpad checkouts are withheld from the default checkout offer",
   );
-  assert.ok(forge.checkouts.every((c) => c.exists), "no missing checkout remains visible on Forge");
+  assert.equal(missingCount, 2, "both deleted scratchpads are counted behind show N missing");
 
   // The canonical aggregate still counts the scratchpad runs.
   assert.equal(forge.runCount, 3, "runCount preserves scratchpad history");

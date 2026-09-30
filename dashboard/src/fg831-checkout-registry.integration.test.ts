@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { provenPhysical } from "../../src/util/path-identity.js";
 
 // FORGE_HOME before anything evaluates src/util/paths.ts (FG-607/FG-616).
 const root = mkdtempSync(join(tmpdir(), "fg831-registry-"));
@@ -66,7 +67,7 @@ run(feature);
 const goneRun = run(gone);
 
 function atlasRecord() {
-  const record = presentationRegistry(listProjects({ scanRoots: [scanRoot] })).find((p) => p.checkouts.some((c) => realpathSync(c.projectDir) === atlas || c.projectDir === gone));
+  const record = presentationRegistry(listProjects({ scanRoots: [scanRoot] })).find((p) => p.checkouts.some((c) => provenPhysical(c.projectDir) === atlas || c.projectDir === gone));
   assert.ok(record, "the atlas project is registered");
   return record;
 }
