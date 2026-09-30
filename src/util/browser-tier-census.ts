@@ -274,7 +274,8 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // keep their counts, choosing "all" statuses where they need every ticket. Fixture
   // port 18836. Verification also adds a complete type × status fixture proving the
   // active default covers every type, scoped clicks preserve FG-820's project and do
-  // not re-fetch the already-loaded payload, and a future Backlog badge agrees with it.
+  // not re-fetch the already-loaded payload, and the header's "N of M tickets" count
+  // agrees with the active filter. The left column has no Backlog badge.
   "fg832-backlog-filter.test.ts": 5,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
