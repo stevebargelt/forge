@@ -64,6 +64,6 @@ test("FG-820: the scope control reads All projects, a project, or project › ch
   const project = { label: "Forge", checkouts: [{ projectDir: "/r/forge", branch: "main" }] };
   assert.equal(scopeSummary({ project: null, checkout: null }, null), "All projects");
   assert.equal(scopeSummary({ project: "forge", checkout: null }, project), "Forge");
-  assert.equal(scopeSummary({ project: "forge", checkout: "/r/forge" }, project), "Forge › main");
+  assert.equal(scopeSummary({ project: "forge", checkout: "/r/forge" }, project), "Forge › forge · main");
   assert.equal(scopeSummary({ project: "forge", checkout: "/x/wt" }, null), "forge › wt", "an unloaded project reads by key");
 });

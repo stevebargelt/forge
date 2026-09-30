@@ -467,7 +467,11 @@ export type EventType =
   | "attention.snoozed"
   | "attention.undismissed"
   | "attention.dismissal_superseded"
-  | "attention.snooze_expired";
+  | "attention.snooze_expired"
+  // FG-831: `forge projects prune --missing` removed one checkout registration whose
+  // directory is gone (src/store/pruned-checkouts.ts). Payload: { checkoutRoot, actor }.
+  // Additive to the TS union alone — event_type has no CHECK.
+  | "checkout.pruned";
 
 export type Event = {
   id: number;

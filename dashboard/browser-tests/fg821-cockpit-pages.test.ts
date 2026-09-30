@@ -206,7 +206,8 @@ test("FG-821: the run index lists project, ticket, status, started and duration,
   assert.deepEqual(await page.locator(".runs-table th").allTextContents(), ["run", "project", "ticket", "status", "started", "duration"]);
   const first = page.locator('.runs-table tr[data-run-id="run-1"]');
   assert.equal(await first.locator("a").first().getAttribute("href"), "#run/run-1", "a run row links to its page");
-  assert.equal(await first.locator("td").nth(1).innerText(), "Atlas", "the project column names the registered project");
+  assert.equal(await first.locator("td").nth(1).locator("a").innerText(), "Atlas", "the project column names the registered project");
+  assert.equal(await first.locator("td .runs-checkout").innerText(), "atlas-main · main", "FG-831: …and its checkout, by the shared label rule");
   assert.equal(await first.locator("td").nth(1).locator("a").getAttribute("href"), "#runs?project=atlas");
   assert.equal(await first.locator("td").nth(2).locator("a").getAttribute("href"), "#backlog/FG-9?project=atlas", "the ticket column links to the ticket in its project");
   assert.equal(await page.locator('.runs-table tr[data-run-id="run-2"] td').nth(2).innerText(), "—", "a run without a ticket shows none");

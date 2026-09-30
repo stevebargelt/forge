@@ -17,7 +17,6 @@ export interface NavModelGroup {
 }
 export function scopedHref(hash: string, scope: Partial<HashScope> | null): string;
 export function navModel(view: string, scope: Partial<HashScope> | null): NavModelGroup[];
-export function checkoutScopeLabel(checkout: { exists?: boolean; branch?: string | null; projectDir: string }): string;
 export function scopeSummary(
   scope: Partial<HashScope> | null,
   project: { label?: string; checkouts?: { exists?: boolean; branch?: string | null; projectDir: string }[] } | null,

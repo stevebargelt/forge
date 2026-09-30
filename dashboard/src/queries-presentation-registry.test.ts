@@ -35,7 +35,7 @@ function record(o: Partial<ProjectRecord> & { key: string; checkouts: ProjectRec
   };
 }
 
-test("suppresses a checkout only when gone AND idle AND no live session", () => {
+test("FG-831: a surviving project keeps every checkout, missing ones included, for the client to count and reveal", () => {
   const rec = record({
     key: "repo-a",
     label: "Repo A",
@@ -57,8 +57,8 @@ test("suppresses a checkout only when gone AND idle AND no live session", () => 
   assert.ok(out);
   assert.deepEqual(
     out.checkouts.map((c) => c.projectDir),
-    ["/main", "/present-idle", "/gone-active", "/gone-live"],
-    "only the gone+idle+no-live checkout is suppressed",
+    ["/main", "/present-idle", "/gone-active", "/gone-live", "/gone-idle"],
+    "the gone+idle checkout is passed through, still exists:false, for the scope bar's show-N-missing",
   );
 
   // Aggregates and the full historical projectDirs array are passed through untouched.

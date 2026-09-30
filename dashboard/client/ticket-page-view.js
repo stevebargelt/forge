@@ -14,6 +14,7 @@ import { md } from "./renderers.js";
 import { breadcrumbTrail, parentHash } from "./breadcrumbs-render.js";
 import { ticketHeader } from "./screen-header-render.js";
 import { hashFor } from "./view-routing.js";
+import { checkoutLabelForDir } from "./checkout-label.js";
 import { ObjectHead, useEscapeTo } from "./object-page-view.js";
 
 const html = htm.bind(h);
@@ -70,7 +71,7 @@ export function TicketPage({ ticketId, data, scope, projects }) {
         ? html`<div class="muted">loading ticket…</div>`
         : !ticket
         ? html`<div class="card muted" role="note">No ticket ${ticketId} in this project's backlog.</div>`
-        : html`<${TicketFields} ticket=${ticket} epic=${epic} />`}
+        : html`<${TicketFields} ticket=${ticket} epic=${epic} projects=${projects} />`}
       <section class="ticket-runs" aria-labelledby="ticket-runs-heading">
         <h2 id="ticket-runs-heading">Runs</h2>
         ${runsLoad.error
@@ -96,14 +97,14 @@ export function TicketPage({ ticketId, data, scope, projects }) {
   `;
 }
 
-function TicketFields({ ticket, epic }) {
+function TicketFields({ ticket, epic, projects }) {
   return html`
     <div class="ticket-fields">
       <div class="row" style="gap: 8px; flex-wrap: wrap; margin: 12px 0; align-items: baseline;">
         <span class="badge ${statusClass("ticket", ticket.status)}" aria-label=${"Status: " + ticket.status}>${statusLabel("ticket", ticket.status)}</span>
         <span class="badge backlog-type-badge">${ticket.type}</span>
         <span class="mono faint" style="font-size: 12px;">${ticket.id}</span>
-        ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}
+        ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${checkoutLabelForDir(ticket.checkoutDir, projects, ticket.checkoutBranch)}</span>` : null}
       </div>
       ${epic || ticket.epic || ticket.created || ticket.closed || (ticket.related && ticket.related.length) ? html`<div class="subcard" style="margin-bottom: 16px; font-size: 12px;">
         <div class="row" style="gap: 16px; flex-wrap: wrap;">

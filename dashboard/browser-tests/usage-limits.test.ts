@@ -248,7 +248,7 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   assert.equal(await card.count(), 1);
   assert.equal(await card.locator(".project-card-head .project-chip").innerText(), "Forge");
   await card.locator(".project-dirs-toggle").click();
-  assert.deepEqual(await card.locator(".checkout-branch").allTextContents(), ["main", "dashboard-home", "fg578-raci-clobber"]);
+  assert.deepEqual(await card.locator(".checkout-branch").allTextContents(), ["forge · main", "forge-dashboard · dashboard-home", "forge-fg571 · fg578-raci-clobber"]);
   assert.match(await card.innerText(), /\/workspace\/forge-dashboard/);
 
   await card.locator(".project-checkout-row").filter({ hasText: "dashboard-home" }).click();
@@ -256,7 +256,7 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   await assertEventually(async () => activityRequests.some((url) => url.searchParams.get("projectDir") === "/workspace/forge-dashboard"));
   const projectChip = page.locator(".feed .project-chip").first();
   assert.equal(await projectChip.innerText(), "Forge");
-  assert.equal(await page.locator(".feed .checkout-chip").first().innerText(), "forge-dashboard");
+  assert.equal(await page.locator(".feed .checkout-chip").first().innerText(), "forge-dashboard · dashboard-home", "FG-831: the feed names its checkout by the shared label rule");
   assert.equal(await projectChip.evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(122, 159, 255)");
   assert.equal(await page.locator(".feed .checkout-chip").first().evaluate((element) => getComputedStyle(element).backgroundColor), "rgba(0, 0, 0, 0)");
   assert.match(await page.locator(".feed .project-identity").first().getAttribute("title") ?? "", /forge-dashboard$/);
@@ -282,7 +282,7 @@ test("Backlog renders multi-checkout handoffs as compact list cards with one det
   assert.ok((await page.locator(".backlog-notes").evaluate((element) => element.getBoundingClientRect().height)) < 400);
 
   await cards.nth(1).click();
-  const detail = page.getByRole("dialog", { name: "Session handoff for dashboard-home" });
+  const detail = page.getByRole("dialog", { name: "Session handoff for forge-dashboard · dashboard-home" });
   await detail.waitFor();
   assert.match(await detail.innerText(), /Dashboard checkout context/);
   assert.match(await detail.innerText(), /\/workspace\/forge-dashboard/);

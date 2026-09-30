@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import type { Command } from "commander";
 import { listProjects, sortProjects, findProject, operatorProjects, type ProjectRecord } from "../../util/projects.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { listRuns } from "../../store/runs.js";
+import { recordPrunedCheckouts } from "../../store/pruned-checkouts.js";
 import {
   classifyWorkspacePurpose,
   isWorkspaceKind,
@@ -136,6 +138,70 @@ export function registerProjects(program: Command): void {
         }
       },
     );
+
+  registerPrune(projects);
+}
+
+// FG-831: the registry-hygiene verb. `--missing` is the only criterion: a checkout
+// registration whose directory no longer exists. It prints each registration and, without
+// --dry-run, records it as pruned (src/store/pruned-checkouts.ts) so the registry stops
+// offering it. It never touches a directory and never deletes a run.
+function registerPrune(projects: Command): void {
+  projects
+    .command("prune")
+    .description(
+      "Remove checkout registrations whose directory no longer exists on disk. Prints each one; " +
+        "--dry-run writes nothing. Never touches a directory or deletes a run.",
+    )
+    .option("--missing", "prune registrations whose checkout directory is gone (required)")
+    .option("--dry-run", "print what would be pruned without recording anything")
+    .option("--json", "emit JSON instead of text")
+    .option("--actor <who>", "the acting operator, recorded on the prune audit trail (defaults to $USER)")
+    .option("--scan-root <dir>", "filesystem root to scan (can repeat)", collect, [] as string[])
+    .option("--scan-depth <n>", "max scan depth (default: 3)", (v) => parseInt(v, 10), 3)
+    .action((opts: { missing?: boolean; dryRun?: boolean; json?: boolean; actor?: string; scanRoot: string[]; scanDepth: number }) => {
+      if (!opts.missing) {
+        console.error("forge projects prune: pass --missing (the only prune criterion: a checkout whose directory is gone).");
+        process.exitCode = 1;
+        return;
+      }
+      ensureForgeDirs();
+      const recs = listProjects({
+        ...(opts.scanRoot.length > 0 ? { scanRoots: opts.scanRoot } : {}),
+        scanMaxDepth: opts.scanDepth,
+      });
+      const seen = new Set<string>();
+      const candidates: Array<{ checkoutRoot: string; project: string; runCount: number }> = [];
+      for (const rec of recs) {
+        for (const checkout of rec.checkouts) {
+          // Re-check at the moment of pruning: the registry's answer may be up to one
+          // listing old, and a directory that came back is not missing.
+          if (checkout.exists || existsSync(checkout.projectDir) || seen.has(checkout.projectDir)) continue;
+          seen.add(checkout.projectDir);
+          candidates.push({ checkoutRoot: checkout.projectDir, project: rec.label, runCount: checkout.runCount });
+        }
+      }
+      candidates.sort((a, b) => a.project.localeCompare(b.project) || a.checkoutRoot.localeCompare(b.checkoutRoot));
+      const actor = opts.actor ?? process.env["USER"] ?? "operator";
+      if (!opts.dryRun && candidates.length > 0) recordPrunedCheckouts(candidates.map((c) => c.checkoutRoot), actor);
+      if (opts.json) {
+        console.log(JSON.stringify({ dryRun: !!opts.dryRun, pruned: candidates }, null, 2));
+        return;
+      }
+      if (candidates.length === 0) {
+        console.log("No checkout registrations point at a missing directory.");
+        return;
+      }
+      const verb = opts.dryRun ? "would prune" : "pruned";
+      for (const c of candidates) {
+        console.log(`${verb}  ${c.checkoutRoot}  (${c.project}, ${c.runCount} run${c.runCount === 1 ? "" : "s"})`);
+      }
+      console.log(
+        opts.dryRun
+          ? `${candidates.length} missing checkout registration(s); nothing written (--dry-run).`
+          : `${candidates.length} missing checkout registration(s) pruned. Their runs are kept; no directory was touched.`,
+      );
+    });
 }
 
 // commander option collector for repeatable --scan-root flags.

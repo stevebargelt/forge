@@ -94,7 +94,7 @@ export function RunsIndexView({ scope, status, projects, onLoad }) {
                   return html`
                     <tr key=${row.runId} data-run-id=${row.runId}>
                       <td><a href=${row.href}>${row.title}</a><div class="faint mono runs-id">${row.runId}</div></td>
-                      <td><a href=${row.project.href}>${row.project.label}</a></td>
+                      <td><a href=${row.project.href}>${row.project.label}</a>${row.checkout ? html`<div class="faint mono runs-checkout">${row.checkout}</div>` : null}</td>
                       <td>${row.ticket ? html`<a href=${row.ticket.href}>${row.ticket.label}</a>` : html`<span class="faint">—</span>`}</td>
                       <td><span class=${badgeClass("run", row.status)}>${statusLabel("run", row.status)}</span></td>
                       <td class=${MONO_CLASS} title=${row.startedAt}>${formatTimestamp(row.startedAt)}</td>

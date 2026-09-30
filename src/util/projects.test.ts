@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregateProjectSignals, extractReadmeProse, findProject, listProjects, operatorProjects, type RepositoryIdentityResolver, type WorkspacePurposeResolver } from "./projects.js";
+import { aggregateProjectSignals, extractReadmeProse, findProject, listProjects, operatorProjects, withoutPrunedCheckouts, type ProjectRecord, type RepositoryIdentityResolver, type WorkspacePurposeResolver } from "./projects.js";
 import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
 import { captureProcessIdentity } from "./process-identity.js";
 
@@ -326,4 +326,29 @@ test("extractReadmeProse skips a standalone HTML-link line and returns the follo
 test("extractReadmeProse keeps an inline link's label inside genuine prose", () => {
   const readme = "See the [docs](https://example.test) for details.\n";
   assert.equal(extractReadmeProse(readme), "See the docs for details.");
+});
+
+test("FG-831: withoutPrunedCheckouts drops pruned MISSING checkouts only, re-points a pruned primary, and drops an emptied record", () => {
+  const co = (projectDir: string, exists: boolean) => ({ projectDir, projectDirs: [projectDir], exists, runCount: 1, inFlightCount: 0, liveSessions: 0 });
+  const rec = (key: string, checkouts: ProjectRecord["checkouts"]): ProjectRecord => ({
+    key, projectDir: checkouts[0]!.projectDir, primaryCheckout: checkouts[0]!.projectDir,
+    projectDirs: checkouts.map((c) => c.projectDir), checkouts, label: key, color: "#000",
+    runCount: checkouts.length, inFlightCount: 0, liveSessions: 0,
+  });
+  const records = [
+    rec("forge", [co("/r/forge", true), co("/gone/a", false), co("/gone/b", false)]),
+    rec("ghost", [co("/gone/ghost", false), co("/gone/ghost2", false)]),
+    rec("back", [co("/r/back", true)]),
+  ];
+  const out = withoutPrunedCheckouts(records, new Set(["/gone/a", "/gone/ghost", "/gone/ghost2", "/r/back"]));
+  assert.deepEqual(out.map((r) => [r.key, r.checkouts.map((c) => c.projectDir)]), [
+    ["forge", ["/r/forge", "/gone/b"]],
+    ["back", ["/r/back"]],
+  ], "a pruned root that exists on disk again is kept; a record with nothing left is dropped");
+  assert.deepEqual(out[0]!.projectDirs, ["/r/forge", "/gone/a", "/gone/b"], "history stays in scope");
+
+  const primaryGone = withoutPrunedCheckouts([rec("p", [co("/gone/p", false), co("/r/p2", true)])], new Set(["/gone/p"]));
+  assert.equal(primaryGone[0]!.primaryCheckout, "/r/p2");
+  assert.equal(primaryGone[0]!.projectDir, "/r/p2");
+  assert.equal(withoutPrunedCheckouts(records, new Set()), records, "nothing pruned: the same array");
 });

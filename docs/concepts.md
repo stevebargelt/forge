@@ -38,6 +38,14 @@ A durable, **declared** fact — never inferred — about what a Forge-owned on-
 
 Suppression lives ONLY in the Projects projection — run-scoping stays purpose-blind (AC5). Selecting an owner project (`resolveProjectScope`, `dashboard/src/queries.ts`) therefore folds in the live work of any artifact it owns, even a **separately-identified** one — e.g. a private, no-remote clone whose repository identity does not converge with its owner's and so is its own suppressed `ProjectRecord` — matched on the declared `workspace_purposes.project_identity` ownership link, never on a path or name. An artifact's active runs and sessions stay reachable under its owner in Current activity and In flight; only its own top-level Projects card is suppressed.
 
+## Projects, checkouts and the scope bar (FG-831)
+
+A **project** in the registry (`forge projects list`, the dashboard's Projects page and scope bar) is one repository identity; its **checkouts** are every directory forge has seen it in — the primary checkout, linked worktrees, disposable clones — derived from `runs.project_dir`, the filesystem scan and live orchestrator sessions, deduplicated by canonical path (a symlinked spelling and its target are one checkout, FG-693). The **primary** checkout is the registry's preferred one: on disk, its directory named for the repository, on `main`/`master`.
+
+Every surface that names a checkout uses one rule (`dashboard/client/checkout-label.js`): the directory's basename plus just enough parent path to be unique among the project's checkouts, then ` · <branch>` — `forge · main`, `forge-fg827 · feat/fg-827-roles-second-pass`, `run-1/forge · main`. The scope bar lists the primary first and marks it. A checkout whose directory no longer exists is **not offered by default**: the scope bar shows "show N missing", which reveals it labeled `missing on disk`; selecting it still shows its runs and notes. The Projects card counts missing checkouts and names the verb that clears them.
+
+`forge projects prune --missing [--dry-run]` removes checkout registrations whose directory is gone. It prints each one (`would prune` / `pruned`, with its project and run count); `--dry-run` writes nothing. A prune is recorded in the `pruned_checkouts` table with an actor (`--actor`, default `$USER`) and a `checkout.pruned` event — it deletes no run and never touches a directory, and a pruned checkout whose directory reappears is offered again. Nothing prunes automatically.
+
 ## Operator adapters (`/orient`, `/handoff`)
 
 Start-of-session orientation and end-of-session handoff, defined **once** as provider-neutral data in

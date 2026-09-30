@@ -514,7 +514,7 @@ details.action-refused ul { margin: 4px 0 0; padding-left: 16px; }
 .runs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .runs-table th { text-align: left; color: var(--fg-faint); font-weight: 500; font-size: 11px; padding: 4px 8px; }
 .runs-table td { padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: top; }
-.runs-id { font-size: 10px; }
+.runs-id, .runs-checkout { font-size: 10px; }
 .runs-load-more { margin-top: 10px; }
 a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
 /* FG-817: the Roles list and role pages. Nine tabs wrap rather than scroll off a phone. */
@@ -662,9 +662,19 @@ a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
   cursor: pointer;
   font: 10px ui-monospace, "SF Mono", Menlo, monospace;
   padding: 3px 7px;
+  text-align: left;
 }
 .checkout-scope-btn:hover { color: var(--fg); border-color: var(--fg-dim); }
 .checkout-scope-btn-active { background: rgba(122, 159, 255, 0.16); border-color: var(--accent); color: var(--accent); }
+/* FG-831: the primary checkout's mark, a missing checkout's option, and the "show N missing" disclosure. */
+.checkout-primary-mark { border: 1px solid currentColor; border-radius: 3px; font-size: 9px; opacity: 0.8; padding: 0 3px; }
+.checkout-scope-btn-missing { border-style: dashed; font-style: italic; }
+.checkout-missing-toggle {
+  background: transparent; border: 0; color: var(--fg-dim); cursor: pointer;
+  font: 10px ui-monospace, "SF Mono", Menlo, monospace; padding: 3px 4px; text-decoration: underline;
+}
+.checkout-missing-toggle:hover { color: var(--fg); }
+.project-missing-count { font-size: 11px; margin-top: 4px; }
 .clear-filter {
   background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
   font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer;

@@ -103,8 +103,9 @@ after(async () => {
 
 const controlPlaneTab = (page: Page) => page.getByRole("link", { name: "Config", exact: true });
 
+// FG-831: an option reads `<path> · <branch>` by the shared label rule; match its branch.
 function checkoutScopeButton(page: Page, name: string) {
-  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(`^${name}$`) });
+  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(` · ${name}$`) });
 }
 
 const cpProjectDir = (page: Page) => page.locator(".cp-header .mono").first();
@@ -113,7 +114,7 @@ const cpProjectDir = (page: Page) => page.locator(".cp-header .mono").first();
 async function openScopedControlPlane(page: Page): Promise<void> {
   await page.goto(`${baseUrl}/#projects`);
   await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
+  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
   await controlPlaneTab(page).click();
   await page.locator(".cp-view").waitFor();
   assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_MAIN);
@@ -146,7 +147,7 @@ test("A slow leaving-scope config-graph response that lands after the switch can
   delayByScope.set(`dir:${CHECKOUT_MAIN}`, 3_000);
   await page.goto(`${baseUrl}/#projects`);
   await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
+  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
   await controlPlaneTab(page).click();
 
   // The main graph read has NOT resolved: the panel is genuinely pending.
@@ -190,7 +191,7 @@ test("A scope change during config-graph BODY decode cannot render the retired c
 
   await page.goto(`${baseUrl}/#projects`);
   await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
+  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
   await controlPlaneTab(page).click();
 
   // Headers are in, but the body is still held: the panel is genuinely pending.
