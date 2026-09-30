@@ -4,14 +4,13 @@
 // Runs badge (FG-821); view-routing.js owns the hashes.
 //
 // Every nav item is an <a href="#…"> link, so Tab / Enter / open-in-new-tab work
-// natively; group headings are plain headings, not controls. The only buttons are the
-// scope control's, More, and the drawer's close.
+// natively; group headings are plain headings, not controls. The only buttons are More
+// and the drawer's close.
 
 import { h } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useRef } from "preact/hooks";
 import htm from "htm";
 import { formatClock } from "./format.js";
-import { checkoutOptions } from "./checkout-label.js";
 import { BOTTOM_BAR_ITEMS, homeBadge, navHref, navModel } from "./nav-render.js";
 import { ROUTES } from "./view-routing.js";
 import { runsBadge } from "./runs-index-render.js";
@@ -27,11 +26,11 @@ function NavBadge({ badge }) {
   `;
 }
 
+// FG-843: the scope column is the project select and nothing else. Selecting a project
+// selects its primary checkout silently; the checkout is chosen only where it changes the
+// answer — the header chooser on Routing, Config and Notes (checkout-chooser-view.js).
 function ScopeControl({ scope, projects, onScopeChange, idPrefix }) {
-  const project = scope.project ? projects.find((p) => p.key === scope.project) ?? null : null;
-  const known = scope.project === null || project !== null;
-  const [showMissing, setShowMissing] = useState(false);
-  const { options, missingCount } = checkoutOptions(project, { showMissing, selected: scope.checkout });
+  const known = scope.project === null || projects.some((p) => p.key === scope.project);
   const selectId = `${idPrefix}-scope-project`;
   return html`
     <div class="nav-scope" role="group" aria-label="Project scope">
@@ -46,36 +45,6 @@ function ScopeControl({ scope, projects, onScopeChange, idPrefix }) {
         ${known ? null : html`<option value=${scope.project}>${scope.project}</option>`}
         ${projects.map((p) => html`<option key=${p.key} value=${p.key}>${p.label}</option>`)}
       </select>
-      ${scope.project && (options.length > 0 || missingCount > 0) ? html`
-        <div class="project-scope-options" aria-label="Project checkout scope">
-          <button
-            type="button"
-            class=${"checkout-scope-btn" + (!scope.checkout ? " checkout-scope-btn-active" : "")}
-            onClick=${() => onScopeChange({ project: scope.project, checkout: null })}
-            aria-pressed=${!scope.checkout}
-          >all checkouts</button>
-          ${options.map((option) => html`
-            <button
-              type="button"
-              key=${option.projectDir}
-              class=${"checkout-scope-btn" + (scope.checkout === option.projectDir ? " checkout-scope-btn-active" : "") + (option.missing ? " checkout-scope-btn-missing" : "")}
-              onClick=${() => onScopeChange({ project: scope.project, checkout: option.projectDir })}
-              aria-pressed=${scope.checkout === option.projectDir}
-              title=${option.projectDir}
-              data-primary=${option.primary ? "true" : null}
-            >${option.label}${option.primary ? html` <span class="checkout-primary-mark">primary</span>` : null}</button>
-          `)}
-          ${missingCount > 0 ? html`
-            <button
-              type="button"
-              class="checkout-missing-toggle"
-              aria-expanded=${showMissing}
-              onClick=${() => setShowMissing((v) => !v)}
-            >${showMissing ? `hide ${missingCount} missing` : `show ${missingCount} missing`}</button>
-          ` : null}
-        </div>
-      ` : null}
-      ${scope.project ? html`<button type="button" class="clear-filter" onClick=${() => onScopeChange({ project: null, checkout: null })}>clear ×</button>` : null}
     </div>
   `;
 }

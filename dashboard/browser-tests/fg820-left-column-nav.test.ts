@@ -191,38 +191,52 @@ test("FG-840: Routing names the project audit source for a scoped checkout and t
 test("FG-820: a reloaded deep link restores view and scope, and the scope reaches the server as ?projectKey/?projectDir", async () => {
   inboxMode = "counts";
   apiRequests.length = 0;
-  const hash = `#ops?project=atlas&checkout=${encodeURIComponent(MAIN)}`;
-  const page = await open(hash);
-  await page.locator(".page-title", { hasText: "Ops" }).waitFor();
-  const opsScoped = () => apiRequests.some((u) => u.startsWith("/api/ops") && new URL(u, baseUrl).searchParams.get("projectDir") === MAIN);
-  await page.waitForFunction(() => document.querySelectorAll(".checkout-scope-btn").length > 0);
-  assert.ok(opsScoped(), `the ops read carried projectDir=${MAIN}: ${JSON.stringify(apiRequests.filter((u) => u.startsWith("/api/ops")))}`);
-  assert.equal(await column(page).locator(".nav-scope-select").inputValue(), "atlas");
-  assert.equal(await column(page).locator(".checkout-scope-btn-active").innerText(), "atlas-main · main");
+  // FG-843: the checkout rides only on Routing, Config and Notes; Ops takes the project alone.
+  const opsPage = await open(`#ops?project=atlas&checkout=${encodeURIComponent(MAIN)}`);
+  await opsPage.locator(".page-title", { hasText: "Ops" }).waitFor();
+  await opsPage.waitForFunction(() => location.hash === "#ops?project=atlas");
+  await opsPage.waitForFunction(() => document.querySelector<HTMLSelectElement>(".nav-column .nav-scope-select")?.value === "atlas");
+  const opsReads = () => apiRequests.filter((u) => u.startsWith("/api/ops")).map((u) => new URL(u, baseUrl).searchParams);
+  for (let i = 0; i < 50 && !opsReads().some((q) => q.get("projectKey") === "atlas"); i += 1) await opsPage.waitForTimeout(100);
+  assert.ok(opsReads().some((q) => q.get("projectKey") === "atlas" && !q.has("projectDir")), `the ops read carried the project alone: ${JSON.stringify(apiRequests.filter((u) => u.startsWith("/api/ops")))}`);
+  await opsPage.close();
 
-  // Nav links carry the scope to other list views; scope-less views do not take it.
-  assert.equal(await column(page).getByRole("link", { name: "Usage", exact: true }).getAttribute("href"), `#usage?project=atlas&checkout=${encodeURIComponent(MAIN)}`);
+  apiRequests.length = 0;
+  const page = await open(`#routing?project=atlas&checkout=${encodeURIComponent(MAIN)}`);
+  await page.locator(".page-title", { hasText: "Routing" }).waitFor();
+  const chooser = page.locator(".page-head .checkout-chooser-button");
+  await chooser.waitFor();
+  const governanceScoped = (dir: string) => apiRequests.some((u) => u.startsWith("/api/governance") && new URL(u, baseUrl).searchParams.get("projectDir") === dir);
+  for (let i = 0; i < 50 && !governanceScoped(MAIN); i += 1) await page.waitForTimeout(100);
+  assert.ok(governanceScoped(MAIN), `the governance read carried projectDir=${MAIN}: ${JSON.stringify(apiRequests.filter((u) => u.startsWith("/api/governance")))}`);
+  assert.equal(await column(page).locator(".nav-scope-select").inputValue(), "atlas");
+  assert.match(await chooser.innerText(), /atlas-main · main/);
+
+  // Nav links carry the scope to other list views — the checkout only to the checkout-scoped ones.
+  assert.equal(await column(page).getByRole("link", { name: "Usage", exact: true }).getAttribute("href"), "#usage?project=atlas");
+  assert.equal(await column(page).getByRole("link", { name: "Config", exact: true }).getAttribute("href"), `#config?project=atlas&checkout=${encodeURIComponent(MAIN)}`);
   assert.equal(await column(page).getByRole("link", { name: "Projects", exact: true }).getAttribute("href"), "#projects");
 
-  // A scope change rewrites the hash in place — no new history entry.
+  // A checkout change rewrites the hash in place — no new history entry.
   const historyBefore = await page.evaluate(() => history.length);
-  await column(page).locator(".checkout-scope-btn", { hasText: /^atlas feature · feature$/ }).click();
-  assert.equal(hashOf(page), `#ops?project=atlas&checkout=${encodeURIComponent(FEATURE)}`);
+  await chooser.click();
+  await page.getByRole("option", { name: /atlas feature · feature/ }).click();
+  assert.equal(hashOf(page), `#routing?project=atlas&checkout=${encodeURIComponent(FEATURE)}`);
   assert.equal(await page.evaluate(() => history.length), historyBefore, "scope change used replaceState");
-  await page.waitForFunction((dir) => document.querySelector(".checkout-scope-btn-active")?.getAttribute("title") === dir, FEATURE);
+  await page.waitForFunction((dir) => document.querySelector(".page-head .checkout-chooser-button")?.getAttribute("title") === dir, FEATURE);
 
   apiRequests.length = 0;
   await page.reload();
-  await page.locator(".page-title", { hasText: "Ops" }).waitFor();
-  await page.waitForFunction(() => document.querySelectorAll(".checkout-scope-btn").length > 0);
-  assert.equal(await column(page).locator(".checkout-scope-btn-active").innerText(), "atlas feature · feature", "reload restored the checkout scope");
-  assert.ok(apiRequests.some((u) => u.startsWith("/api/ops") && new URL(u, baseUrl).searchParams.get("projectDir") === FEATURE),
-    "after reload the server still receives the scope from the hash");
+  await page.locator(".page-title", { hasText: "Routing" }).waitFor();
+  await page.locator(".page-head .checkout-chooser-button").waitFor();
+  assert.match(await page.locator(".page-head .checkout-chooser-button").innerText(), /atlas feature · feature/, "reload restored the checkout scope");
+  for (let i = 0; i < 50 && !governanceScoped(FEATURE); i += 1) await page.waitForTimeout(100);
+  assert.ok(governanceScoped(FEATURE), "after reload the server still receives the scope from the hash");
   assert.ok(await page.evaluate(() => Object.keys(localStorage).length === 0 && Object.keys(sessionStorage).length === 0), "nothing is stored client-side");
 
-  // Clearing the scope clears it from the hash.
-  await column(page).locator(".clear-filter").click();
-  assert.equal(hashOf(page), "#ops");
+  // Clearing the scope (the select's All projects) clears it from the hash.
+  await column(page).locator(".nav-scope-select").selectOption("");
+  assert.equal(hashOf(page), "#routing");
   assert.equal(await column(page).locator(".nav-scope-select").inputValue(), "");
   await page.close();
 });
@@ -421,10 +435,12 @@ function createFixtureServer(): Server {
         label: "Atlas",
         color: "#345",
         classification: "independent",
+        primaryCheckout: MAIN,
         checkouts: [
-          { projectDir: MAIN, branch: "main", exists: true },
-          { projectDir: FEATURE, branch: "feature", exists: true },
+          { projectDir: MAIN, branch: "main", exists: true, kind: "operator" },
+          { projectDir: FEATURE, branch: "feature", exists: true, kind: "operator" },
         ],
+        checkoutCounts: { operator: 2, liveOperator: 2, run: 0 },
       }]);
       return;
     }

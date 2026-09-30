@@ -7,8 +7,10 @@
 //
 // The window-change path (agent-runtime.test.ts) already invalidated on a
 // window change; this suite proves the SAME invalidation now runs when the
-// operator changes scope through a `.checkout-scope-btn`, for BOTH metrics
-// (duration and the completed-runs count — AC5).
+// operator changes scope, for BOTH metrics (duration and the completed-runs count
+// — AC5). FG-843 retired the scope bar's checkout buttons (Ops reads the whole
+// project), so the scope switch under test is the project select moving from Atlas
+// to Borealis — a genuinely different read, exactly as the checkout switch was.
 // Mirrors browser-tests/agent-runtime.test.ts.
 
 import { after, before, test } from "node:test";
@@ -32,6 +34,7 @@ const DAY = 86_400_000;
 const PROJECT_KEY = "atlas";
 const CHECKOUT_MAIN = "/checkouts/atlas-main";
 const CHECKOUT_FEATURE = "/checkouts/atlas-feature";
+const OTHER_KEY = "borealis";
 
 const projectsFixture = [
   {
@@ -49,6 +52,19 @@ const projectsFixture = [
       { projectDir: CHECKOUT_MAIN, branch: "main", exists: true },
       { projectDir: CHECKOUT_FEATURE, branch: "feature", exists: true },
     ],
+  },
+  {
+    key: OTHER_KEY,
+    label: "Borealis",
+    color: "#c084fc",
+    runCount: 3,
+    inFlightCount: 0,
+    liveSessions: 0,
+    lastRunAt: "2026-06-09T12:00:00.000Z",
+    githubUrl: null,
+    description: "the project the scope switches to",
+    readmeFirstLine: null,
+    checkouts: [{ projectDir: "/checkouts/borealis", branch: "main", exists: true }],
   },
 ];
 
@@ -155,13 +171,13 @@ async function openScopedOps(page: Page): Promise<void> {
   await page.getByRole("heading", { name: "Average agent runtime over time" }).waitFor();
 }
 
-// The single-checkout scope button in the checkout-scope banner (render 576-589).
-// FG-831: an option reads `<path> · <branch>` by the shared label rule; match its branch.
-function checkoutScopeButton(page: Page, name: string) {
-  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(` · ${name}$`) });
+// The scope column's project select (FG-843: the only scope control).
+const scopeSelect = (page: Page) => page.locator(".nav-column .nav-scope-select");
+async function switchScope(page: Page, key: string): Promise<void> {
+  await scopeSelect(page).selectOption(key);
 }
 
-test("Switching checkout scope drops the DURATION panel to loading, not the previous scope's sample note", async () => {
+test("Switching scope drops the DURATION panel to loading, not the previous scope's sample note", async () => {
   delayByScope.clear();
   statusByScope.clear();
   const page = await newPage({ width: 1440, height: 1200 });
@@ -174,8 +190,8 @@ test("Switching checkout scope drops the DURATION panel to loading, not the prev
   // The single-checkout read hangs. When the operator narrows scope, the panel
   // must show loading — NOT keep "14 runs" (the abandoned scope's number) under
   // the new scope's label.
-  delayByScope.set(`dir:${CHECKOUT_MAIN}`, 5_000);
-  await checkoutScopeButton(page, "main").click();
+  delayByScope.set(`key:${OTHER_KEY}`, 5_000);
+  await switchScope(page, OTHER_KEY);
 
   const loading = page.locator(".runtime-loading");
   await loading.waitFor();
@@ -186,7 +202,7 @@ test("Switching checkout scope drops the DURATION panel to loading, not the prev
   await page.close();
 });
 
-test("Switching checkout scope drops the COMPLETED-RUNS panel to loading, not the previous scope's total", async () => {
+test("Switching scope drops the COMPLETED-RUNS panel to loading, not the previous scope's total", async () => {
   delayByScope.clear();
   statusByScope.clear();
   const page = await newPage({ width: 1440, height: 1200 });
@@ -197,8 +213,8 @@ test("Switching checkout scope drops the COMPLETED-RUNS panel to loading, not th
   // The all-checkouts scope resolved: its total is on screen.
   assert.equal(await page.locator(".runs-total-num").innerText(), "9");
 
-  delayByScope.set(`dir:${CHECKOUT_MAIN}`, 5_000);
-  await checkoutScopeButton(page, "main").click();
+  delayByScope.set(`key:${OTHER_KEY}`, 5_000);
+  await switchScope(page, OTHER_KEY);
 
   const loading = page.locator(".runtime-loading");
   await loading.waitFor();
@@ -241,7 +257,7 @@ test("A slow leaving-scope failure that lands after the scope switch cannot repa
   );
 
   // Narrow to a fast, clean checkout scope while the leaving 500 is in flight.
-  await checkoutScopeButton(page, "main").click();
+  await switchScope(page, OTHER_KEY);
   await page.getByRole("img", { name: /Average agent runtime for/ }).waitFor();
   assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's own data is shown");
 
@@ -255,11 +271,11 @@ test("A slow leaving-scope failure that lands after the scope switch cannot repa
   assert.equal(await page.locator(".runtime-stale").count(), 0, "a late leaving-scope failure cannot be pinned to the new scope's data as stale");
   assert.equal(await page.locator(".runtime-error").count(), 0, "a late leaving-scope failure cannot repaint the abandoned scope");
   assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's data still stands");
-  assert.equal(await checkoutScopeButton(page, "main").getAttribute("aria-pressed"), "true");
+  assert.equal(await scopeSelect(page).inputValue(), OTHER_KEY);
   await page.close();
 });
 
-test("Switching checkout scope clears the leaving scope's on-screen error (checkout-scope-btn)", async () => {
+test("Switching scope clears the leaving scope's on-screen error (the project select)", async () => {
   delayByScope.clear();
   statusByScope.clear();
   const page = await newPage({ width: 1440, height: 1200 });
@@ -278,11 +294,11 @@ test("Switching checkout scope clears the leaving scope's on-screen error (check
   assert.match(await error.innerText(), /HTTP 500/);
 
   // The new (checkout) scope answers cleanly: the leaving error must clear.
-  await checkoutScopeButton(page, "main").click();
+  await switchScope(page, OTHER_KEY);
   await page.getByRole("img", { name: /Average agent runtime for/ }).waitFor();
   assert.equal(await page.locator(".runtime-error").count(), 0, "the leaving scope's error is not attributed to the new scope");
   assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's own data is shown");
-  assert.equal(await checkoutScopeButton(page, "main").getAttribute("aria-pressed"), "true");
+  assert.equal(await scopeSelect(page).inputValue(), OTHER_KEY);
   await page.close();
 });
 
@@ -329,7 +345,7 @@ test("Clearing the project filter drops DURATION data and clears the old scope's
   // The unscoped response hangs, which gives the assertion a real pending
   // interval rather than merely checking the eventual replacement payload.
   delayByScope.set("unscoped", 5_000);
-  await page.locator(".clear-filter").click();
+  await switchScope(page, "");
 
   const loading = page.locator(".runtime-loading");
   await loading.waitFor();
@@ -345,18 +361,15 @@ test("Clearing the project filter drops DURATION data and clears the old scope's
   await page.close();
   delayByScope.clear();
   statusByScope.clear();
-  statusByScope.set(`dir:${CHECKOUT_MAIN}`, 500);
+  statusByScope.set(`key:${OTHER_KEY}`, 500);
   const errorPage = await newPage({ width: 1440, height: 1200 });
-  await errorPage.goto(`${baseUrl}/#projects`);
-  await errorPage.locator(".project-dirs-toggle").click();
-  await errorPage.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
-  await errorPage.getByRole("link", { name: "Ops", exact: true }).click();
+  await errorPage.goto(`${baseUrl}/#ops?project=${OTHER_KEY}`);
   const error = errorPage.locator(".runtime-error");
   await error.waitFor();
   assert.match(await error.innerText(), /HTTP 500/);
 
   delayByScope.set("unscoped", 5_000);
-  await errorPage.locator(".clear-filter").click();
+  await switchScope(errorPage, "");
   await errorPage.locator(".runtime-loading").waitFor();
   assert.equal(await errorPage.locator(".runtime-error").count(), 0,
     "clearProjectFilter must not attribute the project error to the unscoped panel");
@@ -408,7 +421,7 @@ function createFixtureServer(): Server {
         res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "store read failed" }));
         return;
       }
-      const single = scope.startsWith("dir:");
+      const single = scope.startsWith("dir:") || scope === `key:${OTHER_KEY}`;
       const payload = url.pathname === "/api/completed-runs"
         ? (single ? countOneCheckout : countAllCheckouts)
         : (single ? durationOneCheckout : durationAllCheckouts);

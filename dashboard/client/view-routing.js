@@ -30,6 +30,12 @@
 // FG-844: `#queue?lane=<view>` names the lane the under-900px strip shows (the values are
 // queue-board-state.js's BOARD_VIEWS); an unknown lane is dropped, and the board then shows
 // its first lane with cards.
+// FG-843: `checkout=` rides only on the three views whose answer changes with the
+// checkout (`checkout: true` — Routing, Config, Notes); every other view drops it, so a
+// project scope alone means the project's primary checkout, silently. The one carve-out is
+// a role PAGE (`checkout: "object"`): FG-835's Models rows link to a role's Harness tab at
+// the checkout the row was resolved at, and that provenance must survive the link. It is
+// never a chooser — nothing on a role page offers another checkout.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -45,7 +51,7 @@ export const ROUTES = Object.freeze({
   home: { group: "now", label: "Home", path: "#home", scope: "optional", object: "none", aliases: [] },
   activity: { group: "now", label: "Activity", path: "#activity", scope: "optional", object: "none", aliases: [] },
   backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", params: ["type", "status"], paramValues: { type: ["epic", "story", "idea"], status: ["all", "blocked", "deferred", "done"] }, aliases: [] },
-  notes: { group: "plan", label: "Notes", path: "#notes[/<checkout>]", scope: "optional", object: "optional", aliases: [] },
+  notes: { group: "plan", label: "Notes", path: "#notes[/<checkout>]", scope: "optional", checkout: true, object: "optional", aliases: [] },
   queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", params: ["lane"], paramValues: { lane: ["backlog", "queued", "in_progress", "blocked", "done", "executing_not_queued"] }, aliases: [] },
   campaigns: { group: "plan", label: "Campaigns", path: "#campaigns[/<campaignId>]", scope: "optional", object: "optional", aliases: [] },
   runs: { group: "evidence", label: "Runs", path: "#runs", scope: "optional", object: "none", params: ["status"], aliases: [] },
@@ -53,10 +59,10 @@ export const ROUTES = Object.freeze({
   task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
-  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "object", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["family", "sort", "dir"], paramValues: { family: ["build", "red", "research", "test", "review", "plan", "author"], sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
-  routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", params: ["mode"], paramValues: { mode: ["edit"] }, aliases: ["governance"] },
+  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "object", checkout: "object", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["family", "sort", "dir"], paramValues: { family: ["build", "red", "research", "test", "review", "plan", "author"], sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
+  routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", checkout: true, object: "none", params: ["mode"], paramValues: { mode: ["edit"] }, aliases: ["governance"] },
   models: { group: "setup", label: "Models", path: "#models", scope: "optional", object: "none", params: ["mode", "target"], paramValues: { mode: ["edit"], target: ["host", "project"] }, aliases: [] },
-  config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
+  config: { group: "setup", label: "Config", path: "#config", scope: "checkout", checkout: true, object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },
   usage: { group: "health", label: "Usage", path: "#usage", scope: "optional", object: "none", aliases: [] },
   ops: { group: "health", label: "Ops", path: "#ops", scope: "optional", object: "none", params: ["since", "window"], paramValues: { since: ["30d", "all"], window: ["1d", "30d", "90d", "all"] }, aliases: [] },
@@ -96,9 +102,16 @@ export function carriesScope(view, id = null) {
   return route.scope !== "object" || Boolean(id);
 }
 
-function normalizeScope(scope) {
+/** Whether a view's hash carries `checkout=` (FG-843): Routing, Config and Notes — and a
+ *  role page, whose checkout is FG-835's resolution provenance, not a choice. */
+export function carriesCheckout(view, id = null) {
+  const carried = ROUTES[view]?.checkout;
+  return carried === true || (carried === "object" && Boolean(id));
+}
+
+function normalizeScope(scope, view = null, id = null) {
   const project = scope && typeof scope.project === "string" && scope.project !== "" ? scope.project : null;
-  const checkout = project && typeof scope.checkout === "string" && scope.checkout !== "" ? scope.checkout : null;
+  const checkout = project && (view === null || carriesCheckout(view, id)) && typeof scope.checkout === "string" && scope.checkout !== "" ? scope.checkout : null;
   return { project, checkout };
 }
 
@@ -128,7 +141,7 @@ export function hashFor({ view, id = null, tab = null, scope = null, params = nu
     if (route.tabs && tab && tab !== route.tabs[0] && route.tabs.includes(tab)) path += `/${encodeURIComponent(tab)}`;
   }
   const query = [];
-  const { project, checkout } = carriesScope(name, route.object !== "none" ? id : null) ? normalizeScope(scope) : NO_SCOPE;
+  const { project, checkout } = carriesScope(name, route.object !== "none" ? id : null) ? normalizeScope(scope, name, route.object !== "none" ? id : null) : NO_SCOPE;
   if (project) query.push(`project=${encodeURIComponent(project)}`);
   if (checkout) query.push(`checkout=${encodeURIComponent(checkout)}`);
   query.push(...routeParams(route, params, route.object !== "none" ? id : null));
@@ -186,6 +199,7 @@ export function parseHash(hash) {
   }
 
   if (!carriesScope(view, id)) scope = NO_SCOPE;
+  else scope = normalizeScope(scope, view, id);
   const owner = ROUTES[view];
   if (!(owner.object !== "none" && id)) {
     for (const key of owner.params ?? []) {

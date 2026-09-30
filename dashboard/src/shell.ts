@@ -429,7 +429,6 @@ section.feed { margin-top: 24px; }
   width: 100%; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
   border-radius: 4px; font: inherit; font-size: 13px; padding: 5px 6px;
 }
-.nav-scope .clear-filter { align-self: flex-start; }
 .nav-groups { display: flex; flex-direction: column; gap: 14px; }
 .nav-group-heading { font-size: 10px; color: var(--fg-faint); margin: 0 0 4px 8px; }
 .nav-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -454,7 +453,53 @@ section.feed { margin-top: 24px; }
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
-.page-head { display: flex; align-items: baseline; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.page-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+/* FG-843: the checkout chooser in the Routing / Config / Notes header — a button and a
+   listbox of the project's live operator checkouts; a plain label when there is one. */
+.page-head-spacer { flex: 1; }
+.checkout-chooser { position: relative; align-self: center; font-size: 12.5px; color: var(--fg-dim); }
+.checkout-chooser-button, .checkout-chooser-plain {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font: inherit; color: var(--fg-dim);
+}
+.checkout-chooser-button { cursor: pointer; }
+.checkout-chooser-plain { background: transparent; border-color: transparent; padding-right: 0; }
+.checkout-chooser-button:hover { border-color: var(--fg-dim); }
+.checkout-chooser-button:focus-visible, .checkout-chooser-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.checkout-chooser-value { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--fg); overflow-wrap: anywhere; }
+.checkout-chooser-chip {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 4px; color: var(--fg-dim); white-space: nowrap;
+}
+.checkout-chooser-chip-primary { color: var(--accent); border-color: #3a4a80; }
+.checkout-chooser-chip-run { color: var(--warn); border-color: currentColor; }
+.checkout-chooser-caret { font-size: 10px; }
+.checkout-chooser-menu {
+  position: absolute; right: 0; top: 100%; z-index: 32; margin: 6px 0 0; padding: 6px; list-style: none;
+  min-width: 300px; max-width: min(460px, calc(100vw - 32px)); box-sizing: border-box;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.checkout-chooser-option {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 5px;
+  font-size: 13px; color: var(--fg); cursor: pointer;
+}
+.checkout-chooser-option:hover, .checkout-chooser-option[aria-selected="true"] { background: var(--bg-elev-2); }
+.checkout-chooser-option .checkout-chooser-value, .checkout-chooser-option .checkout-chooser-chip { flex: none; white-space: nowrap; }
+.checkout-chooser-path {
+  margin-left: auto; padding-left: 12px; min-width: 0; color: var(--fg-faint); font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.checkout-chooser-footer {
+  margin-top: 4px; padding: 8px 9px 4px; border-top: 1px solid var(--border);
+  color: var(--fg-faint); font-size: 11px;
+}
+@media (max-width: 719px) {
+  .checkout-chooser { flex-basis: 100%; }
+  .checkout-chooser-menu { left: 0; right: auto; min-width: 0; width: 100%; }
+  .checkout-chooser-path { display: none; }
+  .checkout-chooser-option .checkout-chooser-value { flex: 0 1 auto; white-space: normal; overflow-wrap: anywhere; }
+}
 .page-kicker { color: var(--fg-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .route-notice { margin-top: 16px; }
 .placeholder-view a { color: var(--accent); }
@@ -548,6 +593,7 @@ a.backlog-ticket-card { display: block; color: inherit; text-decoration: none; }
 /* FG-830: the Notes view — one compact row per checkout, the note on its own page. */
 .notes-list { list-style: none; margin: 16px 0 0; padding: 0; }
 a.notes-row { display: block; color: inherit; text-decoration: none; }
+.notes-run-caption { margin: 22px 0 0; color: var(--fg-faint); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; }
 .notes-row-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
 .notes-label { overflow-wrap: anywhere; }
 .notes-session { font-size: 11px; margin-left: auto; }
@@ -812,33 +858,7 @@ a.notes-row { display: block; color: inherit; text-decoration: none; }
 }
 .filter-banner strong { color: var(--accent); }
 .project-scope-banner { gap: 10px; flex-wrap: wrap; }
-.project-scope-options { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
-.checkout-scope-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--fg-dim);
-  cursor: pointer;
-  font: 10px ui-monospace, "SF Mono", Menlo, monospace;
-  padding: 3px 7px;
-  text-align: left;
-}
-.checkout-scope-btn:hover { color: var(--fg); border-color: var(--fg-dim); }
-.checkout-scope-btn-active { background: rgba(122, 159, 255, 0.16); border-color: var(--accent); color: var(--accent); }
-/* FG-831: the primary checkout's mark, a missing checkout's option, and the "show N missing" disclosure. */
-.checkout-primary-mark { border: 1px solid currentColor; border-radius: 3px; font-size: 9px; opacity: 0.8; padding: 0 3px; }
-.checkout-scope-btn-missing { border-style: dashed; font-style: italic; }
-.checkout-missing-toggle {
-  background: transparent; border: 0; color: var(--fg-dim); cursor: pointer;
-  font: 10px ui-monospace, "SF Mono", Menlo, monospace; padding: 3px 4px; text-decoration: underline;
-}
-.checkout-missing-toggle:hover { color: var(--fg); }
 .project-missing-count { font-size: 11px; margin-top: 4px; }
-.clear-filter {
-  background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
-  font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
-}
-.clear-filter:hover { color: var(--fg); border-color: var(--fg-dim); }
 
 /* "copy id" button in the task-detail header. */
 .copy-id {

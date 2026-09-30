@@ -15,7 +15,7 @@ import { basename, join, resolve } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta, projectColorForKey } from "@forge/project-meta";
 import { readBacklogConfig } from "@forge/backlog-config";
-import { listProjects, sortProjects, operatorProjects, type ProjectRecord } from "@forge/projects";
+import { listProjects, sortProjects, operatorProjects, type ProjectCheckout, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
 import { buildConfigGraph, redactGraph } from "../../src/v2/config-graph.js";
@@ -2355,12 +2355,45 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
 // shared store/db.ts cache is per-module and separate from queries.ts's
 // readonly handle above). On a fresh install with no DB, getDb() will create
 // the schema; on a real install it's a no-op. Acceptable cost.
-export function projectsForDashboard(): ProjectRecord[] {
+export function projectsForDashboard(): DashboardProjectRecord[] {
   const now = Date.now();
   if (projectCache && now - projectCache.at < PROJECT_CACHE_MS) return projectCache.projects;
-  const projects = presentationRegistry(sortProjects(listProjects(), "activity"));
+  const projects = presentationRegistry(sortProjects(listProjects(), "activity")).map(withCheckoutKinds);
   projectCache = { at: now, projects };
   return projects;
+}
+
+// FG-843: THE checkout-kind rule, stated once. An OPERATOR checkout is one of the
+// registry's own rows: the project's primary checkout, a directory the operator
+// registered as a project (`forge projects classify <dir> --purpose operator` — the
+// workspace_purposes row the projects index reads). A live interactive session is not
+// registration: liveSessions stays a displayed fact and never promotes a checkout. Every
+// other checkout exists only because a run or task executed in it (an agent clone,
+// ~/.forge/worktrees/*, a per-ticket clone): a RUN checkout. Run checkouts stay on the record — their runs keep their project, labels and scope — but
+// the dashboard's checkout chooser offers operator checkouts only. No flag and no
+// schema: the kind is derived here and served on GET /api/projects.
+export type CheckoutKind = "operator" | "run";
+export type KindedCheckout = ProjectCheckout & { kind: CheckoutKind };
+export type CheckoutCounts = { operator: number; liveOperator: number; run: number };
+export type DashboardProjectRecord = Omit<ProjectRecord, "checkouts"> & { checkouts: KindedCheckout[]; checkoutCounts: CheckoutCounts };
+
+export function checkoutKind(record: Pick<ProjectRecord, "primaryCheckout">, checkout: ProjectCheckout): CheckoutKind {
+  if (checkout.projectDir === record.primaryCheckout) return "operator";
+  return checkout.purpose === "operator" ? "operator" : "run";
+}
+
+export function withCheckoutKinds(record: ProjectRecord): DashboardProjectRecord {
+  const checkouts = record.checkouts.map((checkout) => ({ ...checkout, kind: checkoutKind(record, checkout) }));
+  const operator = checkouts.filter((checkout) => checkout.kind === "operator");
+  return {
+    ...record,
+    checkouts,
+    checkoutCounts: {
+      operator: operator.length,
+      liveOperator: operator.filter((checkout) => checkout.exists).length,
+      run: checkouts.length - operator.length,
+    },
+  };
 }
 
 // FG-745: the OPERATOR-project membership projection, for the Projects grid. It is
@@ -2377,7 +2410,7 @@ export function projectsForDashboard(): ProjectRecord[] {
 // projectsForDashboard(), so an active artifact's runs and live session stay reachable
 // in Current Activity and its scope still resolves — the Projects presentation filter
 // never hides live work.
-export function operatorProjectsForDashboard(): ProjectRecord[] {
+export function operatorProjectsForDashboard(): DashboardProjectRecord[] {
   return operatorProjects(projectsForDashboard());
 }
 
@@ -2388,9 +2421,9 @@ export function operatorProjectsForDashboard(): ProjectRecord[] {
 // own repository never becomes a Projects card or a scope option.
 //
 // A surviving project keeps ALL its checkouts, missing ones included (FG-831 AC2): the
-// client's shared rule (client/checkout-label.js) withholds a missing checkout from the
-// scope bar behind "show N missing" and labels it `missing on disk`, and the Projects card
-// counts them next to `forge projects prune --missing`. Deciding that here instead would
+// client's shared rule (client/checkout-label.js) labels a missing checkout `missing on
+// disk` wherever it is named, the header chooser never offers one (FG-843), and the
+// Projects card counts them next to `forge projects prune --missing`. Deciding that here instead would
 // make the count unknowable and a remembered missing scope unselectable. Checkouts the
 // operator pruned never reach this function (listProjects drops them). The record's
 // aggregate runCount/inFlightCount/liveSessions/lastRunAt and its full historical
@@ -2407,7 +2440,7 @@ export function presentationRegistry(projects: ProjectRecord[]): ProjectRecord[]
 // selection fans out to feed/in-flight/usage/etc. without re-scanning between
 // simultaneous requests. DB rows themselves are still queried on every call.
 const PROJECT_CACHE_MS = 30_000;
-let projectCache: { at: number; projects: ProjectRecord[] } | null = null;
+let projectCache: { at: number; projects: DashboardProjectRecord[] } | null = null;
 
 /** Resolve HTTP selection into either one exact checkout or every observed
  * member path of a canonical repository. Unknown keys intentionally match

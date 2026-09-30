@@ -2,6 +2,9 @@
 // the Backlog's tickets. `#notes` lists one row per checkout with a note; `#notes/<dir>`
 // is that checkout's note page, rendered through the sanitized Markdown boundary.
 // Read-only: the data is GET /api/backlog's `notesByCheckout`, and nothing here writes.
+// FG-843: the list IS the Notes checkout chooser's content — operator checkouts first,
+// run checkouts that left a note under their own caption; the header chooser (on the list
+// and on a note page) offers the operator checkouts only.
 
 import { h } from "preact";
 import htm from "htm";
@@ -9,7 +12,9 @@ import { md } from "./markdown.js";
 import { noteTrail, parentHash } from "./breadcrumbs-render.js";
 import { noteHeader } from "./screen-header-render.js";
 import { ObjectHead, useEscapeTo } from "./object-page-view.js";
-import { NO_NOTES_MESSAGE, NO_PROJECT_MESSAGE, noteRowFor, noteRows, sessionDisplay } from "./notes-render.js";
+import { NO_NOTES_MESSAGE, NO_PROJECT_MESSAGE, RUN_CHECKOUTS_CAPTION, noteGroups, noteRowFor, noteRows, scopedProject, sessionDisplay } from "./notes-render.js";
+import { hashFor } from "./view-routing.js";
+import { CheckoutChooser } from "./checkout-chooser-view.js";
 
 const html = htm.bind(h);
 
@@ -22,16 +27,12 @@ function PrimaryMark({ primary }) {
   return primary ? html`<span class="badge notes-primary" title="The project's primary checkout">primary</span>` : null;
 }
 
-export function NotesView({ data, projectFilter, scope, projects }) {
-  if (!projectFilter) return html`<div class="card muted notes-no-project" role="note">${NO_PROJECT_MESSAGE}</div>`;
-  if (!data) return html`<div class="muted">loading notes…</div>`;
-  const rows = noteRows(data, scope, projects);
-  if (rows.length === 0) return html`<div class="muted notes-empty">${NO_NOTES_MESSAGE}</div>`;
+function NoteList({ rows, label }) {
   return html`
-    <ul class="notes-list" aria-label="Session handoff notes by checkout">
+    <ul class="notes-list" aria-label=${label}>
       ${rows.map((row) => html`
         <li key=${row.checkoutDir}>
-          <a class="card notes-row" href=${row.href} data-checkout=${row.checkoutDir} aria-label=${`Open the session handoff for ${row.label}`}>
+          <a class="card notes-row" href=${row.href} data-checkout=${row.checkoutDir} data-checkout-kind=${row.kind} aria-label=${`Open the session handoff for ${row.label}`}>
             <div class="notes-row-head">
               <${PrimaryMark} primary=${row.primary} />
               <strong class="notes-label" title=${row.checkoutDir}>${row.label}</strong>
@@ -45,13 +46,34 @@ export function NotesView({ data, projectFilter, scope, projects }) {
   `;
 }
 
+export function NotesView({ data, projectFilter, scope, projects }) {
+  if (!projectFilter) return html`<div class="card muted notes-no-project" role="note">${NO_PROJECT_MESSAGE}</div>`;
+  if (!data) return html`<div class="muted">loading notes…</div>`;
+  const rows = noteRows(data, scope, projects);
+  if (rows.length === 0) return html`<div class="muted notes-empty">${NO_NOTES_MESSAGE}</div>`;
+  const groups = noteGroups(rows);
+  return html`
+    ${groups.operator.length > 0 ? html`<${NoteList} rows=${groups.operator} label="Session handoff notes by checkout" />` : null}
+    ${groups.run.length > 0 ? html`
+      <h2 class="notes-run-caption" title="Directories a run executed in. Their notes are listed here; the checkout chooser offers operator checkouts only.">${RUN_CHECKOUTS_CAPTION}</h2>
+      <${NoteList} rows=${groups.run} label="Session handoff notes left in run checkouts" />
+    ` : null}
+  `;
+}
+
 export function NotePage({ checkoutDir, data, scope, projects }) {
   const row = data ? noteRowFor(noteRows(data, scope, projects), checkoutDir) : null;
   const label = row ? row.label : checkoutDir;
   useEscapeTo(parentHash("note", null, scope));
   return html`
     <section class="object-page note-page" data-checkout=${checkoutDir}>
-      <${ObjectHead} crumbs=${noteTrail(label, scope, projects)} title=${label} header=${noteHeader(row)} />
+      <${ObjectHead} crumbs=${noteTrail(label, scope, projects)} title=${label} header=${noteHeader(row)}>
+        <${CheckoutChooser}
+          project=${scopedProject(scope, projects)}
+          selected=${checkoutDir}
+          onChoose=${(dir) => { window.location.hash = hashFor({ view: "notes", id: dir, scope: { project: scope?.project ?? null, checkout: null } }); }}
+        />
+      <//>
       ${!scope || !scope.project
         ? html`<div class="card muted notes-no-project" role="note">${NO_PROJECT_MESSAGE}</div>`
         : !data

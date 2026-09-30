@@ -235,7 +235,7 @@ test("In-flight rows copy their task id without opening task detail", async () =
   await page.close();
 });
 
-test("Projects renders one canonical card with subordinate checkouts and preserves exact checkout selection", async () => {
+test("Projects renders one canonical card with subordinate checkouts, and a checkout row scopes Activity to its project", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   const activityRequests: URL[] = [];
   page.on("request", (request) => {
@@ -253,7 +253,8 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
 
   await card.locator(".project-checkout-row").filter({ hasText: "dashboard-home" }).click();
   await page.getByRole("heading", { name: "Recent agent outputs" }).waitFor();
-  await assertEventually(async () => activityRequests.some((url) => url.searchParams.get("projectDir") === "/workspace/forge-dashboard"));
+  // FG-843: Activity reads the whole project; a checkout row scopes to its project.
+  await assertEventually(async () => activityRequests.some((url) => url.searchParams.has("projectKey") && !url.searchParams.has("projectDir")));
   const projectChip = page.locator(".feed .project-chip").first();
   assert.equal(await projectChip.innerText(), "Forge");
   assert.equal(await page.locator(".feed .checkout-chip").first().innerText(), "forge-dashboard · dashboard-home", "FG-831: the feed names its checkout by the shared label rule");

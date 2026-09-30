@@ -15,6 +15,7 @@ export interface NoteRow {
   label: string;
   branch: string | null;
   primary: boolean;
+  kind: "operator" | "run";
   notes: string;
   session: NoteSession;
   sessionMs: number | null;
@@ -22,7 +23,7 @@ export interface NoteRow {
   href: string;
 }
 type Scope = { project?: string | null; checkout?: string | null } | null | undefined;
-type Projects = readonly { key: string; primaryCheckout?: string; checkouts?: readonly { projectDir: string; projectDirs?: readonly string[]; branch?: string | null; exists?: boolean }[] }[] | null | undefined;
+type Projects = readonly { key: string; primaryCheckout?: string; checkouts?: readonly { projectDir: string; projectDirs?: readonly string[]; branch?: string | null; exists?: boolean; kind?: "operator" | "run" }[] }[] | null | undefined;
 
 export const NO_PROJECT_MESSAGE: string;
 export const NO_NOTES_MESSAGE: string;
@@ -33,3 +34,5 @@ export function notePreview(notes: string | null | undefined, max?: number): str
 export function scopedProject(scope: Scope, projects: Projects): { key: string; primaryCheckout?: string } | null;
 export function noteRows(data: { notesByCheckout?: readonly NotesEntry[] } | null | undefined, scope: Scope, projects: Projects): NoteRow[];
 export function noteRowFor(rows: readonly NoteRow[], checkoutDir: string | null | undefined): NoteRow | null;
+export const RUN_CHECKOUTS_CAPTION: string;
+export function noteGroups(rows: readonly NoteRow[]): { operator: NoteRow[]; run: NoteRow[] };

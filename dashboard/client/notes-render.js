@@ -6,7 +6,7 @@
 // that, the file's mtime as the server reported it; failing both, "unknown" — never a
 // guessed date. Rows sort newest session first, unknown last.
 
-import { checkoutLabelForDir } from "./checkout-label.js";
+import { checkoutKindForDir, checkoutLabelForDir } from "./checkout-label.js";
 import { formatRelativeTime, formatTimestamp } from "./format.js";
 import { hashFor } from "./view-routing.js";
 
@@ -74,7 +74,9 @@ export function scopedProject(scope, projects) {
 
 /**
  * One row per checkout with a non-empty note, newest session first (unknown last, then by
- * label). `label` is FG-831's checkout label; `primary` marks the project's primary checkout.
+ * label). `label` is FG-831's checkout label; `primary` marks the project's primary checkout;
+ * `kind` is the server's operator/run kind for the checkout (FG-843) — a directory the
+ * project does not list reads `run`, since only the registry's own rows are operator ones.
  */
 export function noteRows(data, scope, projects) {
   const entries = data && Array.isArray(data.notesByCheckout) ? data.notesByCheckout : [];
@@ -89,6 +91,7 @@ export function noteRows(data, scope, projects) {
         label: checkoutLabelForDir(entry.checkoutDir, projects, entry.checkoutBranch ?? null),
         branch: entry.checkoutBranch ?? null,
         primary: primaryKey !== null && pathKey(entry.checkoutDir) === primaryKey,
+        kind: checkoutKindForDir(entry.checkoutDir, project) === "operator" ? "operator" : "run",
         notes: entry.notes,
         session,
         sessionMs: validTime(session.iso),
@@ -105,6 +108,17 @@ export function noteRows(data, scope, projects) {
     return a.label.localeCompare(b.label);
   });
 }
+
+/** FG-843: the rows split for the list — operator checkouts, then run checkouts under
+ *  their own caption. Order within each group is noteRows' order. */
+export function noteGroups(rows) {
+  return {
+    operator: rows.filter((row) => row.kind === "operator"),
+    run: rows.filter((row) => row.kind !== "operator"),
+  };
+}
+
+export const RUN_CHECKOUTS_CAPTION = "Run checkouts";
 
 /** The row for one checkout directory, or null. */
 export function noteRowFor(rows, checkoutDir) {

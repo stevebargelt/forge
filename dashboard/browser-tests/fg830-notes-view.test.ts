@@ -1,6 +1,7 @@
 // FG-830 — session-handoff Notes moved out of the Backlog into their own view under Plan.
 // The Backlog starts at its tickets with no notes section; `#notes` lists one row per
-// checkout that has a note (FG-831 label, session date, one-line preview, primary
+// checkout that has a note (operator checkouts, then run checkouts under their own caption —
+// FG-843; FG-831 label, session date, one-line preview, primary
 // marked) newest session first; a row opens `#notes/<checkout>`, the note rendered
 // through the sanitized Markdown boundary with the FG-821 trail and Escape-to-parent.
 //
@@ -29,8 +30,11 @@ const CLONE_A = "/workspace/clones/a/forge";
 const CLONE_B = "/workspace/clones/b/forge";
 const FEATURE = "/workspace/forge-fg830";
 
-function checkout(projectDir: string, branch: string) {
-  return { projectDir, projectDirs: [projectDir], branch, exists: true, runCount: 0, inFlightCount: 0, liveSessions: 0 };
+// FG-843: GET /api/projects states each checkout's kind. The primary and the feature
+// checkout are operator checkouts; the two disposable clones are run checkouts, so their
+// notes list under the Run checkouts caption and never in the header chooser.
+function checkout(projectDir: string, branch: string, kind: "operator" | "run") {
+  return { projectDir, projectDirs: [projectDir], branch, exists: true, runCount: 0, inFlightCount: 0, liveSessions: 0, kind };
 }
 const projectsFixture = [{
   key: "repo-forge",
@@ -43,7 +47,8 @@ const projectsFixture = [{
   inFlightCount: 0,
   liveSessions: 0,
   lastRunAt: new Date().toISOString(),
-  checkouts: [checkout(PRIMARY, "main"), checkout(CLONE_A, "main"), checkout(CLONE_B, "main"), checkout(FEATURE, "feat/fg-830-notes-view")],
+  checkouts: [checkout(PRIMARY, "main", "operator"), checkout(CLONE_A, "main", "run"), checkout(CLONE_B, "main", "run"), checkout(FEATURE, "feat/fg-830-notes-view", "operator")],
+  checkoutCounts: { operator: 2, liveOperator: 2, run: 2 },
 }];
 
 // A long note, as the real ones are, so the old inline section's cost is visible.
@@ -71,10 +76,11 @@ const backlogFixture = {
   ],
 };
 
+// Operator checkouts first, then run checkouts (FG-843); newest session first within each.
 const EXPECTED_ORDER = [
   "forge-fg830 · feat/fg-830-notes-view",
-  "a/forge · main",
   "workspace/forge · main",
+  "a/forge · main",
   "b/forge · main",
 ];
 
@@ -135,15 +141,17 @@ test("FG-830: #notes lists each checkout with a note once, unique FG-831 labels,
   assert.deepEqual((await plan.allTextContents()).map((s) => s.trim()), ["Backlog", "Notes", "Queue", "Campaigns"], "Notes sits under Plan, after Backlog");
   assert.equal(await page.locator('.nav-column a.nav-item[aria-current="page"]').innerText(), "Notes");
 
-  assert.deepEqual(await rowLabels(page), EXPECTED_ORDER, "2026-09-28 note, 2026-09-20 mtime, 2026-08-13 note, then the undated one");
+  assert.deepEqual(await rowLabels(page), EXPECTED_ORDER, "operator checkouts (2026-09-28 note, 2026-08-13 note), then run checkouts (2026-09-20 mtime, then the undated one)");
+  assert.equal((await page.locator(".notes-run-caption").innerText()).trim().toLowerCase(), "run checkouts");
+  assert.deepEqual(await page.locator(".notes-row").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-checkout-kind"))), ["operator", "operator", "run", "run"]);
   assert.equal(new Set(EXPECTED_ORDER).size, EXPECTED_ORDER.length);
   const primaryRows = page.locator(".notes-row").filter({ has: page.locator(".notes-primary") });
   assert.equal(await primaryRows.count(), 1);
   assert.equal(await primaryRows.getAttribute("data-checkout"), PRIMARY);
   const sources = await page.locator(".notes-row .notes-session").evaluateAll((els) => els.map((el) => el.getAttribute("data-session-source")));
-  assert.deepEqual(sources, ["note", "modified", "note", "unknown"]);
+  assert.deepEqual(sources, ["note", "note", "modified", "unknown"]);
   assert.match(await page.locator(".notes-row").nth(3).innerText(), /session date unknown/);
-  assert.equal(await page.locator(".notes-row").nth(2).locator(".notes-preview").innerText(), "Where we left off: the primary checkout's handoff.", "a one-line preview, not the whole note");
+  assert.equal(await page.locator(".notes-row").nth(1).locator(".notes-preview").innerText(), "Where we left off: the primary checkout's handoff.", "a one-line preview, not the whole note");
   assert.equal(await page.locator(".note-body, .md").count(), 0, "the list renders no note bodies");
   await page.screenshot({ path: join(SHOTS, "fg830-notes-list.png"), fullPage: true });
 
@@ -224,33 +232,36 @@ test("FG-830: at 400px the Notes list and a note page fit the viewport", async (
   await page.close();
 });
 
-test("FG-830 / FG-831: every Notes row repeats its checkout's scope-bar label, with mixed session dates and one primary", async () => {
+test("FG-830 / FG-831: every Notes row repeats its checkout's label — the header chooser's for operator checkouts — with mixed session dates and one primary", async () => {
   const page = await open("#notes?project=repo-forge");
   await rowLabels(page);
+  await page.locator(".page-head .checkout-chooser-button").click();
+  await page.locator(".checkout-chooser-menu [role=option]").first().waitFor();
   const parity = await page.evaluate(() => {
-    const scope = new Map(Array.from(document.querySelectorAll<HTMLButtonElement>(".checkout-scope-btn[title]")).map((button) => [
-      button.title,
-      (button.textContent ?? "").replace(/\s+primary$/, "").trim(),
+    const chooser = new Map(Array.from(document.querySelectorAll<HTMLElement>(".checkout-chooser-menu [role=option]")).map((option) => [
+      option.dataset.checkout ?? "",
+      option.querySelector(".checkout-chooser-value")?.textContent?.trim() ?? "",
     ]));
     return Array.from(document.querySelectorAll<HTMLElement>(".notes-row")).map((row) => ({
       checkout: row.dataset.checkout ?? "",
       label: row.querySelector(".notes-label")?.textContent?.trim() ?? "",
-      scopeLabel: scope.get(row.dataset.checkout ?? "") ?? null,
+      chooserLabel: chooser.get(row.dataset.checkout ?? "") ?? null,
       session: row.querySelector(".notes-session")?.textContent?.trim() ?? "",
       source: row.querySelector(".notes-session")?.getAttribute("data-session-source"),
       primary: row.querySelector(".notes-primary") !== null,
     }));
   });
-  assert.deepEqual(parity.map((row) => [row.checkout, row.label, row.scopeLabel]), [
+  await page.keyboard.press("Escape");
+  assert.deepEqual(parity.map((row) => [row.checkout, row.label, row.chooserLabel]), [
     [FEATURE, "forge-fg830 · feat/fg-830-notes-view", "forge-fg830 · feat/fg-830-notes-view"],
-    [CLONE_A, "a/forge · main", "a/forge · main"],
     [PRIMARY, "workspace/forge · main", "workspace/forge · main"],
-    [CLONE_B, "b/forge · main", "b/forge · main"],
-  ], "Notes and the scope bar use the same FG-831 label for every checkout");
-  assert.deepEqual(parity.map((row) => row.source), ["note", "modified", "note", "unknown"], "note date, mtime fallback, and unknown stay sorted newest first");
+    [CLONE_A, "a/forge · main", null],
+    [CLONE_B, "b/forge · main", null],
+  ], "Notes and the chooser use the same FG-831 label; run checkouts are never in the chooser");
+  assert.deepEqual(parity.map((row) => row.source), ["note", "note", "modified", "unknown"], "note dates, mtime fallback, and unknown stay sorted newest first within each group");
   assert.match(parity[0]!.session, /^session ended 2026-09-28 · \d+d ago$/);
-  assert.match(parity[1]!.session, /^file modified \d+d ago$/);
-  assert.match(parity[2]!.session, /^session ended 2026-08-13 · \d+d ago$/);
+  assert.match(parity[2]!.session, /^file modified \d+d ago$/);
+  assert.match(parity[1]!.session, /^session ended 2026-08-13 · \d+d ago$/);
   assert.equal(parity[3]!.session, "session date unknown");
   assert.match(await page.locator(".notes-row").nth(3).locator(".notes-preview").innerText(), /^Scribble with no session line\.$/, "the prose-quoted date neither dates nor lifts the row");
   assert.deepEqual(parity.filter((row) => row.primary).map((row) => row.checkout), [PRIMARY]);

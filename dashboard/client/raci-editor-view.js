@@ -122,10 +122,10 @@ export function RoutingView({ governance, scope, params, onRefresh }) {
   }
 
   const editButton = html`<button type="button" class="raci-btn raci-btn-primary" data-raci="edit" disabled=${!project}
-    title=${project ? "Open this checkout's RACI in the editor" : "Select a project checkout: the host default is forge-owned and changes only through forge upgrade"}
+    title=${project ? "Open this checkout's RACI in the editor" : "Select a project: the host default is forge-owned and changes only through forge upgrade"}
     onClick=${() => go(true)}>Edit RACI</button>`;
   const note = !project
-    ? html`<span class="hint">select a project checkout to edit its RACI override</span>`
+    ? html`<span class="hint">select a project to edit its RACI override</span>`
     : mode === "edit" && read.error
       ? html`<span class="raci-error">the RACI source could not be read: ${read.error}</span>`
       : mode === "edit"

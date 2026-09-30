@@ -41,6 +41,9 @@ export type ProjectCheckout = {
   inFlightCount: number;
   liveSessions: number;
   lastRunAt?: string;
+  /** FG-843: the workspace purpose recorded for this checkout root (`forge projects
+   *  classify`, or a Forge artifact's creation record); absent when none is recorded. */
+  purpose?: WorkspaceKind;
 };
 
 export type ProjectRecord = {
@@ -123,7 +126,7 @@ export function storeWorkspacePurposeResolver(checkoutRoot: string): ProjectPurp
  *  artifact kind; KEEPS operator projects AND unclassified ones (the visible,
  *  flagged fail-safe). It consults nothing but the recorded `classification` — no
  *  path, name, age, run-count, or remote-presence signal decides visibility. */
-export function operatorProjects(records: ProjectRecord[]): ProjectRecord[] {
+export function operatorProjects<T extends ProjectRecord>(records: T[]): T[] {
   return records.filter((record) => record.classification !== "artifact");
 }
 
@@ -277,6 +280,12 @@ export function aggregateProjectSignals(
     byRepository.set(checkout.key, list);
   }
 
+  const purposes = new Map<string, ProjectPurposeInfo | undefined>();
+  const purposeOf: WorkspacePurposeResolver = (dir) => {
+    if (!purposes.has(dir)) purposes.set(dir, resolvePurpose(dir));
+    return purposes.get(dir);
+  };
+
   const out: ProjectRecord[] = [];
   for (const [key, members] of byRepository) {
     const primary = preferredCheckout(members);
@@ -289,6 +298,7 @@ export function aggregateProjectSignals(
     const sortedMembers = [primary, ...members.filter((member) => member !== primary).sort((a, b) => a.projectDir.localeCompare(b.projectDir))];
     const checkouts: ProjectCheckout[] = sortedMembers.map((member) => ({
       projectDir: member.projectDir,
+      ...(purposeOf(member.projectDir) ? { purpose: purposeOf(member.projectDir)!.purpose } : {}),
       projectDirs: [...member.projectDirs].sort(),
       exists: member.exists,
       runCount: member.runCount,
@@ -306,7 +316,7 @@ export function aggregateProjectSignals(
     // But a clone/worktree CAN converge onto its source checkout's repository identity,
     // so a record may group an artifact member with its operator sibling. Suppression is
     // therefore per-member, never from the preferred member: see resolveRecordPurpose.
-    const { purpose, info: purposeInfo } = resolveRecordPurpose(members, primary, resolvePurpose);
+    const { purpose, info: purposeInfo } = resolveRecordPurpose(members, primary, purposeOf);
     const record: ProjectRecord = {
       key,
       projectDir: primary.projectDir,
