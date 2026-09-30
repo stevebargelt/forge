@@ -101,17 +101,20 @@ test("FG-822: awaiting_gate offers the three gate decisions, each labeled with i
   }
 });
 
-test("FG-822: the registry is closed — three task rows and FG-823's three attention rows, four verbs, none of the CLI-only capabilities", () => {
-  assert.deepEqual(Object.keys(ACTION_ROUTES).sort(), ["attention-dismiss", "attention-snooze", "attention-undismiss", "gate", "recover-re-drive", "retry"]);
-  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "gate", "recover", "retry"]);
+test("FG-822: the registry is closed — three task rows, FG-823's three attention rows and FG-834's two RACI rows, five verbs, none of the CLI-only capabilities", () => {
+  assert.deepEqual(Object.keys(ACTION_ROUTES).sort(), [
+    "attention-dismiss", "attention-snooze", "attention-undismiss", "gate", "raci-apply", "raci-propose", "recover-re-drive", "retry",
+  ]);
+  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "gate", "raci", "recover", "retry"]);
   assert.deepEqual([...new Set(Object.values(ACTION_ROUTES).map((r) => r.verb))].sort(), [...ACTION_FORGE_VERBS].sort());
-  const forbidden = ["dispatcher", "arm", "disarm", "max-active-runs", "cancel", "next", "route", "routing", "raci", "model-policy", "apply", "backlog", "--force"];
+  const forbidden = ["dispatcher", "arm", "disarm", "max-active-runs", "cancel", "next", "route", "routing", "model-policy", "apply", "backlog", "--force"];
   for (const word of forbidden) {
     assert.ok(!(ACTION_FORGE_VERBS as readonly string[]).includes(word), `${word} is not an action verb`);
     assert.ok(!(QUEUE_MUTATION_FORGE_VERBS as readonly string[]).includes(word), `${word} is not a queue verb`);
     assert.ok(!Object.keys(ACTION_ROUTES).includes(word), `${word} is not an action route`);
   }
-  for (const path of ["/api/task/t/cancel", "/api/task/t/next", "/api/task/t/force", "/api/task/t/dispatcher-arm", "/api/task/t/actions", "/api/task/t"]) {
+  for (const path of ["/api/task/t/cancel", "/api/task/t/next", "/api/task/t/force", "/api/task/t/dispatcher-arm", "/api/task/t/actions", "/api/task/t",
+    "/api/raci", "/api/raci/validate", "/api/raci/compile", "/api/route/compile", "/api/raci/apply/force"]) {
     assert.equal(isActionMutationPath(path), false, `${path} is not a mutation route`);
   }
 });

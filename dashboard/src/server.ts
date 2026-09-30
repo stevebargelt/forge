@@ -29,9 +29,12 @@
 // - POST /api/projects/classify                    records a legacy workspace's purpose (FG-745)
 // - GET  /api/task/:id/actions                     the task-action preview: eligible actions with their verb + argv, refused ones with the policy's advice (FG-822)
 // - POST /api/task/:id/gate|retry|recover-re-drive the operator's TASK ACTIONS (FG-822)
+// - GET  /api/raci?project=<key>[&projectDir=]      the RACI editor's read: effective source, governance, audit tail (FG-834)
+// - POST /api/raci/propose|apply                    a project RACI change through `forge raci propose|apply` (FG-834)
 //
-// Every GET is a read. The eight POSTs above — four queue verbs, classify, and three task
-// actions — are the ONLY mutating routes on this surface, and they do not write the DB
+// Every GET is a read. The POSTs above — four queue verbs, classify, three task actions,
+// the RACI propose/apply pair, and the FG-823 attention rows in the same registry — are
+// the ONLY mutating routes on this surface, and they do not write the DB
 // either: each shells exactly one named `forge` verb (FORGE-DEC-015), guarded same-origin
 // and behind a non-simple content type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
 // exposed here (FG-591 D2) — that is authority to run repo-writing containers
@@ -65,6 +68,8 @@ import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest, degradedGraphErrorPayload } from "./http-error.js";
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 import { actionPreviewTaskId, handleActionMutation, isActionMutationPath, previewTaskActions, taskIdOperand } from "./action-mutation.js";
+import { raciReadModel } from "./raci-mutation.js";
+import { resolveCheckoutDir } from "./queue-mutation.js";
 import {
   guardBindAddress,
   guardMutationPost,
@@ -135,7 +140,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   // FG-822: the task actions — a second closed registry (action-mutation.ts), behind the
   // same guards. The task is looked up only after every header guard has passed.
   if (req.method === "POST" && isActionMutationPath(path)) {
-    await handleActionMutation(req, res, path, { lookupTask: taskActionFacts });
+    await handleActionMutation(req, res, path, {
+      lookupTask: taskActionFacts,
+      resolveProject: (projectKey) => resolveOwnerProject(projectsForDashboard(), projectKey, undefined),
+    });
     return;
   }
 
@@ -282,6 +290,25 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // and live session remain visible under its owner (AC5).
     const data = operatorProjectsForDashboard();
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/raci") {
+    // FG-834: the RACI editor's read — the effective source, the governance panel and the
+    // checkout's audit tail. Resolved by registry key (and an optional checkout among the
+    // project's own), exactly as the RACI mutation rows resolve it.
+    const projectKey = url.searchParams.get("project") ?? "";
+    const owner = projectKey ? resolveOwnerProject(projectsForDashboard(), projectKey, undefined) : undefined;
+    if (!owner) {
+      sendJson(res, 404, { error: projectKey ? `no registered project has the key ${JSON.stringify(projectKey)}.` : "pass ?project=<key>." });
+      return;
+    }
+    const checkout = resolveCheckoutDir(owner, url.searchParams.get("projectDir") ?? undefined);
+    if (isRefusal(checkout)) {
+      sendJson(res, checkout.status, { error: checkout.error });
+      return;
+    }
+    sendJson(res, 200, raciReadModel(owner, checkout, routingGovernance(checkout)));
     return;
   }
 
