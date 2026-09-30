@@ -475,10 +475,26 @@ test("FG-835 tables: resolution rows tag changed/undispatchable with what was; t
   assert.deepEqual(policyAuditRows([
     { timestamp: "2026-09-30T07:41:02.000Z", actor: "dashboard", source: "dashboard", rationale: "deeper plans", candidate_sha256: "4b1e", outcome: "applied", diff: [{ role: "architecture-advisor", activity: "plan" }] },
     { timestamp: "2026-09-12T18:03:11.000Z", actor: "steve", outcome: "failed", error: "EACCES\nstack", diff: [] },
-  ]).map((r) => [r.who, r.actor, r.change]), [
-    ["dashboard", "dashboard", "~1 resolution (architecture-advisor · plan)"],
-    ["cli", "steve", "failed — EACCES"],
+  ]).map((r) => [r.attribution, r.actor, r.change]), [
+    ["dashboard (claimed)", "dashboard", "~1 resolution (architecture-advisor · plan)"],
+    ["steve (claimed)", "steve", "failed — EACCES"],
   ]);
+});
+
+test("FG-840 AC 4b: Models Recorded rows attribute only what the audit line recorded — an absent source is never filled in", () => {
+  const attributionCases = [
+    [{ actor: "steve" }, "steve (claimed)"],
+    [{ actor: "dashboard", source: "dashboard" }, "dashboard (claimed)"],
+    [{ actor: "steve", source: "cli" }, "steve (claimed) via cli (claimed)"],
+    [{ actor: "steve", source: "terminal-script" }, "steve (claimed) via terminal-script (claimed)"],
+    [{ source: "terminal-script" }, "terminal-script (claimed)"],
+    [{}, null],
+  ] as const;
+  for (const [entry, expected] of attributionCases) {
+    const row = policyAuditRows([{ timestamp: "2026-09-30T12:00:00Z", outcome: "applied", diff: [], ...entry }])[0]!;
+    assert.equal(row.attribution, expected, JSON.stringify(entry));
+    assert.equal(row.source, "source" in entry ? entry.source : null, "the row's source is the recorded one or none");
+  }
 });
 
 test("FG-835 pickers: a change keeps the prior model offered and the order stable", () => {

@@ -64,7 +64,7 @@ export declare function sideText(s: Partial<RowState> | null | undefined): strin
 export declare function proposalDiffRows(result: any): Array<{ key: string; label: string; before: string; after: string; becomesUndispatchable: boolean }>;
 export declare function proposalSummary(result: any): { changed: number; newlyUndispatchable: number; preExisting: number; runtimeText: string; authText: string };
 export declare function diffSummary(diff: any[] | null | undefined): string;
-export declare function policyAuditRows(entries: Array<Record<string, any>> | null | undefined): Array<{ timestamp: string | null; who: string; actor: string | null; change: string; rationale: string | null; sha: string | null }>;
+export declare function policyAuditRows(entries: Array<Record<string, any>> | null | undefined): Array<{ timestamp: string | null; actor: string | null; source: string | null; attribution: string | null; change: string; rationale: string | null; sha: string | null }>;
 export declare function formatBytes(n: number): string;
 export declare function backupRows(entries: Array<Record<string, any>> | null | undefined, maxBytes: number): Array<{ name: string; timestamp: string; sha: string; size: string; blocked: string | null }>;
 export declare function modelChoices(outline: PolicyOutline | null | undefined, current: string | null, knownModels: string[] | null | undefined, inForce?: PolicyOutline | null, offered?: Iterable<string> | null): string[];

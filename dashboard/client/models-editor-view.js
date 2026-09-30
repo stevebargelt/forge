@@ -22,7 +22,6 @@ import {
   beginApply,
   beginDryRun,
   beginPropose,
-  claimedAttribution,
   createDryRunner,
   failApply,
   failDryRun,
@@ -292,7 +291,7 @@ function RecordedTable({ read }) {
               <tbody>
                 ${rows.map((r) => html`<tr>
                   <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
-                  <td class="gov-audit-actor">${claimedAttribution(r.actor ?? r.who, r.who)}</td>
+                  <td class="gov-audit-actor">${r.attribution ?? html`<span class="muted">—</span>`}</td>
                   <td>${r.change}</td>
                   <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
                   <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>
