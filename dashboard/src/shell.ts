@@ -2345,39 +2345,104 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .queue-pending { font-size: 12px; }
 .queue-controls-note { font-size: 11px; margin: 8px 0 0; max-width: 90ch; line-height: 1.5; }
 
+/* FG-844: one row of lanes, always. The board is one screen tall (the viewport less
+ * --queue-board-chrome: the page's own padding and the horizontal scrollbar); every lane
+ * header stays on screen while each lane scrolls its cards inside itself, and the board
+ * scrolls sideways when the lanes are wider than the content. */
+.app:has(> .queue-view) { max-width: none; }
+.queue-view { --queue-board-chrome: 140px; }
 .queue-columns {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(260px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
   margin-top: 16px;
-  align-items: start;
+  height: max(320px, calc(100dvh - var(--queue-board-chrome)));
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
 }
+.queue-columns:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .queue-column {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
+  border-radius: 8px;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-.queue-column-head { margin-bottom: 8px; }
+.queue-column-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: none;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
+  padding: 10px 12px;
+}
 .queue-column-title {
-  font-size: 13px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
   margin: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
 }
+.queue-column-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .queue-column-count {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11px;
-  color: var(--fg-faint);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--fg);
 }
-.queue-derived-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); font-size: 10px; }
-.queue-column-hint { font-size: 11px; margin: 4px 0 0; line-height: 1.45; }
+.queue-derived-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); font-size: 10px; letter-spacing: 0; text-transform: none; }
+.queue-lane-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px; }
+.queue-column-hint { font-size: 11px; margin: 0 0 8px; line-height: 1.45; }
 .queue-column-missing { font-size: 11px; margin-bottom: 6px; color: var(--warn); }
 .queue-column-empty { font-size: 12px; font-style: italic; list-style: none; padding: 8px 0; }
 .queue-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* Past COMPACT_CARD_THRESHOLD cards a lane is a scannable list: title, id and one status
+ * line. The full card returns on hover, on focus anywhere inside it, and on the
+ * aria-expanded toggle — the toggle is the path that needs neither a mouse nor focus. */
+.queue-card.queue-card-compact { padding: 6px 10px; }
+.queue-card-compact .queue-card-title { font-size: 12.5px; font-weight: 500; }
+.queue-card-compact:not(.queue-card-expanded):not(:hover):not(:focus-within) .queue-card-detail { display: none; }
+.queue-card-compact .queue-card-head { flex-wrap: nowrap; align-items: flex-start; }
+.queue-card-compact .queue-card-title { flex: 1 1 auto; min-width: 0; line-height: 1.35; }
+.queue-card-meta { display: flex; gap: 6px; align-items: baseline; margin-top: 3px; min-width: 0; }
+.queue-card-meta .queue-card-rank { min-width: 0; }
+.queue-card-status { font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-card-toggle {
+  flex: none; background: transparent; border: 1px solid var(--border); border-radius: 4px;
+  color: var(--fg-dim); font: inherit; font-size: 11px; line-height: 1; padding: 2px 6px; cursor: pointer;
+}
+.queue-card-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The lane strip exists only under 900px, where the board shows one lane at a time. */
+.queue-lane-strip { display: none; }
+@media (max-width: 899.98px) {
+  .queue-lane-strip {
+    display: flex; gap: 4px; margin-top: 16px; overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+  }
+  .queue-lane-tab {
+    flex: none; padding: 6px 12px; color: var(--fg-dim); text-decoration: none; font-size: 13px;
+    border-bottom: 2px solid transparent; white-space: nowrap;
+  }
+  .queue-lane-tab:hover { color: var(--fg); }
+  .queue-lane-tab-current { color: var(--fg); border-bottom-color: var(--accent); }
+  .queue-lane-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .queue-lane-tab-count { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--fg-dim); }
+  .queue-columns { grid-auto-columns: minmax(0, 1fr); margin-top: 10px; overflow-x: hidden; }
+  .queue-column:not(.queue-column-selected) { display: none; }
+}
+@media (max-width: 719.98px) {
+  /* The page reserves room for the fixed FG-820 bottom bar below the nav breakpoint. */
+  .queue-view { --queue-board-chrome: 200px; }
+}
 
 /* .card carries cursor:pointer for the click-to-open feed cards; these are not
  * click-to-open, so the affordance would be a lie. */

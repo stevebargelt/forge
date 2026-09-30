@@ -134,6 +134,14 @@ The plan is `docs/research/dashboard-information-architecture.md`. The 13-button
 - **Abort and budget.** `createWindowedReader` aborts its in-flight read when a newer one starts, and also after `OPS_FETCH_BUDGET_MS` (10s). A timeout, an HTTP error or a network error is shown inline with its reason and the window it concerns; the kept series stays. A superseded read never writes. A scope change still calls `reset()` and drops both metrics to loading (FG-699).
 - **The summary's since is the same shape.** `#ops?since=30d|all` (7d the omitted default) is the `since` for `GET /api/ops`, read through its own `createWindowedReader` ("ops summary"). `runtimeWindowHash` and `opsSinceHash` each keep the other param, so `#ops?since=all&window=90d` round-trips. The summary shows "showing <w>" beside its buttons, "in <w>" on each count, and the same loading line, dimming (`.ops-summary-body-loading`) and inline failure as the chart. It is not reset on a scope change, as before. Home's summary stays at a fixed 30d and is not hash state.
 
+## Queue board layout (FG-844)
+
+- **One row of lanes, always.** `.queue-columns` is a single grid row (`grid-auto-flow: column`, `grid-auto-columns: minmax(260px, 1fr)`) that scrolls sideways inside itself when the six lanes are wider than the content; lanes never wrap. The board is one screen tall — `100dvh` less `--queue-board-chrome` (140px, 200px under the 720px nav breakpoint) — so the page is at most one viewport plus the dispatcher panel and controls above it. Each lane is a bounded column: a header (`.queue-column-head`: title, derived badge, count) that never scrolls and holds no focus stop, over `.queue-lane-scroll`, which scrolls the hint and cards.
+- **Compact past 20.** `COMPACT_CARD_THRESHOLD` and `laneIsCompact` (`client/queue-board-state.js`) put a lane with more than 20 cards into the compact card: title, rank, id and one status line (`compactStatusLine`). The full FG-591 card returns on hover, on focus anywhere inside it, and on its `aria-expanded` toggle, which is the path that needs neither a mouse nor focus.
+- **Under 900px, one lane at a time.** A lane tablist (`.queue-lane-strip`, links with arrow-key movement) replaces the row and shows one lane. The lane rides the hash as `#queue?lane=<view>` (`ROUTES.queue.params`, values = `BOARD_VIEWS`); an unknown lane is dropped, and `selectedLane` then picks the first lane with cards. The strip is hidden at 900px and up.
+- **Keyboard.** The sideways scroller is `tabindex="0"` with a label; lanes and cards follow in DOM order. A key pressed on a button inside a queued card belongs to that button, not to the card's grab/reorder handler.
+- **Pinned by** `src/fg844-queue-board-layout.test.ts` (unit) and `browser-tests/fg844-queue-board.test.ts` (real browser).
+
 ## Conventions specific to the dashboard
 
 - **No build step.** `tsx` runs the server directly. Browser JS is plain ES modules, no bundler.
