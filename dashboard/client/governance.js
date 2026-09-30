@@ -100,13 +100,13 @@ function EffectiveSection({ effective }) {
   `;
 }
 
-export function AuditSourceCaption({ source, path, skippedLines = 0 }) {
+export function AuditSourceCaption({ source, path, skippedLines = 0, refused = false }) {
   const caption = source === "project"
     ? "recorded in this checkout's .forge/raci-audit.log"
     : "recorded in the host log — no checkout in scope";
   return html`
     <div class="muted gov-audit-source" data-testid="gov-audit-source" title=${path}>
-      ${caption} · <span class="mono">${path}</span>${skippedLines ? ` · ${skippedLines} unreadable line(s) skipped` : ""}
+      ${caption} · <span class="mono">${path}</span>${skippedLines ? ` · ${skippedLines} unreadable line(s) skipped` : ""}${refused ? " · not read: the log resolves outside this checkout's .forge" : ""}
     </div>
   `;
 }
@@ -115,7 +115,7 @@ function RecordedSection({ recorded }) {
   return html`
     <section class="workbench-section" role="region" aria-label="RECORDED — RACI audit log">
       <h2 class="workbench-section-label">RECORDED</h2>
-      <${AuditSourceCaption} source=${recorded.source} path=${recorded.path} skippedLines=${recorded.skippedLines} />
+      <${AuditSourceCaption} source=${recorded.source} path=${recorded.path} skippedLines=${recorded.skippedLines} refused=${recorded.refused} />
       <${AuditPanel} entries=${recorded.entries} />
     </section>
   `;
@@ -215,7 +215,7 @@ function AuditPanel({ entries }) {
             <span class="mono faint" style="min-width: 168px;">${e.timestamp}</span>
             <span class="badge">${e.action}</span>
             <span class="mono">${changed.length ? changed.join(" ") : "no route change"}</span>
-            ${e.actor ? html`<span class="faint">by ${e.actor}${e.source ? ` via ${e.source}` : ""}</span>` : null}
+            ${e.actor ? html`<span class="faint gov-audit-actor">by ${e.actor}${e.source ? ` via ${e.source}` : ""}</span>` : null}
             ${e.rationale ? html`<span class="muted">— ${e.rationale}</span>` : null}
           </div>
         `;

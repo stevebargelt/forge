@@ -459,6 +459,8 @@ test("integ FG-835: green propose → host apply through the real CLI replaces t
   assert.equal(view.body["resolution"].rows.find((r: { role: string; isDefault: boolean }) => r.role === "engineer" && r.isDefault).model, "claude-opus-5-5",
     "the resolution table re-reads the applied policy");
   assert.equal(view.body["audit"].entries[0].rationale, "default activity to opus for the release push");
+  assert.equal(view.body["audit"].entries[0].actor, "dashboard", "the reader renames the written `by` to the one attribution field, `actor`");
+  assert.equal("by" in view.body["audit"].entries[0], false);
   assert.deepEqual(view.body["backups"].entries.map((b: { path: string; sha256: string }) => [b.path, b.sha256]), [[backup, sha(CURRENT)]]);
 });
 

@@ -154,7 +154,7 @@ function AppliedCard({ applied }) {
 }
 
 function RecordedTable({ read, recorded }) {
-  const label = html`<h2 class="workbench-section-label">RECORDED</h2>${recorded ? html`<${AuditSourceCaption} source=${recorded.source} path=${recorded.path} />` : null}`;
+  const label = html`<h2 class="workbench-section-label">RECORDED</h2>${recorded ? html`<${AuditSourceCaption} source=${recorded.source} path=${recorded.path} refused=${recorded.refused} />` : null}`;
   if (read.error) return html`<section class="workbench-section" aria-label="RECORDED — RACI audit log">${label}<div class="raci-error">the audit tail could not be read: ${read.error}</div></section>`;
   if (!read.data) return html`<section class="workbench-section" aria-label="RECORDED — RACI audit log">${label}<div class="muted">loading the audit tail…</div></section>`;
   const rows = auditRows(read.data.audit.entries);

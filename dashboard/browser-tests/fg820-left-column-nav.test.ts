@@ -181,6 +181,7 @@ test("FG-840: Routing names the project audit source for a scoped checkout and t
   await page.locator(".page-title", { hasText: "Routing" }).waitFor();
   await page.locator('[data-testid="gov-audit-source"]', { hasText: "recorded in this checkout's .forge/raci-audit.log" }).waitFor();
   assert.match(await page.locator('[data-testid="gov-audit-source"]').getAttribute("title") ?? "", /\.forge\/raci-audit\.log$/);
+  assert.equal(await page.locator(".gov-audit-row .gov-audit-actor").textContent(), "by dashboard via dashboard");
 
   await page.goto(`${baseUrl}/#routing`);
   await page.locator('[data-testid="gov-audit-source"]', { hasText: "recorded in the host log — no checkout in scope" }).waitFor();
@@ -448,7 +449,9 @@ function createFixtureServer(): Server {
         recorded: {
           source: scoped ? "project" : "host",
           path: scoped ? `${MAIN}/.forge/raci-audit.log` : "/host/.forge/raci-audit.log",
-          entries: [],
+          entries: scoped
+            ? [{ timestamp: "2026-09-30T11:00:00.000Z", action: "apply", routes_added: [], routes_removed: [], routes_modified: ["research"], actor: "dashboard", source: "dashboard", rationale: "route research to the researcher" }]
+            : [],
           skippedLines: 0,
         },
       });

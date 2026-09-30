@@ -36,8 +36,24 @@ test("FG-840 readAuditTail: malformed lines are skipped while complete FG-834 au
   const tail = readAuditTail(path);
   assert.deepEqual(tail.entries.map((e) => e["n"]), [2, 1]);
   assert.equal(tail.skippedLines, 3);
-  assert.deepEqual(tail.entries[0], JSON.parse(second));
-  assert.deepEqual(tail.entries[1], JSON.parse(first));
+  const { by: _secondBy, ...secondRest } = JSON.parse(second);
+  const { by: _firstBy, ...firstRest } = JSON.parse(first);
+  assert.deepEqual(tail.entries[0], { ...secondRest, actor: "dashboard" });
+  assert.deepEqual(tail.entries[1], { ...firstRest, actor: "terminal" });
+});
+
+test("FG-840 readAuditTail: attribution is always `actor` — a `by` line is renamed, an `actor` line kept as written", () => {
+  const path = join(tmpHome, "attribution.log");
+  writeFileSync(path, [
+    JSON.stringify({ n: 1, actor: "dashboard", source: "dashboard" }),
+    JSON.stringify({ n: 2, by: "steve", rationale: "model policy" }),
+    JSON.stringify({ n: 3, actor: "dashboard", by: "ignored" }),
+  ].join("\n"));
+  assert.deepEqual(readAuditTail(path).entries, [
+    { n: 3, actor: "dashboard" },
+    { n: 2, rationale: "model policy", actor: "steve" },
+    { n: 1, actor: "dashboard", source: "dashboard" },
+  ]);
 });
 
 test("FG-840 raciAuditTail: a scoped checkout reads its own .forge log; no scope reads the host log", () => {
@@ -81,4 +97,31 @@ test("FG-840 raciAuditTail: a checkout reached through a symlinked parent reads 
   assert.equal(tail.source, "project");
   assert.deepEqual(tail.entries.map((entry) => entry["n"]), [42]);
   assert.equal(realpathSync(tail.path), realpathSync(join(checkout, ".forge", "raci-audit.log")));
+});
+
+test("FG-840 raciAuditTail: a checkout whose .forge is a symlink outside the checkout is refused, not read", () => {
+  const checkout = mkdtempSync(join(tmpdir(), "fg840-audit-forge-link-"));
+  const outside = mkdtempSync(join(tmpdir(), "fg840-audit-outside-"));
+  writeFileSync(join(outside, "raci-audit.log"), line(66) + "\n");
+  symlinkSync(outside, join(checkout, ".forge"), "dir");
+
+  assert.deepEqual(raciAuditTail(checkout), {
+    source: "project",
+    path: join(checkout, ".forge", "raci-audit.log"),
+    entries: [],
+    skippedLines: 0,
+    refused: "outside_checkout_forge",
+  });
+});
+
+test("FG-840 raciAuditTail: a raci-audit.log symlinked outside the checkout's .forge is refused, not read", () => {
+  const checkout = mkdtempSync(join(tmpdir(), "fg840-audit-log-link-"));
+  const outside = mkdtempSync(join(tmpdir(), "fg840-audit-outside-log-"));
+  writeFileSync(join(outside, "secret.log"), line(77) + "\n");
+  mkdirSync(join(checkout, ".forge"));
+  symlinkSync(join(outside, "secret.log"), join(checkout, ".forge", "raci-audit.log"));
+
+  const tail = raciAuditTail(checkout);
+  assert.equal(tail.refused, "outside_checkout_forge");
+  assert.deepEqual(tail.entries, []);
 });

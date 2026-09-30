@@ -360,6 +360,7 @@ test("integ FG-834: green propose → apply through the real CLI writes the over
   assert.equal(view.body["source"].text, CANDIDATE);
   assert.equal(view.body["audit"].entries.length, 1);
   assert.equal(view.body["audit"].entries[0].actor, "dashboard");
+  assert.equal(view.body["audit"].entries[0].source, "dashboard");
   assert.match(JSON.stringify(view.body["governance"].effective.routes["implementation_quick"]), /frontend-specialist/,
     "the governance view re-reads the applied route");
 
