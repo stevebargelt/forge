@@ -266,7 +266,8 @@ test("FG-835: quick edit one profile's model → the resolution diff → Apply r
   await resolutionRow(page, "architecture-advisor", "reasoning").locator('td:has-text("claude-fable-5-1")').waitFor({ timeout: 30_000 });
   const newest = page.locator(".mp-recorded tbody tr").first();
   await newest.locator('td:has-text("dashboard")').waitFor({ timeout: 30_000 });
-  assert.match(await newest.innerText(), /\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\s+dashboard\s+~1 resolution \(architecture-advisor · reasoning\)\s+Architecture plans go to the deeper model/);
+  assert.match(await newest.innerText(), /\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\s+dashboard \(claimed\)\s+~1 resolution \(architecture-advisor · reasoning\)\s+Architecture plans go to the deeper model/);
+  assert.match(await page.locator('.mp-recorded [data-testid="attribution-claim"]').textContent() ?? "", /It is a claim, not a proof\.$/);
   assert.equal(await page.locator(".mp-backups tbody tr").count(), 2, "the replaced file is kept as a backup");
   const apply = applies();
   assert.equal(apply.length, 1);

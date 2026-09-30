@@ -408,6 +408,15 @@ function routeChangeText(added = [], modified = [], removed = []) {
   return parts.length ? parts.join(" ") : "no route change";
 }
 
+// FG-840 AC 4: `--by`/`--source` are whatever the caller passed, and any local forge caller can
+// pass them — the audit logs record attribution as a claim, labelled as one, never a proof.
+export const ATTRIBUTION_CLAIM_CAPTION = "Attribution is recorded as the caller gave it; on this host anyone who can run forge can write these values. It is a claim, not a proof.";
+
+export function claimedAttribution(by, source) {
+  const claimed = (v) => `${v} (claimed)`;
+  return source && source !== by ? `${claimed(by)} via ${claimed(source)}` : claimed(by);
+}
+
 /** RECORDED: one row per audit line — when, who, action, change, rationale, candidate sha. */
 export function auditRows(entries) {
   return (entries ?? []).map((e) => ({

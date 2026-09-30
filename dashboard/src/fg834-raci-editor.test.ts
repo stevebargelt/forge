@@ -9,6 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
+  ATTRIBUTION_CLAIM_CAPTION,
   RACI_SECTIONS,
   applyBody,
   applyReadiness,
@@ -16,6 +17,7 @@ import {
   beginApply,
   beginDryRun,
   beginPropose,
+  claimedAttribution,
   confirmKeyMatches,
   createDryRunner,
   diffLines,
@@ -43,6 +45,7 @@ import {
   type EditorState,
   type ProposeResponse,
 } from "../client/raci-editor-state.js";
+import { AttributionClaimCaption } from "../client/governance.js";
 import { ROUTES, parseHash } from "../client/view-routing.js";
 import { statusToken } from "../client/status-tokens.js";
 
@@ -69,6 +72,21 @@ const refused = (findings: Array<Record<string, string>>): ProposeResponse => ({
   status: 409,
   body: { ok: false, refusal: "gate_failed", error: "the RACI gate refused the candidate", result: { ok: false, validation: { raci: { ok: false, findings }, route: { ok: false, findings: [] } } } },
 });
+
+/** Text a Preact vnode would put in the browser; keeps this renderer test DOM-free. */
+function vnodeText(node: any): string {
+  if (node === null || node === undefined || node === false) return "";
+  if (Array.isArray(node)) return node.map(vnodeText).join("");
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  return vnodeText(node.props?.children);
+}
+
+function nodesWithTestId(node: any, testId: string): any[] {
+  if (node === null || node === undefined || node === false) return [];
+  if (Array.isArray(node)) return node.flatMap((child) => nodesWithTestId(child, testId));
+  if (typeof node !== "object") return [];
+  return [node, ...nodesWithTestId(node.props?.children, testId)].filter((child) => child?.props?.["data-testid"] === testId);
+}
 
 /** Dry-run a text green through the machine, as the view does. */
 function dryRunGreen(state: EditorState, seq = state.dryRun.seq + 1): EditorState {
@@ -259,6 +277,31 @@ test("proposal and audit presentation: counts, force-rule check, diff lines, aud
     { timestamp: "2026-08-07T13:28:00Z", who: "cli", action: "apply", change: "no route change", rationale: null, sha: "b71d" },
   ]);
   assert.equal(auditRows([{ routes_added: ["a", "b", "c", "d"] }])[0]!.change, "+4 routes (a, b, c, …)", "a long list is cut after three names");
+});
+
+test("FG-840 AC 4: Routing's rendered Recorded rows label every attribution as a claim", () => {
+  assert.equal(claimedAttribution("dashboard", "dashboard"), "dashboard (claimed)");
+  assert.equal(claimedAttribution("cli", undefined), "cli (claimed)");
+  assert.equal(claimedAttribution("steve", "cli"), "steve (claimed) via cli (claimed)");
+
+  const attributionCases = [
+    [{ actor: "dashboard", source: "dashboard" }, "dashboard (claimed)"],
+    [{ actor: "dashboard", source: "cli" }, "dashboard (claimed) via cli (claimed)"],
+    [{ actor: "dashboard", source: "terminal-script" }, "dashboard (claimed) via terminal-script (claimed)"],
+    [{ actor: "dashboard" }, "dashboard (claimed)"],
+    [{ source: "dashboard" }, "dashboard (claimed)"],
+  ] as const;
+  for (const [entry, expected] of attributionCases) {
+    const auditEntry = { timestamp: "2026-09-30T12:00:00Z", action: "apply", routes_added: [], routes_modified: [], routes_removed: [], ...entry };
+    const row = auditRows([auditEntry])[0]!;
+    const source = "source" in auditEntry ? auditEntry.source : undefined;
+    assert.equal(claimedAttribution(row.who, source), expected, `${expected}; an absent by value falls back without a blank cell or crash`);
+  }
+
+  assert.equal(ATTRIBUTION_CLAIM_CAPTION, "Attribution is recorded as the caller gave it; on this host anyone who can run forge can write these values. It is a claim, not a proof.");
+  const captions = nodesWithTestId(AttributionClaimCaption(), "attribution-claim");
+  assert.equal(captions.length, 1, "the Routing view's Recorded panel renders one attribution caption");
+  assert.equal(vnodeText(captions[0]), ATTRIBUTION_CLAIM_CAPTION);
 });
 
 test("reset to host default is an edit of the draft, never a delete", () => {

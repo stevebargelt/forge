@@ -375,6 +375,15 @@ target (the project key, or `host`) and a rationale, and runs `apply --confirm -
 `docs/SCHEMA-CONTRACT.md`). `--rationale <text>` and `--source dashboard` are recorded in the
 audit line; from a terminal both are optional.
 
+**Attribution is a claim, not a proof (FG-840).** `by` and `source` are recorded exactly as the
+caller passed them. A terminal caller can pass `--by dashboard --source dashboard` too, and
+anyone who can run forge on this host can write `model-policy-audit.log`, so the Models page's
+RECORDED table labels them `dashboard (claimed)` / `cli (claimed)` under a caption saying so.
+On a single-user host the dashboard and the terminal share one OS user and one filesystem, so
+there is nothing a stronger binding could rest on; by operator decision attribution is
+labelled, not token-bound (FORGE-DEC-037 addendum,
+`learnings/decisions/2026-09-30_dashboard-confirmed-governance-writes.md`).
+
 **The dashboard path — Setup › Models (FG-835).** `#models` shows the policy in force (its
 source path, `schema_version`, profile and role counts), the resolution of every installed
 role × activity (the same rows as each role's Harness / Runtime tab — a role name opens its

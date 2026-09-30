@@ -6,7 +6,7 @@
 
 import { h } from "preact";
 import htm from "htm";
-import { auditRows } from "./raci-editor-state.js";
+import { ATTRIBUTION_CLAIM_CAPTION, auditRows, claimedAttribution } from "./raci-editor-state.js";
 import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
 
 const html = htm.bind(h);
@@ -131,7 +131,7 @@ export function RecordedAudit({ audit }) {
                   const via = audit.entries[i].source;
                   return html`<tr class="gov-audit-row">
                     <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
-                    <td class="gov-audit-actor">${r.who}${via && via !== r.who ? ` via ${via}` : ""}</td>
+                    <td class="gov-audit-actor">${claimedAttribution(r.who, via)}</td>
                     <td><span class="raci-chip">${r.action}</span></td>
                     <td>${r.change}</td>
                     <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
@@ -141,8 +141,13 @@ export function RecordedAudit({ audit }) {
               </tbody>
             </table>
           </div>`}
+      ${rows.length ? html`<${AttributionClaimCaption} />` : null}
     </section>
   `;
+}
+
+export function AttributionClaimCaption() {
+  return html`<div class="faint gov-attribution-claim" data-testid="attribution-claim" style="margin-top: 6px; font-size: 12px;">${ATTRIBUTION_CLAIM_CAPTION}</div>`;
 }
 
 function Finding({ f }) {

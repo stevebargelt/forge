@@ -68,6 +68,8 @@ export declare function visibleRows<T extends { tag: string | null }>(rows: T[],
 export declare function routeChangeCounts(changes: any): { added: number; changed: number; removed: number };
 export declare function forceRuleCheck(result: any, routes: RouteMap | null | undefined): { ok: boolean; text: string };
 export declare function diffLines(raciDiff: string | null | undefined): Array<{ text: string; kind: "add" | "del" | "ctx" }>;
+export declare const ATTRIBUTION_CLAIM_CAPTION: string;
+export declare function claimedAttribution(by: string, source: string | null | undefined): string;
 export declare function auditRows(entries: Array<Record<string, any>> | null | undefined): Array<{ timestamp: string | null; who: string; action: string; change: string; rationale: string | null; sha: string | null }>;
 
 export interface DryRunner {

@@ -240,8 +240,9 @@ test("FG-834: edit a route → the changed tag and the diff → Apply refused wi
   const newest = page.locator(".raci-recorded tbody tr").first();
   await newest.locator('td:has-text("dashboard")').waitFor({ timeout: 20_000 });
   const row = await newest.innerText();
-  assert.match(row, /dashboard\s+apply\s+~1 route \(review_backend\)\s+Backend reviews go to the specialist first/);
+  assert.match(row, /dashboard \(claimed\)\s+apply\s+~1 route \(review_backend\)\s+Backend reviews go to the specialist first/);
   assert.match(row, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z/);
+  assert.match(await page.locator('.raci-recorded [data-testid="attribution-claim"]').textContent() ?? "", /It is a claim, not a proof\.$/);
   assert.equal(await page.locator(".raci-recorded tbody tr").count(), 2);
 
   const apply = recordedCalls().filter((argv) => argv[1] === "apply");
