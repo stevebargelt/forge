@@ -160,7 +160,10 @@ test("FG-834: edit a route → the changed tag and the diff → Apply refused wi
   const edit = page.locator('.gov-source-actions [data-raci="edit"]');
   await edit.waitFor();
   assert.equal(await page.locator(".raci-textarea").count(), 0, "view mode is the read-only workbench");
-  await page.locator('.raci-recorded td:has-text("cli")').waitFor();
+  // The seed apply ran from a terminal with no --by/--source: the line carries neither, so the
+  // Who cell says so rather than naming a surface the line never recorded.
+  await page.locator(".raci-recorded tbody tr").first().waitFor();
+  assert.equal(await page.locator(".raci-recorded tbody tr .gov-audit-actor").textContent(), "unattributed");
 
   // FG-692: the Edit RACI button is a real, focusable button; Enter opens edit mode.
   await edit.focus();
@@ -240,9 +243,11 @@ test("FG-834: edit a route → the changed tag and the diff → Apply refused wi
   const newest = page.locator(".raci-recorded tbody tr").first();
   await newest.locator('td:has-text("dashboard")').waitFor({ timeout: 20_000 });
   const row = await newest.innerText();
-  assert.match(row, /dashboard\s+apply\s+~1 route \(review_backend\)\s+Backend reviews go to the specialist first/);
+  assert.match(row, /dashboard \(claimed\)\s+apply\s+~1 route \(review_backend\)\s+Backend reviews go to the specialist first/);
   assert.match(row, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z/);
+  assert.match(await page.locator('.raci-recorded [data-testid="attribution-claim"]').textContent() ?? "", /It is a claim, not a proof\.$/);
   assert.equal(await page.locator(".raci-recorded tbody tr").count(), 2);
+  assert.equal(await page.locator(".raci-recorded tbody tr").last().locator(".gov-audit-actor").textContent(), "unattributed");
 
   const apply = recordedCalls().filter((argv) => argv[1] === "apply");
   assert.equal(apply.length, 1);

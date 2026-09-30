@@ -408,11 +408,23 @@ function routeChangeText(added = [], modified = [], removed = []) {
   return parts.length ? parts.join(" ") : "no route change";
 }
 
+// FG-840 AC 4: `--by`/`--source` are whatever the caller passed, and any local forge caller can
+// pass them — the audit logs record attribution as a claim, labelled as one, never a proof.
+export const ATTRIBUTION_CLAIM_CAPTION = "Attribution is recorded as the caller gave it; on this host anyone who can run forge can write these values. It is a claim, not a proof.";
+
+/** Only what the audit line recorded, each value marked as a claim: an absent actor or source
+ *  is never filled in, and a line with neither is `null` (rendered as "unattributed"). */
+export function claimedAttribution(actor, source) {
+  const claimed = (v) => `${v} (claimed)`;
+  if (!actor) return source ? claimed(source) : null;
+  return source && source !== actor ? `${claimed(actor)} via ${claimed(source)}` : claimed(actor);
+}
+
 /** RECORDED: one row per audit line — when, who, action, change, rationale, candidate sha. */
 export function auditRows(entries) {
   return (entries ?? []).map((e) => ({
     timestamp: e.timestamp ?? null,
-    who: e.actor ?? (e.source === "dashboard" ? "dashboard" : "cli"),
+    attribution: claimedAttribution(e.actor, e.source),
     action: e.action ?? "—",
     change: routeChangeText(e.routes_added ?? [], e.routes_modified ?? [], e.routes_removed ?? []),
     rationale: e.rationale ?? null,

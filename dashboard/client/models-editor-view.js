@@ -14,6 +14,7 @@ import { h } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
 import { ApplyCard, CodeEditor, ErrorNote, Pill, postJson } from "./raci-editor-view.js";
+import { AttributionCell, AttributionClaimCaption } from "./governance.js";
 import { badgeClass } from "./status-tokens.js";
 import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
 import {
@@ -277,7 +278,7 @@ function BackupsTable({ read, onRestore, error }) {
   `;
 }
 
-function RecordedTable({ read }) {
+export function RecordedTable({ read }) {
   const rows = policyAuditRows(read.audit.entries);
   return html`
     <section class="workbench-section raci-recorded mp-recorded" role="region" aria-label="RECORDED — model-policy audit log">
@@ -290,7 +291,7 @@ function RecordedTable({ read }) {
               <tbody>
                 ${rows.map((r) => html`<tr>
                   <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
-                  <td title=${r.actor ?? ""}>${r.who}</td>
+                  <${AttributionCell} attribution=${r.attribution} />
                   <td>${r.change}</td>
                   <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
                   <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>
@@ -299,6 +300,7 @@ function RecordedTable({ read }) {
             </table>
           </div>`}
       ${read.audit.skippedLines > 0 ? html`<div class="hint">${read.audit.skippedLines} unreadable audit line(s) skipped</div>` : null}
+      <${AttributionClaimCaption} />
     </section>
   `;
 }

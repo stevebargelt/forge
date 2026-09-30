@@ -15,7 +15,7 @@
 // block-scalar model) is reported, not guessed at; the editor remains for it.
 
 import { hashFor } from "./view-routing.js";
-import { editDraft, replaceDraft, settleApply } from "./raci-editor-state.js";
+import { claimedAttribution, editDraft, replaceDraft, settleApply } from "./raci-editor-state.js";
 
 export const MODELS_EDIT_MODE = "edit";
 export const HOST_TARGET = "host";
@@ -530,12 +530,15 @@ export function diffSummary(diff) {
   return `~${plural(rows.length, "resolution")} (${names})${broken ? ` · ${broken} undispatchable` : ""}`;
 }
 
-/** RECORDED: one row per audit line — when, who, change, rationale, candidate sha. */
+/** RECORDED: one row per audit line — when, who, change, rationale, candidate sha. `attribution`
+ *  is only what the line recorded (FG-840): an absent source is never filled in, and a line with
+ *  neither actor nor source has no attribution at all. */
 export function policyAuditRows(entries) {
   return (entries ?? []).map((e) => ({
     timestamp: e.timestamp ?? null,
-    who: e.source === "dashboard" ? "dashboard" : "cli",
     actor: e.actor ?? null,
+    source: e.source ?? null,
+    attribution: claimedAttribution(e.actor, e.source),
     change: e.outcome === "failed" ? `failed — ${firstLine(e.error)}` : diffSummary(e.diff),
     rationale: e.rationale ?? null,
     sha: e.candidate_sha256 ?? null,

@@ -168,3 +168,28 @@ path) to solve a problem (confirmation ergonomics) that does not need one.
   authority beyond them — e.g. a bulk/multi-route apply, applying without a green propose,
   or writing the host RACI — that is new surface area and needs its own decision, not a
   quiet extension of this one.
+
+---
+
+## Addendum (FG-840 AC 4, 2026-09-30): attribution is a claim
+
+The `by`/`actor`, `source` and `rationale` recorded on `raci-audit.log` and
+`model-policy-audit.log` lines are claims, bounded by filesystem trust. `--by <who>` and
+`--source dashboard` (FG-834, FG-835 part 2a) are ordinary CLI flags: a terminal caller can
+pass `--by dashboard --source dashboard` exactly as the dashboard does, and anyone who can run
+forge on the host can append to either log directly. There is no token binding — by operator
+decision (FG-840 AC 4, option a). On a single-user host the dashboard and the terminal run as
+the same OS user over the same filesystem, so a secret the dashboard held to "sign" its
+applies would be readable, and replayable, by the same caller it was meant to exclude; it
+would add a proof-shaped value without adding a boundary.
+
+What changes instead is the presentation: the dashboard's RECORDED panels (Routing, the RACI
+editor, Models) render `by` and `source` with a "claimed" marker — `dashboard (claimed)`,
+`steve (claimed)` — and a caption: "Attribution is recorded as the caller gave it; on this host
+anyone who can run forge can write these values. It is a claim, not a proof." Neither panel
+synthesizes a fallback (AC 4b) — both show only what the line actually recorded, and a line
+with neither `by` nor `source` renders "unattributed" rather than a guessed value. The audit
+line format, the readers and the routes are unchanged.
+
+Revisit if forge ever runs the dashboard under a separate OS identity from the operator's
+shell, or on a multi-user host: then a real boundary exists for a binding to rest on.
