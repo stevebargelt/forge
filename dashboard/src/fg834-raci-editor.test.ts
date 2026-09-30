@@ -45,7 +45,7 @@ import {
   type EditorState,
   type ProposeResponse,
 } from "../client/raci-editor-state.js";
-import { AttributionClaimCaption } from "../client/governance.js";
+import { AttributionCell, AttributionClaimCaption } from "../client/governance.js";
 import { ROUTES, parseHash } from "../client/view-routing.js";
 import { statusToken } from "../client/status-tokens.js";
 
@@ -273,8 +273,8 @@ test("proposal and audit presentation: counts, force-rule check, diff lines, aud
     { timestamp: "2026-09-30T06:41:00Z", action: "apply", actor: "dashboard", source: "dashboard", routes_modified: ["review_backend"], routes_added: [], routes_removed: [], rationale: "why", candidate_sha256: "9f3c" },
     { timestamp: "2026-08-07T13:28:00Z", action: "apply", routes_modified: [], routes_added: [], routes_removed: [], candidate_sha256: "b71d" },
   ]), [
-    { timestamp: "2026-09-30T06:41:00Z", who: "dashboard", action: "apply", change: "~1 route (review_backend)", rationale: "why", sha: "9f3c" },
-    { timestamp: "2026-08-07T13:28:00Z", who: "cli", action: "apply", change: "no route change", rationale: null, sha: "b71d" },
+    { timestamp: "2026-09-30T06:41:00Z", attribution: "dashboard (claimed)", action: "apply", change: "~1 route (review_backend)", rationale: "why", sha: "9f3c" },
+    { timestamp: "2026-08-07T13:28:00Z", attribution: null, action: "apply", change: "no route change", rationale: null, sha: "b71d" },
   ]);
   assert.equal(auditRows([{ routes_added: ["a", "b", "c", "d"] }])[0]!.change, "+4 routes (a, b, c, …)", "a long list is cut after three names");
 });
@@ -293,15 +293,32 @@ test("FG-840 AC 4: Routing's rendered Recorded rows label every attribution as a
   ] as const;
   for (const [entry, expected] of attributionCases) {
     const auditEntry = { timestamp: "2026-09-30T12:00:00Z", action: "apply", routes_added: [], routes_modified: [], routes_removed: [], ...entry };
-    const row = auditRows([auditEntry])[0]!;
-    const source = "source" in auditEntry ? auditEntry.source : undefined;
-    assert.equal(claimedAttribution(row.who, source), expected, `${expected}; an absent by value falls back without a blank cell or crash`);
+    assert.equal(auditRows([auditEntry])[0]!.attribution, expected, JSON.stringify(entry));
   }
 
   assert.equal(ATTRIBUTION_CLAIM_CAPTION, "Attribution is recorded as the caller gave it; on this host anyone who can run forge can write these values. It is a claim, not a proof.");
   const captions = nodesWithTestId(AttributionClaimCaption(), "attribution-claim");
   assert.equal(captions.length, 1, "the Routing view's Recorded panel renders one attribution caption");
   assert.equal(vnodeText(captions[0]), ATTRIBUTION_CLAIM_CAPTION);
+});
+
+test("FG-840 AC 4a: recorded-audit attribution renders only what the line recorded — no actor or source is synthesized", () => {
+  const cases = [
+    [{ source: "terminal-script" }, "terminal-script (claimed)"],
+    [{ source: "cli" }, "cli (claimed)"],
+    [{ actor: "steve" }, "steve (claimed)"],
+    [{ actor: "steve", source: "cli" }, "steve (claimed) via cli (claimed)"],
+    [{ actor: "steve", source: "some-unknown-tool" }, "steve (claimed) via some-unknown-tool (claimed)"],
+    [{}, "unattributed"],
+  ] as const;
+  for (const [entry, expected] of cases) {
+    const row = auditRows([{ timestamp: "2026-09-30T12:00:00Z", action: "apply", ...entry }])[0]!;
+    const cell = AttributionCell({ attribution: row.attribution });
+    assert.equal(vnodeText(cell), expected, JSON.stringify(entry));
+  }
+  const blank = AttributionCell({ attribution: null }) as any;
+  const faint = [blank.props.children].flat().find((c: any) => c?.props?.class === "faint");
+  assert.ok(faint, "a line with neither actor nor source renders an explicit 'unattributed' in the faint token");
 });
 
 test("reset to host default is an edit of the draft, never a delete", () => {

@@ -6,7 +6,7 @@
 
 import { h } from "preact";
 import htm from "htm";
-import { ATTRIBUTION_CLAIM_CAPTION, auditRows, claimedAttribution } from "./raci-editor-state.js";
+import { ATTRIBUTION_CLAIM_CAPTION, auditRows } from "./raci-editor-state.js";
 import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
 
 const html = htm.bind(h);
@@ -127,23 +127,25 @@ export function RecordedAudit({ audit }) {
             <table class="raci-table raci-audit" aria-label="RACI audit log, newest first">
               <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">Change</th><th scope="col">Rationale</th><th scope="col">Candidate</th></tr></thead>
               <tbody>
-                ${rows.map((r, i) => {
-                  const via = audit.entries[i].source;
-                  return html`<tr class="gov-audit-row">
-                    <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
-                    <td class="gov-audit-actor">${claimedAttribution(r.who, via)}</td>
-                    <td><span class="raci-chip">${r.action}</span></td>
-                    <td>${r.change}</td>
-                    <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
-                    <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>
-                  </tr>`;
-                })}
+                ${rows.map((r) => html`<tr class="gov-audit-row">
+                  <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
+                  <${AttributionCell} attribution=${r.attribution} />
+                  <td><span class="raci-chip">${r.action}</span></td>
+                  <td>${r.change}</td>
+                  <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
+                  <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>
+                </tr>`)}
               </tbody>
             </table>
           </div>`}
       ${rows.length ? html`<${AttributionClaimCaption} />` : null}
     </section>
   `;
+}
+
+/** The Who cell of every recorded-audit panel (Routing view/edit, Models). */
+export function AttributionCell({ attribution }) {
+  return html`<td class="gov-audit-actor">${attribution ?? html`<span class="faint">unattributed</span>`}</td>`;
 }
 
 export function AttributionClaimCaption() {

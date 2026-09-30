@@ -14,7 +14,7 @@ import { h } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
 import { ApplyCard, CodeEditor, ErrorNote, Pill, postJson } from "./raci-editor-view.js";
-import { AttributionClaimCaption } from "./governance.js";
+import { AttributionCell, AttributionClaimCaption } from "./governance.js";
 import { badgeClass } from "./status-tokens.js";
 import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
 import {
@@ -291,7 +291,7 @@ function RecordedTable({ read }) {
               <tbody>
                 ${rows.map((r) => html`<tr>
                   <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
-                  <td class="gov-audit-actor">${r.attribution ?? html`<span class="muted">—</span>`}</td>
+                  <${AttributionCell} attribution=${r.attribution} />
                   <td>${r.change}</td>
                   <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
                   <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>

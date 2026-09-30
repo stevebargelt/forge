@@ -538,7 +538,7 @@ export function policyAuditRows(entries) {
     timestamp: e.timestamp ?? null,
     actor: e.actor ?? null,
     source: e.source ?? null,
-    attribution: e.actor || e.source ? claimedAttribution(e.actor || e.source, e.source) : null,
+    attribution: claimedAttribution(e.actor, e.source),
     change: e.outcome === "failed" ? `failed — ${firstLine(e.error)}` : diffSummary(e.diff),
     rationale: e.rationale ?? null,
     sha: e.candidate_sha256 ?? null,

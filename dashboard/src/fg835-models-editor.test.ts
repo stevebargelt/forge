@@ -488,6 +488,7 @@ test("FG-840 AC 4b: Models Recorded rows attribute only what the audit line reco
     [{ actor: "steve", source: "cli" }, "steve (claimed) via cli (claimed)"],
     [{ actor: "steve", source: "terminal-script" }, "steve (claimed) via terminal-script (claimed)"],
     [{ source: "terminal-script" }, "terminal-script (claimed)"],
+    [{ actor: "steve", source: "some-unknown-tool" }, "steve (claimed) via some-unknown-tool (claimed)"],
     [{}, null],
   ] as const;
   for (const [entry, expected] of attributionCases) {
