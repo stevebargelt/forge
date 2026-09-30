@@ -76,6 +76,25 @@ const alpha = projectsForDashboard().find((project) => project.key === alphaKey)
 assert.ok(alpha, "fixture must register the granted project");
 const foreignTokens = ["FG-BRAVO", "Bravo-foreign-title", bravoDir, "run-FG-BRAVO", "campaign-FG-BRAVO", "FG-CHARLIE", "Charlie-foreign-title", charlieDir, "run-FG-CHARLIE", "campaign-FG-CHARLIE"];
 const sensitiveTokens = ["RAW_LOG_FG-ALPHA", "TRANSCRIPT_FG-ALPHA", "API_KEY=secret-FG-ALPHA", "bearer-token-FG-ALPHA", "/absolute/FG-ALPHA/path", "https://control.invalid/FG-ALPHA"];
+type CapturedResponse = [path: string, status: number, headers: Array<[string, string]>, body: string];
+
+// Node adds Date at write time. It is the only time-varying header emitted by these routes;
+// retain every other response header in the disabled-mode identity assertion.
+function normalizeResponseHeaders(headers: Array<[string, string]>): Array<[string, string]> {
+  return headers.filter(([name]) => name !== "date");
+}
+function normalizeCapturedResponses(responses: CapturedResponse[]): CapturedResponse[] {
+  return responses.map(([path, status, headers, body]) => [path, status, normalizeResponseHeaders(headers), body]);
+}
+
+test("response-header normalizer ignores Date but preserves all other differences", () => {
+  const before = [["content-type", "application/json"], ["date", "Mon, 01 Sep 2026 10:00:00 GMT"]] as Array<[string, string]>;
+  const oneSecondLater = [["content-type", "application/json"], ["date", "Mon, 01 Sep 2026 10:00:01 GMT"]] as Array<[string, string]>;
+  const changedHeader = [["content-type", "text/plain"], ["date", "Mon, 01 Sep 2026 10:00:01 GMT"]] as Array<[string, string]>;
+
+  assert.deepEqual(normalizeResponseHeaders(before), normalizeResponseHeaders(oneSecondLater));
+  assert.notDeepEqual(normalizeResponseHeaders(before), normalizeResponseHeaders(changedHeader));
+});
 
 function listen(server: ReturnType<typeof createRemoteBoardServer>): Promise<string> {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
@@ -158,13 +177,13 @@ test("AC1/AC2/AC6: actual server-entry children preserve local responses and exp
   const disabled = await boot(localDisabled!, remoteDisabled!, "0");
   const enabled = await boot(localEnabled!, remoteEnabled!, "1");
   try {
-    const capture = async (base: string) => Promise.all(["/api/board", "/client/main.js"].map(async (path) => {
+    const capture = async (base: string): Promise<CapturedResponse[]> => Promise.all(["/api/board", "/client/main.js"].map(async (path) => {
       const response = await fetch(base + path);
       const headers: Array<[string, string]> = [];
       response.headers.forEach((value, key) => headers.push([key, value]));
-      return [path, response.status, headers.sort(), await response.text()];
+      return [path, response.status, headers.sort(), await response.text()] as CapturedResponse;
     }));
-    assert.deepEqual(await capture(off.base), await capture(disabled.base), "remote-disabled boot is byte-identical to ordinary boot for fixed local responses and headers");
+    assert.deepEqual(normalizeCapturedResponses(await capture(off.base)), normalizeCapturedResponses(await capture(disabled.base)), "remote-disabled boot is byte-identical to ordinary boot for fixed local responses and headers");
     await assert.rejects(fetch(`${off.remote}/api/board`), "disabled mode does not listen on its configured remote port");
     const remote = await fetch(`${enabled.remote}/api/board`, { headers: { "x-forwarded-for": "203.0.113.9", "x-forwarded-user": "attacker@test", "tailscale-user-name": "spoof", "cf-access-jwt-assertion": "forged" } });
     assert.equal(remote.status, 401); const raw = await remote.text(); assert.equal(JSON.parse(raw).board, null);
@@ -172,7 +191,7 @@ test("AC1/AC2/AC6: actual server-entry children preserve local responses and exp
     const publicAddress = Object.values(networkInterfaces()).flat().find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address;
     assert.ok(publicAddress, "fixture host must expose a non-loopback interface to prove the listener did not bind it");
     await cannotConnect(publicAddress!, remoteEnabled!);
-    assert.deepEqual(await capture(off.base), await capture(enabled.base), "enabling the dedicated listener leaves local dashboard responses unchanged");
+    assert.deepEqual(normalizeCapturedResponses(await capture(off.base)), normalizeCapturedResponses(await capture(enabled.base)), "enabling the dedicated listener leaves local dashboard responses unchanged");
   } finally { await Promise.all([stop(off.child), stop(disabled.child), stop(enabled.child)]); }
 });
 
