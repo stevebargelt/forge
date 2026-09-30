@@ -186,11 +186,10 @@ would add a proof-shaped value without adding a boundary.
 What changes instead is the presentation: the dashboard's RECORDED panels (Routing, the RACI
 editor, Models) render `by` and `source` with a "claimed" marker — `dashboard (claimed)`,
 `cli (claimed)` — and a caption: "Attribution is recorded as the caller gave it; on this host
-anyone who can run forge can write these values. It is a claim, not a proof." Routing falls
-back to `cli (claimed)` when no actor was recorded; Models never synthesizes a fallback
-(AC 4b) — it shows only what the line actually recorded, and a line with neither `by` nor
-`source` carries no attribution at all. The audit line format, the readers and the routes
-are unchanged.
+anyone who can run forge can write these values. It is a claim, not a proof." Neither panel
+synthesizes a fallback (AC 4b) — both show only what the line actually recorded, and a line
+with neither `by` nor `source` renders "unattributed" rather than a guessed value. The audit
+line format, the readers and the routes are unchanged.
 
 Revisit if forge ever runs the dashboard under a separate OS identity from the operator's
 shell, or on a multi-user host: then a real boundary exists for a binding to rest on.
