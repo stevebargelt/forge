@@ -1768,7 +1768,6 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .gov-finding { padding: 2px 0; }
 .gov-diff-line { padding: 4px 0; }
 .gov-field { padding: 1px 0; }
-.gov-audit-row + .gov-audit-row { border-top: 1px solid var(--border); }
 /* FG-834: the Edit RACI mode (client/raci-editor-view.js), after /design/edit-raci-mock.html. */
 .gov-view .hint { color: var(--fg-dim); font-size: 12px; }
 .gov-source-label-row { display: flex; align-items: center; gap: 10px; }

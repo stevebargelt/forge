@@ -181,7 +181,7 @@ test("FG-840: Routing names the project audit source for a scoped checkout and t
   await page.locator(".page-title", { hasText: "Routing" }).waitFor();
   await page.locator('[data-testid="gov-audit-source"]', { hasText: "recorded in this checkout's .forge/raci-audit.log" }).waitFor();
   assert.match(await page.locator('[data-testid="gov-audit-source"]').getAttribute("title") ?? "", /\.forge\/raci-audit\.log$/);
-  assert.equal(await page.locator(".gov-audit-row .gov-audit-actor").textContent(), "by dashboard via dashboard");
+  assert.equal(await page.locator(".gov-audit-row .gov-audit-actor").textContent(), "dashboard");
 
   await page.goto(`${baseUrl}/#routing`);
   await page.locator('[data-testid="gov-audit-source"]', { hasText: "recorded in the host log — no checkout in scope" }).waitFor();

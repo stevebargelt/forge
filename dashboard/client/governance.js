@@ -6,6 +6,8 @@
 
 import { h } from "preact";
 import htm from "htm";
+import { auditRows } from "./raci-editor-state.js";
+import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
 
 const html = htm.bind(h);
 
@@ -23,9 +25,8 @@ const HEALTH_META = {
 };
 
 // FG-834: `sourceActions` (the Edit RACI button) sits on the SOURCE label row, `afterSource`
-// under it (an apply's result), and `recorded` replaces the host audit with the checkout's
-// own tail when a project is in scope (raci-editor-view.js).
-export function GovernanceView({ data, sourceActions = null, afterSource = null, recorded = null }) {
+// under it (an apply's result) — raci-editor-view.js.
+export function GovernanceView({ data, sourceActions = null, afterSource = null }) {
   if (!data) return html`<div class="muted">loading workbench…</div>`;
 
   return html`
@@ -34,7 +35,7 @@ export function GovernanceView({ data, sourceActions = null, afterSource = null,
       ${afterSource}
       <${DerivedSection} derived=${data.derived} />
       <${EffectiveSection} effective=${data.effective} />
-      ${recorded ?? html`<${RecordedSection} recorded=${data.recorded} />`}
+      <${RecordedAudit} audit=${data.recorded} />
     </section>
   `;
 }
@@ -111,12 +112,35 @@ export function AuditSourceCaption({ source, path, skippedLines = 0, refused = f
   `;
 }
 
-function RecordedSection({ recorded }) {
+// FG-840: the ONE RECORDED renderer — the workbench (host log, or the scoped checkout's
+// via /api/governance) and the editor (the same reader's tail via /api/raci) both use it.
+// `audit` is src/raci-audit.ts's RaciAuditTail.
+export function RecordedAudit({ audit }) {
+  const label = html`<h2 class="workbench-section-label">RECORDED</h2><${AuditSourceCaption} source=${audit.source} path=${audit.path} skippedLines=${audit.skippedLines} refused=${audit.refused} />`;
+  const rows = auditRows(audit.entries);
   return html`
-    <section class="workbench-section" role="region" aria-label="RECORDED — RACI audit log">
-      <h2 class="workbench-section-label">RECORDED</h2>
-      <${AuditSourceCaption} source=${recorded.source} path=${recorded.path} skippedLines=${recorded.skippedLines} refused=${recorded.refused} />
-      <${AuditPanel} entries=${recorded.entries} />
+    <section class="workbench-section raci-recorded" role="region" aria-label="RECORDED — RACI audit log">
+      ${label}
+      ${rows.length === 0
+        ? html`<div class="muted">${audit.source === "project" ? "No RACI changes recorded for this checkout yet." : "No RACI audit entries yet."}</div>`
+        : html`<div class="card raci-table-card">
+            <table class="raci-table raci-audit" aria-label="RACI audit log, newest first">
+              <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">Change</th><th scope="col">Rationale</th><th scope="col">Candidate</th></tr></thead>
+              <tbody>
+                ${rows.map((r, i) => {
+                  const via = audit.entries[i].source;
+                  return html`<tr class="gov-audit-row">
+                    <td class=${MONO_CLASS} title=${r.timestamp ?? ""}>${formatUtcMinute(r.timestamp)}</td>
+                    <td class="gov-audit-actor">${r.who}${via && via !== r.who ? ` via ${via}` : ""}</td>
+                    <td><span class="raci-chip">${r.action}</span></td>
+                    <td>${r.change}</td>
+                    <td class="raci-rationale" title=${r.rationale ?? ""}>${r.rationale ?? html`<span class="muted">—</span>`}</td>
+                    <td class=${`${MONO_CLASS} muted`} title=${r.sha ?? ""}>${shortSha(r.sha, 8)}</td>
+                  </tr>`;
+                })}
+              </tbody>
+            </table>
+          </div>`}
     </section>
   `;
 }
@@ -194,32 +218,6 @@ function OverrideDiff({ diff }) {
               `)}
             `}
       </div>
-    </div>
-  `;
-}
-
-function AuditPanel({ entries }) {
-  if (!entries || entries.length === 0) {
-    return html`<div class="muted">No RACI audit entries yet.</div>`;
-  }
-  return html`
-    <div class="card gov-card">
-      ${entries.map((e) => {
-        const changed = [
-          ...(e.routes_added ?? []).map((r) => `+${r}`),
-          ...(e.routes_removed ?? []).map((r) => `−${r}`),
-          ...(e.routes_modified ?? []).map((r) => `~${r}`),
-        ];
-        return html`
-          <div class="row gov-audit-row" style="gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 3px 0;">
-            <span class="mono faint" style="min-width: 168px;">${e.timestamp}</span>
-            <span class="badge">${e.action}</span>
-            <span class="mono">${changed.length ? changed.join(" ") : "no route change"}</span>
-            ${e.actor ? html`<span class="faint gov-audit-actor">by ${e.actor}${e.source ? ` via ${e.source}` : ""}</span>` : null}
-            ${e.rationale ? html`<span class="muted">— ${e.rationale}</span>` : null}
-          </div>
-        `;
-      })}
     </div>
   `;
 }
