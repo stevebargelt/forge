@@ -23,13 +23,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWN_CHROME_LOCATIONS } from "../../src/util/chrome-bin.js";
-import { DECLARED_TIER_SUITES, tierSuites, tierTestTotal } from "../../src/util/browser-tier-census.js";
+import { DECLARED_TIER_SUITES, countTierTests, tierSuites, tierTestTotal } from "../../src/util/browser-tier-census.js";
 
 const DASHBOARD = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PROJECT = join(DASHBOARD, "..");
 const BOGUS = "/nonexistent/forge-fg642/deliberately-absent/chromium";
 
 /** node:test marks its own children with NODE_TEST_CONTEXT, and a runner that sees it
@@ -48,6 +50,26 @@ function total(output: string, label: string): number {
   return Number(match![1]);
 }
 
+/** FG-839: the suites whose tests did not all register, from the junit report's per-testcase
+ *  `file` attribute. A suite that throws on import (a module-scope mkdirSync on an
+ *  unwritable path, say) reports ONE failure named after the file instead of its tests. */
+function shortSuites(junit: string): string[] {
+  const reported: Record<string, number> = {};
+  const loadFailures = new Set<string>();
+  // Attribute values may carry an unescaped `>`, so walk quoted attributes rather than `[^>]*`.
+  for (const [tag] of junit.matchAll(/<testcase(?:\s+[\w-]+="[^"]*")*/g)) {
+    const attr = (key: string) => new RegExp(`\\s${key}="([^"]*)"`).exec(tag)?.[1] ?? "";
+    const file = basename(attr("file"));
+    reported[file] = (reported[file] ?? 0) + 1;
+    if (basename(attr("name")) === file) loadFailures.add(file);
+  }
+  return Object.entries(countTierTests())
+    .filter(([file, declared]) => reported[file] !== declared || loadFailures.has(file))
+    .map(([file, declared]) =>
+      `${file} (${reported[file] ?? 0} of ${declared} reported${loadFailures.has(file) ? " — the file failed to load" : ""})`
+    );
+}
+
 test("FG-642: a Chrome-less run of the real browser tier FAILS every test with the named precondition — it never skips to green", () => {
   const suites = tierSuites();
   assert.deepEqual(
@@ -59,9 +81,19 @@ test("FG-642: a Chrome-less run of the real browser tier FAILS every test with t
   assert.ok(!existsSync(BOGUS), "the override must point at a path that genuinely does not exist");
   const realChrome = KNOWN_CHROME_LOCATIONS.find(existsSync);
 
+  const junitPath = join(mkdtempSync(join(tmpdir(), "fg642-fail-first-")), "tier.xml");
   const run = spawnSync(
     process.execPath,
-    ["--import", "tsx", "--test", ...suites.map((f) => join("browser-tests", f))],
+    [
+      "--import",
+      "tsx",
+      "--test",
+      "--test-reporter=spec",
+      "--test-reporter-destination=stdout",
+      "--test-reporter=junit",
+      `--test-reporter-destination=${junitPath}`,
+      ...suites.map((f) => join("browser-tests", f)),
+    ],
     {
       cwd: DASHBOARD,
       encoding: "utf8",
@@ -94,10 +126,54 @@ test("FG-642: a Chrome-less run of the real browser tier FAILS every test with t
   // counting the tier (src/util/browser-tier-census.ts); this file used to pin its own
   // literal, FG-694 grew the tier, and this copy is the one that went stale.
   const expected = tierTestTotal();
-  assert.equal(total(output, "tests"), expected, `all ${expected} tier tests must be accounted for`);
+  const short = existsSync(junitPath) ? shortSuites(readFileSync(junitPath, "utf8")) : ["(no junit report was written)"];
+  assert.equal(
+    total(output, "tests"),
+    expected,
+    `all ${expected} tier tests must be accounted for — missing from: ${short.join(", ") || "(no suite short in the junit report)"}`
+  );
+  assert.deepEqual(short, [], `every suite must register all its declared tests — short: ${short.join(", ")}`);
   assert.equal(total(output, "fail"), expected, "every tier test must fail without a browser");
   assert.equal(total(output, "pass"), 0, "no tier test may pass without a browser");
   assert.equal(total(output, "skipped"), 0, "a skip is the exact regression FG-642 closed — the tier must go red, not quiet");
   assert.equal(total(output, "todo"), 0);
   assert.equal(total(output, "cancelled"), 0);
+});
+
+test("FG-839: the fail-first accounting names a suite that throws while loading", () => {
+  const root = mkdtempSync(join(tmpdir(), "fg839-fail-first-"));
+  const dashboard = join(root, "dashboard");
+  const source = join(root, "src");
+  const fixture = "fg839-load-failure.test.ts";
+  try {
+    // The inner process runs the real first proof against an isolated copy. Restrict it
+    // to that test so this regression test does not recursively launch itself.
+    cpSync(DASHBOARD, dashboard, { recursive: true, filter: (path) => !path.endsWith("node_modules") });
+    cpSync(join(PROJECT, "src"), source, { recursive: true });
+    symlinkSync(join(PROJECT, "node_modules"), join(root, "node_modules"));
+    writeFileSync(join(dashboard, "browser-tests", fixture), 'throw new Error("FG-839 deliberate suite load failure");\n');
+
+    const census = join(source, "util", "browser-tier-census.ts");
+    writeFileSync(
+      census,
+      readFileSync(census, "utf8").replace(
+        "export const TIER_TESTS: Readonly<Record<string, number>> = {",
+        'export const TIER_TESTS: Readonly<Record<string, number>> = {\n  "fg839-load-failure.test.ts": 1,'
+      )
+    );
+    const run = spawnSync(
+      "npx",
+      ["tsx", "--test", "--test-name-pattern", "Chrome-less run", "src/fg642-browser-tier-fail-first.integration.test.ts"],
+      { cwd: dashboard, encoding: "utf8", timeout: 240_000, env: childEnv({ npm_config_yes: "true" }) }
+    );
+    const output = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+    assert.notEqual(run.status, 0, `the deliberate load failure must make the copied proof fail:\n${output.slice(-3000)}`);
+    assert.match(
+      output,
+      /fg839-load-failure\.test\.ts \(1 of 0 reported — the file failed to load\)/,
+      `the fail-first accounting assertion must name the suite that failed to load:\n${output.slice(-3000)}`
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
