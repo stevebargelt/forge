@@ -1,4 +1,4 @@
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
@@ -112,7 +112,7 @@ export function registerModel(program: Command): void {
     .command("policy")
     .description("Propose / apply a replacement model-policy.yml through the validation gate (FG-835)");
 
-  type PolicyOpts = { project?: string; json?: boolean; confirm?: boolean; by?: string; allowUndispatchable?: boolean; expectSha256?: string };
+  type PolicyOpts = { project?: string; json?: boolean; confirm?: boolean; by?: string; rationale?: string; source?: "dashboard"; allowUndispatchable?: boolean; expectSha256?: string };
 
   const runPolicyGate = (verb: "propose" | "apply", candidateArg: string, opts: PolicyOpts) => {
     const candidatePath = resolve(candidateArg);
@@ -129,7 +129,9 @@ export function registerModel(program: Command): void {
         candidateLabel: candidatePath,
         allowUndispatchable: opts.allowUndispatchable ?? false,
         confirm: verb === "apply" && (opts.confirm ?? false),
-        by: opts.by,
+        by: opts.by?.trim() || undefined,
+        rationale: opts.rationale?.trim() ? opts.rationale : undefined,
+        source: opts.source,
         expectTargetSha256: opts.expectSha256,
       });
     } catch (e) {
@@ -177,6 +179,8 @@ export function registerModel(program: Command): void {
     .option("--project <dir>", "replace the project's .forge/model-policy.yml (default: the host ~/.forge/model-policy.yml)")
     .option("--confirm", "actually write (without it, behaves exactly as propose)")
     .option("--by <who>", "who is applying, recorded in the audit log (default: the OS user)")
+    .option("--rationale <text>", "why the change is being made, recorded verbatim in the audit line (attribution only)")
+    .addOption(new Option("--source <surface>", "the surface the apply came through, recorded in the audit line").choices(["dashboard"]))
     .option("--expect-sha256 <sha>", "refuse (target_changed) unless the target still carries these bytes — the targetSha256 of a reviewed `propose --json` (\"absent\" for no file)")
     .option("--allow-undispatchable", "accept a candidate that leaves an installed role undispatchable for its default activity")
     .option("--json", "emit the structured apply result as JSON")

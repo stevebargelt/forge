@@ -275,7 +275,7 @@ function boundRuntime(runtimeName: string, gen: SeedGeneration | null) {
 /** One row per activity the role can be dispatched with, each the report `forge model
  *  resolve <role> --activity <a> --json` prints (`resolve`, verbatim), plus the bound
  *  runtime's image. */
-function harnessActivities(role: string, gen: SeedGeneration | null, project?: { key: string; dir: string }) {
+export function harnessActivities(role: string, gen: SeedGeneration | null, project?: { key: string; dir: string }) {
   const ctx: LoadContext = { seedGeneration: gen, ...(project ? { projectDir: project.dir } : {}) };
   const runtimeCtx: LoadContext = { seedGeneration: gen };
   const defaultActivity = defaultActivityForRole(role);

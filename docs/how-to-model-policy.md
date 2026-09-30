@@ -355,7 +355,7 @@ checks a candidate first and records what changed:
 
 ```bash
 forge model policy propose candidate.yml [--project <dir>] [--json]
-forge model policy apply   candidate.yml --confirm [--by <who>] [--project <dir>] [--allow-undispatchable] [--expect-sha256 <sha>]
+forge model policy apply   candidate.yml --confirm [--by <who>] [--rationale <text>] [--source dashboard] [--project <dir>] [--allow-undispatchable] [--expect-sha256 <sha>]
 ```
 
 The safe sequence is **propose, read the diff, then apply --confirm**: `propose` never
@@ -367,6 +367,13 @@ safe way to preview what applying would do.
 
 **Target.** With `--project <dir>` the target is `<dir>/.forge/model-policy.yml`.
 Without it, the target is the host `~/.forge/model-policy.yml`.
+
+**From the dashboard.** `POST /api/model-policy/propose` and `POST /api/model-policy/apply`
+shell these same verbs: apply needs a green propose of the identical bytes, the typed
+target (the project key, or `host`) and a rationale, and runs `apply --confirm --by dashboard
+--source dashboard --rationale <text>` — never `--allow-undispatchable` (see
+`docs/SCHEMA-CONTRACT.md`). `--rationale <text>` and `--source dashboard` are recorded in the
+audit line; from a terminal both are optional.
 
 **The gate** (`propose` runs it; `apply` re-runs it right before writing and
 never relies on an earlier propose). A candidate fails when:
@@ -433,7 +440,8 @@ and target checks above clear:
    write.
 3. One JSONL line appended to `model-policy-audit.log` in the same directory:
    `outcome` (`applied` or `failed`), `by` (`--by`, default the OS user),
-   `timestamp`, `target`, `target_kind`, `target_sha256_before` (the bytes
+   `rationale` (`--rationale`, verbatim, when non-blank), `source`
+   (`"dashboard"` when the apply carried `--source dashboard`), `timestamp`, `target`, `target_kind`, `target_sha256_before` (the bytes
    this apply validated against and replaced, `null` when absent), `candidate`,
    `candidate_sha256`, `backup`, `allow_undispatchable`, and `diff` (only the
    rows that change). The audit log is opened for append — and an unwritable

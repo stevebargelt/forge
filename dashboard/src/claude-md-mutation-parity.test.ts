@@ -4,7 +4,7 @@
 // server.ts listens on import, so its routing is read as source: every non-GET branch ahead
 // of the 405 fallthrough must dispatch through a closed registry this test can resolve —
 // QUEUE_MUTATION_ROUTES, ACTION_ROUTES (FG-822's task actions, FG-823's attention-row
-// actions and FG-834's RACI actions), or a named path constant.
+// actions, FG-834's RACI actions and FG-835's model-policy actions), or a named path constant.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,7 +21,7 @@ const guide = readFileSync(resolve(HERE, "..", "CLAUDE.md"), "utf8");
 const serverSource = readFileSync(resolve(HERE, "server.ts"), "utf8");
 const intro = guide.split("\n## ")[0]!;
 
-const NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14 };
+const NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15 };
 
 function exportedStringConst(name: string): string {
   const m = serverSource.match(new RegExp(`export const ${name} = "([^"]+)";`));
@@ -32,7 +32,7 @@ function exportedStringConst(name: string): string {
 /** Resolve every `if (req.method === "…" && <cond>)` branch ahead of the 405 fallthrough to
  *  the concrete paths it accepts. A branch shape this test cannot resolve fails outright, so
  *  a new mutating route cannot slip past the guide unnoticed. */
-function serverMutatingRoutes(): { queue: string[]; actions: string[]; attention: string[]; raci: string[]; all: string[] } {
+function serverMutatingRoutes(): { queue: string[]; actions: string[]; attention: string[]; raci: string[]; modelPolicy: string[]; all: string[] } {
   const fallthrough = serverSource.indexOf(`if (req.method !== "GET")`);
   assert.ok(fallthrough > 0, "server.ts refuses every non-GET it does not route");
   const branches = [...serverSource.slice(0, fallthrough).matchAll(/if \(req\.method === "([A-Z]+)" && ([^)]+\)?)\)\s*\{/g)];
@@ -41,6 +41,7 @@ function serverMutatingRoutes(): { queue: string[]; actions: string[]; attention
   const actions: string[] = [];
   const attention: string[] = [];
   const raci: string[] = [];
+  const modelPolicy: string[] = [];
   const all: string[] = [];
   for (const [, method, cond] of branches) {
     const c = cond!.trim();
@@ -55,6 +56,7 @@ function serverMutatingRoutes(): { queue: string[]; actions: string[]; attention
       actions.push(...paths.filter((p) => p.startsWith("/api/task/")));
       attention.push(...paths.filter((p) => p.startsWith("/api/attention/")));
       raci.push(...paths.filter((p) => p.startsWith("/api/raci/")));
+      modelPolicy.push(...paths.filter((p) => p.startsWith("/api/model-policy/")));
       all.push(...paths.map((p) => `${method} ${p}`));
       continue;
     }
@@ -62,7 +64,7 @@ function serverMutatingRoutes(): { queue: string[]; actions: string[]; attention
     assert.ok(named, `unrecognised mutating-route condition in server.ts: ${c}`);
     all.push(`${method} ${exportedStringConst(named[1]!)}`);
   }
-  return { queue, actions, attention, raci, all };
+  return { queue, actions, attention, raci, modelPolicy, all };
 }
 
 /** The routes the guide's "Mutations shell out" contract names for server.ts — stopping
@@ -79,8 +81,8 @@ function guideMutatingRoutes(): string[] {
   return routes;
 }
 
-test("dashboard/CLAUDE.md intro names the closed mutation set, including the task, attention and RACI actions", () => {
-  const { queue, actions, attention, raci } = serverMutatingRoutes();
+test("dashboard/CLAUDE.md intro names the closed mutation set, including the task, attention, RACI and model-policy actions", () => {
+  const { queue, actions, attention, raci, modelPolicy } = serverMutatingRoutes();
   const m = intro.match(/the (\w+) `forge queue` verbs/);
   assert.ok(m, "the intro counts the forge queue verbs");
   assert.equal(NUMBER_WORDS[m[1]!], queue.length, "the intro's queue verb count matches server.ts");
@@ -97,6 +99,10 @@ test("dashboard/CLAUDE.md intro names the closed mutation set, including the tas
   assert.ok(r, "the intro counts the RACI actions");
   assert.equal(NUMBER_WORDS[r[1]!], raci.length, "the intro's RACI-action count matches ACTION_ROUTES");
   assert.ok(intro.includes("`forge raci propose|apply`"), "the intro names the RACI verbs");
+  const mp = intro.match(/the (\w+) model-policy actions/);
+  assert.ok(mp, "the intro counts the model-policy actions");
+  assert.equal(NUMBER_WORDS[mp[1]!], modelPolicy.length, "the intro's model-policy-action count matches ACTION_ROUTES");
+  assert.ok(intro.includes("`forge model policy propose|apply`"), "the intro names the model-policy verbs");
   assert.match(intro, /Next, cancel and dispatcher arming stay CLI-only/);
 });
 

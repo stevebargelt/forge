@@ -313,6 +313,10 @@ export type ModelPolicyAuditEntry = {
   outcome: "applied" | "failed";
   error?: string;
   by: string;
+  /** FG-835: why (`--rationale`), recorded verbatim — attribution only. */
+  rationale?: string;
+  /** FG-835: the surface the apply came through (`--source`); absent from a terminal. */
+  source?: "dashboard";
   target: string;
   target_kind: "host" | "project";
   /** The target bytes this apply validated against and replaced (null: absent). */
@@ -418,6 +422,8 @@ export function applyModelPolicy(
   opts: ProposeOpts & {
     confirm: boolean;
     by?: string;
+    rationale?: string;
+    source?: "dashboard";
     now?: () => Date;
     /** The target sha a caller already reviewed (e.g. a `propose --json` targetSha256;
      *  "absent" for no file). Refused `target_changed` when the file no longer matches. */
@@ -460,6 +466,8 @@ export function applyModelPolicy(
         action: "apply",
         outcome: "applied",
         by: opts.by ?? defaultApplier(),
+        ...(opts.rationale ? { rationale: opts.rationale } : {}),
+        ...(opts.source ? { source: opts.source } : {}),
         target: target.path,
         target_kind: target.kind,
         target_sha256_before: now,
