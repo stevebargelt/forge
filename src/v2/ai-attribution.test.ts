@@ -1,5 +1,6 @@
 // FG-799 (AC1): the per-project ai_attribution reader/writer.
 // FG-845 (AC1): the host default beneath it — project → host → default.
+// FG-853: the carried value between them — project → carried → host → default.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -8,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  carriedAiAttributionValue,
   readAiAttribution,
   writeAiAttribution,
   writeHostAiAttribution,
@@ -15,8 +17,11 @@ import {
   formatAiAttribution,
 } from "./ai-attribution.js";
 import {
+  AI_ATTRIBUTION_CARRIED_ENV,
   classifyAiAttributionReadError,
+  describeAiAttributionFailure,
   parseAiAttributionConfig,
+  parseCarriedAiAttribution,
   resolveAiAttributionLevels,
   scalarValue,
   stripComment,
@@ -32,12 +37,18 @@ type ParseHelpers = {
   parseAiAttributionConfig(text: string | null): { mode: "allow" | "suppress"; recognized: boolean; present: boolean; duplicate?: true };
   scalarValue(rest: string): string;
   stripComment(s: string): string;
+  parseCarriedAiAttribution: typeof parseCarriedAiAttribution;
   resolveAiAttributionLevels: typeof resolveAiAttributionLevels;
+  describeAiAttributionFailure: typeof describeAiAttributionFailure;
   classifyAiAttributionReadError: typeof classifyAiAttributionReadError;
-  readMode(projectDir: string, hostFile: string): "allow" | "suppress";
+  readMode(projectDir: string, hostFile: string, carried?: string): "allow" | "suppress";
 };
 const readerUrl = new URL("../../scripts/git-hooks/read-ai-attribution.mjs", import.meta.url).href;
 const hookReader = (await import(readerUrl)) as ParseHelpers;
+
+// FG-853: this suite may itself run inside a Forge agent container, where dispatch sets
+// the carried value; every case below that wants it passes it explicitly.
+delete process.env[AI_ATTRIBUTION_CARRIED_ENV];
 
 function tmpProject(): string {
   return mkdtempSync(join(tmpdir(), "forge-ai-attr-"));
@@ -404,6 +415,7 @@ test("formatAiAttribution: the exact strings config-show / doctor print", () => 
   assert.equal(formatAiAttribution({ mode: "suppress", source: "default" }), "ai attribution: suppress (default)");
   assert.equal(formatAiAttribution({ mode: "allow", source: "project" }), "ai attribution: allow (project)");
   assert.equal(formatAiAttribution({ mode: "allow", source: "host" }), "ai attribution: allow (host)");
+  assert.equal(formatAiAttribution({ mode: "allow", source: "host (carried)" }), "ai attribution: allow (host (carried))");
 });
 
 test("FG-845: writeHostAiAttribution creates the host file, then read-modify-writes preserving neighbours", () => {
@@ -439,4 +451,156 @@ test("FG-845: unsetAiAttribution removes only the key; absent key/file is a no-o
   writeConfig(dir, "ai_attribution: allow\n  bad: [\n");
   assert.throws(() => unsetAiAttribution(dir), /not valid YAML/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// FG-853: the carried level. Each carried case is the raw env value (undefined = unset).
+type CarriedCase = { label: string; value?: string };
+const CARRIED_CASES: CarriedCase[] = [
+  { label: "unset" },
+  { label: "host allow", value: "allow;source=host;file=/h/.forge/config.yml" },
+  { label: "host suppress", value: "suppress;source=host;file=/h/.forge/config.yml" },
+  { label: "project allow", value: "allow;source=project;file=/p/.forge/config.yml" },
+  { label: "bare default", value: "suppress;source=default;file=" },
+  { label: "fail-closed default", value: "suppress;source=default;file=/h/.forge/config.yml" },
+  { label: "malformed: empty", value: "" },
+  { label: "malformed: bare mode", value: "allow" },
+  { label: "malformed: unknown mode", value: "banana;source=host;file=/x" },
+  { label: "malformed: unknown source", value: "allow;source=elsewhere;file=/x" },
+  { label: "malformed: allow claimed from default", value: "allow;source=default;file=" },
+  { label: "malformed: case", value: "Allow;source=host;file=/x" },
+  { label: "malformed: newline", value: "allow;source=host;file=/x\nallow" },
+  { label: "malformed: extra field", value: "allow;source=host;file=/h/.forge/config.yml;extra=x" },
+  { label: "malformed: missing source", value: "allow;file=/h/.forge/config.yml" },
+  { label: "malformed: missing file", value: "allow;source=host" },
+  { label: "malformed: fields out of order", value: "allow;file=/x;source=host" },
+];
+
+const CARRIED_PROJECT_LEVELS: Level[] = ["absent", "no-key", "allow", "suppress", "unknown", "duplicate", "unreadable"];
+const CARRIED_HOST_LEVELS: Level[] = ["absent", "allow", "suppress", "unknown"];
+
+function expectedWithCarried(
+  project: Level,
+  carried: string | undefined,
+  host: Level,
+): { mode: "allow" | "suppress"; source: string; file: "project" | "host" | "carried" | null; failed?: boolean } {
+  if (project === "allow" || project === "suppress") return { mode: project, source: "project", file: "project" };
+  if (project !== "absent" && project !== "no-key") return { mode: "suppress", source: "default", file: "project", failed: true };
+  if (carried !== undefined) {
+    const m = carried.match(/^(allow|suppress);source=(project|host|default);file=([^;\n]*)$/);
+    if (!m || (m[2] === "default" && m[1] === "allow")) return { mode: "suppress", source: "default", file: null, failed: true };
+    return { mode: m[1] as "allow" | "suppress", source: `${m[2]} (carried)`, file: m[3] ? "carried" : null };
+  }
+  const h = expected("absent", host);
+  return { mode: h.mode, source: h.source, file: h.failedAt ? "host" : h.source === "host" ? "host" : null, failed: !!h.failedAt };
+}
+
+test("FG-853: readAiAttribution resolves project → carried → host → default across every combination; the hook reader agrees", () => {
+  for (const p of CARRIED_PROJECT_LEVELS) {
+    for (const c of CARRIED_CASES) {
+      for (const h of CARRIED_HOST_LEVELS) {
+        const dir = tmpProject();
+        const home = tmpProject();
+        const projectFile = cfg(dir);
+        const hostFile = join(home, "config.yml");
+        placeLevel(projectFile, p);
+        placeLevel(hostFile, h);
+        const label = `project=${p} carried=${c.label} host=${h}`;
+        const want = expectedWithCarried(p, c.value, h);
+        const got = readAiAttribution(dir, { forgeHome: home, carried: c.value ?? null });
+        assert.equal(got.mode, want.mode, `mode for ${label}`);
+        assert.equal(got.source, want.source, `source for ${label}`);
+        const wantFile =
+          want.file === "project"
+            ? projectFile
+            : want.file === "host"
+              ? hostFile
+              : want.file === "carried"
+                ? parseCarriedAiAttribution(c.value!)!.file
+                : null;
+        assert.equal(got.file, wantFile, `file for ${label}`);
+        assert.equal(!!got.reason, !!want.failed, `fail-closed reason for ${label}`);
+        if (want.failed && want.file === null) assert.match(got.reason!, /FORGE_AI_ATTRIBUTION_CARRIED=/, `reason names the env for ${label}`);
+        assert.equal(hookReader.readMode(dir, hostFile, c.value), want.mode, `hook reader mode for ${label}`);
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("FG-853: an unset carried option reads the env value at call time", () => {
+  const dir = tmpProject();
+  const home = tmpProject();
+  process.env[AI_ATTRIBUTION_CARRIED_ENV] = "allow;source=host;file=/h/config.yml";
+  try {
+    assert.deepEqual(readAiAttribution(dir, { forgeHome: home }), { mode: "allow", source: "host (carried)", file: "/h/config.yml" });
+    assert.deepEqual(readAiAttribution(dir, { forgeHome: home, carried: null }), { mode: "suppress", source: "default", file: null });
+  } finally {
+    delete process.env[AI_ATTRIBUTION_CARRIED_ENV];
+  }
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-853: a project value that overrides a carried host value is flagged like a host override", () => {
+  const dir = tmpProject();
+  const home = tmpProject();
+  writeConfig(dir, "ai_attribution: suppress\n");
+  const r = readAiAttribution(dir, { forgeHome: home, carried: "allow;source=host;file=/h/config.yml" });
+  assert.deepEqual(r, { mode: "suppress", source: "project", file: cfg(dir), overridesHost: { mode: "allow", file: "/h/config.yml" } });
+  const same = readAiAttribution(dir, { forgeHome: home, carried: "suppress;source=default;file=" });
+  assert.equal(same.overridesHost, undefined);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-853: the hook reader's carried parse and level resolution are byte-identical to the TS copy", () => {
+  for (const c of CARRIED_CASES) {
+    if (c.value === undefined) continue;
+    assert.deepEqual(hookReader.parseCarriedAiAttribution(c.value), parseCarriedAiAttribution(c.value), `parse divergence on ${c.label}`);
+  }
+  for (const p of LEVEL_READS) {
+    for (const c of CARRIED_CASES) {
+      for (const h of LEVEL_READS) {
+        assert.deepEqual(
+          hookReader.resolveAiAttributionLevels(p, h, c.value),
+          resolveAiAttributionLevels(p, h, c.value),
+          `resolveAiAttributionLevels divergence on ${JSON.stringify([p, c.value, h])}`,
+        );
+        const failed = resolveAiAttributionLevels(p, h, c.value).failed;
+        if (failed) {
+          const files = { project: "/p/.forge/config.yml", host: "/h/config.yml" };
+          assert.equal(
+            hookReader.describeAiAttributionFailure(failed, files, c.value),
+            describeAiAttributionFailure(failed, files, c.value),
+            `failure reason divergence on ${JSON.stringify([p, c.value, h])}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("FG-853: carriedAiAttributionValue carries the host resolution, and a container reading it agrees with the host", () => {
+  const cases: { project?: string; host?: string; want: string; inContainer: string }[] = [
+    { want: "suppress;source=default;file=", inContainer: "ai attribution: suppress (default (carried))" },
+    { host: "ai_attribution: allow\n", want: "allow;source=host;file=HOST", inContainer: "ai attribution: allow (host (carried))" },
+    { host: "ai_attribution: suppress\n", want: "suppress;source=host;file=HOST", inContainer: "ai attribution: suppress (host (carried))" },
+    { host: "ai_attribution: banana\n", want: "suppress;source=default;file=HOST", inContainer: "ai attribution: suppress (default (carried))" },
+    { project: "ai_attribution: allow\n", host: "ai_attribution: suppress\n", want: "allow;source=project;file=PROJECT", inContainer: "ai attribution: allow (project (carried))" },
+  ];
+  for (const c of cases) {
+    const dir = tmpProject();
+    const home = tmpProject();
+    const emptyHome = tmpProject();
+    if (c.project) writeConfig(dir, c.project);
+    if (c.host) writeFileSync(join(home, "config.yml"), c.host);
+    const value = carriedAiAttributionValue(dir, { forgeHome: home });
+    assert.equal(value, c.want.replace("HOST", join(home, "config.yml")).replace("PROJECT", cfg(dir)));
+    // The container sees a clone with NO project file here and no host config at all.
+    const clone = tmpProject();
+    assert.equal(formatAiAttribution(readAiAttribution(clone, { forgeHome: emptyHome, carried: value })), c.inContainer);
+    assert.equal(hookReader.readMode(clone, join(emptyHome, "config.yml"), value), readAiAttribution(dir, { forgeHome: home, carried: null }).mode);
+    for (const d of [dir, home, emptyHome, clone]) rmSync(d, { recursive: true, force: true });
+  }
 });

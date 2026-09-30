@@ -2,6 +2,7 @@
 // line, exercised through the real CLI (tsx entry) against a temp project.
 // FG-845 (AC2): the host default — `set --host`, `unset`, and the project / host /
 // default source on show and doctor. Every spawn gets its OWN disposable FORGE_HOME.
+// FG-853: the carried value dispatch sets in an agent container, as show/doctor report it.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -14,6 +15,10 @@ import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cl
 
 let projectDir: string;
 let forgeHome: string;
+
+// FG-853: spawns inherit process.env; a carried value from an enclosing agent container
+// must not leak into cases that do not set one.
+delete process.env.FORGE_AI_ATTRIBUTION_CARRIED;
 
 function runForge(args: string[]) {
   return spawnSync(tsx, [entry, ...args], { cwd: projectDir, encoding: "utf8", env: { ...process.env, FORGE_HOME: forgeHome } });
@@ -318,4 +323,58 @@ test("FG-845 (RF-1): a duplicated project ai_attribution key stops before an all
   assert.equal(json.aiAttribution.file, configPath());
   assert.match(json.aiAttribution.reason, /more than one top-level ai_attribution key/);
   assert.match(runForge(["doctor"]).stdout, /ai attribution: suppress \(default\)/);
+});
+
+test("FG-853 (AC2): inside a container with no host config, show and doctor report the carried mode and name the carry", () => {
+  const hostFile = "/host/home/.forge/config.yml";
+  const inContainer = (args: string[], carried: string) =>
+    spawnSync(tsx, [entry, ...args], {
+      cwd: projectDir,
+      encoding: "utf8",
+      env: { ...process.env, FORGE_HOME: forgeHome, FORGE_AI_ATTRIBUTION_CARRIED: carried },
+    });
+
+  const show = inContainer(["config", "show", "--project", projectDir], `allow;source=host;file=${hostFile}`);
+  assert.equal(show.status, 0, show.stderr);
+  assert.match(show.stdout, /ai attribution: allow \(host \(carried\)\)/);
+  assert.match(show.stdout, new RegExp(`file: ${hostFile}`));
+  assert.doesNotMatch(show.stdout, /\(default\)/);
+
+  const doctorJson = inContainer(["doctor", "--json"], `allow;source=host;file=${hostFile}`);
+  assert.deepEqual(JSON.parse(doctorJson.stdout).aiAttribution, { mode: "allow", source: "host (carried)", file: hostFile });
+  assert.match(inContainer(["doctor"], `allow;source=host;file=${hostFile}`).stdout, /ai attribution: allow \(host \(carried\)\)/);
+
+  const showJson = inContainer(["config", "show", "--project", projectDir, "--json"], `allow;source=host;file=${hostFile}`);
+  assert.deepEqual(JSON.parse(showJson.stdout).aiAttribution, { mode: "allow", source: "host (carried)", file: hostFile });
+
+  // Nothing set on the host at dispatch: the carry still names itself.
+  const carriedDefault = "suppress;source=default;file=";
+  assert.match(inContainer(["config", "show", "--project", projectDir], carriedDefault).stdout, /ai attribution: suppress \(default \(carried\)\)/);
+  assert.deepEqual(JSON.parse(inContainer(["config", "show", "--project", projectDir, "--json"], carriedDefault).stdout).aiAttribution, {
+    mode: "suppress",
+    source: "default (carried)",
+    file: null,
+  });
+  assert.deepEqual(JSON.parse(inContainer(["doctor", "--json"], carriedDefault).stdout).aiAttribution, {
+    mode: "suppress",
+    source: "default (carried)",
+    file: null,
+  });
+
+  // The project file still wins over the carried value.
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(configPath(), "ai_attribution: suppress\n");
+  const json = inContainer(["config", "show", "--project", projectDir, "--json"], `allow;source=host;file=${hostFile}`);
+  assert.deepEqual(JSON.parse(json.stdout).aiAttribution, {
+    mode: "suppress",
+    source: "project",
+    file: configPath(),
+    overridesHost: { mode: "allow", file: hostFile },
+  });
+
+  // An unparseable carried value fails closed with a named reason.
+  rmSync(join(projectDir, ".forge"), { recursive: true, force: true });
+  const bad = inContainer(["config", "show", "--project", projectDir], "allow;source=elsewhere");
+  assert.match(bad.stdout, /ai attribution: suppress \(default\)/);
+  assert.match(bad.stdout, /FORGE_AI_ATTRIBUTION_CARRIED=.*failing closed to suppress/);
 });

@@ -8,6 +8,9 @@
 //
 // Behavioral, not structural: a hook can be present and still never fire, so each
 // assertion is on git's own accept/reject of a real commit.
+//
+// FG-853: in a Forge task clone the hook sees no host config (the container has no
+// $FORGE_HOME); the host resolution arrives as the carried env value dispatch sets.
 
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -17,13 +20,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { provisionWorkspaceCommitMsgHook } from "../util/commit-msg-hook.js";
-import { readAiAttribution } from "./ai-attribution.js";
+import { carriedAiAttributionValue, readAiAttribution } from "./ai-attribution.js";
+import { createTaskClone } from "./worktree-lifecycle.js";
 
 const HOOKS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "git-hooks");
 const BUNDLED_HOOK = join(HOOKS_DIR, "commit-msg-no-ai-attribution");
 const READER_MJS = join(HOOKS_DIR, "read-ai-attribution.mjs");
 
 const tmpDirs: string[] = [];
+
+// FG-853: commits spawned here inherit process.env; an enclosing agent container's
+// carried value must not decide the cases below that do not set one.
+delete process.env.FORGE_AI_ATTRIBUTION_CARRIED;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -172,8 +180,13 @@ test("FG-799 (RF-1/3/5/6): every ai_attribution form drives the hook the same wa
 // the SAME mode as readAiAttribution for every input, run as a real `node` spawn exactly
 // as the hook invokes it (the unit tier pins the TS side over the same rows; a unit test
 // may not spawn a subprocess, so the reader half lives here). ──
-test("FG-799: the standalone reader and readAiAttribution agree on every input (RF-1/3/5/6)", () => {
-  const table: ReadonlyArray<{ label: string; config?: string | "unreadable"; mode: "allow" | "suppress" }> = [
+test("FG-799/FG-853: the standalone reader and readAiAttribution agree byte-for-byte on config and carried inputs", () => {
+  const table: ReadonlyArray<{
+    label: string;
+    config?: string | "unreadable";
+    carried?: string;
+    mode: "allow" | "suppress";
+  }> = [
     { label: "absent config", config: undefined, mode: "suppress" },
     { label: "allow", config: "ai_attribution: allow\n", mode: "allow" },
     { label: "suppress", config: "ai_attribution: suppress\n", mode: "suppress" },
@@ -186,6 +199,12 @@ test("FG-799: the standalone reader and readAiAttribution agree on every input (
     { label: "unknown value", config: "ai_attribution: banana\n", mode: "suppress" },
     { label: "duplicate top-level key (FG-845 RF-1)", config: "ai_attribution: allow\nai_attribution: suppress\n", mode: "suppress" },
     { label: "unreadable file", config: "unreadable", mode: "suppress" },
+    { label: "FG-853 carried host allow", carried: "allow;source=host;file=/host/.forge/config.yml", mode: "allow" },
+    { label: "FG-853 carried host suppress", carried: "suppress;source=host;file=/host/.forge/config.yml", mode: "suppress" },
+    { label: "FG-853 carried default", carried: "suppress;source=default;file=", mode: "suppress" },
+    { label: "FG-853 malformed carried bare mode", carried: "maybe", mode: "suppress" },
+    { label: "FG-853 malformed carried missing source", carried: "allow;file=/host/.forge/config.yml", mode: "suppress" },
+    { label: "FG-853 malformed carried extra field", carried: "allow;source=host;file=/host/.forge/config.yml;extra=x", mode: "suppress" },
   ];
   for (const row of table) {
     const dir = mkdtempSync(join(tmpdir(), "forge-fg799-reader-"));
@@ -196,8 +215,11 @@ test("FG-799: the standalone reader and readAiAttribution agree on every input (
       mkdirSync(join(dir, ".forge"), { recursive: true });
       writeFileSync(join(dir, ".forge", "config.yml"), row.config);
     }
-    const viaReader = execFileSync(process.execPath, [READER_MJS, dir], { encoding: "utf8" }).trim();
-    const viaTs = readAiAttribution(dir).mode;
+    const env = { ...process.env };
+    if (row.carried !== undefined) env.FORGE_AI_ATTRIBUTION_CARRIED = row.carried;
+    else delete env.FORGE_AI_ATTRIBUTION_CARRIED;
+    const viaReader = execFileSync(process.execPath, [READER_MJS, dir], { encoding: "utf8", env }).trim();
+    const viaTs = readAiAttribution(dir, { carried: row.carried ?? null }).mode;
     assert.equal(viaReader, row.mode, `reader mode for ${row.label}`);
     assert.equal(viaReader, viaTs, `reader and readAiAttribution DISAGREE on ${row.label}`);
   }
@@ -256,5 +278,89 @@ test("FG-799 (RF-4): hook bare-mention provider set matches the Co-Authored-By t
   assert.deepEqual(bare, trailer, "the bare-mention matcher must cover exactly the trailer provider set");
   for (const provider of ["gemini", "copilot"]) {
     assert.ok(bare.includes(provider), `bare-mention set must include ${provider} (RF-4)`);
+  }
+});
+
+// ── FG-853 (AC1): the carried value through a REAL task clone + its provisioned hook.
+// The host resolves the mode against the durable project exactly as dispatch does
+// (carriedAiAttributionValue, what buildDockerArgs sets); the commit then runs in the
+// clone with FORGE_HOME pointing at an EMPTY directory — the container, which cannot
+// see the host config — and only the carried value in its environment.
+function taskCloneCommit(
+  projectConfig: string | undefined,
+  hostConfig: string | undefined,
+  message: string,
+  carriedOverride?: string,
+): { ok: boolean; stderr: string } {
+  const project = mkdtempSync(join(tmpdir(), "forge-fg853-project-"));
+  const hostHome = mkdtempSync(join(tmpdir(), "forge-fg853-host-"));
+  const containerHome = mkdtempSync(join(tmpdir(), "forge-fg853-container-"));
+  tmpDirs.push(project, hostHome, containerHome);
+  git(project, "init", "-q", "-b", "main");
+  git(project, "config", "user.email", "test@forge.test");
+  git(project, "config", "user.name", "Forge Test");
+  writeFileSync(join(project, "README.md"), "# fg853\n");
+  if (projectConfig !== undefined) {
+    mkdirSync(join(project, ".forge"), { recursive: true });
+    writeFileSync(join(project, ".forge", "config.yml"), projectConfig);
+  }
+  git(project, "add", ".");
+  git(project, "commit", "-q", "-m", "initial");
+  if (hostConfig !== undefined) writeFileSync(join(hostHome, "config.yml"), hostConfig);
+
+  const taskId = `task-fg853-${tmpDirs.length}`;
+  const { clonePath } = createTaskClone(project, "run-fg853", taskId, git(project, "rev-parse", "HEAD").trim());
+  tmpDirs.push(clonePath);
+  const carried = carriedOverride ?? carriedAiAttributionValue(project, { forgeHome: hostHome });
+
+  writeFileSync(join(clonePath, "work.txt"), "work\n");
+  git(clonePath, "add", "work.txt");
+  const before = git(clonePath, "rev-parse", "HEAD").trim();
+  const r = spawnSync("git", ["commit", "-m", message], {
+    cwd: clonePath,
+    encoding: "utf8",
+    env: { ...process.env, FORGE_HOME: containerHome, FORGE_AI_ATTRIBUTION_CARRIED: carried },
+  });
+  const after = git(clonePath, "rev-parse", "HEAD").trim();
+  return { ok: r.status === 0 && after !== before, stderr: r.stderr ?? "" };
+}
+
+test("FG-853 (AC1): no project key + host allow → a task-clone commit carrying the resolved mode accepts a Co-Authored-By trailer", () => {
+  const r = taskCloneCommit(undefined, "ai_attribution: allow\n", CLAUDE_TRAILER);
+  assert.equal(r.ok, true, `the carried host allow must let the trailer commit in the clone\n${r.stderr}`);
+});
+
+test("FG-853 (AC1): host allow + project suppress → the task-clone commit is refused", () => {
+  const r = taskCloneCommit("ai_attribution: suppress\n", "ai_attribution: allow\n", CLAUDE_TRAILER);
+  assert.equal(r.ok, false, "a project suppress must beat a carried host allow");
+});
+
+test("FG-853 (AC1): the carried value controls a real clone hook, while a project key wins in either direction", () => {
+  assert.equal(
+    taskCloneCommit(undefined, undefined, CLAUDE_TRAILER, "suppress;source=host;file=/host/config.yml").ok,
+    false,
+    "a carried suppress refuses the trailer even when no host file is mounted",
+  );
+  assert.equal(
+    taskCloneCommit("ai_attribution: suppress\n", undefined, CLAUDE_TRAILER, "allow;source=host;file=/host/config.yml").ok,
+    false,
+    "project suppress beats carried allow",
+  );
+  assert.equal(
+    taskCloneCommit("ai_attribution: allow\n", undefined, CLAUDE_TRAILER, "suppress;source=host;file=/host/config.yml").ok,
+    true,
+    "project allow beats carried suppress",
+  );
+});
+
+test("FG-853 (AC1): malformed carried values fail closed and the real hook names the carried stop", () => {
+  for (const carried of ["maybe", "allow;file=/host/config.yml", "allow;source=host;file=/host/config.yml;extra=x"]) {
+    const r = taskCloneCommit(undefined, undefined, CLAUDE_TRAILER, carried);
+    assert.equal(r.ok, false, `${carried} must fail closed in the hook`);
+    assert.match(
+      r.stderr,
+      /FORGE_AI_ATTRIBUTION_CARRIED.*carried.*failing closed to suppress/i,
+      `the hook must expose the carried fail-closed stop for ${carried}\n${r.stderr}`,
+    );
   }
 });

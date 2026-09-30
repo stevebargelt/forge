@@ -3,7 +3,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Runtime } from "./schema.js";
@@ -13,6 +13,7 @@ import {
   prepareDependencyEnvironmentForDispatch,
   resolveProjectContainerPath,
   _internal,
+  type BuildDockerArgsOpts,
   type SpawnContext,
 } from "./spawn.js";
 import { lockfileHash, planDependencyVolumes } from "./dependency-provisioning.js";
@@ -1129,4 +1130,50 @@ test("buildProvisionerDockerArgs: mounts the repo READ-ONLY, mounts every plan v
   assert.equal(args[args.length - 2], BASE_RUNTIME.image, "runs the SAME agent image (has node/npm) — not a different provisioner-only image");
   assert.equal(args[args.length - 1], "true", "execs a trivial no-op after install — never the agent invocation/command");
   assert.ok(!args.includes(BASE_RUNTIME.invocation.command), "must never carry the agent's own invocation command");
+});
+
+// FG-853: the container has no $FORGE_HOME, so buildDockerArgs carries the HOST's
+// ai_attribution resolution in. Always set — a bare built-in default is carried as
+// source=default — so the container never falls through to a host file of its own.
+test("buildDockerArgs: FG-853 carries the host ai_attribution resolution of the authority project", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+  const prevForgeHome = process.env.FORGE_HOME;
+  const prevCarried = process.env.FORGE_AI_ATTRIBUTION_CARRIED;
+  const forgeHome = mkdtempSync(join(tmpdir(), "forge-fg853-home-"));
+  process.env.FORGE_HOME = forgeHome;
+  process.env.FORGE_AI_ATTRIBUTION_CARRIED = "allow";
+  const hostFile = join(forgeHome, "config.yml");
+  const project = mkdtempSync(join(tmpdir(), "forge-fg853-project-"));
+  const clone = mkdtempSync(join(tmpdir(), "forge-fg853-clone-"));
+  const carried = (ctx: SpawnContext, opts: BuildDockerArgsOpts = {}) =>
+    pickEnv(buildDockerArgs(BASE_RUNTIME, ctx, opts).args)["FORGE_AI_ATTRIBUTION_CARRIED"];
+  try {
+    // Neither a clone-local allow nor the inherited value may bias dispatch.
+    mkdirSync(join(clone, ".forge"), { recursive: true });
+    writeFileSync(join(clone, ".forge", "config.yml"), "ai_attribution: allow\n");
+    assert.equal(
+      carried({ ...BASE_CTX, PROJECT_DIR: clone }, { backlogAuthorityDir: project }),
+      "suppress;source=default;file=",
+      "the durable authority project, not clone config or inherited carry, decides the value",
+    );
+
+    writeFileSync(hostFile, "ai_attribution: allow\n");
+    assert.equal(carried({ ...BASE_CTX, PROJECT_DIR: project }), `allow;source=host;file=${hostFile}`);
+
+    // Resolved against the durable project, not the clone being mounted.
+    mkdirSync(join(project, ".forge"), { recursive: true });
+    writeFileSync(join(project, ".forge", "config.yml"), "ai_attribution: suppress\n");
+    assert.equal(
+      carried({ ...BASE_CTX, PROJECT_DIR: clone }, { backlogAuthorityDir: project }),
+      `suppress;source=project;file=${join(project, ".forge", "config.yml")}`,
+    );
+  } finally {
+    rmSync(hostFile, { force: true });
+    rmSync(forgeHome, { recursive: true, force: true });
+    if (prevForgeHome === undefined) delete process.env.FORGE_HOME;
+    else process.env.FORGE_HOME = prevForgeHome;
+    if (prevCarried !== undefined) process.env.FORGE_AI_ATTRIBUTION_CARRIED = prevCarried;
+    else delete process.env.FORGE_AI_ATTRIBUTION_CARRIED;
+  }
 });
