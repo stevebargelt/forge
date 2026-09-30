@@ -132,7 +132,7 @@ function firstCaseRequest(sourceFile: ts.SourceFile): number {
     }
   });
   if (firstCase < 0) return -1;
-  const request = sourceFile.text.slice(firstCase).search(/\bfetch\s*\(\s*(?:BASE\b|`\$\{BASE\})/);
+  const request = sourceFile.text.slice(firstCase).search(/\bfetch\s*\(/);
   return request < 0 ? -1 : firstCase + request;
 }
 
@@ -258,21 +258,24 @@ function scanSuite({ file, source }: Suite): { findings: string[]; ports: PortDe
   return { findings, ports };
 }
 
+/** `import("<specifier>")` or `... from "<specifier>"`. */
+function importsModule(source: string, specifier: string): boolean {
+  const quoted = `["']${specifier.replace(/[./]/g, "\\$&")}["']`;
+  return new RegExp(`import\\s*\\(\\s*${quoted}\\s*\\)|\\bfrom\\s*${quoted}`).test(source);
+}
+
 /**
- * A dashboard fixture is identified by its base URL and import of the dashboard server,
- * not by either readiness-convention half. This catches a new fixture before either half
- * has been added. Browser suites which bind a temporary HTTP server do not import this
- * server module and remain outside the dashboard-server rule.
+ * A dashboard fixture is identified by its import of the dashboard server alone — not by
+ * how it names its base URL, and not by either readiness-convention half. This catches a
+ * new fixture before either half has been added. Browser suites which bind a temporary
+ * HTTP server do not import this server module and remain outside the dashboard-server rule.
  */
 function readinessFindings({ file, source }: Suite): string[] {
   const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const importsDashboardServer =
-    (file.startsWith(DASHBOARD_SRC + "/") && !file.slice(DASHBOARD_SRC.length + 1).includes("/") && /import\s*\(\s*["']\.\/server\.js["']\s*\)/.test(source)) ||
-    (file.startsWith(BROWSER_TIER + "/") && /import\s*\(\s*["']\.\.\/src\/server\.js["']\s*\)/.test(source));
-  const isDashboardReadinessFixture =
-    /\bconst\s+BASE\b/.test(source) &&
-    importsDashboardServer;
-  if (!isDashboardReadinessFixture) return [];
+    (file.startsWith(DASHBOARD_SRC + "/") && !file.slice(DASHBOARD_SRC.length + 1).includes("/") && importsModule(source, "./server.js")) ||
+    (file.startsWith(BROWSER_TIER + "/") && importsModule(source, "../src/server.js"));
+  if (!importsDashboardServer) return [];
 
   const findings: string[] = [];
   const firstRequest = firstCaseRequest(sourceFile);
@@ -421,6 +424,28 @@ test("FG-848: a dashboard-server fixture with neither readiness half is refused 
     `${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`,
     `${file}: missing process.env.FORGE_DASHBOARD_REMOTE = "0" fixture opt-out`,
   ]);
+});
+
+test("FG-848: a dashboard-server fixture whose base URL is not named BASE is still refused with both findings", () => {
+  for (const [file, source] of [
+    [join(DASHBOARD_SRC, "lowercase-base.test.ts"), `const base = "http://127.0.0.1:19995";\nconst { server } = await import("./server.js");\ntest("request", async () => { await fetch(base); });\n`],
+    [join(BROWSER_TIER, "let-base.test.ts"), `let BASE_URL = "http://127.0.0.1:19994";\nconst { server } = await import("../src/server.js");\ntest("request", async () => { await fetch(BASE_URL); });\n`],
+    [join(DASHBOARD_SRC, "no-base-identifier.test.ts"), `import { server } from "./server.js";\ntest("request", async () => { await fetch(\`http://127.0.0.1:\${19993}/api/health\`); });\n`],
+  ] as const) {
+    assert.deepEqual(readinessFindings({ file, source }), [
+      `${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`,
+      `${file}: missing process.env.FORGE_DASHBOARD_REMOTE = "0" fixture opt-out`,
+    ]);
+  }
+});
+
+test("FG-848: readiness awaited only after the first case request is refused, whatever the base URL is named", () => {
+  const file = join(DASHBOARD_SRC, "late-readiness.test.ts");
+  const findings = readinessFindings({
+    file,
+    source: `const url = "http://127.0.0.1:19992";\nprocess.env.FORGE_DASHBOARD_REMOTE = "0";\nconst { server } = await import("./server.js");\ntest("request", async () => { await fetch(url); });\nawait awaitDashboardReady(url, { timeoutMs: 4000 });\n`,
+  });
+  assert.deepEqual(findings, [`${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`]);
 });
 
 test("FG-848: a browser fixture that binds its own temporary server stays outside the dashboard-server rule", () => {
