@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 
 const TEST_PORT = 19004;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const SAME_ORIGIN = BASE;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -161,6 +163,7 @@ function scratchLeftovers(): string[] {
 }
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

@@ -25,6 +25,8 @@ const SHOTS = process.env.FG843_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "fg
 
 const TEST_PORT = 18845;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("../src/test-support/await-dashboard-ready.js");
 
 const testHome = mkdtempSync(join(tmpdir(), "fg843-checkout-scope-"));
 const forgeHome = join(testHome, ".forge");
@@ -94,6 +96,7 @@ before(async () => {
   classifyWorkspacePurpose({ path: stable, kind: "operator", actor: "fg843-test" });
 
   ({ server } = await import("../src/server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let attempt = 0; attempt < 75; attempt += 1) {
     try {
       await fetch(`${BASE}/`);

@@ -27,6 +27,8 @@ import { join } from "node:path";
 
 const TEST_PORT = 19013;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg679-no-subproc-"));
 process.env.FORGE_HOME = tmpHome;
@@ -114,6 +116,7 @@ globalThis.fetch = ((input: Parameters<typeof realFetch>[0], init?: Parameters<t
 }) as typeof realFetch;
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   globalThis.fetch = realFetch;

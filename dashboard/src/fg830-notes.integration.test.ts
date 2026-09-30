@@ -19,6 +19,8 @@ import { noteRows } from "../client/notes-render.js";
 
 const TEST_PORT = 18838;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const testHome = realpathSync(mkdtempSync(join(tmpdir(), "forge-fg830-notes-")));
 const forgeHome = join(testHome, ".forge");
 const reposRoot = join(testHome, "checkouts");
@@ -83,6 +85,7 @@ for (const bin of ["docker", "git", "gh", "tmux", "forge", "forge-dev", "aws"]) 
   chmodSync(join(rig, "bin", bin), 0o755);
 }
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

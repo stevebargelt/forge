@@ -19,7 +19,9 @@
 //         mkdirSync(SHOTS, { recursive: true });
 //       plus paths derived from tmpdir()/mkdtempSync(), and a bare `process.env.X` only
 //       under an `if (X)` guard;
-//   (c) two source or browser suites declaring the same fixture `*PORT` constant value.
+//   (c) two source or browser suites declaring the same fixture `*PORT` constant value;
+//   (d) an FG-842-style dashboard fixture has the shared awaited readiness probe before
+//       cases issue requests, and opts out of the remote listener.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -114,6 +116,24 @@ function forEachNode(sourceFile: ts.SourceFile, visit: (node: ts.Node) => void):
     ts.forEachChild(node, walk);
   };
   ts.forEachChild(sourceFile, walk);
+}
+
+/** The first BASE request made by a test case, not a request helper merely declared above the cases. */
+function firstCaseRequest(sourceFile: ts.SourceFile): number {
+  let firstCase = -1;
+  forEachNode(sourceFile, (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      (node.expression.text === "test" || node.expression.text === "it")
+    ) {
+      const start = node.getStart(sourceFile);
+      firstCase = firstCase < 0 ? start : Math.min(firstCase, start);
+    }
+  });
+  if (firstCase < 0) return -1;
+  const request = sourceFile.text.slice(firstCase).search(/\bfetch\s*\(/);
+  return request < 0 ? -1 : firstCase + request;
 }
 
 function moduleBindings(sourceFile: ts.SourceFile): Map<string, ts.Expression> {
@@ -238,6 +258,37 @@ function scanSuite({ file, source }: Suite): { findings: string[]; ports: PortDe
   return { findings, ports };
 }
 
+/** `import("<specifier>")` or `... from "<specifier>"`. */
+function importsModule(source: string, specifier: string): boolean {
+  const quoted = `["']${specifier.replace(/[./]/g, "\\$&")}["']`;
+  return new RegExp(`import\\s*\\(\\s*${quoted}\\s*\\)|\\bfrom\\s*${quoted}`).test(source);
+}
+
+/**
+ * A dashboard fixture is identified by its import of the dashboard server alone — not by
+ * how it names its base URL, and not by either readiness-convention half. This catches a
+ * new fixture before either half has been added. Browser suites which bind a temporary
+ * HTTP server do not import this server module and remain outside the dashboard-server rule.
+ */
+function readinessFindings({ file, source }: Suite): string[] {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const importsDashboardServer =
+    (file.startsWith(DASHBOARD_SRC + "/") && !file.slice(DASHBOARD_SRC.length + 1).includes("/") && importsModule(source, "./server.js")) ||
+    (file.startsWith(BROWSER_TIER + "/") && importsModule(source, "../src/server.js"));
+  if (!importsDashboardServer) return [];
+
+  const findings: string[] = [];
+  const firstRequest = firstCaseRequest(sourceFile);
+  const readinessCall = source.search(/await\s+awaitDashboardReady\s*\(/);
+  if (readinessCall < 0 || (firstRequest >= 0 && readinessCall > firstRequest)) {
+    findings.push(`${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`);
+  }
+  if (!/FORGE_DASHBOARD_REMOTE\s*=\s*["']0["']/.test(source)) {
+    findings.push(`${file}: missing process.env.FORGE_DASHBOARD_REMOTE = "0" fixture opt-out`);
+  }
+  return findings;
+}
+
 function portCollisions(ports: PortDecl[]): string[] {
   const byValue = new Map<number, PortDecl[]>();
   for (const port of ports) byValue.set(port.value, [...(byValue.get(port.value) ?? []), port]);
@@ -252,7 +303,7 @@ function portCollisions(ports: PortDecl[]): string[] {
 function guardTier(suites: Suite[]): { findings: string[]; ports: PortDecl[] } {
   const scanned = suites.map(scanSuite);
   const ports = scanned.flatMap((s) => s.ports);
-  return { findings: [...scanned.flatMap((s) => s.findings), ...portCollisions(ports)], ports };
+  return { findings: [...scanned.flatMap((s) => s.findings), ...suites.flatMap(readinessFindings), ...portCollisions(ports)], ports };
 }
 
 const fixture = (name: string, source: string): Suite => ({ file: join(BROWSER_TIER, name), source });
@@ -273,8 +324,10 @@ test("FG-842: every dashboard source and browser suite passes the content and fi
   // extends only the port namespace, so existing source fixtures are not retrofitted to
   // screenshot-directory conventions they do not use.
   const { findings, ports: browserPorts } = guardTier(browserSuites);
-  const sourcePorts = sourceSuites.flatMap(scanSuite).flatMap((suite) => suite.ports);
+  const sourceScans = sourceSuites.map(scanSuite);
+  const sourcePorts = sourceScans.flatMap((suite) => suite.ports);
   const ports = [...sourcePorts, ...browserPorts];
+  findings.push(...sourceSuites.flatMap(readinessFindings));
   findings.push(...portCollisions(ports));
   assert.ok(ports.length > 1, "the guard found no fixture PORT constants — the port rule would be vacuous");
   assert.deepEqual(findings, [], `browser-tier content guard (src/util/fg839-browser-tier-content-guard.test.ts):\n${findings.join("\n")}`);
@@ -341,6 +394,67 @@ test("FG-842: a duplicate literal fixture port across source and browser suites 
   assert.ok(collision.includes(`${join(DASHBOARD_SRC, "one.test.ts")}:2 (PORT)`), collision);
   assert.ok(collision.includes(`${join(BROWSER_TIER, "two.test.ts")}:1 (TEST_PORT)`), collision);
   assert.ok(!collision.includes("three.test.ts"), collision);
+});
+
+test("FG-848: a dashboard fixture with the remote opt-out but no shared awaited readiness probe is refused by file", () => {
+  const file = join(DASHBOARD_SRC, "missing-readiness.test.ts");
+  const findings = readinessFindings({
+    file,
+    source: `const BASE = "http://127.0.0.1:19999";\nprocess.env.FORGE_DASHBOARD_REMOTE = "0";\nconst { server } = await import("./server.js");\ntest("request", async () => { await fetch(BASE); });\n`,
+  });
+  assert.deepEqual(findings, [`${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`]);
+});
+
+test("FG-848: a dashboard fixture with the shared readiness probe but no remote opt-out is refused by file", () => {
+  const file = join(BROWSER_TIER, "missing-remote-opt-out.test.ts");
+  const findings = readinessFindings({
+    file,
+    source: `const BASE = "http://127.0.0.1:19998";\nconst { server } = await import("../src/server.js");\nawait awaitDashboardReady(BASE, { timeoutMs: 4000 });\ntest("request", async () => { await fetch(BASE); });\n`,
+  });
+  assert.deepEqual(findings, [`${file}: missing process.env.FORGE_DASHBOARD_REMOTE = "0" fixture opt-out`]);
+});
+
+test("FG-848: a dashboard-server fixture with neither readiness half is refused with both findings", () => {
+  const file = join(DASHBOARD_SRC, "missing-readiness-convention.test.ts");
+  const findings = readinessFindings({
+    file,
+    source: `const BASE = "http://127.0.0.1:19997";\nconst { server } = await import("./server.js");\ntest("request", async () => { await fetch(BASE); });\n`,
+  });
+  assert.deepEqual(findings, [
+    `${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`,
+    `${file}: missing process.env.FORGE_DASHBOARD_REMOTE = "0" fixture opt-out`,
+  ]);
+});
+
+test("FG-848: a dashboard-server fixture whose base URL is not named BASE is still refused with both findings", () => {
+  for (const [file, source] of [
+    [join(DASHBOARD_SRC, "lowercase-base.test.ts"), `const base = "http://127.0.0.1:19995";\nconst { server } = await import("./server.js");\ntest("request", async () => { await fetch(base); });\n`],
+    [join(BROWSER_TIER, "let-base.test.ts"), `let BASE_URL = "http://127.0.0.1:19994";\nconst { server } = await import("../src/server.js");\ntest("request", async () => { await fetch(BASE_URL); });\n`],
+    [join(DASHBOARD_SRC, "no-base-identifier.test.ts"), `import { server } from "./server.js";\ntest("request", async () => { await fetch(\`http://127.0.0.1:\${19993}/api/health\`); });\n`],
+  ] as const) {
+    assert.deepEqual(readinessFindings({ file, source }), [
+      `${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`,
+      `${file}: missing process.env.FORGE_DASHBOARD_REMOTE = "0" fixture opt-out`,
+    ]);
+  }
+});
+
+test("FG-848: readiness awaited only after the first case request is refused, whatever the base URL is named", () => {
+  const file = join(DASHBOARD_SRC, "late-readiness.test.ts");
+  const findings = readinessFindings({
+    file,
+    source: `const url = "http://127.0.0.1:19992";\nprocess.env.FORGE_DASHBOARD_REMOTE = "0";\nconst { server } = await import("./server.js");\ntest("request", async () => { await fetch(url); });\nawait awaitDashboardReady(url, { timeoutMs: 4000 });\n`,
+  });
+  assert.deepEqual(findings, [`${file}: missing awaited awaitDashboardReady(BASE, { timeoutMs }) before the first case request`]);
+});
+
+test("FG-848: a browser fixture that binds its own temporary server stays outside the dashboard-server rule", () => {
+  const file = join(BROWSER_TIER, "temporary-server.test.ts");
+  const findings = readinessFindings({
+    file,
+    source: `const BASE = "http://127.0.0.1:19996";\nconst server = createServer();\nawait new Promise((ready) => server.listen(0, "127.0.0.1", ready));\ntest("request", async () => { await fetch(BASE); });\n`,
+  });
+  assert.deepEqual(findings, []);
 });
 
 test("FG-839: the accepted shapes pass", () => {

@@ -37,6 +37,8 @@ import { captureProcessIdentity } from "../../src/util/process-identity.js";
 
 const TEST_PORT = 19010;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 // realpath'd: `orchestrator_receipts.project_dir` is stored CANONICAL, so a fixture
 // that inserted rows under a symlinked tmpdir spelling (darwin's /var -> /private/var)
@@ -178,6 +180,7 @@ database.close();
 // ─── boot ───────────────────────────────────────────────────────────────────
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 // Imported the same way, and for the same reason: every module here resolves its
 // store path from the env set above, so nothing may be loaded before the fixtures are.
 const { orchestratorEntries } = await import("./queries.js");

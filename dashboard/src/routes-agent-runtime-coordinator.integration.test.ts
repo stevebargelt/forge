@@ -14,6 +14,8 @@ import { SCHEMA_SQL } from "../../src/store/schema.js";
 
 const PORT = 18806;
 const BASE = `http://127.0.0.1:${PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const testHome = mkdtempSync(join(tmpdir(), "forge-runtime-coordinator-route-"));
 const forgeHome = join(testHome, ".forge");
 const scanRoots = join(testHome, "checkouts");
@@ -92,6 +94,7 @@ process.env.PORT = String(PORT);
 process.env.HOST = "127.0.0.1";
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => { server.closeAllConnections?.(); server.close(); Date.now = realDateNow; });
 
 type Bucket = { bucketStart: string; averageMs: number | null; sampleCount: number; partial: boolean };

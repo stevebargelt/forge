@@ -13,6 +13,8 @@ import type { ProjectRecord } from "@forge/projects";
 
 const TEST_PORT = 18859;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const root = mkdtempSync(join(tmpdir(), "forge-fg759-contract-"));
 const forgeHome = join(root, ".forge");
 const scanRoot = join(root, "projects");
@@ -60,6 +62,7 @@ writeTransaction(() => {
 });
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

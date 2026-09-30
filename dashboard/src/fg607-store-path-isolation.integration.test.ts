@@ -32,6 +32,8 @@ import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.j
 
 const TEST_PORT = 18779;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg607-store-path-"));
 const secondHome = mkdtempSync(join(tmpdir(), "fg616-second-home-"));
@@ -106,6 +108,7 @@ seed(tmpHome, ["FG-901", "FG-902", "FG-903"]);
 seed(secondHome, ["FG-950"]);
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

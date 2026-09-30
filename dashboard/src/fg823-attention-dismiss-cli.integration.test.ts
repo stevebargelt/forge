@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fixtureFetch } from "./test-support/fixture-fetch.js";
+import { awaitDashboardReady } from "./test-support/await-dashboard-ready.js";
 
 // The default remains unique in the tier; an explicit override lets the FG-841 stress
 // loop run beside one full integration tier without competing with that tier's fixture.
@@ -57,21 +58,7 @@ after(() => {
   server.close();
 });
 
-async function waitForServer(ms = 4000): Promise<void> {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    try {
-      const response = await fixtureFetch(`${BASE}/api/attention-inbox`);
-      if (response.ok) return;
-      throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
-    } catch (err) {
-      if (Date.now() > deadline) throw err;
-      await new Promise((r) => setTimeout(r, 40));
-    }
-  }
-}
-
-await waitForServer();
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 async function route(): Promise<Record<string, any>> {
   const deadline = Date.now() + 4000;

@@ -48,6 +48,8 @@ import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js"
 
 const TEST_PORT = 18811;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("../src/test-support/await-dashboard-ready.js");
 const SHOT_DIR = process.env.FG591_SHOT_DIR;
 
 // --- env before ANY forge module is evaluated: the store handle, the dashboard's
@@ -196,6 +198,7 @@ before(async () => {
   const chromeBin = requireChrome("the dashboard browser tier");
 
   ({ server } = await import("../src/server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       await fetch(`${BASE}/`);

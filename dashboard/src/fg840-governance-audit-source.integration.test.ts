@@ -13,6 +13,8 @@ import { join } from "node:path";
 
 const TEST_PORT = 19019;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg840-home-"));
 process.env.FORGE_HOME = tmpHome;
@@ -63,6 +65,7 @@ const HOST_LOG = join(tmpHome, "raci-audit.log");
 writeFileSync(HOST_LOG, entry("2026-01-01T00:00:00.000Z", "host_only_route") + "\n");
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

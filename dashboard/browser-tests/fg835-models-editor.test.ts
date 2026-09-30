@@ -24,6 +24,8 @@ const SHOTS = process.env.FG835_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "fg
 
 const TEST_PORT = 18843;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("../src/test-support/await-dashboard-ready.js");
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = realpathSync(resolve(HERE, "..", ".."));
 const REAL_FORGE = join(REPO_ROOT, "bin", "forge");
@@ -145,6 +147,7 @@ before(async () => {
   Object.assign(RIG, { home, forgeHome, key: repositoryCheckoutIdentity(dir).key, dir, rig });
 
   ({ server } = await import("../src/server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let attempt = 0; attempt < 75; attempt += 1) {
     try {
       await fetch(`${BASE}/`);
