@@ -4,12 +4,13 @@
 // GET /api/governance (routingGovernance) and GET /api/raci read through
 // raciAuditTail(), so the two can never show different entries for one checkout.
 
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { provenPhysical } from "../../src/util/path-identity.js";
 
 export const AUDIT_TAIL_LINES = 20;
+export const AUDIT_TAIL_CHUNK_BYTES = 64 * 1024;
 
 /** One parsed JSONL line. Untrusted file content, so not narrowed further; the
  *  fields `forge raci apply` writes are timestamp, action, current_raci, candidate,
@@ -32,7 +33,7 @@ export type RaciAuditTail = {
  *  is not a JSON object is counted in `skippedLines`, never fatal. */
 export function readAuditTail(path: string, limit: number = AUDIT_TAIL_LINES): { entries: RaciAuditLine[]; skippedLines: number } {
   if (!existsSync(path)) return { entries: [], skippedLines: 0 };
-  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim() !== "").slice(-limit);
+  const lines = lastNonEmptyLines(path, limit);
   const entries: RaciAuditLine[] = [];
   let skippedLines = 0;
   for (const line of lines) {
@@ -45,6 +46,33 @@ export function readAuditTail(path: string, limit: number = AUDIT_TAIL_LINES): {
     }
   }
   return { entries: entries.reverse(), skippedLines };
+}
+
+/** Reads backwards from the end of the file one chunk at a time until `limit`
+ *  complete non-empty lines (or the start of the file) are in hand, so the read is
+ *  bounded by the tail, not the log's size. Decoding starts just after a newline
+ *  byte, which never falls inside a multi-byte UTF-8 sequence. */
+function lastNonEmptyLines(path: string, limit: number): string[] {
+  const fd = openSync(path, "r");
+  try {
+    let start = fstatSync(fd).size;
+    let buf = Buffer.alloc(0);
+    let lines: string[] = [];
+    while (start > 0) {
+      const size = Math.min(AUDIT_TAIL_CHUNK_BYTES, start);
+      start -= size;
+      const chunk = Buffer.alloc(size);
+      readSync(fd, chunk, 0, size, start);
+      buf = Buffer.concat([chunk, buf]);
+      const from = start === 0 ? 0 : buf.indexOf(0x0a) + 1;
+      if (from === 0 && start > 0) continue;
+      lines = buf.subarray(from).toString("utf8").split("\n").filter((l) => l.trim() !== "");
+      if (lines.length >= limit) break;
+    }
+    return lines.slice(-limit);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function withActor(line: RaciAuditLine): RaciAuditLine {

@@ -3,14 +3,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg840-audit-home-"));
 process.env.FORGE_HOME = tmpHome;
 
-const { AUDIT_TAIL_LINES, raciAuditTail, readAuditTail } = await import("./raci-audit.js");
+const { AUDIT_TAIL_CHUNK_BYTES, AUDIT_TAIL_LINES, raciAuditTail, readAuditTail } = await import("./raci-audit.js");
 
 const line = (n: number) => JSON.stringify({ timestamp: `2026-09-30T00:00:${String(n).padStart(2, "0")}Z`, action: "apply", n });
 
@@ -26,6 +26,32 @@ test("FG-840 readAuditTail: bounded to the last `limit` lines, newest first", ()
   assert.equal(tail.entries[0]!["n"], AUDIT_TAIL_LINES + 4, "newest first");
   assert.equal(tail.entries[AUDIT_TAIL_LINES - 1]!["n"], 5, "older lines beyond the bound are not read");
   assert.deepEqual(readAuditTail(path, 3).entries.map((e) => e["n"]), [AUDIT_TAIL_LINES + 4, AUDIT_TAIL_LINES + 3, AUDIT_TAIL_LINES + 2]);
+});
+
+test("FG-840 readAuditTail: only the tail of a log larger than the read window is read", () => {
+  const path = join(tmpHome, "huge.log");
+  // A sparse head past V8's max string length: reading the whole file as UTF-8 throws ERR_STRING_TOO_LONG.
+  writeFileSync(path, "");
+  truncateSync(path, 600 * 1024 * 1024);
+  appendFileSync(path, "\n" + Array.from({ length: AUDIT_TAIL_LINES + 5 }, (_, i) => line(i)).join("\n") + "\n");
+  try {
+    const tail = readAuditTail(path);
+    assert.deepEqual(tail.entries.map((e) => e["n"]), Array.from({ length: AUDIT_TAIL_LINES }, (_, i) => AUDIT_TAIL_LINES + 4 - i));
+    assert.equal(tail.skippedLines, 0);
+  } finally {
+    rmSync(path);
+  }
+});
+
+test("FG-840 readAuditTail: lines longer than the read window, split mid-character, are reassembled whole", () => {
+  const path = join(tmpHome, "long-lines.log");
+  const long = (n: number) => JSON.stringify({ n, rationale: "é€".repeat(AUDIT_TAIL_CHUNK_BYTES / 3 + n) });
+  writeFileSync(path, [long(1), "{not json", long(2), long(3)].join("\n") + "\n");
+  const tail = readAuditTail(path, 3);
+  assert.deepEqual(tail.entries.map((e) => e["n"]), [3, 2]);
+  assert.equal(tail.skippedLines, 1);
+  assert.deepEqual(tail.entries[0], JSON.parse(long(3)));
+  assert.deepEqual(readAuditTail(path, 10).entries.map((e) => e["n"]), [3, 2, 1]);
 });
 
 test("FG-840 readAuditTail: malformed lines are skipped while complete FG-834 audit fields survive newest first", () => {
