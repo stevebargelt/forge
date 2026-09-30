@@ -625,7 +625,7 @@ function findings(over: Partial<DoctorFindings> = {}): DoctorFindings {
     },
     project: projectIdentity,
     // FG-799: default fixture — the suppress default (no project config).
-    aiAttribution: { mode: "suppress", source: "default" },
+    aiAttribution: { mode: "suppress", source: "default", file: null },
     ...over,
   };
 }
@@ -1081,6 +1081,26 @@ test("FG-546 doctor --json: carries the classifier verdict a script can branch o
   assert.deepEqual(payload.docsSurfaces, { verdict: "customized-invalid", path: "/tmp/p/.forge/docs-surfaces.yml", detail: "surfaces: Required" });
   // The human section renders the same verdict — the two faces cannot disagree.
   assert.match(renderDoctor(f), /INVALID/);
+});
+
+test("FG-845 doctor: prints the attribution source and warns when the project overrides the host default", () => {
+  const plain = renderDoctor(findings({ aiAttribution: { mode: "allow", source: "host", file: "/h/config.yml" } }));
+  assert.match(plain, /ai attribution: allow \(host\)/);
+  assert.doesNotMatch(plain, /overrides the host default/);
+
+  const f = findings({
+    aiAttribution: {
+      mode: "suppress",
+      source: "project",
+      file: "/p/.forge/config.yml",
+      overridesHost: { mode: "allow", file: "/h/config.yml" },
+    },
+  });
+  const human = renderDoctor(f);
+  assert.match(human, /ai attribution: suppress \(project\)/);
+  assert.match(human, /⚠ this project overrides the host default \(allow, \/h\/config\.yml\)/);
+  const payload = JSON.parse(JSON.stringify(doctorJson(f))) as { aiAttribution: DoctorFindings["aiAttribution"] };
+  assert.deepEqual(payload.aiAttribution, f.aiAttribution);
 });
 
 test("FG-546 doctor (real gather): a valid project docs-surfaces file reads as valid-project", () => {

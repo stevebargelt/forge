@@ -33,7 +33,7 @@ import {
 import { inspectSeedInstall, type SeedInstallState } from "../../v2/seed-generation.js";
 import { computeBuildInputDigest } from "../../v2/build-input-digest.js";
 import { classifyDocsSurfaces, type DocsSurfacesClassification } from "../../v2/contract.js";
-import { formatAiAttribution, readAiAttribution, type AiAttribution } from "../../v2/ai-attribution.js";
+import { readAiAttribution, renderAiAttributionDetail, type AiAttribution } from "../../v2/ai-attribution.js";
 import {
   buildModelPolicyStatus,
   renderModelPolicyStatus,
@@ -533,7 +533,7 @@ export function gatherDoctorFindings(projectDir: string = process.cwd(), imageNa
     // other checks read; projectDir seeds project discovery from this checkout.
     modelPolicyStatus: buildModelPolicyStatus({ forgeHome: FORGE_HOME }),
     // FG-799: the per-project AI-attribution mode, read from the same projectDir.
-    aiAttribution: readAiAttribution(projectDir),
+    aiAttribution: readAiAttribution(projectDir, { forgeHome: FORGE_HOME }),
   };
 }
 
@@ -585,6 +585,17 @@ export function renderDocsSurfaces(c: DocsSurfacesClassification): string {
   }
 }
 
+/** FG-845: the shared attribution line + detail, plus a warning when this project's
+ *  file overrides a different host default. */
+export function renderAiAttributionWithOverride(a: AiAttribution): string {
+  const out = renderAiAttributionDetail(a);
+  if (!a.overridesHost) return out;
+  return (
+    `${out}\n  ⚠ this project overrides the host default (${a.overridesHost.mode}, ${a.overridesHost.file}); ` +
+    `forge config unset ai-attribution to inherit it`
+  );
+}
+
 export function renderDoctor(f: DoctorFindings): string {
   const out: string[] = [renderReleaseReport(f.report)];
   const push = (section: string): void => {
@@ -595,7 +606,7 @@ export function renderDoctor(f: DoctorFindings): string {
   push(renderProjectAdapterDrift(f.projectAdapters));
   push(renderDocsSurfaces(f.docsSurfaces));
   push(renderModelPolicyStatus(f.modelPolicyStatus));
-  push(formatAiAttribution(f.aiAttribution));
+  push(renderAiAttributionWithOverride(f.aiAttribution));
   if (f.seedInstall.kind === "incomplete") {
     out.push(
       `\nSeed install: INCOMPLETE (repairable) — ${f.seedInstall.reason}\n` +

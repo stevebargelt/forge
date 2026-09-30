@@ -36,9 +36,13 @@ export type ParsedAiAttribution = {
    *  (allow | suppress). false — with mode `suppress` — for every fail-closed
    *  outcome (absent key, nested key, unknown/mangled value). */
   recognized: boolean;
+  /** FG-845: true when a TOP-LEVEL `ai_attribution` key exists at all, recognized
+   *  or not. A present-but-unrecognized key fails closed at ITS level — the host
+   *  default beneath it is never consulted — while an absent key falls through. */
+  present: boolean;
 };
 
-const NONE: ParsedAiAttribution = { mode: "suppress", recognized: false };
+const NONE: ParsedAiAttribution = { mode: "suppress", recognized: false, present: false };
 
 /** Parse the `ai_attribution` mode out of a `.forge/config.yml` body. `null` (the
  *  file could not be read) is the absent case. See the module header for why this
@@ -63,8 +67,8 @@ export function parseAiAttributionConfig(text: string | null): ParsedAiAttributi
   if (!top) return NONE;
 
   const value = scalarValue(top.rest);
-  if (value === "allow" || value === "suppress") return { mode: value, recognized: true };
-  return NONE;
+  if (value === "allow" || value === "suppress") return { mode: value, recognized: true, present: true };
+  return { mode: "suppress", recognized: false, present: true };
 }
 
 /** The scalar after `key:` — inline comment stripped, then unquoted. A value that
@@ -92,4 +96,52 @@ export function stripComment(s: string): string {
     }
   }
   return s;
+}
+
+// FG-845: the level resolution — project file, then host file, then the built-in
+// `suppress`. Like the parse above it is dependency-free and duplicated (pinned by
+// test) into the hook reader, so the hook and readAiAttribution resolve the SAME
+// level, not just the same per-file parse. A level whose file is absent, or which
+// has no top-level key, falls through to the next. A level whose file cannot be read,
+// or whose key carries an unrecognized value, STOPS the resolution: it fails closed to
+// `suppress` right there — a broken project file never lets a host `allow` through.
+
+export type AiAttributionLevelRead =
+  | { kind: "absent" }
+  | { kind: "unreadable" }
+  | { kind: "text"; text: string };
+
+export type AiAttributionLevel = "project" | "host";
+
+export type ResolvedAiAttributionLevels = {
+  mode: AiAttributionMode;
+  source: AiAttributionLevel | "default";
+  /** Set only on a fail-closed stop: the level that stopped the resolution and why. */
+  failed?: { level: AiAttributionLevel; why: "unreadable" | "unrecognized" };
+};
+
+export function resolveAiAttributionLevels(
+  project: AiAttributionLevelRead,
+  host: AiAttributionLevelRead,
+): ResolvedAiAttributionLevels {
+  const levels: [AiAttributionLevel, AiAttributionLevelRead][] = [
+    ["project", project],
+    ["host", host],
+  ];
+  for (const [level, read] of levels) {
+    if (read.kind === "absent") continue;
+    if (read.kind === "unreadable") return { mode: "suppress", source: "default", failed: { level, why: "unreadable" } };
+    const parsed = parseAiAttributionConfig(read.text);
+    if (!parsed.present) continue;
+    if (!parsed.recognized) return { mode: "suppress", source: "default", failed: { level, why: "unrecognized" } };
+    return { mode: parsed.mode, source: level };
+  }
+  return { mode: "suppress", source: "default" };
+}
+
+/** Absent means the file does not exist (ENOENT / ENOTDIR); any other read failure is
+ *  `unreadable`, which fails closed rather than falling through. */
+export function classifyAiAttributionReadError(err: unknown): AiAttributionLevelRead {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
 }

@@ -1,11 +1,12 @@
 // FG-799: cross the real enforcement seams together: CLI config → current-style
 // installed hook → renderer, plus the runner's red anti-prompt path.  Every home
 // and project in this file is disposable; the operator's forge state is never read.
+// FG-845: the same seams with the value set only in the host default.
 
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { runNext, type DockerExecFn } from "./runNext.js";
@@ -13,6 +14,7 @@ import { startRun } from "./startRun.js";
 import { tasksForRun } from "../store/tasks.js";
 import { composeSystemPrompt } from "./compose.js";
 import { resolveEffectiveConstraints } from "./constraints.js";
+import { runUpgrade } from "../cli/commands/upgrade.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Workflow } from "./schema.js";
 import { BUILT_CLI_ENTRY, NODE_EXEC, REPO_ROOT } from "../integration-cli-spawn.js";
@@ -58,14 +60,15 @@ function forge(home: string, project: string, args: string[]) {
   });
 }
 
-function attemptCommit(project: string, n: number, message: string): { ok: boolean; stderr: string } {
+function attemptCommit(project: string, n: number, message: string, home?: string): { ok: boolean; stderr: string } {
   const path = join(project, `change-${n}.txt`);
   writeFileSync(path, `change ${n}\n`);
   // Do not accidentally stage the deliberately untracked .forge/ and CLAUDE.md
   // surfaces: this commit fixture must change only its own file.
   git(project, "add", path);
   const before = git(project, "rev-parse", "HEAD").trim();
-  const result = spawnSync("git", ["commit", "-m", message], { cwd: project, encoding: "utf8" });
+  const env = home ? { ...process.env, FORGE_HOME: home } : process.env;
+  const result = spawnSync("git", ["commit", "-m", message], { cwd: project, encoding: "utf8", env });
   const after = git(project, "rev-parse", "HEAD").trim();
   git(project, "reset", "-q", "--hard", "HEAD");
   // CLAUDE.md and .forge/config.yml are deliberately untracked in this temporary
@@ -99,9 +102,13 @@ test("FG-799 E2E: init/current hook, config toggle, and re-render round-trip tog
   assert.equal(allow.status, 0, allow.stderr);
   assert.equal(attemptCommit(project, 2, codexTrailer).ok, true, "the identical trailer passes after allow");
   const show = forge(home, project, ["config", "show", "--project", project]);
-  assert.match(show.stdout, /ai attribution: allow \(\.forge\/config\.yml\)/);
+  assert.match(show.stdout, /ai attribution: allow \(project\)/);
   const doctor = forge(home, project, ["doctor", "--json"]);
-  assert.deepEqual(JSON.parse(doctor.stdout).aiAttribution, { mode: "allow", source: "project-config" });
+  assert.deepEqual(JSON.parse(doctor.stdout).aiAttribution, {
+    mode: "allow",
+    source: "project",
+    file: join(project, ".forge", "config.yml"),
+  });
 
   // `init` is the documented re-render entry point used when an upgrade is not
   // desired in a test; it replaces the marker-owned block in place.
@@ -119,6 +126,110 @@ test("FG-799 E2E: init/current hook, config toggle, and re-render round-trip tog
   assert.match(claude, /Don't attribute work to an AI assistant/);
   assert.doesNotMatch(claude, /AI attribution is ALLOWED in this project/);
   assert.doesNotMatch(claude, /<!-- forge:if|<!-- forge:endif/);
+});
+
+/** Drive the real `forge upgrade` [4/4] block refresh in-process (the fg546 driver
+ *  shape): git/npm skipped, a disposable assets tree carrying only an orchestrator
+ *  template with both attribution branches. */
+function upgradeRender(project: string): void {
+  const assets = temp("forge-fg845-assets-");
+  mkdirSync(join(assets, "seeds"), { recursive: true });
+  writeFileSync(
+    join(assets, "seeds", "orchestrator-template.md"),
+    [
+      "<!-- forge:orchestrator-start -->",
+      "# forge orchestrator",
+      "<!-- forge:if ai_attribution=suppress -->",
+      "BRANCH: suppress",
+      "<!-- forge:endif -->",
+      "<!-- forge:if ai_attribution=allow -->",
+      "BRANCH: allow",
+      "<!-- forge:endif -->",
+      "<!-- forge:orchestrator-end -->",
+      "",
+    ].join("\n"),
+  );
+  const realLog = console.log;
+  const realWarn = console.warn;
+  const cwdBefore = process.cwd();
+  const exitBefore = process.exitCode;
+  console.log = () => {};
+  console.warn = () => {};
+  try {
+    process.chdir(project);
+    runUpgrade({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+  } finally {
+    process.chdir(cwdBefore);
+    process.exitCode = exitBefore;
+    console.log = realLog;
+    console.warn = realWarn;
+  }
+}
+
+test("FG-845 E2E: a host-only allow reaches the hook, the constraint gate, and the upgrade render through the one reader", () => {
+  const { home, project } = setupCliProject();
+  assert.equal(forge(home, project, ["init", "--project", project]).status, 0);
+  const codexTrailer = "feat: attribution check\n\nCo-Authored-By: Codex <noreply@openai.com>\n";
+  assert.equal(attemptCommit(project, 1, codexTrailer, home).ok, false, "no host or project value → suppress");
+
+  const setHost = forge(home, project, ["config", "set", "ai-attribution", "allow", "--host"]);
+  assert.equal(setHost.status, 0, setHost.stderr);
+  const projectConfig = join(project, ".forge", "config.yml");
+  assert.doesNotMatch(existsSync(projectConfig) ? readFileSync(projectConfig, "utf8") : "", /ai_attribution/, "no project key");
+  assert.match(forge(home, project, ["config", "show", "--project", project]).stdout, /ai attribution: allow \(host\)/);
+
+  // 1. The hook: the identical trailer commits once the host default is allow.
+  assert.equal(attemptCommit(project, 2, codexTrailer, home).ok, true, "host-only allow lets the trailer through the hook");
+
+  const prevHome = process.env.FORGE_HOME;
+  process.env.FORGE_HOME = home;
+  try {
+    // 2. The constraint: enabled_when is false, so the host force rule is skipped.
+    const effective = resolveEffectiveConstraints({ hostDir: join(REPO_ROOT, "seeds", "constraints"), projectDir: project });
+    assert.ok(!effective.constraints.some((c) => c.id === "no-ai-attribution"), "no-ai-attribution not active under host allow");
+    assert.deepEqual(
+      effective.skipped.filter((c) => c.id === "no-ai-attribution"),
+      [{ id: "no-ai-attribution", reason: "toggle ai_attribution=allow" }],
+    );
+
+    // 3. The rendered block: forge upgrade re-renders the allow branch.
+    upgradeRender(project);
+    const claude = readFileSync(join(project, "CLAUDE.md"), "utf8");
+    assert.match(claude, /BRANCH: allow/);
+    assert.doesNotMatch(claude, /BRANCH: suppress/);
+    assert.doesNotMatch(claude, /<!-- forge:if|<!-- forge:endif/);
+  } finally {
+    if (prevHome === undefined) delete process.env.FORGE_HOME;
+    else process.env.FORGE_HOME = prevHome;
+  }
+
+  // A project suppress overrides the host allow at every point again.
+  const setProject = forge(home, project, ["config", "set", "ai-attribution", "suppress", "--project", project]);
+  assert.equal(setProject.status, 0, setProject.stderr);
+  assert.equal(attemptCommit(project, 3, codexTrailer, home).ok, false, "project suppress beats host allow in the hook");
+  const doctor = JSON.parse(forge(home, project, ["doctor", "--json"]).stdout);
+  assert.deepEqual(doctor.aiAttribution.overridesHost, { mode: "allow", file: join(home, "config.yml") });
+
+  // The same project override must re-enable the constraint and render the
+  // suppress branch; otherwise the three enforcement points disagree.
+  process.env.FORGE_HOME = home;
+  try {
+    const effective = resolveEffectiveConstraints({ hostDir: join(REPO_ROOT, "seeds", "constraints"), projectDir: project });
+    assert.ok(effective.constraints.some((c) => c.id === "no-ai-attribution"), "project suppress re-enables the constraint");
+    assert.ok(!effective.skipped.some((c) => c.id === "no-ai-attribution"));
+    upgradeRender(project);
+    const claude = readFileSync(join(project, "CLAUDE.md"), "utf8");
+    assert.match(claude, /BRANCH: suppress/);
+    assert.doesNotMatch(claude, /BRANCH: allow/);
+  } finally {
+    if (prevHome === undefined) delete process.env.FORGE_HOME;
+    else process.env.FORGE_HOME = prevHome;
+  }
+
+  // Unset hands the project back to the host default.
+  const unset = forge(home, project, ["config", "unset", "ai-attribution", "--project", project]);
+  assert.equal(unset.status, 0, unset.stderr);
+  assert.equal(attemptCommit(project, 4, codexTrailer, home).ok, true, "after unset the host allow applies again");
 });
 
 test("FG-799 E2E: suppress hook retains technical-identifier exemptions while refusing attribution prose", () => {

@@ -11,8 +11,9 @@ import {
   writeSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describeIdentity, identify } from "../util/path-identity.js";
+import { stripComment } from "../v2/ai-attribution-parse.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import type { RetentionOverrides } from "../v2/retention-policy.js";
@@ -126,9 +127,12 @@ function atomicWriteConfig(projectDir: string, contents: string): void {
         `${describeIdentity(forgeIdentity)}; the .forge dir must resolve immediately before the write.`,
     );
   }
-  const realForge = forgeIdentity.physical;
-  const configPath = join(realForge, "config.yml");
-  const tmp = join(realForge, `.config.yml.tmp-${randomBytes(12).toString("hex")}`);
+  atomicReplaceInDir(forgeIdentity.physical, "config.yml", contents);
+}
+
+function atomicReplaceInDir(realDir: string, basename: string, contents: string): void {
+  const target = join(realDir, basename);
+  const tmp = join(realDir, `.${basename}.tmp-${randomBytes(12).toString("hex")}`);
   const fd = openSync(
     tmp,
     fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
@@ -140,7 +144,7 @@ function atomicWriteConfig(projectDir: string, contents: string): void {
     closeSync(fd);
   }
   try {
-    renameSync(tmp, configPath);
+    renameSync(tmp, target);
   } catch (err) {
     try {
       unlinkSync(tmp);
@@ -209,24 +213,131 @@ export function writeProjectKey(projectDir: string, projectKey: string): void {
 // this is a diagnostics-lifecycle read, and it must never be the thing that breaks a
 // command. NOTHING is ever written here: reading the config never materializes defaults
 // into it. Durations are MILLISECONDS, matching RetentionOverrides.
-// FG-799: set a single TOP-LEVEL scalar key in .forge/config.yml, preserving every
-// other key (read-modify-write, never template-overwrite) and reusing the same
-// symlink-guarded atomic write path as writeProjectKey. Creates the file/dir if
-// absent. A malformed existing file is overwritten cleanly (matching writeProjectKey).
-export function writeTopLevelConfigKey(projectDir: string, key: string, value: string): void {
-  const configPath = safeConfigPath(projectDir);
-  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+// FG-845: the ONE edit behind every top-level scalar config write (project set, host
+// set, project unset). The config file is operator-owned prose as much as data, so
+// the edit is LINE-oriented: replace the existing top-level `key:` line in place
+// (keeping its indentation and any trailing comment), append one line when absent,
+// or delete exactly that line — every other byte is left untouched. YAML is parsed
+// only to VALIDATE: the file before and after must parse as a mapping, the result
+// must carry exactly the intended value, and the caller's `verify` must accept it.
+// Anything else is a refusal that writes nothing. Returns null when an unset finds
+// no key (nothing to write).
+export type TopLevelEditVerify = (text: string) => boolean;
 
-  let existing: Record<string, unknown> = {};
-  if (existsSync(configPath)) {
-    try {
-      existing = (parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown>) ?? {};
-    } catch {
-      // malformed — overwrite cleanly
-    }
+export function editTopLevelConfigText(
+  configPath: string,
+  text: string,
+  key: string,
+  value: string | null,
+  verify?: TopLevelEditVerify,
+): string | null {
+  parseMappingOrRefuse(configPath, text);
+
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text.split("\n");
+  const keyLines: { i: number; indent: string; key: string; rest: string }[] = [];
+  lines.forEach((raw, i) => {
+    const m = raw.replace(/\r$/, "").match(/^(\s*)([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$/);
+    if (m) keyLines.push({ i, indent: m[1] ?? "", key: m[2] ?? "", rest: m[3] ?? "" });
+  });
+  const minIndent = keyLines.length === 0 ? 0 : Math.min(...keyLines.map((k) => k.indent.length));
+  const hits = keyLines.filter((k) => k.indent.length === minIndent && k.key === key);
+  if (hits.length > 1) {
+    throw new Error(`forge: refusing to rewrite ${configPath} — it carries more than one top-level '${key}' line`);
   }
-  existing[key] = value;
-  atomicWriteConfig(projectDir, stringifyYaml(existing));
+  const hit = hits[0];
+
+  if (value === null) {
+    if (!hit) return null;
+    lines.splice(hit.i, 1);
+  } else if (hit) {
+    const cr = lines[hit.i]!.endsWith("\r") ? "\r" : "";
+    const body = stripComment(hit.rest);
+    const comment = hit.rest.slice(body.length);
+    const spacer = comment ? (body.match(/\s*$/)?.[0] || " ") : "";
+    lines[hit.i] = `${hit.indent}${key}: ${value}${spacer}${comment}${cr}`;
+  } else {
+    const indent = keyLines.find((k) => k.indent.length === minIndent)?.indent ?? "";
+    const sep = text.length === 0 || text.endsWith("\n") ? "" : eol;
+    return checked(configPath, `${text}${sep}${indent}${key}: ${value}${eol}`, key, value, verify);
+  }
+  return checked(configPath, lines.join("\n"), key, value, verify);
+}
+
+function checked(configPath: string, next: string, key: string, value: string | null, verify?: TopLevelEditVerify): string {
+  const map = parseMappingOrRefuse(configPath, next, "the edited file");
+  const has = Object.prototype.hasOwnProperty.call(map, key);
+  const ok = value === null ? !has : map[key] === value;
+  if (!ok || (verify && !verify(next))) {
+    throw new Error(
+      `forge: refusing to rewrite ${configPath} — editing the top-level '${key}' line would not ` +
+        (value === null ? `remove '${key}'` : `resolve '${key}' to '${value}'`) +
+        `; edit the file by hand`,
+    );
+  }
+  return next;
+}
+
+function parseMappingOrRefuse(configPath: string, text: string, what = "it"): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(text);
+  } catch (err) {
+    throw new Error(`forge: refusing to rewrite ${configPath} — ${what} is not valid YAML (${(err as Error).message})`);
+  }
+  if (parsed == null) return {};
+  if (typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`forge: refusing to rewrite ${configPath} — ${what === "it" ? "its" : `${what}'s`} top level is not a mapping`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function readIfPresent(path: string): string | null {
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+// FG-799: set a single TOP-LEVEL scalar key in .forge/config.yml through the
+// line-oriented edit above and the same symlink-guarded atomic write as
+// writeProjectKey. Creates the file/dir if absent.
+export function writeTopLevelConfigKey(projectDir: string, key: string, value: string, verify?: TopLevelEditVerify): void {
+  const configPath = safeConfigPath(projectDir);
+  const next = editTopLevelConfigText(configPath, readIfPresent(configPath) ?? "", key, value, verify);
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  atomicWriteConfig(projectDir, next!);
+}
+
+// FG-845: remove a single TOP-LEVEL key line from .forge/config.yml. Returns false —
+// writing nothing — when the file or the key is absent.
+export function removeTopLevelConfigKey(projectDir: string, key: string, verify?: TopLevelEditVerify): boolean {
+  const configPath = safeConfigPath(projectDir);
+  const text = readIfPresent(configPath);
+  if (text === null) return false;
+  const next = editTopLevelConfigText(configPath, text, key, null, verify);
+  if (next === null) return false;
+  atomicWriteConfig(projectDir, next);
+  return true;
+}
+
+// FG-845: set a TOP-LEVEL scalar key in the HOST config ($FORGE_HOME/config.yml)
+// through the same line-oriented edit, with an atomic temp+rename in the resolved
+// $FORGE_HOME. Created when absent. A symlinked config.yml is refused rather than
+// replaced, matching the project path.
+export function writeHostConfigKey(configPath: string, key: string, value: string, verify?: TopLevelEditVerify): void {
+  const dir = dirname(configPath);
+  let isLink = false;
+  try {
+    isLink = lstatSync(configPath).isSymbolicLink();
+  } catch {
+    // absent — nothing to follow
+  }
+  if (isLink) throw new Error(`forge: refusing to write ${configPath} — it is a symlink.`);
+  const next = editTopLevelConfigText(configPath, readIfPresent(configPath) ?? "", key, value, verify);
+  mkdirSync(dir, { recursive: true });
+  const dirIdentity = identify(dir);
+  if (dirIdentity.kind !== "resolved") {
+    throw new Error(`forge: refusing to write ${configPath} — ${describeIdentity(dirIdentity)}.`);
+  }
+  atomicReplaceInDir(dirIdentity.physical, basename(configPath), next!);
 }
 
 export function readRetentionConfig(projectDir: string): RetentionOverrides | undefined {
