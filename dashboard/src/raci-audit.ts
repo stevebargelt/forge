@@ -4,9 +4,10 @@
 // GET /api/governance (routingGovernance) and GET /api/raci read through
 // raciAuditTail(), so the two can never show different entries for one checkout.
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
+import { provenPhysical } from "../../src/util/path-identity.js";
 
 export const AUDIT_TAIL_LINES = 20;
 
@@ -59,7 +60,9 @@ export function raciAuditTail(checkoutDir?: string): RaciAuditTail {
     return { source: "host", path, ...readAuditTail(path) };
   }
   const path = join(checkoutDir, ".forge", "raci-audit.log");
-  if (existsSync(path) && !realpathSync(path).startsWith(join(realpathSync(checkoutDir), ".forge") + sep)) {
+  const physical = provenPhysical(path);
+  const checkout = provenPhysical(checkoutDir);
+  if (physical !== null && (checkout === null || !physical.startsWith(join(checkout, ".forge") + sep))) {
     return { source: "project", path, entries: [], skippedLines: 0, refused: "outside_checkout_forge" };
   }
   return { source: "project", path, ...readAuditTail(path) };
