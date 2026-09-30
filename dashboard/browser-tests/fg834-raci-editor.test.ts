@@ -167,6 +167,10 @@ test("FG-834: edit a route → the changed tag and the diff → Apply refused wi
   await page.keyboard.press("Enter");
   await page.waitForURL(/mode=edit$/);
   await waitDryRun(page, "dry_run_ok");
+  // FG-692: in edit mode the Edit RACI control is the pressed, disabled current state — never an enabled no-op.
+  const current = page.locator('.gov-source-actions [data-raci="edit"]');
+  assert.equal(await current.getAttribute("aria-pressed"), "true");
+  assert.equal(await current.isDisabled(), true, "the current-mode control is not an enabled button with no action");
   assert.equal(await page.locator(".raci-textarea").evaluate((ta) => ta.tagName), "TEXTAREA", "a real <textarea>, not contenteditable");
   assert.equal(await page.locator(".raci-textarea").inputValue(), OVERRIDE, "the editor opens on the project's override");
   assert.equal(await page.locator(".gov-source-actions .raci-pill").getAttribute("data-raci-state"), "unedited");
@@ -317,7 +321,8 @@ test("FG-834: a reload keeps edit mode but not the draft; nothing is stored in t
   assert.match(onLine.line ?? "", /^informed: /);
   assert.equal(await chip.getAttribute("aria-pressed"), "true");
 
-  await page.locator('[data-raci="view"]').click();
+  await page.locator('[data-raci="view"]').focus();
+  await page.keyboard.press("Enter");
   await page.waitForURL((url) => !url.hash.includes("mode=edit"));
   await page.locator(".gov-view .gov-table").waitFor();
   assert.equal(await page.locator(".raci-textarea").count(), 0);

@@ -279,7 +279,8 @@ function RaciEditor({ read, governance, onView, onApplied }) {
         note=${html`<span class="hint">${starting}</span>`}
         actions=${html`${sourcePill}
           <button type="button" class="raci-btn" data-raci="view" onClick=${onView}>View</button>
-          <button type="button" class="raci-btn raci-btn-primary" data-raci="edit" aria-pressed="true">Edit RACI</button>`}
+          <button type="button" class="raci-btn raci-btn-primary" data-raci="edit" aria-pressed="true" disabled
+            title="Editing this checkout's RACI — View returns to the read-only workbench">Edit RACI</button>`}
       />
       <div class="raci-editor">
         <div class="raci-pane">

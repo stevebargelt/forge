@@ -315,3 +315,13 @@ test("the dry-run runner debounces, aborts the in-flight request on a newer edit
   runner.cancel();
   assert.equal(posts[2]!.signal.aborted, true);
 });
+
+test("the state-location docs count the per-project RACI override, its compiled policy and audit log as per-project state", () => {
+  const doc = readFileSync(resolve(HERE, "..", "..", "docs", "how-to-use-forge-across-projects.md"), "utf8");
+  assert.match(doc, /^\| `<project>\/\.forge\/forge-raci\.md`, `routing-policy\.yml`, `raci-audit\.log` \|/m);
+  const summary = doc.split("\n").find((l) => l.startsWith("Per-project state is intentionally minimal"));
+  assert.ok(summary, "the per-project state summary is present");
+  assert.match(summary, /orchestrator block/);
+  assert.match(summary, /workflow override/);
+  assert.match(summary, /RACI override with its compiled policy and audit log/);
+});

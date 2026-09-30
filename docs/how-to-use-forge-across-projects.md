@@ -93,7 +93,7 @@ Both modes write to the same `~/.forge/forge.db` and the same `~/.forge/runs/<ru
 | `<project>/.forge/workflows/*.yml` | Per-project workflow override | Per-project |
 | `<project>/.forge/forge-raci.md`, `routing-policy.yml`, `raci-audit.log` | Per-project RACI override, its compiled policy and its audit log (see below) | Per-project |
 
-Per-project state is intentionally minimal: just the orchestrator block and an optional workflow override. Everything else is one install for the whole machine.
+Per-project state is intentionally minimal: the orchestrator block, an optional workflow override, and an optional RACI override with its compiled policy and audit log. Everything else is one install for the whole machine.
 
 ## Per-project workflow overrides
 
