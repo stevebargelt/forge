@@ -51,6 +51,7 @@ import {
 } from "./queries.js";
 import { runIndex, RunIndexRequestError } from "./run-index.js";
 import { roleDetail, rolesIndex } from "./roles.js";
+import { readCheckoutNotes } from "./checkout-notes.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
 import { budgetedLivenessProbe, RECONCILE_FANOUT_BUDGET_MS } from "@forge/reconcile-candidate";
@@ -343,11 +344,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       );
       return;
     }
-    const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }> = [];
+    // FG-830: `modifiedAt` is the Notes view's fallback session date when the note
+    // itself carries no "Last session ended" line.
+    const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string; modifiedAt: string | null }> = [];
     for (const checkout of checkouts) {
       const notesPath = join(checkout.projectDir, "backlog", "notes.md");
-      const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
-      if (notes.trim()) notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes });
+      const { notes, modifiedAt } = readCheckoutNotes(notesPath);
+      if (notes.trim()) {
+        notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes, modifiedAt });
+      }
     }
 
     // FG-608: ticket truth is HOST-WIDE, keyed by project_key — the same rows for

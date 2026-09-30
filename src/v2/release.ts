@@ -263,6 +263,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/markdown.js",
   "dashboard/client/nav-render.js",
   "dashboard/client/nav-view.js",
+  "dashboard/client/notes-render.js",
+  "dashboard/client/notes-view.js",
   "dashboard/client/object-page-view.js",
   "dashboard/client/order-pin-render.js",
   "dashboard/client/order-pin-view.js",

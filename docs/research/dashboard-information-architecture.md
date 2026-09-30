@@ -80,6 +80,7 @@ The column has a scope control at the top ("All projects", a project, or project
 | Now | Home | `#home[?scope]` (or empty) | N then H: Needs you, In flight | Open-attention count, a server field on `GET /api/attention-inbox` | `composeInbox`; In flight via `/api/in-flight` and `deriveCurrentActivity` (shared with `forge status`) |
 | Now | Activity | `#activity[?scope]` | H: what finished; Diagnostics | none | `/api/feed`, `/api/current-activity`, `/api/orchestrators` |
 | Plan | Backlog | `#backlog[/<ticketId>][?scope]` | D: what is filed, in what state | none | `/api/backlog` |
+| Plan | Notes | `#notes[/<checkout>][?scope]` | H: what each checkout's last session left off | none | `/api/backlog` (`notesByCheckout`) |
 | Plan | Queue | `#queue?scope` (project required) | D: what runs next; planning verbs | none | `/api/queue`; writes via `QUEUE_MUTATION_ROUTES` → `forge queue` |
 | Plan | Campaigns | `#campaigns[/<id>][?scope]` | H/D: campaign progress, pauses | none (pauses count on Home) | `/api/campaigns`, `/api/campaign/:id` |
 | Evidence | Runs (new) | `#runs[?scope&status=]`; object `#run/<runId>[/<tab>]` | H: what ran and is running; entry to the object graph | Active-run count, a server field on `GET /api/runs` | new `GET /api/runs` over `queryRuns` (shared with `forge runs query`); run page over `/api/run/:id/map` |
@@ -93,6 +94,8 @@ The column has a scope control at the top ("All projects", a project, or project
 | Setup | Projects | `#projects` | D: registry, checkouts, classify | none | `/api/projects`; `POST /api/projects/classify` → `forge projects classify` |
 | Health | Usage | `#usage[?scope]` | H: spend, model mix, plan pace | none | `/api/usage*`, `/api/usage/limits` |
 | Health | Ops | `#ops[?scope]` | H: success rate, failure mix, durations | none | `/api/ops`, `/api/agent-runtime`, `/api/completed-runs` |
+
+**Note, 2026-09-30 (FG-830): Notes moved out of Backlog.** The Backlog view used to render a "Notes / Session handoff" section above its tickets, one entry per registered checkout. For Forge on 2026-09-29 that made the page about 108,000 px tall and pushed the tickets below the fold. The notes are now their own Plan item after Backlog: `#notes[/<checkout>][?scope]` (project-optional). It lists one row per checkout that has a note, newest session first, and the note itself opens on a page with the FG-821 trail. Its source is `/api/backlog`'s `notesByCheckout`, and it has no badge. The Backlog item keeps the same route and source but renders tickets only. This adds a fifteenth item to the column.
 
 **Order.** The groups descend through the screen contract:
 

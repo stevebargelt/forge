@@ -18,7 +18,7 @@ test("FG-820: the nav column is the document's five groups in order, object page
     NAV_GROUPS.map((g) => [g.label, g.items]),
     [
       ["Now", ["home", "activity"]],
-      ["Plan", ["backlog", "queue", "campaigns"]],
+      ["Plan", ["backlog", "notes", "queue", "campaigns"]],
       ["Evidence", ["runs", "reviews", "shipping"]],
       ["Setup", ["roles", "routing", "config", "projects"]],
       ["Health", ["usage", "ops"]],

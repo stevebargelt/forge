@@ -15,6 +15,7 @@ import { ControlPlaneView } from "./control-plane.js";
 import { RunPage } from "./run-page-view.js";
 import { TaskPage, ModelBadge, CopyIdButton } from "./task-page-view.js";
 import { TicketPage } from "./ticket-page-view.js";
+import { NotesView, NotePage } from "./notes-view.js";
 import { ReviewPage } from "./reviews.js";
 import { RunsIndexView } from "./runs-index-view.js";
 import { RolesIndexView } from "./roles-index-view.js";
@@ -584,7 +585,7 @@ function App() {
   }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
-    if (view !== "backlog") return;
+    if (view !== "backlog" && view !== "notes") return;
     pollBacklog();
     const id = setInterval(pollBacklog, USAGE_POLL_MS);
     return () => clearInterval(id);
@@ -760,6 +761,10 @@ function App() {
         ? route.id
           ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`
           : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} projects=${projects} params=${route.params} />`
+        : view === "notes"
+        ? route.id
+          ? html`<${NotePage} key=${route.id} checkoutDir=${route.id} data=${backlog} scope=${scope} projects=${projects} />`
+          : html`<${NotesView} data=${backlog} projectFilter=${projectFilter} scope=${scope} projects=${projects} />`
         : view === "queue"
         ? html`<${QueueBoardView}
             data=${queue}

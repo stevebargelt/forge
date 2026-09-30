@@ -277,6 +277,19 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // not re-fetch the already-loaded payload, and the header's "N of M tickets" count
   // agrees with the active filter. The left column has no Backlog badge.
   "fg832-backlog-filter.test.ts": 5,
+  // FG-830 adds `fg830-notes-view` (8 tests): the Backlog starts at its tickets with no
+  // notes section or per-checkout note list; `#notes` under Plan (after Backlog) lists one
+  // row per checkout with a note — unique FG-831 labels, newest session first (note line,
+  // else file mtime, else "unknown"), a one-line preview, the primary marked — and with no
+  // project asks for one; a row opens `#notes/<checkout>` with the note through the
+  // sanitized renderer and the Project › Notes › checkout trail; the deep link survives
+  // reload; Escape returns to the scoped list; and both fit at 400px. `usage-limits` keeps
+  // its 8, its handoff case re-pointed from the Backlog cards to the Notes rows; `fg820`
+  // keeps its 7 with Notes in the Plan group and tab order. Verification additionally
+  // proves every Notes row's FG-831 label exactly matches its scope-bar checkout label,
+  // mixed note/mtime/unknown dates and the primary mark, plus FG-692 Enter activation
+  // with hostile script, event-handler, and javascript-link markup inert. Fixture port 18837.
+  "fg830-notes-view.test.ts": 8,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

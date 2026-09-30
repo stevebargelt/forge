@@ -7,7 +7,6 @@ import { h } from "preact";
 import { useState, useMemo } from "preact/hooks";
 import htm from "htm";
 import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
-import { md } from "./renderers.js";
 import { backlogBoardState, backlogCountLabel, backlogFilterHash, backlogFilterState, filterBacklogTickets, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
 import { hashFor } from "./view-routing.js";
 import { checkoutLabelForDir } from "./checkout-label.js";
@@ -21,11 +20,11 @@ const STATUSES = ["active", "blocked", "deferred", "done"];
 
 // FG-821: a ticket opens its page, #backlog/<ticketId> (ticket-page-view.js), keeping
 // the scope in hand — ticket ids are per project. FG-832: the type/status filter is the
-// hash's (`#backlog?type=&status=`), defaulting to every type, active only.
+// hash's (`#backlog?type=&status=`), defaulting to every type, active only. FG-830: the
+// session-handoff notes moved to their own view (notes-view.js); the tickets start here.
 export function BacklogView({ data, projectFilter, scope, projects = [], params = null }) {
   const filter = backlogFilterState(params);
   const [search, setSearch] = useState("");
-  const [selectedNote, setSelectedNote] = useState(null);
 
   if (!projectFilter) {
     return html`<div class="muted" style="margin-top: 20px;">Select a project to view its backlog.</div>`;
@@ -74,26 +73,6 @@ export function BacklogView({ data, projectFilter, scope, projects = [], params 
           ${" "}markdown mode: <code>backlog/*.md</code> in the checkout is this project's ticket truth.
         </div>
       ` : null}
-      ${data.notes && data.notes.trim() ? html`
-        <section class="backlog-notes">
-          <h2>Notes / Session handoff</h2>
-          <div class="card backlog-notes-body md" dangerouslySetInnerHTML=${{ __html: md(data.notes) }}></div>
-        </section>
-      ` : null}
-      ${!data.notes && (data.notesByCheckout || []).length > 0 ? html`
-        <section class="backlog-notes">
-          <h2>Notes / Session handoff</h2>
-          ${data.notesByCheckout.map((entry) => html`
-            <${NoteCard}
-              key=${entry.checkoutDir}
-              entry=${entry}
-              projects=${projects}
-              onClick=${() => setSelectedNote(entry)}
-            />
-          `)}
-        </section>
-      ` : null}
-
       <section class="backlog-controls">
         <div class="row" style="gap: 8px; flex-wrap: wrap; margin-top: 16px; margin-bottom: 8px;">
           <label class="sr-only" for="backlog-search">Search tickets</label>
@@ -165,10 +144,6 @@ export function BacklogView({ data, projectFilter, scope, projects = [], params 
             `;
           })
       }
-
-      ${selectedNote ? html`
-        <${NoteDetail} entry=${selectedNote} projects=${projects} onClose=${() => setSelectedNote(null)} />
-      ` : null}
     </div>
   `;
 }
@@ -182,62 +157,6 @@ function FilterButton({ pressed, href, label, children }) {
       aria-pressed=${pressed ? "true" : "false"}
       aria-label=${label}
     >${children}</button>
-  `;
-}
-
-// FG-831: a note row names its checkout by the shared label rule, not its branch alone.
-function noteLabel(entry, projects) {
-  return checkoutLabelForDir(entry.checkoutDir, projects, entry.checkoutBranch);
-}
-
-function NoteCard({ entry, projects, onClick }) {
-  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } };
-  const preview = entry.notes.trim().replace(/\s+/g, " ").slice(0, 200);
-  return html`
-    <div
-      class="card backlog-note-card"
-      onClick=${onClick}
-      role="button"
-      tabIndex="0"
-      onKeyDown=${onKey}
-      aria-label=${`Open session handoff for ${noteLabel(entry, projects)}`}
-    >
-      <div class="head">
-        <div>
-          <span class="badge backlog-note-badge">handoff</span>
-          <strong title=${entry.checkoutDir}>${noteLabel(entry, projects)}</strong>
-        </div>
-        <span class="faint mono backlog-note-action">view notes →</span>
-      </div>
-      ${preview ? html`<div class="preview muted">${preview}</div>` : null}
-    </div>
-  `;
-}
-
-function NoteDetail({ entry, projects, onClose }) {
-  const onKey = (e) => { if (e.key === "Escape") onClose(); };
-  const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
-  return html`
-    <div class="detail-overlay" onClick=${onClose} onKeyDown=${onKey} role="dialog" aria-modal="true" aria-label=${`Session handoff for ${noteLabel(entry, projects)}`}>
-      <div class="detail" onClick=${(e) => e.stopPropagation()}>
-        <span
-          class="close"
-          onClick=${onClose}
-          role="button"
-          tabIndex="0"
-          aria-label="Close session handoff detail"
-          onKeyDown=${onCloseKey}
-        >×</span>
-
-        <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: baseline;">
-          <span class="badge backlog-note-badge">handoff</span>
-          <span class="checkout-chip" title=${entry.checkoutDir}>${noteLabel(entry, projects)}</span>
-        </div>
-        <h1 style="margin-bottom: 12px;">Session handoff</h1>
-        <div class="subcard backlog-note-path mono faint" title=${entry.checkoutDir}>${entry.checkoutDir}</div>
-        <div class="md" dangerouslySetInnerHTML=${{ __html: md(entry.notes) }}></div>
-      </div>
-    </div>
   `;
 }
 

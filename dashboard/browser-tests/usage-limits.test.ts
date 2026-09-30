@@ -267,40 +267,43 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   await page.close();
 });
 
-test("Backlog renders multi-checkout handoffs as compact list cards with one detail view", async () => {
+// FG-830: the handoffs moved from the Backlog to the Notes view — still compact rows, the
+// note itself on its own page rather than expanded into the list.
+test("Notes renders multi-checkout handoffs as compact rows with one note page", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Forge checkouts" }).click();
-  await page.getByRole("link", { name: "Backlog", exact: true }).click();
+  await page.getByRole("link", { name: "Notes", exact: true }).click();
 
-  const cards = page.locator(".backlog-note-card");
-  await cards.first().waitFor();
-  assert.equal(await cards.count(), 2);
-  assert.equal(await page.locator(".backlog-notes-body").count(), 0, "multi-checkout notes must not render expanded markdown cards");
-  assert.match(await cards.first().innerText(), /main/);
-  assert.match(await cards.nth(1).innerText(), /dashboard-home/);
-  assert.ok((await page.locator(".backlog-notes").evaluate((element) => element.getBoundingClientRect().height)) < 400);
+  const rows = page.locator(".notes-row");
+  await rows.first().waitFor();
+  assert.equal(await rows.count(), 2);
+  assert.equal(await page.locator(".note-body").count(), 0, "multi-checkout notes must not render expanded markdown in the list");
+  assert.match(await rows.first().innerText(), /main/);
+  assert.match(await rows.nth(1).innerText(), /dashboard-home/);
+  assert.ok((await page.locator(".notes-list").evaluate((element) => element.getBoundingClientRect().height)) < 400);
 
-  await cards.nth(1).click();
-  const detail = page.getByRole("dialog", { name: "Session handoff for forge-dashboard · dashboard-home" });
-  await detail.waitFor();
-  assert.match(await detail.innerText(), /Dashboard checkout context/);
-  assert.match(await detail.innerText(), /\/workspace\/forge-dashboard/);
-  assert.equal(await page.locator(".detail-overlay").count(), 1);
-  await detail.getByRole("button", { name: "Close session handoff detail" }).click();
-  assert.equal(await page.locator(".detail-overlay").count(), 0);
+  await rows.nth(1).click();
+  const note = page.locator(".note-page");
+  await note.locator(".note-body").waitFor();
+  assert.equal(await page.locator(".page-title").innerText(), "forge-dashboard · dashboard-home");
+  assert.match(await note.innerText(), /Dashboard checkout context/);
+  assert.match(await note.innerText(), /\/workspace\/forge-dashboard/);
+  await page.keyboard.press("Escape");
+  await rows.first().waitFor();
+  assert.equal(await page.locator(".note-page").count(), 0);
 
   await page.setViewportSize({ width: 390, height: 844 });
   const narrow = await page.evaluate(() => ({
     viewport: window.innerWidth,
     documentWidth: document.documentElement.scrollWidth,
-    cardsContained: Array.from(document.querySelectorAll(".backlog-note-card")).every((element) => {
+    rowsContained: Array.from(document.querySelectorAll(".notes-row")).every((element) => {
       const box = element.getBoundingClientRect();
       return box.left >= 0 && box.right <= window.innerWidth;
     }),
   }));
   assert.ok(narrow.documentWidth <= narrow.viewport, JSON.stringify(narrow));
-  assert.equal(narrow.cardsContained, true, JSON.stringify(narrow));
+  assert.equal(narrow.rowsContained, true, JSON.stringify(narrow));
   await page.close();
 });
 
