@@ -213,8 +213,8 @@ test("FG-821: the run index lists project, ticket, status, started and duration,
   assert.equal(await page.locator('.runs-table tr[data-run-id="run-2"] td').nth(2).innerText(), "—", "a run without a ticket shows none");
   assert.match(await first.locator("td").nth(5).innerText(), /so far/, "an active run's duration is running");
   assert.match(await page.locator('.runs-table tr[data-run-id="run-2"] td').nth(5).innerText(), /^1h 0m$/);
-  assert.match(await page.locator(".screen-line").innerText(), /7 runs are active · .* · Open a run to walk its tasks: forge runs query/,
-    "the header states the three answers from the server's activeCount and names the verb");
+  assert.equal(await page.locator(".screen-line").innerText(), "7 runs are active",
+    "FG-838: the header states the server's activeCount alone; the contract and verb are in the info tip");
   assert.ok(apiRequests.some((u) => u.startsWith("/api/runs?") && new URL(u, baseUrl).searchParams.get("projectKey") === "atlas"),
     "the index read carries the scope");
   await page.screenshot({ path: join(SHOTS, "fg821-runs-index-badge.png") });

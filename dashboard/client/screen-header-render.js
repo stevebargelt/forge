@@ -1,6 +1,9 @@
-// FG-821: the screen contract, as data. Every list view and object page header states
-// three answers in one short line — H what is happening, N does it need me, D what do I
-// do — and names the next CLI verb where one applies. Pure, so the copy is unit-tested.
+// FG-821: the screen contract, as data — H what is happening, N does it need me, D what do
+// I do, and the next CLI verb where one applies. Pure, so the copy is unit-tested.
+//
+// FG-838: a header carries live facts only. Object pages state theirs in one line under
+// the title; a list view's contract never changes with state, so it lives in the info tip
+// (info-tip.js) beside the title, and only a live count (the run index's) sits under it.
 //
 // Object-page copy is read off the payload on screen: the task's status and failure kind,
 // and the attention inbox's own `reason` / `requestedAction` for that run or task (the
@@ -94,18 +97,18 @@ export function runHeader(graph, load) {
 export function ticketHeader(ticketId, ticket, runsLoad) {
   const runs = runsLoad && Array.isArray(runsLoad.runs) ? runsLoad.runs : null;
   const state = ticket ? `${ticketId} is ${ticket.status}` : `Ticket ${ticketId}`;
-  const happening = runs === null ? state : runs.length === 0 ? `${state}; no run has been dispatched for it` : `${state}; its runs are listed below`;
+  const happening = runs !== null && runs.length === 0 ? `${state}; no run has been dispatched for it` : state;
   if (ticket && ticket.status === "active" && runs !== null && runs.length === 0) {
     return { happening, needsYou: false, needs: NOTHING, todo: "Queue it to run", verb: `forge queue enqueue ${ticketId}` };
   }
-  return { happening, needsYou: false, needs: NOTHING, todo: "Read it", verb: `forge backlog show ${ticketId}` };
+  return { happening, needsYou: false, needs: NOTHING, todo: "", verb: `forge backlog show ${ticketId}` };
 }
 
 /** Header for one checkout's session-handoff note (FG-830). Read-only: the verb is the
  *  CLI read, run in that checkout. */
 export function noteHeader(row) {
   if (!row) return { happening: "No note for this checkout", needsYou: false, needs: NOTHING, todo: "Pick a checkout from Notes", verb: "forge backlog notes show" };
-  return { happening: `The handoff ${row.label} left for the next session`, needsYou: false, needs: NOTHING, todo: "Read it", verb: "forge backlog notes show" };
+  return { happening: `The handoff ${row.label} left for the next session`, needsYou: false, needs: NOTHING, todo: "", verb: "forge backlog notes show" };
 }
 
 /** Header for a review opened by id. `nextAction` is review-ledger-render's
@@ -122,15 +125,17 @@ export function reviewHeader(review, nextAction) {
   };
 }
 
-/** Header for the run index, from GET /api/runs's server-computed activeCount. */
+/** The run index's live line, from GET /api/runs's server-computed activeCount; empty
+ *  until that count is read. Its contract is in the tip (LIST_HEADERS.runs). */
 export function runsIndexHeader(load) {
   const active = load && load.phase === "ready" && Number.isInteger(load.body?.activeCount) ? load.body.activeCount : null;
-  const happening = active === null ? "What ran and what is running" : active === 0 ? "No run is active" : `${active} ${active === 1 ? "run is" : "runs are"} active`;
-  return { happening, needsYou: false, needs: "Needs you only via Home", todo: "Open a run to walk its tasks", verb: "forge runs query" };
+  const happening = active === null ? "" : active === 0 ? "No run is active" : `${active} ${active === 1 ? "run is" : "runs are"} active`;
+  return { happening, needsYou: false, needs: "", todo: "", verb: null };
 }
 
-// The list views' lines: the plan's "What it answers" column, stated as the contract.
+// The list views' contracts: the plan's "What it answers" column. Shown in the info tip.
 const LIST_HEADERS = {
+  runs: { happening: "What ran and what is running", needs: "Needs you only via Home", todo: "Open a run to walk its tasks", verb: "forge runs query" },
   home: { happening: "What needs you, then what is running", needs: "The Needs you list is exactly what needs you", todo: "Act on each item's command", verb: "forge attention list" },
   activity: { happening: "What finished and what is running", needs: "Home owns what needs you", todo: "Open an output to read it", verb: "forge status" },
   backlog: { happening: "What is filed, in what state", needs: "Readiness gaps count on Home", todo: "Open a ticket for its runs", verb: "forge backlog list" },
@@ -147,9 +152,20 @@ const LIST_HEADERS = {
   ops: { happening: "Success rate, failure mix and durations", needs: NOTHING, todo: "Hunt regressions", verb: "forge ops check" },
 };
 
+/** A list view's contract, for its info tip; null for a view without one. */
 export function listHeader(view) {
   const line = LIST_HEADERS[view];
   return line ? { ...line, needsYou: false } : null;
+}
+
+export const LIST_HEADER_VIEWS = Object.keys(LIST_HEADERS);
+
+/** What a list view renders under its title: a live line, or null. Only the run index
+ *  has one. */
+export function listScreenLine(view, runsLoad) {
+  if (view !== "runs") return null;
+  const header = runsIndexHeader(runsLoad);
+  return header.happening === "" ? null : header;
 }
 
 /** The one short line, as plain text (the view renders `verb` as code). */

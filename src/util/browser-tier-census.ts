@@ -290,6 +290,21 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // mixed note/mtime/unknown dates and the primary mark, plus FG-692 Enter activation
   // with hostile script, event-handler, and javascript-link markup inert. Fixture port 18837.
   "fg830-notes-view.test.ts": 8,
+  // FG-838 adds `fg838-info-tip` (7 tests): Home renders its title with no static
+  // three-answer line and a 20px "?" beside it whose hover tooltip names what the page
+  // shows; Enter opens the popover as an announced dialog with focus moved in, holding the
+  // three answers and the verb, Escape closes it with focus back on the "?", Space and a
+  // click toggle it and a click outside closes it; Tab reaches Copy, which copies the verb;
+  // Backlog, Roles and Ops carry no line under the title and each its own tip, Runs only
+  // "N runs are active", and the Roles Source caption sits in a footer under the table;
+  // and at 400px the "?" stays on the title's line with the popover inside the viewport.
+  // Verification adds a route-table-driven sweep of every FG-820 list route: exactly one
+  // tip per rendered header, every view's contract and verb in its popover, and no static
+  // three-answer line; plus a mixed fixture through failed/gated tasks, an active run, and
+  // an open review proving their object headers retain live facts without static filler.
+  // `fg821-cockpit-pages` keeps its count, its run-index line assertion re-pointed at the
+  // live count alone. Fixture port 18839.
+  "fg838-info-tip.test.ts": 7,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

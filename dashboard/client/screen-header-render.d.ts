@@ -14,4 +14,6 @@ export function reviewHeader(review: { id: string; state: string } | null, nextA
 export function noteHeader(row: { label: string } | null): ScreenHeader;
 export function runsIndexHeader(load: unknown): ScreenHeader;
 export function listHeader(view: string): ScreenHeader | null;
+export const LIST_HEADER_VIEWS: string[];
+export function listScreenLine(view: string, runsLoad: unknown): ScreenHeader | null;
 export function screenLineText(header: ScreenHeader | null): string;

@@ -28,10 +28,11 @@ export function Breadcrumbs({ crumbs }) {
 
 /** The screen contract in one short line: H · N · D, and the CLI verb as code. */
 export function ScreenLine({ header }) {
-  if (!header) return null;
+  const text = screenLineText(header);
+  if (text === "") return null;
   const parts = [header.happening, header.needs, header.todo].filter((s) => typeof s === "string" && s !== "");
   return html`
-    <p class=${"screen-line" + (header.needsYou ? " screen-line-needs" : "")} data-screen-line=${screenLineText(header)}>
+    <p class=${"screen-line" + (header.needsYou ? " screen-line-needs" : "")} data-screen-line=${text}>
       ${parts.join(" · ")}${header.verb ? html`: <code class="screen-verb">${header.verb}</code>` : null}
     </p>
   `;
