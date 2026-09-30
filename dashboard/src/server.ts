@@ -38,7 +38,7 @@
 // unattended, and it stays CLI-only. See queue-mutation.ts and action-mutation.ts.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -51,6 +51,7 @@ import {
 } from "./queries.js";
 import { runIndex, RunIndexRequestError } from "./run-index.js";
 import { roleDetail, rolesIndex } from "./roles.js";
+import { readCheckoutNotes } from "./checkout-notes.js";
 import type { BacklogTicket, GroupBy, ProjectRecord, ProjectScope } from "./queries.js";
 import { isLaunchId } from "@forge/current-activity";
 import { budgetedLivenessProbe, RECONCILE_FANOUT_BUDGET_MS } from "@forge/reconcile-candidate";
@@ -348,9 +349,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string; modifiedAt: string | null }> = [];
     for (const checkout of checkouts) {
       const notesPath = join(checkout.projectDir, "backlog", "notes.md");
-      const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
+      const { notes, modifiedAt } = readCheckoutNotes(notesPath);
       if (notes.trim()) {
-        const modifiedAt = statSync(notesPath, { throwIfNoEntry: false })?.mtime.toISOString() ?? null;
         notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes, modifiedAt });
       }
     }

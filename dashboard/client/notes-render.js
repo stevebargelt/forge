@@ -2,7 +2,7 @@
 // note (`backlog/notes.md`, `forge backlog notes`), read off GET /api/backlog's
 // `notesByCheckout`. Pure, so the render tests and the browser suite pin one answer.
 //
-// A row's session date is the note's own "Last session ended YYYY-MM-DD" line; failing
+// A row's session date is the note's own "Last session ended YYYY-MM-DD" marker line; failing
 // that, the file's mtime as the server reported it; failing both, "unknown" — never a
 // guessed date. Rows sort newest session first, unknown last.
 
@@ -13,7 +13,9 @@ import { hashFor } from "./view-routing.js";
 export const NO_PROJECT_MESSAGE = "Select a project to read its checkouts' session handoff notes.";
 export const NO_NOTES_MESSAGE = "No checkout of this project has session handoff notes.";
 
-const SESSION_LINE = /Last session ended\s+(\d{4}-\d{2}-\d{2})/i;
+// The whole line must be the marker `forge backlog notes` writes — `**Last session ended
+// YYYY-MM-DD.**`, bold optional — so a date quoted in prose is never read as the session.
+const SESSION_LINE = /^[ \t]*(\*\*|__)?Last session ended[ \t]+(\d{4}-\d{2}-\d{2})\.?\1\.?[ \t]*$/im;
 const PREVIEW_MAX = 160;
 
 function pathKey(dir) {
@@ -29,7 +31,7 @@ function validTime(iso) {
 /** The date on the note's "Last session ended …" line, or null. */
 export function lastSessionDate(notes) {
   const match = typeof notes === "string" ? notes.match(SESSION_LINE) : null;
-  return match && validTime(match[1]) !== null ? match[1] : null;
+  return match && validTime(match[2]) !== null ? match[2] : null;
 }
 
 /** Where a row's session date came from: the note, the file's mtime, or nowhere. */

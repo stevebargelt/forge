@@ -16,6 +16,7 @@ import {
 import { noteTrail, parentHash } from "../client/breadcrumbs-render.js";
 import { listHeader, noteHeader } from "../client/screen-header-render.js";
 import { md } from "../client/markdown.js";
+import { readFileSync } from "node:fs";
 import { NAV_GROUPS, ROUTES, hashFor, navItemFor, parseHash } from "../client/view-routing.js";
 
 const PROJECTS = [{
@@ -51,6 +52,25 @@ test("FG-830: the session date is the note's own line, else the file mtime, else
   assert.equal(sessionDisplay({ iso: "2026-09-28", source: "note" }, now).text, "session ended 2026-09-28 · 2d ago");
   assert.match(sessionDisplay({ iso: "2026-09-20T10:00:00.000Z", source: "modified" }, now).text, /^file modified 9d ago$/);
   assert.equal(sessionDisplay({ iso: null, source: "unknown" }, now).text, "session date unknown");
+});
+
+test("FG-830: only the dedicated marker line dates a note — a date quoted in prose never does", () => {
+  assert.equal(lastSessionDate("Last session ended 2026-09-28."), "2026-09-28");
+  assert.equal(lastSessionDate("# Handoff\n\n  **Last session ended 2026-09-28**.\n"), "2026-09-28");
+  assert.equal(lastSessionDate("Context: Last session ended 2026-09-29 was copied from another handoff."), null);
+  assert.equal(lastSessionDate("Last session ended 2026-09-29 was copied from another handoff."), null);
+  assert.equal(lastSessionDate("> **Last session ended 2026-09-29.**"), null, "a quoted marker is prose");
+  assert.equal(lastSessionDate("**Last session ended 2026-09-29.__"), null, "mismatched bold is not the marker");
+  const quoted = { checkoutDir: "/Users/s/code/forge-quiet", checkoutBranch: "feat/quiet", notes: "Context: Last session ended 2026-09-29 was copied from another handoff.", modifiedAt: "2026-09-10T00:00:00.000Z" };
+  assert.deepEqual(sessionOf(quoted), { iso: "2026-09-10T00:00:00.000Z", source: "modified" }, "falls back to the mtime");
+  assert.equal(notePreview(quoted.notes), "Context: Last session ended 2026-09-29 was copied from another handoff.", "a prose line is not skipped as the marker");
+  const rows = noteRows({ notesByCheckout: DATA.notesByCheckout.map((e) => (e.checkoutDir === quoted.checkoutDir ? quoted : e)) }, SCOPE, PROJECTS);
+  assert.deepEqual(rows.map((r) => r.label), [
+    "forge-fg830 · feat/fg-830-notes-view",
+    "run-1/forge · main",
+    "forge-quiet · feat/quiet",
+    "code/forge · main",
+  ], "the quoted 2026-09-29 does not sort the row first; its 2026-09-10 mtime places it");
 });
 
 test("FG-830: the preview is one line of prose — markup stripped, the session line skipped, truncated", () => {
@@ -123,4 +143,11 @@ test("FG-830: #notes is a Plan route after Backlog, project-optional, with an op
   assert.equal(parseHash("#notes").rewrite, false, "no project is a valid Notes hash — the view asks for one");
   assert.equal(parseHash("#notes?project=repo-forge&type=story").canonical, "#notes?project=repo-forge", "backlog-only params are dropped");
   assert.equal(parseHash("#backlog?project=repo-forge").view, "backlog", "Backlog keeps its own route");
+});
+
+test("FG-830: the IA navigation matrix lists the shipped Plan items, Notes after Backlog", () => {
+  const doc = readFileSync(new URL("../../docs/research/dashboard-information-architecture.md", import.meta.url), "utf8");
+  const planRows = doc.split("\n").filter((line) => line.startsWith("| Plan | ")).map((line) => line.split("|")[2]!.trim().toLowerCase());
+  assert.deepEqual(planRows, NAV_GROUPS.find((g) => g.id === "plan")?.items);
+  assert.match(doc, /^\| Plan \| Notes \| `#notes\[\/<checkout>\]\[\?scope\]` \|.*\| none \| `\/api\/backlog` \(`notesByCheckout`\) \|$/m);
 });

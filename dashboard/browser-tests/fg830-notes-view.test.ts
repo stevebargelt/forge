@@ -51,7 +51,8 @@ const LONG = Array.from({ length: 60 }, (_, i) => `${i + 1}. A paragraph of hand
 const notesFixture = [
   { checkoutDir: PRIMARY, checkoutBranch: "main", notes: `**Last session ended 2026-08-13.**\n\n**Where we left off:** the primary checkout's handoff.\n\n${LONG}`, modifiedAt: "2026-09-29T08:00:00.000Z" },
   { checkoutDir: CLONE_A, checkoutBranch: "main", notes: "# Clone A handoff\n\nNo session line — dated by the file.", modifiedAt: "2026-09-20T10:00:00.000Z" },
-  { checkoutDir: CLONE_B, checkoutBranch: "main", notes: "Scribble with no date at all.", modifiedAt: null },
+  // A date quoted in prose is not the session marker line: this row stays undated.
+  { checkoutDir: CLONE_B, checkoutBranch: "main", notes: "Scribble with no session line.\n\nContext: Last session ended 2026-09-29 was copied from another handoff.", modifiedAt: null },
   {
     checkoutDir: FEATURE,
     checkoutBranch: "feat/fg-830-notes-view",
@@ -251,6 +252,7 @@ test("FG-830 / FG-831: every Notes row repeats its checkout's scope-bar label, w
   assert.match(parity[1]!.session, /^file modified \d+d ago$/);
   assert.match(parity[2]!.session, /^session ended 2026-08-13 · \d+d ago$/);
   assert.equal(parity[3]!.session, "session date unknown");
+  assert.match(await page.locator(".notes-row").nth(3).locator(".notes-preview").innerText(), /^Scribble with no session line\.$/, "the prose-quoted date neither dates nor lifts the row");
   assert.deepEqual(parity.filter((row) => row.primary).map((row) => row.checkout), [PRIMARY]);
   await page.close();
 });

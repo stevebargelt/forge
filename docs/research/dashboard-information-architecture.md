@@ -80,6 +80,7 @@ The column has a scope control at the top ("All projects", a project, or project
 | Now | Home | `#home[?scope]` (or empty) | N then H: Needs you, In flight | Open-attention count, a server field on `GET /api/attention-inbox` | `composeInbox`; In flight via `/api/in-flight` and `deriveCurrentActivity` (shared with `forge status`) |
 | Now | Activity | `#activity[?scope]` | H: what finished; Diagnostics | none | `/api/feed`, `/api/current-activity`, `/api/orchestrators` |
 | Plan | Backlog | `#backlog[/<ticketId>][?scope]` | D: what is filed, in what state | none | `/api/backlog` |
+| Plan | Notes | `#notes[/<checkout>][?scope]` | H: what each checkout's last session left off | none | `/api/backlog` (`notesByCheckout`) |
 | Plan | Queue | `#queue?scope` (project required) | D: what runs next; planning verbs | none | `/api/queue`; writes via `QUEUE_MUTATION_ROUTES` → `forge queue` |
 | Plan | Campaigns | `#campaigns[/<id>][?scope]` | H/D: campaign progress, pauses | none (pauses count on Home) | `/api/campaigns`, `/api/campaign/:id` |
 | Evidence | Runs (new) | `#runs[?scope&status=]`; object `#run/<runId>[/<tab>]` | H: what ran and is running; entry to the object graph | Active-run count, a server field on `GET /api/runs` | new `GET /api/runs` over `queryRuns` (shared with `forge runs query`); run page over `/api/run/:id/map` |
