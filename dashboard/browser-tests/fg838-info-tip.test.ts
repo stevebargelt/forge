@@ -121,6 +121,8 @@ test("FG-838: the popover opens by keyboard, is announced as a dialog, closes on
   await popover(page).waitFor({ state: "visible" });
   await page.mouse.click(1100, 800);
   await popover(page).waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.activeElement === document.querySelector(".page-head .info-tip-button"), undefined, { timeout: 2000 }).catch(() => {});
+  assert.ok(await focusedIs(page, ".page-head .info-tip-button"), "a click outside returns focus to the ?");
   await button(page).click();
   await popover(page).waitFor({ state: "visible" });
   await button(page).click();

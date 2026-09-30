@@ -55,7 +55,15 @@ export function InfoTip({ view, title }) {
     if (!open) return undefined;
     popRef.current?.focus();
     const onPointer = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+      if (!wrapRef.current || wrapRef.current.contains(e.target)) return;
+      setOpen(false);
+      // After the browser's own mousedown focus change: a click onto another control keeps
+      // its focus; one onto blank space (body, or a tabindex="-1" container like main) returns
+      // it to the ? as Escape does.
+      setTimeout(() => {
+        const active = document.activeElement;
+        if (!active || active.tabIndex < 0 || wrapRef.current?.contains(active)) buttonRef.current?.focus();
+      });
     };
     document.addEventListener("pointerdown", onPointer);
     return () => document.removeEventListener("pointerdown", onPointer);
