@@ -23,6 +23,8 @@ import Database from "better-sqlite3";
 
 const TEST_PORT = 18799;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 // --- env before ANY forge module is evaluated: both the store handle and the
 // dashboard's read-only handle resolve FORGE_HOME per call, and both must land on
@@ -285,6 +287,7 @@ globalThis.fetch = ((input: Parameters<typeof realFetch>[0], init?: Parameters<t
 }) as typeof realFetch;
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   globalThis.fetch = realFetch;

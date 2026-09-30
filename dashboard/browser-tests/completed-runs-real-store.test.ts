@@ -16,6 +16,8 @@ import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js"
 
 const PORT = 18883;
 const BASE = `http://127.0.0.1:${PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("../src/test-support/await-dashboard-ready.js");
 const home = mkdtempSync(join(tmpdir(), "forge-completed-runs-real-browser-"));
 const forgeHome = join(home, ".forge");
 const checkouts = join(home, "checkouts");
@@ -83,6 +85,7 @@ let server: Server;
 
 before(async () => {
   ({ server } = await import("../src/server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let i = 0; i < 75; i += 1) {
     try { await fetch(`${BASE}/`); break; }
     catch (error) {

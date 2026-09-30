@@ -47,6 +47,8 @@ import Database from "better-sqlite3";
 
 const TEST_PORT = 18801;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const SAME_ORIGIN = `http://127.0.0.1:${TEST_PORT}`;
 
 // --- env before ANY forge module is evaluated (the fg591-queue-routes precedent):
@@ -171,6 +173,7 @@ function useStub(): void {
 useStub();
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

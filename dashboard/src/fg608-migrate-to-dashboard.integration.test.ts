@@ -46,6 +46,8 @@ const TSX = existsSync(LOCAL_TSX) ? LOCAL_TSX : "tsx";
 
 const TEST_PORT = 19005;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const testHome = mkdtempSync(join(tmpdir(), "fg608-migrate-dash-"));
 const forgeHome = join(testHome, ".forge");
 const reposRoot = join(testHome, "checkouts");
@@ -177,6 +179,7 @@ before(async () => {
   database.close();
 
   ({ server } = await import("./server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let attempt = 0; attempt < 75; attempt += 1) {
     try {
       await fetch(`${BASE}/`);

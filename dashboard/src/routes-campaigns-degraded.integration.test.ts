@@ -15,6 +15,8 @@ import { applyMigrations, setDbForTest } from "../../src/store/db.js";
 
 const TEST_PORT = 19014;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-campaigns-degraded-"));
 
 {
@@ -35,6 +37,7 @@ process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

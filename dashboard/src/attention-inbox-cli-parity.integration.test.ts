@@ -15,6 +15,8 @@ import { fixtureFetch } from "./test-support/fixture-fetch.js";
 
 const TEST_PORT = 18820;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-inbox-parity-"));
 process.env.FORGE_HOME = tmpHome;
@@ -93,6 +95,7 @@ insertConflict({
 });
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

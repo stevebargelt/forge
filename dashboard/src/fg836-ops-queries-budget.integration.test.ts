@@ -24,6 +24,8 @@ import { applyMigrations } from "../../src/store/db.js";
 
 const TEST_PORT = 19017;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const BUDGET_MS = 500;
 const SAMPLES = 20;
 
@@ -145,6 +147,7 @@ const seeded = (() => {
 
 const realFetch = globalThis.fetch;
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 const { AGENT_RUNTIME_WINDOWS, agentRuntimeRowsStatement, opsMetricsStatements } = await import("./queries.js");
 
 after(() => {

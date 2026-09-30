@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 const TEST_PORT = 18402;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-inbox-"));
 process.env.FORGE_HOME = tmpHome;
@@ -157,6 +159,7 @@ seed();
 // the FG-679/FG-742 route tests do) so every test — including the HTTP one — is
 // registered only after the server is listening.
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

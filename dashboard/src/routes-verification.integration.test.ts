@@ -19,6 +19,8 @@ import { join } from "node:path";
 
 const TEST_PORT = 18765;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 // --- env must be set before server.ts is evaluated (module-level reads) ---
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-verify-rt-"));
@@ -84,6 +86,7 @@ db.prepare(`
 
 // --- start the real server (side-effect import; reads PORT from env) ---
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

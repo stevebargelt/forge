@@ -11,6 +11,8 @@ import { join } from "node:path";
 
 const TEST_PORT = 19009;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-runtime-route-"));
 
 // FG-673: one clock reading for the whole fixture. Reading Date.now() per call
@@ -55,6 +57,7 @@ process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

@@ -36,6 +36,8 @@ import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.j
 
 const TEST_PORT = 18773;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const testHome = mkdtempSync(join(tmpdir(), "fg608-db-truth-"));
 const forgeHome = join(testHome, ".forge");
 const brokenHome = join(testHome, ".forge-no-ticket-tables");
@@ -186,6 +188,7 @@ function seedRuns(database: Database.Database): void {
 }
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

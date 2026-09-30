@@ -23,6 +23,8 @@ import { provenPhysical } from "../../src/util/path-identity.js";
 
 const TEST_PORT = 18844;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const testHome = provenPhysical(mkdtempSync(join(tmpdir(), "forge-fg843-kinds-")))!;
 const forgeHome = join(testHome, ".forge");
 const codeRoot = join(testHome, "code");
@@ -75,6 +77,7 @@ before(async () => {
   recordWorkspacePurpose({ path: worktree, kind: "worktree" });
 
   ({ server } = await import("./server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let attempt = 0; attempt < 75; attempt += 1) {
     try {
       await fetch(`${BASE}/`);

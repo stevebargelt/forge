@@ -19,6 +19,8 @@ import type { FailureKind } from "../../src/v2/failure-kind.js";
 
 const TEST_PORT = 18822;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const SAME_ORIGIN = BASE;
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg822-actions-"));
@@ -102,6 +104,7 @@ function resetCalls(): void {
 }
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

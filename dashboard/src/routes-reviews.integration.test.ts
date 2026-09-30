@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { awaitDashboardReady } from "./test-support/await-dashboard-ready.js";
 
 const TEST_PORT = 18776;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -53,21 +54,7 @@ after(() => {
   server.close();
 });
 
-async function waitForServer(ms = 4000): Promise<void> {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    try {
-      const response = await fetch(`${BASE}/api/reviews`);
-      if (response.ok) return;
-      throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
-    } catch (err) {
-      if (Date.now() > deadline) throw err;
-      await new Promise((r) => setTimeout(r, 40));
-    }
-  }
-}
-
-await waitForServer();
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 test("integ GET /api/reviews returns the ledger with findings embedded", async () => {
   const res = await fetch(`${BASE}/api/reviews`);

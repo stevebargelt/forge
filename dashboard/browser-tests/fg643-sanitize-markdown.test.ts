@@ -24,6 +24,8 @@ const LOCAL_TSX = join(REPO_ROOT, "node_modules", ".bin", "tsx");
 const TSX = existsSync(LOCAL_TSX) ? LOCAL_TSX : "tsx";
 const PORT = 18899;
 const BASE = `http://127.0.0.1:${PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("../src/test-support/await-dashboard-ready.js");
 const testHome = mkdtempSync(join(tmpdir(), "fg643-browser-"));
 const forgeHome = join(testHome, ".forge");
 const projectDir = join(testHome, "checkout");
@@ -108,6 +110,7 @@ before(async () => {
   database.close();
 
   ({ server } = await import("../src/server.js"));
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
   for (let attempt = 0; attempt < 75; attempt += 1) {
     try {
       await fetch(`${BASE}/`);

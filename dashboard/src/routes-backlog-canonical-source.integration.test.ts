@@ -41,6 +41,8 @@ import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.j
 
 const TEST_PORT = 18772;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const testHome = mkdtempSync(join(tmpdir(), "forge-backlog-canon-src-"));
 const forgeHome = join(testHome, ".forge");
 const reposRoot = join(testHome, "checkouts");
@@ -177,6 +179,7 @@ const unimportedDir = makeCheckout(
 }
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 after(() => {
   server.closeAllConnections?.();
   server.close();

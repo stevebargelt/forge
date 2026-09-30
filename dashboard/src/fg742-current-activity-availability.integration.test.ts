@@ -56,6 +56,8 @@ import {
 
 const TEST_PORT = 18742;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 // The server-side budget this test proves current-activity stays under while a slow
 // sibling is polled concurrently — deliberately far below the 8s client deadline so the
@@ -195,6 +197,7 @@ const slowInspect: LivenessProbe = (_name): LivenessState => {
 
 const realFetch = globalThis.fetch;
 const { server, __setInFlightProbeForTest } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   __setInFlightProbeForTest(null);

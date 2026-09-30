@@ -12,6 +12,8 @@ import Database from "better-sqlite3";
 
 const PORT = 18955;
 const BASE = `http://127.0.0.1:${PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 const home = mkdtempSync(join(tmpdir(), "forge-campaigns-coverage-"));
 const forgeHome = join(home, ".forge");
 const checkouts = join(home, "checkouts");
@@ -94,6 +96,7 @@ test("runInReadOnlyDbScope forces a no-argument store read onto a non-writing ha
 });
 
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

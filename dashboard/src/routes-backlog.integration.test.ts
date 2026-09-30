@@ -33,6 +33,8 @@ import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.j
 
 const TEST_PORT = 18764;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
+process.env.FORGE_DASHBOARD_REMOTE = "0";
+const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
 
 // --- env must be set before server.ts is evaluated (module-level reads) ---
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-backlog-rt-"));
@@ -88,6 +90,7 @@ const PROJECT_KEY = "pk-backlog-fx";
 
 // --- start the real server (side-effect import; reads PORT from env) ---
 const { server } = await import("./server.js");
+await awaitDashboardReady(BASE, { timeoutMs: 4000 });
 
 after(() => {
   server.closeAllConnections?.();

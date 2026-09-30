@@ -13,6 +13,7 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { awaitDashboardReady } from "./test-support/await-dashboard-ready.js";
 
 const TEST_PORT = 19001;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -71,18 +72,7 @@ after(() => {
   server.close();
 });
 
-{
-  const deadline = Date.now() + 5000;
-  for (;;) {
-    try {
-      await fetch(`${BASE}/api/attention-inbox`);
-      break;
-    } catch {
-      if (Date.now() > deadline) throw new Error(`server on ${TEST_PORT} did not start`);
-      await new Promise((r) => setTimeout(r, 40));
-    }
-  }
-}
+await awaitDashboardReady(BASE, { timeoutMs: 5000 });
 
 type PostOptions = { headers?: Record<string, string>; body?: unknown; raw?: string };
 
