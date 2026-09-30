@@ -72,6 +72,21 @@ export function rolesIndexRows(body, scope = null) {
   }));
 }
 
+// FG-849: the whole row opens its role through a click handler on the <tr>, not a
+// stretched ::after overlay — WebKit does not make a positioned <tr> the overlay's
+// containing block, so every row's overlay spanned the list and the last row took every
+// click. Only a plain primary click on no real control navigates; the link keeps its own
+// behaviour, modifier/middle clicks and a text selection are left alone.
+export const ROLE_ROW_CONTROLS = "a, button, input, select, textarea, label, [role=button]";
+
+export function roleRowClickHref(event, href, selection = "") {
+  if (!href || event.defaultPrevented || event.button !== 0) return null;
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return null;
+  if (event.target?.closest?.(ROLE_ROW_CONTROLS)) return null;
+  if (selection) return null;
+  return href;
+}
+
 // FG-828: the list's sortable columns, in header order. The route table owns the
 // vocabulary so an unknown `?sort=` is dropped from the hash before it gets here.
 export const ROLE_SORT_COLUMNS = ROUTES.roles.paramValues.sort;

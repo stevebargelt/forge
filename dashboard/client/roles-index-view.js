@@ -17,7 +17,7 @@ import { RoleTile } from "./role-glyph-view.js";
 import { TILE_SIZES } from "./role-glyph.js";
 import {
   filterRolesByFamily, rolesCountLabel, rolesFamilyHash, rolesFamilyState, rolesFamilyTabs, rolesIndexNotices, rolesIndexRows,
-  rolesIndexSource, rolesSortHash, rolesSortLabel, rolesSortState, sortRoles,
+  rolesIndexSource, rolesSortHash, rolesSortLabel, rolesSortState, roleRowClickHref, sortRoles,
 } from "./roles-index-render.js";
 
 const html = htm.bind(h);
@@ -30,6 +30,11 @@ const COLUMNS = [
   ["lastTask", "Last task"],
   ["mount", "Mount"],
 ];
+
+function openRoleRow(event) {
+  const href = roleRowClickHref(event, event.currentTarget.dataset.rowHref, String(window.getSelection?.() ?? ""));
+  if (href) window.location.hash = href;
+}
 
 function SortHeader({ column, label, sort, family }) {
   const active = sort.column === column;
@@ -89,7 +94,7 @@ export function RolesIndexView({ params = null, scope = null }) {
           <tbody>
             ${rows.length === 0 ? html`<tr class="roles-empty"><td colspan=${COLUMNS.length} class="muted">No role in this family.</td></tr>` : null}
             ${rows.map((r) => html`
-              <tr key=${r.role} data-role=${r.role} data-family=${r.family}>
+              <tr key=${r.role} data-role=${r.role} data-family=${r.family} data-row-href=${r.href} onClick=${openRoleRow}>
                 <td>
                   <div class="roles-ident">
                     <span class="role-name"><${RoleTile} role=${r.role} size=${TILE_SIZES.list} /><a href=${r.href}>${r.role}</a></span>

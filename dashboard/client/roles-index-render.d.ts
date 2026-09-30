@@ -65,3 +65,9 @@ export function filterRolesByFamily(rows: RoleIndexRow[], family: string): RoleI
 export function rolesFamilyTabs(rows: RoleIndexRow[], current: string): Array<{ id: string; label: string; count: number; current: boolean }>;
 export function rolesCountLabel(n: number): string;
 export function sortRoles(rows: RoleIndexRow[], column: string, dir: string): RoleIndexRow[];
+export const ROLE_ROW_CONTROLS: string;
+export interface RoleRowClick {
+  button: number; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean; defaultPrevented: boolean;
+  target: { closest?: (selector: string) => unknown } | null;
+}
+export function roleRowClickHref(event: RoleRowClick, href: string | null | undefined, selection?: string): string | null;
