@@ -250,6 +250,8 @@ The local dashboard binds loopback, so "mobile" here mostly means a narrow windo
 3. **A danger-toned attention badge when something is severe** (lane E §1; `Sidebar.tsx:169-176`).
 4. **A five-slot bottom bar below one breakpoint**, safe-area aware, capped at 99+ (lane E §7; `MobileBottomNav.tsx:45-113`).
 5. **Grouped object tabs in the URL**, with alias parsing and an `overview` fallback (lane E §1; `agent-detail-navigation.ts:18-67`). Used for the role, run and task pages.
+
+   **Note, 2026-09-30 (FG-837): an object page with many tabs uses a grouped left sub-nav.** Ten tabs in one horizontal strip on the role page wrapped and read as a flat list. At 900px and wider the role page now puts them in a left sub-nav under group labels (Role, Runtime, Governance, Audit), each entry a link with a 15px line icon and `aria-current` on the open one — Paperclip's agent page layout. Under 900px the same tabs collapse back to the tablist, so a narrow screen loses no reach. The groups are presentation only: the hashes, aliases, trail and Escape-to-parent are the tab route's, unchanged. The pattern is reusable: a run or campaign page that grows past a handful of tabs should group them the same way rather than widen the strip.
 6. **Filtering history out of the actor page** instead of duplicating it (lane E §1, the Audit hub; `agent-detail-navigation.ts:66-79`). A role's Tasks tab links to `#runs?role=<role>`.
 7. **Everything URL-addressable**, so the chain can be walked and shared (lane E §1).
 8. **The screen contract as the test for every nav item** (lane E Patterns worth borrowing 1).

@@ -141,3 +141,113 @@ export const DEFAULT_USAGE_PERIOD = "30d";
 export function usageWindow(usage, since) {
   return (usage?.windows ?? []).find((w) => w.since === since) ?? null;
 }
+
+// FG-837: the grouped left sub-nav a role page shows at 900px and wider (under it the
+// FG-817 tablist stands in). Every tab is in exactly one group; the hashes are the tabs'.
+export const ROLE_TAB_GROUPS = Object.freeze([
+  { id: "role", label: "Role", tabs: ["overview", "instructions", "skills"] },
+  { id: "runtime", label: "Runtime", tabs: ["harness", "secrets", "tools"] },
+  { id: "governance", label: "Governance", tabs: ["capabilities", "receipts"] },
+  { id: "audit", label: "Audit", tabs: ["tasks", "usage"] },
+]);
+
+const SUBNAV_LABELS = { capabilities: "Capabilities / Trust" };
+
+// 15px line icons on a 24-unit box, drawn like the FG-829 glyphs.
+export const SUBNAV_ICONS = Object.freeze({
+  overview: ["M12 3l2 5 5 .5-4 3.5 1.5 5L12 14l-4.5 3 1.5-5-4-3.5L10 8z"],
+  instructions: ["M5 4h6a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H5z", "M19 4h-6a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h7z"],
+  skills: ["M4 6h16M4 12h10M4 18h7"],
+  harness: ["M4 7h16M4 12h16M4 17h16", "M10.5 7a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M16.5 12a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M9.5 17a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0"],
+  secrets: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"],
+  tools: ["M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.4 2.4-2.6-2.6z"],
+  capabilities: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", "M9 12l2 2 4-4"],
+  receipts: ["M20 12a8 8 0 1 1-2.3-5.7", "M20 4v5h-5"],
+  tasks: ["M20 12a8 8 0 1 1-16 0a8 8 0 1 1 16 0", "M12 8v4l3 2"],
+  usage: ["M4 19h16M6 16V9M10 16V5M14 16v-7M18 16v-4"],
+});
+
+export function roleSubnav(role, current) {
+  return ROLE_TAB_GROUPS.map((g) => ({
+    id: g.id,
+    label: g.label,
+    items: g.tabs.map((id) => ({
+      id,
+      label: SUBNAV_LABELS[id] ?? TAB_LABELS[id],
+      href: hashFor({ view: "roles", id: role, tab: id }),
+      current: id === current,
+      icon: SUBNAV_ICONS[id],
+    })),
+  }));
+}
+
+/** The header's meta line: runtime · model · family · mount, each a value the payload
+ *  carries (the default activity's resolution) or "—". */
+export function roleMeta(detail, family) {
+  const r = detail?.overview?.resolution ?? {};
+  const mode = detail?.overview?.mountMode?.mode;
+  return {
+    runtime: r.runtime || "—",
+    model: r.error ? "unresolved" : r.model || "—",
+    family,
+    mount: mode === "ro" ? "read-only" : mode === "rw" ? "read-write" : "—",
+  };
+}
+
+const constraintName = (k) => (k.file ? k.file.split("/").pop().replace(/\.md$/, "") : k.id);
+
+/** The Overview's four cards as label/value rows, each with the tab its link opens. */
+export function overviewCards(detail, family) {
+  const o = detail.overview;
+  const r = o.resolution ?? {};
+  const c = detail.capabilities ?? {};
+  const link = (tab, label) => ({ label, href: hashFor({ view: "roles", id: detail.role, tab }) });
+  return {
+    identity: {
+      link: link("instructions", "Instructions"),
+      rows: [
+        ["Family", family],
+        ["Default activity", r.activity || "—"],
+        ["Mount", o.mountMode?.mode === "ro" ? "read-only" : o.mountMode?.mode === "rw" ? "read-write" : "—"],
+        ["Seed generation", detail.generation?.id ?? "none published", "mono"],
+        ["Protocol sha", o.protocolSha ? shortSha(o.protocolSha) : "none", o.protocolSha ? "mono" : null],
+      ],
+    },
+    harness: {
+      link: link("harness", "Configure"),
+      rows: r.error
+        ? [["Resolution", `unresolved: ${r.error}`, "err"]]
+        : [
+          ["Runtime", r.runtime || "—"],
+          ["Profile", r.profile || "legacy (no model policy)"],
+          ["Model", r.model || "—", "mono"],
+          ["Auth", authLabel(r.auth)],
+          ["Resolved by", r.resolvedBy || "—", "mono"],
+        ],
+    },
+    capabilities: {
+      link: link("capabilities", "Trust"),
+      rows: [
+        ["Activities", (c.activities ?? []).map((a) => a.activity).join(", ") || "—"],
+        ["Routes", (c.routes ?? []).map((rt) => `${rt.route} (${relationLabel(rt.relations)})`).join(", ") || "none"],
+        ["Constraints", (c.constraints ?? []).map(constraintName).join(" · ") || "none"],
+      ],
+    },
+    skills: {
+      link: link("skills", "Manage"),
+      chips: skillChips(detail.role, o.skills),
+      hostOnly: (detail.skills?.hostOnly ?? []).map((k) => k.name),
+    },
+  };
+}
+
+/** The Overview's Recent tasks rows: id, the run's title, and "status · 3h ago". */
+export function recentTaskRows(overview, now = Date.now()) {
+  return (overview?.recentTasks ?? []).map((t) => ({
+    taskId: t.taskId,
+    href: hashFor({ view: "task", id: t.taskId }),
+    title: t.runTitle || t.runId,
+    meta: `${t.status} · ${formatRelativeTime(t.createdAt, now)}`,
+    when: formatTimestamp(t.createdAt),
+  }));
+}

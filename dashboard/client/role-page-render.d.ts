@@ -39,3 +39,15 @@ export function latestTaskCard(
 export const USAGE_PERIODS: readonly string[];
 export const DEFAULT_USAGE_PERIOD: string;
 export function usageWindow<W extends { since: string }>(usage: { windows?: W[] } | null | undefined, since: string): W | null;
+export const ROLE_TAB_GROUPS: ReadonlyArray<{ id: string; label: string; tabs: readonly string[] }>;
+export const SUBNAV_ICONS: Readonly<Record<string, readonly string[]>>;
+export function roleSubnav(role: string, current: string): Array<{ id: string; label: string; items: Array<{ id: string; label: string; href: string; current: boolean; icon: readonly string[] }> }>;
+export function roleMeta(detail: Record<string, any> | null | undefined, family: string): { runtime: string; model: string; family: string; mount: string };
+export interface OverviewCard { link: { label: string; href: string }; rows: Array<[string, string, (string | null)?]> }
+export function overviewCards(detail: Record<string, any>, family: string): {
+  identity: OverviewCard;
+  harness: OverviewCard;
+  capabilities: OverviewCard;
+  skills: { link: { label: string; href: string }; chips: Array<{ name: string; href: string }>; hostOnly: string[] };
+};
+export function recentTaskRows(overview: { recentTasks?: Array<Record<string, any>> } | null | undefined, now?: number): Array<{ taskId: string; href: string; title: string; meta: string; when: string }>;

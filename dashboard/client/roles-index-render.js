@@ -3,6 +3,7 @@
 // GET /api/roles; nothing is counted or resolved in the browser.
 
 import { ROUTES, hashFor } from "./view-routing.js";
+import { roleFamily } from "./role-glyph.js";
 
 function dash(value) {
   return typeof value === "string" && value !== "" ? value : "—";
@@ -16,6 +17,36 @@ export function profileLabel(role) {
   return [role.profile, role.model, role.effort ? `effort ${role.effort}` : null].filter(Boolean).join(" · ");
 }
 
+/** FG-837: the row's second line under the model — the profile and effort, never the
+ *  model again, or why there is no profile. */
+export function profileLine(role) {
+  if (role.resolutionError) return `unresolved: ${role.resolutionError}`;
+  if (!role.profile) return "legacy (no model policy)";
+  return [role.profile, role.effort ? `effort ${role.effort}` : null].filter(Boolean).join(" · ");
+}
+
+export const SUBTITLE_MAX = 120;
+
+/** FG-837: a row's one-line subtitle — the seed description's first sentence with its
+ *  Markdown stripped, cut at a word boundary with an ellipsis past `max` characters. */
+export function roleSubtitle(description, max = SUBTITLE_MAX) {
+  if (typeof description !== "string") return "";
+  const plain = description
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/`+([^`]*)`+/g, "$1")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])[*_]([^*_\s][^*_]*?)[*_](?=[^\w*]|$)/g, "$1$2")
+    .replace(/^\s*(#{1,6}|>|[-*+]|\d+\.)\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const end = plain.search(/[.!?](\s|$)/);
+  const sentence = end === -1 ? plain : plain.slice(0, end + 1);
+  if (sentence.length <= max) return sentence;
+  const cut = sentence.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:—–-]+$/, "")}…`;
+}
+
 export function mountLabel(mode) {
   return mode === "ro" ? "read-only" : mode === "rw" ? "read-write" : "—";
 }
@@ -26,9 +57,14 @@ export function rolesIndexRows(body) {
     role: r.role,
     href: hashFor({ view: "roles", id: r.role }),
     description: dash(r.description),
+    subtitle: roleSubtitle(r.description),
+    family: roleFamily(r.role),
+    model: r.resolutionError ? "unresolved" : dash(r.model),
+    profileLine: profileLine(r),
     activity: dash(r.defaultActivity),
     profile: profileLabel(r),
     mount: mountLabel(r.mountMode),
+    mountMode: r.mountMode === "ro" || r.mountMode === "rw" ? r.mountMode : null,
     profileResolved: Boolean(r.profile) && !r.resolutionError,
     mountSource: r.mountModeSource ?? "",
     lastTaskAt: r.lastTaskAt ?? null,
@@ -48,10 +84,52 @@ export function rolesSortState(params) {
   return { column, dir };
 }
 
-/** The hash a header click writes: ascending on a new column, flipped on the active one. */
-export function rolesSortHash(state, column) {
+/** The hash a header click writes: ascending on a new column, flipped on the active one.
+ *  FG-837: the family filter, when one is set, rides along. */
+export function rolesSortHash(state, column, family = ROLE_FAMILY_ALL) {
   const dir = state.column === column && state.dir === "asc" ? "desc" : "asc";
-  return hashFor({ view: "roles", params: { sort: column, dir } });
+  return hashFor({ view: "roles", params: { family: family === ROLE_FAMILY_ALL ? null : family, sort: column, dir } });
+}
+
+const SORT_NAMES = { role: "name", activity: "activity", profile: "profile", mount: "mount", lastTask: "last task" };
+
+/** The toolbar's "sorted by name ▲". */
+export function rolesSortLabel(state) {
+  return `sorted by ${SORT_NAMES[state.column] ?? state.column} ${state.dir === "desc" ? "▼" : "▲"}`;
+}
+
+// FG-837: the family filter tabs, in toolbar order — the FG-829 families by their plural.
+export const ROLE_FAMILY_ALL = "all";
+export const ROLE_FAMILY_TABS = Object.freeze([
+  ["build", "Builders"], ["red", "Reds"], ["research", "Research"], ["test", "Testers"],
+  ["review", "Reviewers"], ["plan", "Planners"], ["author", "Authors"],
+]);
+
+/** The family a `#roles` hash's params name, or "all" for anything it does not. */
+export function rolesFamilyState(params) {
+  return ROUTES.roles.paramValues.family.includes(params?.family) ? params.family : ROLE_FAMILY_ALL;
+}
+
+/** The hash a family tab writes: the family (none for All) with the current sort kept. */
+export function rolesFamilyHash(params, family) {
+  return hashFor({ view: "roles", params: { ...(params ?? {}), family: family === ROLE_FAMILY_ALL ? null : family } });
+}
+
+export function filterRolesByFamily(rows, family) {
+  return family === ROLE_FAMILY_ALL ? rows : rows.filter((r) => r.family === family);
+}
+
+/** All, then each family that has a role; a selected family stays even when empty so
+ *  a pasted link still shows what it selected. */
+export function rolesFamilyTabs(rows, current) {
+  const count = (id) => filterRolesByFamily(rows, id).length;
+  return [[ROLE_FAMILY_ALL, "All"], ...ROLE_FAMILY_TABS]
+    .filter(([id]) => id === ROLE_FAMILY_ALL || id === current || count(id) > 0)
+    .map(([id, label]) => ({ id, label, count: count(id), current: id === current }));
+}
+
+export function rolesCountLabel(n) {
+  return `${n} ${n === 1 ? "role" : "roles"}`;
 }
 
 // The value a row sorts on, or null when it has none. lastTask sorts on the ISO

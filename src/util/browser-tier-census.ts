@@ -338,6 +338,16 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // proposal. The refusal case continues through the complete authoring route with keyboard
   // only at 400px and verifies that neither browser storage area is used after Apply. Fixture port 18841.
   "fg834-raci-editor.test.ts": 5,
+  // FG-837 adds `fg837-roles-parity` (8 tests): the Roles list after Paperclip — each row's
+  // 36px tile, name over a one-line subtitle, mono model over profile, family · activity,
+  // relative time and mount pill, no row past two text lines at 1200px and 900px, and the whole row a link; the
+  // family tabs filtering client-side in `#roles?family=` composed with FG-828's sort, across a
+  // reload, with empty families hidden; keyboard reach of family tabs and sort headers; the role
+  // page's grouped left sub-nav, header, Overview strip, cards and Recent tasks at 1200px; the
+  // sub-nav by Tab/Enter with the configuration alias, breadcrumbs and Escape intact; the
+  // collapse to the FG-817 tablist under 900px; and computed AA contrast on every new text
+  // element. Fixture port 18842.
+  "fg837-roles-parity.test.ts": 8,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

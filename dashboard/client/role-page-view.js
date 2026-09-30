@@ -7,20 +7,24 @@
 // seed, not an agent, so it carries no status of its own.
 //
 // Breadcrumbs are Roles › <role> › <tab>; Escape returns to the Roles list.
+//
+// FG-837: laid out after Paperclip's agent page — a 48px tile, the name, one meta line
+// (runtime · model · family · mount) and the forge upgrade / forge model resolve hint;
+// the Overview is a latest-task strip, four label/value cards and Recent tasks.
 
 import { h } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import htm from "htm";
 import { parentHash, roleTrail } from "./breadcrumbs-render.js";
 import { hashFor } from "./view-routing.js";
-import { ObjectHead, ObjectTabs, useEscapeTo } from "./object-page-view.js";
+import { Breadcrumbs, ObjectTabs, useEscapeTo } from "./object-page-view.js";
 import { formatDuration, formatTimestamp } from "./format.js";
 import { mountLabel } from "./roles-index-render.js";
 import { RoleTile } from "./role-glyph-view.js";
-import { TILE_SIZES } from "./role-glyph.js";
+import { TILE_SIZES, roleFamily } from "./role-glyph.js";
 import {
-  DEFAULT_USAGE_PERIOD, HARNESS_COLUMNS, USAGE_PERIODS, authLabel, harnessRows, latestTaskCard, percent, relationLabel, roleHeader,
-  roleTabLabel, roleTabs, shortSha, skillChips, skillSourceLabel, tabCaption, tokens, usageWindow,
+  DEFAULT_USAGE_PERIOD, HARNESS_COLUMNS, USAGE_PERIODS, authLabel, harnessRows, latestTaskCard, overviewCards, percent, recentTaskRows,
+  relationLabel, roleMeta, roleSubnav, roleTabLabel, roleTabs, shortSha, skillSourceLabel, tabCaption, tokens, usageWindow,
 } from "./role-page-render.js";
 import { InstructionsPanel } from "./instructions-panel-view.js";
 
@@ -48,22 +52,91 @@ function useRoleDetail(role, project) {
   return state.key === key ? state : { key, detail: null, error: null };
 }
 
+// FG-837: at 900px and wider the tabs are a grouped left sub-nav (a plain nav of links,
+// aria-current on the open one); under it they collapse to the FG-817 tablist. One or
+// the other is rendered, never both, so there is one control per tab on screen.
+const WIDE = "(min-width: 900px)";
+
+function useWide() {
+  const [wide, setWide] = useState(() => typeof window.matchMedia === "function" && window.matchMedia(WIDE).matches);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined;
+    const mq = window.matchMedia(WIDE);
+    const on = () => setWide(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return wide;
+}
+
+function SubnavIcon({ paths }) {
+  return html`<svg class="role-subnav-icon" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths.map((d) => html`<path key=${d} d=${d} />`)}</svg>`;
+}
+
+function RoleSubnav({ role, current }) {
+  return html`
+    <nav class="role-subnav" aria-label="Role views">
+      ${roleSubnav(role, current).map((g) => html`
+        <div key=${g.id} class="role-subnav-group" data-group=${g.id}>
+          <div class="role-subnav-label" id=${`role-subnav-${g.id}`}>${g.label}</div>
+          <ul aria-labelledby=${`role-subnav-${g.id}`}>
+            ${g.items.map((t) => html`
+              <li key=${t.id}>
+                <a class=${"role-subnav-item" + (t.current ? " role-subnav-current" : "")} href=${t.href} data-tab=${t.id} aria-current=${t.current ? "page" : undefined}>
+                  <${SubnavIcon} paths=${t.icon} />${t.label}
+                </a>
+              </li>
+            `)}
+          </ul>
+        </div>
+      `)}
+    </nav>
+  `;
+}
+
+function RoleHead({ role, detail }) {
+  const family = roleFamily(role);
+  const meta = roleMeta(detail, family);
+  return html`
+    <div class="role-head">
+      <${RoleTile} role=${role} size=${TILE_SIZES.page} />
+      <div class="role-head-text">
+        <h1 class="page-title">${role}</h1>
+        ${detail ? html`<div class="role-meta" data-role-meta>${meta.runtime} · <span class="mono">${meta.model}</span> · ${meta.family} · ${meta.mount}</div>` : null}
+      </div>
+    </div>
+    <p class="role-hint">A seed changes only through <code class="mono">forge upgrade</code>. Read why it runs where it does: <code class="mono">forge model resolve ${role}</code></p>
+  `;
+}
+
 export function RolePage({ role, tab, project = null }) {
   const { detail, error } = useRoleDetail(role, project);
   const current = tab || "overview";
+  const wide = useWide();
   useEscapeTo(parentHash("role", null));
+  const body = html`
+    <h2 class="role-panel-title" id="role-panel-title">${roleTabLabel(current)}</h2>
+    ${error ? html`<div class="card" style="color: var(--err);" role="alert">${error}</div>` : null}
+    ${!detail && !error ? html`<div class="muted">loading ${role}…</div>` : null}
+    ${detail ? html`
+      ${detail.storeError ? html`<div class="card muted role-notice" role="status">Store unreadable: ${detail.storeError}</div>` : null}
+      <${RoleTab} tab=${current} detail=${detail} />
+      <p class="role-caption role-footer" data-caption=${current}>${tabCaption(detail, current)}</p>
+    ` : null}
+  `;
   return html`
-    <section class="object-page role-page" data-role=${role}>
-      <${ObjectHead} crumbs=${roleTrail(role, roleTabLabel(current))} title=${html`<span class="role-title"><${RoleTile} role=${role} size=${TILE_SIZES.header} />${role}</span>`} header=${roleHeader(role, detail)} />
-      <${ObjectTabs} id="role-views" label="Role views" tabs=${roleTabs(role, current)}>
-        ${error ? html`<div class="card" style="color: var(--err);" role="alert">${error}</div>` : null}
-        ${!detail && !error ? html`<div class="muted">loading ${role}…</div>` : null}
-        ${detail ? html`
-          ${detail.storeError ? html`<div class="card muted role-notice" role="status">Store unreadable: ${detail.storeError}</div>` : null}
-          <${RoleTab} tab=${current} detail=${detail} />
-          <p class="role-caption role-footer faint" data-caption=${current}>${tabCaption(detail, current)}</p>
-        ` : null}
-      <//>
+    <section class=${"object-page role-page" + (wide ? " role-page-wide" : "")} data-role=${role}>
+      <div class="page-head object-head role-crumbs"><${Breadcrumbs} crumbs=${roleTrail(role, roleTabLabel(current))} /></div>
+      <div class="role-layout">
+        ${wide ? html`<${RoleSubnav} role=${role} current=${current} />` : null}
+        <div class="role-main">
+          <${RoleHead} role=${role} detail=${detail} />
+          ${wide
+            ? html`<div class="object-tabpanel role-panel" id="role-views-panel" role="region" aria-labelledby="role-panel-title">${body}</div>`
+            : html`<${ObjectTabs} id="role-views" label="Role views" tabs=${roleTabs(role, current)}>${body}<//>`}
+        </div>
+      </div>
     </section>
   `;
 }
@@ -95,49 +168,65 @@ function TaskLinks({ taskId }) {
   return html`<a class="mono" href=${hashFor({ view: "task", id: taskId })}>${taskId}</a> (<a href=${hashFor({ view: "task", id: taskId, tab: "explain" })}>explain</a>)`;
 }
 
+function Card({ title, link, className = "", label = title, children }) {
+  return html`
+    <section class=${`role-card ${className}`} aria-label=${label}>
+      <div class="role-card-head"><h3 class="role-card-title">${title}</h3>${link ? html`<a class="role-card-link" href=${link.href}>${link.label} →</a>` : null}</div>
+      ${children}
+    </section>
+  `;
+}
+
+function Kv({ rows }) {
+  return html`
+    <dl class="role-kv">
+      ${rows.map(([label, value, tone]) => html`<div key=${label}><dt>${label}</dt><dd class=${tone === "mono" ? "mono" : tone === "err" ? "role-err" : ""}>${value}</dd></div>`)}
+    </dl>
+  `;
+}
+
 function OverviewTab({ detail }) {
   const o = detail.overview;
-  const r = o.resolution;
-  const profile = r.error ? html`<span style="color: var(--err);">unresolved: ${r.error}</span>`
-    : r.profile ? `${r.profile} · ${r.model ?? "—"}${r.effort ? ` · effort ${r.effort}` : ""}` : `legacy (no model policy)${r.model ? ` · ${r.model}` : ""}`;
   const latest = latestTaskCard(o);
-  const chips = skillChips(detail.role, o.skills);
+  const cards = overviewCards(detail, roleFamily(detail.role));
+  const recent = recentTaskRows(o);
   return html`
     <div class="role-overview">
-      <p class="role-description-full">${o.description || "(the seed has no description paragraph)"}</p>
-      <div class="role-cards">
-        <section class="role-card role-latest" aria-label="Latest task" data-latest-task=${latest?.taskId ?? ""}>
-          <div class="role-card-label">Latest task</div>
-          ${latest ? html`
-            <div class="role-latest-row">
-              <span class=${`badge ${latest.token.class}`} data-token=${latest.token.tone}>${latest.token.label}</span>
-              <a class="mono" href=${latest.href}>${latest.taskId}</a>
-              <span class="faint" title=${latest.title} data-relative>${latest.when}</span>
-            </div>
-            <div class="faint role-latest-run">in <a href=${latest.runHref}>${latest.runLabel}</a></div>
-          ` : html`<div class="muted">No task recorded for this role.</div>`}
-        </section>
-        <section class="role-card role-skill-chips" aria-label="Skills">
-          <div class="role-card-label">Skills</div>
-          ${chips.length === 0 ? html`<div class="muted">No skill is mounted into this role's container.</div>`
-            : html`<div class="role-chips">${chips.map((c) => html`<a key=${c.name} class="role-chip mono" href=${c.href} data-chip=${c.name}>${c.name}</a>`)}</div>`}
-        </section>
+      <section class="role-latest" aria-label="Latest task" data-latest-task=${latest?.taskId ?? ""}>
+        ${latest ? html`
+          <span class=${`badge ${latest.token.class}`} data-token=${latest.token.tone}>${latest.token.label}</span>
+          <a class="mono role-latest-id" href=${latest.href}>${latest.taskId}</a>
+          <a class="role-latest-title" href=${latest.runHref}>${latest.runLabel}</a>
+          <span class="role-latest-when" title=${latest.title} data-relative>${latest.when}</span>
+        ` : html`<span class="muted">No task recorded for this role.</span>`}
+      </section>
+      <div class="role-card-grid">
+        <${Card} title="Identity" link=${cards.identity.link} className="role-card-identity"><${Kv} rows=${cards.identity.rows} /><//>
+        <${Card} title="Harness / Runtime" link=${cards.harness.link} className="role-card-harness"><${Kv} rows=${cards.harness.rows} /><//>
+        <${Card} title="Capabilities" link=${cards.capabilities.link} className="role-card-capabilities"><${Kv} rows=${cards.capabilities.rows} /><//>
+        <${Card} title="Skills" link=${cards.skills.link} className="role-skill-chips">
+          ${cards.skills.chips.length === 0 && cards.skills.hostOnly.length === 0 ? html`<div class="muted">No skill is mounted into this role's container.</div>` : null}
+          <div class="role-chips">
+            ${cards.skills.chips.map((c) => html`<a key=${c.name} class="role-chip" href=${c.href} data-chip=${c.name}>${c.name}</a>`)}
+            ${cards.skills.hostOnly.length > 0 ? html`<span class="role-chip role-chip-host" data-host-only>host: ${cards.skills.hostOnly.join(" · ")}</span>` : null}
+          </div>
+        <//>
+        <${Card} title="Last 30 days" className="role-card-wide role-card-ops"><${Kv} rows=${[
+          ["Success rate", o.ops ? `${percent(o.ops.successRate)} of ${o.ops.terminal} finished` : "—"],
+          ["Median duration", o.ops && o.ops.medianMs !== null ? formatDuration(o.ops.medianMs) : "—"],
+          ["Tokens", o.usage ? `${tokens(o.usage.inputTokens)} in · ${tokens(o.usage.outputTokens)} out · ${o.usage.requests} requests` : "—"],
+        ]} /><//>
       </div>
-      <${Facts} rows=${[
-        ["Default activity", r.activity],
-        ["Resolved profile", profile],
-        ["Resolved by", r.resolvedBy ?? "—"],
-        ["Mount", html`${mountLabel(o.mountMode.mode)} <span class="faint">(${o.mountMode.source})</span>`],
-        ["Seed generation", detail.generation ? html`<span class="mono">${detail.generation.id}</span>` : "none published"],
-        ["Protocol sha", o.protocolSha ? html`<span class="mono" title=${o.protocolSha}>${shortSha(o.protocolSha)}</span>` : "none (not a covered role)"],
-        ["Success rate (30d)", o.ops ? `${percent(o.ops.successRate)} of ${o.ops.terminal} finished` : "—"],
-        ["Median duration (30d)", o.ops && o.ops.medianMs !== null ? formatDuration(o.ops.medianMs) : "—"],
-        ["Tokens (30d)", o.usage ? `${tokens(o.usage.inputTokens)} in · ${tokens(o.usage.outputTokens)} out · ${o.usage.requests} requests` : "—"],
-      ]} />
-      <h2 class="role-h2">Recent tasks</h2>
-      ${o.recentTasks.length === 0 ? html`<div class="muted">No task recorded for this role.</div>`
-        : html`<ul class="role-list">${o.recentTasks.map((t) => html`<li key=${t.taskId}><${TaskLinks} taskId=${t.taskId} /> <span class="faint">${t.status} · ${when(t.createdAt)}</span></li>`)}</ul>`}
-      <p class="muted">Routes naming this role are on <a href=${hashFor({ view: "roles", id: detail.role, tab: "capabilities" })}>Capabilities</a>.</p>
+      <div class="role-section-head"><h3 class="role-card-title">Recent tasks</h3><a class="role-card-link" href=${hashFor({ view: "roles", id: detail.role, tab: "tasks" })}>See all →</a></div>
+      ${recent.length === 0 ? html`<div class="muted">No task recorded for this role.</div>` : html`
+        <ul class="role-task-rows">
+          ${recent.map((t) => html`
+            <li key=${t.taskId} class="role-task-row" data-recent-task=${t.taskId}>
+              <span class="role-task-main"><a class="mono" href=${t.href}>${t.taskId}</a><span class="role-task-title">${t.title}</span></span>
+              <span class="role-task-meta" title=${t.when}>${t.meta}</span>
+            </li>
+          `)}
+        </ul>`}
     </div>
   `;
 }

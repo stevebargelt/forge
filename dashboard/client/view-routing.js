@@ -19,6 +19,8 @@
 // the Roles list and `#roles/<role>[/<tab>]` a role page, with `overview` the default tab.
 // `tabAliases` maps a retired tab name onto its successor (FG-827: `configuration` is now
 // `harness`), so a saved link lands on the renamed tab and is canonicalized to it.
+// FG-837: the Roles list's `family=` (an FG-829 family) filters it beside FG-828's
+// `sort=`/`dir=`; an unknown family is dropped like an unknown sort.
 // FG-830: `#notes/<checkout>` names a checkout by its URI-encoded directory, the one id
 // that is unique and stable across label changes.
 
@@ -44,7 +46,7 @@ export const ROUTES = Object.freeze({
   task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
-  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["sort", "dir"], paramValues: { sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
+  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["family", "sort", "dir"], paramValues: { family: ["build", "red", "research", "test", "review", "plan", "author"], sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
   routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", params: ["mode"], paramValues: { mode: ["edit"] }, aliases: ["governance"] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },

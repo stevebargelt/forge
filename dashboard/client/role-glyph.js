@@ -93,7 +93,8 @@ export const ROLE_GLYPHS = Object.freeze({
 
 export const UNKNOWN_FAMILY = "neutral";
 export const UNKNOWN_GLYPH = "layers";
-export const TILE_SIZES = Object.freeze({ row: 20, header: 36 });
+// FG-837: `list` is the Roles list row tile, `page` the role page header's.
+export const TILE_SIZES = Object.freeze({ row: 20, header: 36, list: 36, page: 48 });
 
 const own = (table, key) => (typeof key === "string" && Object.hasOwn(table, key) ? table[key] : undefined);
 

@@ -117,12 +117,13 @@ const NONE = { role: "none", activity: "none", profile: "none", mount: "none", l
 test("FG-828: clicking two headers sorts the list, flips on a second click, and sets aria-sort — without refetching", async () => {
   rolesReads = 0;
   const { page, errors } = await open("#roles");
+  // FG-837: headers follow the roles-mock column order (name, model, family · activity, last task, mount).
   assert.deepEqual(await headers(page), [
     ["role", "ascending", "button", "▲"],
-    ["activity", "none", "button", "↕"],
     ["profile", "none", "button", "↕"],
-    ["mount", "none", "button", "↕"],
+    ["activity", "none", "button", "↕"],
     ["lastTask", "none", "button", "↕"],
+    ["mount", "none", "button", "↕"],
   ], "every header is a button; the default is role ascending");
   await waitFor(() => order(page), BY_ROLE, "row order");
   assert.equal(await page.locator('.nav-column a[data-view="roles"]').getAttribute("href"), "#roles", "the nav link carries no sort");
@@ -171,7 +172,7 @@ test("FG-828: a reload or a pasted link restores the sort", async () => {
 
 test("FG-828: a header is reached by Tab and operated by Enter and Space (FG-692)", async () => {
   const { page, errors } = await open("#roles");
-  await page.locator('th[data-sort="profile"] button').focus();
+  await page.locator('th[data-sort="lastTask"] button').focus(); // FG-837: mount follows lastTask in the mock's order
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement?.closest("th")?.getAttribute("data-sort") ?? null), "mount", "Tab moves to the next header button");
   await page.keyboard.press("Enter");
@@ -256,9 +257,9 @@ test("FG-828: roles keeps only valid sort state, drops scope like Projects, and 
   const rolesReadsBeforeKeyboard = rolesReads;
 
   await page.setViewportSize({ width: 400, height: 800 });
-  await page.locator('th[data-sort="mount"] button').focus();
+  await page.locator('th[data-sort="activity"] button').focus(); // FG-837: lastTask follows activity in the mock's order
   await page.keyboard.press("Tab");
-  assert.equal(await page.evaluate(() => document.activeElement?.closest("th")?.getAttribute("data-sort") ?? null), "lastTask", "Tab reaches the final column");
+  assert.equal(await page.evaluate(() => document.activeElement?.closest("th")?.getAttribute("data-sort") ?? null), "lastTask", "Tab reaches the Last task column");
   await page.keyboard.press("Space");
   await waitFor(async () => hashOf(page), "#roles?sort=lastTask&dir=asc", "Space sorts Last task at phone width");
   assert.deepEqual(await ariaSorts(page), { ...NONE, lastTask: "ascending" });

@@ -168,7 +168,7 @@ test("FG-829: every Roles list row shows a 20px tile in its family colour — ev
     assert.equal(t.glyphStroke, RGB[family], `${t.role} glyph`);
     assert.equal(Number(t.fillOpacity), 0.13, `${t.role} background alpha`);
     assert.equal(t.fill === RGB.red, t.role!.startsWith("red-"), `${t.role}: reds are red and nothing else is`);
-    assert.deepEqual([t.width, t.height], [20, 20], `${t.role} size`);
+    assert.deepEqual([t.width, t.height], [36, 36], `${t.role} size (FG-837: the list row tile is 36px)`);
     assert.equal(t.beside, t.role, `${t.role}: the tile sits beside its visible name`);
   }
   const reds = tiles.filter((t) => t.family === "red").map((t) => t.role);
@@ -182,25 +182,26 @@ test("FG-829: every Roles list row shows a 20px tile in its family colour — ev
   await page.close();
 });
 
-test("FG-829: a role page header shows the 36px tile beside its title", async () => {
-  const { page, errors } = await open("#roles/engineer", ".role-page .page-title .role-tile");
+// FG-837: the header tile is 48px and sits beside the title block (name over the meta line).
+test("FG-829: a role page header shows the 48px tile beside its title", async () => {
+  const { page, errors } = await open("#roles/engineer", ".role-page .role-head .role-tile");
   await page.locator(".role-overview").waitFor();
-  const [tile] = await tileFacts(page, ".role-page .page-title .role-tile");
-  assert.deepEqual([tile!.role, tile!.family, tile!.glyph, tile!.width, tile!.height], ["engineer", "build", "wrench", 36, 36]);
+  const [tile] = await tileFacts(page, ".role-page .role-head .role-tile");
+  assert.deepEqual([tile!.role, tile!.family, tile!.glyph, tile!.width, tile!.height], ["engineer", "build", "wrench", 48, 48]);
   assert.deepEqual([tile!.fill, tile!.glyphStroke], [RGB.build, RGB.build]);
   assert.equal(tile!.ariaHidden, "true");
   assert.equal(await page.locator(".role-page .page-title").textContent(), "engineer", "the title text is unchanged");
-  assert.equal(await page.locator(".role-page .page-title .role-tile").count(), 1);
+  assert.equal(await page.locator(".role-page .role-head .role-tile").count(), 1);
   const titleBox = await page.locator(".role-page .page-title").boundingBox();
-  const tileBox = await page.locator(".role-page .page-title .role-tile").boundingBox();
-  assert.ok(tileBox!.y >= titleBox!.y && tileBox!.y + tileBox!.height <= titleBox!.y + titleBox!.height + 1, "the tile sits in the title line");
-  await page.locator(".role-page .page-head").screenshot({ path: join(SHOTS, "fg829-engineer-header.png") });
+  const tileBox = await page.locator(".role-page .role-head .role-tile").boundingBox();
+  assert.ok(titleBox!.y >= tileBox!.y && titleBox!.y + titleBox!.height <= tileBox!.y + tileBox!.height + 1 && tileBox!.x + tileBox!.width <= titleBox!.x, "the tile sits beside the title line");
+  await page.locator(".role-page .role-head").screenshot({ path: join(SHOTS, "fg829-engineer-header.png") });
   await page.screenshot({ path: join(SHOTS, "fg829-engineer-page.png"), fullPage: true });
 
   await page.goto(`${baseUrl}/#roles/red-security`);
-  await page.locator('.role-page[data-role="red-security"] .page-title .role-tile').waitFor();
-  const [red] = await tileFacts(page, ".role-page .page-title .role-tile");
-  assert.deepEqual([red!.family, red!.glyph, red!.fill, red!.width], ["red", "shield", RGB.red, 36]);
+  await page.locator('.role-page[data-role="red-security"] .role-head .role-tile').waitFor();
+  const [red] = await tileFacts(page, ".role-page .role-head .role-tile");
+  assert.deepEqual([red!.family, red!.glyph, red!.fill, red!.width], ["red", "shield", RGB.red, 48]);
   assert.deepEqual(errors, []);
   await page.close();
 });
