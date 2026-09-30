@@ -37,10 +37,13 @@ import { TaskActions } from "./task-actions-view.js";
 import { RoleTile } from "./role-glyph-view.js";
 import { PinRefreshButton, usePinnedOrder } from "./order-pin-view.js";
 import { formatDuration, formatRelativeTime, shortSha } from "./format.js";
-import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
+import { badgeClass, statusClass, statusLabel, toneAccentClass } from "./status-tokens.js";
+import { EMPTY_WINDOW_LOAD, OPS_SINCES, RUNTIME_WINDOWS, createWindowedReader, opsSinceHash, opsSinceState, runtimeWindowHash, runtimeWindowState, windowLoadView } from "./ops-window-state.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
+// Home's Operations summary is not hash state; it keeps the 30d it has always read.
+const HOME_OPS_SINCE = "30d";
 const USAGE_POLL_MS = 30000;
 // Sentinel for the runtime chart's default "All agents" series. Not a role, so
 // it can never collide with a real agent_role coming back from the API.
@@ -96,22 +99,25 @@ function App() {
   const [planUsageRefreshError, setPlanUsageRefreshError] = useState(null);
   const [usageGroupBy, setUsageGroupBy] = useState("project");
   const [usageSince, setUsageSince] = useState("30d");
-  const [ops, setOps] = useState(null);
-  const [opsSince, setOpsSince] = useState("30d");
-  const [runtime, setRuntime] = useState(null);
-  const [runtimeError, setRuntimeError] = useState(null);
-  const [runtimeWindow, setRuntimeWindow] = useState("7d");
+  // FG-836: on #ops the summary window is hash state (`#ops?since=<w>`), read through its
+  // own windowed reader so a change keeps the previous summary, labelled, until it lands.
+  const opsSince = view === "ops" ? opsSinceState(route.params) : HOME_OPS_SINCE;
+  const [opsLoad, setOpsLoad] = useState(EMPTY_WINDOW_LOAD);
+  const opsReader = useMemo(() => createWindowedReader({ label: "ops summary", onUpdate: setOpsLoad }), []);
+  // FG-836: the runtime window is hash state (`#ops?window=<w>`), so a reload restores it.
+  const runtimeWindow = runtimeWindowState(view === "ops" ? route.params : null);
   const [runtimeRole, setRuntimeRole] = useState(RUNTIME_ALL_ROLES);
   // FG-683: which metric the runtime panel charts. Duration is the default and
   // the only thing that reads /api/agent-runtime.
   const [runtimeMetric, setRuntimeMetric] = useState(RUNTIME_METRIC_DURATION);
-  const [completedRuns, setCompletedRuns] = useState(null);
-  const [completedRunsError, setCompletedRunsError] = useState(null);
-  // Sequence token for the runtime read. The server cost varies sharply by
-  // window, so a slower earlier request can resolve after a faster later one;
-  // only the newest request may write the series it belongs to.
-  const runtimeSeq = useRef(0);
-  const completedRunsSeq = useRef(0);
+  // FG-836: one reader per metric. A newer read aborts the older one (the server cost
+  // varies by window, so a slower earlier request could otherwise land last), a read
+  // past the client budget is aborted and reported, and each load remembers the window
+  // its data came from so the panel can never label a stale series as the new window.
+  const [runtimeLoad, setRuntimeLoad] = useState(EMPTY_WINDOW_LOAD);
+  const [completedRunsLoad, setCompletedRunsLoad] = useState(EMPTY_WINDOW_LOAD);
+  const runtimeReader = useMemo(() => createWindowedReader({ label: "agent runtime", onUpdate: setRuntimeLoad }), []);
+  const completedRunsReader = useMemo(() => createWindowedReader({ label: "completed runs", onUpdate: setCompletedRunsLoad }), []);
   const [governance, setGovernance] = useState(null);
   const [controlPlane, setControlPlane] = useState(null);
   // Scope token for the control-plane read — see pollControlPlane. A response
@@ -302,13 +308,9 @@ function App() {
     return () => clearInterval(id);
   }, [pollUsage, view]);
 
-  const pollOps = useCallback(async () => {
-    try {
-      const res = await fetch(appendScope(`/api/ops?since=${opsSince}`, projectFilter, checkoutFilter));
-      if (res.ok) setOps(await res.json());
-      setNow(Date.now());
-    } catch (e) { setError(String(e)); }
-  }, [opsSince, projectFilter, checkoutFilter]);
+  const pollOps = useCallback(() => {
+    opsReader.read(appendScope(`/api/ops?since=${opsSince}`, projectFilter, checkoutFilter), opsSince);
+  }, [opsReader, opsSince, projectFilter, checkoutFilter]);
 
   useEffect(() => {
     if (view !== "home" && view !== "ops") return;
@@ -317,46 +319,16 @@ function App() {
     return () => clearInterval(id);
   }, [pollOps, view]);
 
-  const pollRuntime = useCallback(async () => {
-    const seq = (runtimeSeq.current += 1);
-    try {
-      const res = await fetch(appendScope(`/api/agent-runtime?window=${runtimeWindow}`, projectFilter, checkoutFilter));
-      if (seq !== runtimeSeq.current) return;
-      if (!res.ok) {
-        setRuntimeError(`agent runtime unavailable — HTTP ${res.status}`);
-      } else {
-        setRuntime(await res.json());
-        setRuntimeError(null);
-      }
-      setNow(Date.now());
-    } catch (e) {
-      if (seq !== runtimeSeq.current) return;
-      setRuntimeError(String(e));
-      setError(String(e));
-    }
-  }, [runtimeWindow, projectFilter, checkoutFilter]);
+  const pollRuntime = useCallback(() => {
+    runtimeReader.read(appendScope(`/api/agent-runtime?window=${runtimeWindow}`, projectFilter, checkoutFilter), runtimeWindow);
+  }, [runtimeReader, runtimeWindow, projectFilter, checkoutFilter]);
 
-  // FG-683: the throughput read, on its own endpoint and its own sequence token.
-  // Only the selected metric is polled — an operator reading counts does not pay
-  // for the duration query, which is by far the more expensive of the two.
-  const pollCompletedRuns = useCallback(async () => {
-    const seq = (completedRunsSeq.current += 1);
-    try {
-      const res = await fetch(appendScope(`/api/completed-runs?window=${runtimeWindow}`, projectFilter, checkoutFilter));
-      if (seq !== completedRunsSeq.current) return;
-      if (!res.ok) {
-        setCompletedRunsError(`completed runs unavailable — HTTP ${res.status}`);
-      } else {
-        setCompletedRuns(await res.json());
-        setCompletedRunsError(null);
-      }
-      setNow(Date.now());
-    } catch (e) {
-      if (seq !== completedRunsSeq.current) return;
-      setCompletedRunsError(String(e));
-      setError(String(e));
-    }
-  }, [runtimeWindow, projectFilter, checkoutFilter]);
+  // FG-683: the throughput read, on its own endpoint and its own reader. Only the
+  // selected metric is polled — an operator reading counts does not pay for the
+  // duration query, which is by far the more expensive of the two.
+  const pollCompletedRuns = useCallback(() => {
+    completedRunsReader.read(appendScope(`/api/completed-runs?window=${runtimeWindow}`, projectFilter, checkoutFilter), runtimeWindow);
+  }, [completedRunsReader, runtimeWindow, projectFilter, checkoutFilter]);
 
   useEffect(() => {
     if (view !== "ops") return;
@@ -366,30 +338,27 @@ function App() {
     return () => clearInterval(id);
   }, [pollRuntime, pollCompletedRuns, runtimeMetric, view]);
 
-  // Drop the stale series so the chart shows its loading state rather than a
-  // grid that silently belongs to the previous scope/window. The seq bumps
-  // retire whatever is still in flight for the view being left — a late
-  // response fails its own guard and never writes. Both metrics are dropped:
-  // the one not on screen is stale too, and switching metric afterwards would
-  // otherwise show the previous view's counts. Errors clear alongside the data
-  // so a previous view's failure is not attributed to the new one.
+  // A scope change drops both metrics' series, so the chart shows its loading state
+  // rather than a grid that silently belongs to the previous scope. The reset aborts
+  // whatever is still in flight for the scope being left — a late response never
+  // writes. Errors clear alongside the data so a previous scope's failure is not
+  // attributed to the new one. A window change does NOT drop the series (FG-836): the
+  // previous window stays on screen, labelled as what it is, until the new read lands.
   const invalidateRuntimePanels = () => {
-    runtimeSeq.current += 1;
-    completedRunsSeq.current += 1;
-    setRuntime(null);
-    setRuntimeError(null);
-    setCompletedRuns(null);
-    setCompletedRunsError(null);
+    runtimeReader.reset();
+    completedRunsReader.reset();
   };
 
   const changeRuntimeWindow = (next) => {
-    invalidateRuntimePanels();
-    setRuntimeWindow(next);
+    window.location.hash = runtimeWindowHash(scopeRef.current, next, opsSince);
+  };
+
+  const changeOpsSince = (next) => {
+    window.location.hash = opsSinceHash(scopeRef.current, next, runtimeWindow);
   };
 
   // FG-699: scope changes must invalidate the runtime panels too. Invalidate
-  // BEFORE changing the filter, mirroring changeRuntimeWindow (which sets the
-  // window last): this retires the leaving scope's in-flight read and shows the
+  // BEFORE changing the filter: this retires the leaving scope's in-flight read and shows the
   // loading state immediately, instead of rendering the previous scope's
   // numbers (or error) under the new scope's label for one round trip.
   const scopeRef = useRef(scope);
@@ -736,8 +705,8 @@ function App() {
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
             onTaskClick=${openTask}
-            ops=${ops}
-            opsSince=${opsSince}
+            ops=${opsLoad.data}
+            opsSince=${opsLoad.window ?? opsSince}
           />`
         : view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} onReload=${poll} />`
@@ -789,19 +758,17 @@ function App() {
           />`
         : view === "ops"
         ? html`<${OpsView}
-            data=${ops}
+            opsLoad=${opsLoad}
             since=${opsSince}
-            onSinceChange=${setOpsSince}
-            runtime=${runtime}
-            runtimeError=${runtimeError}
+            onSinceChange=${changeOpsSince}
+            runtimeLoad=${runtimeLoad}
             runtimeWindow=${runtimeWindow}
             onRuntimeWindowChange=${changeRuntimeWindow}
             runtimeRole=${runtimeRole}
             onRuntimeRoleChange=${setRuntimeRole}
             runtimeMetric=${runtimeMetric}
             onRuntimeMetricChange=${setRuntimeMetric}
-            completedRuns=${completedRuns}
-            completedRunsError=${completedRunsError}
+            completedRunsLoad=${completedRunsLoad}
           />`
         : view === "usage"
         ? html`<${UsageView}
@@ -922,20 +889,21 @@ function HomeView({ hrefFor, planUsage, planUsageLoading, planUsageRefreshing, p
           </div>
           <span class="muted mono">${opsSince}</span>
         </div>
-        <${OpsSummary} data=${ops} />
+        <${OpsSummary} data=${ops} window=${opsSince} />
       </section>
     </section>
   `;
 }
 
-function OpsSummary({ data }) {
+// `window` is the window the data came from, so each count names its own bounds.
+function OpsSummary({ data, window }) {
   if (!data) return html`<div class="muted">loading metrics…</div>`;
   const pct = (data.runs.successRate * 100).toFixed(0);
   return html`
     <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
-      <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate (of ${data.runs.terminal} terminal)</div></div>
-      <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures${data.runs.active ? ` · ${data.runs.active} active` : ""})</div></div>
-      <div class="card stat"><div class="stat-num">${data.taskCount}</div><div class="muted">tasks</div></div>
+      <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate (of ${data.runs.terminal} terminal in ${window})</div></div>
+      <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs in ${window} (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures${data.runs.active ? ` · ${data.runs.active} active` : ""})</div></div>
+      <div class="card stat"><div class="stat-num">${data.taskCount}</div><div class="muted">tasks in ${window}</div></div>
     </div>
 
     <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
@@ -950,41 +918,79 @@ function OpsSummary({ data }) {
 // RUN-3: operations summary — success rate, failure-kind mix, median durations,
 // operational counts. Reads /api/ops.
 function OpsView({
-  data, since, onSinceChange, runtime, runtimeError, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange,
-  runtimeMetric, onRuntimeMetricChange, completedRuns, completedRunsError,
+  opsLoad, since, onSinceChange, runtimeLoad, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange,
+  runtimeMetric, onRuntimeMetricChange, completedRunsLoad,
 }) {
   const trends = html`<${AgentRuntimeTrends}
-    data=${runtime}
-    error=${runtimeError}
-    window=${runtimeWindow}
+    runtimeLoad=${runtimeLoad}
+    requestedWindow=${runtimeWindow}
     onWindowChange=${onRuntimeWindowChange}
     role=${runtimeRole}
     onRoleChange=${onRuntimeRoleChange}
     metric=${runtimeMetric}
     onMetricChange=${onRuntimeMetricChange}
-    completedRuns=${completedRuns}
-    completedRunsError=${completedRunsError}
+    completedRunsLoad=${completedRunsLoad}
   />`;
-  if (!data) return html`<section class="ops-view"><div class="muted">loading metrics…</div>${trends}</section>`;
-  const maxKind = Math.max(1, ...data.failureKinds.map((k) => k.count));
-  return html`
-    <section class="ops-view">
-      <div class="row" style="gap: 8px; margin-bottom: 16px;">
-        <span class="muted">window:</span>
-        ${["7d", "30d", "all"].map((w) => html`
+  // FG-836: the same honesty as the runtime panel — every label reads the window the
+  // summary on screen came from, and a read for another window dims it under a
+  // "loading <w>…" line rather than silently swapping (or not swapping) the numbers.
+  const data = opsLoad.data;
+  const loadView = windowLoadView(opsLoad, since);
+  const shown = loadView.showing;
+  const error = opsLoad.error;
+  const controls = html`
+    <div class="row ops-since-controls" style="gap: 8px; margin-bottom: 16px; align-items: center; flex-wrap: wrap;">
+      <span class="muted" id="ops-since-label">window:</span>
+      <div class="row ops-since-btns" style="gap: 8px;" role="group" aria-labelledby="ops-since-label" aria-busy=${loadView.loading ? "true" : "false"}>
+        ${OPS_SINCES.map((w) => html`
           <button
             key=${w}
             type="button"
-            class=${"usage-dim-btn " + (since === w ? "usage-dim-btn-active" : "")}
-            aria-pressed=${since === w}
+            class=${"usage-dim-btn " + (loadView.pressed === w ? "usage-dim-btn-active" : "") + (loadView.loadingWindow === w ? " ops-since-pending" : "")}
+            aria-pressed=${loadView.pressed === w}
+            disabled=${loadView.loading}
             onClick=${() => onSinceChange(w)}
           >${w}</button>
         `)}
       </div>
+      ${shown ? html`<span class="muted ops-since-showing">showing ${shown}</span>` : null}
+    </div>
+  `;
+  if (!data) {
+    return html`<section class="ops-view">
+      ${controls}
+      ${error
+        ? html`<div class=${"card ops-error " + toneAccentClass("err")} role="alert">${error.reason}. Retrying every 30s.</div>`
+        : html`<div class=${"card muted ops-loading " + toneAccentClass("info")} role="status">loading ops summary for ${loadView.loadingWindow ?? since}…</div>`}
+      ${trends}
+    </section>`;
+  }
+  const staleNotice = error ? html`
+    <div class=${"card ops-stale " + toneAccentClass(error.window === shown ? "warn" : "err")} role="alert">
+      ${error.window === shown
+        ? `${error.reason}. Showing the last successful read — these numbers are stale. Retrying every 30s.`
+        : `${error.reason}. Still showing ${shown} — these numbers are for ${shown}, not ${error.window}. Retrying every 30s.`}
+    </div>
+  ` : null;
+  const loadingLine = loadView.loading ? html`
+    <div class=${"card muted ops-loading " + toneAccentClass("info")} role="status">
+      loading ${loadView.loadingWindow}… showing ${shown} until it answers
+    </div>
+  ` : null;
+  const bodyClass = "ops-summary-body" + (loadingLine ? " ops-summary-body-loading" : "");
+  const busy = loadingLine ? "true" : "false";
+  const maxKind = Math.max(1, ...data.failureKinds.map((k) => k.count));
+  return html`
+    <section class="ops-view">
+      ${controls}
+      ${staleNotice}
+      ${loadingLine}
 
-      <${OpsSummary} data=${data} />
+      <div class=${bodyClass} aria-busy=${busy}><${OpsSummary} data=${data} window=${shown} /></div>
 
       ${trends}
+
+      <div class=${bodyClass} aria-busy=${busy}>
 
       ${data.failureKinds.length > 0 ? html`
         <h2>Failure kinds</h2>
@@ -1013,6 +1019,7 @@ function OpsView({
           `)}
         </div>
       ` : null}
+      </div>
     </section>
   `;
 }
@@ -1036,7 +1043,6 @@ function opsFmtMs(ms) {
 // One series at a time — "All agents" by default, or a single observed role.
 // Rendering every role at once produces an unreadable multi-line chart, so the
 // role breakdown table below carries the cross-role comparison instead.
-const RUNTIME_WINDOWS = ["1d", "7d", "30d", "90d", "all"];
 const RUNTIME_RESOLUTION_WORD = { hour: "hour", day: "day", week: "week" };
 
 // FG-648 (reopened): the y-axis steps, in the units an operator reads durations
@@ -1220,10 +1226,12 @@ const RUNTIME_METRICS = [
   { metric: RUNTIME_METRIC_COMPLETED_RUNS, label: "Completed runs", heading: "Completed runs over time" },
 ];
 
-function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange, metric, onMetricChange, completedRuns, completedRunsError }) {
+function AgentRuntimeTrends({ runtimeLoad, completedRunsLoad, requestedWindow, onWindowChange, role, onRoleChange, metric, onMetricChange }) {
   const [tzMode, setTzMode] = useState("local");
   const zone = runtimeZoneFor(tzMode);
   const showRuns = metric === RUNTIME_METRIC_COMPLETED_RUNS;
+  const data = runtimeLoad.data;
+  const completedRuns = completedRunsLoad.data;
   const roles = data ? data.roleSummary.map((r) => r.role) : [];
   const roleObserved = role === RUNTIME_ALL_ROLES || roles.includes(role);
   // The fallback to "All agents" is written back, not just displayed. Left in
@@ -1233,6 +1241,16 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
   useEffect(() => {
     if (data && !roleObserved) onRoleChange(RUNTIME_ALL_ROLES);
   }, [data, roleObserved, onRoleChange]);
+
+  // FG-836: the selected metric's own load. Every label below reads the window its
+  // data came from (`shownWindow`), never the one asked for, so a view still waiting
+  // on — or failed at — a new window cannot claim to be it.
+  const load = showRuns ? completedRunsLoad : runtimeLoad;
+  const loadView = windowLoadView(load, requestedWindow);
+  const shownWindow = loadView.showing;
+  const shownData = load.data;
+  const shownError = load.error;
+  const noun = showRuns ? "completed runs" : "agent runtime";
 
   const controls = html`
     <div class="runtime-controls">
@@ -1249,17 +1267,19 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
         `)}
       </div>
       <span class="muted" id="runtime-window-label">runtime window:</span>
-      <div class="runtime-window-btns" role="group" aria-labelledby="runtime-window-label">
+      <div class="runtime-window-btns" role="group" aria-labelledby="runtime-window-label" aria-busy=${loadView.loading ? "true" : "false"}>
         ${RUNTIME_WINDOWS.map((w) => html`
           <button
             key=${w}
             type="button"
-            class=${"usage-dim-btn " + (window === w ? "usage-dim-btn-active" : "")}
-            aria-pressed=${window === w}
+            class=${"usage-dim-btn " + (loadView.pressed === w ? "usage-dim-btn-active" : "") + (loadView.loadingWindow === w ? " runtime-window-pending" : "")}
+            aria-pressed=${loadView.pressed === w}
+            disabled=${loadView.loading}
             onClick=${() => onWindowChange(w)}
           >${w}</button>
         `)}
       </div>
+      ${shownWindow ? html`<span class="muted runtime-showing">showing ${shownWindow}</span>` : null}
       <span class="muted" id="runtime-tz-label">times:</span>
       <div class="runtime-tz-btns" role="group" aria-labelledby="runtime-tz-label">
         ${RUNTIME_TZ_MODES.map(({ mode, label }) => html`
@@ -1279,15 +1299,20 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
   // on screen, so the error card below (which only renders when there is nothing
   // to show) is unreachable and the operator watches frozen numbers believing they
   // are current. The series is kept — stale numbers beat no numbers — and said to
-  // be stale, beside the chart still showing them.
-  // The selected metric's own payload and its own read error — each metric is a
-  // separate read, so neither can be reported under the other's series.
-  const shownData = showRuns ? completedRuns : data;
-  const shownError = showRuns ? completedRunsError : error;
-
+  // be stale, beside the chart still showing them. FG-836: when the failed read was
+  // for a different window, the notice names both, so the kept series is never
+  // mistaken for the window that failed.
   const staleNotice = shownData && shownError ? html`
-    <div class="card runtime-stale" role="alert">
-      ${shownError}. Showing the last successful read — these numbers are stale. Retrying every 30s.
+    <div class=${"card runtime-stale " + toneAccentClass(shownError.window === shownWindow ? "warn" : "err")} role="alert">
+      ${shownError.window === shownWindow
+        ? `${shownError.reason}. Showing the last successful read — these numbers are stale. Retrying every 30s.`
+        : `${shownError.reason}. Still showing ${shownWindow} — these numbers are for ${shownWindow}, not ${shownError.window}. Retrying every 30s.`}
+    </div>
+  ` : null;
+
+  const loadingLine = shownData && loadView.loading ? html`
+    <div class=${"card muted runtime-loading " + toneAccentClass("info")} role="status">
+      loading ${loadView.loadingWindow}… showing ${shownWindow} until it answers
     </div>
   ` : null;
 
@@ -1296,14 +1321,15 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
       <h2 id="runtime-heading">${RUNTIME_METRICS.find((m) => m.metric === metric)?.heading ?? RUNTIME_METRICS[0].heading}</h2>
       ${controls}
       ${staleNotice}
-      ${body}
+      ${loadingLine}
+      <div class=${"runtime-body" + (loadingLine ? " runtime-body-loading" : "")} aria-busy=${loadingLine ? "true" : "false"}>${body}</div>
     </section>
   `;
 
   if (!shownData) {
     return frame(shownError
-      ? html`<div class="card runtime-error" role="alert">${shownError}. Retrying every 30s.</div>`
-      : html`<div class="card muted runtime-loading" role="status">${showRuns ? "loading completed runs…" : "loading agent runtime…"}</div>`);
+      ? html`<div class=${"card runtime-error " + toneAccentClass("err")} role="alert">${shownError.reason}. Retrying every 30s.</div>`
+      : html`<div class=${"card muted runtime-loading " + toneAccentClass("info")} role="status">loading ${noun} for ${loadView.loadingWindow ?? requestedWindow}…</div>`);
   }
 
   if (showRuns) {
@@ -1311,7 +1337,7 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
     return frame(html`
       <div class="runs-total">
         <span class="runs-total-num">${total}</span>
-        <span class="muted runs-total-note">completed ${total === 1 ? "run" : "runs"} in ${window}</span>
+        <span class="muted runs-total-note">completed ${total === 1 ? "run" : "runs"} in ${shownWindow}</span>
       </div>
       ${completedRuns.buckets.length === 0
         ? html`<div class="card runtime-empty runs-empty">
@@ -1321,7 +1347,7 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
             buckets=${completedRuns.buckets}
             total=${total}
             resolution=${completedRuns.resolution}
-            window=${window}
+            window=${shownWindow}
             bucketMs=${completedRuns.bucketMs}
             zone=${zone}
             mode=${tzMode}
@@ -1348,7 +1374,7 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
         <option value=${RUNTIME_ALL_ROLES}>All agents</option>
         ${roles.map((r) => html`<option key=${r} value=${r}>${r}</option>`)}
       </select>
-      <span class="muted runtime-sample-note">${samples} ${samples === 1 ? "run" : "runs"} in ${window}</span>
+      <span class="muted runtime-sample-note">${samples} ${samples === 1 ? "run" : "runs"} in ${shownWindow}</span>
     </div>
   `;
 
@@ -1367,12 +1393,12 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
       buckets=${buckets}
       label=${seriesLabel}
       resolution=${data.resolution}
-      window=${window}
+      window=${shownWindow}
       bucketMs=${data.bucketMs}
       zone=${zone}
       mode=${tzMode}
     />
-    <${RuntimeRoleTable} summary=${data.roleSummary} activeRole=${activeRole} onRoleChange=${onRoleChange} window=${window} />
+    <${RuntimeRoleTable} summary=${data.roleSummary} activeRole=${activeRole} onRoleChange=${onRoleChange} window=${shownWindow} />
   `);
 }
 

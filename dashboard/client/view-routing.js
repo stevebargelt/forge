@@ -11,7 +11,8 @@
 // `#task/<taskId>`) are addressed by a global id and carry no scope. A route may name
 // extra parameters it owns (`params`: the run index's `status=`); any other key is dropped.
 // FG-832: the backlog's `type=`/`status=` omit their defaults (all, active), so
-// `#backlog?status=active` canonicalizes to `#backlog`.
+// `#backlog?status=active` canonicalizes to `#backlog`. FG-836: `#ops?window=` likewise
+// omits the runtime panel's default window (7d), and `#ops?since=` the summary's (7d).
 //
 // FG-821: object tabs follow the Paperclip pattern — an unknown tab falls back to the
 // route's default (its first tab), which the canonical hash omits. FG-817: `#roles` is
@@ -48,7 +49,7 @@ export const ROUTES = Object.freeze({
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },
   usage: { group: "health", label: "Usage", path: "#usage", scope: "optional", object: "none", aliases: [] },
-  ops: { group: "health", label: "Ops", path: "#ops", scope: "optional", object: "none", aliases: [] },
+  ops: { group: "health", label: "Ops", path: "#ops", scope: "optional", object: "none", params: ["since", "window"], paramValues: { since: ["30d", "all"], window: ["1d", "30d", "90d", "all"] }, aliases: [] },
 });
 
 const ALIASES = Object.freeze(

@@ -11,6 +11,7 @@ The forge dashboard workspace. Read-only view of `~/.forge/forge.db` plus an HTT
 - `src/shell.ts` — the HTML shell + CSS (template literals).
 - `client/main.js`, `client/renderers.js` — browser JS, served as static files (no build, no bundling).
 - `client/backlog.js` — read-only backlog view (`#backlog[/<ticketId>]`); mirrors `/api/backlog`. No writes. Its type/status filter state, hash and "N of M tickets" count are pure helpers in `client/backlog-state.js` (FG-832). It renders tickets only; session-handoff notes are the Notes view's (FG-830).
+- `client/ops-window-state.js` — the Ops runtime window and summary since: hash state, the per-metric load reducers and the abortable, budgeted reader (FG-836). No DOM, fetch and timers injectable; unit-tested in `src/fg836-ops-loading.test.ts`.
 - `client/notes-render.js`, `client/notes-view.js` — the Notes view (FG-830): `#notes` lists one row per checkout with a note, and `#notes/<checkout>` is that checkout's note page. Both read `/api/backlog`'s `notesByCheckout`; the pure row rules (session date, preview, order, primary) are in `notes-render.js`.
 - `client/view-routing.js` — the closed `ROUTES` table and the only hash parser/writer (FG-820).
 - `client/nav-render.js`, `client/nav-view.js` — the left-column navigation, the narrow-screen bottom bar and drawer (FG-820).
@@ -114,6 +115,13 @@ The plan is `docs/research/dashboard-information-architecture.md`. The 13-button
 
 - **The Backlog opens on every type, active only.** Type All and status Active are the defaults and render selected (`aria-pressed`), never as "no filter"; the controls are two labelled button groups. The filter rides the hash as `#backlog?type=epic|story|idea&status=all|active|blocked|deferred|done` — a button writes it, a missing `type` means all, a missing `status` means active, the canonical hash omits both defaults (`#backlog?status=active` canonicalizes to `#backlog`), and an unknown value is dropped silently. `#backlog/<id>` carries none. The count line reads "N of M tickets" for the current filter and search. Filtering stays client-side over the one `GET /api/backlog` read; the left column has no Backlog badge.
 - **Pure helpers, no DOM.** `client/backlog-state.js` holds `backlogFilterState`, `backlogFilterHash`, `filterBacklogTickets` and `backlogCountLabel` — unit-tested without a browser, same shape as `view-routing.js`.
+
+## Ops windows (FG-836)
+
+- **The window is hash state.** `#ops?window=1d|30d|90d|all` (`ROUTES.ops.params`, alongside `since`). 7d is the default and is omitted from the canonical hash, and an unknown value is dropped silently. A window button writes the hash; `main.js` derives the window from `route.params`.
+- **Loading is explicit, and the previous data stays.** `client/ops-window-state.js` holds one load per metric, `{ data, window, error, pending }`, where `window` is the window the data came from. While a read for another window is in flight, the buttons are disabled, the chart is dimmed under a "loading <w>…" line (FG-824 `tone-accent-info`), and the label beside the buttons reads "showing <data window>"; the pressed button follows the data too. A background refresh of the window on screen is silent.
+- **Abort and budget.** `createWindowedReader` aborts its in-flight read when a newer one starts, and also after `OPS_FETCH_BUDGET_MS` (10s). A timeout, an HTTP error or a network error is shown inline with its reason and the window it concerns; the kept series stays. A superseded read never writes. A scope change still calls `reset()` and drops both metrics to loading (FG-699).
+- **The summary's since is the same shape.** `#ops?since=30d|all` (7d the omitted default) is the `since` for `GET /api/ops`, read through its own `createWindowedReader` ("ops summary"). `runtimeWindowHash` and `opsSinceHash` each keep the other param, so `#ops?since=all&window=90d` round-trips. The summary shows "showing <w>" beside its buttons, "in <w>" on each count, and the same loading line, dimming (`.ops-summary-body-loading`) and inline failure as the chart. It is not reset on a scope change, as before. Home's summary stays at a fixed 30d and is not hash state.
 
 ## Conventions specific to the dashboard
 

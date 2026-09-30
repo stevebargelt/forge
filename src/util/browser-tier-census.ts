@@ -305,6 +305,24 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // `fg821-cockpit-pages` keeps its count, its run-index line assertion re-pointed at the
   // live count alone. Fixture port 18839.
   "fg838-info-tip.test.ts": 7,
+  // FG-836 adds `fg836-ops-window` (7 tests): changing the Ops runtime window shows the
+  // loading state — every window button disabled, the chart dimmed under a "loading 30d…"
+  // line in the FG-824 info tone — over the kept 7d series labelled "showing 7d", then
+  // "showing 30d" once its data lands; `#ops?window=90d` survives a reload and is the first
+  // window read; a failed read names its reason inline and the window it kept; a read past
+  // the 10s client budget is cancelled and reported; a window change mid-read aborts the
+  // in-flight request; an unknown window falls back to 7d silently; and a control writes
+  // one navigable hash entry without background polling churning history. `agent-runtime`,
+  // `agent-runtime-legibility` and `completed-runs` keep their counts, re-pointed at the
+  // kept-series semantics (a window click settles on "showing <w>"). Fixture port 18840.
+  // The second pass (7 -> 13) gives the summary's own `#ops?since=` control the same
+  // honesty: a since change dims the kept summary under "loading 30d… showing 7d until
+  // it answers", then settles on "showing 30d" with each count's "in 30d"; a reload
+  // restores since and window together; an unknown since falls back to 7d silently.
+  // Its follow-up cases paste `since` and `window` in either order through reloads, prove
+  // the two independent readers cannot overwrite each other's captions while one is slow,
+  // and retain `since` across a project-scope change while the newer scoped read wins.
+  "fg836-ops-window.test.ts": 13,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

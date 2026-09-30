@@ -1625,6 +1625,22 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 /* FG-661/RF-15: the series on screen is real, just no longer current — warn, not
  * error, and never in place of the chart it is warning about. */
 .runtime-stale { border-color: var(--warn); color: var(--warn); margin-bottom: 12px; }
+/* FG-836: a window change keeps the previous series on screen, dimmed, under a
+ * "loading <w>…" line until the new read lands; the label beside the window buttons
+ * names the window the data on screen came from. */
+.runtime-loading.tone-accent-info { margin-bottom: 12px; }
+.runtime-body { transition: opacity 0.15s; }
+.runtime-body-loading { opacity: 0.45; }
+.runtime-window-btns .usage-dim-btn:disabled { cursor: progress; }
+.runtime-window-pending { border-style: dashed; }
+.runtime-showing { font-size: 12px; }
+/* FG-836: the Ops summary's own window control, the same honesty as the runtime panel's. */
+.ops-loading, .ops-error, .ops-stale { padding: 16px; margin-bottom: 12px; }
+.ops-summary-body { transition: opacity 0.15s; }
+.ops-summary-body-loading { opacity: 0.45; }
+.ops-since-btns .usage-dim-btn:disabled { cursor: progress; }
+.ops-since-pending { border-style: dashed; }
+.ops-since-showing { font-size: 12px; }
 .runtime-chart {
   margin: 0 0 16px;
   background: var(--bg-elev);
@@ -1637,6 +1653,8 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .runs-bar { transition: height 0.2s ease, y 0.2s ease; }
 @media (prefers-reduced-motion: reduce) {
   .runtime-bar { transition: none; }
+  .runtime-body { transition: none; }
+  .ops-summary-body { transition: none; }
   .runs-bar { transition: none; }
 }
 /* FG-683: the completed-runs metric. A zero bucket is an observed zero, so it
