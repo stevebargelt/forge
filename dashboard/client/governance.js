@@ -138,7 +138,7 @@ export function RecordedAudit({ audit }) {
               </tbody>
             </table>
           </div>`}
-      ${rows.length ? html`<${AttributionClaimCaption} />` : null}
+      <${AttributionClaimCaption} />
     </section>
   `;
 }

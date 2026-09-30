@@ -45,7 +45,7 @@ import {
   type EditorState,
   type ProposeResponse,
 } from "../client/raci-editor-state.js";
-import { AttributionCell, AttributionClaimCaption } from "../client/governance.js";
+import { AttributionCell, AttributionClaimCaption, RecordedAudit } from "../client/governance.js";
 import { ROUTES, parseHash } from "../client/view-routing.js";
 import { statusToken } from "../client/status-tokens.js";
 
@@ -319,6 +319,14 @@ test("FG-840 AC 4a: recorded-audit attribution renders only what the line record
   const blank = AttributionCell({ attribution: null }) as any;
   const faint = [blank.props.children].flat().find((c: any) => c?.props?.class === "faint");
   assert.ok(faint, "a line with neither actor nor source renders an explicit 'unattributed' in the faint token");
+});
+
+test("FG-840 AC 4a: the Routing Recorded panel shows the attribution caption even when it has no rows", () => {
+  for (const source of ["project", "host"] as const) {
+    const panel = RecordedAudit({ audit: { source, path: "/x/raci-audit.log", entries: [], skippedLines: 0 } });
+    const children = [(panel as any).props.children].flat(Infinity);
+    assert.equal(children.filter((c: any) => c?.type === AttributionClaimCaption).length, 1, `an empty ${source} panel still carries the trust-boundary caption`);
+  }
 });
 
 test("reset to host default is an edit of the draft, never a delete", () => {

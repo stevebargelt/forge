@@ -11,6 +11,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
+import { AttributionClaimCaption } from "../client/governance.js";
+import { RecordedTable } from "../client/models-editor-view.js";
 import {
   MODEL_POLICY_GATE,
   addableRoles,
@@ -496,6 +498,12 @@ test("FG-840 AC 4b: Models Recorded rows attribute only what the audit line reco
     assert.equal(row.attribution, expected, JSON.stringify(entry));
     assert.equal(row.source, "source" in entry ? entry.source : null, "the row's source is the recorded one or none");
   }
+});
+
+test("FG-840 AC 4a: the Models Recorded panel shows the attribution caption even when it has no rows", () => {
+  const panel = RecordedTable({ read: { audit: { entries: [], skippedLines: 0 } } });
+  const children = [(panel as any).props.children].flat(Infinity);
+  assert.equal(children.filter((c: any) => c?.type === AttributionClaimCaption).length, 1, "an empty Models panel still carries the trust-boundary caption");
 });
 
 test("FG-835 pickers: a change keeps the prior model offered and the order stable", () => {

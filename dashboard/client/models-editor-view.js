@@ -278,7 +278,7 @@ function BackupsTable({ read, onRestore, error }) {
   `;
 }
 
-function RecordedTable({ read }) {
+export function RecordedTable({ read }) {
   const rows = policyAuditRows(read.audit.entries);
   return html`
     <section class="workbench-section raci-recorded mp-recorded" role="region" aria-label="RECORDED — model-policy audit log">
@@ -300,7 +300,7 @@ function RecordedTable({ read }) {
             </table>
           </div>`}
       ${read.audit.skippedLines > 0 ? html`<div class="hint">${read.audit.skippedLines} unreadable audit line(s) skipped</div>` : null}
-      ${rows.length ? html`<${AttributionClaimCaption} />` : null}
+      <${AttributionClaimCaption} />
     </section>
   `;
 }

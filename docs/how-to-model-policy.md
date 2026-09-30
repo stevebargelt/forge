@@ -379,7 +379,7 @@ audit line; from a terminal both are optional.
 caller passed them, and the Models page's RECORDED table shows exactly that — `dashboard
 (claimed)`, `steve (claimed)` (`<actor> (claimed) via <source> (claimed)` when they differ) —
 never a synthesized fallback: a line recording only a `source` labels that alone, and a line
-with neither `by` nor `source` shows no attribution at all (FG-840 AC 4b). A terminal caller
+with neither `by` nor `source` renders the word `unattributed`, never a guess (FG-840 AC 4b). A terminal caller
 can pass `--by dashboard --source dashboard` too, and anyone who can run forge on this host
 can write `model-policy-audit.log`; the table's caption says so. On a single-user host the
 dashboard and the terminal share one OS user and one filesystem, so there is nothing a
