@@ -185,7 +185,7 @@ would add a proof-shaped value without adding a boundary.
 
 What changes instead is the presentation: the dashboard's RECORDED panels (Routing, the RACI
 editor, Models) render `by` and `source` with a "claimed" marker — `dashboard (claimed)`,
-`cli (claimed)` — and a caption: "Attribution is recorded as the caller gave it; on this host
+`steve (claimed)` — and a caption: "Attribution is recorded as the caller gave it; on this host
 anyone who can run forge can write these values. It is a claim, not a proof." Neither panel
 synthesizes a fallback (AC 4b) — both show only what the line actually recorded, and a line
 with neither `by` nor `source` renders "unattributed" rather than a guessed value. The audit
