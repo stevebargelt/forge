@@ -17,6 +17,7 @@ const tmpHome = mkdtempSync(join(tmpdir(), "forge-reviews-rt-"));
 process.env.FORGE_HOME = tmpHome;
 process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
+process.env.FORGE_DASHBOARD_REMOTE = "0";
 
 const db = new Database(join(tmpHome, "forge.db"));
 db.exec(`
@@ -51,6 +52,22 @@ after(() => {
   server.closeAllConnections?.();
   server.close();
 });
+
+async function waitForServer(ms = 4000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      const response = await fetch(`${BASE}/api/reviews`);
+      if (response.ok) return;
+      throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
+    } catch (err) {
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+}
+
+await waitForServer();
 
 test("integ GET /api/reviews returns the ledger with findings embedded", async () => {
   const res = await fetch(`${BASE}/api/reviews`);

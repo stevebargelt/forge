@@ -25,6 +25,7 @@ process.env.FORGE_DB_PATH = join(tmpHome, "forge.db");
 process.env.FORGE_PROJECT_SCAN_ROOTS = mkdtempSync(join(tmpdir(), "fg823-scan-"));
 process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
+process.env.FORGE_DASHBOARD_REMOTE = "0";
 delete process.env.FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS;
 delete process.env.FORGE_DASHBOARD_ORIGIN;
 

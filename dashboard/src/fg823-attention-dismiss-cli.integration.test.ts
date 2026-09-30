@@ -23,6 +23,7 @@ process.env.FORGE_DB_PATH = join(tmpHome, "forge.db");
 process.env.FORGE_PROJECT_SCAN_ROOTS = mkdtempSync(join(tmpdir(), "fg823-cli-scan-"));
 process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
+process.env.FORGE_DASHBOARD_REMOTE = "0";
 delete process.env.FORGE_BIN;
 delete process.env.FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS;
 delete process.env.FORGE_DASHBOARD_ORIGIN;
@@ -52,6 +53,22 @@ after(() => {
   server.closeAllConnections?.();
   server.close();
 });
+
+async function waitForServer(ms = 4000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      const response = await fetch(`${BASE}/api/attention-inbox`);
+      if (response.ok) return;
+      throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
+    } catch (err) {
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+}
+
+await waitForServer();
 
 async function route(): Promise<Record<string, any>> {
   const deadline = Date.now() + 4000;
