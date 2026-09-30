@@ -15,7 +15,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -307,4 +307,69 @@ test("integ FG-607: `mode --set db` refuses on an unseeded sequence even with an
   assert.equal(existsSync(join(project, ".forge", "config.yml")), false, "no config heal on a refused flip");
   const porcelain = spawnSync("git", ["status", "--porcelain"], { cwd: project, encoding: "utf8" }).stdout;
   assert.ok(!porcelain.includes(".forge"), `the refused flip dirtied .forge:\n${porcelain}`);
+});
+
+// FG-851: the heal ladder edits .forge/config.yml line-wise — the operator's comments
+// and blank lines survive the project_key heal — and an unparseable config is a
+// named refusal with nothing written, never "healed" by overwrite.
+test("FG-851: the mode flip's project_key heal appends one line and keeps the operator's config bytes", () => {
+  const project = join(root, "proj");
+  initRepo(project);
+  writeMarkdownTicket(project, "FG-1");
+  const config = "# operator notes\n\nbacklog:\n  prefix: FG   # ours\n\nextra: 'kept'\n";
+  mkdirSync(join(project, ".forge"), { recursive: true });
+  writeFileSync(join(project, ".forge", "config.yml"), config);
+
+  const imported = forge(project, ["backlog", "import", "--json"]);
+  assert.equal(imported.status, 0, `import failed: ${imported.stderr}`);
+  const projectKey = (JSON.parse(imported.stdout) as { projectKey: string }).projectKey;
+  assert.equal(forge(project, ["backlog", "mode", "--set", "db", "--json"]).status, 0);
+
+  assert.equal(readFileSync(join(project, ".forge", "config.yml"), "utf8"), `${config}project_key: ${projectKey}\n`);
+});
+
+test("FG-851: an unparseable config refuses the flip by name (path + reason) and stays byte-identical", () => {
+  const project = join(root, "proj");
+  initRepo(project);
+  writeMarkdownTicket(project, "FG-1");
+  const configPath = join(project, ".forge", "config.yml");
+  const broken = "# operator notes\nbacklog: : : :\n  bad";
+  mkdirSync(join(project, ".forge"), { recursive: true });
+  writeFileSync(configPath, broken);
+
+  const res = forge(project, ["backlog", "mode", "--set", "db", "--json"]);
+  assert.equal(res.status, 1, res.stderr);
+  const reason = (JSON.parse(res.stdout) as { status: string; reason: string }).reason;
+  assert.match(reason, /refusing to rewrite .*config\.yml — it is not valid YAML/);
+  assert.ok(reason.includes(configPath), reason);
+  assert.equal(readFileSync(configPath, "utf8"), broken);
+});
+
+test("FG-851: duplicate project_key refuses in human and JSON mode without claiming identity", () => {
+  const project = join(root, "duplicate-key");
+  initRepo(project);
+  writeMarkdownTicket(project, "FG-1");
+  const configPath = join(project, ".forge", "config.yml");
+  const duplicate = "# operator config\nproject_key: pk-first\nbacklog:\n  prefix: FG\nproject_key: pk-second\n";
+  mkdirSync(join(project, ".forge"), { recursive: true });
+  writeFileSync(configPath, duplicate);
+  const db = getDb();
+  const identitiesBefore = (db.prepare("SELECT COUNT(*) AS n FROM project_identity").get() as { n: number }).n;
+  const modesBefore = (db.prepare("SELECT COUNT(*) AS n FROM ticket_storage_mode").get() as { n: number }).n;
+
+  const human = forge(project, ["backlog", "mode", "--set", "db"]);
+  assert.equal(human.status, 1, human.stderr);
+  assert.match(human.stderr, /refusing to rewrite .*config\.yml.*Map keys must be unique/s);
+  assert.match(human.stderr, /Storage mode unchanged/);
+
+  const json = forge(project, ["backlog", "mode", "--set", "db", "--json"]);
+  assert.equal(json.status, 1, json.stderr);
+  const result = JSON.parse(json.stdout) as { status: string; reason: string };
+  assert.equal(result.status, "error");
+  assert.match(result.reason, /refusing to rewrite .*config\.yml.*Map keys must be unique/s);
+  assert.match(result.reason, /Storage mode unchanged/);
+  assert.equal(readFileSync(configPath, "utf8"), duplicate, "the duplicate operator config remains untouched");
+
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM project_identity").get() as { n: number }).n, identitiesBefore, "no identity row was claimed");
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM ticket_storage_mode").get() as { n: number }).n, modesBefore, "storage mode was not changed");
 });

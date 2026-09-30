@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeBacklogConfig } from "../../backlog/config.js";
+import { assertBacklogConfigWritable, ConfigWriteRefusal, writeBacklogConfig } from "../../backlog/config.js";
 import { readAiAttribution, renderOrchestratorTemplate } from "../../v2/ai-attribution.js";
 
 export { renderOrchestratorTemplate };
@@ -139,11 +139,23 @@ export function registerInit(program: Command): void {
       const gitignorePlan = installHooks ? planGitignoreEntries(projectDir) : { action: "skipped" as const };
 
       if (options.dryRun) {
+        // FG-851: the dry run forecasts the refusal the live run's write would raise.
+        let configRefusal: string | null = null;
+        if (options.prefix) {
+          try {
+            assertBacklogConfigWritable(projectDir, { prefix: options.prefix });
+          } catch (e) {
+            if (!(e instanceof ConfigWriteRefusal)) throw e;
+            configRefusal = e.message;
+          }
+        }
         console.log(`forge init (dry-run) in ${projectDir}`);
         console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${blockStatus(blockResult.action, !!existing)}`);
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
         console.log(`  backlog/:         ${describeBacklogScaffoldPlan(projectDir)}`);
-        console.log(`  config.yml:       ${options.prefix ? `WOULD write prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
+        console.log(
+          `  config.yml:       ${configRefusal ? `WOULD REFUSE — ${configRefusal}` : options.prefix ? `WOULD write prefix = ${options.prefix}` : "skipped (no --prefix)"}`,
+        );
         console.log(`  model-policy.yml: ${projectModelPolicyNotice(forgeProjectDir)}`);
         console.log(`  docs-surfaces.yml:${describeDocsSurfacesProvisionPlan(projectDir)}`);
         // AC8 (RF-3): dry-run must forecast the 'requires operator repair' state
@@ -169,6 +181,18 @@ export function registerInit(program: Command): void {
         return;
       }
 
+      // FG-851: a --prefix write into a .forge/config.yml forge cannot edit in place
+      // is refused, never healed by overwrite. The write itself is the FIRST mutation
+      // — not a pre-flight followed by a second read — so its refusal, whatever
+      // raised it, lands before CLAUDE.md, backlog/ or any hook exists.
+      if (options.prefix) {
+        try {
+          writeBacklogConfig(projectDir, { prefix: options.prefix });
+        } catch (e) {
+          if (!(e instanceof ConfigWriteRefusal)) throw e;
+          throw new Error(`${e.message} (forge init wrote nothing)`);
+        }
+      }
       if (willWrite) {
         writeFileSync(claudeMdPath, next);
       }
@@ -176,9 +200,6 @@ export function registerInit(program: Command): void {
         mkdirSync(forgeProjectDir, { recursive: true });
       }
       const backlogScaffoldResult = scaffoldBacklogDirs(projectDir);
-      if (options.prefix) {
-        writeBacklogConfig(projectDir, { prefix: options.prefix });
-      }
       // FG-796: forge init no longer provisions a PROJECT-level model-policy.yml. A
       // project policy is a deliberate operator override that fully replaces the host
       // policy; seeding it silently installs the subscription-default + codex-pin shape

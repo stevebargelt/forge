@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parseBacklog } from "../../backlog/parse.js";
 import type { Backlog } from "../../backlog/types.js";
-import { readBacklogConfig, writeBacklogConfig } from "../../backlog/config.js";
+import { assertBacklogConfigWritable, readBacklogConfig, writeBacklogConfig } from "../../backlog/config.js";
 import { generateSlug, type TicketFrontmatter, type TicketType, type TicketStatus } from "../../backlog/structured.js";
 import { stringify as stringifyYaml } from "yaml";
 
@@ -42,6 +42,9 @@ export function registerBacklogMigrate(program: Command): void {
           prefix = "FG";
           console.log("(dry-run) No prefix configured — would prompt. Using 'FG' for preview.");
         } else {
+          // FG-851: refuse a config forge cannot edit in place before prompting —
+          // the write below refuses the same file, and never overwrites it.
+          assertBacklogConfigWritable(dir, { prefix: "FG" });
           prefix = await promptPrefix();
           writeBacklogConfig(dir, { prefix });
           console.log(`Wrote prefix '${prefix}' to .forge/config.yml`);

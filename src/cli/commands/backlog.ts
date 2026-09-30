@@ -15,7 +15,7 @@ import type { Command } from "commander";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { assertConfigWritable, readBacklogConfig, writeProjectKey } from "../../backlog/config.js";
+import { assertConfigWritable, ConfigWriteRefusal, readBacklogConfig, writeProjectKey } from "../../backlog/config.js";
 import {
   clearBacklogStoreCache,
   describeBacklogStore,
@@ -858,6 +858,17 @@ class ModeSetRefusal extends Error {
   }
 }
 
+// FG-851: the heal ladder never overwrites a config it cannot edit in place — the
+// config refusal (path + reason) surfaces as the flip's own named refusal.
+function configRefusalAsModeSet(fn: () => void): void {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof ConfigWriteRefusal) throw new ModeSetRefusal(`${e.message} (Storage mode unchanged.)`);
+    throw e;
+  }
+}
+
 // FG-608: a refusal to run the cutover. Distinct from ModeSetRefusal so the CLI
 // (and tests) can tell "migrate declined to start" from "the flip itself refused".
 class MigrateRefusal extends Error {
@@ -1127,7 +1138,7 @@ function setBacklogMode(
 
   // Same pre-flight as import: if we WILL heal config, fail closed before we
   // claim a registry identity.
-  if (config.projectKey == null) assertConfigWritable(projectDir);
+  if (config.projectKey == null) configRefusalAsModeSet(() => assertConfigWritable(projectDir));
 
   // Filesystem reads, outside the transaction. BOTH directions need them now: the
   // markdown direction to spot db-only tickets it would strand, the db direction
@@ -1250,7 +1261,7 @@ function setBacklogMode(
 
         opts.reassertBeforeFlip?.(projectKey);
 
-        if (resolved.persistToConfig) writeProjectKey(projectDir, resolved.projectKey);
+        if (resolved.persistToConfig) configRefusalAsModeSet(() => writeProjectKey(projectDir, resolved.projectKey));
         ensureStorageMode(projectKey, now);
         setStorageMode(projectKey, mode, now);
         opts.recordWithFlip?.(projectKey, now);

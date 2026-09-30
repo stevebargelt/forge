@@ -14,7 +14,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,6 +93,22 @@ test("FG-608 migrate: on success the mode flips to db and the flipping forge rev
     ticketsForProject(key).length,
     2,
     "the shadow equals the Markdown set at the moment of the flip",
+  );
+});
+
+test("FG-851 migrate: the project_key heal appends one line to a commented config", () => {
+  const config = "# operator-owned config\n\nname: 'quoted value'\nbacklog:\n  prefix: FG\n  format: structured\nextra: keep\n";
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.yml"), config);
+  writeTicketFile(projectDir, { id: "FG-1", type: "story", status: "active", title: "one" }, "body");
+
+  const res = runForge(["backlog", "migrate"]);
+  assert.equal(res.status, 0, `${res.stdout}\n${res.stderr}`);
+  const key = projectKey();
+  assert.equal(
+    readFileSync(join(projectDir, ".forge", "config.yml"), "utf8"),
+    `${config}project_key: ${key}\n`,
+    "the cutover must preserve every operator-owned byte and append only its identity",
   );
 });
 
