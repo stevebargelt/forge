@@ -253,6 +253,7 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/campaigns-render.js",
   "dashboard/client/campaigns.js",
   "dashboard/client/checkout-label.js",
+  "dashboard/client/checkout-chooser-view.js",
   "dashboard/client/control-plane.js",
   "dashboard/client/current-activity-render.js",
   "dashboard/client/current-activity-view.js",

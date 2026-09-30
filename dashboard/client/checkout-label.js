@@ -66,19 +66,31 @@ export function checkoutLabel(checkout, all) {
   return checkout.branch ? `${path} · ${checkout.branch}` : path;
 }
 
-/** The same label for a bare directory — a checkout root or any exact run directory the
- *  registry observed under one — resolved against the registry's projects. An
- *  unregistered directory falls back to its basename (plus the branch when known). */
-export function checkoutLabelForDir(dir, projects, branch = null) {
-  if (typeof dir !== "string" || dir === "") return "";
+/** The registered checkout a directory belongs to — a checkout root, or any exact run
+ *  directory the registry observed under one (`projectDirs`) — with its project; null
+ *  when no project knows it. The registry grouped every recorded spelling by its
+ *  path-identity (FG-693) before serving it, so a run recorded through a symlinked parent
+ *  is listed under the physical checkout it names; this matches against that result and
+ *  never re-derives identity in the browser. */
+export function checkoutForDir(dir, projects) {
+  if (typeof dir !== "string" || dir === "") return null;
   const key = pathKey(dir);
   for (const project of Array.isArray(projects) ? projects : []) {
     const checkouts = Array.isArray(project?.checkouts) ? project.checkouts : [];
-    const match = checkouts.find((c) => c && typeof c.projectDir === "string" && (
+    const checkout = checkouts.find((c) => c && typeof c.projectDir === "string" && (
       pathKey(c.projectDir) === key || (Array.isArray(c.projectDirs) && c.projectDirs.some((d) => pathKey(d) === key))
     ));
-    if (match) return checkoutLabel(match, checkouts);
+    if (checkout) return { project, checkout };
   }
+  return null;
+}
+
+/** The same label for a bare directory, resolved against the registry's projects. An
+ *  unregistered directory falls back to its basename (plus the branch when known). */
+export function checkoutLabelForDir(dir, projects, branch = null) {
+  if (typeof dir !== "string" || dir === "") return "";
+  const match = checkoutForDir(dir, projects);
+  if (match) return checkoutLabel(match.checkout, match.project.checkouts);
   const base = segmentsOf(dir).pop() || dir;
   return branch ? `${base} · ${branch}` : base;
 }
@@ -111,4 +123,75 @@ export function checkoutOptions(project, { showMissing = false, selected = null 
       missing: c.exists === false,
     }));
   return { options, missingCount };
+}
+
+// FG-843: the checkout chooser on Routing, Config and Notes — the only views whose answer
+// changes with the checkout. It offers the project's LIVE OPERATOR checkouts (the server's
+// `kind`, derived once in dashboard/src/queries.ts; never re-derived here), primary first
+// and flagged. With fewer than two it is not a chooser at all: the header shows the label
+// as plain text. A run checkout named by the hash (a deep link from a run page) is honoured
+// and reads `run checkout`; the menu then offers the operator checkouts to go back to.
+
+export const RUN_CHECKOUT_LABEL = "run checkout";
+
+/** `operator` or `run` for a directory of this project (a checkout root or an exact run
+ *  directory observed under one); null when the project does not know the directory. */
+export function checkoutKindForDir(dir, project) {
+  const match = project ? checkoutForDir(dir, [project]) : null;
+  if (!match) return null;
+  return match.checkout.kind === "operator" ? "operator" : "run";
+}
+
+/** The checkout a hash's `checkout=` names when the project knows it (an operator or a
+ *  run checkout), else null: an unknown path is not a run checkout, it is unknown, and a
+ *  checkout-scoped view falls back to the primary (the FG-828 pattern for unknown values). */
+export function knownCheckout(dir, project) {
+  return checkoutKindForDir(dir, project) === null ? null : dir;
+}
+
+/** A home-relative spelling of a directory for the menu's secondary column. */
+export function displayPath(dir) {
+  return String(dir).replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+}
+
+/** The checkout a checkout-scoped view reads when the hash names none: the primary. */
+export function defaultCheckout(project) {
+  return typeof project?.primaryCheckout === "string" && project.primaryCheckout !== "" ? project.primaryCheckout : null;
+}
+
+/**
+ * The chooser as data for one project and the checkout on screen (null = the primary).
+ *
+ *   mode     "none" (no project), "label" (plain text) or "menu" (button + listbox)
+ *   current  { projectDir, label, primary, run } — `run` when the hash named a run checkout
+ *   options  the live operator checkouts, primary first: { projectDir, label, primary, path, selected }
+ *   footer   `N operator checkouts · M run checkouts are listed on their runs, not here`
+ */
+export function checkoutChooser(project, selected = null) {
+  const all = dedupeCheckouts(project?.checkouts);
+  const currentDir = knownCheckout(selected, project) || defaultCheckout(project);
+  if (!project || !currentDir) return { mode: "none", current: null, options: [], footer: "" };
+  const primaryKey = pathKey(project.primaryCheckout ?? "");
+  const currentKey = pathKey(currentDir);
+  const live = all.filter((c) => c.kind === "operator" && c.exists !== false);
+  const ordered = [...live.filter((c) => pathKey(c.projectDir) === primaryKey), ...live.filter((c) => pathKey(c.projectDir) !== primaryKey)];
+  const options = ordered.map((c) => ({
+    projectDir: c.projectDir,
+    label: checkoutLabel(c, all),
+    primary: pathKey(c.projectDir) === primaryKey,
+    path: displayPath(c.projectDir),
+    selected: pathKey(c.projectDir) === currentKey,
+  }));
+  const run = checkoutKindForDir(currentDir, project) === "run";
+  const current = {
+    projectDir: currentDir,
+    label: checkoutLabelForDir(currentDir, [project]),
+    primary: currentKey === primaryKey,
+    run,
+  };
+  const runCount = Number.isInteger(project.checkoutCounts?.run) ? project.checkoutCounts.run : all.filter((c) => c.kind !== "operator").length;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const footer = `${plural(options.length, "operator checkout")} · ${plural(runCount, "run checkout")} ${runCount === 1 ? "is" : "are"} listed on ${runCount === 1 ? "its run" : "their runs"}, not here`;
+  const mode = options.length >= 2 || (run && options.length >= 1) ? "menu" : "label";
+  return { mode, current, options, footer };
 }

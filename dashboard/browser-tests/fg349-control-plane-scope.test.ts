@@ -43,10 +43,12 @@ const projectsFixture = [
     githubUrl: null,
     description: "control-plane scope fixture",
     readmeFirstLine: null,
+    primaryCheckout: CHECKOUT_MAIN,
     checkouts: [
-      { projectDir: CHECKOUT_MAIN, branch: "main", exists: true },
-      { projectDir: CHECKOUT_FEATURE, branch: "feature", exists: true },
+      { projectDir: CHECKOUT_MAIN, branch: "main", exists: true, kind: "operator" },
+      { projectDir: CHECKOUT_FEATURE, branch: "feature", exists: true, kind: "operator" },
     ],
+    checkoutCounts: { operator: 2, liveOperator: 2, run: 0 },
   },
 ];
 
@@ -101,21 +103,20 @@ after(async () => {
   await new Promise<void>((closed) => server?.close(() => closed()));
 });
 
-const controlPlaneTab = (page: Page) => page.getByRole("link", { name: "Config", exact: true });
 
-// FG-831: an option reads `<path> · <branch>` by the shared label rule; match its branch.
-function checkoutScopeButton(page: Page, name: string) {
-  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(` · ${name}$`) });
+// FG-843: the checkout is chosen in Config's header chooser (the scope column holds the
+// project select alone). An option reads `<path> · <branch>` by the FG-831 label rule.
+async function chooseCheckout(page: Page, name: string): Promise<void> {
+  await page.locator(".page-head .checkout-chooser-button").click();
+  await page.locator(".checkout-chooser-menu [role=option]").filter({ hasText: new RegExp(` · ${name}`) }).click();
 }
+const chosenCheckout = (page: Page) => page.locator(".page-head .checkout-chooser-button").getAttribute("title");
 
 const cpProjectDir = (page: Page) => page.locator(".cp-header .mono").first();
 
 // Land on the Control Plane scoped to the `main` checkout, with its graph rendered.
 async function openScopedControlPlane(page: Page): Promise<void> {
-  await page.goto(`${baseUrl}/#projects`);
-  await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
-  await controlPlaneTab(page).click();
+  await page.goto(`${baseUrl}/#config?project=${PROJECT_KEY}&checkout=${encodeURIComponent(CHECKOUT_MAIN)}`);
   await page.locator(".cp-view").waitFor();
   assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_MAIN);
 }
@@ -129,7 +130,7 @@ test("Switching checkout scope drops the control-plane graph to loading, not the
   // The feature-checkout read hangs. When the operator narrows to it, the panel
   // must show loading — NOT keep main's graph under the feature label.
   delayByScope.set(`dir:${CHECKOUT_FEATURE}`, 5_000);
-  await checkoutScopeButton(page, "feature").click();
+  await chooseCheckout(page, "feature");
 
   await page.getByText("loading control plane…").waitFor();
   assert.equal(await page.locator(".cp-view").count(), 0,
@@ -145,10 +146,7 @@ test("A slow leaving-scope config-graph response that lands after the switch can
   // feature checkout, and only lands afterwards. A generous delay keeps it pending
   // across the switch; we then await its late landing deterministically.
   delayByScope.set(`dir:${CHECKOUT_MAIN}`, 3_000);
-  await page.goto(`${baseUrl}/#projects`);
-  await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
-  await controlPlaneTab(page).click();
+  await page.goto(`${baseUrl}/#config?project=${PROJECT_KEY}&checkout=${encodeURIComponent(CHECKOUT_MAIN)}`);
 
   // The main graph read has NOT resolved: the panel is genuinely pending.
   await page.getByText("loading control plane…").waitFor();
@@ -160,7 +158,7 @@ test("A slow leaving-scope config-graph response that lands after the switch can
   );
 
   // Narrow to the fast feature checkout while main's read is in flight.
-  await checkoutScopeButton(page, "feature").click();
+  await chooseCheckout(page, "feature");
   await page.locator(".cp-view").waitFor();
   assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_FEATURE, "the new scope's own graph is shown");
 
@@ -170,7 +168,7 @@ test("A slow leaving-scope config-graph response that lands after the switch can
   await page.waitForTimeout(100);
   assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_FEATURE,
     "a late leaving-scope graph cannot repaint the abandoned checkout");
-  assert.equal(await checkoutScopeButton(page, "feature").getAttribute("aria-pressed"), "true");
+  assert.equal(await chosenCheckout(page), CHECKOUT_FEATURE);
   await page.close();
 });
 
@@ -189,17 +187,14 @@ test("A scope change during config-graph BODY decode cannot render the retired c
     (res) => res.url().includes("/api/config-graph") && res.url().includes(`projectDir=${encodeURIComponent(CHECKOUT_MAIN)}`),
   );
 
-  await page.goto(`${baseUrl}/#projects`);
-  await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
-  await controlPlaneTab(page).click();
+  await page.goto(`${baseUrl}/#config?project=${PROJECT_KEY}&checkout=${encodeURIComponent(CHECKOUT_MAIN)}`);
 
   // Headers are in, but the body is still held: the panel is genuinely pending.
   await page.getByText("loading control plane…").waitFor();
   const leaving = await mainResp; // resolves on headers (immediate)
 
   // Narrow to the fast feature checkout while main's BODY decode is still pending.
-  await checkoutScopeButton(page, "feature").click();
+  await chooseCheckout(page, "feature");
   await page.locator(".cp-view").waitFor();
   assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_FEATURE, "the new scope's own graph is shown");
 
@@ -209,7 +204,7 @@ test("A scope change during config-graph BODY decode cannot render the retired c
   await page.waitForTimeout(100);
   assert.equal(await cpProjectDir(page).innerText(), CHECKOUT_FEATURE,
     "a scope change during body decode cannot render the retired checkout's graph");
-  assert.equal(await checkoutScopeButton(page, "feature").getAttribute("aria-pressed"), "true");
+  assert.equal(await chosenCheckout(page), CHECKOUT_FEATURE);
   await page.close();
 });
 

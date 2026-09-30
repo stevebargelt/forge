@@ -8,6 +8,7 @@
 // Project resolves to the run index scoped to that project (#runs?project=<key>).
 
 import { hashFor } from "./view-routing.js";
+import { checkoutForDir } from "./checkout-label.js";
 
 function nonEmpty(value) {
   return typeof value === "string" && value !== "" ? value : null;
@@ -17,11 +18,10 @@ function basename(dir) {
   return dir.replace(/\/+$/, "").split("/").pop() || dir;
 }
 
-/** The registered project whose checkouts include `projectDir`, or null. */
+/** The registered project whose checkouts include `projectDir` (a checkout root or a run
+ *  directory observed under one — checkout-label.js's checkoutForDir), or null. */
 export function projectForDir(projectDir, projects) {
-  const dir = nonEmpty(projectDir);
-  if (!dir || !Array.isArray(projects)) return null;
-  return projects.find((p) => Array.isArray(p.checkouts) && p.checkouts.some((c) => c.projectDir === dir)) ?? null;
+  return checkoutForDir(projectDir, projects)?.project ?? null;
 }
 
 /** The registered project a payload names — by `projectKey` when it carries one (the

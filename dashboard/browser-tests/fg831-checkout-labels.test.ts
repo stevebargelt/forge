@@ -1,12 +1,13 @@
-// FG-831: the scope bar's checkout selector, rendered from the REAL dashboard server over
-// a scratch registry — the shape that made Forge read "main" fifteen times: a primary
-// checkout, a feature clone, two disposable clones that are both a directory called
-// `forge` on `main`, and a checkout whose directory is gone.
+// FG-831: the checkout label rule, rendered from the REAL dashboard server over a scratch
+// registry — the shape that made Forge read "main" fifteen times: a primary checkout, a
+// feature clone, two disposable clones that are both a directory called `forge` on `main`,
+// and a checkout whose directory is gone.
 //
-// Proves: every option is distinguishable (path context + branch), the primary is first
-// and marked; the missing checkout is withheld behind "show 1 missing" and reads
-// `missing on disk` when revealed; selecting it renders its runs with no page error; and
-// the Projects card names the missing count and `forge projects prune --missing`.
+// Proves: every checkout is distinguishable (path context + branch) wherever it is named —
+// since FG-843 the Runs rows and the Routing header chooser, the scope bar's list having
+// been retired — and the primary is marked; the missing checkout reads `missing on disk`
+// and its runs still render, on Runs and through a `?checkout=` deep link, with no page
+// error; the Projects card names the missing count and `forge projects prune --missing`.
 //
 // Screenshots go to a fresh temp dir unless FG831_SCREENSHOT_DIR names one.
 
@@ -98,48 +99,56 @@ async function newPage(): Promise<Page> {
 async function scopeToForge(page: Page): Promise<void> {
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: /Open all Forge checkouts/ }).click();
-  await page.getByRole("link", { name: "Activity", exact: true }).click();
-  await page.locator(".nav-column .project-scope-options").waitFor();
+  await page.waitForFunction(() => document.querySelector<HTMLSelectElement>(".nav-column .nav-scope-select")?.value !== "");
 }
 
-const options = (page: Page) => page.locator(".nav-column .checkout-scope-btn");
+// FG-843 retired the scope bar's checkout list: the labels it carried now live where a
+// checkout is named — every Runs row (the cross-checkout view) and the header of the
+// checkout-scoped views. The rule under test is unchanged: FG-831's one label module.
+const runLabel = async (page: Page, runId: string) => (await page.locator(`tr[data-run-id=${runId}] .runs-checkout`).innerText()).trim();
 
-test("FG-831: the selector labels every checkout distinctly — path context plus branch — with the primary first and marked", async () => {
+test("FG-831: every checkout is labelled distinctly — path context plus branch — and the primary is marked", async () => {
   const page = await newPage();
   await scopeToForge(page);
-  const texts = (await options(page).allInnerTexts()).map((t) => t.trim());
-  assert.deepEqual(texts, [
-    "all checkouts",
-    "code/forge · main primary",
-    "run-1/forge · main",
-    "run-2/forge · main",
-    "forge-fg827 · feat/fg-827-roles-second-pass",
-  ]);
-  assert.equal(await options(page).nth(1).getAttribute("data-primary"), "true");
-  assert.equal(await options(page).nth(1).getAttribute("title"), primary);
-  assert.equal(new Set(texts).size, texts.length, "no two options read the same");
-  assert.ok(!texts.some((t) => /missing/.test(t)), "the missing checkout is not offered by default");
-  assert.equal(await page.locator(".nav-column .checkout-missing-toggle").innerText(), "show 1 missing");
+  await page.getByRole("link", { name: "Runs", exact: true }).click();
+  await page.locator("tr[data-run-id=run-gone]").waitFor();
+  const labels = {
+    primary: await runLabel(page, "run-primary"),
+    clone1: await runLabel(page, "run-clone1"),
+    clone2: await runLabel(page, "run-clone2"),
+    feature: await runLabel(page, "run-feature"),
+  };
+  assert.deepEqual(labels, {
+    primary: "code/forge · main",
+    clone1: "run-1/forge · main",
+    clone2: "run-2/forge · main",
+    feature: "forge-fg827 · feat/fg-827-roles-second-pass",
+  });
+  assert.equal(new Set(Object.values(labels)).size, 4, "no two checkouts read the same");
   await page.screenshot({ path: join(SHOTS, "fg831-scope-bar-labels.png") });
+
+  await page.getByRole("link", { name: "Routing", exact: true }).click();
+  const head = page.locator(".page-head .checkout-chooser");
+  await head.waitFor();
+  assert.match(await head.innerText(), /checkout:\s*code\/forge · main\s*primary/);
+  assert.equal(await head.locator("[title]").first().getAttribute("title"), primary);
   await page.close();
 });
 
-test("FG-831: show 1 missing reveals the gone checkout labeled missing on disk; selecting it renders its runs", async () => {
+test("FG-831: the gone checkout reads missing on disk, and its runs still render — on Runs and through a deep link", async () => {
   const page = await newPage();
   await scopeToForge(page);
-  const toggle = page.locator(".nav-column .checkout-missing-toggle");
-  await toggle.click();
-  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
-  const missing = page.locator(".nav-column .checkout-scope-btn-missing");
-  assert.equal(await missing.innerText(), "wt-a · missing on disk");
-  await page.screenshot({ path: join(SHOTS, "fg831-scope-bar-missing-shown.png") });
-
-  await missing.click();
-  await page.waitForFunction(() => document.querySelector(".nav-column .checkout-scope-btn-active")?.textContent?.includes("missing on disk"));
   await page.getByRole("link", { name: "Runs", exact: true }).click();
   await page.locator("tr[data-run-id=run-gone]").waitFor();
-  assert.equal(await page.locator("tr[data-run-id]").count(), 1, "the missing checkout's scope holds exactly its own run");
-  assert.match(await page.locator("tr[data-run-id=run-gone]").innerText(), /wt-a · missing on disk/, "the run row names its checkout by the same rule");
+  assert.equal(await runLabel(page, "run-gone"), "wt-a · missing on disk", "the run row names its checkout by the same rule");
+  await page.screenshot({ path: join(SHOTS, "fg831-scope-bar-missing-shown.png") });
+
+  const key = new URL(page.url()).hash.match(/project=([^&]+)/)?.[1];
+  assert.ok(key, "the Runs hash carries the project");
+  await page.goto(`${BASE}/#routing?project=${key}&checkout=${encodeURIComponent(gone)}`);
+  const chooser = page.locator(".page-head .checkout-chooser");
+  await chooser.waitFor();
+  assert.match(await chooser.innerText(), /wt-a · missing on disk/);
   assert.match(await page.locator(".mobile-head-scope").textContent() ?? "", /Forge › wt-a · missing on disk/);
   await page.close();
 });
@@ -158,26 +167,22 @@ test("FG-831: the Projects card counts the missing checkout and names the prune 
   await page.close();
 });
 
-test("FG-831: at 400px the drawer keeps unique checkout labels and the selected label reaches Runs unchanged", async () => {
+test("FG-831: at 400px the drawer holds the project select alone and the Runs rows keep their labels", async () => {
   const page = await browser!.newPage({ viewport: { width: 400, height: 900 } });
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: /Open all Forge checkouts/ }).click();
   await page.getByRole("button", { name: "More" }).click();
   const drawer = page.getByRole("dialog", { name: "Navigation" });
   await drawer.waitFor();
-  const drawerOptions = drawer.locator(".checkout-scope-btn");
-  const labels = (await drawerOptions.allInnerTexts()).map((text) => text.trim());
-  assert.equal(new Set(labels).size, labels.length, "the narrow scope bar never repeats a checkout label");
-  assert.ok(labels.includes("run-1/forge · main"));
+  assert.equal(await drawer.locator(".nav-scope button").count(), 0, "FG-843: no checkout buttons in the scope control");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "the 400px scope drawer does not overflow");
 
-  await drawer.getByRole("button", { name: "run-1/forge · main", exact: true }).click();
   await drawer.getByRole("link", { name: "Runs", exact: true }).click();
   await page.locator("tr[data-run-id=run-clone1]").waitFor();
   assert.equal(
     (await page.locator("tr[data-run-id=run-clone1] .runs-checkout").innerText()).trim(),
     "run-1/forge · main",
-    "the selected scope and runs index call the same exported checkout-label rule",
+    "the runs index calls the same exported checkout-label rule",
   );
   await page.screenshot({ path: join(SHOTS, "fg831-mobile-scope-to-runs.png"), fullPage: true });
   await page.close();

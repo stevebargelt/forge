@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GROUPS, NAV_GROUPS, ROUTES, carriesScope, groupOf, hashFor, navItemFor, parseHash } from "../client/view-routing.js";
+import { GROUPS, NAV_GROUPS, ROUTES, carriesCheckout, carriesScope, groupOf, hashFor, navItemFor, parseHash } from "../client/view-routing.js";
 
 test("FG-820: every route names one of the five groups, a path, a scope requirement and its aliases", () => {
   const groupIds = GROUPS.map((g) => g.id);
@@ -50,12 +50,20 @@ test("an unknown hash lands on Home with a one-line notice naming it, and is can
   assert.equal(parseHash("#verification").view, "home", "the retired Verification tab stays retired");
 });
 
-test("list views carry scope as ?project=&checkout= and restore it from the hash", () => {
+test("FG-843: only Routing, Config and Notes carry ?checkout=; every other list view carries the project alone", () => {
   const dir = "/Users/op/src/forge wt";
+  for (const view of ["routing", "config", "notes"]) {
+    const hash = hashFor({ view, scope: { project: "forge", checkout: dir } });
+    assert.equal(hash, `#${view}?project=forge&checkout=${encodeURIComponent(dir)}`);
+    const p = parseHash(hash);
+    assert.deepEqual([p.view, p.scope, p.rewrite], [view, { project: "forge", checkout: dir }, false]);
+    assert.equal(carriesCheckout(view), true);
+  }
   const hash = hashFor({ view: "queue", scope: { project: "forge", checkout: dir } });
-  assert.equal(hash, `#queue?project=forge&checkout=${encodeURIComponent(dir)}`);
-  const p = parseHash(hash);
-  assert.deepEqual([p.view, p.group, p.scope, p.rewrite], ["queue", "plan", { project: "forge", checkout: dir }, false]);
+  assert.equal(hash, "#queue?project=forge");
+  const q = parseHash(`#queue?project=forge&checkout=${encodeURIComponent(dir)}`);
+  assert.deepEqual([q.view, q.group, q.scope, q.canonical, q.rewrite], ["queue", "plan", { project: "forge", checkout: null }, "#queue?project=forge", true]);
+  for (const view of ["home", "activity", "backlog", "runs", "models", "ops", "usage", "reviews"]) assert.equal(carriesCheckout(view), false, view);
   assert.deepEqual(parseHash("#activity?project=forge").scope, { project: "forge", checkout: null });
 });
 

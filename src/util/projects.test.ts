@@ -352,3 +352,29 @@ test("FG-831: withoutPrunedCheckouts drops pruned MISSING checkouts only, re-poi
   assert.equal(primaryGone[0]!.projectDir, "/r/p2");
   assert.equal(withoutPrunedCheckouts(records, new Set()), records, "nothing pruned: the same array");
 });
+
+test("FG-843: each checkout carries its own recorded purpose (absent when none), resolved once per checkout", () => {
+  const dirs = ["/tmp/forge", "/tmp/forge-stable", "/tmp/forge-fg801"];
+  const calls: string[] = [];
+  const purposes: Record<string, ReturnType<WorkspacePurposeResolver>> = {
+    [dirs[1]!]: { purpose: "operator" },
+    [dirs[2]!]: { purpose: "disposable_clone" },
+  };
+  const [record] = aggregateProjectSignals(
+    dirs.map((projectDir) => ({ projectDir, runCount: 1 })),
+    identity({
+      [dirs[0]!]: { key: forgeKey, branch: "main", remoteName: "forge" },
+      [dirs[1]!]: { key: forgeKey, branch: "main", remoteName: "forge" },
+      [dirs[2]!]: { key: forgeKey, branch: "feat/fg-801", remoteName: "forge" },
+    }),
+    (root) => {
+      calls.push(root);
+      return purposes[root];
+    },
+  );
+  assert.deepEqual(
+    record!.checkouts.map((checkout) => [checkout.projectDir, checkout.purpose ?? null]),
+    [[dirs[0], null], [dirs[2], "disposable_clone"], [dirs[1], "operator"]],
+  );
+  assert.equal(new Set(calls).size, calls.length, "the purpose store is read once per checkout root");
+});

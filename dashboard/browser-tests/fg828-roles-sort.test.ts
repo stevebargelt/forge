@@ -251,7 +251,7 @@ test("FG-828: roles keeps only valid sort state, drops scope like Projects, and 
   assert.equal(rolesReads, rolesReadsBeforeHeader, "header sorting issues no request");
 
   await page.goto(`${baseUrl}/#runs?project=forge&checkout=%2Fproject%2Fworktree`);
-  await waitFor(async () => hashOf(page), "#runs?project=forge&checkout=%2Fproject%2Fworktree", "the scope-bearing Runs route keeps project and checkout");
+  await waitFor(async () => hashOf(page), "#runs?project=forge", "the scope-bearing Runs route keeps the project; FG-843: the checkout rides only on Routing, Config and Notes");
   await page.goto(`${baseUrl}/#roles`);
   await page.locator(".roles-table tbody tr").first().waitFor();
   const rolesReadsBeforeKeyboard = rolesReads;

@@ -35,10 +35,22 @@ const projectsFixture = [{
   lastRunAt: new Date().toISOString(),
   checkouts: [
     { projectDir: "/workspace/forge", projectDirs: ["/workspace/forge"], branch: "main", exists: true, runCount: 4, inFlightCount: 0, liveSessions: 0 },
-    // A second checkout so the scope banner offers a switch target. Its shipping-audit
-    // fetch is made to FAIL by the fixture server (RF-3): switching to it must never
-    // leave the first scope's rows on screen.
-    { projectDir: "/workspace/forge-wt", projectDirs: ["/workspace/forge-wt"], branch: "wt", exists: true, runCount: 1, inFlightCount: 0, liveSessions: 0 },
+  ],
+}, {
+  // A second project so the scope select offers a switch target (FG-843: the scope
+  // column switches projects, not checkouts). Its shipping-audit fetch is made to FAIL
+  // by the fixture server (RF-3): switching to it must never leave the first scope's
+  // rows on screen.
+  key: "repo-other",
+  projectDir: "/workspace/other",
+  label: "Other",
+  color: "#c084fc",
+  runCount: 1,
+  inFlightCount: 0,
+  liveSessions: 0,
+  lastRunAt: new Date().toISOString(),
+  checkouts: [
+    { projectDir: "/workspace/other", projectDirs: ["/workspace/other"], branch: "main", exists: true, runCount: 1, inFlightCount: 0, liveSessions: 0 },
   ],
 }];
 
@@ -344,10 +356,10 @@ test("FG-386: switching scope clears the panel; a failed new-scope response neve
   await openShipping(page);
   assert.ok((await page.locator('[data-testid="audit-row"]').count()) > 0, "the first scope shows its rows");
 
-  // Switch to a checkout whose audit fetch FAILS. The prior scope's rows must be gone
+  // Switch to a project whose audit fetch FAILS. The prior scope's rows must be gone
   // immediately — never rendered under the new scope while it resolves, and never
   // retained when it fails.
-  await page.locator('button[title="/workspace/forge-wt"]').click();
+  await page.locator(".nav-column .nav-scope-select").selectOption("repo-other");
   await page.getByText(/loading shipping audit/).waitFor();
   assert.equal(await page.locator('[data-testid="audit-row"]').count(), 0, "no prior-scope rows survive the switch");
 
@@ -387,9 +399,9 @@ function createFixtureServer(): Server {
       return;
     }
     if (url.pathname === "/api/shipping-audit") {
-      // RF-3: the second checkout's audit fetch fails. A failed new-scope response must
+      // RF-3: the second project's audit fetch fails. A failed new-scope response must
       // not cause the panel to retain the prior scope's rows.
-      if (url.searchParams.get("projectDir") === "/workspace/forge-wt") {
+      if (url.searchParams.get("projectKey") === "repo-other") {
         res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "boom" }));
         return;
       }

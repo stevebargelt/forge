@@ -132,7 +132,7 @@ test("FG-835: #models is a Setup entry with hash-carried mode and target (FG-828
   assert.equal(ROUTES.models!.scope, "optional");
   assert.ok(listHeader("models")?.verb === "forge model policy propose", "the info tip names the gate verb");
   const p = parseHash("#models?project=atlas&checkout=%2Frepos%2Fatlas&mode=edit&target=project");
-  assert.deepEqual([p.view, p.params, p.rewrite], ["models", { mode: "edit", target: "project" }, false]);
+  assert.deepEqual([p.view, p.params, p.canonical], ["models", { mode: "edit", target: "project" }, "#models?project=atlas&mode=edit&target=project"], "FG-843: #models keeps mode and target; the checkout rides only on Routing, Config and Notes");
   const bad = parseHash("#models?mode=write&target=elsewhere");
   assert.deepEqual([bad.canonical, bad.rewrite], ["#models", true], "unknown mode/target values are dropped");
   assert.equal(modelsEditorMode(p.params), "edit");
@@ -141,7 +141,7 @@ test("FG-835: #models is a Setup entry with hash-carried mode and target (FG-828
   assert.equal(requestedTarget({ target: "project" }, { project: null }), null, "no project in scope: no project target");
   assert.equal(requestedTarget({ target: "host" }, { project: "atlas" }), "host");
   assert.equal(requestedTarget({}, { project: "atlas" }), null);
-  assert.equal(modelsEditorHash({ project: "atlas", checkout: "/repos/atlas" }, { edit: true, target: "host" }), "#models?project=atlas&checkout=%2Frepos%2Fatlas&mode=edit&target=host");
+  assert.equal(modelsEditorHash({ project: "atlas", checkout: "/repos/atlas" }, { edit: true, target: "host" }), "#models?project=atlas&mode=edit&target=host", "FG-843: the checkout does not ride on #models");
   assert.equal(modelsEditorHash(null, {}), "#models");
   assert.equal(modelPolicyReadUrl("host", { project: "atlas", checkout: "/r" }), "/api/model-policy");
   assert.equal(modelPolicyReadUrl("project", { project: "atlas", checkout: "/r" }), "/api/model-policy?project=atlas&projectDir=%2Fr");

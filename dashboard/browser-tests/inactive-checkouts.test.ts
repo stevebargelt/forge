@@ -134,14 +134,17 @@ test("Projects view hides the deleted scratchpad but keeps the missing-but-activ
   await page.close();
 });
 
+// FG-843: the checkout is named in the header of the checkout-scoped views (Routing,
+// Config, Notes) — the scope column's checkout list is gone — so the scope-control
+// assertions below read Routing's header chooser, fed by the same project.checkouts.
 test("Checkout scope controls omit stale paths and label the missing one", async () => {
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
   // Open the missing-but-active project (label 'Unknown repository') to scope by it.
   await page.getByRole("button", { name: /Open all Unknown repository checkouts/ }).click();
-  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("link", { name: "Routing", exact: true }).click();
 
-  const scope = page.locator(".project-scope-options");
+  const scope = page.locator(".page-head .checkout-chooser");
   await scope.waitFor();
   const scopeText = await scope.innerText();
   assert.ok(!scopeText.includes("scratchpad"), "scope controls never surface a stale scratchpad path");
@@ -155,27 +158,22 @@ test("Forge scope selector — the project that HAD a stale scratchpad — offer
   // The prior test scopes a project ('Unknown repository') that never carried a
   // scratchpad, so its 'no scratchpad' assertion is trivially true. This one
   // scopes the Forge project, whose grouped scratchpad WAS suppressed, proving
-  // the same suppressed project.checkouts feeds the scope selector — a stale
+  // the same suppressed project.checkouts feeds the checkout chooser — a stale
   // path can never reappear as a scope option.
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
   await page.getByRole("button", { name: /Open all Forge checkouts/ }).click();
-  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("link", { name: "Routing", exact: true }).click();
 
-  const scope = page.locator(".project-scope-options");
+  const scope = page.locator(".page-head .checkout-chooser");
   await scope.waitFor();
   const scopeText = await scope.innerText();
   assert.ok(!/scratchpad/.test(scopeText), "the suppressed scratchpad path never reaches the Forge scope selector");
-  // FG-831: the deleted scratchpad is withheld behind a count rather than dropped, so it
-  // can be revealed (labeled `missing on disk`) or pruned; it is never a default option.
-  assert.equal(await scope.locator(".checkout-missing-toggle").innerText(), "show 1 missing");
-  assert.equal(await scope.locator(".checkout-scope-btn-missing").count(), 0, "no missing checkout is offered until revealed");
-
-  // Exactly one real checkout scope option beyond the always-present 'all checkouts'.
-  const options = scope.locator(".checkout-scope-btn");
-  assert.equal(await options.count(), 2, "'all checkouts' plus exactly the one on-disk main checkout");
-  assert.match(await options.nth(0).innerText(), /all checkouts/i);
-  assert.match(await options.nth(1).innerText(), /main/, "the sole scope option is the on-disk main checkout");
+  // The deleted scratchpad is a run checkout, and missing: it is never offered. With one
+  // live operator checkout the header names it as plain text rather than a menu.
+  assert.equal(await scope.getAttribute("data-checkout-chooser"), "label", "one on-disk checkout: the plain label, no menu");
+  assert.ok(!/missing/.test(scopeText), "no missing checkout is offered");
+  assert.match(scopeText, /main/, "the sole checkout named is the on-disk main checkout");
 
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, "scope-controls-forge.png"), fullPage: true });
   await page.close();

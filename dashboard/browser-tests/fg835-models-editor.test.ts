@@ -418,7 +418,7 @@ test("FG-835: a reload keeps edit mode but not the draft; nothing is stored in t
   await page.goto(`${BASE}/#config?project=${encodeURIComponent(RIG.key)}&checkout=${encodeURIComponent(RIG.dir)}`);
   const link = page.locator('#cp-row-model-policy a[data-cp="models"]');
   await link.waitFor({ timeout: 30_000 });
-  assert.equal(await link.getAttribute("href"), `#models?project=${encodeURIComponent(RIG.key)}&checkout=${encodeURIComponent(RIG.dir)}`);
+  assert.equal(await link.getAttribute("href"), `#models?project=${encodeURIComponent(RIG.key)}`, "FG-843: #models carries the project; the checkout rides only on Routing, Config and Notes");
   assert.deepEqual(errors, []);
   await page.close();
 });

@@ -45,7 +45,8 @@ test("FG-820: nav hrefs carry scope on list views only, and the current item fol
   const scope = { project: "forge", checkout: "/r/forge" };
   const items = navModel("run", scope).flatMap((g) => g.items);
   assert.deepEqual(items.filter((i) => i.current).map((i) => i.view), ["runs"]);
-  assert.equal(items.find((i) => i.view === "queue")?.href, "#queue?project=forge&checkout=%2Fr%2Fforge");
+  assert.equal(items.find((i) => i.view === "queue")?.href, "#queue?project=forge", "FG-843: the checkout rides only on Routing, Config and Notes");
+  assert.equal(items.find((i) => i.view === "routing")?.href, "#routing?project=forge&checkout=%2Fr%2Fforge");
   assert.equal(items.find((i) => i.view === "projects")?.href, "#projects");
   assert.equal(items.find((i) => i.view === "roles")?.href, "#roles");
   assert.deepEqual([...BOTTOM_BAR_ITEMS], ["home", "runs", "queue", "backlog"]);

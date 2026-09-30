@@ -25,10 +25,11 @@ import { RUNS_LOADING, RUNS_POLL_MS, readRuns, runsUrl } from "./runs-index-rend
 import { listScreenLine } from "./screen-header-render.js";
 import { InfoTip } from "./info-tip.js";
 import { ScreenLine } from "./object-page-view.js";
-import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, navItemFor } from "./view-routing.js";
+import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, carriesCheckout, navItemFor } from "./view-routing.js";
 import { NavColumn, BottomBar, NavDrawer } from "./nav-view.js";
 import { scopeSummary, scopedHref } from "./nav-render.js";
-import { MISSING_LABEL, PRUNE_VERB, checkoutLabel, checkoutLabelForDir, dedupeCheckouts } from "./checkout-label.js";
+import { MISSING_LABEL, PRUNE_VERB, checkoutLabel, checkoutLabelForDir, dedupeCheckouts, defaultCheckout, knownCheckout } from "./checkout-label.js";
+import { CheckoutChooser } from "./checkout-chooser-view.js";
 import { verificationRowBadge } from "./verification-render.js";
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
@@ -84,10 +85,20 @@ function App() {
   // The server scope: `projectFilter` is keyed on the project key alone so its identity
   // only changes when the scope does, which is what every scope-invalidation effect keys on.
   const projectFilter = useMemo(() => (scope.project ? { key: scope.project } : null), [scope.project]);
-  const checkoutFilter = scope.checkout;
   const [feed, setFeed] = useState([]);
   const [inFlight, setInFlight] = useState([]);
   const [projects, setProjects] = useState([]);
+  const scopedProject = scope.project ? projects.find((p) => p.key === scope.project) ?? null : null;
+  // FG-843: only Routing and Config read one checkout's files, so only they send one: the
+  // hash's `checkout=` (a header-chooser pick or a deep link, run checkouts included), else
+  // the project's primary checkout — selecting a project selects it silently. Every other
+  // view reads the whole project, every checkout, so it sends the project key alone. A
+  // `checkout=` the loaded project does not know is unknown, not a run checkout: the
+  // primary is read, and the effect below drops it from the hash.
+  const staleCheckout = Boolean(scopedProject && scope.checkout && !knownCheckout(scope.checkout, scopedProject));
+  const checkoutFilter = projectFilter && (view === "routing" || view === "config")
+    ? (staleCheckout ? null : scope.checkout) ?? defaultCheckout(scopedProject)
+    : null;
   const [orchCollapsed, setOrchCollapsed] = useState(true);
   const [error, setError] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -445,13 +456,13 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     const read = async () => {
-      const load = await readRuns(runsUrl({ scope: { project: scope.project, checkout: scope.checkout }, limit: 1 }));
+      const load = await readRuns(runsUrl({ scope: { project: scope.project, checkout: null }, limit: 1 }));
       if (!cancelled) setRunsLoad(load);
     };
     read();
     const id = setInterval(read, RUNS_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
-  }, [scope.project, scope.checkout]);
+  }, [scope.project]);
 
   const pollReviews = useCallback(async () => {
     try {
@@ -635,10 +646,22 @@ function App() {
   // activity) opens the task PAGE — a hash change, so it is linkable and Back returns.
   const openTask = (taskId) => navigate({ view: "task", id: taskId });
 
-  // A project card (or one of its checkouts) scopes the dashboard and opens Activity.
-  const filterByProject = (project, checkoutDir = null) => {
-    navigate({ view: "activity", scope: { project: project.key, checkout: checkoutDir } });
+  // A project card (or one of its checkout rows) scopes the dashboard to the project and
+  // opens Activity, which reads every checkout of it (FG-843: no checkout scope there).
+  const filterByProject = (project) => {
+    navigate({ view: "activity", scope: { project: project.key, checkout: null } });
   };
+
+  // FG-843: the header chooser. On Routing and Config a pick rewrites `?checkout=` in place
+  // and the view re-reads; on Notes it opens that checkout's note.
+  const chooseCheckout = (dir) => {
+    if (view === "notes") navigate({ view: "notes", id: dir, scope: { project: scope.project, checkout: null } });
+    else changeScope({ project: scope.project, checkout: dir });
+  };
+
+  useEffect(() => {
+    if (staleCheckout && ROUTES[view]?.checkout === true) changeScope({ project: scope.project, checkout: null });
+  }, [staleCheckout, view]);
 
   const skipToContent = (e) => {
     e.preventDefault();
@@ -650,7 +673,6 @@ function App() {
   // from their payload in place of the group kicker (FG-821).
   const objectPage = currentRoute.object === "required" || (currentRoute.object === "optional" && route.id && view !== "campaigns");
   const currentGroup = GROUPS.find((g) => g.id === currentRoute.group);
-  const scopedProject = scope.project ? projects.find((p) => p.key === scope.project) ?? null : null;
   const navColumn = (idPrefix) => html`<${NavColumn}
     view=${view}
     scope=${scope}
@@ -677,6 +699,10 @@ function App() {
           <span class="page-kicker">${currentGroup?.label}</span>
           <h1 class="page-title">${currentRoute.label}</h1>
           <${InfoTip} view=${view} title=${currentRoute.label} />
+          ${scopedProject && carriesCheckout(view) ? html`
+            <span class="page-head-spacer"></span>
+            <${CheckoutChooser} project=${scopedProject} selected=${scope.checkout} onChoose=${chooseCheckout} />
+          ` : null}
         </div>
         <${ScreenLine} header=${listScreenLine(view, runsLoad)} />
       `}
@@ -713,11 +739,11 @@ function App() {
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} onReload=${poll} />`
         : view === "routing"
         ? projectFilter && !checkoutFilter
-          ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
-          : html`<${RoutingView} governance=${governance} scope=${scope} params=${route.params} onRefresh=${pollGovernance} />`
+          ? html`<div class="card muted" style="margin-top: 20px;">${projects.length === 0 ? "loading the project's checkouts…" : `No registered project has the key ${scope.project}, so there is no checkout to read.`}</div>`
+          : html`<${RoutingView} governance=${governance} scope=${{ project: scope.project, checkout: checkoutFilter }} params=${route.params} onRefresh=${pollGovernance} />`
         : view === "config"
         ? projectFilter && !checkoutFilter
-          ? html`<div class="card muted" style="margin-top: 20px;">The config graph is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
+          ? html`<div class="card muted" style="margin-top: 20px;">${projects.length === 0 ? "loading the project's checkouts…" : `No registered project has the key ${scope.project}, so there is no checkout to read.`}</div>`
           : html`<${ControlPlaneView} data=${controlPlane} modelsHref=${hashFor({ view: "models", scope })} />`
         : view === "models"
         ? html`<${ModelsView} key=${`${scope.project ?? ""}\n${scope.checkout ?? ""}`} scope=${scope} params=${route.params} />`

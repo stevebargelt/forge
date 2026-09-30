@@ -18,7 +18,7 @@ export interface CrumbPayload {
 export interface CrumbProject {
   key: string;
   label?: string;
-  checkouts?: { projectDir: string }[];
+  checkouts?: { projectDir: string; projectDirs?: readonly string[] }[];
 }
 export type ObjectPageKind = "run" | "task" | "explain" | "ticket" | "review" | "role" | "note";
 export function projectForDir(projectDir: string | null | undefined, projects: CrumbProject[] | null | undefined): CrumbProject | null;
