@@ -8,8 +8,10 @@
 #
 # FG-799: this hook is per-project TOGGLEABLE. If <repo-root>/.forge/config.yml
 # sets `ai_attribution: allow` the hook exits 0 silently (attribution is fine in
-# that project). Absent or `suppress` → enforce. The mode is read by ONE parser
-# shared with the TypeScript reader (see below) — never a bash grep of the YAML.
+# that project). FG-845: with no project key, the host default (the forge
+# home's config.yml, resolved by the reader) applies the same way. Absent or
+# `suppress` → enforce. The mode is read by ONE parser shared with the
+# TypeScript reader (see below) — never a bash grep of the YAML.
 #
 # Patterns rejected under suppress (case-insensitive), widened to every assistant
 # forge runs (Claude/Anthropic, Codex/OpenAI/ChatGPT, Gemini, Copilot):

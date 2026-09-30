@@ -153,6 +153,7 @@ const TOGGLE_TABLE: ReadonlyArray<{ label: string; config: string; allows: boole
   { label: "RF-3 allowed (not allow)", config: "ai_attribution: allowed\n", allows: false },
   { label: "RF-3 allow_x (not allow)", config: "ai_attribution: allow_x\n", allows: false },
   { label: "explicit suppress", config: "ai_attribution: suppress\n", allows: false },
+  { label: "FG-845 RF-1 duplicate top-level key", config: "ai_attribution: allow\nai_attribution: suppress\n", allows: false },
 ];
 
 test("FG-799 (RF-1/3/5/6): every ai_attribution form drives the hook the same way the TS reader resolves it", () => {
@@ -183,6 +184,7 @@ test("FG-799: the standalone reader and readAiAttribution agree on every input (
     { label: "nested key (RF-1)", config: "nested:\n  ai_attribution: allow\n", mode: "suppress" },
     { label: "mismatched quotes (RF-6)", config: 'ai_attribution: "allow\'\n', mode: "suppress" },
     { label: "unknown value", config: "ai_attribution: banana\n", mode: "suppress" },
+    { label: "duplicate top-level key (FG-845 RF-1)", config: "ai_attribution: allow\nai_attribution: suppress\n", mode: "suppress" },
     { label: "unreadable file", config: "unreadable", mode: "suppress" },
   ];
   for (const row of table) {

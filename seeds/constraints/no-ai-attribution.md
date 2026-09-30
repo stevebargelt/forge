@@ -19,4 +19,4 @@ Write commits and PRs as a human author would. The work is attributable to the h
 
 This applies regardless of which agent role you are (orchestrator, engineer, frontend-specialist, etc.) and which workflow is running.
 
-This rule is injected only when the project's `ai_attribution` mode is `suppress` (the default). A project that sets `ai_attribution: allow` in `.forge/config.yml` opts out — the constraint is not injected and the commit-msg hook passes everything.
+This rule is injected only when the resolved `ai_attribution` mode is `suppress` (the default) — resolved from the project's own `.forge/config.yml`, falling back to a host-wide default, falling back to `suppress` itself. A project that sets `ai_attribution: allow` (or inherits an `allow` host default) opts out — the constraint is not injected and the commit-msg hook passes everything. See `docs/how-to-ai-attribution.md`.

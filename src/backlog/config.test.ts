@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { readBacklogConfig, writeProjectKey, writeBacklogConfig } from "./config.js";
+import { editTopLevelConfigText, readBacklogConfig, writeProjectKey, writeBacklogConfig } from "./config.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "forge-backlog-config-test-"));
@@ -225,4 +225,20 @@ test("FG-590 readRetentionConfig: malformed YAML reads as no override", () => {
   mkdirSync(join(dir, ".forge"));
   writeFileSync(join(dir, ".forge", "config.yml"), "retention: : : :\n  bad");
   assert.equal(readRetentionConfig(dir), undefined);
+});
+
+test("FG-845 editTopLevelConfigText: CRLF line endings and an indented top level are kept", () => {
+  assert.equal(editTopLevelConfigText("c.yml", "a: 1\r\nk: x\r\n", "k", "y"), "a: 1\r\nk: y\r\n");
+  assert.equal(editTopLevelConfigText("c.yml", "a: 1\r\n", "k", "y"), "a: 1\r\nk: y\r\n");
+  assert.equal(editTopLevelConfigText("c.yml", "  a: 1\n", "k", "y"), "  a: 1\n  k: y\n");
+  assert.equal(editTopLevelConfigText("c.yml", "", "k", "y"), "k: y\n");
+  assert.equal(editTopLevelConfigText("c.yml", "a: 1\n", "k", null), null);
+});
+
+test("FG-845 editTopLevelConfigText: refuses edits that would not resolve as intended", () => {
+  assert.throws(() => editTopLevelConfigText("c.yml", "k: x\nk: z\n", "k", "y"), /refusing to rewrite/);
+  assert.throws(() => editTopLevelConfigText("c.yml", "{a: 1}\n", "k", "y"), /refusing to rewrite/);
+  assert.throws(() => editTopLevelConfigText("c.yml", "- a\n", "k", "y"), /not a mapping/);
+  assert.throws(() => editTopLevelConfigText("c.yml", "k: |\n  x\n", "k", "y"), /refusing to rewrite/);
+  assert.throws(() => editTopLevelConfigText("c.yml", "a: 1\n", "k", "y", () => false), /would not resolve 'k' to 'y'/);
 });

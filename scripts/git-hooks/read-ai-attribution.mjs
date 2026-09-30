@@ -21,31 +21,50 @@
 // differed space-vs-NUL between the copies) still fails the pin, not just a mode diff.
 //
 // ─── FAIL CLOSED, NEVER THROW ────────────────────────────────────────────────
+// FG-845: the host level is read from $FORGE_HOME (default ~/.forge) in the hook's
+// own environment. In an agent container that has no host config mounted, the host
+// level is simply absent and the project value (or suppress) governs.
+//
 // Contract: print exactly `allow` or `suppress` on stdout, exit 0. On ANY failure — no
 // config, unreadable file, a malformed value, an unexpected error — print `suppress`
 // and exit 0. A throw into the hook, or a silent `allow` from a broken config, are the
 // two outcomes this must never produce.
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+
+// FG-845: the mode resolves project file → host file ($FORGE_HOME/config.yml, the
+// same default the TypeScript reader uses) → suppress, through the inline copy of
+// resolveAiAttributionLevels below — so a host `allow` reaches the hook exactly as a
+// project `allow` does, and a broken project file never lets the host value through.
+function hostConfigFile() {
+  return join(process.env.FORGE_HOME ?? join(homedir(), ".forge"), "config.yml");
+}
+
+function readLevel(path) {
+  try {
+    return { kind: "text", text: readFileSync(path, "utf8") };
+  } catch (err) {
+    return classifyAiAttributionReadError(err);
+  }
+}
+
+function readMode(projectDir, hostFile) {
+  return resolveAiAttributionLevels(readLevel(join(projectDir, ".forge", "config.yml")), readLevel(hostFile)).mode;
+}
 
 function main() {
   const projectDir = process.argv[2];
   if (!projectDir) return "suppress";
-  let text;
-  try {
-    text = readFileSync(join(projectDir, ".forge", "config.yml"), "utf8");
-  } catch {
-    return "suppress"; // absent or unreadable
-  }
-  return parseAiAttributionConfig(text).mode;
+  return readMode(projectDir, hostConfigFile());
 }
 
 // ── inline copy of src/v2/ai-attribution-parse.ts (pinned by ai-attribution.test.ts) ──
 
 function parseAiAttributionConfig(text) {
-  const NONE = { mode: "suppress", recognized: false };
+  const NONE = { mode: "suppress", recognized: false, present: false };
   if (text == null) return NONE;
 
   const keyLines = [];
@@ -56,12 +75,14 @@ function parseAiAttributionConfig(text) {
   if (keyLines.length === 0) return NONE;
 
   const minIndent = Math.min(...keyLines.map((k) => k.indent));
-  const top = keyLines.find((k) => k.indent === minIndent && k.key === "ai_attribution");
+  const tops = keyLines.filter((k) => k.indent === minIndent && k.key === "ai_attribution");
+  const top = tops[0];
   if (!top) return NONE;
+  if (tops.length > 1) return { mode: "suppress", recognized: false, present: true, duplicate: true };
 
   const value = scalarValue(top.rest);
-  if (value === "allow" || value === "suppress") return { mode: value, recognized: true };
-  return NONE;
+  if (value === "allow" || value === "suppress") return { mode: value, recognized: true, present: true };
+  return { mode: "suppress", recognized: false, present: true };
 }
 
 function scalarValue(rest) {
@@ -86,6 +107,28 @@ function stripComment(s) {
   return s;
 }
 
+function resolveAiAttributionLevels(project, host) {
+  const levels = [
+    ["project", project],
+    ["host", host],
+  ];
+  for (const [level, read] of levels) {
+    if (read.kind === "absent") continue;
+    if (read.kind === "unreadable") return { mode: "suppress", source: "default", failed: { level, why: "unreadable" } };
+    const parsed = parseAiAttributionConfig(read.text);
+    if (!parsed.present) continue;
+    if (parsed.duplicate) return { mode: "suppress", source: "default", failed: { level, why: "duplicate" } };
+    if (!parsed.recognized) return { mode: "suppress", source: "default", failed: { level, why: "unrecognized" } };
+    return { mode: parsed.mode, source: level };
+  }
+  return { mode: "suppress", source: "default" };
+}
+
+function classifyAiAttributionReadError(err) {
+  const code = err?.code;
+  return code === "ENOENT" || code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
+}
+
 // Run the CLI ONLY when invoked directly (the commit-msg hook shells out to this
 // file). Guarding it lets the pin test import the parse helpers below without the
 // side effect of reading argv / writing stdout / exiting.
@@ -100,4 +143,11 @@ function runCli() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runCli();
 
-export { parseAiAttributionConfig, scalarValue, stripComment };
+export {
+  parseAiAttributionConfig,
+  scalarValue,
+  stripComment,
+  resolveAiAttributionLevels,
+  classifyAiAttributionReadError,
+  readMode,
+};
