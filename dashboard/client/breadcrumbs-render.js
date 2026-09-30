@@ -74,12 +74,12 @@ export function breadcrumbTrail(page, payload, projects) {
   return crumbs.map((crumb, i) => (i === crumbs.length - 1 ? { ...crumb, href: null } : crumb));
 }
 
-/** A role page's trail: Roles › <role> › <tab>. Role pages are global, so there is no
- *  project crumb; the tab crumb is the page on screen. */
-export function roleTrail(role, tabLabel) {
+/** A role page's trail: Roles › <role> › <tab>. The Roles list is global, so there is no
+ *  project crumb; the role crumb keeps the page's scope. The tab crumb is the page on screen. */
+export function roleTrail(role, tabLabel, scope = null) {
   return [
     { kind: "roles", label: "Roles", href: hashFor({ view: "roles" }) },
-    { kind: "role", label: role, href: hashFor({ view: "roles", id: role }) },
+    { kind: "role", label: role, href: hashFor({ view: "roles", id: role, scope }) },
     { kind: "role-tab", label: tabLabel, href: null },
   ];
 }

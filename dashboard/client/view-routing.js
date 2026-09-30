@@ -17,6 +17,8 @@
 // FG-821: object tabs follow the Paperclip pattern — an unknown tab falls back to the
 // route's default (its first tab), which the canonical hash omits. FG-817: `#roles` is
 // the Roles list and `#roles/<role>[/<tab>]` a role page, with `overview` the default tab.
+// Its scope is `object` (FG-835): only a role page carries scope — its Harness rows resolve
+// at the scoped checkout — while the list, like Projects, drops it.
 // `tabAliases` maps a retired tab name onto its successor (FG-827: `configuration` is now
 // `harness`), so a saved link lands on the renamed tab and is canonicalized to it.
 // FG-837: the Roles list's `family=` (an FG-829 family) filters it beside FG-828's
@@ -48,7 +50,7 @@ export const ROUTES = Object.freeze({
   task: { group: "evidence", label: "Task", path: "#task/<taskId>[/explain]", scope: "none", object: "required", parent: "runs", tabs: ["detail", "explain"], aliases: [] },
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
-  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["family", "sort", "dir"], paramValues: { family: ["build", "red", "research", "test", "review", "plan", "author"], sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
+  roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "object", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["family", "sort", "dir"], paramValues: { family: ["build", "red", "research", "test", "review", "plan", "author"], sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
   routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", params: ["mode"], paramValues: { mode: ["edit"] }, aliases: ["governance"] },
   models: { group: "setup", label: "Models", path: "#models", scope: "optional", object: "none", params: ["mode", "target"], paramValues: { mode: ["edit"], target: ["host", "project"] }, aliases: [] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
@@ -84,9 +86,11 @@ export function navItemFor(view) {
   return route.parent ?? view;
 }
 
-export function carriesScope(view) {
+/** Whether a location carries scope; `id` matters only to a route whose scope is `object`. */
+export function carriesScope(view, id = null) {
   const route = ROUTES[view];
-  return Boolean(route) && route.scope !== "none";
+  if (!route || route.scope === "none") return false;
+  return route.scope !== "object" || Boolean(id);
 }
 
 function normalizeScope(scope) {
@@ -121,7 +125,7 @@ export function hashFor({ view, id = null, tab = null, scope = null, params = nu
     if (route.tabs && tab && tab !== route.tabs[0] && route.tabs.includes(tab)) path += `/${encodeURIComponent(tab)}`;
   }
   const query = [];
-  const { project, checkout } = route.scope === "none" ? NO_SCOPE : normalizeScope(scope);
+  const { project, checkout } = carriesScope(name, route.object !== "none" ? id : null) ? normalizeScope(scope) : NO_SCOPE;
   if (project) query.push(`project=${encodeURIComponent(project)}`);
   if (checkout) query.push(`checkout=${encodeURIComponent(checkout)}`);
   query.push(...routeParams(route, params, route.object !== "none" ? id : null));
@@ -178,7 +182,7 @@ export function parseHash(hash) {
     }
   }
 
-  if (!carriesScope(view)) scope = NO_SCOPE;
+  if (!carriesScope(view, id)) scope = NO_SCOPE;
   const owner = ROUTES[view];
   if (!(owner.object !== "none" && id)) {
     for (const key of owner.params ?? []) {

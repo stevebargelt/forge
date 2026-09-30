@@ -1,3 +1,5 @@
+import type { HashScope } from "./view-routing.js";
+
 export interface RoleIndexEntry {
   role: string;
   description: string;
@@ -41,7 +43,7 @@ export interface RoleIndexRow {
 }
 export function profileLabel(role: Partial<RoleIndexEntry>): string;
 export function mountLabel(mode: string | null | undefined): string;
-export function rolesIndexRows(body: RolesIndexBody | null | undefined): RoleIndexRow[];
+export function rolesIndexRows(body: RolesIndexBody | null | undefined, scope?: Partial<HashScope> | null): RoleIndexRow[];
 export function rolesIndexNotices(body: RolesIndexBody | null | undefined): string[];
 export function rolesIndexSource(body: RolesIndexBody | null | undefined): string;
 export type RoleSortColumn = "role" | "activity" | "profile" | "mount" | "lastTask";

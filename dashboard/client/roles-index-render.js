@@ -51,11 +51,11 @@ export function mountLabel(mode) {
   return mode === "ro" ? "read-only" : mode === "rw" ? "read-write" : "—";
 }
 
-export function rolesIndexRows(body) {
+export function rolesIndexRows(body, scope = null) {
   if (!body || !Array.isArray(body.roles)) return [];
   return body.roles.map((r) => ({
     role: r.role,
-    href: hashFor({ view: "roles", id: r.role }),
+    href: hashFor({ view: "roles", id: r.role, scope }),
     description: dash(r.description),
     subtitle: roleSubtitle(r.description),
     family: roleFamily(r.role),

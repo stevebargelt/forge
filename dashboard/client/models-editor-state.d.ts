@@ -38,6 +38,8 @@ export declare function modelsEditorMode(params: Record<string, string> | null |
 export declare function requestedTarget(params: Record<string, string> | null | undefined, scope: ModelsScope): "host" | "project" | null;
 export declare function modelsEditorHash(scope: ModelsScope, opts?: { edit?: boolean; target?: string | null }): string;
 export declare function modelPolicyReadUrl(target: "host" | "project", scope: ModelsScope): string;
+export declare function roleHarnessHash(role: string, target: PolicyTargetView | null | undefined): string;
+export declare function backupReadUrl(target: PolicyTargetView | null | undefined, name: string): string;
 
 export declare function policyOutline(text: string): PolicyOutline;
 export declare function yamlScalar(value: string): string;
@@ -64,7 +66,7 @@ export declare function proposalSummary(result: any): { changed: number; newlyUn
 export declare function diffSummary(diff: any[] | null | undefined): string;
 export declare function policyAuditRows(entries: Array<Record<string, any>> | null | undefined): Array<{ timestamp: string | null; who: string; actor: string | null; change: string; rationale: string | null; sha: string | null }>;
 export declare function formatBytes(n: number): string;
-export declare function backupRows(entries: Array<Record<string, any>> | null | undefined): Array<{ name: string; timestamp: string; sha: string; size: string; text: string | null }>;
+export declare function backupRows(entries: Array<Record<string, any>> | null | undefined, maxBytes: number): Array<{ name: string; timestamp: string; sha: string; size: string; blocked: string | null }>;
 export declare function modelChoices(outline: PolicyOutline | null | undefined, current: string | null, knownModels: string[] | null | undefined, inForce?: PolicyOutline | null, offered?: Iterable<string> | null): string[];
 export declare function addableRoles(outline: PolicyOutline | null | undefined, rows: Array<{ role: string }> | null | undefined): string[];
 export declare function policyFacts(read: any): { schemaVersion: string | null; profiles: number; roles: number };

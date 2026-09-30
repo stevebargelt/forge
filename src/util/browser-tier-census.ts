@@ -361,7 +361,11 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // backup and applying it through the gate; a reload keeping edit mode but not the draft, no
   // browser storage, and Config's link here; and a keyboard-only project-override apply at
   // 400px. `fg820-left-column-nav` keeps its count with Models in the Setup group. Fixture port 18843.
-  "fg835-models-editor.test.ts": 6,
+  // Its review fix batch adds two: a backup over the candidate limit shows Restore… disabled
+  // with its size and the limit (the server refusing its bytes), and a resolution row's role
+  // link opening the Harness tab under the scope the row was resolved at (project override
+  // scoped, host file unscoped).
+  "fg835-models-editor.test.ts": 8,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

@@ -12,7 +12,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -353,9 +353,14 @@ test("FG-835: Restore… loads a backup as the candidate and proposes it — the
   const name = (await newest.getAttribute("data-backup"))!;
   const backup = readFileSync(join(RIG.forgeHome, name), "utf8");
   assert.equal(backup, START, "the newest backup is the file the first apply replaced");
+  const listed = await page.evaluate(async () => (await (await fetch("/api/model-policy")).json()).backups.entries);
+  assert.ok(listed.every((b: Record<string, unknown>) => !("text" in b)), "the list carries no backup's content");
+  const backupReads: string[] = [];
+  page.on("request", (req) => { if (req.url().includes("/api/model-policy?") && req.url().includes("backup=")) backupReads.push(new URL(req.url()).searchParams.get("backup")!); });
   await newest.locator('[data-mp="restore"]').click();
   await page.waitForFunction((re) => new RegExp(re).test(location.hash), /mode=edit/.source);
   await page.locator('.mp-proposal .raci-pill[data-raci-state="gate_passed"]').waitFor({ timeout: 30_000 });
+  assert.deepEqual(backupReads, [name], "Restore… reads exactly the one backup it restores");
   assert.equal(await textarea(page).inputValue(), backup);
   assert.match(await page.locator(".raci-reload-hint").innerText(), new RegExp(`starting candidate: backup ${name.replace(/\./g, "\\.")}`));
   assert.equal(await page.locator(".mp-diff tbody tr").first().innerText(), "architecture-advisor · reasoning\tspec-writer → claude-fable-5-1 · subscription · claude-oauth · tier premium\tspec-writer → claude-opus-5-5 · subscription · claude-oauth · tier premium");
@@ -369,6 +374,28 @@ test("FG-835: Restore… loads a backup as the candidate and proposes it — the
   assert.equal(applies().length, 2, "a restore is an apply through the gate");
   assert.deepEqual(errors, []);
   await page.close();
+});
+
+test("FG-835: a backup larger than a candidate may be shows Restore… disabled with its size and the limit; the server refuses to read it", async () => {
+  const name = "model-policy.yml.bak-2000-01-01T00:00:00.000Z";
+  const path = join(RIG.forgeHome, name);
+  writeFileSync(path, `# ${"x".repeat(70 * 1024)}\n`);
+  try {
+    const { page, errors } = await open("#models");
+    const row = page.locator(`.mp-backups tbody tr[data-backup="${name}"]`);
+    await row.waitFor();
+    assert.equal(await row.locator('[data-mp="restore"]').isDisabled(), true);
+    const reason = await row.locator(".mp-restore-blocked").innerText();
+    assert.match(reason, /^70\.0 KB is over the 64\.0 KB a candidate may be — restore it from a terminal$/);
+    assert.equal(await row.locator('[data-mp="restore"]').getAttribute("title"), reason);
+    const direct = await page.evaluate(async (n) => (await fetch(`/api/model-policy?backup=${encodeURIComponent(n)}`)).status, name);
+    assert.equal(direct, 413);
+    await page.screenshot({ path: join(SHOTS, "fg835-backup-oversized.png"), fullPage: true });
+    assert.deepEqual(errors, []);
+    await page.close();
+  } finally {
+    rmSync(path, { force: true });
+  }
 });
 
 test("FG-835: a reload keeps edit mode but not the draft; nothing is stored in the browser; Config links here", async () => {
@@ -454,6 +481,36 @@ test("FG-835: keyboard only at 400px — switch the target to a project override
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, "no horizontal page overflow at 400px");
   assert.deepEqual(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })), { local: 0, session: 0 });
   await page.screenshot({ path: join(SHOTS, "fg835-keyboard-400px.png"), fullPage: true });
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("FG-835: a resolution row's role link opens its Harness tab under the scope the row was resolved at — the project override's, or unscoped for the host file", async () => {
+  // A project override that pins architecture-advisor to another profile than the host file does.
+  writeFileSync(projectPolicy(), policy().replace("    architecture-advisor: spec-writer", "    architecture-advisor: fast-orchestrator"));
+  const { page, errors } = await open(scoped("&target=project"));
+  const row = resolutionRow(page, "architecture-advisor", "reasoning");
+  await row.locator('td:text-is("claude-haiku-4-5-20251001")').waitFor({ timeout: 30_000 });
+  const scopedHash = `#roles/architecture-advisor/harness?project=${encodeURIComponent(RIG.key)}&checkout=${encodeURIComponent(RIG.dir)}`;
+  assert.equal(await row.locator(".mp-role-link").getAttribute("href"), scopedHash);
+  await row.locator(".mp-role-link").click();
+  await page.waitForFunction((h) => location.hash === h, scopedHash);
+  const model = page.locator('.role-harness-table tr[data-activity="reasoning"] td[data-col="model"]');
+  await model.waitFor({ timeout: 30_000 });
+  assert.equal(await model.innerText(), "claude-haiku-4-5-20251001", "the Harness tab re-reads the same project override the row came from");
+  await page.reload();
+  await page.locator('.role-harness-table tr[data-activity="reasoning"] td[data-col="model"]').waitFor({ timeout: 30_000 });
+  assert.equal(await model.innerText(), "claude-haiku-4-5-20251001", "the scope rides the hash, so a reload or a shared link reads the same policy");
+
+  // The host file, viewed under the same project scope: its rows are unscoped, and so is the link.
+  await page.goto(`${BASE}/${scoped("&target=host")}`);
+  const hostRow = resolutionRow(page, "architecture-advisor", "reasoning");
+  await hostRow.locator('td:text-is("claude-opus-5-5")').waitFor({ timeout: 30_000 });
+  assert.equal(await hostRow.locator(".mp-role-link").getAttribute("href"), "#roles/architecture-advisor/harness");
+  await hostRow.locator(".mp-role-link").click();
+  await page.waitForFunction(() => location.hash === "#roles/architecture-advisor/harness");
+  await page.locator('.role-harness-table tr[data-activity="reasoning"] td[data-col="model"]:text-is("claude-opus-5-5")').waitFor({ timeout: 30_000 });
+  await page.screenshot({ path: join(SHOTS, "fg835-harness-scoped.png"), fullPage: true });
   assert.deepEqual(errors, []);
   await page.close();
 });

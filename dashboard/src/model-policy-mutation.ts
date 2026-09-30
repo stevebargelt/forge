@@ -449,8 +449,9 @@ export type PolicyResolutionRow = {
   error: string | null;
 };
 
-/** `text` is null for a backup larger than a candidate may be — it could not be proposed. */
-export type PolicyBackup = { path: string; name: string; timestamp: string; sha256: string; bytes: number; text: string | null };
+/** A listed backup carries no content: its bytes are read one at a time, on Restore…, by
+ *  readPolicyBackup — a policy may once have held a key the operator since removed. */
+export type PolicyBackup = { path: string; name: string; timestamp: string; sha256: string; bytes: number };
 
 export type ModelPolicyReadModel = {
   /** The file an apply from this view replaces, and the confirmation it takes. */
@@ -486,10 +487,21 @@ export function listPolicyBackups(targetPath: string, limit: number = MAX_BACKUP
     .slice(0, limit)
     .map((name) => {
       const path = join(dir, name);
-      const bytes = statSync(path).size;
-      const text = bytes <= MAX_POLICY_CANDIDATE_BYTES ? readFileSync(path, "utf8") : null;
-      return { path, name, timestamp: name.slice(prefix.length), sha256: sha256OfBytes(path), bytes, text };
+      return { path, name, timestamp: name.slice(prefix.length), sha256: sha256OfBytes(path), bytes: statSync(path).size };
     });
+}
+
+/** GET /api/model-policy?backup=<name>: one listed backup's bytes, for Restore… to load as
+ *  the candidate. `name` must be one listPolicyBackups returns for the target (the host
+ *  file, or `checkoutDir`'s override) — never a path — and no larger than a candidate may be. */
+export function readPolicyBackup(name: string, checkoutDir?: string): { ok: true; backup: PolicyBackup & { text: string } } | MutationRefusal {
+  const targetPath = policyTarget(checkoutDir).path;
+  const backup = listPolicyBackups(targetPath).find((b) => b.name === name);
+  if (!backup) return refuse(404, `${JSON.stringify(name)} is not a listed backup of ${targetPath}.`);
+  if (backup.bytes > MAX_POLICY_CANDIDATE_BYTES) {
+    return refuse(413, `the backup ${name} is ${backup.bytes} bytes; a candidate may be at most ${MAX_POLICY_CANDIDATE_BYTES} — restore it from a terminal.`);
+  }
+  return { ok: true, backup: { ...backup, text: readFileSync(backup.path, "utf8") } };
 }
 
 /** The model ids the current generation's runtime seeds name in their `models:` maps — picker

@@ -25,5 +25,5 @@ export function projectForDir(projectDir: string | null | undefined, projects: C
 export function projectCrumb(projectDir: string | null | undefined, projects: CrumbProject[] | null | undefined, projectKey?: string | null): Crumb;
 export function breadcrumbTrail(page: ObjectPageKind, payload: CrumbPayload | null | undefined, projects: CrumbProject[] | null | undefined): Crumb[];
 export function parentHash(page: ObjectPageKind, payload: CrumbPayload | null | undefined, scope?: Partial<HashScope> | null): string;
-export function roleTrail(role: string, tabLabel: string): Crumb[];
+export function roleTrail(role: string, tabLabel: string, scope?: Partial<HashScope> | null): Crumb[];
 export function noteTrail(checkoutLabel: string, scope: Partial<HashScope> | null | undefined, projects: CrumbProject[] | null | undefined): Crumb[];

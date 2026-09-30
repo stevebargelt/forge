@@ -1,4 +1,4 @@
-export type ScopeRequirement = "none" | "optional" | "project" | "checkout";
+export type ScopeRequirement = "none" | "optional" | "project" | "checkout" | "object";
 export interface Route {
   group: string;
   label: string;
@@ -32,6 +32,6 @@ export const ROUTES: Readonly<Record<string, Route>>;
 export const NAV_GROUPS: readonly { id: string; label: string; items: string[] }[];
 export function groupOf(view: string): string | null;
 export function navItemFor(view: string): string | null;
-export function carriesScope(view: string): boolean;
+export function carriesScope(view: string, id?: string | null): boolean;
 export function hashFor(location: { view: string; id?: string | null; tab?: string | null; scope?: Partial<HashScope> | null; params?: Record<string, string> | null }): string;
 export function parseHash(hash?: string | null): ParsedHash;

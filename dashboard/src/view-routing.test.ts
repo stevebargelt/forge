@@ -7,7 +7,7 @@ test("FG-820: every route names one of the five groups, a path, a scope requirem
   assert.deepEqual(groupIds, ["now", "plan", "evidence", "setup", "health"]);
   for (const [view, route] of Object.entries(ROUTES)) {
     assert.ok(groupIds.includes(route.group), `${view} has a known group`);
-    assert.ok(["none", "optional", "project", "checkout"].includes(route.scope), `${view} has a known scope requirement`);
+    assert.ok(["none", "optional", "project", "checkout", "object"].includes(route.scope), `${view} has a known scope requirement`);
     assert.ok(route.path.startsWith(`#${view}`), `${view}'s path pattern starts with its own name`);
     assert.ok(Array.isArray(route.aliases));
   }

@@ -39,6 +39,25 @@ export function modelsEditorHash(scope, { edit = false, target = null } = {}) {
   return hashFor({ view: "models", scope, params });
 }
 
+/** A role's Harness tab, at the scope its resolution rows were read at: the target
+ *  project's checkout, or none for the host file — so the tab and the row cannot disagree. */
+export function roleHarnessHash(role, target) {
+  const project = target?.kind === "project" ? target.project : null;
+  const scope = project ? { project: project.key, checkout: project.checkoutDir } : null;
+  return hashFor({ view: "roles", id: role, tab: "harness", scope });
+}
+
+/** The GET for one listed backup's bytes (Restore…), for the target it was listed under. */
+export function backupReadUrl(target, name) {
+  const q = new URLSearchParams();
+  if (target?.kind === "project" && target.project) {
+    q.set("project", target.project.key);
+    q.set("projectDir", target.project.checkoutDir);
+  }
+  q.set("backup", name);
+  return `/api/model-policy?${q.toString()}`;
+}
+
 /** The GET the page reads for a target. */
 export function modelPolicyReadUrl(target, scope) {
   if (target !== "project" || !scope?.project) return "/api/model-policy";
@@ -528,9 +547,19 @@ export function formatBytes(n) {
   return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
 }
 
-/** BACKUPS: newest first, as the server listed them. */
-export function backupRows(entries) {
-  return (entries ?? []).map((b) => ({ name: b.name, timestamp: b.timestamp, sha: b.sha256, size: formatBytes(b.bytes), text: b.text ?? null }));
+/** BACKUPS: newest first, as the server listed them. A backup larger than a candidate may
+ *  be (`maxBytes`) cannot be proposed, so its Restore… is blocked with the reason. */
+export function backupRows(entries, maxBytes) {
+  return (entries ?? []).map((b) => {
+    const over = Number.isFinite(maxBytes) && b.bytes > maxBytes;
+    return {
+      name: b.name,
+      timestamp: b.timestamp,
+      sha: b.sha256,
+      size: formatBytes(b.bytes),
+      blocked: over ? `${formatBytes(b.bytes)} is over the ${formatBytes(maxBytes)} a candidate may be — restore it from a terminal` : null,
+    };
+  });
 }
 
 // ─── quick-edit choices ──────────────────────────────────────────────────────

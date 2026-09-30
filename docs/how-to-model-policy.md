@@ -378,7 +378,9 @@ audit line; from a terminal both are optional.
 **The dashboard path — Setup › Models (FG-835).** `#models` shows the policy in force (its
 source path, `schema_version`, profile and role counts), the resolution of every installed
 role × activity (the same rows as each role's Harness / Runtime tab — a role name opens its
-own), the backups beside the target and the RECORDED audit tail. The **target** of an apply
+own, under the scope the row was resolved at: the project override's rows link
+`#roles/<role>/harness?project=<key>&checkout=<dir>`, the host file's rows link it unscoped),
+the backups beside the target and the RECORDED audit tail. The **target** of an apply
 is named on the MODEL POLICY line: with a project in scope it is that project's override
 when one exists, else the host file, and the line's link switches between them
 (`#models?target=project` / `?target=host`). Setup › Config stays read-only and links here
@@ -410,10 +412,12 @@ from its Model policy row.
 
 **Backups and Restore….** Each apply keeps the file it replaced as
 `<target>.bak-<timestamp>` beside it; the BACKUPS table lists them newest first with sha256
-and size. **Restore…** loads a backup into the editor as the candidate and proposes it —
-then it is applied like any other edit, through the gate, with the typed target and a
-rationale. It is never a file copy. (From a terminal: `forge model policy apply
-<target>.bak-<timestamp> --confirm`.)
+and size — never their contents. **Restore…** reads that one backup's bytes, loads them into
+the editor as the candidate and proposes it — then it is applied like any other edit,
+through the gate, with the typed target and a rationale. It is never a file copy. A backup
+larger than a candidate may be (64 KB, `maxCandidateBytes`) cannot be proposed from the
+dashboard: its Restore… is disabled and the row says so, with its size and the limit.
+Restore it from a terminal: `forge model policy apply <target>.bak-<timestamp> --confirm`.
 
 **The gate** (`propose` runs it; `apply` re-runs it right before writing and
 never relies on an earlier propose). A candidate fails when:

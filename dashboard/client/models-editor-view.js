@@ -16,7 +16,6 @@ import htm from "htm";
 import { ApplyCard, CodeEditor, ErrorNote, Pill, postJson } from "./raci-editor-view.js";
 import { badgeClass } from "./status-tokens.js";
 import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
-import { hashFor } from "./view-routing.js";
 import {
   applyReadiness,
   beginApply,
@@ -43,6 +42,7 @@ import {
   addableRoles,
   applyBody,
   applyVerb,
+  backupReadUrl,
   backupRows,
   modelChoices,
   modelPolicyReadUrl,
@@ -58,6 +58,7 @@ import {
   quickEdit,
   requestedTarget,
   resolutionRows,
+  roleHarnessHash,
   setProfileModel,
   setRoleOverride,
   settleModelsApply,
@@ -80,6 +81,7 @@ export function ModelsView({ scope, params }) {
   const [read, setRead] = useState({ data: null, error: null });
   const [applied, setApplied] = useState(null);
   const [start, setStart] = useState(null);
+  const [restoreError, setRestoreError] = useState(null);
   const seq = useRef(0);
 
   const reload = useCallback(async () => {
@@ -101,16 +103,24 @@ export function ModelsView({ scope, params }) {
   useEffect(() => {
     setRead({ data: null, error: null });
     setApplied(null);
+    setRestoreError(null);
     reload();
   }, [reload]);
 
   const go = (edit, target = asked) => {
     window.location.hash = modelsEditorHash(scope, { edit, target });
   };
-  const restore = (backup) => {
+  // A backup's bytes are read only now, one backup at a time — the list carries none.
+  const restore = async (backup) => {
     setApplied(null);
-    setStart({ text: backup.text, origin: `backup:${backup.name}`, propose: true });
-    go(true);
+    setRestoreError(null);
+    try {
+      const { text } = await readPolicy(backupReadUrl(read.data.target, backup.name));
+      setStart({ text, origin: `backup:${backup.name}`, propose: true });
+      go(true);
+    } catch (e) {
+      setRestoreError(`${backup.name} could not be read: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   const data = read.data;
@@ -140,11 +150,11 @@ export function ModelsView({ scope, params }) {
       <section class="workbench-section" role="region" aria-label="RESOLUTION — every role × activity in force">
         <div class="raci-label-row mp-label-row"><h2 class="workbench-section-label raci-inline-label">RESOLUTION</h2><span class="raci-spacer"></span>
           <span class="hint">in force · ${data.resolution.rows.length} role × activity rows</span></div>
-        <${ResolutionTable} rows=${resolutionRows(data.resolution.rows, null)} />
+        <${ResolutionTable} rows=${resolutionRows(data.resolution.rows, null)} target=${data.target} />
         <${HarnessHint} />
         ${data.resolution.policyError ? html`<div class="raci-error">the policy in force fails to load: ${data.resolution.policyError}</div>` : null}
       </section>
-      <${BackupsTable} read=${data} onRestore=${restore} />
+      <${BackupsTable} read=${data} onRestore=${restore} error=${restoreError} />
       <${RecordedTable} read=${data} />
     </section>
   `;
@@ -207,7 +217,7 @@ function stateCells(s) {
   };
 }
 
-function ResolutionTable({ rows, collapse = false }) {
+function ResolutionTable({ rows, target, collapse = false }) {
   const [all, setAll] = useState(false);
   const { shown, hidden } = collapse && !all ? visibleRows(rows) : { shown: rows, hidden: 0 };
   return html`
@@ -218,7 +228,7 @@ function ResolutionTable({ rows, collapse = false }) {
           ${shown.map((r) => {
             const c = stateCells(r.state);
             return html`<tr class=${r.tags.includes("changed") ? "raci-row-changed" : ""} data-role=${r.role} data-activity=${r.activity}>
-              <td class=${`${MONO_CLASS} mp-role`}><a class="mp-role-link" href=${hashFor({ view: "roles", id: r.role, tab: "harness" })}>${r.role}</a>${r.tags.map((t) => html` <span class=${`raci-tag mp-tag-${t}`}>${t}</span>`)}</td>
+              <td class=${`${MONO_CLASS} mp-role`}><a class="mp-role-link" href=${roleHarnessHash(r.role, target)}>${r.role}</a>${r.tags.map((t) => html` <span class=${`raci-tag mp-tag-${t}`}>${t}</span>`)}</td>
               <td title=${r.isDefault ? "the role's default activity" : ""}>${r.activity}</td>
               <td class=${MONO_CLASS}>${c.profile}</td>
               <td class=${MONO_CLASS}>${c.model}${r.was !== null ? html`<div class="mp-was">was ${r.was}</div>` : null}</td>
@@ -234,8 +244,8 @@ function ResolutionTable({ rows, collapse = false }) {
   `;
 }
 
-function BackupsTable({ read, onRestore }) {
-  const rows = backupRows(read.backups.entries);
+function BackupsTable({ read, onRestore, error }) {
+  const rows = backupRows(read.backups.entries, read.maxCandidateBytes);
   return html`
     <section class="workbench-section mp-backups" role="region" aria-label="BACKUPS — earlier versions of the target">
       <h2 class="workbench-section-label">BACKUPS</h2>
@@ -251,15 +261,18 @@ function BackupsTable({ read, onRestore }) {
                   <td class=${`${MONO_CLASS} muted`} title=${b.sha ?? ""}>${shortSha(b.sha, 8)}</td>
                   <td class="muted">${b.size}</td>
                   <td class="mp-restore-cell">
-                    <button type="button" class="raci-btn" data-mp="restore" disabled=${b.text === null}
-                      title=${b.text === null ? "larger than a candidate may be — restore it from a terminal" : `Load ${b.name} into the editor and propose it`}
+                    <button type="button" class="raci-btn" data-mp="restore" disabled=${b.blocked !== null}
+                      title=${b.blocked ?? `Load ${b.name} into the editor and propose it`}
                       onClick=${() => onRestore(b)}>Restore…</button>
-                    ${i === 0 ? html` <span class="hint">proposes this backup as the candidate</span>` : null}
+                    ${b.blocked !== null
+                      ? html` <span class="hint mp-restore-blocked">${b.blocked}</span>`
+                      : i === 0 ? html` <span class="hint">proposes this backup as the candidate</span>` : null}
                   </td>
                 </tr>`)}
               </tbody>
             </table>
           </div>`}
+      ${error ? html`<div class="raci-error mp-restore-error" role="alert">${error}</div>` : null}
     </section>
   `;
 }
@@ -382,7 +395,7 @@ function ModelsEditor({ read, scope, start, onView, onApplied }) {
         </div>
         <div class="raci-pane">
           <div class="raci-label-row"><h2 class="workbench-section-label raci-inline-label">RESOLUTION (DRY-RUN)</h2><span class="raci-spacer"></span><${ResolutionPill} state=${state} /></div>
-          <${ResolutionTable} rows=${resolutionRows(read.resolution.rows, state.lastGreen)} collapse=${true} />
+          <${ResolutionTable} rows=${resolutionRows(read.resolution.rows, state.lastGreen)} target=${target} collapse=${true} />
           <${HarnessHint} />
         </div>
       </div>

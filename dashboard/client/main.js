@@ -380,7 +380,7 @@ function App() {
   const changeScope = (next) => {
     adoptScope(next);
     const current = routeRef.current;
-    if (!carriesScope(current.view)) return;
+    if (!carriesScope(current.view, current.id)) return;
     const id = current.view === "campaigns" ? null : current.id;
     if (id !== current.id) setRoute({ ...current, id });
     replaceHash(hashFor({ ...current, id, scope: next }));
@@ -607,7 +607,7 @@ function App() {
     const onHash = () => {
       const parsed = parseHash(window.location.hash);
       if (parsed.rewrite) replaceHash(parsed.canonical);
-      if (carriesScope(parsed.view)) adoptScope(parsed.scope);
+      if (carriesScope(parsed.view, parsed.id)) adoptScope(parsed.scope);
       // FG-348: the selected run follows the hash, so a deep link (#run/<runId>)
       // and the back button both land on the right run.
       setRoute({ view: parsed.view, id: parsed.id, tab: parsed.tab, params: parsed.params });
@@ -729,8 +729,8 @@ function App() {
         ? html`<${RunsIndexView} scope=${scope} status=${route.params?.status ?? null} projects=${projects} onLoad=${setRunsLoad} />`
         : view === "roles"
         ? route.id
-          ? html`<${RolePage} key=${route.id} role=${route.id} tab=${route.tab} project=${scope.project} />`
-          : html`<${RolesIndexView} params=${route.params} />`
+          ? html`<${RolePage} key=${route.id} role=${route.id} tab=${route.tab} scope=${scope} />`
+          : html`<${RolesIndexView} params=${route.params} scope=${scope} />`
         : view === "backlog"
         ? route.id
           ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`

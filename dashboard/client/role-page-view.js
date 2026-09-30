@@ -34,12 +34,19 @@ function when(iso) {
   return formatTimestamp(iso);
 }
 
-function useRoleDetail(role, project) {
+function roleDetailUrl(role, scope) {
+  if (!scope?.project) return `/api/roles/${encodeURIComponent(role)}`;
+  const q = new URLSearchParams({ project: scope.project });
+  if (scope.checkout) q.set("projectDir", scope.checkout);
+  return `/api/roles/${encodeURIComponent(role)}?${q.toString()}`;
+}
+
+function useRoleDetail(role, scope) {
   const [state, setState] = useState({ key: null, detail: null, error: null });
-  const key = `${role}\n${project ?? ""}`;
+  const key = roleDetailUrl(role, scope);
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/roles/${encodeURIComponent(role)}${project ? `?project=${encodeURIComponent(project)}` : ""}`)
+    fetch(key)
       .then(async (res) => {
         if (res.ok) return { detail: await res.json(), error: null };
         if (res.status === 400) return { detail: null, error: (await res.json().catch(() => ({}))).error ?? `Role read refused (HTTP 400).` };
@@ -74,10 +81,10 @@ function SubnavIcon({ paths }) {
   return html`<svg class="role-subnav-icon" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths.map((d) => html`<path key=${d} d=${d} />`)}</svg>`;
 }
 
-function RoleSubnav({ role, current }) {
+function RoleSubnav({ role, current, scope }) {
   return html`
     <nav class="role-subnav" aria-label="Role views">
-      ${roleSubnav(role, current).map((g) => html`
+      ${roleSubnav(role, current, scope).map((g) => html`
         <div key=${g.id} class="role-subnav-group" data-group=${g.id}>
           <div class="role-subnav-label" id=${`role-subnav-${g.id}`}>${g.label}</div>
           <ul aria-labelledby=${`role-subnav-${g.id}`}>
@@ -110,8 +117,8 @@ function RoleHead({ role, detail }) {
   `;
 }
 
-export function RolePage({ role, tab, project = null }) {
-  const { detail, error } = useRoleDetail(role, project);
+export function RolePage({ role, tab, scope = null }) {
+  const { detail, error } = useRoleDetail(role, scope);
   const current = tab || "overview";
   const wide = useWide();
   useEscapeTo(parentHash("role", null));
@@ -121,27 +128,27 @@ export function RolePage({ role, tab, project = null }) {
     ${!detail && !error ? html`<div class="muted">loading ${role}…</div>` : null}
     ${detail ? html`
       ${detail.storeError ? html`<div class="card muted role-notice" role="status">Store unreadable: ${detail.storeError}</div>` : null}
-      <${RoleTab} tab=${current} detail=${detail} />
+      <${RoleTab} tab=${current} detail=${detail} scope=${scope} />
       <p class="role-caption role-footer" data-caption=${current}>${tabCaption(detail, current)}</p>
     ` : null}
   `;
   return html`
     <section class=${"object-page role-page" + (wide ? " role-page-wide" : "")} data-role=${role}>
-      <div class="page-head object-head role-crumbs"><${Breadcrumbs} crumbs=${roleTrail(role, roleTabLabel(current))} /></div>
+      <div class="page-head object-head role-crumbs"><${Breadcrumbs} crumbs=${roleTrail(role, roleTabLabel(current), scope)} /></div>
       <div class="role-layout">
-        ${wide ? html`<${RoleSubnav} role=${role} current=${current} />` : null}
+        ${wide ? html`<${RoleSubnav} role=${role} current=${current} scope=${scope} />` : null}
         <div class="role-main">
           <${RoleHead} role=${role} detail=${detail} />
           ${wide
             ? html`<div class="object-tabpanel role-panel" id="role-views-panel" role="region" aria-labelledby="role-panel-title">${body}</div>`
-            : html`<${ObjectTabs} id="role-views" label="Role views" tabs=${roleTabs(role, current)}>${body}<//>`}
+            : html`<${ObjectTabs} id="role-views" label="Role views" tabs=${roleTabs(role, current, scope)}>${body}<//>`}
         </div>
       </div>
     </section>
   `;
 }
 
-function RoleTab({ tab, detail }) {
+function RoleTab({ tab, detail, scope }) {
   switch (tab) {
     case "instructions": return html`<${InstructionsPanel} key=${detail.instructions.sha256 ?? "refused"} i=${detail.instructions} />`;
     case "harness": return html`<${HarnessTab} hn=${detail.harness} />`;
@@ -152,7 +159,7 @@ function RoleTab({ tab, detail }) {
     case "tasks": return html`<${TasksTab} rows=${detail.tasks.rows} />`;
     case "receipts": return html`<${ReceiptsTab} r=${detail.receipts} />`;
     case "usage": return html`<${UsageTab} u=${detail.usage} />`;
-    default: return html`<${OverviewTab} detail=${detail} />`;
+    default: return html`<${OverviewTab} detail=${detail} scope=${scope} />`;
   }
 }
 
@@ -185,10 +192,10 @@ function Kv({ rows }) {
   `;
 }
 
-function OverviewTab({ detail }) {
+function OverviewTab({ detail, scope }) {
   const o = detail.overview;
   const latest = latestTaskCard(o);
-  const cards = overviewCards(detail, roleFamily(detail.role));
+  const cards = overviewCards(detail, roleFamily(detail.role), scope);
   const recent = recentTaskRows(o);
   return html`
     <div class="role-overview">
@@ -217,7 +224,7 @@ function OverviewTab({ detail }) {
           ["Tokens", o.usage ? `${tokens(o.usage.inputTokens)} in · ${tokens(o.usage.outputTokens)} out · ${o.usage.requests} requests` : "—"],
         ]} /><//>
       </div>
-      <div class="role-section-head"><h3 class="role-card-title">Recent tasks</h3><a class="role-card-link" href=${hashFor({ view: "roles", id: detail.role, tab: "tasks" })}>See all →</a></div>
+      <div class="role-section-head"><h3 class="role-card-title">Recent tasks</h3><a class="role-card-link" href=${hashFor({ view: "roles", id: detail.role, tab: "tasks", scope })}>See all →</a></div>
       ${recent.length === 0 ? html`<div class="muted">No task recorded for this role.</div>` : html`
         <ul class="role-task-rows">
           ${recent.map((t) => html`

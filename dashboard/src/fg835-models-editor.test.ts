@@ -16,6 +16,7 @@ import {
   addableRoles,
   applyBody,
   applyVerb,
+  backupReadUrl,
   backupRows,
   diffSummary,
   lineOfPath,
@@ -34,6 +35,7 @@ import {
   quickEdit,
   requestedTarget,
   resolutionRows,
+  roleHarnessHash,
   setProfileModel,
   setRoleOverride,
   settleModelsApply,
@@ -386,14 +388,32 @@ test("FG-835 machine: apply lands with the CLI's own account; a spent proposal r
 
 test("FG-835 restore: a backup opens as the candidate — the same edit/propose loop, never a file copy", () => {
   const backup = SMALL.replace("claude-opus-5-5", "claude-sonnet-5");
-  const rows = backupRows([{ name: "model-policy.yml.bak-2026-09-30T07:41:02.000Z", timestamp: "2026-09-30T07:41:02.000Z", sha256: "9d2f", bytes: 1234, text: backup }, { name: "big", timestamp: "t", sha256: "x", bytes: 900000, text: null }]);
-  assert.deepEqual(rows.map((r) => [r.size, r.text === null]), [["1.2 KB", false], ["878.9 KB", true]]);
+  const rows = backupRows([{ name: "model-policy.yml.bak-2026-09-30T07:41:02.000Z", timestamp: "2026-09-30T07:41:02.000Z", sha256: "9d2f", bytes: 1234 }, { name: "big", timestamp: "t", sha256: "x", bytes: 900000 }], 65536);
+  assert.deepEqual(rows.map((r) => [r.size, r.blocked]), [
+    ["1.2 KB", null],
+    ["878.9 KB", "878.9 KB is over the 64.0 KB a candidate may be — restore it from a terminal"],
+  ], "an oversized backup's Restore… is blocked with the size and the limit, never a silent no-op");
+  assert.equal(backupRows([{ name: "edge", timestamp: "t", sha256: "x", bytes: 65536 }], 65536)[0]!.blocked, null, "exactly the limit is restorable");
+  assert.equal(backupReadUrl(HOST, "model-policy.yml.bak-2026-09-30T07:41:02.000Z"), "/api/model-policy?backup=model-policy.yml.bak-2026-09-30T07%3A41%3A02.000Z");
+  assert.equal(
+    backupReadUrl(PROJECT, "model-policy.yml.bak-x"),
+    `/api/model-policy?project=${KEY}&projectDir=%2Frepos%2Fatlas&backup=model-policy.yml.bak-x`,
+    "a backup's bytes are read one at a time, from the target it was listed under",
+  );
   const opened = openModelsEditor(read(SMALL), { text: backup, origin: "backup:model-policy.yml.bak-2026-09-30T07:41:02.000Z" });
   assert.deepEqual([opened.draft, opened.baseText, opened.origin, isDirty(opened)], [backup, SMALL, "backup:model-policy.yml.bak-2026-09-30T07:41:02.000Z", true]);
   const proposed = settlePropose({ ...opened, proposing: true }, backup, green(backup), MODEL_POLICY_GATE);
   assert.equal(proposed.proposal?.text, backup, "the backup's bytes are what gets proposed and applied");
   const replaced = replaceDraft(proposed, SMALL, "backup:other");
   assert.equal(proposalLive(replaced), false, "restoring another backup supersedes the proposal");
+});
+
+test("FG-835 resolution: a role links to its Harness tab at the scope the row was resolved at — the project's checkout, or none for the host file", () => {
+  assert.equal(roleHarnessHash("engineer", PROJECT), `#roles/engineer/harness?project=${KEY}&checkout=%2Frepos%2Fatlas`);
+  assert.equal(roleHarnessHash("engineer", HOST), "#roles/engineer/harness", "host rows are unscoped, so the tab reads the host policy too");
+  const opened = parseHash(roleHarnessHash("architecture-advisor", PROJECT));
+  assert.deepEqual([opened.view, opened.id, opened.tab, opened.scope, opened.rewrite], ["roles", "architecture-advisor", "harness", { project: KEY, checkout: "/repos/atlas" }, false], "the scoped link is canonical, so the role page reads the same checkout");
+  assert.deepEqual(parseHash(`#roles?project=${KEY}&checkout=%2Frepos%2Fatlas`).scope, { project: null, checkout: null }, "the Roles list still drops scope (FG-828)");
 });
 
 test("FG-835 debounce/abort: dry-runs post the draft to propose after quiet, abort the in-flight one, and only the newest settles", async () => {
