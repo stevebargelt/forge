@@ -662,14 +662,17 @@ a.notes-row { display: block; color: inherit; text-decoration: none; }
 .roles-table tbody tr { position: relative; }
 .roles-table tbody tr + tr td { border-top: 1px solid var(--border); }
 .roles-table tbody tr[data-role]:hover { background: var(--bg-elev-2); }
-.roles-table tbody tr[data-role]:has(a:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 .roles-table td { padding: 12px 16px; vertical-align: middle; min-width: 0; }
 .roles-ident { display: grid; grid-template-columns: 36px auto minmax(0, 1fr); align-items: center; column-gap: 16px; row-gap: 2px; }
 .roles-ident .role-name { display: contents; }
 .roles-ident .role-tile { grid-row: 1 / 3; grid-column: 1; }
 .roles-ident a { grid-row: 1; grid-column: 2; color: var(--fg); font-weight: 600; text-decoration: none; white-space: nowrap; }
 .roles-ident a::after { content: ""; position: absolute; inset: 0; }
-.roles-ident a:focus-visible { outline: none; }
+.roles-ident a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@supports selector(:has(a)) {
+  .roles-table tbody tr[data-role]:has(a:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .roles-ident a:focus-visible { outline: none; }
+}
 .roles-flag { grid-row: 1; grid-column: 3; justify-self: start; font-size: 11px; color: var(--fg-dim); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
 .role-subtitle { grid-row: 2; grid-column: 2 / 4; font-size: 12.5px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .role-model, .role-profile { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--fg-dim); }

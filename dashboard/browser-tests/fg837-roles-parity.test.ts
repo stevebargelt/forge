@@ -373,6 +373,29 @@ test("FG-837: keyboard — Tab walks the family tabs into the sort headers, Ente
   await page.locator('.roles-family-tab[data-family="build"]').focus();
   await page.keyboard.press("Space");
   await waitFor(async () => hashOf(page), "#roles?family=build&sort=profile&dir=asc", "Space selects a family and keeps the sort");
+
+  await page.locator('th[data-sort="mount"] button').focus();
+  await page.keyboard.press("Tab");
+  const focusRing = await page.evaluate(() => {
+    const a = document.activeElement as HTMLElement;
+    const tr = a.closest("tr[data-role]") as HTMLElement | null;
+    return { inRow: !!tr && a.matches(".roles-ident a:focus-visible"), rowOutline: tr ? getComputedStyle(tr).outlineStyle : "" };
+  });
+  assert.ok(focusRing.inRow, "Tab from the last sort header lands on the first row's link");
+  assert.equal(focusRing.rowOutline, "solid", "with :has() the focused row is outlined");
+  const ringRules = await page.evaluate(() => {
+    const out: Array<{ supports: string | null; outline: string }> = [];
+    const walk = (rules: CSSRuleList, supports: string | null) => {
+      for (const r of Array.from(rules)) {
+        if (r instanceof CSSSupportsRule) walk(r.cssRules, r.conditionText);
+        else if (r instanceof CSSStyleRule && r.selectorText === ".roles-ident a:focus-visible") out.push({ supports, outline: r.style.getPropertyValue("outline") });
+      }
+    };
+    for (const sheet of Array.from(document.styleSheets)) walk(sheet.cssRules, null);
+    return out;
+  });
+  assert.ok(ringRules.some((r) => r.supports === null && r.outline.includes("solid")), "the link's own focus outline is unconditional, so a browser without :has() still shows focus");
+  assert.ok(ringRules.every((r) => r.outline !== "none" || (r.supports ?? "").includes(":has(")), "the link outline is only dropped where :has() carries the row outline");
   assert.deepEqual(errors, []);
   await page.close();
 });
