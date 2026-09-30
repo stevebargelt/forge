@@ -271,10 +271,9 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   const windows = page.getByRole("group", { name: "runtime window:" }).getByRole("button");
   assert.deepEqual(await windows.allTextContents(), ["1d", "7d", "30d", "90d", "all"]);
   assert.equal(await windows.nth(1).getAttribute("aria-pressed"), "true");
-  const pick = (name: string) => windows.filter({ hasText: new RegExp(`^${name}$`) });
 
   // 1d — hourly labels, and the one empty leading hour draws no bar.
-  await pick("1d").click();
+  await chooseWindow(page, "1d");
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   assert.equal(await page.locator(".runtime-chart rect.runtime-bar").count(), 19, "6 of 25 hourly buckets are empty");
   assert.match(await page.locator(".runtime-chart svg").textContent() ?? "", /14:00/);
@@ -289,7 +288,7 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   assert.match(hourLabels.at(-1) ?? "", /^6\/10 14:00 UTC$/);
 
   // 30d — a single point, still a legible bar inside the plot area.
-  await pick("30d").click();
+  await chooseWindow(page, "30d");
   await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
   await page.getByRole("button", { name: "documentation-maintainer" }).waitFor();
   const bar = page.locator(".runtime-chart rect.runtime-bar");
@@ -302,7 +301,7 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   assert.match(await page.locator(".runtime-table").innerText(), /2h3m/, "a multi-hour average must format as hours");
 
   // 90d — weekly resolution. The widest label form there is, actually rendered.
-  await pick("90d").click();
+  await chooseWindow(page, "90d");
   await page.getByRole("img", { name: /by week, over 90d/ }).waitFor();
   assert.match(await page.locator(".runtime-caption").innerText(), /per week, bucketed by completion time/);
   const weekLabels = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
@@ -313,14 +312,14 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   assert.equal(await page.locator(".runtime-chart rect.runtime-bar-partial").count(), 1);
 
   // all — no observations at all: an empty state, not an empty chart.
-  await pick("all").click();
+  await chooseWindow(page, "all");
   await page.locator(".runtime-empty").waitFor();
   assert.match(await page.locator(".runtime-empty").innerText(), /No completed agent runs for All agents in this window/);
   assert.equal(await page.locator(".runtime-chart").count(), 0);
   assert.equal(await page.locator(".runtime-table").count(), 0);
   assert.match(await page.locator(".runtime-selector").innerText(), /0 runs in all/);
 
-  await pick("7d").click();
+  await chooseWindow(page, "7d");
   await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
   await page.close();
 });
@@ -333,8 +332,10 @@ test("The runtime panel shows a loading state before the first response", async 
   await loading.waitFor();
   assert.match(await loading.innerText(), /loading agent runtime/);
   assert.equal(await loading.getAttribute("role"), "status");
-  // The window controls stay usable while the series is in flight.
+  // The window controls stay on screen while the series is in flight — disabled
+  // (FG-836) until it lands, with the window being read shown pressed.
   assert.equal(await page.locator(".runtime-window-btns button").count(), 5);
+  assert.equal(await runtimeWindow(page, "7d").getAttribute("aria-pressed"), "true");
   await page.locator(".runtime-chart svg").waitFor();
   assert.equal(await page.locator(".runtime-loading").count(), 0);
   runtimeDelayMs = 0;
@@ -368,7 +369,7 @@ test("The runtime panel stays contained and legible at a narrow viewport", async
 
   // The densest window at the narrowest width — 25 hourly buckets, a y-axis, a
   // value row and a run-count row, all inside a 390px column.
-  await runtimeWindow(page, "1d").click();
+  await chooseWindow(page, "1d");
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   const dense = await measureNarrowLayout(page);
   assert.ok(dense.documentWidth <= dense.innerWidth, JSON.stringify(dense));
@@ -509,20 +510,24 @@ test("A failing runtime read is reported, not left as a permanent loading state"
   await page.goto(`${baseUrl}/#ops`);
   await page.locator(".runtime-chart svg").waitFor();
 
-  // The reachable path: an ordinary window switch, which drops the cached series
-  // first, against a store read that is now failing.
+  // The reachable path: an ordinary window switch against a store read that is now
+  // failing. FG-836: the switch keeps the 7d series on screen, so the failure is
+  // reported beside it, naming both the window that failed and the one still shown.
   runtimeStatus = 500;
   await runtimeWindow(page, "1d").click();
-  const error = page.locator(".runtime-error");
+  const error = page.locator(".runtime-stale");
   await error.waitFor();
-  assert.match(await error.innerText(), /HTTP 500/);
+  assert.match(await error.innerText(), /HTTP 500\. Still showing 7d — these numbers are for 7d, not 1d/);
   assert.equal(await error.getAttribute("role"), "alert");
   assert.equal(await page.locator(".runtime-loading").count(), 0, "a failed read is not a load in progress");
+  assert.match(await page.locator(".runtime-chart svg").getAttribute("aria-label") ?? "", /by day, over 7d/);
 
   runtimeStatus = 200;
-  await runtimeWindow(page, "7d").click();
+  await chooseWindow(page, "7d");
+  await page.waitForFunction(() => location.hash === "#ops");
+  await error.waitFor({ state: "detached" });
   await page.getByRole("img", { name: /by day, over 7d/ }).waitFor();
-  assert.equal(await page.locator(".runtime-error").count(), 0, "the panel recovers once the read succeeds");
+  assert.equal(await page.locator(".runtime-error").count(), 0);
   await page.close();
 });
 
@@ -531,11 +536,13 @@ test("A slow earlier window's response cannot overwrite the window the operator 
   await page.goto(`${baseUrl}/#ops`);
   await page.locator(".runtime-chart svg").waitFor();
 
-  // 90d answers slowly, 1d immediately — so the FIRST request resolves LAST.
+  // 90d answers slowly, 1d immediately — so the FIRST request would resolve LAST.
+  // FG-836: the window buttons are disabled mid-read, so the second change arrives the
+  // other way a window can move — the hash (back button, an edited link).
   runtimeDelayByWindow.set("90d", 700);
   await runtimeWindow(page, "90d").click();
   await page.locator(".runtime-loading").waitFor();
-  await runtimeWindow(page, "1d").click();
+  await page.evaluate(() => { location.hash = "#ops?window=1d"; });
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
 
   await page.waitForTimeout(1200);
@@ -559,11 +566,11 @@ test("A role with no observations in the new window is written back, not just di
   // 30d has no red-wide runs, so the panel falls back to All agents. Re-picking
   // "All agents" in the select would fire no change event — the value is already
   // that — so the fallback has to be the stored selection, not just the shown one.
-  await runtimeWindow(page, "30d").click();
+  await chooseWindow(page, "30d");
   await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
   assert.equal(await page.locator(".runtime-role-select").inputValue(), "__all__");
 
-  await runtimeWindow(page, "7d").click();
+  await chooseWindow(page, "7d");
   await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
   assert.equal(await page.locator(".runtime-role-select").inputValue(), "__all__");
   assert.match(await page.locator(".runtime-selector").innerText(), /14 runs in 7d/,
@@ -621,7 +628,7 @@ test("Every bucket's mean and run count are on the chart surface, not only in th
 
   // The single-point case keeps both labels — it is the degenerate chart, not an
   // exception to reading a value off it.
-  await runtimeWindow(page, "30d").click();
+  await chooseWindow(page, "30d");
   await page.getByRole("button", { name: "documentation-maintainer" }).waitFor();
   assert.deepEqual(await page.locator(".runtime-chart svg .runtime-value").allTextContents(), ["2.1h"]);
   assert.deepEqual(await page.locator(".runtime-chart svg .runtime-count").allTextContents(), ["1"]);
@@ -634,7 +641,7 @@ test("A window too dense to label every bar lists every bucket's value beneath i
   await page.goto(`${baseUrl}/#ops`);
   await page.locator(".runtime-chart svg").waitFor();
 
-  await runtimeWindow(page, "1d").click();
+  await chooseWindow(page, "1d");
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   const plotted = await page.locator(".runtime-chart svg .runtime-count").count();
   assert.ok(plotted < 25, `25 hourly bars cannot all carry a label: ${plotted}`);
@@ -677,7 +684,7 @@ test("Period labels name their own zone in the label itself, so a reader cannot 
 
   // Hourly labels carry it too — the case the operator was actually reading. 25
   // buckets span two local dates, so the row escalates and every label is dated.
-  await runtimeWindow(page, "1d").click();
+  await chooseWindow(page, "1d");
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   for (const tick of await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents()) {
     assert.match(tick, /^\d+\/\d+ \d\d:00 PDT$/);
@@ -735,7 +742,7 @@ test("The chart defaults to Local, states which mode is active, and switches eve
 
   // The per-bucket value list is the surface a dense window falls back to, and it
   // is the one most easily left behind in the other mode.
-  await runtimeWindow(page, "1d").click();
+  await chooseWindow(page, "1d");
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   assert.match(await page.locator(".runtime-bucket-values li").first().innerText(), /Jun 9 14:00 – Jun 9 15:00 UTC/);
   await tz("Local").click();
@@ -831,6 +838,14 @@ async function anyChartRowOverlaps(page: Page): Promise<string | null> {
 function runtimeWindow(page: Page, name: string) {
   return page.getByRole("group", { name: "runtime window:" }).getByRole("button")
     .filter({ hasText: new RegExp(`^${name}$`) });
+}
+
+// FG-836: a window change keeps the previous series on screen until the new read lands,
+// so a click is only done once the panel says it is showing the chosen window.
+async function chooseWindow(page: Page, name: string): Promise<void> {
+  await runtimeWindow(page, name).click();
+  await page.waitForFunction((w) => document.querySelector(".runtime-showing")?.textContent?.trim() === `showing ${w}`
+    && document.querySelector(".runtime-body-loading") === null, name);
 }
 
 // reducedMotion defaults to "reduce" because the bars carry a 0.2s height

@@ -315,7 +315,7 @@ test("FG-648 AC9: a bar's mean and its run count are drawn together, at every wi
 
     for (const window of ["7d", "1d", "30d", "90d"]) {
       if (window !== "7d") {
-        await runtimeWindow(page, window).click();
+        await chooseWindow(page, window);
         await page.getByRole("img", { name: new RegExp(`over ${window}\\.`) }).waitFor();
       }
       const where = `${window} at ${width}px`;
@@ -489,7 +489,7 @@ test("FG-648 AC9: whenever the plot drops a bar's labels, the list beneath carri
     for (const window of ["7d", "1d", "30d", "90d"]) {
       const total = BUCKETS_IN.get(window)!;
       if (window !== "7d") {
-        await runtimeWindow(page, window).click();
+        await chooseWindow(page, window);
         await page.getByRole("img", { name: new RegExp(`over ${window}\\.`) }).waitFor();
       }
       const where = `${window} at ${width}px`;
@@ -549,7 +549,7 @@ test("FG-661 AC7: no period a reader can read off the PLOT is bare, in EITHER to
     await tz(mode).click();
     for (const window of ["7d", "1d", "30d", "90d"]) {
       if (window !== charted) {
-        await runtimeWindow(page, window).click();
+        await chooseWindow(page, window);
         await page.getByRole("img", { name: new RegExp(`over ${window}\\.`) }).waitFor();
         charted = window;
       }
@@ -581,7 +581,7 @@ test("FG-661 AC7: no period a reader can read off the PLOT is bare, in EITHER to
   // `8/1 PDT` and its tooltip states the hours outright, so there is no offset left
   // to apply and nothing to get wrong.
   await tz("Local").click();
-  await runtimeWindow(page, "7d").click();
+  await chooseWindow(page, "7d");
   await page.getByRole("img", { name: /over 7d\./ }).waitFor();
   assert.deepEqual(await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents(),
     ["7/25 PDT", "7/26 PDT", "7/27 PDT", "7/28 PDT", "7/29 PDT", "7/30 PDT", "7/31 PDT", "8/1 PDT"]);
@@ -811,6 +811,14 @@ async function anyRowOverlaps(page: Page): Promise<string | null> {
 function runtimeWindow(page: Page, name: string) {
   return page.getByRole("group", { name: "runtime window:" }).getByRole("button")
     .filter({ hasText: new RegExp(`^${name}$`) });
+}
+
+// FG-836: a window change keeps the previous series on screen until the new read lands,
+// so a click is only done once the panel says it is showing the chosen window.
+async function chooseWindow(page: Page, name: string): Promise<void> {
+  await runtimeWindow(page, name).click();
+  await page.waitForFunction((w) => document.querySelector(".runtime-showing")?.textContent?.trim() === `showing ${w}`
+    && document.querySelector(".runtime-body-loading") === null, name);
 }
 
 async function newPage(

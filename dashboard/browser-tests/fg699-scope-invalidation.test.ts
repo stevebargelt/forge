@@ -233,10 +233,11 @@ test("A slow leaving-scope failure that lands after the scope switch cannot repa
   await page.locator(".runtime-loading").waitFor();
   assert.equal(await page.locator(".runtime-error").count(), 0, "the leaving read is still pending, not yet resolved");
 
-  // Arm the wait for the leaving scope's own late response BEFORE switching, so
-  // we can assert on the panel exactly after that retired 500 has been received.
-  const leavingLate = page.waitForResponse(
-    (res) => res.url().includes("/api/agent-runtime") && res.url().includes(`projectKey=${PROJECT_KEY}`),
+  // Arm the wait for the leaving scope's own read BEFORE switching. FG-836: the scope
+  // change aborts it (AbortController), so it ends as a failed request rather than a
+  // late 500 — we assert on the panel exactly after that retirement.
+  const leavingLate = page.waitForEvent("requestfailed",
+    (req) => req.url().includes("/api/agent-runtime") && req.url().includes(`projectKey=${PROJECT_KEY}`),
   );
 
   // Narrow to a fast, clean checkout scope while the leaving 500 is in flight.
@@ -244,8 +245,8 @@ test("A slow leaving-scope failure that lands after the scope switch cannot repa
   await page.getByRole("img", { name: /Average agent runtime for/ }).waitFor();
   assert.match(await page.locator(".runtime-sample-note").innerText(), /3 runs in 7d/, "the new scope's own data is shown");
 
-  // The retired 500 lands. Its seq is stale, so the guard drops it and never
-  // writes: no error is attributed to the checkout the operator moved to. The
+  // The retired read is aborted; had it landed, its superseded token would make the
+  // reader drop it without writing: no error is attributed to the checkout the operator moved to. The
   // decisive check is `.runtime-stale`, NOT `.runtime-error` — with the new
   // scope's data on screen a broken guard would attach the leaving 500 to it as
   // the stale-data notice (render 1144), never the bare error card (render 1159).

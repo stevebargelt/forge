@@ -267,6 +267,7 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/notes-render.js",
   "dashboard/client/notes-view.js",
   "dashboard/client/object-page-view.js",
+  "dashboard/client/ops-window-state.js",
   "dashboard/client/order-pin-render.js",
   "dashboard/client/order-pin-view.js",
   "dashboard/client/queue-board-state.js",

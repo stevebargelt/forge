@@ -236,7 +236,7 @@ test("A window with no completions charts real zeros, and a window with no runs 
 
   // 30d: every bucket observed, every bucket zero. The chart still draws, and
   // every bar says 0 — the duration metric's "no runs" gap would be a lie here.
-  await runtimeWindow(page, "30d").click();
+  await chooseWindow(page, "30d");
   await page.getByRole("img", { name: /over 30d/ }).waitFor();
   assert.deepEqual(await page.locator(".runs-chart svg .runs-value").allTextContents(), ["0", "0", "0"]);
   assert.equal(await page.locator(".runs-chart rect.runs-bar-zero").count(), 3);
@@ -245,7 +245,7 @@ test("A window with no completions charts real zeros, and a window with no runs 
   assert.deepEqual(await page.locator(".runs-chart svg .runs-y-tick").allTextContents(), ["0", "1"]);
 
   // all: no range at all — there is no grid to draw, so it is an empty state.
-  await runtimeWindow(page, "all").click();
+  await chooseWindow(page, "all");
   await page.locator(".runs-empty").waitFor();
   assert.match(await page.locator(".runs-empty").innerText(), /No completed runs in this window/);
   assert.equal(await page.locator(".runs-chart").count(), 0);
@@ -259,7 +259,7 @@ test("A dense window thins its axis labels and spells every bucket's count out b
   await metric(page, "Completed runs").click();
   await page.locator(".runs-chart svg").waitFor();
 
-  await runtimeWindow(page, "1d").click();
+  await chooseWindow(page, "1d");
   await page.getByRole("img", { name: /Completed runs by hour, over 1d/ }).waitFor();
   const labels = await page.locator(".runs-chart svg .runs-x-tick").allTextContents();
   assert.ok(labels.length < 25, `25 hourly labels cannot all be drawn: ${labels.length}`);
@@ -422,6 +422,14 @@ function metric(page: Page, name: string) {
 function runtimeWindow(page: Page, name: string) {
   return page.getByRole("group", { name: "runtime window:" }).getByRole("button")
     .filter({ hasText: new RegExp(`^${name}$`) });
+}
+
+// FG-836: a window change keeps the previous series on screen until the new read lands,
+// so a click is only done once the panel says it is showing the chosen window.
+async function chooseWindow(page: Page, name: string): Promise<void> {
+  await runtimeWindow(page, name).click();
+  await page.waitForFunction((w) => document.querySelector(".runtime-showing")?.textContent?.trim() === `showing ${w}`
+    && document.querySelector(".runtime-body-loading") === null, name);
 }
 
 async function newPage(
