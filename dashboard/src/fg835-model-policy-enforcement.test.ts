@@ -190,5 +190,7 @@ test("FG-835 enforcement: GET's read model uses Harness rows, reverses bounded a
   assert.equal(read.audit.entries[0]?.rationale, "r54", "audit tail is newest first");
   assert.deepEqual(read.backups.entries.map((b) => b.name), ["model-policy.yml.bak-2026-09-02T00:00:00.000Z", "model-policy.yml.bak-2026-09-01T00:00:00.000Z"]);
   assert.ok(read.backups.entries.every((b) => /^[a-f0-9]{64}$/.test(b.sha256)));
+  assert.deepEqual(read.backups.entries.map((b) => b.text), ["new\n", "old\n"], "each backup carries its bytes, so Restore loads it as the candidate");
+  assert.deepEqual(read.knownModels, ["claude-sonnet-5"], "the picker's model ids come from the generation's runtime seeds");
   assert.deepEqual(calls(), [], "GET's read-model work never shells forge");
 });

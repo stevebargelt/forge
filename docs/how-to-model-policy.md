@@ -375,6 +375,46 @@ target (the project key, or `host`) and a rationale, and runs `apply --confirm -
 `docs/SCHEMA-CONTRACT.md`). `--rationale <text>` and `--source dashboard` are recorded in the
 audit line; from a terminal both are optional.
 
+**The dashboard path — Setup › Models (FG-835).** `#models` shows the policy in force (its
+source path, `schema_version`, profile and role counts), the resolution of every installed
+role × activity (the same rows as each role's Harness / Runtime tab — a role name opens its
+own), the backups beside the target and the RECORDED audit tail. The **target** of an apply
+is named on the MODEL POLICY line: with a project in scope it is that project's override
+when one exists, else the host file, and the line's link switches between them
+(`#models?target=project` / `?target=host`). Setup › Config stays read-only and links here
+from its Model policy row.
+
+1. **Edit policy** (`#models?mode=edit`) opens the policy in force in a plain `<textarea>`.
+   Nothing is stored in the browser: a reload reopens it on that starting candidate.
+2. **Quick edit** covers the common changes without hand-editing: *Profile → model* picks a
+   model for one profile's map entry (the choices are every model the draft or the policy
+   in force names, the seed runtimes' known models, and any already offered this session —
+   listed alphabetically, and the list only grows, so changing a model never drops the one
+   it replaced), and *Role override → profile* pins a role to a profile, changes it,
+   drops it (`(inherit default)`) or adds one (`+ add a role override`). Each rewrites one
+   line of the YAML in place — comments and keys it does not know are kept — so a quick
+   edit is just an edit, and the editor stays the source of truth. A shape it cannot place
+   (a non-empty flow `agents: { … }`) is left to the editor.
+3. Every change is dry-run through `POST /api/model-policy/propose` (debounced). The gate's
+   findings show under the editor **by line** — a schema error per field, an unknown
+   runtime seed on its `runtime:` line, unsatisfiable auth on its `auth:` line, an
+   undispatchable role on its override — and **RESOLUTION (DRY-RUN)** shows the last green
+   answer, rows tagged *changed* (with what the model or profile *was*) or *undispatchable*.
+4. **Propose** renders the gate's summary and the before → after row for every role ×
+   activity that changes, with the candidate's sha and the minutes left in the window.
+5. **Apply** takes the typed target (`host` or the project key) and a rationale, and is
+   enabled only for the exact bytes proposed — any edit afterwards supersedes the proposal.
+   The CLI's answer renders inline; the resolution table, backups and audit tail re-read,
+   and the Harness tabs show the new resolution. An undispatchable candidate is refused as
+   the CLI words it; the dashboard never offers `--allow-undispatchable`.
+
+**Backups and Restore….** Each apply keeps the file it replaced as
+`<target>.bak-<timestamp>` beside it; the BACKUPS table lists them newest first with sha256
+and size. **Restore…** loads a backup into the editor as the candidate and proposes it —
+then it is applied like any other edit, through the gate, with the typed target and a
+rationale. It is never a file copy. (From a terminal: `forge model policy apply
+<target>.bak-<timestamp> --confirm`.)
+
 **The gate** (`propose` runs it; `apply` re-runs it right before writing and
 never relies on an earlier propose). A candidate fails when:
 

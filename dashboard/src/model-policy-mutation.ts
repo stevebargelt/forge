@@ -22,12 +22,15 @@
 //
 // GET /api/model-policy is the editor's read: the effective source, the FG-827 resolution
 // table (roles.ts harnessActivities, so it can never disagree with the Harness tab), the
-// audit tail and the backups beside the target. No subprocess (invariant 21).
+// audit tail and the backups beside the target (each with its bytes, so Restore can load one
+// into the editor as the candidate), and the model ids the seed runtimes name (the quick-edit
+// picker). No subprocess (invariant 21).
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { parse as parseYaml } from "yaml";
 import type { ProjectRecord } from "./queries.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
 import { MAX_RATIONALE_CHARS, PROPOSAL_WINDOW_MS, ProposalWindow, sha256Hex } from "./raci-mutation.js";
@@ -53,7 +56,7 @@ import {
 import { loadModelPolicyWithSource } from "../../src/v2/loader.js";
 import { auditLogPath, policyTarget } from "../../src/v2/model-policy-gate.js";
 import { listSeedRoles } from "../../src/v2/role-surface.js";
-import { resolveSeedGeneration } from "../../src/v2/seed-generation.js";
+import { generationCategoryDir, resolveSeedGeneration, type SeedGeneration } from "../../src/v2/seed-generation.js";
 import { sha256OfBytes } from "../../src/util/content-digest.js";
 
 export type ModelPolicyAction = "model-policy-propose" | "model-policy-apply";
@@ -446,7 +449,8 @@ export type PolicyResolutionRow = {
   error: string | null;
 };
 
-export type PolicyBackup = { path: string; name: string; timestamp: string; sha256: string; bytes: number };
+/** `text` is null for a backup larger than a candidate may be — it could not be proposed. */
+export type PolicyBackup = { path: string; name: string; timestamp: string; sha256: string; bytes: number; text: string | null };
 
 export type ModelPolicyReadModel = {
   /** The file an apply from this view replaces, and the confirmation it takes. */
@@ -463,6 +467,8 @@ export type ModelPolicyReadModel = {
   resolution: { rows: PolicyResolutionRow[]; policyError: string | null };
   audit: { path: string; entries: RaciAuditLine[]; skippedLines: number };
   backups: { dir: string; entries: PolicyBackup[] };
+  /** Every model id a runtime seed in the current generation names, sorted. */
+  knownModels: string[];
   proposalWindowMs: number;
   maxCandidateBytes: number;
 };
@@ -480,8 +486,30 @@ export function listPolicyBackups(targetPath: string, limit: number = MAX_BACKUP
     .slice(0, limit)
     .map((name) => {
       const path = join(dir, name);
-      return { path, name, timestamp: name.slice(prefix.length), sha256: sha256OfBytes(path), bytes: statSync(path).size };
+      const bytes = statSync(path).size;
+      const text = bytes <= MAX_POLICY_CANDIDATE_BYTES ? readFileSync(path, "utf8") : null;
+      return { path, name, timestamp: name.slice(prefix.length), sha256: sha256OfBytes(path), bytes, text };
     });
+}
+
+/** The model ids the current generation's runtime seeds name in their `models:` maps — picker
+ *  suggestions only, so a seed is read for that map alone rather than validated whole. */
+export function runtimeSeedModels(gen: SeedGeneration | null): string[] {
+  if (!gen) return [];
+  const dir = generationCategoryDir(gen, "runtimes");
+  if (!existsSync(dir)) return [];
+  const ids = new Set<string>();
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".yml")) continue;
+    try {
+      const models = (parseYaml(readFileSync(join(dir, file), "utf8")) as { models?: unknown } | null)?.models;
+      if (!models || typeof models !== "object") continue;
+      for (const id of Object.values(models)) if (typeof id === "string" && id !== "") ids.add(id);
+    } catch {
+      // A runtime seed that does not parse names no model the picker can offer.
+    }
+  }
+  return [...ids].sort();
 }
 
 /** READ-ONLY: the model-policy editor's view of one target — the host file, or one
@@ -547,6 +575,7 @@ export function modelPolicyReadModel(project?: { owner: ProjectRecord; checkoutD
     resolution: { rows, policyError },
     audit: { path: auditPath, ...readAuditTail(auditPath) },
     backups: { dir: dirname(target.path), entries: listPolicyBackups(target.path) },
+    knownModels: runtimeSeedModels(gen),
     proposalWindowMs: PROPOSAL_WINDOW_MS,
     maxCandidateBytes: MAX_POLICY_CANDIDATE_BYTES,
   };

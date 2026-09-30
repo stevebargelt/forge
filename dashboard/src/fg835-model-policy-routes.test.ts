@@ -170,7 +170,11 @@ test("listPolicyBackups: only <target>.bak-* files beside the target, newest fir
     timestamp: "2026-09-02T00:00:00.000Z",
     sha256: sha256Hex("newer\n"),
     bytes: 6,
+    text: "newer\n",
   });
   assert.equal(listPolicyBackups(target, 1).length, 1);
+  // FG-835 part 2b: Restore loads a backup's bytes as the candidate — never one too big to propose.
+  writeFileSync(join(dir, "model-policy.yml.bak-2026-09-03T00:00:00.000Z"), "x".repeat(MAX_POLICY_CANDIDATE_BYTES + 1));
+  assert.equal(listPolicyBackups(target)[0]!.text, null);
   assert.deepEqual(listPolicyBackups(join(dir, "missing", "model-policy.yml")), []);
 });

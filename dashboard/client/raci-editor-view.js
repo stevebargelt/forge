@@ -56,7 +56,9 @@ const LINE_HEIGHT = 20;
 const PAD_TOP = 12;
 const list = (arr) => (arr && arr.length ? arr.join(", ") : "—");
 
-async function postJson(path, body, signal) {
+// Shared with the model-policy editor (models-editor-view.js): the request helper, the pill,
+// the line-numbered <textarea>, its findings list and the typed-confirmation APPLY card.
+export async function postJson(path, body, signal) {
   const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   let parsed = null;
   try {
@@ -67,7 +69,7 @@ async function postJson(path, body, signal) {
   return { status: res.status, body: parsed };
 }
 
-function Pill({ state, detail = null, symbol = null }) {
+export function Pill({ state, detail = null, symbol = null }) {
   return html`<span class=${`${badgeClass("raci", state)} raci-pill`} data-raci-state=${state}>
     ${symbol ? `${symbol} ` : ""}${statusLabel("raci", state)}${detail ? ` · ${detail}` : ""}
   </span>`;
@@ -274,7 +276,7 @@ function RaciEditor({ read, governance, onView, onApplied }) {
   `;
 }
 
-function CodeEditor({ value, findings, onInput, textareaRef, scrollTop, onScroll }) {
+export function CodeEditor({ value, findings, onInput, textareaRef, scrollTop, onScroll, label = "RACI candidate source" }) {
   const count = value.split("\n").length;
   const errorLines = new Set(findings.map((f) => f.line).filter((n) => n !== null));
   const numbers = [];
@@ -290,13 +292,13 @@ function CodeEditor({ value, findings, onInput, textareaRef, scrollTop, onScroll
         ${[...errorLines].map((n) => html`<div class="raci-errline" data-line=${n} style=${`top: ${PAD_TOP + (n - 1) * LINE_HEIGHT - scrollTop}px`}></div>`)}
       </div>
       <textarea ref=${textareaRef} class="raci-textarea" spellcheck="false" wrap="off" autocomplete="off"
-        aria-label="RACI candidate source" aria-describedby="raci-errnote" aria-invalid=${errorLines.size > 0 || findings.length > 0 ? "true" : "false"}
+        aria-label=${label} aria-describedby="raci-errnote" aria-invalid=${errorLines.size > 0 || findings.length > 0 ? "true" : "false"}
         value=${value} onInput=${(e) => onInput(e.currentTarget.value)} onScroll=${(e) => onScroll(e.currentTarget.scrollTop)}></textarea>
     </div>
   `;
 }
 
-function ErrorNote({ state }) {
+export function ErrorNote({ state }) {
   const findings = state.dryRun.text === state.draft ? state.dryRun.findings : [];
   return html`<ul id="raci-errnote" class="raci-errnote" aria-live="polite">
     ${findings.map((f) => html`<li data-line=${f.line ?? ""}>${f.line !== null ? `line ${f.line} · ` : ""}${f.route && f.line === null ? `${f.route} · ` : ""}${f.message}</li>`)}
@@ -391,14 +393,19 @@ function ProposalSection({ state, now, read }) {
 }
 
 function ApplySection({ state, now, project, setState, onApply }) {
-  const ready = applyReadiness(state, project.key, now);
+  return html`<${ApplyCard} state=${state} ready=${applyReadiness(state, project.key, now)} setState=${setState} onApply=${onApply}
+    confirmLabel="Type the project key to confirm" confirmKey=${project.key}
+    hint=${html`shells <code class=${MONO_CLASS}>${`forge raci apply <candidate> --project ${project.checkoutDir} --confirm --by dashboard --source dashboard --rationale <rationale> --json`}</code> · the CLI re-runs the gate before writing`} />`;
+}
+
+export function ApplyCard({ state, ready, setState, onApply, confirmLabel, confirmKey, hint }) {
   return html`
     <section class="workbench-section raci-apply" role="region" aria-label="APPLY">
       <h2 class="workbench-section-label">APPLY</h2>
       <div class="card">
         <div class="raci-apply-grid">
           <label class="raci-field">
-            <span>Type the project key to confirm · <span class=${MONO_CLASS}>${project.key}</span></span>
+            <span>${confirmLabel} · <span class=${MONO_CLASS}>${confirmKey}</span></span>
             <input type="text" class=${MONO_CLASS} data-raci="confirm-key" autocomplete="off" spellcheck="false"
               value=${state.confirmKey} onInput=${(e) => { const v = e.currentTarget.value; setState((s) => setConfirmKey(s, v)); }} />
           </label>
@@ -411,7 +418,7 @@ function ApplySection({ state, now, project, setState, onApply }) {
         <div class="raci-bar">
           <button type="button" class="raci-btn raci-btn-primary" data-raci="apply" disabled=${!ready.enabled} aria-describedby="raci-apply-hint" onClick=${onApply}>Apply</button>
           <span id="raci-apply-hint" class="hint">
-            ${ready.reason ? html`<span class="raci-apply-reason">${ready.reason} · </span>` : null}shells <code class=${MONO_CLASS}>${`forge raci apply <candidate> --project ${project.checkoutDir} --confirm --by dashboard --source dashboard --rationale <rationale> --json`}</code> · the CLI re-runs the gate before writing
+            ${ready.reason ? html`<span class="raci-apply-reason">${ready.reason} · </span>` : null}${hint}
           </span>
         </div>
         ${state.applyError ? html`<div class="raci-result raci-result-fail" role="alert">

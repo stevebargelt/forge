@@ -6,6 +6,7 @@ import htm from "htm";
 import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";
 import { RoutingView } from "./raci-editor-view.js";
+import { ModelsView } from "./models-editor-view.js";
 import { BacklogView } from "./backlog.js";
 import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
@@ -717,7 +718,9 @@ function App() {
         : view === "config"
         ? projectFilter && !checkoutFilter
           ? html`<div class="card muted" style="margin-top: 20px;">The config graph is checkout-specific. Select a checkout in the scope control; Forge will not substitute an arbitrary clone.</div>`
-          : html`<${ControlPlaneView} data=${controlPlane} />`
+          : html`<${ControlPlaneView} data=${controlPlane} modelsHref=${hashFor({ view: "models", scope })} />`
+        : view === "models"
+        ? html`<${ModelsView} key=${`${scope.project ?? ""}\n${scope.checkout ?? ""}`} scope=${scope} params=${route.params} />`
         : view === "run"
         ? html`<${RunPage} key=${route.id} runId=${route.id} tab=${route.tab} projects=${projects} />`
         : view === "task"

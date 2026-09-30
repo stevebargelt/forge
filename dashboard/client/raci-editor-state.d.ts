@@ -4,17 +4,17 @@ export declare const DRY_RUN_DEBOUNCE_MS: number;
 export declare const RACI_EDIT_MODE: string;
 export declare const RACI_SECTIONS: ReadonlyArray<{ id: string; label: string; pattern: RegExp }>;
 
-export type Finding = { code: string; route: string | null; message: string; line: number | null };
+export type Finding = { code: string; route?: string | null; message: string; line: number | null };
 export type ProposeResponse = { status: number; body: Record<string, any> };
 export type RouteMap = Record<string, Record<string, any>>;
 
 export interface EditorState {
   mode: "editing" | "proposed" | "applied";
-  origin: "source" | "host";
+  origin: string;
   baseText: string;
   draft: string;
   dryRun: { seq: number; pending: boolean; text: string | null; ok: boolean | null; findings: Finding[]; error: string | null };
-  lastGreen: { text: string; routes: RouteMap | null; routeChanges: any } | null;
+  lastGreen: { text: string; routes?: RouteMap | null; routeChanges?: any; rows?: any[] } | null;
   proposal: { text: string; sha: string; expiresAt: string | null; verb: string | null; result: any } | null;
   proposing: boolean;
   proposeError: { message: string; refusal: string | null; findings: Finding[] } | null;
@@ -37,12 +37,18 @@ export declare function gateFindings(result: any, text: string): Finding[];
 export declare function openEditor(read: any, origin?: "source" | "host"): EditorState;
 export declare function isDirty(state: EditorState | null): boolean;
 export declare function editDraft(state: EditorState, text: string): EditorState;
-export declare function replaceDraft(state: EditorState, text: string, origin: "source" | "host"): EditorState;
+export declare function replaceDraft(state: EditorState, text: string, origin: string): EditorState;
 export declare function beginDryRun(state: EditorState, seq: number): EditorState;
-export declare function settleDryRun(state: EditorState, seq: number, text: string, response: ProposeResponse): EditorState;
+export interface GateAdapter {
+  isVerdict(result: any): boolean;
+  findings(result: any, text: string): Finding[];
+  green(text: string, result: any): any;
+}
+export declare const RACI_GATE: GateAdapter;
+export declare function settleDryRun(state: EditorState, seq: number, text: string, response: ProposeResponse, gate?: GateAdapter): EditorState;
 export declare function failDryRun(state: EditorState, seq: number, reason: string): EditorState;
 export declare function beginPropose(state: EditorState): EditorState;
-export declare function settlePropose(state: EditorState, text: string, response: ProposeResponse): EditorState;
+export declare function settlePropose(state: EditorState, text: string, response: ProposeResponse, gate?: GateAdapter): EditorState;
 export declare function failPropose(state: EditorState, reason: string): EditorState;
 export declare function setConfirmKey(state: EditorState, value: string): EditorState;
 export declare function setRationale(state: EditorState, value: string): EditorState;
@@ -51,7 +57,7 @@ export declare function minutesLeft(expiresAt: string | null | undefined, now?: 
 export declare function proposalExpired(expiresAt: string | null | undefined, now?: number): boolean;
 export declare function proposalLive(state: EditorState | null): boolean;
 export declare function proposeReadiness(state: EditorState): Readiness;
-export declare function applyReadiness(state: EditorState, projectKey: string, now?: number): Readiness;
+export declare function applyReadiness(state: EditorState, projectKey: string, now?: number, keyNoun?: string): Readiness;
 export declare function applyBody(state: EditorState, project: { key: string; checkoutDir: string }): Record<string, string>;
 export declare function beginApply(state: EditorState): EditorState;
 export declare function settleApply(state: EditorState, response: ProposeResponse): EditorState;

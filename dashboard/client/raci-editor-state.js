@@ -164,9 +164,18 @@ export function beginDryRun(state, seq) {
   return { ...state, dryRun: { ...state.dryRun, seq, pending: true, error: null } };
 }
 
+/** What the machine needs to know about one gate's answers: whether a result is a gate
+ *  verdict, its findings placed on lines of the text, and what a green answer keeps. The
+ *  model-policy editor (models-editor-state.js) passes its own. */
+export const RACI_GATE = Object.freeze({
+  isVerdict: (result) => Boolean(result && (result.validation || result.proposal)),
+  findings: (result, text) => gateFindings(result, text),
+  green: (text, result) => ({ text, routes: result?.candidateRoutes ?? null, routeChanges: result?.routeChanges ?? null }),
+});
+
 /** A dry-run answered. A superseded one (older seq) or one for text no longer in the
  *  editor never writes. */
-export function settleDryRun(state, seq, text, response) {
+export function settleDryRun(state, seq, text, response, gate = RACI_GATE) {
   if (seq !== state.dryRun.seq || text !== state.draft) return state;
   const body = response?.body ?? {};
   const result = body.result ?? null;
@@ -174,11 +183,11 @@ export function settleDryRun(state, seq, text, response) {
     return {
       ...state,
       dryRun: { seq, pending: false, text, ok: true, findings: [], error: null },
-      lastGreen: { text, routes: result?.candidateRoutes ?? null, routeChanges: result?.routeChanges ?? null },
+      lastGreen: gate.green(text, result),
     };
   }
-  if (result && (result.validation || result.proposal)) {
-    const findings = gateFindings(result, text);
+  if (gate.isVerdict(result)) {
+    const findings = gate.findings(result, text);
     return {
       ...state,
       dryRun: { seq, pending: false, text, ok: false, findings: findings.length ? findings : [{ code: body.refusal ?? "gate_failed", route: null, message: body.error ?? "the gate refused the candidate", line: null }], error: null },
@@ -198,7 +207,7 @@ export function beginPropose(state) {
 
 /** The Propose button's answer. Green → proposed, bound to the text sent and the sha the
  *  server hashed; refused → the reason stays on screen and Apply stays disabled. */
-export function settlePropose(state, text, response) {
+export function settlePropose(state, text, response, gate = RACI_GATE) {
   const next = { ...state, proposing: false };
   if (text !== state.draft) return next;
   const body = response?.body ?? {};
@@ -207,19 +216,20 @@ export function settlePropose(state, text, response) {
       ...next,
       mode: "proposed",
       dryRun: { seq: next.dryRun.seq, pending: false, text, ok: true, findings: [], error: null },
-      lastGreen: { text, routes: body.result?.candidateRoutes ?? null, routeChanges: body.result?.routeChanges ?? null },
+      lastGreen: gate.green(text, body.result ?? null),
       proposal: { text, sha: body.candidateSha256, expiresAt: body.proposalExpiresAt ?? null, verb: body.verb ?? null, result: body.result ?? null },
       proposeError: null,
       applyError: null,
     };
   }
   const result = body.result ?? null;
-  const findings = result ? gateFindings(result, text) : [];
+  const verdict = gate.isVerdict(result);
+  const findings = verdict ? gate.findings(result, text) : [];
   return {
     ...next,
     mode: "editing",
     proposal: null,
-    dryRun: result ? { seq: next.dryRun.seq, pending: false, text, ok: false, findings, error: null } : { ...next.dryRun, pending: false },
+    dryRun: verdict ? { seq: next.dryRun.seq, pending: false, text, ok: false, findings, error: null } : { ...next.dryRun, pending: false },
     proposeError: { message: body.error ?? `propose failed — HTTP ${response?.status}`, refusal: body.refusal ?? null, findings },
   };
 }
@@ -268,11 +278,12 @@ export function proposeReadiness(state) {
   return { enabled: true, reason: "runs the full gate; nothing is written" };
 }
 
-export function applyReadiness(state, projectKey, now = Date.now()) {
+/** `keyNoun` names what is typed: the project key here, "the target" for a model policy. */
+export function applyReadiness(state, projectKey, now = Date.now(), keyNoun = "the project key") {
   if (!proposalLive(state)) return { enabled: false, reason: "propose this exact candidate first" };
   if (state.applying) return { enabled: false, reason: "applying…" };
   if (proposalExpired(state.proposal.expiresAt, now)) return { enabled: false, reason: "the proposal expired — propose again" };
-  if (!confirmKeyMatches(state.confirmKey, projectKey)) return { enabled: false, reason: "type the project key exactly" };
+  if (!confirmKeyMatches(state.confirmKey, projectKey)) return { enabled: false, reason: `type ${keyNoun} exactly` };
   if (state.rationale.trim() === "") return { enabled: false, reason: "a rationale is required" };
   return { enabled: true, reason: null };
 }

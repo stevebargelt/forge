@@ -146,6 +146,7 @@ const LIST_HEADERS = {
   shipping: { happening: "Whether each ticket can ship", needs: "Only when you are shipping", todo: "Read a ticket's readiness", verb: "forge readiness" },
   roles: { happening: "What each role is and runs on", needs: "A seed changes only through forge upgrade", todo: "Open a role for its instructions and receipts", verb: "forge model resolve <role>" },
   routing: { happening: "The effective routing policy", needs: NOTHING, todo: "Read why a role routes here", verb: "forge route governance" },
+  models: { happening: "The model policy and what every role resolves to", needs: NOTHING, todo: "Propose and apply a policy change", verb: "forge model policy propose" },
   config: { happening: "The effective config and its precedence", needs: NOTHING, todo: "Read where a value came from", verb: "forge config show" },
   projects: { happening: "The project and checkout registry", needs: "Only an unclassified project", todo: "Classify or pick a scope", verb: "forge projects classify" },
   usage: { happening: "Spend, model mix and plan pace", needs: NOTHING, todo: "Watch the pace", verb: "forge usage" },

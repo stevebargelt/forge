@@ -23,6 +23,8 @@
 // `sort=`/`dir=`; an unknown family is dropped like an unknown sort.
 // FG-830: `#notes/<checkout>` names a checkout by its URI-encoded directory, the one id
 // that is unique and stable across label changes.
+// FG-835: `#models?mode=edit&target=host|project` is the model-policy editor; `target`
+// omitted means the scoped project's override when it has one, else the host file.
 
 export const GROUPS = Object.freeze([
   { id: "now", label: "Now" },
@@ -48,6 +50,7 @@ export const ROUTES = Object.freeze({
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
   roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["family", "sort", "dir"], paramValues: { family: ["build", "red", "research", "test", "review", "plan", "author"], sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
   routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", params: ["mode"], paramValues: { mode: ["edit"] }, aliases: ["governance"] },
+  models: { group: "setup", label: "Models", path: "#models", scope: "optional", object: "none", params: ["mode", "target"], paramValues: { mode: ["edit"], target: ["host", "project"] }, aliases: [] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },
   usage: { group: "health", label: "Usage", path: "#usage", scope: "optional", object: "none", aliases: [] },

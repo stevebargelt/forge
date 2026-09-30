@@ -46,7 +46,7 @@ test("rolesIndexNotices: a missing generation, an unreadable policy or store, an
 });
 
 test("the role route: #roles is the list, #roles/<role>/<tab> a deep-linkable page, an unknown tab falls back to overview", () => {
-  assert.deepEqual(NAV_GROUPS.find((g) => g.id === "setup")!.items, ["roles", "routing", "config", "projects"]);
+  assert.deepEqual(NAV_GROUPS.find((g) => g.id === "setup")!.items, ["roles", "routing", "models", "config", "projects"]);
   const list = parseHash("#roles");
   assert.deepEqual([list.view, list.id, list.rewrite], ["roles", null, false]);
   const deep = parseHash("#roles/engineer/instructions");

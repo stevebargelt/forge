@@ -40,7 +40,7 @@ function ReadinessBadge({ readiness }) {
   return html`<span class=${"cp-badge " + meta.cls} aria-label=${"readiness: " + meta.label}>${meta.symbol} ${meta.label}</span>`;
 }
 
-export function ControlPlaneView({ data }) {
+export function ControlPlaneView({ data, modelsHref = "#models" }) {
   if (!data) return html`<div class="muted">loading control plane…</div>`;
 
   return html`
@@ -56,13 +56,13 @@ export function ControlPlaneView({ data }) {
           <span class="faint">contract v${data.version}</span>
         </div>
       </header>
-      <${SourcesPanel} sources=${data.sections.sources} />
+      <${SourcesPanel} sources=${data.sections.sources} modelsHref=${modelsHref} />
       <${CapabilitiesPanel} capabilities=${data.sections.capabilities} />
     </section>
   `;
 }
 
-function SourcesPanel({ sources }) {
+function SourcesPanel({ sources, modelsHref }) {
   const rows = sources && sources.rows ? sources.rows : [];
   return html`
     <section class="workbench-section" role="region" aria-label="Sources — effective config provenance">
@@ -79,7 +79,7 @@ function SourcesPanel({ sources }) {
                 </tr>
               </thead>
               <tbody>
-                ${rows.map((r) => html`<${SourceRow} row=${r} />`)}
+                ${rows.map((r) => html`<${SourceRow} row=${r} modelsHref=${modelsHref} />`)}
               </tbody>
             </table>
           </div>
@@ -88,7 +88,8 @@ function SourcesPanel({ sources }) {
   `;
 }
 
-function SourceRow({ row }) {
+// FG-835: this panel stays read-only; the model policy is changed on Setup › Models.
+function SourceRow({ row, modelsHref }) {
   return html`
     <tr id=${"cp-row-" + row.key}>
       <td><div class="cp-surface-label">${row.label}</div></td>
@@ -100,6 +101,7 @@ function SourceRow({ row }) {
         ${row.warning ? html`<div class="cp-warn">⚠ ${row.warning}</div>` : null}
         ${!row.warning && row.detail ? html`<div class="faint">${row.detail}</div>` : null}
         <div class="faint cp-semantics">override: ${row.overrideSemantics}</div>
+        ${row.key === "model-policy" ? html`<a class="cp-models-link" data-cp="models" href=${modelsHref}>Change it on Setup › Models →</a>` : null}
       </td>
     </tr>
   `;
