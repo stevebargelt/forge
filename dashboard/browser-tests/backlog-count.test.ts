@@ -98,11 +98,21 @@ async function countText(page: Page): Promise<string> {
   return (await page.locator(".backlog-result-count").innerText()).trim();
 }
 
+// FG-832: filters ride the hash, so the count re-renders after the hashchange.
+async function expectCount(page: Page, expected: string, message?: string): Promise<void> {
+  await page.waitForFunction((want) => document.querySelector(".backlog-result-count")?.textContent?.trim() === want, expected, { timeout: 5000 })
+    .catch(() => undefined);
+  assert.equal(await countText(page), expected, message);
+}
+
 test("Backlog All/All shows the aggregate result count across every type, not the Epic count", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   await openBacklog(page);
+  // FG-832: the board opens on Active; this suite's contract is the All/All aggregate.
+  await expectCount(page, "3 of 4 tickets", "the default Active filter hides the done story");
+  await page.getByRole("button", { name: "Show all statuses" }).click();
 
-  assert.equal(await countText(page), "4 results", "All/All must aggregate every matching ticket");
+  await expectCount(page, "4 of 4 tickets", "All/All must aggregate every matching ticket");
   // Not Epic-only: all three type groups render with their own counts.
   const headings = await page.locator(".backlog-group > h2").allTextContents();
   assert.equal(headings.length, 3, "Epic, Story and Idea groups must all render — not Epic-only");
@@ -110,7 +120,7 @@ test("Backlog All/All shows the aggregate result count across every type, not th
   assert.ok(headings.some((h) => /Storys \(2\)/.test(h)), JSON.stringify(headings));
   assert.ok(headings.some((h) => /Ideas \(1\)/.test(h)), JSON.stringify(headings));
   // The aggregate (4) must not read as the Epic group count (1).
-  assert.notEqual(await countText(page), "1 results");
+  assert.notEqual(await countText(page), "1 of 4 tickets");
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, "backlog-all-all.png"), fullPage: true });
   await page.close();
 });
@@ -118,30 +128,33 @@ test("Backlog All/All shows the aggregate result count across every type, not th
 test("Backlog type / status / search selections all recalculate the same result count", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   await openBacklog(page);
+  // FG-832: the board opens on Active; this suite's contract is the All/All aggregate.
+  await expectCount(page, "3 of 4 tickets", "the default Active filter hides the done story");
+  await page.getByRole("button", { name: "Show all statuses" }).click();
 
   await page.getByRole("button", { name: "Filter by type: Epic" }).click();
-  assert.equal(await countText(page), "1 result of 4", "Epic narrows the aggregate to 1");
+  await expectCount(page, "1 of 4 tickets", "Epic narrows the aggregate to 1");
   assert.equal((await page.locator(".backlog-group > h2").allTextContents()).length, 1);
 
   await page.getByRole("button", { name: "Filter by type: Story" }).click();
-  assert.equal(await countText(page), "2 results of 4", "Story is not multiplied — exactly 2");
+  await expectCount(page, "2 of 4 tickets", "Story is not multiplied — exactly 2");
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, "backlog-type-story.png"), fullPage: true });
 
   await page.getByRole("button", { name: "Show all types" }).click();
-  assert.equal(await countText(page), "4 results", "clearing the type returns to the full aggregate");
+  await expectCount(page, "4 of 4 tickets", "clearing the type returns to the full aggregate");
 
   await page.getByRole("button", { name: "Filter by status: Done" }).click();
-  assert.equal(await countText(page), "1 result of 4", "status Done narrows to the single done story");
+  await expectCount(page, "1 of 4 tickets", "status Done narrows to the single done story");
 
   await page.getByRole("button", { name: "Show all statuses" }).click();
-  assert.equal(await countText(page), "4 results");
+  await expectCount(page, "4 of 4 tickets");
 
   await page.locator("#backlog-search").fill("Delta");
-  assert.equal(await countText(page), "1 result of 4", "search narrows to the one matching title");
+  await expectCount(page, "1 of 4 tickets", "search narrows to the one matching title");
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, "backlog-search-delta.png"), fullPage: true });
 
   await page.locator("#backlog-search").fill("");
-  assert.equal(await countText(page), "4 results", "clearing the search restores the aggregate");
+  await expectCount(page, "4 of 4 tickets", "clearing the search restores the aggregate");
   await page.close();
 });
 

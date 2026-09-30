@@ -212,6 +212,9 @@ test("a migrated project's board renders the DB tickets and never the frozen Mar
   const page = await newPage();
   await openBacklog(page, "cutover");
   await page.locator(".backlog-result-count").waitFor();
+  // FG-832: the board opens on Active; the blocked ticket needs every status shown.
+  await page.getByRole("button", { name: "Show all statuses" }).click();
+  await page.locator(".backlog-ticket-card", { hasText: "Migrated blocked" }).waitFor();
 
   const ids = await page.locator(".backlog-id").allTextContents();
   assert.deepEqual(ids.map((s) => s.trim()).sort(), ["FG-1", "FG-2", "FG-E"], "the migrated tickets render");

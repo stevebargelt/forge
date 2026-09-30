@@ -14,6 +14,8 @@
 // FG-607 spent four test files on. Kept as a pure function so it is unit-testable
 // without a DOM — same shape as verification-label.js / view-routing.js.
 
+import { hashFor, ROUTES } from "./view-routing.js";
+
 /**
  * @param {{tickets?: unknown[], ticketsProjectKey?: string|null, ticketsStorageMode?: string|null, ticketsError?: string}} data
  */
@@ -44,3 +46,30 @@ export const NO_TRUTH_MESSAGE =
 export const SHADOW_BADGE_TITLE =
   "This project is in markdown mode: backlog/*.md in the checkout is authoritative and these rows are " +
   "an import shadow of it. They are not ticket truth.";
+
+// FG-832: the board's type/status filter, carried in `#backlog?type=<t>&status=<s>`.
+// A missing (or unknown — the route table drops it) param is the default: every type,
+// active status only. "all" is a real status choice; the type default already is all.
+export const BACKLOG_FILTER_DEFAULT = Object.freeze({ type: "all", status: "active" });
+
+export function backlogFilterState(params) {
+  const type = ROUTES.backlog.paramValues.type.includes(params?.type) ? params.type : BACKLOG_FILTER_DEFAULT.type;
+  const status = params?.status === "active" || ROUTES.backlog.paramValues.status.includes(params?.status)
+    ? params.status
+    : BACKLOG_FILTER_DEFAULT.status;
+  return { type, status };
+}
+
+/** The hash a filter button writes, keeping the scope; defaults are omitted. */
+export function backlogFilterHash(scope, state) {
+  return hashFor({ view: "backlog", scope, params: { type: state.type, status: state.status } });
+}
+
+export function filterBacklogTickets(tickets, state) {
+  return (tickets || []).filter((tk) =>
+    (state.type === "all" || tk.type === state.type) && (state.status === "all" || tk.status === state.status));
+}
+
+export function backlogCountLabel(shown, total) {
+  return `${shown} of ${total} ${total === 1 ? "ticket" : "tickets"}`;
+}
