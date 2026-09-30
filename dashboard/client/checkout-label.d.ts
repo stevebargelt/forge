@@ -58,4 +58,10 @@ export function checkoutKindForDir(dir: string | null | undefined, project: Choo
 export function knownCheckout(dir: string | null | undefined, project: ChooserProject | null | undefined): string | null;
 export function displayPath(dir: string): string;
 export function defaultCheckout(project: ChooserProject | null | undefined): string | null;
+export function viewCheckout(
+  view: string,
+  projectKey: string | null | undefined,
+  project: ChooserProject | null | undefined,
+  requested: string | null | undefined,
+): string | null;
 export function checkoutChooser(project: ChooserProject | null | undefined, selected?: string | null): CheckoutChooser;

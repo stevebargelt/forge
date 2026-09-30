@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { provenPhysical } from "../../src/util/path-identity.js";
 import type { ProjectCheckout, ProjectRecord } from "../../src/util/projects.js";
 import { checkoutKind, withCheckoutKinds } from "./queries.js";
-import { RUN_CHECKOUT_LABEL, checkoutChooser, checkoutKindForDir, checkoutForDir, defaultCheckout, displayPath, knownCheckout } from "../client/checkout-label.js";
+import { RUN_CHECKOUT_LABEL, checkoutChooser, checkoutKindForDir, checkoutForDir, defaultCheckout, displayPath, knownCheckout, viewCheckout } from "../client/checkout-label.js";
 import { runRow } from "../client/runs-index-render.js";
 import { noteGroups, noteRows } from "../client/notes-render.js";
 
@@ -42,7 +42,7 @@ const CLONE = "/Users/op/code/forge-fg801";
 const WORKTREE = "/Users/op/.forge/worktrees/run-9/forge";
 const GONE = "/Users/op/code/forge-fg700";
 
-test("FG-843: the primary, a registered (purpose operator) checkout and a live-session checkout are operator; run-only directories are run", () => {
+test("FG-843: the primary and a registered (purpose operator) checkout are operator; a live session does not promote a run checkout", () => {
   const r = record([
     co(PRIMARY),
     co(STABLE, { purpose: "operator" }),
@@ -54,7 +54,7 @@ test("FG-843: the primary, a registered (purpose operator) checkout and a live-s
   ]);
   assert.deepEqual(
     r.checkouts.map((c) => checkoutKind(r, c)),
-    ["operator", "operator", "operator", "run", "run", "run", "run"],
+    ["operator", "operator", "run", "run", "run", "run", "run"],
   );
 });
 
@@ -149,4 +149,16 @@ test("FG-843: an unknown checkout in the hash is unknown, not a run checkout —
   assert.deepEqual(model.current, { projectDir: PRIMARY, label: "forge · main", primary: true, run: false });
   assert.deepEqual(model.options.map((o) => [o.projectDir, o.selected]), [[PRIMARY, true], [STABLE, false]]);
   assert.equal(checkoutChooser(project, CLONE).current?.run, true, "a known run checkout is still honoured");
+});
+
+test("FG-843 RF-2: a checkout scopes only Routing's and Config's own read; every shared read takes the project alone", () => {
+  const project = withCheckoutKinds(record([co(PRIMARY), co(CLONE), co(STABLE, { purpose: "operator" })]));
+  assert.equal(viewCheckout("routing", "forge", project, STABLE), STABLE, "a pick scopes Routing's governance read");
+  assert.equal(viewCheckout("config", "forge", project, null), PRIMARY, "no pick: the primary");
+  assert.equal(viewCheckout("routing", "forge", project, "/Users/op/unknown"), PRIMARY, "an unknown checkout falls back to the primary");
+  assert.equal(viewCheckout("routing", "forge", null, STABLE), STABLE, "before projects load the hash's checkout stands");
+  assert.equal(viewCheckout("routing", null, project, STABLE), null, "no project, no checkout");
+  for (const view of ["home", "activity", "runs", "queue", "reviews", "shipping", "campaigns", "backlog", "notes", "ops", "usage"]) {
+    assert.equal(viewCheckout(view, "forge", project, STABLE), null, `${view} reads the whole project even with ?checkout= in hand`);
+  }
 });

@@ -28,7 +28,7 @@ import { ScreenLine } from "./object-page-view.js";
 import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, carriesCheckout, navItemFor } from "./view-routing.js";
 import { NavColumn, BottomBar, NavDrawer } from "./nav-view.js";
 import { scopeSummary, scopedHref } from "./nav-render.js";
-import { MISSING_LABEL, PRUNE_VERB, checkoutLabel, checkoutLabelForDir, dedupeCheckouts, defaultCheckout, knownCheckout } from "./checkout-label.js";
+import { MISSING_LABEL, PRUNE_VERB, checkoutLabel, checkoutLabelForDir, dedupeCheckouts, knownCheckout, viewCheckout } from "./checkout-label.js";
 import { CheckoutChooser } from "./checkout-chooser-view.js";
 import { verificationRowBadge } from "./verification-render.js";
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
@@ -95,10 +95,11 @@ function App() {
   // view reads the whole project, every checkout, so it sends the project key alone. A
   // `checkout=` the loaded project does not know is unknown, not a run checkout: the
   // primary is read, and the effect below drops it from the hash.
+  // FG-843 RF-2: this checkout scopes that view's OWN read (governance, config graph) and
+  // nothing else — the shared project reads (activity, in-flight, inbox, badges) stay on the
+  // project key, so a pick on Routing never hides the project's other checkouts' work.
   const staleCheckout = Boolean(scopedProject && scope.checkout && !knownCheckout(scope.checkout, scopedProject));
-  const checkoutFilter = projectFilter && (view === "routing" || view === "config")
-    ? (staleCheckout ? null : scope.checkout) ?? defaultCheckout(scopedProject)
-    : null;
+  const viewCheckoutDir = viewCheckout(view, scope.project, scopedProject, scope.checkout);
   const [orchCollapsed, setOrchCollapsed] = useState(true);
   const [error, setError] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -182,7 +183,7 @@ function App() {
   const [orchestrators, setOrchestrators] = useState(null);
 
   const poll = useCallback(async () => {
-    const q = projectScopeQuery(projectFilter, checkoutFilter);
+    const q = projectScopeQuery(projectFilter);
     // Deliberately OUTSIDE the Promise.all below. A rejection from any sibling fetch
     // used to abandon the whole batch, which left the Current-activity surface
     // showing its last payload as though it were still current; this read owns its
@@ -214,24 +215,24 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [view, projectFilter, checkoutFilter, projects.length]);
+  }, [view, projectFilter, projects.length]);
 
   // The retry affordance behind AC7. It supersedes whatever is in flight and goes back
   // to `loading` first, so the operator sees the click do something and the stale
   // failure copy does not linger over a read that is already running.
   const retryCurrentActivity = useCallback(() => {
-    activityReader.current.retry(`/api/current-activity${projectScopeQuery(projectFilter, checkoutFilter)}`);
-  }, [projectFilter, checkoutFilter]);
+    activityReader.current.retry(`/api/current-activity${projectScopeQuery(projectFilter)}`);
+  }, [projectFilter]);
 
   const retryInbox = useCallback(() => {
-    return inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
-  }, [projectFilter, checkoutFilter]);
+    return inboxReader.current.retry(`/api/attention-inbox${projectScopeQuery(projectFilter)}`);
+  }, [projectFilter]);
 
   // FG-823: after a dismiss/snooze/undismiss, re-read in place — the server has already
   // moved the item between `items` and `dismissed`, and the Home badge follows its counts.
   const refreshInbox = useCallback(() => {
-    return inboxReader.current.refresh(`/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`);
-  }, [projectFilter, checkoutFilter]);
+    return inboxReader.current.refresh(`/api/attention-inbox${projectScopeQuery(projectFilter)}`);
+  }, [projectFilter]);
 
   const pollPlanUsage = useCallback(async () => {
     setPlanUsageLoading(true);
@@ -258,9 +259,9 @@ function App() {
     try {
       const tsDays = parseInt(usageSince) * 2;
       const [rollupRes, tsRes, mixRes] = await Promise.all([
-        fetch(appendScope(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`, projectFilter, checkoutFilter)),
-        fetch(appendScope(`/api/usage/timeseries?since=${tsDays}d`, projectFilter, checkoutFilter)),
-        fetch(appendScope(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`, projectFilter, checkoutFilter)),
+        fetch(appendScope(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`, projectFilter)),
+        fetch(appendScope(`/api/usage/timeseries?since=${tsDays}d`, projectFilter)),
+        fetch(appendScope(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`, projectFilter)),
       ]);
       if (rollupRes.ok) setUsageRollup(await rollupRes.json());
       if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
@@ -269,7 +270,7 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [usageGroupBy, usageSince, projectFilter, checkoutFilter]);
+  }, [usageGroupBy, usageSince, projectFilter]);
 
   const refreshPlanUsage = useCallback(async () => {
     setPlanUsageRefreshing(true);
@@ -299,12 +300,12 @@ function App() {
   // it runs on every view, not just the ones the main poll serves, because the Home
   // badge in the nav reads it everywhere.
   useEffect(() => {
-    const url = `/api/attention-inbox${projectScopeQuery(projectFilter, checkoutFilter)}`;
+    const url = `/api/attention-inbox${projectScopeQuery(projectFilter)}`;
     const read = () => inboxReader.current.poll(url);
     read();
     const id = setInterval(read, POLL_MS);
     return () => clearInterval(id);
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   useEffect(() => {
     if (view !== "home" && view !== "usage") return;
@@ -321,8 +322,8 @@ function App() {
   }, [pollUsage, view]);
 
   const pollOps = useCallback(() => {
-    opsReader.read(appendScope(`/api/ops?since=${opsSince}`, projectFilter, checkoutFilter), opsSince);
-  }, [opsReader, opsSince, projectFilter, checkoutFilter]);
+    opsReader.read(appendScope(`/api/ops?since=${opsSince}`, projectFilter), opsSince);
+  }, [opsReader, opsSince, projectFilter]);
 
   useEffect(() => {
     if (view !== "home" && view !== "ops") return;
@@ -332,15 +333,15 @@ function App() {
   }, [pollOps, view]);
 
   const pollRuntime = useCallback(() => {
-    runtimeReader.read(appendScope(`/api/agent-runtime?window=${runtimeWindow}`, projectFilter, checkoutFilter), runtimeWindow);
-  }, [runtimeReader, runtimeWindow, projectFilter, checkoutFilter]);
+    runtimeReader.read(appendScope(`/api/agent-runtime?window=${runtimeWindow}`, projectFilter), runtimeWindow);
+  }, [runtimeReader, runtimeWindow, projectFilter]);
 
   // FG-683: the throughput read, on its own endpoint and its own reader. Only the
   // selected metric is polled — an operator reading counts does not pay for the
   // duration query, which is by far the more expensive of the two.
   const pollCompletedRuns = useCallback(() => {
-    completedRunsReader.read(appendScope(`/api/completed-runs?window=${runtimeWindow}`, projectFilter, checkoutFilter), runtimeWindow);
-  }, [completedRunsReader, runtimeWindow, projectFilter, checkoutFilter]);
+    completedRunsReader.read(appendScope(`/api/completed-runs?window=${runtimeWindow}`, projectFilter), runtimeWindow);
+  }, [completedRunsReader, runtimeWindow, projectFilter]);
 
   useEffect(() => {
     if (view !== "ops") return;
@@ -398,14 +399,14 @@ function App() {
   };
 
   const pollGovernance = useCallback(async () => {
-    if (projectFilter && !checkoutFilter) { setGovernance(null); return; }
+    if (projectFilter && !viewCheckoutDir) { setGovernance(null); return; }
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const q = projectScopeQuery(projectFilter, viewCheckoutDir);
       const res = await fetch(`/api/governance${q}`);
       if (res.ok) setGovernance(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter, viewCheckoutDir]);
 
   useEffect(() => {
     if (view !== "routing") return;
@@ -419,9 +420,9 @@ function App() {
     // (project/checkout) must never overwrite the graph just switched to.
     const seq = (controlPlaneSeq.current += 1);
     // Checkout-specific: a project without an exact checkout has no single graph.
-    if (projectFilter && !checkoutFilter) { setControlPlane(null); return; }
+    if (projectFilter && !viewCheckoutDir) { setControlPlane(null); return; }
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const q = projectScopeQuery(projectFilter, viewCheckoutDir);
       const res = await fetch(`/api/config-graph${q}`);
       if (seq !== controlPlaneSeq.current) return;
       if (res.ok) {
@@ -436,7 +437,7 @@ function App() {
       if (seq !== controlPlaneSeq.current) return;
       setError(String(e));
     }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter, viewCheckoutDir]);
 
   // Clear the graph the instant the scope changes so a previous checkout's config
   // graph is never rendered under the new scope while its request is in flight. The
@@ -444,7 +445,7 @@ function App() {
   useEffect(() => {
     controlPlaneSeq.current += 1;
     setControlPlane(null);
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter, viewCheckoutDir]);
 
   useEffect(() => {
     if (view !== "config") return;
@@ -466,11 +467,11 @@ function App() {
 
   const pollReviews = useCallback(async () => {
     try {
-      const res = await fetch(appendScope(`/api/reviews?limit=25`, projectFilter, checkoutFilter));
+      const res = await fetch(appendScope(`/api/reviews?limit=25`, projectFilter));
       if (res.ok) setReviews(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   useEffect(() => {
     if (view !== "reviews") return;
@@ -487,7 +488,7 @@ function App() {
     // render the "select a project" state (projectKey === null) rather than null data.
     if (!projectFilter) { setShippingAudit({ projectKey: null, rows: [], degraded: [] }); return; }
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const q = projectScopeQuery(projectFilter);
       const res = await fetch(`/api/shipping-audit${q}`);
       if (seq !== shippingSeq.current) return;
       // Only the new scope's response may populate the panel. A failed fetch must NOT
@@ -501,7 +502,7 @@ function App() {
       setShippingAudit(null);
       setError(String(e));
     }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   // Clear the panel the instant the scope changes so the previous project's evidence is
   // never rendered under the new scope while its request is in flight (RF-3, the FG-699
@@ -511,7 +512,7 @@ function App() {
   useEffect(() => {
     shippingSeq.current += 1;
     setShippingAudit(null);
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   useEffect(() => {
     if (view !== "shipping") return;
@@ -526,7 +527,7 @@ function App() {
   const pollCampaigns = useCallback(async () => {
     const seq = (campaignsSeq.current += 1);
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const q = projectScopeQuery(projectFilter);
       const res = await fetch(`/api/campaigns${q}`);
       if (seq !== campaignsSeq.current) return;
       // 503 is the degraded-store read: its body carries the same { campaigns, error }
@@ -540,14 +541,14 @@ function App() {
       setCampaigns(null);
       setError(String(e));
     }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   // Drop the list + any open detail the instant the scope changes, so the previous
   // project's campaigns are never shown under the new scope while the read is in flight.
   useEffect(() => {
     campaignsSeq.current += 1;
     setCampaigns(null);
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   useEffect(() => {
     if (view !== "campaigns") return;
@@ -559,12 +560,12 @@ function App() {
   const pollBacklog = useCallback(async () => {
     if (!projectFilter) { setBacklog(null); return; }
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const q = projectScopeQuery(projectFilter);
       const res = await fetch(`/api/backlog${q}`);
       if (res.ok) setBacklog(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   useEffect(() => {
     if (view !== "backlog" && view !== "notes") return;
@@ -584,7 +585,7 @@ function App() {
     const seq = (queueSeq.current += 1);
     if (!projectFilter) { setQueue(null); return; }
     try {
-      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const q = projectScopeQuery(projectFilter);
       const res = await fetch(`/api/queue${q}`);
       if (seq !== queueSeq.current) return;
       if (res.ok) setQueue(await res.json());
@@ -593,7 +594,7 @@ function App() {
       if (seq !== queueSeq.current) return;
       setError(String(e));
     }
-  }, [projectFilter, checkoutFilter]);
+  }, [projectFilter]);
 
   useEffect(() => {
     if (view !== "queue") return;
@@ -738,11 +739,11 @@ function App() {
         : view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} onReload=${poll} />`
         : view === "routing"
-        ? projectFilter && !checkoutFilter
+        ? projectFilter && !viewCheckoutDir
           ? html`<div class="card muted" style="margin-top: 20px;">${projects.length === 0 ? "loading the project's checkouts…" : `No registered project has the key ${scope.project}, so there is no checkout to read.`}</div>`
-          : html`<${RoutingView} governance=${governance} scope=${{ project: scope.project, checkout: checkoutFilter }} params=${route.params} onRefresh=${pollGovernance} />`
+          : html`<${RoutingView} governance=${governance} scope=${{ project: scope.project, checkout: viewCheckoutDir }} params=${route.params} onRefresh=${pollGovernance} />`
         : view === "config"
-        ? projectFilter && !checkoutFilter
+        ? projectFilter && !viewCheckoutDir
           ? html`<div class="card muted" style="margin-top: 20px;">${projects.length === 0 ? "loading the project's checkouts…" : `No registered project has the key ${scope.project}, so there is no checkout to read.`}</div>`
           : html`<${ControlPlaneView} data=${controlPlane} modelsHref=${hashFor({ view: "models", scope })} />`
         : view === "models"
@@ -769,7 +770,6 @@ function App() {
         ? html`<${QueueBoardView}
             data=${queue}
             projectFilter=${projectFilter}
-            checkoutFilter=${checkoutFilter}
             onReload=${pollQueue}
             lane=${route.params?.lane ?? null}
             scope=${scope}

@@ -2366,10 +2366,10 @@ export function projectsForDashboard(): DashboardProjectRecord[] {
 // FG-843: THE checkout-kind rule, stated once. An OPERATOR checkout is one of the
 // registry's own rows: the project's primary checkout, a directory the operator
 // registered as a project (`forge projects classify <dir> --purpose operator` — the
-// workspace_purposes row the projects index reads), or one an interactive orchestrator
-// session has open. Every other checkout exists only because a run or task executed in
-// it (an agent clone, ~/.forge/worktrees/*, a per-ticket clone): a RUN checkout. Run
-// checkouts stay on the record — their runs keep their project, labels and scope — but
+// workspace_purposes row the projects index reads). A live interactive session is not
+// registration: liveSessions stays a displayed fact and never promotes a checkout. Every
+// other checkout exists only because a run or task executed in it (an agent clone,
+// ~/.forge/worktrees/*, a per-ticket clone): a RUN checkout. Run checkouts stay on the record — their runs keep their project, labels and scope — but
 // the dashboard's checkout chooser offers operator checkouts only. No flag and no
 // schema: the kind is derived here and served on GET /api/projects.
 export type CheckoutKind = "operator" | "run";
@@ -2379,8 +2379,7 @@ export type DashboardProjectRecord = Omit<ProjectRecord, "checkouts"> & { checko
 
 export function checkoutKind(record: Pick<ProjectRecord, "primaryCheckout">, checkout: ProjectCheckout): CheckoutKind {
   if (checkout.projectDir === record.primaryCheckout) return "operator";
-  if (checkout.purpose === "operator") return "operator";
-  return checkout.liveSessions > 0 ? "operator" : "run";
+  return checkout.purpose === "operator" ? "operator" : "run";
 }
 
 export function withCheckoutKinds(record: ProjectRecord): DashboardProjectRecord {

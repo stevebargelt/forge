@@ -159,6 +159,16 @@ export function defaultCheckout(project) {
   return typeof project?.primaryCheckout === "string" && project.primaryCheckout !== "" ? project.primaryCheckout : null;
 }
 
+/** The checkout a view's OWN read is scoped to: Routing and Config read one checkout's
+ *  files, so they get the hash's known checkout, else the primary; every other view gets
+ *  null and reads the whole project. Before the project has loaded, the hash's checkout
+ *  stands. Shared reads (activity, in-flight, inbox, badges) never take this value. */
+export function viewCheckout(view, projectKey, project, requested) {
+  if (!projectKey || (view !== "routing" && view !== "config")) return null;
+  if (!project) return requested ?? null;
+  return knownCheckout(requested, project) ?? defaultCheckout(project);
+}
+
 /**
  * The chooser as data for one project and the checkout on screen (null = the primary).
  *

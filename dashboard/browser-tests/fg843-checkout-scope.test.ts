@@ -188,6 +188,35 @@ test("FG-843: Routing's chooser lists the two live operator checkouts, primary f
   await page.close();
 });
 
+test("FG-843 RF-2: a Routing pick scopes the governance read only; shared project reads and the badges keep the project scope", async () => {
+  const page = await newPage();
+  const shared = ["/api/in-flight", "/api/current-activity", "/api/attention-inbox", "/api/review-loop/phases", "/api/verifications/in-progress"];
+  const seen: URL[] = [];
+  page.on("request", (req) => {
+    const url = new URL(req.url());
+    if (shared.includes(url.pathname)) seen.push(url);
+  });
+  await page.goto(`${BASE}/#routing?project=${forgeKey}`);
+  await chooserButton(page).waitFor();
+  const badges = () => page.locator(".nav-column").evaluate((el) => Array.from(el.querySelectorAll("a"), (a) => a.textContent?.trim()).join("|"));
+  const before = await badges();
+
+  const reread = page.waitForRequest((req) => req.url().includes("/api/governance") && new URL(req.url()).searchParams.get("projectDir") === stable);
+  await chooserButton(page).click();
+  await options(page).nth(1).click();
+  await reread;
+  seen.length = 0;
+  await page.waitForRequest((req) => new URL(req.url()).pathname === "/api/in-flight");
+  await page.waitForRequest((req) => new URL(req.url()).pathname === "/api/attention-inbox");
+  assert.ok(seen.length > 0, "the shared reads kept polling after the pick");
+  for (const url of seen) {
+    assert.equal(url.searchParams.get("projectKey"), forgeKey, `${url.pathname} keeps the project scope`);
+    assert.equal(url.searchParams.get("projectDir"), null, `${url.pathname} is not narrowed to the picked checkout`);
+  }
+  assert.equal(await badges(), before, "the nav badges are unchanged by the pick");
+  await page.close();
+});
+
 test("FG-843: with one live operator checkout Routing, Config and Notes show the plain label", async () => {
   const page = await newPage();
   for (const view of ["routing", "config", "notes"]) {
