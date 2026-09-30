@@ -30,7 +30,8 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ProjectRecord } from "./queries.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
-import { MAX_RATIONALE_CHARS, PROPOSAL_WINDOW_MS, ProposalWindow, readAuditTail, sha256Hex, type RaciAuditLine } from "./raci-mutation.js";
+import { MAX_RATIONALE_CHARS, PROPOSAL_WINDOW_MS, ProposalWindow, sha256Hex } from "./raci-mutation.js";
+import { readAuditTail, type RaciAuditLine } from "./raci-audit.js";
 import { harnessActivities } from "./roles.js";
 import {
   CHILD_TIMEOUT_MS,

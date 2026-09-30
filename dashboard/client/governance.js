@@ -34,7 +34,7 @@ export function GovernanceView({ data, sourceActions = null, afterSource = null,
       ${afterSource}
       <${DerivedSection} derived=${data.derived} />
       <${EffectiveSection} effective=${data.effective} />
-      ${recorded ?? html`<${RecordedSection} entries=${data.recorded.entries} />`}
+      ${recorded ?? html`<${RecordedSection} recorded=${data.recorded} />`}
     </section>
   `;
 }
@@ -100,11 +100,23 @@ function EffectiveSection({ effective }) {
   `;
 }
 
-function RecordedSection({ entries }) {
+export function AuditSourceCaption({ source, path, skippedLines = 0 }) {
+  const caption = source === "project"
+    ? "recorded in this checkout's .forge/raci-audit.log"
+    : "recorded in the host log — no checkout in scope";
+  return html`
+    <div class="muted gov-audit-source" data-testid="gov-audit-source" title=${path}>
+      ${caption} · <span class="mono">${path}</span>${skippedLines ? ` · ${skippedLines} unreadable line(s) skipped` : ""}
+    </div>
+  `;
+}
+
+function RecordedSection({ recorded }) {
   return html`
     <section class="workbench-section" role="region" aria-label="RECORDED — RACI audit log">
       <h2 class="workbench-section-label">RECORDED</h2>
-      <${AuditPanel} entries=${entries} />
+      <${AuditSourceCaption} source=${recorded.source} path=${recorded.path} skippedLines=${recorded.skippedLines} />
+      <${AuditPanel} entries=${recorded.entries} />
     </section>
   `;
 }
@@ -194,15 +206,17 @@ function AuditPanel({ entries }) {
     <div class="card gov-card">
       ${entries.map((e) => {
         const changed = [
-          ...e.routes_added.map((r) => `+${r}`),
-          ...e.routes_removed.map((r) => `−${r}`),
-          ...e.routes_modified.map((r) => `~${r}`),
+          ...(e.routes_added ?? []).map((r) => `+${r}`),
+          ...(e.routes_removed ?? []).map((r) => `−${r}`),
+          ...(e.routes_modified ?? []).map((r) => `~${r}`),
         ];
         return html`
-          <div class="row gov-audit-row" style="gap: 10px; align-items: baseline; padding: 3px 0;">
+          <div class="row gov-audit-row" style="gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 3px 0;">
             <span class="mono faint" style="min-width: 168px;">${e.timestamp}</span>
             <span class="badge">${e.action}</span>
             <span class="mono">${changed.length ? changed.join(" ") : "no route change"}</span>
+            ${e.actor ? html`<span class="faint">by ${e.actor}${e.source ? ` via ${e.source}` : ""}</span>` : null}
+            ${e.rationale ? html`<span class="muted">— ${e.rationale}</span>` : null}
           </div>
         `;
       })}

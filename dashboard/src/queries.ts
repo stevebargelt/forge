@@ -114,6 +114,7 @@ import {
   resolveRetention,
   type RetentionPolicy,
 } from "@forge/retention-policy";
+import { raciAuditTail, type RaciAuditTail } from "./raci-audit.js";
 
 export { type ProjectRecord };
 
@@ -2729,23 +2730,9 @@ function projectPresentation(
 
 // #285: read-only routing/governance read model for the dashboard panel. Backed
 // by the SAME governanceView() core as `forge route governance --json`, so the
-// dashboard can't drift from the CLI's view of routing. Augments it with the tail
-// of the host RACI audit log so policy changes are visible without reading the
-// file. Read-only: there is no write counterpart.
-function auditLogPath(): string {
-  return join(forgeHome(), "raci-audit.log");
-}
-
-export type RaciAuditEntry = {
-  timestamp: string;
-  action: string;
-  current_raci: string;
-  candidate: string;
-  routes_added: string[];
-  routes_removed: string[];
-  routes_modified: string[];
-  validation: { raci: boolean; route: boolean };
-};
+// dashboard can't drift from the CLI's view of routing. Augments it with the RACI
+// audit tail (FG-840: the checkout's own log when one is scoped, else the host log)
+// so policy changes are visible without reading the file. Read-only.
 
 // FG-359: four-section WorkbenchPanel replaces the flat GovernancePanel.
 // source=RACI file in force; derived=compiled policy health; effective=routes+diff;
@@ -2770,25 +2757,8 @@ export type WorkbenchPanel = {
     routes: Extract<GovernanceView, { ok: true }>["routes"];
     diff?: Extract<GovernanceView, { ok: true }>["diff"];
   } | null;
-  recorded: { entries: RaciAuditEntry[] };
+  recorded: RaciAuditTail;
 };
-
-/** Tail of the host-global RACI audit log (newest first). Tolerates a missing
- *  file (no changes yet) and skips any unparseable line. */
-function recentRaciAudit(limit: number): RaciAuditEntry[] {
-  const path = auditLogPath();
-  if (!existsSync(path)) return [];
-  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim() !== "");
-  const out: RaciAuditEntry[] = [];
-  for (const line of lines.slice(-limit)) {
-    try {
-      out.push(JSON.parse(line) as RaciAuditEntry);
-    } catch {
-      /* skip a corrupt line rather than fail the whole panel */
-    }
-  }
-  return out.reverse();
-}
 
 export function routingGovernance(projectDir?: string): WorkbenchPanel {
   const view = governanceView({ projectDir });
@@ -2831,7 +2801,7 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
       ...(accountable !== undefined ? { accountable } : {}),
     },
     effective,
-    recorded: { entries: recentRaciAudit(8) },
+    recorded: raciAuditTail(projectDir),
   };
 }
 

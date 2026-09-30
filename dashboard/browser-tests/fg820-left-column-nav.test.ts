@@ -176,6 +176,17 @@ test("FG-820: the current item carries aria-current, and an object page highligh
   await page.close();
 });
 
+test("FG-840: Routing names the project audit source for a scoped checkout and the host source when unscoped", async () => {
+  const page = await open(`#routing?project=atlas&checkout=${encodeURIComponent(MAIN)}`);
+  await page.locator(".page-title", { hasText: "Routing" }).waitFor();
+  await page.locator('[data-testid="gov-audit-source"]', { hasText: "recorded in this checkout's .forge/raci-audit.log" }).waitFor();
+  assert.match(await page.locator('[data-testid="gov-audit-source"]').getAttribute("title") ?? "", /\.forge\/raci-audit\.log$/);
+
+  await page.goto(`${baseUrl}/#routing`);
+  await page.locator('[data-testid="gov-audit-source"]', { hasText: "recorded in the host log — no checkout in scope" }).waitFor();
+  await page.close();
+});
+
 test("FG-820: a reloaded deep link restores view and scope, and the scope reaches the server as ?projectKey/?projectDir", async () => {
   inboxMode = "counts";
   apiRequests.length = 0;
@@ -425,6 +436,21 @@ function createFixtureServer(): Server {
         runs: { total: 0, active: 0, terminal: 0, clean: 0, withFailures: 0, successRate: 0 },
         taskCount: 0, counts: { idleKills: 0, cancels: 0, retries: 0, redBlocks: 0 },
         failureKinds: [], durations: [],
+      });
+      return;
+    }
+    if (url.pathname === "/api/governance") {
+      const scoped = url.searchParams.has("projectDir");
+      json({
+        source: { kind: scoped ? "project" : "host", raciPath: scoped ? `${MAIN}/.forge/forge-raci.md` : "/host/.forge/forge-raci.md" },
+        derived: { policyPath: scoped ? `${MAIN}/.forge/routing-policy.yml` : "/host/.forge/routing-policy.yml", health: "ok" },
+        effective: null,
+        recorded: {
+          source: scoped ? "project" : "host",
+          path: scoped ? `${MAIN}/.forge/raci-audit.log` : "/host/.forge/raci-audit.log",
+          entries: [],
+          skippedLines: 0,
+        },
       });
       return;
     }

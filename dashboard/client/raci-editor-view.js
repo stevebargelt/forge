@@ -10,7 +10,7 @@
 import { h } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
-import { GovernanceView, SourceSection } from "./governance.js";
+import { AuditSourceCaption, GovernanceView, SourceSection } from "./governance.js";
 import { badgeClass, statusLabel } from "./status-tokens.js";
 import { MONO_CLASS, formatUtcMinute, shortSha } from "./format.js";
 import {
@@ -134,7 +134,7 @@ export function RoutingView({ governance, scope, params, onRefresh }) {
     data=${governance}
     sourceActions=${html`${note}${editButton}`}
     afterSource=${applied ? html`<${AppliedCard} applied=${applied} />` : null}
-    recorded=${project ? html`<${RecordedTable} read=${read} />` : null}
+    recorded=${project ? html`<${RecordedTable} read=${read} recorded=${governance?.recorded} />` : null}
   />`;
 }
 
@@ -153,8 +153,8 @@ function AppliedCard({ applied }) {
   `;
 }
 
-function RecordedTable({ read }) {
-  const label = html`<h2 class="workbench-section-label">RECORDED</h2>`;
+function RecordedTable({ read, recorded }) {
+  const label = html`<h2 class="workbench-section-label">RECORDED</h2>${recorded ? html`<${AuditSourceCaption} source=${recorded.source} path=${recorded.path} />` : null}`;
   if (read.error) return html`<section class="workbench-section" aria-label="RECORDED — RACI audit log">${label}<div class="raci-error">the audit tail could not be read: ${read.error}</div></section>`;
   if (!read.data) return html`<section class="workbench-section" aria-label="RECORDED — RACI audit log">${label}<div class="muted">loading the audit tail…</div></section>`;
   const rows = auditRows(read.data.audit.entries);
