@@ -54,7 +54,7 @@ function FamilyTabs({ tabs, params }) {
   `;
 }
 
-export function RolesIndexView({ params = null }) {
+export function RolesIndexView({ params = null, scope = null }) {
   const [load, setLoad] = useState({ body: null, error: null });
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +69,7 @@ export function RolesIndexView({ params = null }) {
   if (!load.body) return html`<div class="muted roles-loading">loading roles…</div>`;
   const sort = rolesSortState(params);
   const family = rolesFamilyState(params);
-  const all = rolesIndexRows(load.body);
+  const all = rolesIndexRows(load.body, scope);
   const rows = sortRoles(filterRolesByFamily(all, family), sort.column, sort.dir);
   const now = Date.now();
   return html`

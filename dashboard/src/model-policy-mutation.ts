@@ -22,12 +22,15 @@
 //
 // GET /api/model-policy is the editor's read: the effective source, the FG-827 resolution
 // table (roles.ts harnessActivities, so it can never disagree with the Harness tab), the
-// audit tail and the backups beside the target. No subprocess (invariant 21).
+// audit tail and the backups beside the target (each with its bytes, so Restore can load one
+// into the editor as the candidate), and the model ids the seed runtimes name (the quick-edit
+// picker). No subprocess (invariant 21).
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { parse as parseYaml } from "yaml";
 import type { ProjectRecord } from "./queries.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
 import { MAX_RATIONALE_CHARS, PROPOSAL_WINDOW_MS, ProposalWindow, sha256Hex } from "./raci-mutation.js";
@@ -53,7 +56,7 @@ import {
 import { loadModelPolicyWithSource } from "../../src/v2/loader.js";
 import { auditLogPath, policyTarget } from "../../src/v2/model-policy-gate.js";
 import { listSeedRoles } from "../../src/v2/role-surface.js";
-import { resolveSeedGeneration } from "../../src/v2/seed-generation.js";
+import { generationCategoryDir, resolveSeedGeneration, type SeedGeneration } from "../../src/v2/seed-generation.js";
 import { sha256OfBytes } from "../../src/util/content-digest.js";
 
 export type ModelPolicyAction = "model-policy-propose" | "model-policy-apply";
@@ -446,6 +449,8 @@ export type PolicyResolutionRow = {
   error: string | null;
 };
 
+/** A listed backup carries no content: its bytes are read one at a time, on Restore…, by
+ *  readPolicyBackup — a policy may once have held a key the operator since removed. */
 export type PolicyBackup = { path: string; name: string; timestamp: string; sha256: string; bytes: number };
 
 export type ModelPolicyReadModel = {
@@ -463,6 +468,8 @@ export type ModelPolicyReadModel = {
   resolution: { rows: PolicyResolutionRow[]; policyError: string | null };
   audit: { path: string; entries: RaciAuditLine[]; skippedLines: number };
   backups: { dir: string; entries: PolicyBackup[] };
+  /** Every model id a runtime seed in the current generation names, sorted. */
+  knownModels: string[];
   proposalWindowMs: number;
   maxCandidateBytes: number;
 };
@@ -482,6 +489,39 @@ export function listPolicyBackups(targetPath: string, limit: number = MAX_BACKUP
       const path = join(dir, name);
       return { path, name, timestamp: name.slice(prefix.length), sha256: sha256OfBytes(path), bytes: statSync(path).size };
     });
+}
+
+/** GET /api/model-policy?backup=<name>: one listed backup's bytes, for Restore… to load as
+ *  the candidate. `name` must be one listPolicyBackups returns for the target (the host
+ *  file, or `checkoutDir`'s override) — never a path — and no larger than a candidate may be. */
+export function readPolicyBackup(name: string, checkoutDir?: string): { ok: true; backup: PolicyBackup & { text: string } } | MutationRefusal {
+  const targetPath = policyTarget(checkoutDir).path;
+  const backup = listPolicyBackups(targetPath).find((b) => b.name === name);
+  if (!backup) return refuse(404, `${JSON.stringify(name)} is not a listed backup of ${targetPath}.`);
+  if (backup.bytes > MAX_POLICY_CANDIDATE_BYTES) {
+    return refuse(413, `the backup ${name} is ${backup.bytes} bytes; a candidate may be at most ${MAX_POLICY_CANDIDATE_BYTES} — restore it from a terminal.`);
+  }
+  return { ok: true, backup: { ...backup, text: readFileSync(backup.path, "utf8") } };
+}
+
+/** The model ids the current generation's runtime seeds name in their `models:` maps — picker
+ *  suggestions only, so a seed is read for that map alone rather than validated whole. */
+export function runtimeSeedModels(gen: SeedGeneration | null): string[] {
+  if (!gen) return [];
+  const dir = generationCategoryDir(gen, "runtimes");
+  if (!existsSync(dir)) return [];
+  const ids = new Set<string>();
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".yml")) continue;
+    try {
+      const models = (parseYaml(readFileSync(join(dir, file), "utf8")) as { models?: unknown } | null)?.models;
+      if (!models || typeof models !== "object") continue;
+      for (const id of Object.values(models)) if (typeof id === "string" && id !== "") ids.add(id);
+    } catch {
+      // A runtime seed that does not parse names no model the picker can offer.
+    }
+  }
+  return [...ids].sort();
 }
 
 /** READ-ONLY: the model-policy editor's view of one target — the host file, or one
@@ -547,6 +587,7 @@ export function modelPolicyReadModel(project?: { owner: ProjectRecord; checkoutD
     resolution: { rows, policyError },
     audit: { path: auditPath, ...readAuditTail(auditPath) },
     backups: { dir: dirname(target.path), entries: listPolicyBackups(target.path) },
+    knownModels: runtimeSeedModels(gen),
     proposalWindowMs: PROPOSAL_WINDOW_MS,
     maxCandidateBytes: MAX_POLICY_CANDIDATE_BYTES,
   };

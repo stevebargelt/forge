@@ -348,6 +348,24 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // collapse to the FG-817 tablist under 900px; and computed AA contrast on every new text
   // element. Fixture port 18842.
   "fg837-roles-parity.test.ts": 8,
+  // FG-835 part 2b adds `fg835-models-editor` (6 tests) for Setup › Models, against the REAL
+  // server (GET /api/model-policy, POST /api/model-policy/propose|apply) over a scratch
+  // FORGE_HOME carrying every seed role and the seed runtimes as a published generation, with
+  // a recording `forge` shim that execs the real CLI: a quick edit of one profile's model
+  // rewrites exactly that YAML line, the dry-run tags the changed row "was …", Propose renders
+  // the before → after resolution diff, Apply stays disabled (and the server refuses
+  // confirm_key_mismatch) without the typed target and applies with it — the table, the
+  // RECORDED tail, the backups and the role's Harness tab re-read; a runtime error shown by
+  // line with Propose disabled; an undispatchable override refused as the CLI words it, the
+  // proposal superseded and Apply disabled, never --allow-undispatchable; Restore… proposing a
+  // backup and applying it through the gate; a reload keeping edit mode but not the draft, no
+  // browser storage, and Config's link here; and a keyboard-only project-override apply at
+  // 400px. `fg820-left-column-nav` keeps its count with Models in the Setup group. Fixture port 18843.
+  // Its review fix batch adds two: a backup over the candidate limit shows Restore… disabled
+  // with its size and the limit (the server refusing its bytes), and a resolution row's role
+  // link opening the Harness tab under the scope the row was resolved at (project override
+  // scoped, host file unscoped).
+  "fg835-models-editor.test.ts": 8,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

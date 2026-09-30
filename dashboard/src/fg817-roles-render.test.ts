@@ -46,14 +46,16 @@ test("rolesIndexNotices: a missing generation, an unreadable policy or store, an
 });
 
 test("the role route: #roles is the list, #roles/<role>/<tab> a deep-linkable page, an unknown tab falls back to overview", () => {
-  assert.deepEqual(NAV_GROUPS.find((g) => g.id === "setup")!.items, ["roles", "routing", "config", "projects"]);
+  assert.deepEqual(NAV_GROUPS.find((g) => g.id === "setup")!.items, ["roles", "routing", "models", "config", "projects"]);
   const list = parseHash("#roles");
   assert.deepEqual([list.view, list.id, list.rewrite], ["roles", null, false]);
   const deep = parseHash("#roles/engineer/instructions");
   assert.deepEqual([deep.view, deep.group, deep.id, deep.tab, deep.rewrite], ["roles", "setup", "engineer", "instructions", false]);
   const unknown = parseHash("#roles/engineer/bogus");
   assert.deepEqual([unknown.tab, unknown.canonical, unknown.rewrite], ["overview", "#roles/engineer", true]);
-  assert.equal(parseHash("#roles/engineer?project=forge").canonical, "#roles/engineer", "role pages carry no scope");
+  // FG-835: a role page carries scope (its Harness rows resolve at the scoped checkout); the list does not.
+  assert.equal(parseHash("#roles/engineer?project=forge").canonical, "#roles/engineer?project=forge", "a role page keeps its scope");
+  assert.equal(parseHash("#roles?project=forge").canonical, "#roles", "the Roles list drops scope");
   assert.equal(hashFor({ view: "roles", id: "engineer", tab: "overview" }), "#roles/engineer");
   assert.equal(navItemFor("roles"), "roles");
 });
@@ -84,6 +86,9 @@ test("roleTrail is Roles › <role> › <tab>, and Escape goes to the Roles list
     { kind: "role-tab", label: "Instructions", href: null },
   ]);
   assert.equal(parentHash("role", null), "#roles");
+  const scope = { project: "forge", checkout: "/r/forge" };
+  assert.deepEqual(roleTrail("engineer", "Harness / Runtime", scope).map((c) => c.href), ["#roles", "#roles/engineer?project=forge&checkout=%2Fr%2Fforge", null], "the role crumb keeps the page's scope; the list crumb drops it");
+  assert.equal(roleTabs("engineer", "harness", scope)[7]!.href, "#roles/engineer/tasks?project=forge&checkout=%2Fr%2Fforge", "moving between a scoped page's tabs keeps its scope");
 });
 
 test("tabCaption names each tab's source, and says so when the payload carries none", () => {

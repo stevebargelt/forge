@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TEST_PORT = 18835;
@@ -462,6 +462,18 @@ test("integ FG-835: green propose → host apply through the real CLI replaces t
   assert.equal(view.body["audit"].entries[0].actor, "dashboard", "the reader renames the written `by` to the one attribution field, `actor`");
   assert.equal("by" in view.body["audit"].entries[0], false);
   assert.deepEqual(view.body["backups"].entries.map((b: { path: string; sha256: string }) => [b.path, b.sha256]), [[backup, sha(CURRENT)]]);
+  assert.equal("text" in view.body["backups"].entries[0], false, "the list never carries a backup's content");
+
+  const name = basename(backup);
+  const one = await getPolicy(`?backup=${encodeURIComponent(name)}`);
+  assert.equal(one.status, 200, JSON.stringify(one.body));
+  assert.deepEqual([one.body["name"], one.body["sha256"], one.body["text"]], [name, sha(CURRENT), CURRENT], "Restore… reads one listed backup's bytes");
+  for (const bad of ["model-policy.yml", "../model-policy.yml", `${name}/..`, `../${basename(tmpHome)}/${name}`, join(tmpHome, name)]) {
+    const refused = await getPolicy(`?backup=${encodeURIComponent(bad)}`);
+    assert.equal(refused.status, 404, `${bad}: only a listed backup name is read`);
+    assert.equal("text" in refused.body, false);
+  }
+  assert.equal((await getPolicy(`?project=${encodeURIComponent(PROJECT_KEY)}&backup=${encodeURIComponent(name)}`)).status, 404, "a host backup is not readable as the project target's");
 });
 
 test("integ FG-835: green propose → project apply through the real CLI writes <checkout>/.forge/model-policy.yml and leaves the host file alone", async () => {

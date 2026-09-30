@@ -220,6 +220,21 @@ test("GET /api/roles/engineer?project=<registered key>: composed with that proje
   assert.match(i.context, /anchored at /);
 });
 
+test("FG-835: GET /api/roles/engineer?project=<key>&projectDir=<its checkout>: anchored at that checkout; any other dir is 400, never read", async () => {
+  const projects = await get("/api/projects");
+  const records: any[] = Array.isArray(projects.body) ? projects.body : projects.body.projects;
+  const record = records.find((p: any) => p.projectDirs.includes(PROJECT) || p.projectDir === PROJECT);
+  const checkout = record.checkouts.find((c: any) => c.exists).projectDir;
+  const { status, body } = await get(`/api/roles/engineer?project=${encodeURIComponent(record.key)}&projectDir=${encodeURIComponent(checkout)}`);
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.deepEqual(body.instructions.project, { key: record.key, dir: checkout });
+  for (const dir of ["/tmp", `${checkout}/..`, "", "relative"]) {
+    const refused = await get(`/api/roles/engineer?project=${encodeURIComponent(record.key)}&projectDir=${encodeURIComponent(dir)}`);
+    assert.equal(refused.status, 400, `${dir}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.reason, "checkout_not_registered");
+  }
+});
+
 test("GET /api/roles/engineer?project=<unregistered>: 400 with a named reason; a path is never taken", async () => {
   for (const q of ["no-such-project", encodeURIComponent(PROJECT), ""]) {
     const { status, body } = await get(`/api/roles/engineer?project=${q}`);

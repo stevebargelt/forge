@@ -1972,6 +1972,53 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
   .raci-editor, .raci-apply-grid { grid-template-columns: minmax(0, 1fr); }
   .raci-bar .hint { max-width: 100%; }
 }
+/* FG-835: Setup › Models (client/models-editor-view.js), after /design/models-editor-mock.html.
+   It reuses the FG-834 editor classes above; only the model-policy pieces are here. */
+.mp-label-row { margin-top: 26px; }
+.mp-view > .workbench-section:first-child .mp-label-row { margin-top: 0; }
+.mp-source { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.mp-path { overflow-wrap: anywhere; }
+.mp-chip { text-transform: none; }
+.mp-target { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.mp-link, .cp-models-link { color: var(--accent); text-decoration: underline; }
+.cp-models-link { display: inline-block; margin-top: 4px; font-size: 12px; }
+.mp-source-error { flex-basis: 100%; }
+.mp-quick { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.mp-view .hint { font-size: 12px; color: var(--fg-dim); letter-spacing: normal; text-transform: none; }
+.mp-quick-card h3 { margin: 0 0 8px; font-size: 13px; color: var(--fg-dim); font-weight: 500; text-transform: none; letter-spacing: normal; }
+.mp-quick-row { display: flex; gap: 10px; align-items: center; margin: 6px 0; }
+.mp-quick-name { flex: 0 0 150px; overflow-wrap: anywhere; }
+.mp-quick-row[data-role] .mp-quick-name { flex-basis: 170px; }
+.mp-alias { flex: 0 0 110px; font-size: 12px; overflow-wrap: anywhere; }
+.mp-quick-card select { background: #0b0b0d; border: 1px solid var(--border); color: var(--fg); border-radius: 5px; padding: 5px 8px; font-size: 13px; flex: 0 1 240px; width: 240px; min-width: 0; }
+.mp-quick-card select.mp-add { flex-basis: 190px; width: 190px; font-family: inherit; }
+.mp-quick-card select.mono { font-family: ui-monospace, Menlo, monospace; }
+.mp-quick-card select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mp-add { color: var(--fg-dim) !important; }
+.mp-quick-off { margin-top: 0; }
+.mp-editing .raci-editor { margin-top: 14px; }
+.mp-resolution td { font-size: 12.5px; overflow-wrap: break-word; }
+.mp-tier { color: var(--fg-faint); font-size: 11px; }
+.mp-role-link { color: inherit; text-decoration: none; }
+.mp-role-link:hover, .mp-role-link:focus-visible { color: var(--accent); text-decoration: underline; }
+.mp-was { color: var(--fg-faint); font-size: 11px; }
+.mp-cell-err { color: var(--err); }
+.mp-tag-undispatchable { color: var(--err); border-color: #5a2a2a; }
+.mp-tag-changed { color: var(--accent); border-color: #3a4a80; }
+.mp-harness-hint { margin-top: 6px; }
+.mp-diff td { font-size: 12.5px; overflow-wrap: anywhere; }
+.mp-file { overflow-wrap: anywhere; }
+.mp-restore-cell { white-space: nowrap; }
+.mp-backups .workbench-section-label, .mp-recorded .workbench-section-label, .mp-proposal .raci-label-row { margin-top: 26px; }
+@media (max-width: 900px) {
+  .mp-quick { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .mp-quick-row { flex-wrap: wrap; }
+  .mp-quick-name, .mp-quick-row[data-role] .mp-quick-name, .mp-alias { flex-basis: auto; }
+  .mp-quick-card select { flex: 1 1 100%; width: 100%; }
+  .mp-restore-cell { white-space: normal; }
+}
 .gov-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .gov-table th {
   text-align: left;

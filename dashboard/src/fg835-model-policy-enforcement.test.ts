@@ -11,7 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProjectRecord } from "./queries.js";
 import { ProposalWindow } from "./raci-mutation.js";
-import { MAX_POLICY_CANDIDATE_BYTES, handleModelPolicyMutation, modelPolicyReadModel, modelPolicyScratchRoot } from "./model-policy-mutation.js";
+import { MAX_POLICY_CANDIDATE_BYTES, handleModelPolicyMutation, modelPolicyReadModel, modelPolicyScratchRoot, readPolicyBackup } from "./model-policy-mutation.js";
+import { isRefusal } from "./mutation-guards.js";
 
 const port = 18855;
 const base = `http://127.0.0.1:${port}`;
@@ -190,5 +191,13 @@ test("FG-835 enforcement: GET's read model uses Harness rows, reverses bounded a
   assert.equal(read.audit.entries[0]?.rationale, "r54", "audit tail is newest first");
   assert.deepEqual(read.backups.entries.map((b) => b.name), ["model-policy.yml.bak-2026-09-02T00:00:00.000Z", "model-policy.yml.bak-2026-09-01T00:00:00.000Z"]);
   assert.ok(read.backups.entries.every((b) => /^[a-f0-9]{64}$/.test(b.sha256)));
+  assert.ok(read.backups.entries.every((b) => !("text" in b)), "the listing never carries a backup's content");
+  const one = readPolicyBackup("model-policy.yml.bak-2026-09-01T00:00:00.000Z");
+  assert.ok(!isRefusal(one) && one.backup.text === "old\n", "Restore… reads one listed backup, by name");
+  for (const name of ["../model-policy.yml.bak-2026-09-01T00:00:00.000Z", join(home, "model-policy.yml.bak-2026-09-01T00:00:00.000Z"), "model-policy.yml", "model-policy-audit.log"]) {
+    const refused = readPolicyBackup(name);
+    assert.ok(isRefusal(refused) && refused.status === 404, `${name}: an unlisted or path-shaped name is refused`);
+  }
+  assert.deepEqual(read.knownModels, ["claude-sonnet-5"], "the picker's model ids come from the generation's runtime seeds");
   assert.deepEqual(calls(), [], "GET's read-model work never shells forge");
 });

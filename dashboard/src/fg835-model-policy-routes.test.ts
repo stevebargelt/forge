@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
   buildModelPolicyArgv,
   confirmKeyFor,
   listPolicyBackups,
+  readPolicyBackup,
   parseModelPolicyRequest,
   policyApplyRefusal,
   type ModelPolicyRequest,
@@ -170,7 +171,27 @@ test("listPolicyBackups: only <target>.bak-* files beside the target, newest fir
     timestamp: "2026-09-02T00:00:00.000Z",
     sha256: sha256Hex("newer\n"),
     bytes: 6,
-  });
+  }, "a listed backup carries no content — Restore… reads one at a time (readPolicyBackup)");
   assert.equal(listPolicyBackups(target, 1).length, 1);
   assert.deepEqual(listPolicyBackups(join(dir, "missing", "model-policy.yml")), []);
+});
+
+test("readPolicyBackup: one listed backup's bytes for Restore…; an unlisted, path-shaped or oversized name is refused", () => {
+  const checkout = mkdtempSync(join(tmpdir(), "fg835-backup-read-"));
+  const dir = join(checkout, ".forge");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "model-policy.yml"), "current\n");
+  writeFileSync(join(dir, "model-policy.yml.bak-2026-09-01T00:00:00.000Z"), "old\n");
+  writeFileSync(join(dir, "secret.txt"), "not a backup\n");
+  const read = readPolicyBackup("model-policy.yml.bak-2026-09-01T00:00:00.000Z", checkout);
+  assert.ok(!isRefusal(read));
+  assert.deepEqual([read.backup.name, read.backup.bytes, read.backup.sha256, read.backup.text], ["model-policy.yml.bak-2026-09-01T00:00:00.000Z", 4, sha256Hex("old\n"), "old\n"]);
+  for (const name of ["model-policy.yml", "secret.txt", "../.forge/model-policy.yml.bak-2026-09-01T00:00:00.000Z", join(dir, "model-policy.yml.bak-2026-09-01T00:00:00.000Z"), "model-policy.yml.bak-", ""]) {
+    const refused = readPolicyBackup(name, checkout);
+    assert.ok(isRefusal(refused) && refused.status === 404, `${JSON.stringify(name)} is not a listed backup`);
+  }
+  writeFileSync(join(dir, "model-policy.yml.bak-2026-09-02T00:00:00.000Z"), "x".repeat(MAX_POLICY_CANDIDATE_BYTES + 1));
+  const big = readPolicyBackup("model-policy.yml.bak-2026-09-02T00:00:00.000Z", checkout);
+  assert.ok(isRefusal(big) && big.status === 413, "a backup larger than a candidate may be is never read");
+  assert.match(big.error, new RegExp(`${MAX_POLICY_CANDIDATE_BYTES + 1} bytes; a candidate may be at most ${MAX_POLICY_CANDIDATE_BYTES}`));
 });

@@ -71,7 +71,7 @@ import { finishUnhandledRequest, degradedGraphErrorPayload } from "./http-error.
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 import { actionPreviewTaskId, handleActionMutation, isActionMutationPath, previewTaskActions, taskIdOperand } from "./action-mutation.js";
 import { raciReadModel } from "./raci-mutation.js";
-import { modelPolicyReadModel } from "./model-policy-mutation.js";
+import { modelPolicyReadModel, readPolicyBackup } from "./model-policy-mutation.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
 import {
   guardBindAddress,
@@ -319,22 +319,31 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // FG-835: the model-policy editor's read. No `project` reads the host file; a project
     // is named by registry key (and an optional checkout among its own), exactly as the
     // model-policy mutation rows resolve it. No subprocess (invariant 21).
+    // `?backup=<name>` answers one listed backup's bytes instead (Restore…), bounded by
+    // readPolicyBackup; the read model itself lists backups without their content.
     const projectKey = url.searchParams.get("project");
-    if (projectKey === null) {
-      sendJson(res, 200, modelPolicyReadModel());
+    const backup = url.searchParams.get("backup");
+    let project: { owner: ProjectRecord; checkoutDir: string } | undefined;
+    if (projectKey !== null) {
+      const owner = projectKey ? resolveOwnerProject(projectsForDashboard(), projectKey, undefined) : undefined;
+      if (!owner) {
+        sendJson(res, 404, { error: `no registered project has the key ${JSON.stringify(projectKey)}.` });
+        return;
+      }
+      const checkout = resolveCheckoutDir(owner, url.searchParams.get("projectDir") ?? undefined);
+      if (isRefusal(checkout)) {
+        sendJson(res, checkout.status, { error: checkout.error });
+        return;
+      }
+      project = { owner, checkoutDir: checkout };
+    }
+    if (backup === null) {
+      sendJson(res, 200, modelPolicyReadModel(project));
       return;
     }
-    const owner = projectKey ? resolveOwnerProject(projectsForDashboard(), projectKey, undefined) : undefined;
-    if (!owner) {
-      sendJson(res, 404, { error: `no registered project has the key ${JSON.stringify(projectKey)}.` });
-      return;
-    }
-    const checkout = resolveCheckoutDir(owner, url.searchParams.get("projectDir") ?? undefined);
-    if (isRefusal(checkout)) {
-      sendJson(res, checkout.status, { error: checkout.error });
-      return;
-    }
-    sendJson(res, 200, modelPolicyReadModel({ owner, checkoutDir: checkout }));
+    const read = readPolicyBackup(backup, project?.checkoutDir);
+    if (isRefusal(read)) sendJson(res, read.status, { error: read.error });
+    else sendJson(res, 200, read.backup);
     return;
   }
 
@@ -832,7 +841,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         sendJson(res, 400, { error: `project ${JSON.stringify(projectKey)} is not a registered project`, reason: "project_not_registered" });
         return;
       }
-      project = { key: record.key, dir: record.primaryCheckout };
+      // `projectDir` selects among the project's own existing checkouts (FG-835: the Models
+      // page links a role at the checkout its resolution rows were read at); absent, the
+      // primary checkout, as dispatch anchors it.
+      const projectDir = url.searchParams.get("projectDir");
+      const dir = projectDir === null ? record.primaryCheckout : record.checkouts.find((c) => c.exists && c.projectDir === projectDir)?.projectDir;
+      if (!dir) {
+        sendJson(res, 400, { error: `${JSON.stringify(projectDir)} is not a checkout of project ${JSON.stringify(projectKey)} on this host`, reason: "checkout_not_registered" });
+        return;
+      }
+      project = { key: record.key, dir };
     }
     const detail = roleDetail(role, project);
     if (!detail) {

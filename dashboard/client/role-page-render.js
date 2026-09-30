@@ -27,8 +27,8 @@ export function roleTabLabel(tab) {
   return TAB_LABELS[tab] ?? TAB_LABELS.overview;
 }
 
-export function roleTabs(role, current) {
-  return ROLE_TABS.map((t) => ({ ...t, href: hashFor({ view: "roles", id: role, tab: t.id }), current: t.id === current }));
+export function roleTabs(role, current, scope = null) {
+  return ROLE_TABS.map((t) => ({ ...t, href: hashFor({ view: "roles", id: role, tab: t.id, scope }), current: t.id === current }));
 }
 
 /** The caption every tab carries: where its content was read from. */
@@ -115,8 +115,8 @@ export function skillSourceLabel(source) {
 }
 
 /** The Overview's Skills chips: each mounted skill, linking to the Skills tab. */
-export function skillChips(role, names) {
-  const href = hashFor({ view: "roles", id: role, tab: "skills" });
+export function skillChips(role, names, scope = null) {
+  const href = hashFor({ view: "roles", id: role, tab: "skills", scope });
   return (names ?? []).map((name) => ({ name, href }));
 }
 
@@ -167,14 +167,14 @@ export const SUBNAV_ICONS = Object.freeze({
   usage: ["M4 19h16M6 16V9M10 16V5M14 16v-7M18 16v-4"],
 });
 
-export function roleSubnav(role, current) {
+export function roleSubnav(role, current, scope = null) {
   return ROLE_TAB_GROUPS.map((g) => ({
     id: g.id,
     label: g.label,
     items: g.tabs.map((id) => ({
       id,
       label: SUBNAV_LABELS[id] ?? TAB_LABELS[id],
-      href: hashFor({ view: "roles", id: role, tab: id }),
+      href: hashFor({ view: "roles", id: role, tab: id, scope }),
       current: id === current,
       icon: SUBNAV_ICONS[id],
     })),
@@ -197,11 +197,11 @@ export function roleMeta(detail, family) {
 const constraintName = (k) => (k.file ? k.file.split("/").pop().replace(/\.md$/, "") : k.id);
 
 /** The Overview's four cards as label/value rows, each with the tab its link opens. */
-export function overviewCards(detail, family) {
+export function overviewCards(detail, family, scope = null) {
   const o = detail.overview;
   const r = o.resolution ?? {};
   const c = detail.capabilities ?? {};
-  const link = (tab, label) => ({ label, href: hashFor({ view: "roles", id: detail.role, tab }) });
+  const link = (tab, label) => ({ label, href: hashFor({ view: "roles", id: detail.role, tab, scope }) });
   return {
     identity: {
       link: link("instructions", "Instructions"),
@@ -235,7 +235,7 @@ export function overviewCards(detail, family) {
     },
     skills: {
       link: link("skills", "Manage"),
-      chips: skillChips(detail.role, o.skills),
+      chips: skillChips(detail.role, o.skills, scope),
       hostOnly: (detail.skills?.hostOnly ?? []).map((k) => k.name),
     },
   };
