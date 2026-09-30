@@ -10,6 +10,7 @@ import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
 import { md } from "./renderers.js";
 import { backlogBoardState, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
 import { hashFor } from "./view-routing.js";
+import { checkoutLabelForDir } from "./checkout-label.js";
 
 const html = htm.bind(h);
 
@@ -20,7 +21,7 @@ const STATUSES = ["active", "blocked", "deferred", "done"];
 
 // FG-821: a ticket opens its page, #backlog/<ticketId> (ticket-page-view.js), keeping
 // the scope in hand — ticket ids are per project.
-export function BacklogView({ data, projectFilter, scope }) {
+export function BacklogView({ data, projectFilter, scope, projects = [] }) {
   const [typeFilter, setTypeFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null);
   const [search, setSearch] = useState("");
@@ -88,6 +89,7 @@ export function BacklogView({ data, projectFilter, scope }) {
             <${NoteCard}
               key=${entry.checkoutDir}
               entry=${entry}
+              projects=${projects}
               onClick=${() => setSelectedNote(entry)}
             />
           `)}
@@ -157,6 +159,7 @@ export function BacklogView({ data, projectFilter, scope }) {
                     ticket=${tk}
                     epic=${tk.epic ? epicsById[`${tk.checkoutDir || ""}:${tk.epic}`] : null}
                     href=${hashFor({ view: "backlog", id: tk.id, scope })}
+                    projects=${projects}
                   />
                 `)}
               </section>
@@ -165,19 +168,19 @@ export function BacklogView({ data, projectFilter, scope }) {
       }
 
       ${selectedNote ? html`
-        <${NoteDetail} entry=${selectedNote} onClose=${() => setSelectedNote(null)} />
+        <${NoteDetail} entry=${selectedNote} projects=${projects} onClose=${() => setSelectedNote(null)} />
       ` : null}
     </div>
   `;
 }
 
-function noteLabel(entry) {
-  return entry.checkoutBranch || entry.checkoutDir.split("/").pop();
+// FG-831: a note row names its checkout by the shared label rule, not its branch alone.
+function noteLabel(entry, projects) {
+  return checkoutLabelForDir(entry.checkoutDir, projects, entry.checkoutBranch);
 }
 
-function NoteCard({ entry, onClick }) {
+function NoteCard({ entry, projects, onClick }) {
   const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } };
-  const checkoutName = entry.checkoutDir.split("/").pop();
   const preview = entry.notes.trim().replace(/\s+/g, " ").slice(0, 200);
   return html`
     <div
@@ -186,13 +189,12 @@ function NoteCard({ entry, onClick }) {
       role="button"
       tabIndex="0"
       onKeyDown=${onKey}
-      aria-label=${`Open session handoff for ${noteLabel(entry)}`}
+      aria-label=${`Open session handoff for ${noteLabel(entry, projects)}`}
     >
       <div class="head">
         <div>
           <span class="badge backlog-note-badge">handoff</span>
-          <strong>${noteLabel(entry)}</strong>
-          <span class="checkout-chip" title=${entry.checkoutDir}>${checkoutName}</span>
+          <strong title=${entry.checkoutDir}>${noteLabel(entry, projects)}</strong>
         </div>
         <span class="faint mono backlog-note-action">view notes →</span>
       </div>
@@ -201,11 +203,11 @@ function NoteCard({ entry, onClick }) {
   `;
 }
 
-function NoteDetail({ entry, onClose }) {
+function NoteDetail({ entry, projects, onClose }) {
   const onKey = (e) => { if (e.key === "Escape") onClose(); };
   const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
   return html`
-    <div class="detail-overlay" onClick=${onClose} onKeyDown=${onKey} role="dialog" aria-modal="true" aria-label=${`Session handoff for ${noteLabel(entry)}`}>
+    <div class="detail-overlay" onClick=${onClose} onKeyDown=${onKey} role="dialog" aria-modal="true" aria-label=${`Session handoff for ${noteLabel(entry, projects)}`}>
       <div class="detail" onClick=${(e) => e.stopPropagation()}>
         <span
           class="close"
@@ -218,7 +220,7 @@ function NoteDetail({ entry, onClose }) {
 
         <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: baseline;">
           <span class="badge backlog-note-badge">handoff</span>
-          <span class="checkout-chip" title=${entry.checkoutDir}>${noteLabel(entry)}</span>
+          <span class="checkout-chip" title=${entry.checkoutDir}>${noteLabel(entry, projects)}</span>
         </div>
         <h1 style="margin-bottom: 12px;">Session handoff</h1>
         <div class="subcard backlog-note-path mono faint" title=${entry.checkoutDir}>${entry.checkoutDir}</div>
@@ -228,7 +230,7 @@ function NoteDetail({ entry, onClose }) {
   `;
 }
 
-function TicketCard({ ticket, epic, href }) {
+function TicketCard({ ticket, epic, href, projects }) {
   return html`
     <a
       class="card backlog-ticket-card"
@@ -240,7 +242,7 @@ function TicketCard({ ticket, epic, href }) {
           <span class="badge ${statusClass("ticket", ticket.status)}" aria-label=${"Status: " + ticket.status}>${statusLabel("ticket", ticket.status)}</span>
           <span class="backlog-id mono faint" style="font-size: 11px; margin: 0 6px;">${ticket.id}</span>
           <strong>${ticket.title}</strong>
-          ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}
+          ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${checkoutLabelForDir(ticket.checkoutDir, projects, ticket.checkoutBranch)}</span>` : null}
         </div>
         ${epic ? html`<span class="muted" style="font-size: 11px;">Epic: ${epic.title || ticket.epic}</span>` : null}
       </div>

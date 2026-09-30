@@ -1,5 +1,7 @@
 // FG-595: real-browser proof that the Projects view and its checkout scope
-// controls suppress stale checkouts end-to-end. Unlike the canned-fixture
+// controls suppress stale checkouts end-to-end. (FG-831: "suppressed" now means withheld
+// behind the scope bar's "show N missing" and counted on the Projects card — the stale
+// path still never reaches the DOM by default.) Unlike the canned-fixture
 // browser tests, this boots the REAL dashboard server against a real forge DB
 // so the presentation registry (queries.ts) runs for real: a deleted scratchpad
 // grouped under an existing checkout must never reach the DOM, while a missing
@@ -164,7 +166,10 @@ test("Forge scope selector — the project that HAD a stale scratchpad — offer
   await scope.waitFor();
   const scopeText = await scope.innerText();
   assert.ok(!/scratchpad/.test(scopeText), "the suppressed scratchpad path never reaches the Forge scope selector");
-  assert.ok(!/missing/i.test(scopeText), "Forge has no surviving missing checkout, so no scope option is labeled missing");
+  // FG-831: the deleted scratchpad is withheld behind a count rather than dropped, so it
+  // can be revealed (labeled `missing on disk`) or pruned; it is never a default option.
+  assert.equal(await scope.locator(".checkout-missing-toggle").innerText(), "show 1 missing");
+  assert.equal(await scope.locator(".checkout-scope-btn-missing").count(), 0, "no missing checkout is offered until revealed");
 
   // Exactly one real checkout scope option beyond the always-present 'all checkouts'.
   const options = scope.locator(".checkout-scope-btn");

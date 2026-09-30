@@ -14,6 +14,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { uniqueProjectDirs } from "../store/runs.js";
+import { prunedCheckoutRoots } from "../store/pruned-checkouts.js";
 import { findForgeProjects } from "./find-forge-projects.js";
 import { resolveProjectMeta } from "./project-meta.js";
 import { liveOrchestratorSessions } from "./orchestrator-heartbeats.js";
@@ -353,7 +354,33 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
   // The FULL annotated set: run-scoping and `forge projects show` reach every record,
   // including suppressed artifacts. The operatorProjects() membership filter is applied
   // by the CLI list and the dashboard grid — this is the one shared seam (AC7).
-  return aggregateProjectSignals(signals, repositoryCheckoutIdentity, storeWorkspacePurposeResolver);
+  return withoutPrunedCheckouts(
+    aggregateProjectSignals(signals, repositoryCheckoutIdentity, storeWorkspacePurposeResolver),
+    prunedCheckoutRoots(),
+  );
+}
+
+/** FG-831: drop the checkout registrations `forge projects prune --missing` removed. A
+ *  pruned root is honoured only while its directory is still gone — one that reappears on
+ *  disk is offered again. Only the `checkouts` list changes: the record's aggregates and
+ *  its full historical projectDirs pass through, so the project's past runs stay in scope.
+ *  A record left with no checkout at all is dropped. */
+export function withoutPrunedCheckouts(records: ProjectRecord[], pruned: ReadonlySet<string>): ProjectRecord[] {
+  if (pruned.size === 0) return records;
+  const out: ProjectRecord[] = [];
+  for (const record of records) {
+    const checkouts = record.checkouts.filter((checkout) => checkout.exists || !pruned.has(checkout.projectDir));
+    if (checkouts.length === record.checkouts.length) {
+      out.push(record);
+      continue;
+    }
+    if (checkouts.length === 0) continue;
+    const primary = checkouts.some((checkout) => checkout.projectDir === record.primaryCheckout)
+      ? record.primaryCheckout
+      : checkouts[0]!.projectDir;
+    out.push({ ...record, checkouts, primaryCheckout: primary, projectDir: primary });
+  }
+  return out;
 }
 
 export function findProject(query: string, projects: ProjectRecord[]): ProjectRecord | undefined {

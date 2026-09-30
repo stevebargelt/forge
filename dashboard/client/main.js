@@ -1,7 +1,7 @@
 // forge-dashboard client. Preact + htm; no build step. Polls every 2s.
 
-import { h, render } from "preact";
-import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "preact/hooks";
+import { createContext, h, render } from "preact";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, useContext } from "preact/hooks";
 import htm from "htm";
 import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";
@@ -25,6 +25,7 @@ import { ScreenLine } from "./object-page-view.js";
 import { ROUTES, GROUPS, parseHash, hashFor, carriesScope, navItemFor } from "./view-routing.js";
 import { NavColumn, BottomBar, NavDrawer } from "./nav-view.js";
 import { scopeSummary, scopedHref } from "./nav-render.js";
+import { MISSING_LABEL, PRUNE_VERB, checkoutLabel, checkoutLabelForDir, dedupeCheckouts } from "./checkout-label.js";
 import { verificationRowBadge } from "./verification-render.js";
 import { ACTIVITY_LOADING, createActivityReader, homeInFlightActivity } from "./current-activity-render.js";
 import { CurrentActivitySection, InFlightActivityWaits } from "./current-activity-view.js";
@@ -690,6 +691,7 @@ function App() {
   />`;
 
   return html`
+    <${ProjectsContext.Provider} value=${projects}>
     <div class="app-shell">
       <a class="skip-link" href=${hashFor({ ...route, scope })} onClick=${skipToContent}>Skip to content</a>
       <div class="nav-column">${navColumn("nav")}</div>
@@ -757,7 +759,7 @@ function App() {
         : view === "backlog"
         ? route.id
           ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`
-          : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} />`
+          : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} projects=${projects} />`
         : view === "queue"
         ? html`<${QueueBoardView}
             data=${queue}
@@ -857,6 +859,7 @@ function App() {
       />
       ${drawerOpen ? html`<${NavDrawer} onClose=${() => setDrawerOpen(false)} returnFocusRef=${moreRef}>${navColumn("drawer")}</${NavDrawer}>` : null}
     </div>
+    </${ProjectsContext.Provider}>
   `;
 }
 
@@ -1862,7 +1865,7 @@ function ProjectCard({ project, onPick, onReload }) {
       setClaiming(false);
     }
   };
-  const checkouts = project.checkouts || [];
+  const { all: allCheckouts, rows: checkouts, missingCount } = cardCheckouts(project);
   const openProject = (event) => {
     if (event) event.stopPropagation();
     onPick(project, null);
@@ -1963,13 +1966,18 @@ function ProjectCard({ project, onPick, onReload }) {
               >${checkouts.length} working dirs ${showDirs ? "▾" : "▸"}</button>
               ${showDirs
                 ? html`<div class="project-checkouts" aria-label=${`${project.label} working directories`}>
-                    ${checkouts.map((checkout) => checkoutRow(project, checkout, onPick))}
+                    ${checkouts.map((checkout) => checkoutRow(project, checkout, allCheckouts, onPick))}
                   </div>`
                 : null}
             </div>`
         : html`<div class="project-checkouts" aria-label=${`${project.label} working directory`}>
-            ${checkouts.map((checkout) => checkoutRow(project, checkout, onPick))}
+            ${checkouts.map((checkout) => checkoutRow(project, checkout, allCheckouts, onPick))}
           </div>`}
+      ${missingCount > 0
+        ? html`<div class="project-missing-count faint" title="Registrations whose directory no longer exists. Nothing is deleted automatically.">
+            ${missingCount} ${MISSING_LABEL} · prune with <code>${PRUNE_VERB}</code>
+          </div>`
+        : null}
       ${unclassified && showClassify ? html`<${ClassifyControl} project=${project} onReload=${onReload} />` : null}
     </div>
   `;
@@ -2107,29 +2115,29 @@ function ClassifyControl({ project, onReload }) {
   `;
 }
 
-// FG-595: a checkout that survived suppression because it still has active work
-// or a live session but is gone from disk (exists===false) must read truthfully,
-// not as an "unknown branch". Present checkouts keep their branch (or the honest
-// "unknown branch" when git reported none).
-function checkoutLabel(checkout) {
-  if (checkout.exists === false) {
-    return checkout.branch ? `${checkout.branch} (missing)` : "missing / unavailable";
-  }
-  return checkout.branch || "unknown branch";
+// FG-595/FG-831: a card lists its on-disk checkouts, plus any missing one that still
+// carries active work or a live session (read `missing on disk` by the shared label
+// rule, never "unknown branch"). Every other missing checkout is only COUNTED, next to
+// the verb that prunes it — the card never deletes anything itself.
+function cardCheckouts(project) {
+  const all = dedupeCheckouts(project.checkouts);
+  const rows = all.filter((c) => c.exists !== false || c.inFlightCount > 0 || c.liveSessions > 0);
+  return { all, rows, missingCount: all.filter((c) => c.exists === false).length };
 }
 
 // FG-759 (#1): one working-directory row, shared by the single-dir card and the
 // expanded multi-dir disclosure. onPick scopes the activity view to that exact dir.
-function checkoutRow(project, checkout, onPick) {
+function checkoutRow(project, checkout, all, onPick) {
+  const label = checkoutLabel(checkout, all);
   return html`
     <button
       key=${checkout.projectDir}
       class="project-checkout-row"
       onClick=${(event) => { event.stopPropagation(); onPick(project, checkout.projectDir); }}
       title=${checkout.projectDir}
-      aria-label=${`Open ${project.label} checkout ${checkoutLabel(checkout)}`}
+      aria-label=${`Open ${project.label} checkout ${label}`}
     >
-      <span class=${"checkout-branch" + (checkout.exists === false ? " checkout-missing" : "")}>${checkoutLabel(checkout)}</span>
+      <span class=${"checkout-branch" + (checkout.exists === false ? " checkout-missing" : "")}>${label}</span>
       <span class="project-path mono faint">${checkout.projectDir}</span>
     </button>
   `;
@@ -2147,12 +2155,20 @@ function projectAgeState(p) {
   return "stale";
 }
 
+// FG-831: the registry the shared checkout label rule resolves a row's directory against,
+// so an Activity row names its checkout exactly as the scope bar does.
+const ProjectsContext = createContext([]);
+
 function ProjectChip({ entry }) {
+  const projects = useContext(ProjectsContext);
   if (!entry.projectLabel || !entry.projectColor) return null;
+  const checkout = entry.projectDir
+    ? checkoutLabelForDir(entry.projectDir, projects, entry.checkoutBranch)
+    : entry.checkoutBranch || entry.checkoutName;
   return html`
     <span class="project-identity" title=${entry.projectDir ?? ""}>
       <span class="project-chip" style=${{ background: entry.projectColor }}>${entry.projectLabel}</span>
-      ${entry.checkoutBranch || entry.checkoutName ? html`<span class="checkout-chip">${entry.checkoutBranch || entry.checkoutName}</span>` : null}
+      ${checkout ? html`<span class="checkout-chip">${checkout}</span>` : null}
     </span>
   `;
 }

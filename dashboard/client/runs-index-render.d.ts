@@ -22,6 +22,8 @@ export interface RunIndexRow {
   title: string;
   workflow: string;
   project: Crumb;
+  /** FG-831: the run's checkout, by the shared label rule; null when the run resolves to no registered project. */
+  checkout: string | null;
   ticket: { label: string; href: string } | null;
   status: string;
   startedAt: string;

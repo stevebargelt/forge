@@ -8,6 +8,7 @@
 // envelope with no readable `counts`, shows "?" rather than a number.
 
 import { inboxPhase } from "./attention-inbox-render.js";
+import { checkoutLabel } from "./checkout-label.js";
 import { NAV_GROUPS, ROUTES, carriesScope, hashFor, navItemFor, parseHash } from "./view-routing.js";
 
 export const BADGE_CAP = 99;
@@ -83,19 +84,13 @@ export function navModel(view, scope) {
   }));
 }
 
-/** The label a checkout scope button reads as — its branch, else its directory name. */
-export function checkoutScopeLabel(checkout) {
-  if (checkout.exists === false) {
-    return (checkout.branch || checkout.projectDir.split("/").pop()) + " (missing)";
-  }
-  return checkout.branch || checkout.projectDir.split("/").pop();
-}
-
-/** "All projects", "<project>", or "<project> › <checkout>" for the scope control. */
+/** "All projects", "<project>", or "<project> › <checkout>" for the scope control. The
+ *  checkout reads by the shared label rule (checkout-label.js, FG-831). */
 export function scopeSummary(scope, project) {
   if (!scope || !scope.project) return "All projects";
   const label = project?.label || scope.project;
   if (!scope.checkout) return label;
-  const checkout = (project?.checkouts || []).find((c) => c.projectDir === scope.checkout);
-  return `${label} › ${checkout ? checkoutScopeLabel(checkout) : scope.checkout.split("/").pop()}`;
+  const checkouts = project?.checkouts || [];
+  const checkout = checkouts.find((c) => c.projectDir === scope.checkout);
+  return `${label} › ${checkout ? checkoutLabel(checkout, checkouts) : scope.checkout.split("/").pop()}`;
 }

@@ -186,7 +186,7 @@ test("FG-820: a reloaded deep link restores view and scope, and the scope reache
   await page.waitForFunction(() => document.querySelectorAll(".checkout-scope-btn").length > 0);
   assert.ok(opsScoped(), `the ops read carried projectDir=${MAIN}: ${JSON.stringify(apiRequests.filter((u) => u.startsWith("/api/ops")))}`);
   assert.equal(await column(page).locator(".nav-scope-select").inputValue(), "atlas");
-  assert.equal(await column(page).locator(".checkout-scope-btn-active").innerText(), "main");
+  assert.equal(await column(page).locator(".checkout-scope-btn-active").innerText(), "atlas-main · main");
 
   // Nav links carry the scope to other list views; scope-less views do not take it.
   assert.equal(await column(page).getByRole("link", { name: "Usage", exact: true }).getAttribute("href"), `#usage?project=atlas&checkout=${encodeURIComponent(MAIN)}`);
@@ -194,7 +194,7 @@ test("FG-820: a reloaded deep link restores view and scope, and the scope reache
 
   // A scope change rewrites the hash in place — no new history entry.
   const historyBefore = await page.evaluate(() => history.length);
-  await column(page).locator(".checkout-scope-btn", { hasText: /^feature$/ }).click();
+  await column(page).locator(".checkout-scope-btn", { hasText: /^atlas feature · feature$/ }).click();
   assert.equal(hashOf(page), `#ops?project=atlas&checkout=${encodeURIComponent(FEATURE)}`);
   assert.equal(await page.evaluate(() => history.length), historyBefore, "scope change used replaceState");
   await page.waitForFunction((dir) => document.querySelector(".checkout-scope-btn-active")?.getAttribute("title") === dir, FEATURE);
@@ -203,7 +203,7 @@ test("FG-820: a reloaded deep link restores view and scope, and the scope reache
   await page.reload();
   await page.locator(".page-title", { hasText: "Ops" }).waitFor();
   await page.waitForFunction(() => document.querySelectorAll(".checkout-scope-btn").length > 0);
-  assert.equal(await column(page).locator(".checkout-scope-btn-active").innerText(), "feature", "reload restored the checkout scope");
+  assert.equal(await column(page).locator(".checkout-scope-btn-active").innerText(), "atlas feature · feature", "reload restored the checkout scope");
   assert.ok(apiRequests.some((u) => u.startsWith("/api/ops") && new URL(u, baseUrl).searchParams.get("projectDir") === FEATURE),
     "after reload the server still receives the scope from the hash");
   assert.ok(await page.evaluate(() => Object.keys(localStorage).length === 0 && Object.keys(sessionStorage).length === 0), "nothing is stored client-side");

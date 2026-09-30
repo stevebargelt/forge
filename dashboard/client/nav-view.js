@@ -8,10 +8,11 @@
 // scope control's, More, and the drawer's close.
 
 import { h } from "preact";
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
 import { formatClock } from "./format.js";
-import { BOTTOM_BAR_ITEMS, checkoutScopeLabel, homeBadge, navHref, navModel } from "./nav-render.js";
+import { checkoutOptions } from "./checkout-label.js";
+import { BOTTOM_BAR_ITEMS, homeBadge, navHref, navModel } from "./nav-render.js";
 import { ROUTES } from "./view-routing.js";
 import { runsBadge } from "./runs-index-render.js";
 
@@ -29,7 +30,8 @@ function NavBadge({ badge }) {
 function ScopeControl({ scope, projects, onScopeChange, idPrefix }) {
   const project = scope.project ? projects.find((p) => p.key === scope.project) ?? null : null;
   const known = scope.project === null || project !== null;
-  const checkouts = project?.checkouts || [];
+  const [showMissing, setShowMissing] = useState(false);
+  const { options, missingCount } = checkoutOptions(project, { showMissing, selected: scope.checkout });
   const selectId = `${idPrefix}-scope-project`;
   return html`
     <div class="nav-scope" role="group" aria-label="Project scope">
@@ -44,7 +46,7 @@ function ScopeControl({ scope, projects, onScopeChange, idPrefix }) {
         ${known ? null : html`<option value=${scope.project}>${scope.project}</option>`}
         ${projects.map((p) => html`<option key=${p.key} value=${p.key}>${p.label}</option>`)}
       </select>
-      ${scope.project && checkouts.length > 0 ? html`
+      ${scope.project && (options.length > 0 || missingCount > 0) ? html`
         <div class="project-scope-options" aria-label="Project checkout scope">
           <button
             type="button"
@@ -52,16 +54,25 @@ function ScopeControl({ scope, projects, onScopeChange, idPrefix }) {
             onClick=${() => onScopeChange({ project: scope.project, checkout: null })}
             aria-pressed=${!scope.checkout}
           >all checkouts</button>
-          ${checkouts.map((checkout) => html`
+          ${options.map((option) => html`
             <button
               type="button"
-              key=${checkout.projectDir}
-              class=${"checkout-scope-btn" + (scope.checkout === checkout.projectDir ? " checkout-scope-btn-active" : "")}
-              onClick=${() => onScopeChange({ project: scope.project, checkout: checkout.projectDir })}
-              aria-pressed=${scope.checkout === checkout.projectDir}
-              title=${checkout.projectDir}
-            >${checkoutScopeLabel(checkout)}</button>
+              key=${option.projectDir}
+              class=${"checkout-scope-btn" + (scope.checkout === option.projectDir ? " checkout-scope-btn-active" : "") + (option.missing ? " checkout-scope-btn-missing" : "")}
+              onClick=${() => onScopeChange({ project: scope.project, checkout: option.projectDir })}
+              aria-pressed=${scope.checkout === option.projectDir}
+              title=${option.projectDir}
+              data-primary=${option.primary ? "true" : null}
+            >${option.label}${option.primary ? html` <span class="checkout-primary-mark">primary</span>` : null}</button>
           `)}
+          ${missingCount > 0 ? html`
+            <button
+              type="button"
+              class="checkout-missing-toggle"
+              aria-expanded=${showMissing}
+              onClick=${() => setShowMissing((v) => !v)}
+            >${showMissing ? `hide ${missingCount} missing` : `show ${missingCount} missing`}</button>
+          ` : null}
         </div>
       ` : null}
       ${scope.project ? html`<button type="button" class="clear-filter" onClick=${() => onScopeChange({ project: null, checkout: null })}>clear ×</button>` : null}

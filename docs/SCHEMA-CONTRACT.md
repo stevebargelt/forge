@@ -627,6 +627,14 @@ Accessors (`src/store/attention-dismissals.ts`): `activeAttentionDismissals` (th
 
 Additive-only (`CREATE TABLE IF NOT EXISTS` plus its partial unique index on the ordinary open path), the same BD-15 / FG-568 forward-gate contract as its siblings — an older binary sharing the machine-wide `~/.forge/forge.db` reads and ignores it. `user_version` is not bumped. Only the table's nullable columns (`project_key`, `run_id`, `snooze_until`, `rationale`, `settled_at`) are restorable and so appear in `ADDITIVE_COLUMNS` — the table arrives whole from its `CREATE`, so its `NOT NULL` columns have no restore entry, same as `kanban_conflicts` above.
 
+### `pruned_checkouts` table (FG-831 — pruned checkout registrations)
+
+The checkout registrations an operator removed with `forge projects prune --missing`. The registry stores no checkout row of its own — `listProjects` derives checkouts from `runs.project_dir`, the filesystem scan and live sessions — so a prune is a recorded exclusion: `listProjects` (`withoutPrunedCheckouts`, `src/util/projects.ts`) drops a pruned checkout from a record's `checkouts` **while its directory is still gone** (one that reappears on disk is offered again), and drops a record left with no checkout. The record's aggregates and historical `projectDirs` are unchanged, so the project's past runs stay in scope. No run row is deleted and no directory is touched.
+
+Columns: `checkout_root` (PK — the checkout root exactly as the registry reported it; a missing root is its lexical spelling, since nothing could be proven about it, FG-693), `pruned_at`, `actor` (`--actor`, default `$USER`). All `NOT NULL` with no default, so the additive-column list carries nothing for it.
+
+Accessors (`src/store/pruned-checkouts.ts`): `prunedCheckoutRoots` (a store predating the table reads as nothing pruned) and `recordPrunedCheckouts` (`INSERT OR IGNORE`, inside one `writeTransaction` with a `checkout.pruned` events row per newly recorded root). Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 / FG-568 forward-gate contract as its siblings; `user_version` is not touched. See `docs/concepts.md` → [Projects, checkouts and the scope bar](concepts.md#projects-checkouts-and-the-scope-bar-fg-831).
+
 ## Filesystem contract
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:

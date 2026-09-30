@@ -1970,6 +1970,22 @@ CREATE TABLE IF NOT EXISTS attention_dismissals (
 -- (non-restorable), so the parity guard's UNDROPPABLE set is untouched.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_attention_dismissals_active
   ON attention_dismissals(item_key) WHERE state = 'active';
+
+-- FG-831: checkout registrations the operator pruned with 'forge projects prune --missing'.
+-- A checkout is not stored anywhere else — the registry DERIVES it from runs, the
+-- filesystem scan and live sessions (src/util/projects.ts) — so removing a registration
+-- means recording that this checkout root is no longer offered, never deleting the runs
+-- that name it. Written ONLY through src/store/pruned-checkouts.ts, each write paired with
+-- a checkout.pruned events row. checkout_root is the root exactly as the registry reported
+-- it; a pruned root that reappears on disk is offered again (the registry only honours a
+-- prune while the directory is still gone). Brand-new table arriving WHOLE via CREATE TABLE
+-- IF NOT EXISTS (BD-15); every column is NOT NULL with no default, so ADDITIVE_COLUMNS
+-- carries nothing for it and user_version is NOT touched.
+CREATE TABLE IF NOT EXISTS pruned_checkouts (
+  checkout_root TEXT PRIMARY KEY,
+  pruned_at     TEXT NOT NULL,
+  actor         TEXT NOT NULL
+);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only

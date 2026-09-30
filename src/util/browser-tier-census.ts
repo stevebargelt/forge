@@ -256,6 +256,15 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // name is aria-hidden while the link's accessible name stays the role; and an actual
   // Preact-rendered standalone tile exposes its labelled image semantics. Fixture port 18834.
   "fg829-role-glyphs.test.ts": 5,
+  // FG-831 adds `fg831-checkout-labels` (4 tests), against the REAL server over a scratch
+  // registry: the scope bar labels every checkout by path context plus branch (two
+  // disposable clones both called `forge` on `main` read apart), primary first and marked;
+  // a missing checkout withheld behind "show 1 missing", labeled `missing on disk` when
+  // shown, and selectable with its runs rendering; and the Projects card's missing count
+  // naming `forge projects prune --missing`; and at 400px, the drawer's unique options
+  // carry its selected label unchanged into the Runs row. `inactive-checkouts` keeps its 3 tests,
+  // re-pointed at the missing affordance. Fixture port 18835.
+  "fg831-checkout-labels.test.ts": 4,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,

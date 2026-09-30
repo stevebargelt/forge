@@ -9,6 +9,7 @@
 
 import { BADGE_CAP } from "./nav-render.js";
 import { projectCrumb, projectForDir } from "./breadcrumbs-render.js";
+import { checkoutLabelForDir } from "./checkout-label.js";
 import { hashFor } from "./view-routing.js";
 import { formatDuration } from "./format.js";
 
@@ -95,6 +96,7 @@ export function runRow(run, projects, nowMs) {
     title: run.title || run.runId,
     workflow: run.workflow,
     project,
+    checkout: key ? checkoutLabelForDir(run.projectDir, projects) : null,
     ticket: ticketId ? { label: ticketId, href: hashFor({ view: "backlog", id: ticketId, scope: key ? { project: key } : null }) } : null,
     status: run.status,
     startedAt: run.createdAt,

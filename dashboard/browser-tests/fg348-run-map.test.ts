@@ -226,7 +226,7 @@ test("Navigating to another run invalidates the map and a late response for the 
   // Scope to the main checkout, then open the run from the feed.
   await page.goto(`${baseUrl}/#projects`);
   await page.locator(".project-dirs-toggle").click();
-  await page.getByRole("button", { name: "Open Atlas checkout main" }).click();
+  await page.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
   await page.locator(".rm-open-btn").first().waitFor();
 
   // The first run's map read is slow: it is still in flight when we move to another

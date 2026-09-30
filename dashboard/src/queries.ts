@@ -2237,29 +2237,25 @@ export function operatorProjectsForDashboard(): ProjectRecord[] {
   return operatorProjects(projectsForDashboard());
 }
 
-// FG-595: presentation-only view over the canonical ProjectRecord aggregate.
-// A checkout is a stale artifact — a deleted scratchpad, a removed temp clone —
-// only when it is simultaneously gone from disk (exists===false), carries no
-// in-flight work (inFlightCount===0), and hosts no live session
-// (liveSessions===0); those are suppressed so the Projects view and checkout
-// scope controls stop surfacing dead paths. A present checkout (even if idle),
-// or a missing one that still has active work or a live session, stays visible
-// — the client labels a surviving missing checkout truthfully rather than as an
-// unknown branch. The record's aggregate runCount/inFlightCount/liveSessions/
-// lastRunAt and its full historical projectDirs array are passed through
-// untouched, so canonical projectKey scope still queries every historical
-// feed/usage/run record. A project is omitted only when no visible checkout
-// remains after suppression.
+// FG-595 / FG-831: presentation-only view over the canonical ProjectRecord aggregate.
+// A project is omitted only when every checkout is a stale artifact — gone from disk
+// (exists===false), carrying no in-flight work (inFlightCount===0) and hosting no live
+// session (liveSessions===0) — so a deleted scratchpad or removed temp clone that is its
+// own repository never becomes a Projects card or a scope option.
+//
+// A surviving project keeps ALL its checkouts, missing ones included (FG-831 AC2): the
+// client's shared rule (client/checkout-label.js) withholds a missing checkout from the
+// scope bar behind "show N missing" and labels it `missing on disk`, and the Projects card
+// counts them next to `forge projects prune --missing`. Deciding that here instead would
+// make the count unknowable and a remembered missing scope unselectable. Checkouts the
+// operator pruned never reach this function (listProjects drops them). The record's
+// aggregate runCount/inFlightCount/liveSessions/lastRunAt and its full historical
+// projectDirs array are passed through untouched, so canonical projectKey scope still
+// queries every historical feed/usage/run record.
 export function presentationRegistry(projects: ProjectRecord[]): ProjectRecord[] {
-  const out: ProjectRecord[] = [];
-  for (const project of projects) {
-    const checkouts = project.checkouts.filter(
-      (checkout) => checkout.exists || checkout.inFlightCount > 0 || checkout.liveSessions > 0,
-    );
-    if (checkouts.length === 0) continue;
-    out.push({ ...project, checkouts });
-  }
-  return out;
+  return projects.filter((project) =>
+    project.checkouts.some((checkout) => checkout.exists || checkout.inFlightCount > 0 || checkout.liveSessions > 0),
+  );
 }
 
 // Registry discovery executes bounded Git commands for every observed checkout.

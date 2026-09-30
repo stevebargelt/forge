@@ -156,8 +156,9 @@ async function openScopedOps(page: Page): Promise<void> {
 }
 
 // The single-checkout scope button in the checkout-scope banner (render 576-589).
+// FG-831: an option reads `<path> · <branch>` by the shared label rule; match its branch.
 function checkoutScopeButton(page: Page, name: string) {
-  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(`^${name}$`) });
+  return page.locator(".checkout-scope-btn").filter({ hasText: new RegExp(` · ${name}$`) });
 }
 
 test("Switching checkout scope drops the DURATION panel to loading, not the previous scope's sample note", async () => {
@@ -347,7 +348,7 @@ test("Clearing the project filter drops DURATION data and clears the old scope's
   const errorPage = await newPage({ width: 1440, height: 1200 });
   await errorPage.goto(`${baseUrl}/#projects`);
   await errorPage.locator(".project-dirs-toggle").click();
-  await errorPage.getByRole("button", { name: "Open Atlas checkout main" }).click();
+  await errorPage.getByRole("button", { name: "Open Atlas checkout atlas-main · main" }).click();
   await errorPage.getByRole("link", { name: "Ops", exact: true }).click();
   const error = errorPage.locator(".runtime-error");
   await error.waitFor();

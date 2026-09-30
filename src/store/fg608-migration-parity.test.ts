@@ -228,6 +228,46 @@ test("FG-608: ADDITIVE_COLUMNS names exactly the columns ADD COLUMN can restore"
   }
 });
 
+test("FG-831: a pre-prune store gains the whole pruned_checkouts table without crossing a schema-version boundary", () => {
+  // This is deliberately not covered by the broad synthetic-old-shape guard above:
+  // that guard starts from today's fresh schema, so a brand-new table already exists
+  // before it removes restorable columns. Model the actual upgrade instead: every
+  // pre-FG-831 table exists, but pruned_checkouts does not.
+  const pruneTable = `CREATE TABLE IF NOT EXISTS pruned_checkouts (
+  checkout_root TEXT PRIMARY KEY,
+  pruned_at     TEXT NOT NULL,
+  actor         TEXT NOT NULL
+);`;
+  assert.ok(SCHEMA_SQL.includes(pruneTable), "keep this old-schema fixture aligned with the FG-831 DDL");
+  const preFg831Schema = SCHEMA_SQL.replace(pruneTable, "");
+
+  const migrated = new Database(":memory:");
+  migrated.exec(preFg831Schema);
+  applyMigrations(migrated);
+  assert.equal(
+    migrated.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pruned_checkouts'").get(),
+    undefined,
+    "the fixture must really be a store created before the additive table existed",
+  );
+  assert.equal(migrated.pragma("user_version", { simple: true }), 0);
+
+  // This is an ordinary open by the newer binary: CREATE TABLE IF NOT EXISTS adds
+  // the table whole, then migrations run. No destructive migration is involved.
+  migrated.exec(SCHEMA_SQL);
+  applyMigrations(migrated);
+  const fresh = freshDb();
+  assert.deepEqual(shapeOf(migrated, "pruned_checkouts"), shapeOf(fresh, "pruned_checkouts"));
+  assert.deepEqual(constraintsOf(migrated, "pruned_checkouts"), constraintsOf(fresh, "pruned_checkouts"));
+  assert.equal(migrated.pragma("user_version", { simple: true }), 0, "an additive table must not stamp a one-way boundary");
+
+  // A binary that predates this table still executes only its own CREATE ... IF NOT
+  // EXISTS schema on an upgraded store. It must open cleanly and leave the unknown
+  // table and the version stamp alone.
+  migrated.exec(preFg831Schema);
+  assert.deepEqual(shapeOf(migrated, "pruned_checkouts"), shapeOf(fresh, "pruned_checkouts"));
+  assert.equal(migrated.pragma("user_version", { simple: true }), 0);
+});
+
 test("FG-608: the host failure itself — an FG-606-shaped tickets table gains imported_from", () => {
   // The dogfood host's shape: imported_at present, imported_from and the FG-608
   // columns absent. Verbatim CREATE (no IF NOT EXISTS) so SCHEMA_SQL's later exec
