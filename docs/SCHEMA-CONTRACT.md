@@ -984,10 +984,10 @@ Each project record's `checkouts[]` keeps every checkout the registry resolved (
 
 | `kind` | When |
 |---|---|
-| `"operator"` | the record's `primaryCheckout`; or a checkout whose recorded [`workspace_purposes`](#workspace_purposes-table-fg-745-dashboardcli-read-path) kind is `operator` (`forge projects classify <dir> --purpose operator`); or a checkout with a live interactive orchestrator session (`liveSessions > 0`) |
-| `"run"` | every other checkout — a directory known only because a run or task executed in it (`runs.project_dir`): agent clones, `~/.forge/worktrees/*`, per-ticket clones, whether or not a Forge artifact purpose was recorded for it |
+| `"operator"` | the record's `primaryCheckout`; or a checkout whose recorded [`workspace_purposes`](#workspace_purposes-table-fg-745-dashboardcli-read-path) kind is `operator` (`forge projects classify <dir> --purpose operator`) |
+| `"run"` | every other checkout — a directory known only because a run or task executed in it (`runs.project_dir`): agent clones, `~/.forge/worktrees/*`, per-ticket clones, whether or not a Forge artifact purpose was recorded for it, and whether or not it has a live interactive session open |
 
-Each checkout entry also carries `purpose` when one is recorded for its root (absent otherwise). The record carries `checkoutCounts`: `operator` (all operator checkouts), `liveOperator` (operator checkouts whose directory exists — the dashboard shows its checkout chooser on Routing, Config and Notes only when this is ≥ 2), and `run`. No column or table was added: the kind is derived from existing registry and store rows on every read. Run checkouts stay in `checkouts[]` so run rows, run pages and `?projectDir=` scopes naming one keep resolving and labelling.
+A live interactive session does not promote a checkout: `liveSessions` stays a displayed fact, not a classification input, so a run clone an operator happens to have open stays a run checkout until classified. Each checkout entry also carries `purpose` when one is recorded for its root (absent otherwise). The record carries `checkoutCounts`: `operator` (all operator checkouts), `liveOperator` (operator checkouts whose directory exists — the dashboard shows its checkout chooser on Routing, Config and Notes only when this is ≥ 2), and `run`. No column or table was added: the kind is derived from existing registry and store rows on every read. Run checkouts stay in `checkouts[]` so run rows, run pages and `?projectDir=` scopes naming one keep resolving and labelling.
 
 ### `POST /api/projects/classify` — the operator classify/repair mutation (FG-745)
 
