@@ -19,9 +19,11 @@
 //    exists on either verb, and there is no route to `route compile` or `raci validate`.
 //  * apply is refused HERE unless the same candidate bytes were proposed green for the
 //    same checkout within PROPOSAL_WINDOW_MS, the typed confirmation equals the project
-//    key, and a rationale is given. That is a UI-honesty precondition, not authority:
-//    the CLI re-runs the whole gate before it writes, recompiles the policy and appends
-//    the audit line, and its refusal is passed back verbatim.
+//    key, and a rationale is given. Inside the mutation slot, before the spawn, the
+//    proposal is taken, so one green propose admits one apply; it is refunded only when
+//    the child wrote nothing. These refusals are enforced before any spawn, but they are
+//    not the write authority: the CLI re-runs the whole gate before it writes, recompiles
+//    the policy and appends the audit line, and its refusal is passed back verbatim.
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -110,9 +112,26 @@ export class ProposalWindow {
     return this.seen.has(ProposalWindow.key(scope, sha));
   }
 
-  /** An applied candidate is spent: applying it again needs a fresh propose. */
-  consume(scope: string, sha: string): void {
-    this.seen.delete(ProposalWindow.key(scope, sha));
+  /** Spend an admissible proposal, returning when it was recorded, or null when there is
+   *  none. Synchronous, so two applies racing on one green propose cannot both take it. */
+  take(scope: string, sha: string, now: number): number | null {
+    this.prune(now);
+    const key = ProposalWindow.key(scope, sha);
+    const at = this.seen.get(key);
+    if (at === undefined) return null;
+    this.seen.delete(key);
+    return at;
+  }
+
+  /** Give back a proposal whose apply wrote nothing, keeping its original expiry. A
+   *  propose recorded meanwhile wins. */
+  refund(scope: string, sha: string, at: number, now: number): void {
+    const key = ProposalWindow.key(scope, sha);
+    if (this.seen.has(key) || now - at > this.windowMs) return;
+    this.seen.set(key, at);
+    while (this.seen.size > this.maxEntries) {
+      this.seen.delete(this.seen.keys().next().value!);
+    }
   }
 
   get size(): number {
@@ -203,14 +222,16 @@ export function applyRefusal(
   if (request.proposedSha256 !== request.candidateSha256) {
     return named(409, "candidate_changed", "the candidate is not the one that was proposed (its sha256 differs); propose it again before applying.");
   }
-  if (!window.has(scope, request.candidateSha256, now)) {
-    return named(
-      409,
-      "candidate_not_proposed",
-      `this candidate has no green propose for this checkout in the last ${Math.round(PROPOSAL_WINDOW_MS / 60000)} minutes; propose it first.`,
-    );
-  }
+  if (!window.has(scope, request.candidateSha256, now)) return notProposed();
   return null;
+}
+
+function notProposed(): RaciApplyRefusal {
+  return named(
+    409,
+    "candidate_not_proposed",
+    `this candidate has no green propose for this checkout in the last ${Math.round(PROPOSAL_WINDOW_MS / 60000)} minutes; propose it first.`,
+  );
 }
 
 // ─── argv ────────────────────────────────────────────────────────────────────
@@ -361,8 +382,13 @@ export async function handleRaciMutation(
   }
 
   let command = "";
-  const result = await withMutationSlot(() =>
-    withScratchCandidate(request.candidate, async (scratch): Promise<ForgeRunResult | MutationRefusal> => {
+  let taken = null as number | null;
+  const result = await withMutationSlot(() => {
+    if (action === "raci-apply") {
+      taken = window.take(scope, request.candidateSha256, now());
+      if (taken === null) return Promise.resolve(notProposed());
+    }
+    return withScratchCandidate(request.candidate, async (scratch): Promise<ForgeRunResult | MutationRefusal> => {
       const built = buildRaciArgv(action, scratch, checkout, context.actor, request.rationale);
       if (isRefusal(built)) return built;
       if (built.argv[0] !== "raci" || built.argv.includes("--force") || built.argv.includes(request.candidate)) {
@@ -370,14 +396,17 @@ export async function handleRaciMutation(
       }
       command = built.command;
       return runForgeVerb(binary.path, built.argv, checkout);
-    }),
-  );
+    });
+  });
   if (result === null) {
     send(res, 503, { ok: false, action, error: `too many dashboard mutations in flight (${MAX_CONCURRENT_MUTATIONS}); retry in a moment.` });
     return;
   }
+  // A timed-out child may still have written, so its proposal stays spent.
+  const wroteNothing = isRefusal(result) || (!result.timedOut && (result.code !== 0 || parseCliJson(result.stdout)?.["written"] !== true));
+  if (taken !== null && wroteNothing) window.refund(scope, request.candidateSha256, taken, now());
   if (isRefusal(result)) {
-    send(res, result.status, { ok: false, action, error: result.error });
+    send(res, result.status, { ok: false, action, ...("refusal" in result ? { refusal: result.refusal } : {}), error: result.error });
     return;
   }
 
@@ -412,7 +441,6 @@ export async function handleRaciMutation(
     send(res, 409, { ok: false, ...summary, error: "`forge raci apply` exited 0 but reports nothing written.", result: cli });
     return;
   }
-  window.consume(scope, request.candidateSha256);
   send(res, 200, { ok: true, ...summary, result: cli });
 }
 

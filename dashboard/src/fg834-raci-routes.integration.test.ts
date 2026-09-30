@@ -79,6 +79,13 @@ writeFileSync(
 );
 chmodSync(STUB, 0o755);
 
+const SLOW_STUB = join(RIG, "forge-stub-slow");
+writeFileSync(SLOW_STUB, ["#!/bin/sh", 'if [ "$2" = "apply" ]; then sleep 1; fi', `exec "${STUB}" "$@"`].join("\n"));
+chmodSync(SLOW_STUB, 0o755);
+const FAILING_APPLY_STUB = join(RIG, "forge-stub-failing-apply");
+writeFileSync(FAILING_APPLY_STUB, ["#!/bin/sh", 'if [ "$2" = "apply" ]; then echo "lock held" >&2; exit 1; fi', `exec "${STUB}" "$@"`].join("\n"));
+chmodSync(FAILING_APPLY_STUB, 0o755);
+
 function useStub(): void {
   process.env.FORGE_BIN = STUB;
   writeFileSync(CALL_LOG, "");
@@ -206,6 +213,31 @@ test("integ FG-834: apply spawns exactly `forge raci apply <scratch> --project <
   const again = await post("/api/raci/apply", { body: applyBody(CANDIDATE) });
   assert.equal(again.body["refusal"], "candidate_not_proposed", "an applied proposal is spent");
   assert.deepEqual(recordedCalls(), []);
+});
+
+test("integ FG-834: two concurrent applies of one green propose spawn exactly one `forge raci apply`; the other is refused candidate_not_proposed", async () => {
+  process.env.FORGE_BIN = SLOW_STUB;
+  writeFileSync(CALL_LOG, "");
+  assert.equal((await post("/api/raci/propose", { body: { projectKey: PROJECT_KEY, candidate: CANDIDATE } })).status, 200);
+  writeFileSync(CALL_LOG, "");
+  const [a, b] = await Promise.all([post("/api/raci/apply", { body: applyBody(CANDIDATE) }), post("/api/raci/apply", { body: applyBody(CANDIDATE) })]);
+  assert.deepEqual([a.status, b.status].sort(), [200, 409], JSON.stringify([a.body, b.body]));
+  assert.equal((a.status === 409 ? a : b).body["refusal"], "candidate_not_proposed");
+  assert.equal(recordedCalls().filter((c) => c.argv[1] === "apply").length, 1, "one proposal admits one apply");
+  assert.deepEqual(scratchLeftovers(), []);
+});
+
+test("integ FG-834: an apply whose child wrote nothing refunds the proposal; a retry is admitted", async () => {
+  process.env.FORGE_BIN = FAILING_APPLY_STUB;
+  writeFileSync(CALL_LOG, "");
+  assert.equal((await post("/api/raci/propose", { body: { projectKey: PROJECT_KEY, candidate: CANDIDATE } })).status, 200);
+  const failed = await post("/api/raci/apply", { body: applyBody(CANDIDATE) });
+  assert.equal(failed.status, 409, JSON.stringify(failed.body));
+  useStub();
+  const retried = await post("/api/raci/apply", { body: applyBody(CANDIDATE) });
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  const spent = await post("/api/raci/apply", { body: applyBody(CANDIDATE) });
+  assert.equal(spent.body["refusal"], "candidate_not_proposed");
 });
 
 test("integ FG-834: the apply refusals are named and spawn nothing", async () => {
