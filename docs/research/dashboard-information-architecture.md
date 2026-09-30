@@ -176,6 +176,8 @@ Tab handling and links between pages:
 
 **Reload** restores everything in the hash: view, object, tab and scope. It does not restore scroll, open disclosures (Activity → Diagnostics), or chart toggles (usage `since`/`groupBy`, ops window). Those stay component state until FG-820 promotes specific toggles into the closed parameter table, and never into `localStorage`. An unrecognised hash lands on Home with a one-line "No view named …" notice; today the fallback is silent (`view-routing.js:12`).
 
+**Note, 2026-09-30 (FG-836): the ops window is the first chart toggle promoted.** The line above listed "ops window" among the toggles reload does not restore; that is no longer true for Ops. `#ops?window=` (the runtime chart) and `#ops?since=` (the summary) are both now in `ROUTES.ops.params` and restore together on reload, each keeping the other's value; the canonical hash omits either default (7d). Usage's `since`/`groupBy` are unchanged — still component state, not in `ROUTES.usage` — so that half of the original sentence still holds.
+
 ## Badge and counter policy
 
 Two nav items carry numbers:
