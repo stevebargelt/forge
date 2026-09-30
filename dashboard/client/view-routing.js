@@ -45,7 +45,7 @@ export const ROUTES = Object.freeze({
   reviews: { group: "evidence", label: "Reviews", path: "#reviews[/<reviewId>]", scope: "optional", object: "optional", aliases: [] },
   shipping: { group: "evidence", label: "Shipping", path: "#shipping", scope: "project", object: "none", aliases: [] },
   roles: { group: "setup", label: "Roles", path: "#roles[/<role>[/<tab>]]", scope: "none", object: "optional", tabs: ["overview", "instructions", "harness", "skills", "capabilities", "tools", "secrets", "tasks", "receipts", "usage"], tabAliases: { configuration: "harness" }, params: ["sort", "dir"], paramValues: { sort: ["role", "activity", "profile", "mount", "lastTask"], dir: ["asc", "desc"] }, aliases: [] },
-  routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", aliases: ["governance"] },
+  routing: { group: "setup", label: "Routing", path: "#routing", scope: "checkout", object: "none", params: ["mode"], paramValues: { mode: ["edit"] }, aliases: ["governance"] },
   config: { group: "setup", label: "Config", path: "#config", scope: "checkout", object: "none", aliases: ["control-plane"] },
   projects: { group: "setup", label: "Projects", path: "#projects", scope: "none", object: "none", aliases: [] },
   usage: { group: "health", label: "Usage", path: "#usage", scope: "optional", object: "none", aliases: [] },

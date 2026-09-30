@@ -2,7 +2,7 @@
 //
 // Read-only observability: SOURCE / DERIVED / EFFECTIVE / RECORDED.
 // Mirrors `forge route governance --json` via /api/governance.
-// No mutation anywhere in this file — that is FG-361.
+// No mutation anywhere in this file — the Edit RACI mode is raci-editor-view.js (FG-834).
 
 import { h } from "preact";
 import htm from "htm";
@@ -22,28 +22,37 @@ const HEALTH_META = {
   "policy-not-found":    { symbol: "✗", label: "policy not found",     cls: "gov-health-err" },
 };
 
-export function GovernanceView({ data }) {
+// FG-834: `sourceActions` (the Edit RACI button) sits on the SOURCE label row, `afterSource`
+// under it (an apply's result), and `recorded` replaces the host audit with the checkout's
+// own tail when a project is in scope (raci-editor-view.js).
+export function GovernanceView({ data, sourceActions = null, afterSource = null, recorded = null }) {
   if (!data) return html`<div class="muted">loading workbench…</div>`;
 
   return html`
     <section class="gov-view">
-      <${SourceSection} source=${data.source} accountable=${data.derived.accountable} />
+      <${SourceSection} source=${data.source} accountable=${data.derived.accountable} actions=${sourceActions} />
+      ${afterSource}
       <${DerivedSection} derived=${data.derived} />
       <${EffectiveSection} effective=${data.effective} />
-      <${RecordedSection} entries=${data.recorded.entries} />
+      ${recorded ?? html`<${RecordedSection} entries=${data.recorded.entries} />`}
     </section>
   `;
 }
 
-function SourceSection({ source, accountable }) {
+export function SourceSection({ source, accountable, actions = null, note = null, boxed = false }) {
   const cls = source.kind === "project" ? "gov-src-project" : "gov-src-host";
+  const kind = boxed ? (source.kind === "project" ? "project override" : "host default") : source.kind;
   return html`
     <section class="workbench-section" role="region" aria-label="SOURCE — active RACI file">
-      <h2 class="workbench-section-label">SOURCE</h2>
-      <div class="row" style="gap: 12px; align-items: baseline; flex-wrap: wrap;">
-        <span class=${"badge " + cls}>${source.kind}</span>
+      <div class="gov-source-label-row">
+        <h2 class="workbench-section-label">SOURCE</h2>
+        ${actions ? html`<div class="gov-source-actions">${actions}</div>` : null}
+      </div>
+      <div class=${boxed ? "card gov-source-card" : "row"} style="gap: 12px; align-items: baseline; flex-wrap: wrap;">
+        <span class=${"badge " + cls}>${kind}</span>
         <span class="mono muted" title=${source.raciPath}>${source.raciPath}</span>
         ${accountable ? html`<span class="muted">accountable: <strong>${accountable}</strong> (always human)</span>` : null}
+        ${note ? html`<span class="gov-source-note">${note}</span>` : null}
       </div>
     </section>
   `;

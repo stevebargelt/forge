@@ -162,6 +162,7 @@ test("integ FG-834: GET /api/raci — host default as the starting source, gover
   assert.equal(res.body["source"].kind, "host");
   assert.equal(res.body["source"].path, join(tmpHome, "forge-raci.md"));
   assert.equal(res.body["source"].text, HOST_RACI);
+  assert.deepEqual(res.body["host"], { path: join(tmpHome, "forge-raci.md"), text: HOST_RACI });
   assert.ok(res.body["governance"].derived, "the governance panel is embedded");
   assert.deepEqual(res.body["audit"], { path: join(checkoutDir, ".forge", "raci-audit.log"), entries: [], skippedLines: 0 });
   assert.equal(res.body["proposalWindowMs"], 15 * 60 * 1000);
@@ -327,6 +328,7 @@ test("integ FG-834: green propose → apply through the real CLI writes the over
   assert.equal(proposed.body["result"].ok, true);
   const modified = proposed.body["result"].routeChanges;
   assert.ok(modified.added.includes("implementation_quick"), "a fresh override reads every route as added");
+  assert.equal(proposed.body["result"].candidateRoutes.implementation_quick.responsible, "frontend-specialist", "the candidate's compiled routes ride the propose JSON (the editor's dry-run table)");
 
   const refused = await post("/api/raci/apply", { body: applyBody(CANDIDATE, { confirmKey: "" }) });
   assert.equal(refused.body["refusal"], "confirm_key_mismatch");

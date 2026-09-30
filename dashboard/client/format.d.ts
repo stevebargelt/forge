@@ -10,3 +10,4 @@ export function formatRelativeTime(iso: string | number | null | undefined, now?
 export function formatTimestamp(iso: string | number | null | undefined, fallback?: string): string;
 export function formatClock(iso: string | number | null | undefined, options?: Intl.DateTimeFormatOptions, fallback?: string): string;
 export function timestampDisplay(iso: string | number | null | undefined, now?: number): { text: string; title: string; class: string };
+export function formatUtcMinute(iso: string | number | null | undefined, fallback?: string): string;
