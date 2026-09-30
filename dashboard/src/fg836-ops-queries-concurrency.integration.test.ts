@@ -14,7 +14,7 @@ import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { applyMigrations } from "../../src/store/db.js";
 
-const PORT = 18837;
+const PORT = 19018;
 const BASE = `http://127.0.0.1:${PORT}`;
 const TASKS = 7_000;
 const EVENTS = 65_000;

@@ -119,7 +119,7 @@ npm install      # or pnpm install / yarn — match the project's lockfile
 - **"No dev server" is not an excuse to skip visual verification.** You have the project source, you have the package.json, you can start it. If the dev server genuinely cannot start (missing deps, broken config), that's a finding — report it as `status: "failed"`, don't silently mark verification as unavailable.
 
 **If you write or edit a `dashboard/browser-tests/*.test.ts` suite:** default its screenshot/output dir to `process.env.<NAME>_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "<prefix>-"))` and `mkdirSync` only that path (or another temp-rooted one) at module scope — never a literal like `/task/screenshots`, which is EACCES on CI and every host.
-Give any fixture `PORT`/`*_PORT` constant a value no other suite in that directory already uses — suites run concurrently. `src/util/fg839-browser-tier-content-guard.test.ts` enforces both, naming file and line.
+Prefer `server.listen(0)` and derive the base URL from the bound address; a fixture `PORT`/`*_PORT` literal, when genuinely needed, must be unique across both `dashboard/src/**/*.test.ts` and `dashboard/browser-tests/*.test.ts` — suites run concurrently. `src/util/fg839-browser-tier-content-guard.test.ts` enforces both, naming file and line.
 
 **For mobile apps (React Native, Expo):**
 - Do NOT attempt browser-tools verification on native components — it produces misleading results.

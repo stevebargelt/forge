@@ -22,7 +22,7 @@ import Database from "better-sqlite3";
 import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
-const TEST_PORT = 18781;
+const TEST_PORT = 19006;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const testHome = mkdtempSync(join(tmpdir(), "forge-fg745-membership-"));
 const forgeHome = join(testHome, ".forge");

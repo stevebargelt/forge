@@ -25,7 +25,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const TEST_PORT = 18797;
+const TEST_PORT = 19013;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 
 const tmpHome = mkdtempSync(join(tmpdir(), "fg679-no-subproc-"));

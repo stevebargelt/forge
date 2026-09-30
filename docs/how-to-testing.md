@@ -121,14 +121,15 @@ Modeled on the FG-551 tmux tier: an environment that cannot run the work fails l
 
 FG-838's seven cases include the two verification additions: a route-table-driven sweep of every FG-820 list route (one tip, the matching contract and verb, no static line), and mixed failed/gated task, active-run, and open-review object payloads that retain live header facts without static filler.
 
-### Screenshot directories and fixture ports (FG-839)
+### Screenshot directories and fixture ports (FG-839, FG-842)
 
-A suite that throws on import loses every test it declares, and the only signal is the fail-first proof reporting the tier as short. Two rules keep a suite loadable everywhere:
+A suite that throws on import loses every test it declares, and the only signal is the fail-first proof reporting the tier as short. These rules keep a suite loadable everywhere and its first request reliable under load:
 
 - **Screenshot/output dir:** `const SHOTS = process.env.<NAME>_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "<prefix>-"));` — never default to a literal such as `/task/screenshots` (EACCES on CI and every host), and never `mkdirSync` at module scope on anything but a temp-rooted path or that env-override branch.
-- **Fixture port:** each suite's `const PORT = <n>` (or `TEST_PORT`) must be unique across `dashboard/browser-tests/` — suites run concurrently.
+- **Fixture port:** prefer `server.listen(0)` and build the base URL from `server.address().port` when the fixture can use an OS-assigned port. When a fixed `PORT`/`TEST_PORT` is genuinely required (for example, a spawned child reads it), its literal must be unique across both `dashboard/src/**/*.test.ts` and `dashboard/browser-tests/*.test.ts` — suites run concurrently.
+- **Fixture readiness:** the dashboard server starts listening asynchronously during module import, so a fixture must await a successful response from a real route before any case runs — poll on a short interval against a several-second deadline, never a fixed sleep. Under the parallel tier's load, a fixture's first request can beat the bind and fail with `fetch failed` even on a unique port. Set `FORGE_DASHBOARD_REMOTE=0` in the fixture's env too, so the optional remote-board listener's own port errors never appear in the run.
 
-`src/util/fg839-browser-tier-content-guard.test.ts` (unit tier) parses every suite and fails on a `/task/` fallback of `??`/`||`, a `/task/` path passed to `mkdirSync`/`mkdtempSync`/`writeFileSync`, a module-scope `mkdirSync` outside those two shapes, or a duplicated port — naming file and line. If a suite does fail to load, the fail-first proof's "must be accounted for" assertion names it (e.g. `fg832-backlog-filter.test.ts (1 of 5 reported — the file failed to load)`), read from a junit report of the same run.
+`src/util/fg839-browser-tier-content-guard.test.ts` (unit tier) parses every browser suite for the import-loadability rules and both trees for literal fixture ports; it fails on a `/task/` fallback of `??`/`||`, a `/task/` path passed to `mkdirSync`/`mkdtempSync`/`writeFileSync`, a module-scope `mkdirSync` outside those two shapes, or a duplicated literal port across either tree — naming every colliding file and line. If a suite does fail to load, the fail-first proof's "must be accounted for" assertion names it (e.g. `fg832-backlog-filter.test.ts (1 of 5 reported — the file failed to load)`), read from a junit report of the same run.
 
 ### Running it in an agent container
 

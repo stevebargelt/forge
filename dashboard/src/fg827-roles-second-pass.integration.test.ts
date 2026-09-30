@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const TEST_PORT = 18827;
+const TEST_PORT = 19002;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -25,6 +25,7 @@ const home = mkdtempSync(join(tmpdir(), "forge-fg827-"));
 process.env.FORGE_HOME = home;
 process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
+process.env.FORGE_DASHBOARD_REMOTE = "0";
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.AWS_PROFILE;
 delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
@@ -121,6 +122,22 @@ after(() => {
   server.closeAllConnections?.();
   server.close();
 });
+
+async function waitForServer(ms = 4000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      const response = await fetch(`${BASE}/api/roles/engineer`);
+      if (response.ok) return;
+      throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
+    } catch (err) {
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+}
+
+await waitForServer();
 
 async function get(path: string, method = "GET"): Promise<{ status: number; body: any }> {
   const deadline = Date.now() + 4000;

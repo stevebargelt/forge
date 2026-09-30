@@ -40,7 +40,7 @@ import { resetPublishBarrierForTest } from "../../../src/backlog/snapshot.js";
 import { planningAnnotations, remotePlanningAudit } from "../../../src/store/remote-planning.js";
 
 const LOCAL_PORT = 18783;
-const REMOTE_PORT = 18782;
+const REMOTE_PORT = 19020;
 
 process.env.FORGE_HOME = mkdtempSync(join(tmpdir(), "fg781-remote-on-"));
 process.env.PORT = String(LOCAL_PORT);

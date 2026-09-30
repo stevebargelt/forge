@@ -35,7 +35,7 @@ import { applyMigrations } from "../../src/store/db.js";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { captureProcessIdentity } from "../../src/util/process-identity.js";
 
-const TEST_PORT = 18791;
+const TEST_PORT = 19010;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 
 // realpath'd: `orchestrator_receipts.project_dir` is stored CANONICAL, so a fixture

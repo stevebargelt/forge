@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const TEST_PORT = 18827;
+const TEST_PORT = 19001;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const SAME_ORIGIN = BASE;
 const DASHBOARD_DIR = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
@@ -25,6 +25,7 @@ process.env.FORGE_DB_PATH = join(tmpHome, "forge.db");
 process.env.FORGE_PROJECT_SCAN_ROOTS = mkdtempSync(join(tmpdir(), "fg823-scan-"));
 process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
+process.env.FORGE_DASHBOARD_REMOTE = "0";
 delete process.env.FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS;
 delete process.env.FORGE_DASHBOARD_ORIGIN;
 

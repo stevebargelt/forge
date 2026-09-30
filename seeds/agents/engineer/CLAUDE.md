@@ -97,7 +97,7 @@ npm install      # or pnpm install / yarn — match the project's lockfile
 - **"No browser" is a hard failure, not a footnote.** Headless Chrome on `:9222` + the `browser-tools` scripts are part of this container. If `:9222` is unreachable (`curl -s localhost:9222/json/version` fails) or the `browser-tools` scripts are missing, the *environment* is broken: return `status: "failed"` with a note naming the gap (e.g. "Chrome not on :9222 / browser-tools mount absent"). Do NOT downgrade to "validated by type-check + tests only" and report `complete` — a missing browser is a blocker to surface, not a verification step to skip.
 
 **If you write or edit a `dashboard/browser-tests/*.test.ts` suite:** default its screenshot/output dir to `process.env.<NAME>_SCREENSHOT_DIR ?? mkdtempSync(join(tmpdir(), "<prefix>-"))` and `mkdirSync` only that path (or another temp-rooted one) at module scope — never a literal like `/task/screenshots`, which is EACCES on CI and every host.
-Give any fixture `PORT`/`*_PORT` constant a value no other suite in that directory already uses — suites run concurrently. `src/util/fg839-browser-tier-content-guard.test.ts` enforces both, naming file and line.
+Prefer `server.listen(0)` and derive the base URL from the bound address; a fixture `PORT`/`*_PORT` literal, when genuinely needed, must be unique across both `dashboard/src/**/*.test.ts` and `dashboard/browser-tests/*.test.ts` — suites run concurrently. `src/util/fg839-browser-tier-content-guard.test.ts` enforces both, naming file and line.
 
 **If the project is a mobile app** and you modified UI components:
 - Do NOT attempt browser-tools verification on native components — it will produce misleading results.

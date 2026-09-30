@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { applyMigrations, setDbForTest } from "../../src/store/db.js";
 
-const TEST_PORT = 18797;
+const TEST_PORT = 19014;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-campaigns-degraded-"));
 
