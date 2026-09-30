@@ -222,6 +222,13 @@ CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
 -- (...) and order by created_at; without this the "in progress" / "phases"
 -- polls (4x per 2s tick per open tab) full-scan the whole table.
 CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at);
+-- FG-836: the dashboard's agent-runtime and ops roll-ups read a handful of event
+-- types for every task in a window. idx_events_task finds a task's events but not
+-- the types among them, so each lookup walked the task's whole stream. Additive
+-- only (BD-15): IF NOT EXISTS on every open, user_version untouched, and every
+-- column it names is one the oldest events table already carries, so an older
+-- binary sharing the store neither needs nor notices it.
+CREATE INDEX IF NOT EXISTS idx_events_task_type_created ON events(task_id, event_type, created_at);
 
 -- #155: model_calls — one row per Anthropic API request (deduped by request_id).
 -- Populated by spawn.ts at task-completion (and by "forge usage backfill" for
