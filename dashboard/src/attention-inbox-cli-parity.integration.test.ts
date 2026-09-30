@@ -11,6 +11,7 @@ import { copyFileSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureFetch } from "./test-support/fixture-fetch.js";
 
 const TEST_PORT = 18820;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -101,7 +102,7 @@ async function route(query: string): Promise<Record<string, unknown>> {
   const deadline = Date.now() + 4000;
   for (;;) {
     try {
-      const res = await fetch(`${BASE}/api/attention-inbox${query}`);
+      const res = await fixtureFetch(`${BASE}/api/attention-inbox${query}`);
       return (await res.json()) as Record<string, unknown>;
     } catch (err) {
       if (Date.now() > deadline) throw err;

@@ -16,6 +16,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureFetch } from "./test-support/fixture-fetch.js";
 
 const TEST_PORT = 19002;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -127,7 +128,7 @@ async function waitForServer(ms = 4000): Promise<void> {
   const deadline = Date.now() + ms;
   for (;;) {
     try {
-      const response = await fetch(`${BASE}/api/roles/engineer`);
+      const response = await fixtureFetch(`${BASE}/api/roles/engineer`);
       if (response.ok) return;
       throw new Error(`server on ${TEST_PORT} answered ${response.status}`);
     } catch (err) {
@@ -143,7 +144,7 @@ async function get(path: string, method = "GET"): Promise<{ status: number; body
   const deadline = Date.now() + 4000;
   for (;;) {
     try {
-      const res = await fetch(`${BASE}${path}`, { method });
+      const res = await fixtureFetch(`${BASE}${path}`, { method });
       return { status: res.status, body: await res.json() };
     } catch (err) {
       if (Date.now() > deadline) throw err;
