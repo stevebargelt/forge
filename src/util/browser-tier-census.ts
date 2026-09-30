@@ -375,13 +375,14 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // cards; and Tab through the focusable sideways scroller reaching every lane in board order
   // with no stop in a header. `fg591-queue-board` keeps its 6. Fixture port 18851.
   "fg844-queue-board.test.ts": 6,
-  // FG-843 adds `fg843-checkout-scope` (8 tests), against the REAL server over a scratch
+  // FG-843 adds `fg843-checkout-scope` (9 tests), against the REAL server over a scratch
   // registry (a registered primary, a second checkout registered with `forge projects
   // classify --purpose operator`, three run-only directories one of them deleted, and a
   // one-checkout project): after selecting a project the scope column holds the select
   // alone; Routing's header chooser lists the two live operator checkouts, primary first and
   // marked, with the run-checkout count in its footer, and a pick rewrites `?checkout=` and
-  // re-reads (Config keeping it); the one-checkout project shows the plain label on Routing,
+  // re-reads (Config keeping it); a Routing pick scopes the governance read alone while the
+  // shared project reads and nav badges keep the project scope (RF-2); the one-checkout project shows the plain label on Routing,
   // Config and Notes; Home/Activity/Runs/Backlog/Roles/Models/Ops/Usage/Queue/Reviews show no
   // chooser and drop `checkout=`; a run-checkout deep link opens labelled `run checkout` and
   // offers the operator checkouts; the FG-692 keyboard path (Enter, arrows, Enter, Escape
@@ -389,7 +390,7 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // FG-831, FG-830, FG-820, FG-828, FG-699, FG-349 and inactive-checkouts keep their counts,
   // re-pointed from the retired scope-bar checkout list to the header chooser, the Runs rows
   // or the project select. Fixture port 18845.
-  "fg843-checkout-scope.test.ts": 8,
+  "fg843-checkout-scope.test.ts": 9,
   // FG-747 RF-3 adds `fg747-client-model-mix` (1 test): two independent durable
   // identities that share ONE display label keep SEPARATE client model-mix drill-downs
   // and independent expand state — the client joins the mix map by durable identity key,
