@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { renderShell } from "../src/shell.js";
 import { CHROME_LAUNCH_ARGS, requireChrome } from "../../src/util/chrome-bin.js";
@@ -105,7 +106,7 @@ async function waitFor<T>(read: () => Promise<T>, expected: T, what: string): Pr
   let last: T = await read();
   while (Date.now() < deadline) {
     last = await read();
-    if (JSON.stringify(last) === JSON.stringify(expected)) return;
+    if (isDeepStrictEqual(last, expected)) return;
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.deepEqual(last, expected, what);
@@ -177,10 +178,12 @@ test("FG-828: a header is reached by Tab and operated by Enter and Space (FG-692
   assert.equal(await page.evaluate(() => document.activeElement?.closest("th")?.getAttribute("data-sort") ?? null), "mount", "Tab moves to the next header button");
   await page.keyboard.press("Enter");
   await waitFor(async () => hashOf(page), "#roles?sort=mount&dir=asc", "Enter sorts");
+  await waitFor(() => ariaSorts(page), { ...NONE, mount: "ascending" }, "Enter updates aria-sort");
   assert.deepEqual(await ariaSorts(page), { ...NONE, mount: "ascending" });
   await page.locator('th[data-sort="mount"] button').focus();
   await page.keyboard.press("Space");
   await waitFor(async () => hashOf(page), "#roles?sort=mount&dir=desc", "Space flips");
+  await waitFor(() => ariaSorts(page), { ...NONE, mount: "descending" }, "Space updates aria-sort");
   await waitFor(() => order(page), ["engineer", "tech-lead", "architecture-advisor", "red-wide", "scout"], "row order");
   assert.deepEqual(await ariaSorts(page), { ...NONE, mount: "descending" });
   assert.equal(await page.evaluate(() => document.activeElement?.closest("th")?.getAttribute("data-sort") ?? null), "mount", "focus stays on the header");
@@ -262,6 +265,7 @@ test("FG-828: roles keeps only valid sort state, drops scope like Projects, and 
   assert.equal(await page.evaluate(() => document.activeElement?.closest("th")?.getAttribute("data-sort") ?? null), "lastTask", "Tab reaches the Last task column");
   await page.keyboard.press("Space");
   await waitFor(async () => hashOf(page), "#roles?sort=lastTask&dir=asc", "Space sorts Last task at phone width");
+  await waitFor(() => ariaSorts(page), { ...NONE, lastTask: "ascending" }, "Space updates Last task aria-sort at phone width");
   assert.deepEqual(await ariaSorts(page), { ...NONE, lastTask: "ascending" });
   await page.keyboard.press("Space");
   await waitFor(async () => (await ariaSorts(page)).lastTask, "descending", "Space flips aria-sort on Last task");
