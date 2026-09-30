@@ -31,9 +31,11 @@
 // - POST /api/task/:id/gate|retry|recover-re-drive the operator's TASK ACTIONS (FG-822)
 // - GET  /api/raci?project=<key>[&projectDir=]      the RACI editor's read: effective source, governance, audit tail (FG-834)
 // - POST /api/raci/propose|apply                    a project RACI change through `forge raci propose|apply` (FG-834)
+// - GET  /api/model-policy[?project=<key>][&projectDir=]  the model-policy editor's read: effective source, resolution table, audit tail, backups (FG-835)
+// - POST /api/model-policy/propose|apply            a host or project model-policy change through `forge model policy propose|apply` (FG-835)
 //
 // Every GET is a read. The POSTs above — four queue verbs, classify, three task actions,
-// the RACI propose/apply pair, and the FG-823 attention rows in the same registry — are
+// the RACI and model-policy propose/apply pairs, and the FG-823 attention rows in the same registry — are
 // the ONLY mutating routes on this surface, and they do not write the DB
 // either: each shells exactly one named `forge` verb (FORGE-DEC-015), guarded same-origin
 // and behind a non-simple content type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
@@ -69,6 +71,7 @@ import { finishUnhandledRequest, degradedGraphErrorPayload } from "./http-error.
 import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 import { actionPreviewTaskId, handleActionMutation, isActionMutationPath, previewTaskActions, taskIdOperand } from "./action-mutation.js";
 import { raciReadModel } from "./raci-mutation.js";
+import { modelPolicyReadModel } from "./model-policy-mutation.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
 import {
   guardBindAddress,
@@ -309,6 +312,29 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     sendJson(res, 200, raciReadModel(owner, checkout, routingGovernance(checkout)));
+    return;
+  }
+
+  if (path === "/api/model-policy") {
+    // FG-835: the model-policy editor's read. No `project` reads the host file; a project
+    // is named by registry key (and an optional checkout among its own), exactly as the
+    // model-policy mutation rows resolve it. No subprocess (invariant 21).
+    const projectKey = url.searchParams.get("project");
+    if (projectKey === null) {
+      sendJson(res, 200, modelPolicyReadModel());
+      return;
+    }
+    const owner = projectKey ? resolveOwnerProject(projectsForDashboard(), projectKey, undefined) : undefined;
+    if (!owner) {
+      sendJson(res, 404, { error: `no registered project has the key ${JSON.stringify(projectKey)}.` });
+      return;
+    }
+    const checkout = resolveCheckoutDir(owner, url.searchParams.get("projectDir") ?? undefined);
+    if (isRefusal(checkout)) {
+      sendJson(res, checkout.status, { error: checkout.error });
+      return;
+    }
+    sendJson(res, 200, modelPolicyReadModel({ owner, checkoutDir: checkout }));
     return;
   }
 

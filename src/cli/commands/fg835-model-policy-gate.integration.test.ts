@@ -286,6 +286,29 @@ test("apply --confirm: atomically replaces the host file, keeps a timestamped ba
   assert.equal(readFileSync(join(homeDir, "model-policy-audit.log"), "utf8").trim().split("\n").length, 2);
 });
 
+test("apply --rationale/--source dashboard: the audit line carries by, source, rationale and candidate_sha256; a terminal apply carries neither", async () => {
+  const text = policy({ defaultModel: "claude-opus-5-5" });
+  const rationale = "promote default to opus; see FG-835 — \"quoted\" $(not a shell)";
+  const res = await run(["apply", candidate(text), "--confirm", "--by", "dashboard", "--source", "dashboard", "--rationale", rationale, "--json"]);
+  assert.equal(res.exitCode, undefined, res.out);
+  const j = JSON.parse(res.out) as Json & { audit: { by: string; source?: string; rationale?: string; candidate_sha256: string } };
+  assert.equal(j.audit.by, "dashboard");
+  assert.equal(j.audit.source, "dashboard");
+  assert.equal(j.audit.rationale, rationale);
+  const line = JSON.parse(readFileSync(join(homeDir, "model-policy-audit.log"), "utf8").trim()) as { by: string; source?: string; rationale?: string; candidate_sha256: string; diff: unknown[] };
+  assert.deepEqual({ by: line.by, source: line.source, rationale: line.rationale }, { by: "dashboard", source: "dashboard", rationale });
+  assert.equal(line.candidate_sha256, createHash("sha256").update(text).digest("hex"));
+  assert.ok(line.diff.length > 0, "the resolution diff rides alongside");
+
+  await run(["apply", candidate(CURRENT), "--confirm", "--rationale", "   ", "--json"]);
+  const second = JSON.parse(readFileSync(join(homeDir, "model-policy-audit.log"), "utf8").trim().split("\n")[1]!) as Record<string, unknown>;
+  assert.equal("source" in second, false);
+  assert.equal("rationale" in second, false, "a blank rationale is not recorded");
+
+  const bad = await run(["apply", candidate(text), "--confirm", "--source", "web"]).catch((e: Error) => ({ out: e.message, exitCode: 1 }));
+  assert.match(bad.out, /invalid|Allowed choices/i, "--source admits only dashboard");
+});
+
 test("--project targeting: apply writes <project>/.forge/model-policy.yml with its own audit log and leaves the host file alone", async () => {
   const text = policy({ defaultModel: "claude-haiku-4-5" });
   const res = await run(["apply", candidate(text), "--project", projectDir, "--confirm", "--json"]);

@@ -35,9 +35,14 @@
 // a hash-checked green propose, a typed project-key confirmation and a rationale. The
 // CLI's gate is the authority; raci-mutation.ts carries the rest.
 //
+// ─── THE MODEL-POLICY ROWS (FG-835) ───────────────────────────────────────────
+// The same shape for `forge model policy propose|apply`, targeting a registered project's
+// `.forge/model-policy.yml` or the host file (typed confirmation: the project key, or
+// `host`). Never `--allow-undispatchable`. model-policy-mutation.ts carries the rest.
+//
 // ─── WHAT IS NOT HERE, AND CANNOT BE REACHED FROM HERE ───────────────────────
 // Arming or disarming the dispatcher, max_active_runs, cancel, next, route compile/
-// validate, model-policy apply, backlog edits, and any `--force`. The verb set is a closed
+// validate, `--allow-undispatchable`, backlog edits, and any `--force`. The verb set is a closed
 // exported constant, the argv builder can emit nothing outside it, and a test asserts
 // both over the table rather than trusting this comment.
 
@@ -49,6 +54,7 @@ import { isReDrivableFailureKind, recordedRetryDisposition, retryPolicy } from "
 import { isAttentionItemKey, parseSnoozeUntil } from "../../src/store/attention-dismissals.js";
 import type { ProjectRecord, TaskActionFacts } from "./queries.js";
 import { RACI_PATH, handleRaciMutation } from "./raci-mutation.js";
+import { MODEL_POLICY_PATH, handleModelPolicyMutation } from "./model-policy-mutation.js";
 import {
   CHILD_TIMEOUT_MS,
   MAX_CONCURRENT_MUTATIONS,
@@ -68,8 +74,8 @@ import {
 // ─── the route table ─────────────────────────────────────────────────────────
 
 /** The action routes, as a CLOSED table: one row per action, each naming the ONE `forge`
- *  verb it shells — the three task actions, the three attention-row actions, then the
- *  two RACI rows. */
+ *  verb it shells — the three task actions, the three attention-row actions, the two
+ *  RACI rows, then the two model-policy rows. */
 export const ACTION_ROUTES = {
   gate: { path: "/api/task/:id/gate", verb: "gate" },
   retry: { path: "/api/task/:id/retry", verb: "retry" },
@@ -79,6 +85,8 @@ export const ACTION_ROUTES = {
   "attention-undismiss": { path: "/api/attention/:itemKey/undismiss", verb: "attention" },
   "raci-propose": { path: "/api/raci/propose", verb: "raci" },
   "raci-apply": { path: "/api/raci/apply", verb: "raci" },
+  "model-policy-propose": { path: "/api/model-policy/propose", verb: "model" },
+  "model-policy-apply": { path: "/api/model-policy/apply", verb: "model" },
 } as const;
 
 export type ActionRoute = keyof typeof ACTION_ROUTES;
@@ -86,7 +94,7 @@ export type TaskAction = Extract<ActionRoute, "gate" | "retry" | "recover-re-dri
 export type AttentionAction = Extract<ActionRoute, "attention-dismiss" | "attention-snooze" | "attention-undismiss">;
 
 /** The ONLY `forge` verbs this registry can ever spawn. */
-export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention", "raci"] as const;
+export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention", "raci", "model"] as const;
 
 export type ActionForgeVerb = (typeof ACTION_FORGE_VERBS)[number];
 
@@ -110,7 +118,7 @@ const MAX_RATIONALE_CHARS = 4000;
 const MAX_ACTION_BODY_BYTES = 16 * 1024;
 
 export function isActionMutationPath(path: string): boolean {
-  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path) || RACI_PATH.test(path);
+  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path) || RACI_PATH.test(path) || MODEL_POLICY_PATH.test(path);
 }
 
 /** The raw task-id segment of a preview path, or null. */
@@ -382,7 +390,7 @@ const DASHBOARD_DIR = resolve(HERE, "..");
 export type ActionMutationContext = {
   /** Resolved only after every header guard has passed. */
   lookupTask: (taskId: string) => TaskActionFacts | null;
-  /** The RACI rows' project, by registry key — resolved only after every guard. */
+  /** The RACI and model-policy rows' project, by registry key — resolved only after every guard. */
   resolveProject: (projectKey: string) => ProjectRecord | undefined;
 };
 
@@ -400,6 +408,10 @@ export async function handleActionMutation(
   }
   if (RACI_PATH.test(path)) {
     await handleRaciMutation(req, res, path, { resolveProject: context.resolveProject, actor: ACTION_ACTOR });
+    return;
+  }
+  if (MODEL_POLICY_PATH.test(path)) {
+    await handleModelPolicyMutation(req, res, path, { resolveProject: context.resolveProject, actor: ACTION_ACTOR });
     return;
   }
   const m = path.match(ACTION_PATH);
