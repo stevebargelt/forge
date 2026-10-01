@@ -101,11 +101,11 @@ test("FG-822: awaiting_gate offers the three gate decisions, each labeled with i
   }
 });
 
-test("FG-822: the registry is closed — three task rows, FG-823's three attention rows, FG-834's two RACI rows and FG-835's two model-policy rows, six verbs, none of the CLI-only capabilities", () => {
+test("FG-822: the registry is closed — three task rows, FG-823's three attention rows, FG-834's two RACI rows and FG-835's two model-policy rows and FG-845's two attribution rows, seven verbs, none of the CLI-only capabilities", () => {
   assert.deepEqual(Object.keys(ACTION_ROUTES).sort(), [
-    "attention-dismiss", "attention-snooze", "attention-undismiss", "gate", "model-policy-apply", "model-policy-propose", "raci-apply", "raci-propose", "recover-re-drive", "retry",
+    "ai-attribution-host", "ai-attribution-project", "attention-dismiss", "attention-snooze", "attention-undismiss", "gate", "model-policy-apply", "model-policy-propose", "raci-apply", "raci-propose", "recover-re-drive", "retry",
   ]);
-  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "gate", "model", "raci", "recover", "retry"]);
+  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "config", "gate", "model", "raci", "recover", "retry"]);
   assert.deepEqual([...new Set(Object.values(ACTION_ROUTES).map((r) => r.verb))].sort(), [...ACTION_FORGE_VERBS].sort());
   const forbidden = ["dispatcher", "arm", "disarm", "max-active-runs", "cancel", "next", "route", "routing", "model-policy", "apply", "backlog", "--force"];
   for (const word of forbidden) {

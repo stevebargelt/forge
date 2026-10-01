@@ -247,6 +247,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/attention-dismiss-view.js",
   "dashboard/client/attention-inbox-render.js",
   "dashboard/client/attention-inbox-view.js",
+  "dashboard/client/attribution-render.js",
+  "dashboard/client/attribution-view.js",
   "dashboard/client/backlog-state.js",
   "dashboard/client/backlog.js",
   "dashboard/client/breadcrumbs-render.js",

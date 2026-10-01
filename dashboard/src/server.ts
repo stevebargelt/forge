@@ -33,9 +33,10 @@
 // - POST /api/raci/propose|apply                    a project RACI change through `forge raci propose|apply` (FG-834)
 // - GET  /api/model-policy[?project=<key>][&projectDir=]  the model-policy editor's read: effective source, resolution table, audit tail, backups (FG-835)
 // - POST /api/model-policy/propose|apply            a host or project model-policy change through `forge model policy propose|apply` (FG-835)
+// - POST /api/ai-attribution/project|host           a project's or the host's git attribution through `forge config set|unset ai-attribution` (FG-845)
 //
 // Every GET is a read. The POSTs above — four queue verbs, classify, three task actions,
-// the RACI and model-policy propose/apply pairs, and the FG-823 attention rows in the same registry — are
+// the RACI and model-policy propose/apply pairs, the FG-845 attribution pair, and the FG-823 attention rows in the same registry — are
 // the ONLY mutating routes on this surface, and they do not write the DB
 // either: each shells exactly one named `forge` verb (FORGE-DEC-015), guarded same-origin
 // and behind a non-simple content type. Arming autonomous dispatch and setting max_active_runs are deliberately NOT
@@ -72,6 +73,7 @@ import { handleQueueMutation, isQueueMutationPath } from "./queue-mutation.js";
 import { actionPreviewTaskId, handleActionMutation, isActionMutationPath, previewTaskActions, taskIdOperand } from "./action-mutation.js";
 import { raciReadModel } from "./raci-mutation.js";
 import { modelPolicyReadModel, readPolicyBackup } from "./model-policy-mutation.js";
+import { withAiAttribution } from "./ai-attribution-mutation.js";
 import { resolveCheckoutDir } from "./queue-mutation.js";
 import {
   guardBindAddress,
@@ -291,7 +293,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // included (no heuristic decides visibility). Current Activity is unaffected: it
     // reads the unfiltered projectsForDashboard() scope, so an active artifact's runs
     // and live session remain visible under its owner (AC5).
-    const data = operatorProjectsForDashboard();
+    // FG-845: each card carries its checkout's git attribution, read live per request.
+    const data = withAiAttribution(operatorProjectsForDashboard());
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }

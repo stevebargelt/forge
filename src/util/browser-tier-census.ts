@@ -366,6 +366,10 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // link opening the Harness tab under the scope the row was resolved at (project override
   // scoped, host file unscoped).
   "fg835-models-editor.test.ts": 8,
+  // FG-845 adds three real-browser cases for Config's git-attribution row and its
+  // closed-registry controls: host inheritance across two projects, a project override
+  // followed by inherit/fail-closed handling, and FG-692 keyboard + 400px layout. Fixture 18855.
+  "fg845-attribution-setting.test.ts": 3,
   // FG-844 adds `fg844-queue-board` (6 tests) against a fixture queue with a 200-card Queued
   // lane, a 20-card Blocked lane and a 21-card Done lane: at 1400, 1200 and 1000px every lane header on one line with
   // the document bounded by the viewport plus the controls above the board; the long lane

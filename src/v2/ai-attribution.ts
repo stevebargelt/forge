@@ -21,9 +21,10 @@
 // (FORGE_AI_ATTRIBUTION_CARRIED, set by buildDockerArgs from carriedAiAttributionValue),
 // since the container cannot see the host file.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { removeTopLevelConfigKey, writeHostConfigKey, writeTopLevelConfigKey } from "../backlog/config.js";
 import {
   AI_ATTRIBUTION_CARRIED_ENV,
@@ -36,6 +37,7 @@ import {
   type AiAttributionLevelRead,
   type AiAttributionMode,
 } from "./ai-attribution-parse.js";
+import type { AiAttributionView } from "./config-graph-types.js";
 
 export { AI_ATTRIBUTION_CARRIED_ENV, AI_ATTRIBUTION_MODES };
 export type { AiAttributionMode };
@@ -149,6 +151,91 @@ export function renderOrchestratorTemplate(template: string, mode: AiAttribution
     if (keep) out.push(line);
   }
   return out.join("\n");
+}
+
+const BLOCK_START = "<!-- forge:orchestrator-start -->";
+const BLOCK_END = "<!-- forge:orchestrator-end -->";
+
+/** FG-845: the attribution statement each mode renders — the first non-blank line
+ *  inside the template's `forge:if ai_attribution=<mode>` section. */
+export function attributionStatements(template: string): Record<AiAttributionMode, string | null> {
+  const out: Record<AiAttributionMode, string | null> = { suppress: null, allow: null };
+  let open: AiAttributionMode | null = null;
+  for (const line of template.split("\n")) {
+    const ifm = line.match(IF_MARKER_RE);
+    if (ifm) {
+      open = ifm[1] === "allow" ? "allow" : "suppress";
+      continue;
+    }
+    if (ENDIF_MARKER_RE.test(line)) open = null;
+    else if (open && out[open] === null && line.trim() !== "") out[open] = line.trim();
+  }
+  return out;
+}
+
+/** FG-845: which mode the marker-managed orchestrator block in a CLAUDE.md renders,
+ *  by the statement line it carries. `absent` when there is no block. */
+export function renderedBlockMode(
+  claudeMd: string | null,
+  statements: Record<AiAttributionMode, string | null>,
+): { block: "present" | "absent"; mode: AiAttributionMode | null } {
+  const start = claudeMd?.indexOf(BLOCK_START) ?? -1;
+  const end = claudeMd?.indexOf(BLOCK_END) ?? -1;
+  if (!claudeMd || start < 0 || end <= start) return { block: "absent", mode: null };
+  const lines = new Set(claudeMd.slice(start, end).split("\n").map((l) => l.trim()));
+  for (const mode of AI_ATTRIBUTION_MODES) {
+    const statement = statements[mode];
+    if (statement && lines.has(statement)) return { block: "present", mode };
+  }
+  return { block: "present", mode: null };
+}
+
+function readOptional(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+let seedStatements: Record<AiAttributionMode, string | null> | null = null;
+
+/** The statements of the orchestrator template this forge would render with `forge upgrade`. */
+function installedStatements(): Record<AiAttributionMode, string | null> {
+  if (!seedStatements) {
+    const path = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "seeds", "orchestrator-template.md");
+    seedStatements = attributionStatements(existsSync(path) ? readFileSync(path, "utf8") : "");
+  }
+  return seedStatements;
+}
+
+/** FG-845: THE derivation the dashboard's Config row, Projects cards and controls read —
+ *  readAiAttribution's answer (resolved on the host, never from a carried value) plus the
+ *  host default alone, whether the checkout inherits, and whether its rendered
+ *  orchestrator block agrees. Reads files only; no subprocess. */
+export function describeAiAttribution(
+  checkout: string,
+  opts: { forgeHome?: string; template?: string } = {},
+): AiAttributionView {
+  const a = readAiAttribution(checkout, { forgeHome: opts.forgeHome, carried: null });
+  const hostFile = hostAiAttributionFile(opts.forgeHome);
+  const hostOnly = resolveAiAttributionLevels({ kind: "absent" }, readLevel(hostFile));
+  const projectOnly = resolveAiAttributionLevels(readLevel(projectAiAttributionFile(checkout)), { kind: "absent" });
+  const statements = opts.template === undefined ? installedStatements() : attributionStatements(opts.template);
+  const rendered = renderedBlockMode(readOptional(join(checkout, "CLAUDE.md")), statements);
+  const view: AiAttributionView = {
+    mode: a.mode,
+    source: a.source === "project" || a.source === "host" ? a.source : "default",
+    file: a.file,
+    host: hostOnly.source === "host" ? { mode: hostOnly.mode, file: hostFile } : null,
+    hostFile,
+    inheritsHost: projectOnly.source === "default" && !projectOnly.failed,
+    checkout,
+    renderedBlock: rendered.block === "absent" ? "absent" : rendered.mode === a.mode ? "in_sync" : "stale",
+    renderedMode: rendered.mode,
+  };
+  if (a.reason) view.reason = a.reason;
+  return view;
 }
 
 export function writeAiAttribution(projectDir: string, mode: AiAttributionMode): void {
