@@ -137,14 +137,25 @@ function AttributionControl({ target, title, pill, choices, current, view, body,
   const confirm = async () => {
     setStage("running");
     const { status, body: reply } = await postJson(`/api/ai-attribution/${target}`, { ...body, mode: choice });
-    setResult(reply?.ok ? { ok: true, text: reply.stdout || `${command} done` } : { ok: false, text: reply?.error || `HTTP ${status}` });
+    setResult(
+      reply?.ok
+        ? { ok: true, text: reply.stdout || `${command} done`, warning: reply.auditWarning ?? null }
+        : { ok: false, text: reply?.error || `HTTP ${status}` },
+    );
     setStage("idle");
     if (onChanged) await onChanged();
     focusChoice(choice);
   };
+  const onEscape = (event) => {
+    if (event.key !== "Escape" || stage !== "preview") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setStage("idle");
+    focusChoice(choice);
+  };
   const disabled = disabledReason !== null;
   return html`
-    <div class="cp-attr-ctl" data-attr-control=${target}>
+    <div class="cp-attr-ctl" data-attr-control=${target} onKeyDown=${onEscape}>
       <h4 class="cp-attr-ctl-title">${title} <span class="cp-attr-pill mono">${pill}</span></h4>
       <div class="cp-seg" role="group" aria-label=${`${title}: git attribution`} ref=${groupRef} onKeyDown=${onKeyDown}>
         ${choices.map((c) => html`
@@ -180,7 +191,9 @@ function AttributionControl({ target, title, pill, choices, current, view, body,
             ${unchanged ? html`<span class="faint cp-attr-note">current value</span>` : null}
           </div>
         `}
-      <div aria-live="polite" class=${"cp-attr-result" + (result && !result.ok ? " cp-warn" : "")} data-attr-result>${result ? result.text : ""}</div>
+      <div aria-live="polite" class=${"cp-attr-result" + (result && !result.ok ? " cp-warn" : "")} data-attr-result>${result ? result.text : ""}${result?.warning
+        ? html`<div class="cp-warn" data-attr-audit-warning>${result.warning}</div>`
+        : null}</div>
       ${footer ? html`<div class="faint cp-attr-note" data-attr-inherit>${footer}</div>` : null}
     </div>
   `;

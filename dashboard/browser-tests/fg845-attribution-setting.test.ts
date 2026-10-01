@@ -178,8 +178,19 @@ test("FG-845: segmented controls are keyboard-operable, Confirm returns focus, E
   await page.keyboard.press("Enter");
   await project.locator("[data-attr-preview]").waitFor();
   await page.keyboard.press("Escape");
-  // Escape is also the page-level dismissal contract; reopening then confirming proves focus return.
-  if (await project.locator("[data-attr-preview]").count()) await project.getByRole("button", { name: "Confirm" }).click();
+  assert.equal(await project.locator("[data-attr-preview]").count(), 0, "Escape dismisses the preview");
+  const pressedHasFocus = () =>
+    page.evaluate(() => {
+      const el = document.activeElement;
+      return el?.matches('[data-attr-control="project"] [data-choice="allow"][aria-pressed="true"]') ?? false;
+    });
+  assert.equal(await pressedHasFocus(), true, "Escape returns focus to the pressed control");
+  assert.equal(await project.getByRole("button", { name: "Confirm" }).isDisabled(), true, "nothing left to confirm");
+
+  await project.getByRole("button", { name: "Preview" }).click();
+  await project.getByRole("button", { name: "Confirm" }).click();
+  await project.locator("[data-attr-result]").filter({ hasText: "set ai-attribution = allow" }).waitFor();
+  assert.equal(await pressedHasFocus(), true, "Confirm returns focus to the pressed control");
   await host.getByRole("button", { name: "allow" }).click();
   await page.keyboard.press("ArrowLeft");
   assert.equal(await host.getByRole("button", { name: "suppress" }).getAttribute("aria-pressed"), "true");

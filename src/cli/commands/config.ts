@@ -82,7 +82,9 @@ function actorOf(raw: string | undefined): string {
   return actor;
 }
 
-/** FG-845: the audit record of an attribution change — only when the level's value moved. */
+/** FG-845: the audit record of an attribution change — only when the level's value moved.
+ *  Called AFTER the file write, so a failed insert never un-applies the change: it returns
+ *  the audit gap for the caller to report beside the applied result. */
 function logAttributionChange(change: {
   level: "project" | "host";
   file: string;
@@ -90,12 +92,24 @@ function logAttributionChange(change: {
   after: AiAttributionMode | null;
   actor: string;
   projectDir?: string;
-}): void {
-  if (change.before === change.after) return;
-  const resolved = change.projectDir ? readAiAttribution(change.projectDir) : undefined;
-  logEvent("config.ai_attribution_changed", {
-    payload: { ...change, ...(resolved ? { resolved: { mode: resolved.mode, source: resolved.source } } : {}) },
-  });
+}): string | undefined {
+  if (change.before === change.after) return undefined;
+  try {
+    const resolved = change.projectDir ? readAiAttribution(change.projectDir) : undefined;
+    logEvent("config.ai_attribution_changed", {
+      payload: { ...change, ...(resolved ? { resolved: { mode: resolved.mode, source: resolved.source } } : {}) },
+    });
+    return undefined;
+  } catch (err) {
+    return `the config.ai_attribution_changed audit event was not recorded: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+/** The change is applied whatever the audit outcome; an audit gap is a warning, never a failure. */
+function reportAttributionChange(line: string, json: object | undefined, auditError: string | undefined): void {
+  if (json) console.log(JSON.stringify({ ...json, ...(auditError ? { auditError } : {}) }, null, 2));
+  else console.log(line);
+  if (auditError) console.error(`warning: applied, but ${auditError}`);
 }
 
 export function registerConfig(program: Command): void {
@@ -127,8 +141,9 @@ export function registerConfig(program: Command): void {
     .option("--project <dir>", "project whose .forge/config.yml to write (default: cwd)")
     .option("--host", "write the host default ($FORGE_HOME/config.yml) instead of the project file")
     .option("--actor <name>", "who made the change, recorded on the config.ai_attribution_changed event (default: $USER)")
+    .option("--json", "emit { key, mode, level, file, auditError? } as JSON")
     .description("Set a config value. Supported key: ai-attribution (suppress|allow).")
-    .action((key: string, value: string, opts: { project?: string; host?: boolean; actor?: string }) => {
+    .action((key: string, value: string, opts: { project?: string; host?: boolean; actor?: string; json?: boolean }) => {
       if (key !== "ai-attribution") {
         throw new Error(`unknown config key '${key}'. Supported: ai-attribution`);
       }
@@ -143,16 +158,24 @@ export function registerConfig(program: Command): void {
         if (opts.project !== undefined) throw new Error("--host and --project are mutually exclusive");
         const before = levelValue(hostAiAttributionFile());
         const file = writeHostAiAttribution(mode);
-        logAttributionChange({ level: "host", file, before, after: mode, actor });
-        console.log(`set ai-attribution = ${value} (host default, ${file})`);
+        const auditError = logAttributionChange({ level: "host", file, before, after: mode, actor });
+        reportAttributionChange(
+          `set ai-attribution = ${value} (host default, ${file})`,
+          opts.json ? { key: "ai-attribution", mode, level: "host", file } : undefined,
+          auditError,
+        );
         return;
       }
       const projectDir = resolve(opts.project ?? process.cwd());
       const file = join(projectDir, ".forge", "config.yml");
       const before = levelValue(file);
       writeAiAttribution(projectDir, mode);
-      logAttributionChange({ level: "project", file, before, after: mode, actor, projectDir });
-      console.log(`set ai-attribution = ${value} (${file})`);
+      const auditError = logAttributionChange({ level: "project", file, before, after: mode, actor, projectDir });
+      reportAttributionChange(
+        `set ai-attribution = ${value} (${file})`,
+        opts.json ? { key: "ai-attribution", mode, level: "project", file } : undefined,
+        auditError,
+      );
     });
 
   // FG-845: `forge config unset ai-attribution` — remove the project key so the
@@ -162,8 +185,9 @@ export function registerConfig(program: Command): void {
     .command("unset <key>")
     .option("--project <dir>", "project whose .forge/config.yml to edit (default: cwd)")
     .option("--actor <name>", "who made the change, recorded on the config.ai_attribution_changed event (default: $USER)")
+    .option("--json", "emit { key, removed, file, resolved, auditError? } as JSON")
     .description("Remove a project config value so the host default applies. Supported key: ai-attribution.")
-    .action((key: string, opts: { project?: string; actor?: string }) => {
+    .action((key: string, opts: { project?: string; actor?: string; json?: boolean }) => {
       if (key !== "ai-attribution") {
         throw new Error(`unknown config key '${key}'. Supported: ai-attribution`);
       }
@@ -172,13 +196,16 @@ export function registerConfig(program: Command): void {
       const actor = actorOf(opts.actor);
       const before = levelValue(file);
       const removed = unsetAiAttribution(projectDir);
-      if (removed) logAttributionChange({ level: "project", file, before, after: null, actor, projectDir });
-      console.log(
-        removed
-          ? `unset ai-attribution (${file})`
-          : `ai-attribution was not set in ${file}; nothing to unset`,
+      const auditError = removed
+        ? logAttributionChange({ level: "project", file, before, after: null, actor, projectDir })
+        : undefined;
+      const resolved = readAiAttribution(projectDir);
+      reportAttributionChange(
+        (removed ? `unset ai-attribution (${file})` : `ai-attribution was not set in ${file}; nothing to unset`) +
+          `\n${renderAiAttributionDetail(resolved)}`,
+        opts.json ? { key: "ai-attribution", removed, file, resolved } : undefined,
+        auditError,
       );
-      console.log(renderAiAttributionDetail(readAiAttribution(projectDir)));
     });
 
   // FG-799: `forge config show` — the effective per-project settings and where each

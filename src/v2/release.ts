@@ -237,6 +237,7 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/src/queue-mutation.ts",
   "dashboard/src/action-mutation.ts",
   "dashboard/src/mutation-guards.ts",
+  "dashboard/src/ai-attribution-mutation.ts",
   "dashboard/package.json",
   "dashboard/tsconfig.json",
   // Client ES-module graph — main.js and everything it (transitively) imports. A missing

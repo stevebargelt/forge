@@ -31,6 +31,7 @@ const { Command } = await import("commander");
 const { registerConfig } = await import("../../src/cli/commands/config.js");
 const { makeInMemoryDb, setDbForTest } = await import("../../src/store/db.js");
 const { readAiAttribution } = await import("../../src/v2/ai-attribution.js");
+const { provenPhysical } = await import("../../src/util/path-identity.js");
 
 type Request = Parameters<typeof parseAiAttributionRequest>[0];
 
@@ -154,7 +155,7 @@ test("handler: a project change shells the registered argv with the registry's c
   assert.equal(out.body["verb"], "forge config set ai-attribution allow");
   const argv = spawned();
   assert.ok(argv);
-  assert.equal(argv[0], CHECKOUT, "runs in the registry's checkout");
+  assert.equal(provenPhysical(argv[0]!), provenPhysical(CHECKOUT), "runs in the registry's checkout");
   assert.deepEqual(argv.slice(1), ["config", "set", "ai-attribution", "allow", "--project", CHECKOUT, "--actor", "dashboard"]);
 
   const inherit = await post("/api/ai-attribution/project", { projectKey: "pk-1", mode: "inherit" });
@@ -164,6 +165,24 @@ test("handler: a project change shells the registered argv with the registry's c
   const host = await post("/api/ai-attribution/host", { mode: "suppress" });
   assert.equal(host.status, 200);
   assert.deepEqual(spawned()!.slice(1), ["config", "set", "ai-attribution", "suppress", "--host", "--actor", "dashboard"]);
+});
+
+test("handler: an applied change whose audit record failed is reported applied, with the CLI's audit warning", async () => {
+  const warnBin = join(BIN_DIR, "forge-audit-gap");
+  writeFileSync(warnBin, `#!/bin/sh\necho "set ai-attribution = allow (host default)"\necho "warning: applied, but the config.ai_attribution_changed audit event was not recorded: disk I/O error" >&2\n`);
+  chmodSync(warnBin, 0o755);
+  process.env["FORGE_BIN"] = warnBin;
+  try {
+    const out = await post("/api/ai-attribution/host", { mode: "allow" });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body["ok"], true);
+    assert.equal(out.body["stdout"], "set ai-attribution = allow (host default)");
+    assert.equal(out.body["auditWarning"], "warning: applied, but the config.ai_attribution_changed audit event was not recorded: disk I/O error");
+  } finally {
+    process.env["FORGE_BIN"] = FAKE_FORGE;
+  }
+  const clean = await post("/api/ai-attribution/host", { mode: "allow" });
+  assert.equal("auditWarning" in clean.body, false);
 });
 
 test("handler: every refusal happens before a spawn — guards, bad JSON, bad value, unknown project", async () => {

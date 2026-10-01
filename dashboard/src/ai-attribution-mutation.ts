@@ -244,5 +244,8 @@ export async function handleAiAttributionMutation(
     send(res, 409, { ok: false, ...summary, error: cliRefusal(result, built.command.replace(/^forge /, "")) });
     return;
   }
-  send(res, 200, { ok: true, ...summary });
+  // The CLI applies the change before it records the audit event; a failed record exits 0
+  // with a `warning: applied, but …` stderr line, which the response carries beside the result.
+  const auditWarning = result.stderr.split("\n").find((line) => line.startsWith("warning: applied, but "));
+  send(res, 200, { ok: true, ...summary, ...(auditWarning ? { auditWarning: auditWarning.slice(0, MAX_REPORTED_STDERR) } : {}) });
 }
