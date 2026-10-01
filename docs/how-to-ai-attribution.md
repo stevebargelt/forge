@@ -51,7 +51,11 @@ rename (another writer got there first — retry) or when the resulting
 and the command exits non-zero naming the audit gap (`forge: refused — the
 config.ai_attribution_changed audit event could not be recorded (…); <file> is
 unchanged`; `--json` reports `{ ok: false, reason: "audit_unrecorded", error }`) — the
-change is never left applied without its audit record.
+change is never left applied without its audit record, except the one case where
+restoring the file *also* fails (another writer moved it in the narrow window between
+the audit failure and the undo): then the command still exits non-zero naming both
+failures, but the edit is left in place unaudited and the message says to check the
+file by hand.
 
 `forge config show` and `forge doctor` both print the same two lines:
 
