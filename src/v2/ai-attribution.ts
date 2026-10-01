@@ -16,29 +16,45 @@
 // may carry the same key. Resolution is project → host → built-in suppress
 // (resolveAiAttributionLevels); a level that is unreadable, unrecognized or duplicated fails
 // closed where it stands rather than falling through to the next.
+//
+// FG-853: between the two sits the value dispatch carried into an agent container
+// (FORGE_AI_ATTRIBUTION_CARRIED, set by buildDockerArgs from carriedAiAttributionValue),
+// since the container cannot see the host file.
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { removeTopLevelConfigKey, writeHostConfigKey, writeTopLevelConfigKey } from "../backlog/config.js";
 import {
+  AI_ATTRIBUTION_CARRIED_ENV,
   AI_ATTRIBUTION_MODES,
   classifyAiAttributionReadError,
+  describeAiAttributionFailure,
+  formatCarriedAiAttribution,
   parseAiAttributionConfig,
   resolveAiAttributionLevels,
   type AiAttributionLevelRead,
   type AiAttributionMode,
 } from "./ai-attribution-parse.js";
 
-export { AI_ATTRIBUTION_MODES };
+export { AI_ATTRIBUTION_CARRIED_ENV, AI_ATTRIBUTION_MODES };
 export type { AiAttributionMode };
 
-export type AiAttributionSource = "project" | "host" | "default";
+/** FG-853: `<x> (carried)` when the mode came from the value dispatch carried into an
+ *  agent container, naming where the HOST resolved it. */
+export type AiAttributionSource =
+  | "project"
+  | "host"
+  | "default"
+  | "project (carried)"
+  | "host (carried)"
+  | "default (carried)";
 
 export type AiAttribution = {
   mode: AiAttributionMode;
   /** FG-845: `project` / `host` when that level's file carries a recognized value;
-   *  `default` for the built-in suppress — nothing set, or a level failed closed. */
+   *  `default` for the built-in suppress — nothing set, or a level failed closed.
+   *  FG-853: `<x> (carried)` when the carried environment value resolved. */
   source: AiAttributionSource;
   /** The file the mode came from; on a fail-closed `default`, the file that stopped
    *  the resolution; null when nothing is set at either level. */
@@ -67,33 +83,43 @@ function readLevel(path: string): AiAttributionLevelRead {
   }
 }
 
-export function readAiAttribution(projectDir: string, opts: { forgeHome?: string } = {}): AiAttribution {
+/** `carried` defaults to $FORGE_AI_ATTRIBUTION_CARRIED at call time; pass null to
+ *  resolve without it (dispatch does, so it carries only the durable project's files). */
+export function readAiAttribution(
+  projectDir: string,
+  opts: { forgeHome?: string; carried?: string | null } = {},
+): AiAttribution {
   const files = { project: projectAiAttributionFile(projectDir), host: hostAiAttributionFile(opts.forgeHome) };
+  const carried = (opts.carried === undefined ? process.env[AI_ATTRIBUTION_CARRIED_ENV] : opts.carried) ?? undefined;
   const projectRead = readLevel(files.project);
   const hostRead = readLevel(files.host);
-  const r = resolveAiAttributionLevels(projectRead, hostRead);
+  const r = resolveAiAttributionLevels(projectRead, hostRead, carried);
   if (r.failed) {
-    const file = files[r.failed.level];
-    const problem =
-      r.failed.why === "unreadable"
-        ? "could not be read"
-        : r.failed.why === "duplicate"
-          ? "carries more than one top-level ai_attribution key"
-          : "carries an unrecognized ai_attribution value";
-    return {
-      mode: "suppress",
-      source: "default",
-      file,
-      reason: `${file} ${problem} (valid: ${AI_ATTRIBUTION_MODES.join(", ")}); failing closed to suppress`,
-    };
+    const file = r.failed.level === "carried" ? null : files[r.failed.level];
+    return { mode: "suppress", source: "default", file, reason: describeAiAttributionFailure(r.failed, files, carried) };
   }
   if (r.source === "default") return { mode: r.mode, source: "default", file: null };
-  const out: AiAttribution = { mode: r.mode, source: r.source, file: files[r.source] };
+  if (r.carried) return { mode: r.mode, source: `${r.carried.source} (carried)`, file: r.carried.file };
+  const level = r.source === "host" ? "host" : "project";
+  const out: AiAttribution = { mode: r.mode, source: level, file: files[level] };
   if (r.source === "project") {
-    const host = resolveAiAttributionLevels({ kind: "absent" }, hostRead);
-    if (host.source === "host" && host.mode !== r.mode) out.overridesHost = { mode: host.mode, file: files.host };
+    const inherited = resolveAiAttributionLevels({ kind: "absent" }, hostRead, carried);
+    const inheritedFile =
+      inherited.source === "host" ? files.host : inherited.carried?.source === "host" ? inherited.carried.file : null;
+    if (inheritedFile && inherited.mode !== r.mode) out.overridesHost = { mode: inherited.mode, file: inheritedFile };
   }
   return out;
+}
+
+/** FG-853: the FORGE_AI_ATTRIBUTION_CARRIED value dispatch hands an agent container —
+ *  the host's resolution for `projectDir`, always set (a bare built-in default is
+ *  carried as `suppress;source=default;file=`), so the container's reader never falls
+ *  through to a host file it cannot see. Resolved from the files alone, never from an
+ *  inherited carried value, so a nested dispatch cannot propagate a stale one. */
+export function carriedAiAttributionValue(projectDir: string, opts: { forgeHome?: string } = {}): string {
+  const a = readAiAttribution(projectDir, { ...opts, carried: null });
+  const source = a.source.startsWith("project") ? "project" : a.source.startsWith("host") ? "host" : "default";
+  return formatCarriedAiAttribution({ mode: a.mode, source, file: a.file });
 }
 
 // FG-799: the orchestrator template carries ai_attribution block-conditionals —
@@ -154,7 +180,7 @@ export function unsetAiAttribution(projectDir: string): boolean {
 }
 
 /** The one-line summary `forge config show` and `forge doctor` both print, e.g.
- *  `ai attribution: suppress (default)` / `ai attribution: allow (host)`. */
+ *  `ai attribution: suppress (default)` / `ai attribution: allow (host (carried))`. */
 export function formatAiAttribution(a: Pick<AiAttribution, "mode" | "source">): string {
   return `ai attribution: ${a.mode} (${a.source})`;
 }

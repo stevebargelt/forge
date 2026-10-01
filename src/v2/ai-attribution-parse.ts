@@ -111,30 +111,74 @@ export function stripComment(s: string): string {
 // has no top-level key, falls through to the next. A level whose file cannot be read,
 // whose key carries an unrecognized value, or which carries the key twice, STOPS the resolution: it fails closed to
 // `suppress` right there — a broken project file never lets a host `allow` through.
+//
+// FG-853: a CARRIED level sits between the two. An agent container has no $FORGE_HOME
+// mounted, so the host file reads as absent there; dispatch instead resolves the mode
+// on the host and hands it in as one environment value,
+// FORGE_AI_ATTRIBUTION_CARRIED=<mode>;source=<project|host|default>;file=<path>.
+// Order is project file → carried value → host file → suppress: the clone's own
+// project file still wins, and a carried value (even `suppress` from the built-in
+// default) is the host's whole answer, so nothing beneath it is consulted. An
+// unparseable carried value fails closed where it stands, like every other level.
+
+export const AI_ATTRIBUTION_CARRIED_ENV = "FORGE_AI_ATTRIBUTION_CARRIED";
 
 export type AiAttributionLevelRead =
   | { kind: "absent" }
   | { kind: "unreadable" }
   | { kind: "text"; text: string };
 
-export type AiAttributionLevel = "project" | "host";
+export type AiAttributionLevel = "project" | "carried" | "host";
+
+export type CarriedAiAttribution = {
+  mode: AiAttributionMode;
+  /** Where the host's resolution came from at dispatch. */
+  source: "project" | "host" | "default";
+  /** The host file the mode came from (or that stopped it); null for a bare default. */
+  file: string | null;
+};
 
 export type ResolvedAiAttributionLevels = {
   mode: AiAttributionMode;
   source: AiAttributionLevel | "default";
+  /** Set only when the carried level resolved: what the host resolved at dispatch. */
+  carried?: CarriedAiAttribution;
   /** Set only on a fail-closed stop: the level that stopped the resolution and why. */
-  failed?: { level: AiAttributionLevel; why: "unreadable" | "unrecognized" | "duplicate" };
+  failed?: { level: AiAttributionLevel; why: "unreadable" | "unrecognized" | "duplicate" | "unparseable" };
 };
+
+/** Parse a FORGE_AI_ATTRIBUTION_CARRIED value: exactly three fields, in order,
+ *  `<mode>;source=<project|host|default>;file=<path>`. Anything else — an extra or
+ *  missing field, an unknown mode or source, or `allow` claimed from the built-in
+ *  default (always suppress) — is null. */
+export function parseCarriedAiAttribution(value: string): CarriedAiAttribution | null {
+  const m = value.match(/^(allow|suppress);source=(project|host|default);file=([^;\n]*)$/);
+  if (!m) return null;
+  const mode = m[1] === "allow" ? "allow" : "suppress";
+  const source = m[2] === "project" ? "project" : m[2] === "host" ? "host" : "default";
+  if (source === "default" && mode !== "suppress") return null;
+  return { mode, source, file: m[3] ? m[3] : null };
+}
+
+export function formatCarriedAiAttribution(c: CarriedAiAttribution): string {
+  return `${c.mode};source=${c.source};file=${c.file ?? ""}`;
+}
 
 export function resolveAiAttributionLevels(
   project: AiAttributionLevelRead,
   host: AiAttributionLevelRead,
+  carried?: string,
 ): ResolvedAiAttributionLevels {
   const levels: [AiAttributionLevel, AiAttributionLevelRead][] = [
     ["project", project],
     ["host", host],
   ];
   for (const [level, read] of levels) {
+    if (level === "host" && carried !== undefined) {
+      const c = parseCarriedAiAttribution(carried);
+      if (!c) return { mode: "suppress", source: "default", failed: { level: "carried", why: "unparseable" } };
+      return { mode: c.mode, source: "carried", carried: c };
+    }
     if (read.kind === "absent") continue;
     if (read.kind === "unreadable") return { mode: "suppress", source: "default", failed: { level, why: "unreadable" } };
     const parsed = parseAiAttributionConfig(read.text);
@@ -144,6 +188,26 @@ export function resolveAiAttributionLevels(
     return { mode: parsed.mode, source: level };
   }
   return { mode: "suppress", source: "default" };
+}
+
+/** The operator-facing reason for a fail-closed stop, naming the level that stopped
+ *  the resolution — the carried env value, or the project / host file. */
+export function describeAiAttributionFailure(
+  failed: NonNullable<ResolvedAiAttributionLevels["failed"]>,
+  files: { project: string; host: string },
+  carried: string | undefined,
+): string {
+  const valid = `(valid: ${AI_ATTRIBUTION_MODES.join(", ")}); failing closed to suppress`;
+  if (failed.level === "carried") {
+    return `${AI_ATTRIBUTION_CARRIED_ENV}=${JSON.stringify(carried)} is not a valid carried value <mode>;source=<project|host|default>;file=<path> ${valid}`;
+  }
+  const problem =
+    failed.why === "unreadable"
+      ? "could not be read"
+      : failed.why === "duplicate"
+        ? "carries more than one top-level ai_attribution key"
+        : "carries an unrecognized ai_attribution value";
+  return `${files[failed.level]} ${problem} ${valid}`;
 }
 
 /** Absent means the file does not exist (ENOENT / ENOTDIR); any other read failure is

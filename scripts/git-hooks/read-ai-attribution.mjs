@@ -22,10 +22,12 @@
 //
 // ─── FAIL CLOSED, NEVER THROW ────────────────────────────────────────────────
 // FG-845: the host level is read from $FORGE_HOME (default ~/.forge) in the hook's
-// own environment. In an agent container that has no host config mounted, the host
-// level is simply absent and the project value (or suppress) governs.
+// own environment. FG-853: an agent container has no host config mounted, so dispatch
+// carries the host's resolved mode in FORGE_AI_ATTRIBUTION_CARRIED, consulted after
+// the project file and before the (there absent) host file.
 //
-// Contract: print exactly `allow` or `suppress` on stdout, exit 0. On ANY failure — no
+// Contract: print exactly `allow` or `suppress` on stdout (plus, on a fail-closed stop,
+// one stderr note naming the level that stopped it), exit 0. On ANY failure — no
 // config, unreadable file, a malformed value, an unexpected error — print `suppress`
 // and exit 0. A throw into the hook, or a silent `allow` from a broken config, are the
 // two outcomes this must never produce.
@@ -35,7 +37,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// FG-845: the mode resolves project file → host file ($FORGE_HOME/config.yml, the
+// FG-845/FG-853: the mode resolves project file → carried value → host file ($FORGE_HOME/config.yml, the
 // same default the TypeScript reader uses) → suppress, through the inline copy of
 // resolveAiAttributionLevels below — so a host `allow` reaches the hook exactly as a
 // project `allow` does, and a broken project file never lets the host value through.
@@ -51,14 +53,24 @@ function readLevel(path) {
   }
 }
 
-function readMode(projectDir, hostFile) {
-  return resolveAiAttributionLevels(readLevel(join(projectDir, ".forge", "config.yml")), readLevel(hostFile)).mode;
+function resolve(projectDir, hostFile, carried) {
+  const files = { project: join(projectDir, ".forge", "config.yml"), host: hostFile };
+  const r = resolveAiAttributionLevels(readLevel(files.project), readLevel(files.host), carried);
+  return { mode: r.mode, reason: r.failed ? describeAiAttributionFailure(r.failed, files, carried) : undefined };
 }
 
+function readMode(projectDir, hostFile, carried) {
+  return resolve(projectDir, hostFile, carried).mode;
+}
+
+// A fail-closed stop is reported on stderr, naming the level that stopped it; the
+// hook passes it through so a refusal says which level suppressed.
 function main() {
   const projectDir = process.argv[2];
   if (!projectDir) return "suppress";
-  return readMode(projectDir, hostConfigFile());
+  const r = resolve(projectDir, hostConfigFile(), process.env.FORGE_AI_ATTRIBUTION_CARRIED);
+  if (r.reason) process.stderr.write(`\x1b[33mnote:\x1b[0m no-ai-attribution hook: ${r.reason}\n`);
+  return r.mode;
 }
 
 // ── inline copy of src/v2/ai-attribution-parse.ts (pinned by ai-attribution.test.ts) ──
@@ -107,12 +119,26 @@ function stripComment(s) {
   return s;
 }
 
-function resolveAiAttributionLevels(project, host) {
+function parseCarriedAiAttribution(value) {
+  const m = value.match(/^(allow|suppress);source=(project|host|default);file=([^;\n]*)$/);
+  if (!m) return null;
+  const mode = m[1] === "allow" ? "allow" : "suppress";
+  const source = m[2] === "project" ? "project" : m[2] === "host" ? "host" : "default";
+  if (source === "default" && mode !== "suppress") return null;
+  return { mode, source, file: m[3] ? m[3] : null };
+}
+
+function resolveAiAttributionLevels(project, host, carried) {
   const levels = [
     ["project", project],
     ["host", host],
   ];
   for (const [level, read] of levels) {
+    if (level === "host" && carried !== undefined) {
+      const c = parseCarriedAiAttribution(carried);
+      if (!c) return { mode: "suppress", source: "default", failed: { level: "carried", why: "unparseable" } };
+      return { mode: c.mode, source: "carried", carried: c };
+    }
     if (read.kind === "absent") continue;
     if (read.kind === "unreadable") return { mode: "suppress", source: "default", failed: { level, why: "unreadable" } };
     const parsed = parseAiAttributionConfig(read.text);
@@ -122,6 +148,20 @@ function resolveAiAttributionLevels(project, host) {
     return { mode: parsed.mode, source: level };
   }
   return { mode: "suppress", source: "default" };
+}
+
+function describeAiAttributionFailure(failed, files, carried) {
+  const valid = "(valid: suppress, allow); failing closed to suppress";
+  if (failed.level === "carried") {
+    return `FORGE_AI_ATTRIBUTION_CARRIED=${JSON.stringify(carried)} is not a valid carried value <mode>;source=<project|host|default>;file=<path> ${valid}`;
+  }
+  const problem =
+    failed.why === "unreadable"
+      ? "could not be read"
+      : failed.why === "duplicate"
+        ? "carries more than one top-level ai_attribution key"
+        : "carries an unrecognized ai_attribution value";
+  return `${files[failed.level]} ${problem} ${valid}`;
 }
 
 function classifyAiAttributionReadError(err) {
@@ -147,7 +187,9 @@ export {
   parseAiAttributionConfig,
   scalarValue,
   stripComment,
+  parseCarriedAiAttribution,
   resolveAiAttributionLevels,
+  describeAiAttributionFailure,
   classifyAiAttributionReadError,
   readMode,
 };

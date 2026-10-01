@@ -62,6 +62,7 @@ import { getTask } from "../store/tasks.js";
 import { logEvent } from "../store/events.js";
 import { writeTransaction } from "../store/db.js";
 import { FORGE_HOME } from "../util/paths.js";
+import { AI_ATTRIBUTION_CARRIED_ENV, carriedAiAttributionValue } from "./ai-attribution.js";
 
 export type SpawnContext = SubstContext & {
   TASK_ID: string;
@@ -1300,6 +1301,15 @@ export function buildDockerArgs(
     // overwrites the other. The container surfaces both when they differ.
     args.push("-e", `FORGE_DISPATCHED_TICKET=${snapshotMount.dispatchedTicket}`);
   }
+  // FG-853: the container has no $FORGE_HOME, so the host's ai_attribution resolution
+  // is carried in as one env value the clone's commit hook and in-container
+  // `forge config show` / `doctor` read after the project file. Resolved against the
+  // durable project (the same directory the constraint's enabled_when reads), never
+  // written into the clone's own config, where an agent could commit it.
+  args.push(
+    "-e",
+    `${AI_ATTRIBUTION_CARRIED_ENV}=${carriedAiAttributionValue(opts.backlogAuthorityDir ?? ctx.PROJECT_DIR)}`,
+  );
   // FG-608 red F3: the READER ITSELF. Claiming an in-container `forge backlog`
   // surface while the image ships no forge CLI made the whole read path a test
   // fiction — the only thing that ever ran it was a test-only `/forge-src` bind of

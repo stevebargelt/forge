@@ -69,7 +69,9 @@ if [ -n "$ROOT" ]; then
   elif [ ! -f "$READER" ]; then
     printf '\033[33mnote:\033[0m no-ai-attribution hook: reader missing at %s — enforcing suppress.\n' "$READER" >&2
   else
-    READER_OUT="$(node "$READER" "$ROOT" 2>/dev/null || true)"
+    # Not 2>/dev/null: on a fail-closed stop the reader's stderr names the level that
+    # stopped it (a malformed project file, or FORGE_AI_ATTRIBUTION_CARRIED).
+    READER_OUT="$(node "$READER" "$ROOT" || true)"
     case "$READER_OUT" in
       allow) AI_MODE="allow" ;;
       suppress) AI_MODE="suppress" ;;

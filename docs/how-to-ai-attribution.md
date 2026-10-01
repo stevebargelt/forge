@@ -1,4 +1,4 @@
-# How-to: the AI-attribution toggle — project, host default (FG-799, FG-845)
+# How-to: the AI-attribution toggle — project, host default (FG-799, FG-845, FG-853)
 
 Forge suppresses AI-assistant attribution in git/GitHub messages by default.
 `ai_attribution: suppress | allow` is resolved from three levels, in order: the
@@ -7,6 +7,18 @@ project's own `<project>/.forge/config.yml`, then a host-wide default in
 built-in `suppress`. Absent at every level still reads as `suppress` (today's behavior;
 upgrading forge changes nothing for an existing project or a host with no default set).
 This forge repo itself stays `suppress`.
+
+Inside an agent container `$FORGE_HOME` is not mounted, so the host level above isn't
+directly readable there. A fourth, **carried** level stands in for it: at dispatch time
+(both a workflow task and `forge invoke`), forge resolves `project → host → default`
+on the host against the *durable* project — never the mounted clone — and hands the
+container that answer as one environment value. Resolution inside a container is
+therefore project file → carried value → host file (always absent there) → default; see
+[Fail-closed, level by level](#fail-closed-level-by-level) and enforcement point 2
+below. `FORGE_AI_ATTRIBUTION_CARRIED` is an internal contract between dispatch and the
+in-container reader, not something an operator sets — use `forge config set
+ai-attribution` (below) to change the mode; setting the env var by hand has no supported
+effect outside a forge-managed container.
 
 > The dashboard does not yet surface this toggle (Setup › Config row, Projects column,
 > the two closed-registry controls). That's FG-845's second part, tracked separately —
@@ -41,10 +53,14 @@ ai attribution: <mode> (<source>)
   file: <path>
 ```
 
-`<source>` is `project`, `host`, or `default`. `file:` names the file the mode came
-from — for `default` with nothing set at either level, there is no file and that line is
-omitted. `forge config show --json` emits `{ "aiAttribution": { mode, source, file,
-reason?, overridesHost? } }`.
+`<source>` is `project`, `host`, or `default` — or, run inside an agent container where
+the mode came from the carried value dispatch handed in, `project (carried)`, `host
+(carried)`, or `default (carried)`, naming where the *host* resolved it rather than
+implying the container read its own host file (it has none). `file:` names the file the
+mode came from — for a carried value, the host file it came from (or none, for a carried
+`default`); for an uncarried `default` with nothing set at either level, there is no
+file and that line is omitted. `forge config show --json` emits `{ "aiAttribution": {
+mode, source, file, reason?, overridesHost? } }`.
 
 ## Fail-closed, level by level
 
@@ -64,6 +80,12 @@ nothing is wrong:
 - **Duplicated** (more than one top-level `ai_attribution:` line — malformed YAML, and
   which one "wins" is ambiguous) fails closed to `suppress` at that level, whatever the
   values are.
+- **The carried level** (inside an agent container only) fails closed the same way if
+  `$FORGE_AI_ATTRIBUTION_CARRIED` is set but doesn't parse as
+  `<mode>;source=<project|host|default>;file=<path>` — including a `default` source
+  claiming `allow` (the built-in default is always `suppress`). Unlike the file levels,
+  the carried level is never merely absent inside a container that has one: dispatch
+  always sets it, even to carry a bare `suppress;source=default;file=`.
 
 When a level fails closed, `forge config show` / `forge doctor` print the reason and the
 file that stopped it instead of a `file:` line:
@@ -101,21 +123,26 @@ installed as a self-contained file into every task clone per FG-685). Its first 
 run the standalone reader `scripts/git-hooks/read-ai-attribution.mjs` (resolved as a
 sibling of the hook's own real path, and materialized alongside it in a provisioned
 workspace clone) under bare `node`. The reader carries an inline, test-pinned copy of the
-same project → host → default resolution the TypeScript side uses
+same project → carried → host → default resolution the TypeScript side uses
 (`src/v2/ai-attribution-parse.ts`'s `resolveAiAttributionLevels`) and prints `allow` or
 `suppress` for the resolved mode — so quoted values, trailing comments, a root key with
-leading indentation, a nested key, a malformed level, and the host fallback all resolve
-identically in the hook and in `forge config show`/`forge doctor`, with no separate bash
-dialect to keep in sync. If it prints `allow`, the hook exits 0 immediately and nothing
-else runs. Otherwise (resolved `suppress`, including every fail-closed case, or the reader
+leading indentation, a nested key, a malformed level, the carried value, and the host
+fallback all resolve identically in the hook and in `forge config show`/`forge doctor`,
+with no separate bash dialect to keep in sync. If it prints `allow`, the hook exits 0
+immediately and nothing else runs. Otherwise (resolved `suppress`, including every fail-closed case, or the reader
 printing anything else) it enforces: see the provider set and exemptions below. If `node`
 isn't on `PATH` or the reader can't be found or run, the hook fails closed to `suppress`
 and prints one stderr notice explaining why — a broken toolchain is never silently
 permissive. The host level is read from `$FORGE_HOME` (default `~/.forge`) in the hook's
-own process environment — inside an agent task container, where `$FORGE_HOME` is not
-mounted, that level is simply absent and the project's own value (or the built-in
-`suppress`) governs; the host default only reaches hooks running on the operator's own
-checkout.
+own process environment; on the operator's own checkout that's a real file. Inside an
+agent task container, where `$FORGE_HOME` is not mounted, the hook instead consults
+`$FORGE_AI_ATTRIBUTION_CARRIED` (FG-853) between the project file and the — there always
+absent — host file: dispatch resolved the host's `project → host → default` mode against
+the durable project on the host and passed it in as that one environment value, so a
+host-wide `allow` reaches the clone's hook exactly as it reaches the operator's own, and
+the clone's own project file, read first, still wins over it. A fail-closed stop at any
+level — including an unparseable carried value — is reported on the hook's stderr,
+naming the level that stopped it.
 
 **3. The orchestrator block in `CLAUDE.md`.** The template
 (`seeds/orchestrator-template.md`) carries the mode-specific bullet between
