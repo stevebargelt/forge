@@ -44,7 +44,14 @@ project's key (it never touches the host file) so the project falls through to t
 default; unsetting an already-absent key is a no-op that says so. All three writes refuse
 — and leave the file untouched — when the existing file can't be edited safely as a
 single line (unparseable YAML, a flow-style mapping, a block-scalar value, more than one
-top-level `ai_attribution:` line): edit the file by hand in that case.
+top-level `ai_attribution:` line): edit the file by hand in that case. A write also
+refuses, file untouched, when the target changed underneath it between the read and the
+rename (another writer got there first — retry) or when the resulting
+`config.ai_attribution_changed` audit event can't be recorded: the file edit is undone
+and the command exits non-zero naming the audit gap (`forge: refused — the
+config.ai_attribution_changed audit event could not be recorded (…); <file> is
+unchanged`; `--json` reports `{ ok: false, reason: "audit_unrecorded", error }`) — the
+change is never left applied without its audit record.
 
 `forge config show` and `forge doctor` both print the same two lines:
 
