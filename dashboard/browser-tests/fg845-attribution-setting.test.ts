@@ -148,7 +148,8 @@ test("FG-845: project suppress overrides host, inherit removes it, malformed con
   await again.locator("[data-attr-result]").filter({ hasText: `unset ai-attribution (${join(alpha, ".forge", "config.yml")})` }).waitFor();
   await page.reload();
   await page.locator('#cp-row-ai-attribution [data-attr-tag="host"]').waitFor();
-  assert.doesNotMatch(await fixtureFetch(`${BASE}/api/control-plane?projectKey=${encodeURIComponent(alphaKey)}&projectDir=${encodeURIComponent(alpha)}`).then((r) => r.text()), /project.*allow/);
+  const graph = await fixtureFetch(`${BASE}/api/config-graph?projectKey=${encodeURIComponent(alphaKey)}&projectDir=${encodeURIComponent(alpha)}`).then((r) => r.json()) as { aiAttribution: { source: string; file: string | null } };
+  assert.equal(graph.aiAttribution.source, "host", "the page's own read no longer names the unset project value");
 
   writeFileSync(join(alpha, ".forge", "config.yml"), "project_key: fixture\nai_attribution: unexpected\n");
   await page.reload();

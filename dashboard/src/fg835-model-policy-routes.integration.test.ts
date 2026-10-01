@@ -521,8 +521,9 @@ test("integ FG-845: attribution routes spawn only the registered config argv, re
   useRealForge();
   const applied = await post("/api/ai-attribution/host", { body: { mode: "allow" } });
   assert.equal(applied.status, 200, JSON.stringify(applied.body));
-  const reread = await fetch(`${BASE}/api/control-plane?projectKey=${encodeURIComponent(PROJECT_KEY)}&projectDir=${encodeURIComponent(checkoutDir)}`);
+  const reread = await fetch(`${BASE}/api/config-graph?projectKey=${encodeURIComponent(PROJECT_KEY)}&projectDir=${encodeURIComponent(checkoutDir)}`);
   const dto = await reread.json() as { aiAttribution: { mode: string; source: string; hostFile: string } };
+  assert.equal(reread.status, 200, JSON.stringify(dto));
   assert.deepEqual(dto.aiAttribution.mode, "allow");
   assert.deepEqual(dto.aiAttribution.source, "host");
   assert.equal(dto.aiAttribution.hostFile, join(tmpHome, "config.yml"));
