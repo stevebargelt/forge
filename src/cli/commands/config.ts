@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { logEvent } from "../../store/events.js";
+import { restoreHostConfig, restoreProjectConfig } from "../../backlog/config.js";
 import { buildConfigGraph } from "../../v2/config-graph.js";
 import type { ConfigGraph } from "../../v2/config-graph-types.js";
 import {
@@ -83,16 +84,19 @@ function actorOf(raw: string | undefined): string {
 }
 
 /** FG-845: the audit record of an attribution change — only when the level's value moved.
- *  Called AFTER the file write, so a failed insert never un-applies the change: it returns
- *  the audit gap for the caller to report beside the applied result. */
-function logAttributionChange(change: {
-  level: "project" | "host";
-  file: string;
-  before: AiAttributionMode | "invalid" | null;
-  after: AiAttributionMode | null;
-  actor: string;
-  projectDir?: string;
-}): string | undefined {
+ *  One event per applied change: when the insert fails the write is undone (the edit's
+ *  previous bytes restored) and the returned refusal names the audit. */
+function auditOrUndo(
+  change: {
+    level: "project" | "host";
+    file: string;
+    before: AiAttributionMode | "invalid" | null;
+    after: AiAttributionMode | null;
+    actor: string;
+    projectDir?: string;
+  },
+  undo: () => void,
+): string | undefined {
   if (change.before === change.after) return undefined;
   try {
     const resolved = change.projectDir ? readAiAttribution(change.projectDir) : undefined;
@@ -101,15 +105,24 @@ function logAttributionChange(change: {
     });
     return undefined;
   } catch (err) {
-    return `the config.ai_attribution_changed audit event was not recorded: ${err instanceof Error ? err.message : String(err)}`;
+    const why = `the config.ai_attribution_changed audit event could not be recorded (${err instanceof Error ? err.message : String(err)})`;
+    try {
+      undo();
+    } catch (undoErr) {
+      return `${why}, and restoring ${change.file} failed (${undoErr instanceof Error ? undoErr.message : String(undoErr)}) — the change is in place without an audit record; check the file by hand`;
+    }
+    return `${why}; ${change.file} is unchanged`;
   }
 }
 
-/** The change is applied whatever the audit outcome; an audit gap is a warning, never a failure. */
-function reportAttributionChange(line: string, json: object | undefined, auditError: string | undefined): void {
-  if (json) console.log(JSON.stringify({ ...json, ...(auditError ? { auditError } : {}) }, null, 2));
-  else console.log(line);
-  if (auditError) console.error(`warning: applied, but ${auditError}`);
+function report(line: string, json: object | undefined): void {
+  console.log(json ? JSON.stringify(json, null, 2) : line);
+}
+
+function refuseUnaudited(error: string, json: boolean | undefined): void {
+  if (json) console.log(JSON.stringify({ ok: false, reason: "audit_unrecorded", error }, null, 2));
+  console.error(`forge: refused — ${error}`);
+  process.exitCode = 1;
 }
 
 export function registerConfig(program: Command): void {
@@ -141,7 +154,7 @@ export function registerConfig(program: Command): void {
     .option("--project <dir>", "project whose .forge/config.yml to write (default: cwd)")
     .option("--host", "write the host default ($FORGE_HOME/config.yml) instead of the project file")
     .option("--actor <name>", "who made the change, recorded on the config.ai_attribution_changed event (default: $USER)")
-    .option("--json", "emit { key, mode, level, file, auditError? } as JSON")
+    .option("--json", "emit { key, mode, level, file } as JSON ({ ok: false, reason: 'audit_unrecorded', error } on a refusal)")
     .description("Set a config value. Supported key: ai-attribution (suppress|allow).")
     .action((key: string, value: string, opts: { project?: string; host?: boolean; actor?: string; json?: boolean }) => {
       if (key !== "ai-attribution") {
@@ -156,26 +169,21 @@ export function registerConfig(program: Command): void {
       const mode = value as AiAttributionMode;
       if (opts.host) {
         if (opts.project !== undefined) throw new Error("--host and --project are mutually exclusive");
-        const before = levelValue(hostAiAttributionFile());
-        const file = writeHostAiAttribution(mode);
-        const auditError = logAttributionChange({ level: "host", file, before, after: mode, actor });
-        reportAttributionChange(
-          `set ai-attribution = ${value} (host default, ${file})`,
-          opts.json ? { key: "ai-attribution", mode, level: "host", file } : undefined,
-          auditError,
-        );
+        const file = hostAiAttributionFile();
+        const before = levelValue(file);
+        const edit = writeHostAiAttribution(mode);
+        const refusal = auditOrUndo({ level: "host", file, before, after: mode, actor }, () => restoreHostConfig(file, edit));
+        if (refusal) return refuseUnaudited(refusal, opts.json);
+        report(`set ai-attribution = ${value} (host default, ${file})`, opts.json ? { key: "ai-attribution", mode, level: "host", file } : undefined);
         return;
       }
       const projectDir = resolve(opts.project ?? process.cwd());
       const file = join(projectDir, ".forge", "config.yml");
       const before = levelValue(file);
-      writeAiAttribution(projectDir, mode);
-      const auditError = logAttributionChange({ level: "project", file, before, after: mode, actor, projectDir });
-      reportAttributionChange(
-        `set ai-attribution = ${value} (${file})`,
-        opts.json ? { key: "ai-attribution", mode, level: "project", file } : undefined,
-        auditError,
-      );
+      const edit = writeAiAttribution(projectDir, mode);
+      const refusal = auditOrUndo({ level: "project", file, before, after: mode, actor, projectDir }, () => restoreProjectConfig(projectDir, edit));
+      if (refusal) return refuseUnaudited(refusal, opts.json);
+      report(`set ai-attribution = ${value} (${file})`, opts.json ? { key: "ai-attribution", mode, level: "project", file } : undefined);
     });
 
   // FG-845: `forge config unset ai-attribution` — remove the project key so the
@@ -185,7 +193,7 @@ export function registerConfig(program: Command): void {
     .command("unset <key>")
     .option("--project <dir>", "project whose .forge/config.yml to edit (default: cwd)")
     .option("--actor <name>", "who made the change, recorded on the config.ai_attribution_changed event (default: $USER)")
-    .option("--json", "emit { key, removed, file, resolved, auditError? } as JSON")
+    .option("--json", "emit { key, removed, file, resolved } as JSON ({ ok: false, reason: 'audit_unrecorded', error } on a refusal)")
     .description("Remove a project config value so the host default applies. Supported key: ai-attribution.")
     .action((key: string, opts: { project?: string; actor?: string; json?: boolean }) => {
       if (key !== "ai-attribution") {
@@ -195,16 +203,17 @@ export function registerConfig(program: Command): void {
       const file = join(projectDir, ".forge", "config.yml");
       const actor = actorOf(opts.actor);
       const before = levelValue(file);
-      const removed = unsetAiAttribution(projectDir);
-      const auditError = removed
-        ? logAttributionChange({ level: "project", file, before, after: null, actor, projectDir })
+      const edit = unsetAiAttribution(projectDir);
+      const removed = edit !== null;
+      const refusal = edit
+        ? auditOrUndo({ level: "project", file, before, after: null, actor, projectDir }, () => restoreProjectConfig(projectDir, edit))
         : undefined;
+      if (refusal) return refuseUnaudited(refusal, opts.json);
       const resolved = readAiAttribution(projectDir);
-      reportAttributionChange(
+      report(
         (removed ? `unset ai-attribution (${file})` : `ai-attribution was not set in ${file}; nothing to unset`) +
           `\n${renderAiAttributionDetail(resolved)}`,
         opts.json ? { key: "ai-attribution", removed, file, resolved } : undefined,
-        auditError,
       );
     });
 

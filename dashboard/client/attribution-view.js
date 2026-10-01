@@ -16,6 +16,7 @@ import {
   attributionCommand,
   attributionTag,
   attributionTargetFile,
+  confirmOutcome,
   currentHostChoice,
   currentProjectChoice,
   inheritCount,
@@ -136,12 +137,7 @@ function AttributionControl({ target, title, pill, choices, current, view, body,
   const unchanged = choice === current;
   const confirm = async () => {
     setStage("running");
-    const { status, body: reply } = await postJson(`/api/ai-attribution/${target}`, { ...body, mode: choice });
-    setResult(
-      reply?.ok
-        ? { ok: true, text: reply.stdout || `${command} done`, warning: reply.auditWarning ?? null }
-        : { ok: false, text: reply?.error || `HTTP ${status}` },
-    );
+    setResult(await confirmOutcome(() => postJson(`/api/ai-attribution/${target}`, { ...body, mode: choice }), command));
     setStage("idle");
     if (onChanged) await onChanged();
     focusChoice(choice);
@@ -191,9 +187,7 @@ function AttributionControl({ target, title, pill, choices, current, view, body,
             ${unchanged ? html`<span class="faint cp-attr-note">current value</span>` : null}
           </div>
         `}
-      <div aria-live="polite" class=${"cp-attr-result" + (result && !result.ok ? " cp-warn" : "")} data-attr-result>${result ? result.text : ""}${result?.warning
-        ? html`<div class="cp-warn" data-attr-audit-warning>${result.warning}</div>`
-        : null}</div>
+      <div aria-live="polite" class=${"cp-attr-result" + (result && !result.ok ? " cp-warn" : "")} data-attr-result data-attr-outcome=${result?.kind ?? null}>${result ? result.text : ""}</div>
       ${footer ? html`<div class="faint cp-attr-note" data-attr-inherit>${footer}</div>` : null}
     </div>
   `;

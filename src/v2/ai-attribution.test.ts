@@ -13,6 +13,7 @@ import {
   readAiAttribution,
   writeAiAttribution,
   writeHostAiAttribution,
+  hostAiAttributionFile,
   unsetAiAttribution,
   formatAiAttribution,
 } from "./ai-attribution.js";
@@ -420,7 +421,8 @@ test("formatAiAttribution: the exact strings config-show / doctor print", () => 
 
 test("FG-845: writeHostAiAttribution creates the host file, then read-modify-writes preserving neighbours", () => {
   const home = join(tmpProject(), "nested-home");
-  const file = writeHostAiAttribution("allow", { forgeHome: home });
+  const file = hostAiAttributionFile(home);
+  assert.deepEqual(writeHostAiAttribution("allow", { forgeHome: home }), { previous: null, next: "ai_attribution: allow\n" });
   assert.equal(file, join(home, "config.yml"));
   assert.deepEqual(parseYaml(readFileSync(file, "utf8")), { ai_attribution: "allow" });
   writeFileSync(file, "telemetry: off\nai_attribution: allow\nnested:\n  k: v\n");
@@ -441,12 +443,12 @@ test("FG-845: writeHostAiAttribution refuses a symlinked host config", () => {
 
 test("FG-845: unsetAiAttribution removes only the key; absent key/file is a no-op; unparseable is refused", () => {
   const dir = tmpProject();
-  assert.equal(unsetAiAttribution(dir), false, "no file → no-op");
+  assert.equal(unsetAiAttribution(dir), null, "no file → no-op");
   writeConfig(dir, "project_key: pk-abc\nai_attribution: allow\nbacklog:\n  prefix: FG\n");
-  assert.equal(unsetAiAttribution(dir), true);
+  assert.notEqual(unsetAiAttribution(dir), null);
   assert.deepEqual(parseYaml(readFileSync(cfg(dir), "utf8")), { project_key: "pk-abc", backlog: { prefix: "FG" } });
   const before = readFileSync(cfg(dir), "utf8");
-  assert.equal(unsetAiAttribution(dir), false, "absent key → no-op");
+  assert.equal(unsetAiAttribution(dir), null, "absent key → no-op");
   assert.equal(readFileSync(cfg(dir), "utf8"), before, "no-op writes nothing");
   writeConfig(dir, "ai_attribution: allow\n  bad: [\n");
   assert.throws(() => unsetAiAttribution(dir), /not valid YAML/);

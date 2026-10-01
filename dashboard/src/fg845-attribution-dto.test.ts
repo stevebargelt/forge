@@ -198,6 +198,18 @@ test("client helpers: the source tag, the exact verbs, the current choices and t
   assert.deepEqual(render.HOST_CHOICES.map((c) => c.value), ["suppress", "allow"]);
 });
 
+test("client helpers: a Confirm whose fetch rejects resolves to a transport outcome, distinct from a refusal — the control never stays running", async () => {
+  const command = "forge config set ai-attribution allow --host";
+  const transport = await render.confirmOutcome(() => Promise.reject(new TypeError("Failed to fetch")), command);
+  assert.equal(transport.ok, false);
+  assert.equal(transport.kind, "transport");
+  assert.match(transport.text, /could not reach the server \(Failed to fetch\); whether forge config set ai-attribution allow --host ran is unknown/);
+  const refused = await render.confirmOutcome(async () => ({ status: 409, body: { ok: false, error: "audit event could not be recorded" } }), command);
+  assert.deepEqual(refused, { ok: false, kind: "refused", text: "audit event could not be recorded" });
+  assert.deepEqual(await render.confirmOutcome(async () => ({ status: 502, body: null }), command), { ok: false, kind: "refused", text: "HTTP 502" });
+  assert.deepEqual(await render.confirmOutcome(async () => ({ status: 200, body: { ok: true, stdout: "" } }), command), { ok: true, kind: "applied", text: `${command} done` });
+});
+
 test("client helpers: the segmented group's arrow keys wrap, Home/End jump, anything else is not a move (FG-692)", () => {
   const values = ["suppress", "allow", "inherit"];
   assert.equal(render.segmentStep(values, "suppress", "ArrowRight"), "allow");

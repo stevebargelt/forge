@@ -5,7 +5,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,5 +196,29 @@ test("FG-845: segmented controls are keyboard-operable, Confirm returns focus, E
   assert.equal(await host.getByRole("button", { name: "suppress" }).getAttribute("aria-pressed"), "true");
   assert.ok(await page.locator(".cp-attr").evaluate((el) => el.getBoundingClientRect().width <= 400));
   await page.screenshot({ path: join(SHOTS, "05-keyboard-400px-card.png"), fullPage: true });
+  await page.close();
+});
+
+test("FG-845: a Confirm whose request never reaches the server shows a transport outcome and re-enables the control", async () => {
+  cli(["config", "set", "ai-attribution", "suppress", "--host", "--actor", "fixture"]);
+  const page = await open(configHash());
+  const host = page.locator('[data-attr-control="host"]');
+  await page.route("**/api/ai-attribution/**", (route) => route.abort("failed"));
+  await host.getByRole("button", { name: "allow" }).click();
+  await host.getByRole("button", { name: "Preview" }).click();
+  await host.getByRole("button", { name: "Confirm" }).click();
+  const result = host.locator('[data-attr-result][data-attr-outcome="transport"]');
+  await result.waitFor();
+  assert.match(await result.innerText(), /could not reach the server .*whether forge config set ai-attribution allow --host ran is unknown/s);
+  assert.equal(await host.getByRole("button", { name: "Running…" }).count(), 0, "the control left its running state");
+  assert.equal(await host.getByRole("button", { name: "Preview" }).isDisabled(), false, "the control is usable again");
+  assert.ok(await page.evaluate(() => document.activeElement?.matches('[data-attr-control="host"] [data-choice="allow"]') ?? false), "focus returns to the pressed control");
+  assert.match(readFileSync(join(forgeHome, "config.yml"), "utf8"), /ai_attribution: suppress/, "nothing reached the CLI");
+
+  await page.unroute("**/api/ai-attribution/**");
+  await host.getByRole("button", { name: "Preview" }).click();
+  await host.getByRole("button", { name: "Confirm" }).click();
+  await host.locator('[data-attr-result][data-attr-outcome="applied"]').waitFor();
+  assert.match(readFileSync(join(forgeHome, "config.yml"), "utf8"), /ai_attribution: allow/);
   await page.close();
 });

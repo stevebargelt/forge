@@ -167,22 +167,24 @@ test("handler: a project change shells the registered argv with the registry's c
   assert.deepEqual(spawned()!.slice(1), ["config", "set", "ai-attribution", "suppress", "--host", "--actor", "dashboard"]);
 });
 
-test("handler: an applied change whose audit record failed is reported applied, with the CLI's audit warning", async () => {
-  const warnBin = join(BIN_DIR, "forge-audit-gap");
-  writeFileSync(warnBin, `#!/bin/sh\necho "set ai-attribution = allow (host default)"\necho "warning: applied, but the config.ai_attribution_changed audit event was not recorded: disk I/O error" >&2\n`);
-  chmodSync(warnBin, 0o755);
-  process.env["FORGE_BIN"] = warnBin;
+test("handler: a change the CLI undid because its audit could not be recorded is a 409 refusal naming the audit", async () => {
+  const refuseBin = join(BIN_DIR, "forge-audit-unrecorded");
+  const reason = "forge: refused — the config.ai_attribution_changed audit event could not be recorded (disk I/O error); /h/config.yml is unchanged";
+  writeFileSync(refuseBin, `#!/bin/sh\necho "${reason}" >&2\nexit 1\n`);
+  chmodSync(refuseBin, 0o755);
+  process.env["FORGE_BIN"] = refuseBin;
   try {
     const out = await post("/api/ai-attribution/host", { mode: "allow" });
-    assert.equal(out.status, 200, JSON.stringify(out.body));
-    assert.equal(out.body["ok"], true);
-    assert.equal(out.body["stdout"], "set ai-attribution = allow (host default)");
-    assert.equal(out.body["auditWarning"], "warning: applied, but the config.ai_attribution_changed audit event was not recorded: disk I/O error");
+    assert.equal(out.status, 409, JSON.stringify(out.body));
+    assert.equal(out.body["ok"], false);
+    assert.equal(out.body["exitCode"], 1);
+    assert.equal(out.body["error"], reason);
   } finally {
     process.env["FORGE_BIN"] = FAKE_FORGE;
   }
   const clean = await post("/api/ai-attribution/host", { mode: "allow" });
-  assert.equal("auditWarning" in clean.body, false);
+  assert.equal(clean.status, 200);
+  assert.equal(clean.body["ok"], true);
 });
 
 test("handler: every refusal happens before a spawn — guards, bad JSON, bad value, unknown project", async () => {

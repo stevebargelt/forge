@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
@@ -64,51 +64,63 @@ test("a missing project still emits a graph and does not throw / exit non-zero",
   assert.ok(graph.version >= 1);
 });
 
-// FG-845: the file write is the mutation and the event its record. When the record
-// cannot be inserted the change is still applied: exit 0, the applied line, a warning
-// naming the audit gap, and in --json an auditError field — never a bare failure.
-test("an injected config.ai_attribution_changed insert failure still reports the applied mode and names the audit gap", async () => {
+// FG-845: one recorded event per applied change. When the record cannot be inserted
+// the write is undone — the file byte-identical to before — and the change is refused
+// naming the audit: exit non-zero, and in --json { ok: false, reason: "audit_unrecorded" }.
+test("an injected config.ai_attribution_changed insert failure restores the file byte-identical and refuses naming the audit", async () => {
   const db = makeInMemoryDb();
   db.exec("DROP TABLE events");
   const prev = setDbForTest(db);
   const errors: string[] = [];
   const origError = console.error;
   console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
+  const exitCodes: unknown[] = [];
+  const takeExit = () => {
+    exitCodes.push(process.exitCode);
+    process.exitCode = undefined;
+  };
   try {
     const dir = project();
     const file = join(dir, ".forge", "config.yml");
-    writeFileSync(file, "project_key: pk\n");
+    const original = "# operator notes\nproject_key: pk   # keep\n\nai_attribution: allow\n";
+    writeFileSync(file, original);
 
-    const human = await runCli(["config", "set", "ai-attribution", "allow", "--project", dir, "--actor", "t"]);
-    assert.equal(human, `set ai-attribution = allow (${file})`);
-    assert.equal(readFileSync(file, "utf8"), "project_key: pk\nai_attribution: allow\n");
+    const human = await runCli(["config", "set", "ai-attribution", "suppress", "--project", dir, "--actor", "t"]);
+    takeExit();
+    assert.equal(human, "");
+    assert.equal(readFileSync(file, "utf8"), original, "byte-identical after the refused set");
     assert.equal(errors.length, 1);
-    assert.match(errors[0]!, /^warning: applied, but the config\.ai_attribution_changed audit event was not recorded: .*events/);
+    assert.match(errors[0]!, /^forge: refused — the config\.ai_attribution_changed audit event could not be recorded \(.*events.*\); .* is unchanged$/);
 
     const json = JSON.parse(await runCli(["config", "set", "ai-attribution", "suppress", "--project", dir, "--actor", "t", "--json"]));
-    assert.equal(json.mode, "suppress");
-    assert.equal(json.level, "project");
-    assert.equal(json.file, file);
-    assert.match(json.auditError, /config\.ai_attribution_changed audit event was not recorded/);
-    assert.match(readFileSync(file, "utf8"), /ai_attribution: suppress/);
-
-    const host = JSON.parse(await runCli(["config", "set", "ai-attribution", "allow", "--host", "--actor", "t", "--json"]));
-    assert.deepEqual({ mode: host.mode, level: host.level, file: host.file }, { mode: "allow", level: "host", file: join(tmpHome, "config.yml") });
-    assert.match(host.auditError, /audit event was not recorded/);
+    takeExit();
+    assert.equal(json.ok, false);
+    assert.equal(json.reason, "audit_unrecorded");
+    assert.match(json.error, /audit event could not be recorded/);
+    assert.equal(readFileSync(file, "utf8"), original);
 
     const unset = JSON.parse(await runCli(["config", "unset", "ai-attribution", "--project", dir, "--actor", "t", "--json"]));
-    assert.equal(unset.removed, true);
-    assert.equal(unset.resolved.source, "host");
-    assert.match(unset.auditError, /audit event was not recorded/);
-    assert.equal(readFileSync(file, "utf8"), "project_key: pk\n");
-    assert.equal(errors.length, 4, "one warning per applied change");
+    takeExit();
+    assert.deepEqual({ ok: unset.ok, reason: unset.reason }, { ok: false, reason: "audit_unrecorded" });
+    assert.equal(readFileSync(file, "utf8"), original, "byte-identical after the refused unset");
+
+    const hostFile = join(tmpHome, "config.yml");
+    assert.equal(existsSync(hostFile), false);
+    const host = JSON.parse(await runCli(["config", "set", "ai-attribution", "allow", "--host", "--actor", "t", "--json"]));
+    takeExit();
+    assert.deepEqual({ ok: host.ok, reason: host.reason }, { ok: false, reason: "audit_unrecorded" });
+    assert.equal(existsSync(hostFile), false, "a host file the refused set created is removed again");
+
+    assert.deepEqual(exitCodes, [1, 1, 1, 1]);
+    assert.equal(errors.length, 4, "one refusal per change");
   } finally {
     console.error = origError;
+    process.exitCode = undefined;
     if (prev) setDbForTest(prev);
   }
 });
 
-test("a recorded change carries no auditError and prints no warning", async () => {
+test("a recorded change is reported applied with exactly one event and no refusal", async () => {
   const db = makeInMemoryDb();
   const prev = setDbForTest(db);
   const errors: string[] = [];
@@ -118,7 +130,8 @@ test("a recorded change carries no auditError and prints no warning", async () =
     const dir = project();
     const json = JSON.parse(await runCli(["config", "set", "ai-attribution", "allow", "--project", dir, "--actor", "t", "--json"]));
     assert.equal(json.mode, "allow");
-    assert.equal("auditError" in json, false);
+    assert.equal("ok" in json, false);
+    assert.equal(process.exitCode, undefined);
     assert.deepEqual(errors, []);
     assert.equal((db.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type = 'config.ai_attribution_changed'").get() as { n: number }).n, 1);
   } finally {

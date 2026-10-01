@@ -25,7 +25,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { removeTopLevelConfigKey, writeHostConfigKey, writeTopLevelConfigKey } from "../backlog/config.js";
+import { removeTopLevelConfigKey, writeHostConfigKey, writeTopLevelConfigKey, type ConfigEdit } from "../backlog/config.js";
 import {
   AI_ATTRIBUTION_CARRIED_ENV,
   AI_ATTRIBUTION_MODES,
@@ -238,8 +238,8 @@ export function describeAiAttribution(
   return view;
 }
 
-export function writeAiAttribution(projectDir: string, mode: AiAttributionMode): void {
-  writeTopLevelConfigKey(projectDir, "ai_attribution", mode, readsAs(mode));
+export function writeAiAttribution(projectDir: string, mode: AiAttributionMode): ConfigEdit {
+  return writeTopLevelConfigKey(projectDir, "ai_attribution", mode, readsAs(mode));
 }
 
 // FG-845: every write is refused unless the edited file reads back as intended through
@@ -253,16 +253,14 @@ function readsAs(mode: AiAttributionMode): (text: string) => boolean {
 
 /** FG-845: `forge config set ai-attribution <mode> --host` — read-modify-write of
  *  $FORGE_HOME/config.yml, preserving every other key; created when absent. */
-export function writeHostAiAttribution(mode: AiAttributionMode, opts: { forgeHome?: string } = {}): string {
-  const file = hostAiAttributionFile(opts.forgeHome);
-  writeHostConfigKey(file, "ai_attribution", mode, readsAs(mode));
-  return file;
+export function writeHostAiAttribution(mode: AiAttributionMode, opts: { forgeHome?: string } = {}): ConfigEdit {
+  return writeHostConfigKey(hostAiAttributionFile(opts.forgeHome), "ai_attribution", mode, readsAs(mode));
 }
 
 /** FG-845: `forge config unset ai-attribution` — remove the project key so the
- *  project inherits the host default. Returns false (and writes nothing) when the
+ *  project inherits the host default. Returns null (and writes nothing) when the
  *  key was not there. */
-export function unsetAiAttribution(projectDir: string): boolean {
+export function unsetAiAttribution(projectDir: string): ConfigEdit | null {
   return removeTopLevelConfigKey(projectDir, "ai_attribution", (text) => !parseAiAttributionConfig(text).present);
 }
 

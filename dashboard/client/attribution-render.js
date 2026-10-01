@@ -50,6 +50,26 @@ export function inheritCount(projects) {
   return { inherit: read.filter((p) => p.aiAttribution.inheritsHost).length, total: read.length };
 }
 
+/** A Confirm's inline outcome: applied, refused (the server's reason, which already names
+ *  the file state), or a transport failure — the request never got an answer, so whether
+ *  the verb ran is unknown. Never rejects, so the control always leaves its running state. */
+export async function confirmOutcome(post, command) {
+  let response;
+  try {
+    response = await post();
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      kind: "transport",
+      text: `the dashboard could not reach the server (${why}); whether ${command} ran is unknown — re-check the value once it is reachable.`,
+    };
+  }
+  const { status, body } = response;
+  if (body?.ok) return { ok: true, kind: "applied", text: body.stdout || `${command} done` };
+  return { ok: false, kind: "refused", text: body?.error || `HTTP ${status}` };
+}
+
 /** The roving-tabindex move for a segmented group: the next value for an arrow key, else null. */
 export function segmentStep(values, current, key) {
   const i = Math.max(0, values.indexOf(current));

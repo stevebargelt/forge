@@ -22,4 +22,8 @@ export function attributionTargetFile(target: "project" | "host", view: Attribut
 export function currentProjectChoice(view: AttributionViewLike): "suppress" | "allow" | "inherit" | null;
 export function currentHostChoice(view: AttributionViewLike): "suppress" | "allow" | null;
 export function inheritCount(projects: ReadonlyArray<{ aiAttribution?: AttributionViewLike | null } | null | undefined> | null | undefined): { inherit: number; total: number };
+export function confirmOutcome(
+  post: () => Promise<{ status: number; body: { ok?: boolean; stdout?: string; error?: string } | null }>,
+  command: string,
+): Promise<{ ok: boolean; kind: "applied" | "refused" | "transport"; text: string }>;
 export function segmentStep(values: readonly string[], current: string, key: string): string | null;

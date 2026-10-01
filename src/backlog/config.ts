@@ -129,7 +129,17 @@ export function assertConfigWritable(projectDir: string): void {
 // config.yml. We re-run safeConfigPath and realpath the .forge dir HERE, immediately
 // before the open, so no unresolved path is re-derived between the guard and the
 // write (TOCTOU); the guarded open then happens on the resolved dir.
-function atomicWriteConfig(projectDir: string, contents: string): void {
+//
+// FG-845: and a compare-and-swap — `expected` is the text the edit was computed from
+// (null: the file was absent). Two writers that read the same prior bytes would
+// otherwise each rename their own edit into place and the second would silently drop
+// the first's line; the target is re-read immediately before the rename and a
+// mismatch is refused with nothing written, so the caller can re-read and retry.
+function atomicWriteConfig(projectDir: string, contents: string, expected: string | null): void {
+  atomicReplaceInDir(resolvedForgeDir(projectDir), "config.yml", contents, expected);
+}
+
+function resolvedForgeDir(projectDir: string): string {
   safeConfigPath(projectDir);
   // FG-693: the same one contract. An unresolvable .forge here is a named
   // refusal, not a raw filesystem throw out of a TOCTOU-critical window — and
@@ -141,10 +151,10 @@ function atomicWriteConfig(projectDir: string, contents: string): void {
         `${describeIdentity(forgeIdentity)}; the .forge dir must resolve immediately before the write.`,
     );
   }
-  atomicReplaceInDir(forgeIdentity.physical, "config.yml", contents);
+  return forgeIdentity.physical;
 }
 
-function atomicReplaceInDir(realDir: string, basename: string, contents: string): void {
+function atomicReplaceInDir(realDir: string, basename: string, contents: string, expected: string | null): void {
   const target = join(realDir, basename);
   const tmp = join(realDir, `.${basename}.tmp-${randomBytes(12).toString("hex")}`);
   const fd = openSync(
@@ -158,6 +168,7 @@ function atomicReplaceInDir(realDir: string, basename: string, contents: string)
     closeSync(fd);
   }
   try {
+    refuseIfMoved(target, expected);
     renameSync(tmp, target);
   } catch (err) {
     try {
@@ -167,6 +178,38 @@ function atomicReplaceInDir(realDir: string, basename: string, contents: string)
     }
     throw err;
   }
+}
+
+function refuseIfMoved(target: string, expected: string | null): void {
+  if (readIfPresent(target) !== expected) {
+    throw new ConfigWriteRefusal(
+      `forge: refusing to write ${target} — it changed while this edit was being made (another writer got there first); nothing was written, retry`,
+    );
+  }
+}
+
+/** FG-845: what a config write replaced — `previous` is null when the file was absent. */
+export type ConfigEdit = { previous: string | null; next: string };
+
+// FG-845: put back the bytes an edit replaced (the CLI's undo when the audit of an
+// applied change cannot be recorded). Compare-and-swap like every write: refused when
+// the file no longer holds the edit's own bytes, so a later writer is never clobbered.
+function restoreInDir(realDir: string, name: string, edit: ConfigEdit): void {
+  if (edit.previous !== null) {
+    atomicReplaceInDir(realDir, name, edit.previous, edit.next);
+    return;
+  }
+  const target = join(realDir, name);
+  refuseIfMoved(target, edit.next);
+  unlinkSync(target);
+}
+
+export function restoreProjectConfig(projectDir: string, edit: ConfigEdit): void {
+  restoreInDir(resolvedForgeDir(projectDir), "config.yml", edit);
+}
+
+export function restoreHostConfig(configPath: string, edit: ConfigEdit): void {
+  restoreInDir(resolvedHostDir(configPath), basename(configPath), edit);
 }
 
 // FG-851: backlog.prefix (and, when the caller supplies one, the top-level
@@ -179,9 +222,10 @@ export function writeBacklogConfig(
   config: { prefix: string | null; projectKey?: string | null },
 ): void {
   const configPath = safeConfigPath(projectDir);
-  const next = backlogConfigText(configPath, readIfPresent(configPath) ?? "", config);
+  const previous = readIfPresent(configPath);
+  const next = backlogConfigText(configPath, previous ?? "", config);
   mkdirSync(join(projectDir, ".forge"), { recursive: true });
-  atomicWriteConfig(projectDir, next);
+  atomicWriteConfig(projectDir, next, previous);
 }
 
 // FG-851: the same guard and edit as writeBacklogConfig with nothing written, so a
@@ -415,31 +459,40 @@ function readIfPresent(path: string): string | null {
 // FG-799: set a single TOP-LEVEL scalar key in .forge/config.yml through the
 // line-oriented edit above and the same symlink-guarded atomic write as
 // writeProjectKey. Creates the file/dir if absent.
-export function writeTopLevelConfigKey(projectDir: string, key: string, value: string, verify?: TopLevelEditVerify): void {
+export function writeTopLevelConfigKey(projectDir: string, key: string, value: string, verify?: TopLevelEditVerify): ConfigEdit {
   const configPath = safeConfigPath(projectDir);
-  const next = editTopLevelConfigText(configPath, readIfPresent(configPath) ?? "", key, value, verify);
+  const previous = readIfPresent(configPath);
+  const next = editTopLevelConfigText(configPath, previous ?? "", key, value, verify)!;
   mkdirSync(join(projectDir, ".forge"), { recursive: true });
-  atomicWriteConfig(projectDir, next!);
+  atomicWriteConfig(projectDir, next, previous);
+  return { previous, next };
 }
 
-// FG-845: remove a single TOP-LEVEL key line from .forge/config.yml. Returns false —
+// FG-845: remove a single TOP-LEVEL key line from .forge/config.yml. Returns null —
 // writing nothing — when the file or the key is absent.
-export function removeTopLevelConfigKey(projectDir: string, key: string, verify?: TopLevelEditVerify): boolean {
+export function removeTopLevelConfigKey(projectDir: string, key: string, verify?: TopLevelEditVerify): ConfigEdit | null {
   const configPath = safeConfigPath(projectDir);
-  const text = readIfPresent(configPath);
-  if (text === null) return false;
-  const next = editTopLevelConfigText(configPath, text, key, null, verify);
-  if (next === null) return false;
-  atomicWriteConfig(projectDir, next);
-  return true;
+  const previous = readIfPresent(configPath);
+  if (previous === null) return null;
+  const next = editTopLevelConfigText(configPath, previous, key, null, verify);
+  if (next === null) return null;
+  atomicWriteConfig(projectDir, next, previous);
+  return { previous, next };
 }
 
 // FG-845: set a TOP-LEVEL scalar key in the HOST config ($FORGE_HOME/config.yml)
 // through the same line-oriented edit, with an atomic temp+rename in the resolved
 // $FORGE_HOME. Created when absent. A symlinked config.yml is refused rather than
 // replaced, matching the project path.
-export function writeHostConfigKey(configPath: string, key: string, value: string, verify?: TopLevelEditVerify): void {
-  const dir = dirname(configPath);
+export function writeHostConfigKey(configPath: string, key: string, value: string, verify?: TopLevelEditVerify): ConfigEdit {
+  const previous = refuseHostSymlink(configPath);
+  const next = editTopLevelConfigText(configPath, previous ?? "", key, value, verify)!;
+  mkdirSync(dirname(configPath), { recursive: true });
+  atomicReplaceInDir(resolvedHostDir(configPath), basename(configPath), next, previous);
+  return { previous, next };
+}
+
+function refuseHostSymlink(configPath: string): string | null {
   let isLink = false;
   try {
     isLink = lstatSync(configPath).isSymbolicLink();
@@ -447,13 +500,15 @@ export function writeHostConfigKey(configPath: string, key: string, value: strin
     // absent — nothing to follow
   }
   if (isLink) throw new ConfigWriteRefusal(`forge: refusing to write ${configPath} — it is a symlink.`);
-  const next = editTopLevelConfigText(configPath, readIfPresent(configPath) ?? "", key, value, verify);
-  mkdirSync(dir, { recursive: true });
-  const dirIdentity = identify(dir);
+  return readIfPresent(configPath);
+}
+
+function resolvedHostDir(configPath: string): string {
+  const dirIdentity = identify(dirname(configPath));
   if (dirIdentity.kind !== "resolved") {
     throw new ConfigWriteRefusal(`forge: refusing to write ${configPath} — ${describeIdentity(dirIdentity)}.`);
   }
-  atomicReplaceInDir(dirIdentity.physical, basename(configPath), next!);
+  return dirIdentity.physical;
 }
 
 export function readRetentionConfig(projectDir: string): RetentionOverrides | undefined {
