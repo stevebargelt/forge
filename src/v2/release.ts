@@ -237,6 +237,7 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/src/queue-mutation.ts",
   "dashboard/src/action-mutation.ts",
   "dashboard/src/mutation-guards.ts",
+  "dashboard/src/ai-attribution-mutation.ts",
   "dashboard/package.json",
   "dashboard/tsconfig.json",
   // Client ES-module graph — main.js and everything it (transitively) imports. A missing
@@ -247,6 +248,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/attention-dismiss-view.js",
   "dashboard/client/attention-inbox-render.js",
   "dashboard/client/attention-inbox-view.js",
+  "dashboard/client/attribution-render.js",
+  "dashboard/client/attribution-view.js",
   "dashboard/client/backlog-state.js",
   "dashboard/client/backlog.js",
   "dashboard/client/breadcrumbs-render.js",

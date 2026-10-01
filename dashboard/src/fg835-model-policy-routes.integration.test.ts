@@ -500,3 +500,51 @@ test("integ FG-835: green propose → project apply through the real CLI writes 
   assert.equal(view.body["audit"].entries.length, 1);
   assert.equal(view.body["resolution"].rows.find((r: { role: string; isDefault: boolean }) => r.role === "engineer" && r.isDefault).model, "claude-haiku-4-5");
 });
+
+// FG-845 follows the same closed-registry and server-fixture precedent.  It belongs here
+// rather than in a new FG-845 integration file (FG-704): HTTP, registry lookup and child
+// spawning are all exercised together, using the registered checkout rather than body text.
+test("integ FG-845: attribution routes spawn only the registered config argv, return child status/output, and the real CLI re-read exposes the new source", async () => {
+  useStub();
+  const project = await post("/api/ai-attribution/project", { body: { projectKey: PROJECT_KEY, projectDir: "/attacker/path", mode: "allow" } });
+  const host = await post("/api/ai-attribution/host", { body: { mode: "suppress" } });
+  const inherit = await post("/api/ai-attribution/project", { body: { projectKey: PROJECT_KEY, mode: "inherit" } });
+  assert.deepEqual([project.status, host.status, inherit.status], [200, 200, 200]);
+  assert.deepEqual(recordedCalls().map((c) => [c.cwd, c.argv]), [
+    [checkoutDir, ["config", "set", "ai-attribution", "allow", "--project", checkoutDir, "--actor", "dashboard"]],
+    [realpathSync(tmpHome), ["config", "set", "ai-attribution", "suppress", "--host", "--actor", "dashboard"]],
+    [checkoutDir, ["config", "unset", "ai-attribution", "--project", checkoutDir, "--actor", "dashboard"]],
+  ]);
+  assert.equal(project.body["exitCode"], 0);
+  assert.match(String(project.body["stdout"]), /ok/);
+
+  useRealForge();
+  const applied = await post("/api/ai-attribution/host", { body: { mode: "allow" } });
+  assert.equal(applied.status, 200, JSON.stringify(applied.body));
+  const reread = await fetch(`${BASE}/api/config-graph?projectKey=${encodeURIComponent(PROJECT_KEY)}&projectDir=${encodeURIComponent(checkoutDir)}`);
+  const dto = await reread.json() as { aiAttribution: { mode: string; source: string; hostFile: string } };
+  assert.equal(reread.status, 200, JSON.stringify(dto));
+  assert.deepEqual(dto.aiAttribution.mode, "allow");
+  assert.deepEqual(dto.aiAttribution.source, "host");
+  assert.equal(dto.aiAttribution.hostFile, join(tmpHome, "config.yml"));
+});
+
+test("integ FG-845: bad choices and every shared POST guard refuse before the attribution child spawns", async () => {
+  useStub();
+  const before = recordedCalls().length;
+  assert.equal((await post("/api/ai-attribution/project", { body: { projectKey: PROJECT_KEY, mode: "--host" } })).status, 400);
+  for (const [headers, expected] of [
+    [{ Origin: "http://evil.example" }, 403],
+    [{ "Sec-Fetch-Site": "cross-site" }, 403],
+    [{ "Content-Type": "text/plain" }, 415],
+  ] as const) {
+    assert.equal((await post("/api/ai-attribution/host", { headers, body: { mode: "allow" } })).status, expected);
+  }
+  process.env.HOST = "0.0.0.0";
+  try {
+    assert.equal((await post("/api/ai-attribution/host", { body: { mode: "allow" } })).status, 403);
+  } finally {
+    process.env.HOST = "127.0.0.1";
+  }
+  assert.equal(recordedCalls().length, before, "every refusal is before spawn");
+});

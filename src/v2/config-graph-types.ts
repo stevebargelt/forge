@@ -154,6 +154,28 @@ export type ProjectIdentity = {
  *  consume UNMODIFIED. Additional panels (RACI audit, model matrix, runtime
  *  readiness, agents/workflows, seed drift, orchestrator sessions) attach as
  *  further keys under `sections` without restructuring this type. */
+/** FG-845: the effective git-attribution mode for one checkout, as the Config row,
+ *  the Projects cards and the controls read it. mode/source/file/reason are
+ *  readAiAttribution's answer (the one `forge config show` prints), never re-derived. */
+export type AiAttributionView = {
+  mode: "suppress" | "allow";
+  source: "project" | "host" | "default";
+  file: string | null;
+  /** Present only on a fail-closed stop, naming the file and the problem. */
+  reason?: string;
+  /** The host default on its own, when $FORGE_HOME/config.yml carries a recognized value. */
+  host: { mode: "suppress" | "allow"; file: string } | null;
+  /** Where `--host` writes, whether or not it exists yet. */
+  hostFile: string;
+  /** The checkout's own file sets no value, so the host default (or the built-in) applies. */
+  inheritsHost: boolean;
+  checkout: string;
+  /** The marker-managed orchestrator block in <checkout>/CLAUDE.md against the resolved mode. */
+  renderedBlock: "in_sync" | "stale" | "absent";
+  /** The mode the rendered block's attribution statement carries; null when it carries none. */
+  renderedMode: "suppress" | "allow" | null;
+};
+
 export type ConfigGraph = {
   version: number;
   project: ProjectIdentity;
@@ -162,6 +184,8 @@ export type ConfigGraph = {
     sources: SourcesSection;
     capabilities: CapabilitiesSection;
   };
+  /** FG-845: null when the checkout could not be read. */
+  aiAttribution: AiAttributionView | null;
 };
 
 export const CONFIG_GRAPH_VERSION = 1;

@@ -15,6 +15,7 @@ import { redactSecrets } from "./host-readiness.js";
 import { buildConfigGraphSources, resolveProjectIdentity } from "./config-graph-sources.js";
 import { buildConfigGraphCapabilities } from "./config-graph-capabilities.js";
 import { CONFIG_GRAPH_VERSION, type ConfigGraph } from "./config-graph-types.js";
+import { describeAiAttribution } from "./ai-attribution.js";
 
 export type ConfigGraphInput = { projectDir: string; forgeHome?: string };
 
@@ -48,6 +49,7 @@ function missingGraph(projectDir: string, home: string, reason: string): ConfigG
       sources: { rows: [] },
       capabilities: { providers: [], capabilities: [], prerequisites: [] },
     },
+    aiAttribution: null,
   };
 }
 
@@ -65,6 +67,7 @@ export function buildConfigGraph({ projectDir, forgeHome }: ConfigGraphInput): C
         sources: buildConfigGraphSources({ projectDir, forgeHome: home }),
         capabilities: buildConfigGraphCapabilities({ projectDir, forgeHome: home }),
       },
+      aiAttribution: describeAiAttribution(projectDir, { forgeHome: home }),
     };
   } catch (e) {
     graph = missingGraph(projectDir, home, (e as Error).message);

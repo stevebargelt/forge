@@ -251,7 +251,17 @@ test("FG-845 editTopLevelConfigText: refuses edits that would not resolve as int
 
 // ── FG-851: writeBacklogConfig / writeProjectKey edit the file line-wise ──
 
-import { assertBacklogConfigWritable, assertConfigWritable, ConfigWriteRefusal, editBacklogPrefixText } from "./config.js";
+import {
+  assertBacklogConfigWritable,
+  assertConfigWritable,
+  ConfigWriteRefusal,
+  editBacklogPrefixText,
+  removeTopLevelConfigKey,
+  restoreHostConfig,
+  restoreProjectConfig,
+  writeHostConfigKey,
+  writeTopLevelConfigKey,
+} from "./config.js";
 
 const FG851_FIXTURE =
   "# operator notes — keep me\n" +
@@ -421,4 +431,68 @@ test("FG-851 editBacklogPrefixText: CRLF and nested maps under backlog are respe
     "backlog:\r\n  prefix: ZZ\r\n  opts:\r\n    prefix: deep\r\n",
   );
   assert.equal(editBacklogPrefixText("c.yml", "a: 1", "ZZ"), "a: 1\nbacklog:\n  prefix: ZZ\n");
+});
+
+// FG-845 (RF-2): the read-modify-write is a compare-and-swap. A writer whose edit was
+// computed from bytes another writer has since replaced refuses with nothing written,
+// rather than renaming its stale edit over the other's line.
+test("FG-845 writeTopLevelConfigKey: an interleaved write lands first, the second writer refuses rather than clobbering it", () => {
+  const { dir, path } = fg851Dir("project_key: pk-a\n");
+  const interleaved = "project_key: pk-a\nbacklog:\n  prefix: ZZ\n";
+  assert.throws(
+    () =>
+      writeTopLevelConfigKey(dir, "ai_attribution", "allow", () => {
+        writeFileSync(path, interleaved);
+        return true;
+      }),
+    (e: unknown) => e instanceof ConfigWriteRefusal && /changed while this edit was being made.*nothing was written, retry/.test(e.message),
+  );
+  assert.equal(readFileSync(path, "utf8"), interleaved, "the other writer's line survives");
+  assert.deepEqual(readdirSync(join(dir, ".forge")), ["config.yml"], "no temp file left behind");
+
+  writeTopLevelConfigKey(dir, "ai_attribution", "allow");
+  assert.equal(readFileSync(path, "utf8"), `${interleaved}ai_attribution: allow\n`, "a retry applies on top");
+});
+
+test("FG-845 writeHostConfigKey/removeTopLevelConfigKey: the same compare-and-swap; a file created underneath an absent-file edit is refused too", () => {
+  const home = tmp();
+  const hostFile = join(home, "config.yml");
+  assert.throws(
+    () =>
+      writeHostConfigKey(hostFile, "ai_attribution", "allow", () => {
+        writeFileSync(hostFile, "telemetry: off\n");
+        return true;
+      }),
+    /changed while this edit was being made/,
+  );
+  assert.equal(readFileSync(hostFile, "utf8"), "telemetry: off\n");
+
+  const { dir, path } = fg851Dir("ai_attribution: allow\n");
+  assert.throws(
+    () =>
+      removeTopLevelConfigKey(dir, "ai_attribution", () => {
+        writeFileSync(path, "ai_attribution: allow\nproject_key: pk-b\n");
+        return true;
+      }),
+    /changed while this edit was being made/,
+  );
+  assert.equal(readFileSync(path, "utf8"), "ai_attribution: allow\nproject_key: pk-b\n");
+});
+
+test("FG-845 restoreProjectConfig/restoreHostConfig: put back the previous bytes, remove a created file, and never undo a later writer", () => {
+  const { dir, path } = fg851Dir("# notes\nproject_key: pk-a   # keep\n");
+  const edit = writeTopLevelConfigKey(dir, "ai_attribution", "allow");
+  restoreProjectConfig(dir, edit);
+  assert.equal(readFileSync(path, "utf8"), "# notes\nproject_key: pk-a   # keep\n");
+
+  const later = writeTopLevelConfigKey(dir, "ai_attribution", "allow");
+  writeFileSync(path, "project_key: pk-other\n");
+  assert.throws(() => restoreProjectConfig(dir, later), /changed while this edit was being made/);
+  assert.equal(readFileSync(path, "utf8"), "project_key: pk-other\n");
+
+  const hostFile = join(tmp(), "config.yml");
+  const created = writeHostConfigKey(hostFile, "ai_attribution", "allow");
+  assert.equal(created.previous, null);
+  restoreHostConfig(hostFile, created);
+  assert.equal(existsSync(hostFile), false);
 });

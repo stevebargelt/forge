@@ -471,7 +471,12 @@ export type EventType =
   // FG-831: `forge projects prune --missing` removed one checkout registration whose
   // directory is gone (src/store/pruned-checkouts.ts). Payload: { checkoutRoot, actor }.
   // Additive to the TS union alone — event_type has no CHECK.
-  | "checkout.pruned";
+  | "checkout.pruned"
+  // FG-845: `forge config set|unset ai-attribution` changed a level's value. Payload:
+  // { level: "project" | "host", file, before, after (that level's own value, null when
+  // unset), resolved (the checkout's effective { mode, source } after; project level
+  // only), projectDir?, actor }. Additive to the TS union alone — event_type has no CHECK.
+  | "config.ai_attribution_changed";
 
 export type Event = {
   id: number;

@@ -85,7 +85,7 @@ What neither arm sees is an arm that consults the environment and returns green 
 
 ## The dashboard browser tier (FG-642)
 
-`dashboard/browser-tests/*.test.ts` is fifty suites / 309 tests as of FG-843 (the [census](#it-fails-it-never-skips) is authoritative) that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
+`dashboard/browser-tests/*.test.ts` is fifty-one suites / 313 tests as of FG-845 (the [census](#it-fails-it-never-skips) is authoritative) that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
 
 ```bash
 npm run test:browser -w dashboard      # the whole tier, ~6.5s with a browser present
@@ -103,11 +103,11 @@ One resolver, `src/util/chrome-bin.ts`, serves both the browser tier and the hos
 
 A candidate must be a **file**. Symlinks are followed deliberately — the agent image's `/usr/local/bin/chromium` *is* a symlink.
 
-The current total is 309 as of FG-843 (FG-844's 300 plus the nine `fg843-checkout-scope` cases; FG-844's was FG-835's 294 plus the six `fg844-queue-board` cases; FG-835's was FG-837's 286 plus the eight `fg835-models-editor` cases); FG-837's parity suite has an eighth case that measures every list row at 900px as well as the existing 1200px row-shape case.
+The current total is 313 as of FG-845 (FG-843's 309 plus the four `fg845-attribution-setting` cases; FG-844's 300 plus the nine `fg843-checkout-scope` cases; FG-844's was FG-835's 294 plus the six `fg844-queue-board` cases); FG-837's parity suite has an eighth case that measures every list row at 900px as well as the existing 1200px row-shape case.
 
 ### It fails, it never skips
 
-A Chrome-less environment takes every one of the tier's tests (`tierTestTotal()`, 309 as of FG-843) **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
+A Chrome-less environment takes every one of the tier's tests (`tierTestTotal()`, 313 as of FG-845) **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
 
 ```
 chrome precondition: the dashboard browser tier requires a real Chrome/Chromium binary and none was
@@ -234,8 +234,8 @@ npm run test:worktree
 # any root aggregate script; run it explicitly (next).
 npm run test:extended
 
-# Dashboard browser tier: 50 suites / 309 tests against a real Chrome (FG-642).
-# Needs a browser — a Chrome-less environment FAILS all 309, it never skips.
+# Dashboard browser tier: 51 suites / 313 tests against a real Chrome (FG-642).
+# Needs a browser — a Chrome-less environment FAILS all 313, it never skips.
 npm run test:browser -w dashboard
 
 # Canonical deterministic gate: unit tier + dashboard workspace

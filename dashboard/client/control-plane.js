@@ -2,10 +2,14 @@
 // Capabilities (FG-349 / FG-401). Read-only observability over the shared
 // buildConfigGraph() contract via /api/config-graph. A grouped provenance table,
 // not a graph. No mutation anywhere in this file — the view answers "what config
-// would Forge use if I started a run here?" and nothing more.
+// would Forge use if I started a run here?" and nothing more. FG-845: the git
+// attribution controls live in attribution-view.js and arrive through `afterSources`.
 
 import { h } from "preact";
 import htm from "htm";
+import { badgeClass, statusLabel } from "./status-tokens.js";
+import { checkoutLabelForDir } from "./checkout-label.js";
+import { AttributionTag } from "./attribution-view.js";
 
 const html = htm.bind(h);
 
@@ -40,7 +44,7 @@ function ReadinessBadge({ readiness }) {
   return html`<span class=${"cp-badge " + meta.cls} aria-label=${"readiness: " + meta.label}>${meta.symbol} ${meta.label}</span>`;
 }
 
-export function ControlPlaneView({ data, modelsHref = "#models" }) {
+export function ControlPlaneView({ data, modelsHref = "#models", projects = [], afterSources = null }) {
   if (!data) return html`<div class="muted">loading control plane…</div>`;
 
   return html`
@@ -56,14 +60,18 @@ export function ControlPlaneView({ data, modelsHref = "#models" }) {
           <span class="faint">contract v${data.version}</span>
         </div>
       </header>
-      <${SourcesPanel} sources=${data.sections.sources} modelsHref=${modelsHref} />
+      <${SourcesPanel} sources=${data.sections.sources} modelsHref=${modelsHref} attribution=${data.aiAttribution} projects=${projects} />
+      ${afterSources}
       <${CapabilitiesPanel} capabilities=${data.sections.capabilities} />
     </section>
   `;
 }
 
-function SourcesPanel({ sources, modelsHref }) {
+function SourcesPanel({ sources, modelsHref, attribution, projects }) {
   const rows = sources && sources.rows ? sources.rows : [];
+  // FG-845: the Git attribution row sits right after Model policy (or last without one).
+  const at = rows.findIndex((r) => r.key === "model-policy");
+  const split = at < 0 ? rows.length : at + 1;
   return html`
     <section class="workbench-section" role="region" aria-label="Sources — effective config provenance">
       <h3 class="workbench-section-label">Sources</h3>
@@ -79,7 +87,9 @@ function SourcesPanel({ sources, modelsHref }) {
                 </tr>
               </thead>
               <tbody>
-                ${rows.map((r) => html`<${SourceRow} row=${r} modelsHref=${modelsHref} />`)}
+                ${rows.slice(0, split).map((r) => html`<${SourceRow} row=${r} modelsHref=${modelsHref} />`)}
+                ${attribution ? html`<${AttributionRow} view=${attribution} projects=${projects} />` : null}
+                ${rows.slice(split).map((r) => html`<${SourceRow} row=${r} modelsHref=${modelsHref} />`)}
               </tbody>
             </table>
           </div>
@@ -102,6 +112,39 @@ function SourceRow({ row, modelsHref }) {
         ${!row.warning && row.detail ? html`<div class="faint">${row.detail}</div>` : null}
         <div class="faint cp-semantics">override: ${row.overrideSemantics}</div>
         ${row.key === "model-policy" ? html`<a class="cp-models-link" data-cp="models" href=${modelsHref}>Change it on Setup › Models →</a>` : null}
+      </td>
+    </tr>
+  `;
+}
+
+// ─── FG-845: git attribution ─────────────────────────────────────────────────
+
+function checkoutText(dir, projects) {
+  return checkoutLabelForDir(dir, projects) || dir;
+}
+
+function AttributionRow({ view, projects }) {
+  return html`
+    <tr id="cp-row-ai-attribution" class="cp-row-attribution">
+      <td><div class="cp-surface-label">Git attribution</div></td>
+      <td><span class="badge cp-truth">EFFECTIVE</span></td>
+      <td><${StatusBadge} status=${view.reason ? "warning" : "active"} /></td>
+      <td>
+        <span class="mono" data-attr-mode>${view.mode}</span> <${AttributionTag} view=${view} />
+        <div class="mono faint">${view.file ?? "nothing set at either level"}</div>
+      </td>
+      <td>
+        ${view.reason ? html`<div class="cp-warn">⚠ ${view.reason}</div>` : null}
+        <div class="faint" data-attr-host>
+          host default: ${view.host
+            ? html`<span class="mono">${view.host.mode}</span> <span class="mono">${view.host.file}</span>`
+            : "none"} · built-in: suppress
+        </div>
+        <div class="faint">applies to checkout <span class="mono">${checkoutText(view.checkout, projects)}</span></div>
+        <div class="faint">
+          read live by the git hook and the constraint; rendered block:
+          ${" "}<span class=${badgeClass("attribution", view.renderedBlock)} data-attr-block=${view.renderedBlock}>${statusLabel("attribution", view.renderedBlock)}</span>
+        </div>
       </td>
     </tr>
   `;

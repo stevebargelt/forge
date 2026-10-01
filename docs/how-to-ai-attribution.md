@@ -20,9 +20,9 @@ in-container reader, not something an operator sets — use `forge config set
 ai-attribution` (below) to change the mode; setting the env var by hand has no supported
 effect outside a forge-managed container.
 
-> The dashboard does not yet surface this toggle (Setup › Config row, Projects column,
-> the two closed-registry controls). That's FG-845's second part, tracked separately —
-> everything below is CLI-only today.
+> The dashboard surfaces this toggle too (FG-845) — see [The dashboard path](#the-dashboard-path)
+> below. Everything else in this document is the CLI path, which the dashboard shells out
+> to rather than replacing.
 
 ## Set it
 
@@ -44,7 +44,18 @@ project's key (it never touches the host file) so the project falls through to t
 default; unsetting an already-absent key is a no-op that says so. All three writes refuse
 — and leave the file untouched — when the existing file can't be edited safely as a
 single line (unparseable YAML, a flow-style mapping, a block-scalar value, more than one
-top-level `ai_attribution:` line): edit the file by hand in that case.
+top-level `ai_attribution:` line): edit the file by hand in that case. A write also
+refuses, file untouched, when the target changed underneath it between the read and the
+rename (another writer got there first — retry) or when the resulting
+`config.ai_attribution_changed` audit event can't be recorded: the file edit is undone
+and the command exits non-zero naming the audit gap (`forge: refused — the
+config.ai_attribution_changed audit event could not be recorded (…); <file> is
+unchanged`; `--json` reports `{ ok: false, reason: "audit_unrecorded", error }`) — the
+change is never left applied without its audit record, except the one case where
+restoring the file *also* fails (another writer moved it in the narrow window between
+the audit failure and the undo): then the command still exits non-zero naming both
+failures, but the edit is left in place unaudited and the message says to check the
+file by hand.
 
 `forge config show` and `forge doctor` both print the same two lines:
 
@@ -61,6 +72,36 @@ mode came from — for a carried value, the host file it came from (or none, for
 `default`); for an uncarried `default` with nothing set at either level, there is no
 file and that line is omitted. `forge config show --json` emits `{ "aiAttribution": {
 mode, source, file, reason?, overridesHost? } }`.
+
+## The dashboard path
+
+Setup › Config's Sources table carries a "Git attribution" row (right after Model
+policy), reading the same `describeAiAttribution` answer as `forge config show` — mode,
+source tag (project override / host default / built-in default / fail-closed), the file
+it came from, the host default beneath it (or "none"), the checkout it applies to, and
+whether the rendered orchestrator block agrees with the resolved mode. Below the table, a
+controls card offers two independent toggles, each a closed-registry act — Preview shows
+the exact `forge config …` verb and the file it would change, Confirm runs it:
+
+- **This project** — `suppress | allow | inherit host default`. `inherit` is `forge
+  config unset ai-attribution`, removing the project's key so the host default (or the
+  built-in) applies; `suppress`/`allow` are `forge config set ai-attribution <mode>`.
+- **Host default** — `suppress | allow`, i.e. `forge config set ai-attribution <mode>
+  --host`. Its footer names how many of the operator's projects currently inherit it.
+
+Both routes (`POST /api/ai-attribution/project`, `POST /api/ai-attribution/host`) shell
+the identical CLI verbs this document already describes — `--actor dashboard` so the
+`config.ai_attribution_changed` event attributes the change to the surface it came
+through — and write no file themselves; see `docs/SCHEMA-CONTRACT.md` for the route
+contract. Setup › Projects lists each project's effective mode and source in a column, so
+the whole portfolio is visible without opening Config per project.
+
+**Propagation honesty.** The page states plainly that the git hook and the
+`no-ai-attribution` constraint read the resolved value live on every run, but the
+rendered orchestrator block in `CLAUDE.md` only catches up on the next `forge upgrade`.
+When the block disagrees with the resolved mode, the row and the controls card both show
+a "rendered block stale — run `forge upgrade`" notice instead of silently claiming
+agreement.
 
 ## Fail-closed, level by level
 

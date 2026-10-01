@@ -2002,6 +2002,34 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .mp-link, .cp-models-link { color: var(--accent); text-decoration: underline; }
 .cp-models-link { display: inline-block; margin-top: 4px; font-size: 12px; }
 .mp-source-error { flex-basis: 100%; }
+/* FG-845: Setup › Config's git attribution row, controls card and stale notice, and the
+   Projects card line. Secondary text stays --fg-dim (AA on --bg). */
+.cp-row-attribution td { background: rgba(122, 159, 255, 0.06); }
+.attr-tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 4px; background: var(--border); color: var(--fg); text-transform: none; letter-spacing: normal; }
+.attr-tag-src { background: rgba(122, 159, 255, 0.18); color: #c9d6ff; }
+.cp-attr-title { font-size: 14px; margin: 0 0 6px; text-transform: none; letter-spacing: normal; }
+.cp-attr-caption { font-size: 12px; margin: 0 0 12px; }
+.cp-attr-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.cp-attr-ctl { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--bg-elev-2); }
+.cp-attr-ctl-title { margin: 0 0 6px; font-size: 13px; text-transform: none; letter-spacing: normal; }
+.cp-attr-pill { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: 11px; color: var(--fg-dim); font-weight: 400; overflow-wrap: anywhere; }
+.cp-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin: 6px 0; }
+.cp-seg-btn { background: transparent; border: none; border-left: 1px solid var(--border); color: var(--fg-dim); padding: 5px 12px; font-size: 13px; cursor: pointer; min-height: 30px; }
+.cp-seg-btn:first-child { border-left: none; }
+.cp-seg-btn.cp-seg-on { background: rgba(122, 159, 255, 0.22); color: var(--fg); }
+.cp-seg-btn:disabled { cursor: not-allowed; opacity: 0.6; }
+.cp-seg-btn:focus-visible, .cp-attr-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cp-attr-verb { font-size: 12px; margin: 6px 0 10px; overflow-wrap: anywhere; }
+.cp-attr-preview { font-size: 12px; margin: 0 0 10px; padding: 6px 8px; border: 1px dashed var(--border); border-radius: 6px; overflow-wrap: anywhere; }
+.cp-attr-btn { background: transparent; border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 4px 12px; font-size: 13px; cursor: pointer; min-height: 30px; }
+.cp-attr-confirm:not(:disabled) { border-color: var(--accent); background: rgba(122, 159, 255, 0.18); }
+.cp-attr-btn:disabled { color: var(--fg-dim); cursor: not-allowed; }
+.cp-attr-note { font-size: 12px; margin-top: 8px; }
+.cp-attr-result { font-size: 12px; margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cp-attr-result:empty { display: none; }
+.cp-attr-stale { margin-top: 12px; padding: 10px 14px; border: 1px solid rgba(250, 204, 21, 0.6); background: rgba(250, 204, 21, 0.07); border-radius: 8px; font-size: 13px; }
+.project-attr { font-size: 13px; }
+.project-attr-failed { color: var(--warn); }
 .mp-quick { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .mp-view .hint { font-size: 12px; color: var(--fg-dim); letter-spacing: normal; text-transform: none; }
 .mp-quick-card h3 { margin: 0 0 8px; font-size: 13px; color: var(--fg-dim); font-weight: 500; text-transform: none; letter-spacing: normal; }

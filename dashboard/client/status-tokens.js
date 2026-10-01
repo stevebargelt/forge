@@ -101,6 +101,14 @@ const VOCABULARIES = {
     applied: t("applied", "ok", "status-complete"),
     apply_failed: t("apply refused", "err", "status-failed"),
   },
+  // FG-845: the git-attribution row's rendered-block state and the fail-closed source —
+  // not stored anywhere; each borrows the task badge whose colour means the same thing.
+  attribution: {
+    in_sync: t("in sync", "ok", "status-complete"),
+    stale: t("stale — run forge upgrade", "warn", "status-awaiting_gate"),
+    absent: t("no rendered block", "neutral", "status-pending"),
+    fail_closed: t("fail-closed", "warn", "status-awaiting_gate"),
+  },
   marker: {
     reconcile_candidate: t("reconcile candidate", "warn", "status-reconcile_candidate"),
     environment_unavailable: t("environment unavailable", "warn", "status-environment_unavailable"),
@@ -116,6 +124,7 @@ const FALLBACK_CLASS = {
   receipt: "launch-state-unknown",
   ticket: "status-pending",
   raci: "status-pending",
+  attribution: "status-pending",
   marker: "status-unknown",
 };
 

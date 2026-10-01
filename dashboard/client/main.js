@@ -13,6 +13,7 @@ import { ReviewsView } from "./reviews.js";
 import { ShippingAuditView } from "./shipping-audit.js";
 import { CampaignsView } from "./campaigns.js";
 import { ControlPlaneView } from "./control-plane.js";
+import { AttributionControls, ProjectAttributionLine } from "./attribution-view.js";
 import { RunPage } from "./run-page-view.js";
 import { TaskPage, ModelBadge, CopyIdButton } from "./task-page-view.js";
 import { TicketPage } from "./ticket-page-view.js";
@@ -439,6 +440,12 @@ function App() {
     }
   }, [projectFilter, viewCheckoutDir]);
 
+  // FG-845: after an attribution Confirm, the Config row and every Projects card re-read.
+  const rereadAttribution = useCallback(async () => {
+    const [, projRes] = await Promise.all([pollControlPlane(), fetch("/api/projects").catch(() => null)]);
+    if (projRes && projRes.ok) setProjects(await projRes.json());
+  }, [pollControlPlane]);
+
   // Clear the graph the instant the scope changes so a previous checkout's config
   // graph is never rendered under the new scope while its request is in flight. The
   // seq bump retires whatever read is still outstanding for the old scope.
@@ -745,7 +752,14 @@ function App() {
         : view === "config"
         ? projectFilter && !viewCheckoutDir
           ? html`<div class="card muted" style="margin-top: 20px;">${projects.length === 0 ? "loading the project's checkouts…" : `No registered project has the key ${scope.project}, so there is no checkout to read.`}</div>`
-          : html`<${ControlPlaneView} data=${controlPlane} modelsHref=${hashFor({ view: "models", scope })} />`
+          : html`<${ControlPlaneView}
+              data=${controlPlane}
+              modelsHref=${hashFor({ view: "models", scope })}
+              projects=${projects}
+              afterSources=${controlPlane?.aiAttribution
+                ? html`<${AttributionControls} view=${controlPlane.aiAttribution} scope=${{ project: scope.project }} projects=${projects} onChanged=${rereadAttribution} />`
+                : null}
+            />`
         : view === "models"
         ? html`<${ModelsView} key=${`${scope.project ?? ""}\n${scope.checkout ?? ""}`} scope=${scope} params=${route.params} />`
         : view === "run"
@@ -2018,6 +2032,7 @@ function ProjectCard({ project, onPick, onReload }) {
           <div class="project-stat-val ${project.inFlightCount > 0 ? "stat-warn" : ""}">${project.inFlightCount}</div>
         </div>
       </div>
+      <${ProjectAttributionLine} view=${project.aiAttribution} />
       ${checkouts.length > 1
         ? html`
             <div class="project-working-dirs">
