@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { NODE_EXEC as tsx, BUILT_CLI_ENTRY as entry } from "../../integration-cli-spawn.js";
+import { provenPhysical } from "../../util/path-identity.js";
 
 let projectDir: string;
 let forgeHome: string;
@@ -91,7 +92,7 @@ test("FG-799 (AC1): forge doctor prints the effective ai attribution line", () =
   const res = runForge(["doctor", "--json"]);
   // doctor may exit 1 on readiness, but the JSON payload must carry the mode.
   const parsed = JSON.parse(res.stdout);
-  assert.deepEqual(parsed.aiAttribution, { mode: "allow", source: "project", file: configPath() });
+  assert.deepEqual(parsed.aiAttribution, { mode: "allow", source: "project", file: provenPhysical(configPath()) });
 });
 
 // ── FG-845 (AC2) ────────────────────────────────────────────────────────────

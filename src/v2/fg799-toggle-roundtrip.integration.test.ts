@@ -18,6 +18,7 @@ import { runUpgrade } from "../cli/commands/upgrade.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Workflow } from "./schema.js";
 import { BUILT_CLI_ENTRY, NODE_EXEC, REPO_ROOT } from "../integration-cli-spawn.js";
+import { provenPhysical } from "../util/path-identity.js";
 
 const dirs: string[] = [];
 const HOOK_REL = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
@@ -107,7 +108,7 @@ test("FG-799 E2E: init/current hook, config toggle, and re-render round-trip tog
   assert.deepEqual(JSON.parse(doctor.stdout).aiAttribution, {
     mode: "allow",
     source: "project",
-    file: join(project, ".forge", "config.yml"),
+    file: provenPhysical(join(project, ".forge", "config.yml")),
   });
 
   // `init` is the documented re-render entry point used when an upgrade is not
