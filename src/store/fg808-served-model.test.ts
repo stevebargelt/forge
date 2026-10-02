@@ -156,6 +156,30 @@ test("FG-808 RF-2: an assistant event with no message.model is unverifiable, nev
   assert.deepEqual(usageModelMismatches(rows, REQUESTED), [], "an unverifiable row raises no mismatch");
 });
 
+test("FG-808 RF-4: a model-less assistant event on a request that already named a model fails closed to unverifiable", () => {
+  const rows = extractUsageFromStdoutLog(writeStream("rf4-overwrite.jsonl", [
+    { type: "assistant", session_id: "s", request_id: "req", message: { id: "msg", model: REQUESTED } },
+    { type: "assistant", session_id: "s", request_id: "req", message: { id: "msg" } },
+    { type: "stream_event", session_id: "s", event: { type: "message_delta", usage: { output_tokens: 100 } } },
+  ]), { taskId: "t" });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.model, UNVERIFIABLE_SERVED_MODEL);
+  assert.equal(rows[0]?.outputTokens, 100);
+  assert.equal(classifyServedModelRows(rows, REQUESTED)?.classification, "unverifiable");
+  assert.deepEqual(usageModelMismatches(rows, REQUESTED), []);
+});
+
+test("FG-808 RF-4: once unverifiable, a later model-bearing event on the same request does not un-mark it", () => {
+  const rows = extractUsageFromStdoutLog(writeStream("rf4-sticky.jsonl", [
+    { type: "assistant", session_id: "s", request_id: "req", message: { id: "msg", usage: { input_tokens: 5, output_tokens: 1 } } },
+    { type: "assistant", session_id: "s", request_id: "req", message: { id: "msg", model: REQUESTED, usage: { input_tokens: 5, output_tokens: 2 } } },
+    { type: "stream_event", session_id: "s", event: { type: "message_delta", usage: { input_tokens: 5, output_tokens: 100 } } },
+  ]), { taskId: "t" });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.model, UNVERIFIABLE_SERVED_MODEL);
+  assert.equal(classifyServedModelRows(rows, REQUESTED)?.classification, "unverifiable");
+});
+
 test("FG-808: nothing to compare (no requested model, or no rows) → undefined", () => {
   const rows = extractUsageFromStdoutLog(claudeStream("none.jsonl", [{ model: REQUESTED, out: 1 }]));
   assert.equal(classifyServedModelRows(rows, ""), undefined);
@@ -227,4 +251,23 @@ test("FG-808: the served-model record rides a lens outcome on both branches (rev
   const crashed = assessLens({ lens: "security", role: "red-security", dispatched: false, failureKind: "container_crash", servedModel });
   assert.equal(crashed.complete, false);
   assert.equal(crashed.servedModel?.classification, "switched");
+});
+
+test("FG-808 RF-4: the review's sequence records unverifiable with NO mismatch event", () => {
+  insertRun({ id: "r-rf4", workflow: "invoke", title: "r-rf4", status: "active", createdAt: "2026-10-02T00:00:00Z", projectDir: "/p" } as Run);
+  insertTask({
+    id: "t-rf4", runId: "r-rf4", phase: "task", agentRole: "red-security", status: "running",
+    taskPackage: { taskId: "t-rf4", runId: "r-rf4", phase: "task", role: "red-security", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-10-02T00:00:00Z",
+  } as Task);
+  insertUsageRows(extractUsageFromStdoutLog(writeStream("t-rf4.jsonl", [
+    { type: "assistant", session_id: "s", request_id: "req", message: { id: "msg", model: REQUESTED } },
+    { type: "assistant", session_id: "s", request_id: "req", message: { id: "msg" } },
+    { type: "stream_event", session_id: "s", event: { type: "message_delta", usage: { output_tokens: 100 } } },
+  ]), { taskId: "t-rf4" }));
+  const tdir = mkdtempSync(join(tmpdir(), "forge-fg808-t-rf4-"));
+  writeTaskManifest(tdir, { taskId: "t-rf4", runId: "r-rf4" } as TaskManifest);
+  const check = recordServedModelCheck({ runId: "r-rf4", taskId: "t-rf4", taskDir: tdir, requestedModel: REQUESTED });
+  assert.equal(check?.classification, "unverifiable");
+  assert.equal(eventsForTask("t-rf4").filter((e) => e.eventType === "task.model_mismatch").length, 0);
 });

@@ -59,8 +59,10 @@ export function extractUsageFromStdoutLog(
   // request. Function-scope so different log files don't contaminate each other.
   const sessionToActiveRequest = new Map<string, string>();
   // FG-808: request_id → the served model that request's own assistant events
-  // reported. Never borrowed across requests: a request whose stream names no
-  // model is unverifiable, and its message_delta inherits only its own entry.
+  // reported. Never borrowed across requests, and fail-closed within one: if ANY
+  // assistant event for a request names no model, the request is unverifiable —
+  // overwriting an earlier model and never regaining one from a later event. Its
+  // message_delta inherits only its own entry.
   const requestModel = new Map<string, string>();
   let lastSeenTimestamp: string | undefined;
 
@@ -85,8 +87,9 @@ export function extractUsageFromStdoutLog(
       const sessionId = typeof event["session_id"] === "string" ? event["session_id"] : undefined;
       if (!reqId) continue;
       if (sessionId) sessionToActiveRequest.set(sessionId, reqId);
-      if (typeof msg["model"] === "string" && msg["model"].length > 0) requestModel.set(reqId, msg["model"]);
-      else if (!requestModel.has(reqId)) requestModel.set(reqId, UNVERIFIABLE_SERVED_MODEL);
+      const reported = typeof msg["model"] === "string" && msg["model"].length > 0 ? msg["model"] : undefined;
+      if (reported === undefined) requestModel.set(reqId, UNVERIFIABLE_SERVED_MODEL);
+      else if (requestModel.get(reqId) !== UNVERIFIABLE_SERVED_MODEL) requestModel.set(reqId, reported);
       const usage = isObject(msg["usage"]) ? msg["usage"] : undefined;
       if (usage) {
         mergeUsage(byRequest, reqId, requestModel.get(reqId)!, usage, lastSeenTimestamp, opts);
