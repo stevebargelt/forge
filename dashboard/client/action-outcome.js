@@ -76,6 +76,16 @@ export function recordOutcomeInScope(ledger, scope, key, outcome) {
   return recordOutcome(ledger, key, outcome);
 }
 
+/** A ledger writer bound to ONE board scope — the scope of the render that made it. Every
+ *  write it makes goes through recordOutcomeInScope, so a callback that outlives a project or
+ *  checkout switch (an awaited fetch, a Refine save) cannot land in the next board's ledger.
+ * @param {(update: (ledger: any) => any) => void} setLedger
+ * @param {string | null} scope
+ */
+export function scopedRecorder(setLedger, scope) {
+  return (key, outcome) => setLedger((current) => recordOutcomeInScope(current, scope, key, outcome));
+}
+
 /** Patch the outcome a key holds (e.g. open its Refine panel) without re-announcing it. */
 export function updateOutcome(ledger, key, patch) {
   const current = ledger.byKey[key];
@@ -132,6 +142,19 @@ export function returnFocusToControl(outcomeEl, returnFocus = null) {
     return target;
   }
   return null;
+}
+
+/** Dismiss: focus returns to the control FIRST, then the outcome is hidden. Resolving the
+ *  control after the hide is a race — once the outcome has left the DOM there is no previous
+ *  sibling to find, and focus falls to <body>.
+ * @param {any} outcomeEl
+ * @param {((el: any) => any) | null} returnFocus
+ * @param {() => void} dismiss
+ */
+export function dismissWithFocus(outcomeEl, returnFocus, dismiss) {
+  const control = returnFocusToControl(outcomeEl, returnFocus);
+  dismiss();
+  return control;
 }
 
 /** The keydown handler an outcome element carries. A panel inside it that handles Escape

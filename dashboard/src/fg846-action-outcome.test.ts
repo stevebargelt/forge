@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   ActionOutcome,
   dismissOutcome,
+  dismissWithFocus,
   emptyOutcomes,
   outcomeElementProps,
   outcomeFor,
@@ -17,6 +18,7 @@ import {
   recordOutcome,
   recordOutcomeInScope,
   returnFocusToControl,
+  scopedRecorder,
   shouldTakeFocus,
   updateOutcome,
 } from "../client/action-outcome.js";
@@ -114,6 +116,24 @@ test("Escape returns focus to the control — the previous sibling — or to the
   assert.equal(returnFocusToControl(fakeEl("orphan", focused, { previousElementSibling: null })), null);
 });
 
+test("Dismiss returns focus to the triggering control BEFORE the outcome is hidden — the control is resolved while the outcome is still in the DOM", () => {
+  const events: string[] = [];
+  const control = fakeEl("enqueue button", events);
+  const outcomeEl: { previousElementSibling: unknown } = { ...fakeEl("outcome", events), previousElementSibling: control };
+  const focusedTo = dismissWithFocus(outcomeEl, null, () => {
+    events.push("dismissed");
+    // Once hidden the outcome has no sibling to find — resolving the control now would miss.
+    outcomeEl.previousElementSibling = null;
+  });
+  assert.equal(focusedTo, control);
+  assert.deepEqual(events, ["enqueue button", "dismissed"], "focus moves first, then the outcome is dismissed");
+
+  // A reorder's outcome returns focus to its card.
+  const card = fakeEl("card", events);
+  assert.equal(dismissWithFocus(fakeEl("rank outcome", events, { previousElementSibling: control }), () => card, () => events.push("dismissed")), card);
+  assert.deepEqual(events.slice(2), ["card", "dismissed"]);
+});
+
 // ─── persistence and replacement ─────────────────────────────────────────────
 
 test("ledger: an outcome persists per key until replaced; a later success on the same card replaces the refusal and clears its pill", () => {
@@ -175,6 +195,28 @@ test("ledger scope: a refused enqueue whose readiness arrives after a project/ch
   assert.equal(outcomeFor(same, "card:FG-9")!.ok, false);
   assert.equal(same.scope, scopeA);
   assert.equal(recordOutcome(same, "controls", { ok: true, kind: "applied", message: "ok" }).scope, scopeA);
+});
+
+test("ledger scope: a Refine save that resolves after a project/checkout change is discarded by the recorder bound when the save was issued", () => {
+  const scopeA = JSON.stringify(["repo-a", "/checkouts/a"]);
+  const scopeB = JSON.stringify(["repo-a", "/checkouts/b"]);
+  let ledger = emptyOutcomes(scopeA);
+  const setLedger = (update: (current: typeof ledger) => typeof ledger) => { ledger = update(ledger); };
+  ledger = recordOutcome(ledger, "card:FG-9", { ...queueOutcomeEntry({ verb: "enqueue", ticketId: "FG-9", response: { status: 409, payload: { ok: false, error: REFUSAL } }, readiness: NOT_READY }), refineOpen: true });
+  // The save is issued on board A: the board's recorder is the one bound to A.
+  const recordAtSave = scopedRecorder(setLedger, scopeA);
+  // The operator switches checkout while the save is in flight; the ledger resets to B.
+  ledger = emptyOutcomes(scopeB);
+  const boardB = ledger;
+  recordAtSave("card:FG-9", savedOutcome("FG-9", { ok: true, revision: 5, readiness: { ...NOT_READY, outcome: "ready", gaps: [], revision: 5 } }));
+  assert.equal(ledger, boardB, "the late save outcome is discarded whole");
+  assert.equal(outcomeFor(ledger, "card:FG-9"), null, "nothing renders on a same-id card in board B");
+  assert.equal(pillFor(ledger, "FG-9"), null);
+
+  // Board B's own recorder writes; a save that resolves in its own scope records normally.
+  scopedRecorder(setLedger, scopeB)("card:FG-9", savedOutcome("FG-9", { ok: true, revision: 5, readiness: { ...NOT_READY, outcome: "ready", gaps: [], revision: 5 } }));
+  assert.equal(outcomeFor(ledger, "card:FG-9")!.kind, "saved");
+  assert.equal(ledger.scope, scopeB);
 });
 
 // ─── the queue's entries and pills ───────────────────────────────────────────

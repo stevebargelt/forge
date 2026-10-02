@@ -25,7 +25,7 @@ import htm from "htm";
 import { formatDuration } from "./format.js";
 import { badgeClass, statusLabel } from "./status-tokens.js";
 import { hashFor } from "./view-routing.js";
-import { dismissOutcome, emptyOutcomes, outcomeFor, pillFor, placeOutcome, recordOutcome, recordOutcomeInScope, updateOutcome } from "./action-outcome.js";
+import { dismissOutcome, dismissWithFocus, emptyOutcomes, outcomeFor, pillFor, placeOutcome, recordOutcome, scopedRecorder, updateOutcome } from "./action-outcome.js";
 import { RefinePanel, fetchReadiness } from "./refine-panel-view.js";
 import { savedOutcome } from "./refine-state.js";
 import {
@@ -79,7 +79,9 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
   const state = queueBoardState(data, { projectSelected: Boolean(projectFilter) });
   const readinessScope = { projectKey, projectDir: checkoutFilter ?? null };
 
-  const record = (key, entry) => setLedger((current) => recordOutcome(current, key, entry));
+  // Bound to THIS render's scope: a Refine save that resolves after a project or checkout
+  // switch is discarded rather than recorded into the next board.
+  const record = scopedRecorder(setLedger, ledgerScope);
 
   const submit = useCallback(
     async (request, describe, key = null) => {
@@ -87,8 +89,7 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
       const verb = request.path.slice(request.path.lastIndexOf("/") + 1);
       const ticketId = typeof request.body?.ticketId === "string" ? request.body.ticketId : null;
       // Every await below can outlive the scope this request was made in.
-      const scopeAtCall = ledgerScope;
-      const recordLate = (entry) => setLedger((current) => recordOutcomeInScope(current, scopeAtCall, key, entry));
+      const recordLate = scopedRecorder(setLedger, ledgerScope);
       setPending(describe);
       try {
         const res = await fetch(`${request.path}${scopeQuery(projectFilter, checkoutFilter)}`, {
@@ -110,7 +111,7 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
           // A refused enqueue reads the ticket's readiness so the outcome can show the gaps
           // and the proposal, and offer Refine (FG-847).
           const read = !result.ok && verb === "enqueue" && ticketId ? await fetchReadiness(ticketId, { projectKey, projectDir: checkoutFilter ?? null }) : null;
-          recordLate(queueOutcomeEntry({ verb, ticketId, response: { status: res.status, payload }, readiness: read && read.ok ? read.readiness : null }));
+          recordLate(key, queueOutcomeEntry({ verb, ticketId, response: { status: res.status, payload }, readiness: read && read.ok ? read.readiness : null }));
           if (result.ok && key === "controls") setEnqueueId("");
         }
         // A REFUSAL IS NEVER SWALLOWED INTO A RELOAD. Only an applied mutation
@@ -120,7 +121,7 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
         if (result.ok && onReload) onReload();
       } catch (err) {
         setOutcome(mutationOutcome({ status: 0, payload: { error: String(err) } }));
-        if (key) recordLate(queueOutcomeEntry({ verb, ticketId, response: { status: 0, payload: { error: String(err) } } }));
+        if (key) recordLate(key, queueOutcomeEntry({ verb, ticketId, response: { status: 0, payload: { error: String(err) } } }));
       } finally {
         setPending(null);
       }
@@ -155,8 +156,9 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
   const outcomeHandlers = {
     scope: readinessScope,
     onDismiss: (key) => {
-      setLedger((current) => dismissOutcome(current, key));
-      focusControlOf(key);
+      // A reorder's control is its card (QueueCard's returnFocus), not the outcome's sibling.
+      const returnFocus = outcomeFor(ledger, key)?.verb === "rank" ? (el) => el.closest("li") : null;
+      dismissWithFocus(outcomeElement(key), returnFocus, () => setLedger((current) => dismissOutcome(current, key)));
     },
     onRefine: (key, entry) => {
       setLedger((current) => (outcomeFor(current, key) ? updateOutcome(current, key, { refineOpen: true }) : recordOutcome(current, key, { ...entry, refineOpen: true })));
@@ -547,12 +549,6 @@ function outcomeElement(key) {
 /** After the panel closes, focus returns to the outcome it opened from. */
 function focusOutcome(key) {
   setTimeout(() => outcomeElement(key)?.focus(), 0);
-}
-
-/** After Dismiss, focus returns to the control (the outcome's previous sibling). */
-function focusControlOf(key) {
-  const control = outcomeElement(key)?.previousElementSibling;
-  setTimeout(() => control?.focus(), 0);
 }
 
 /** The content of one queue outcome: the pill, the CLI's text verbatim, and — for a

@@ -145,8 +145,8 @@ test("the registry: one row shelling the `backlog` verb; nothing else under /api
   }
 });
 
-test("the argv: exactly `backlog edit <id> --body - [--base-revision <n>]` — the body is never an argv element", () => {
-  assert.deepEqual(backlogEditArgv("FG-7"), ["backlog", "edit", "FG-7", "--body", "-"]);
+test("the argv: exactly `backlog edit <id> --body - --base-revision <n>` — the body is never an argv element", () => {
+  assert.deepEqual(backlogEditArgv("FG-7", 0), ["backlog", "edit", "FG-7", "--body", "-", "--base-revision", "0"]);
   assert.deepEqual(backlogEditArgv("FG-7", 3), ["backlog", "edit", "FG-7", "--body", "-", "--base-revision", "3"]);
 });
 
@@ -154,7 +154,7 @@ test("parseBacklogEditRequest: the one shape, the size bound (MAX_TICKET_BODY_BY
   assert.equal(MAX_TICKET_BODY_BYTES, 64 * 1024);
   assert.deepEqual(parseBacklogEditRequest({ projectKey: "repo-1", body: READY, baseRevision: 3 }), { projectKey: "repo-1", projectDir: undefined, body: READY, baseRevision: 3 });
   const atBound = "é".repeat(MAX_TICKET_BODY_BYTES / 2);
-  assert.ok(!isRefusal(parseBacklogEditRequest({ projectKey: "k", body: atBound })), "exactly the bound is accepted");
+  assert.ok(!isRefusal(parseBacklogEditRequest({ projectKey: "k", body: atBound, baseRevision: 0 })), "exactly the bound is accepted");
   const refused: Array<[unknown, number, RegExp]> = [
     [{ projectKey: "k", body: `${atBound}x` }, 413, /at most 65536 bytes/],
     [{ projectKey: "k" }, 400, /body is required/],
@@ -163,6 +163,9 @@ test("parseBacklogEditRequest: the one shape, the size bound (MAX_TICKET_BODY_BY
     [{ projectKey: "k", body: "x", argv: ["--force"] }, 400, /refusing argv/],
     [{ projectKey: "k", body: "x", force: true }, 400, /refusing force/],
     [{ body: "x" }, 400, /projectKey is required/],
+    [{ projectKey: "k", body: "x" }, 400, /baseRevision is required/],
+    [{ projectKey: "k", body: "x", baseRevision: null }, 400, /baseRevision is required/],
+    [{ projectKey: "k", body: "x", baseRevision: 1.5 }, 400, /baseRevision/],
     [{ projectKey: "k", body: "x", baseRevision: -1 }, 400, /baseRevision/],
     [{ projectKey: "k", body: "x", baseRevision: "3" }, 400, /baseRevision/],
     [{ projectKey: "k", body: 7 }, 400, /body is required/],
@@ -237,7 +240,7 @@ test("handler: the CLI's refusal passes through verbatim as a 409", async () => 
   chmodSync(refuseBin, 0o755);
   process.env["FORGE_BIN"] = refuseBin;
   try {
-    const out = await post("/api/backlog/FG-7/edit", { projectKey: "repo-1", body: READY });
+    const out = await post("/api/backlog/FG-7/edit", { projectKey: "repo-1", body: READY, baseRevision: getTicket(PK, "FG-7")!.revision! });
     assert.equal(out.status, 409);
     assert.equal(out.body["ok"], false);
     assert.equal(out.body["error"], "forge: Ticket FG-7 is locked by a migration");
@@ -246,7 +249,7 @@ test("handler: the CLI's refusal passes through verbatim as a 409", async () => 
   }
 });
 
-test("handler: every refusal happens before a spawn — guards, bad JSON, size, unknown project, markdown store, missing ticket, a moved revision", async () => {
+test("handler: every refusal happens before a spawn — guards, bad JSON, size, unknown project, markdown store, missing ticket, a missing or moved revision", async () => {
   spawned();
   const current = getTicket(PK, "FG-7")!.revision!;
   const refusals: Array<[string, unknown, Record<string, string>, number, RegExp]> = [
@@ -259,10 +262,12 @@ test("handler: every refusal happens before a spawn — guards, bad JSON, size, 
     ["/api/backlog/FG-7/edit", { projectKey: "repo-1", body: "y".repeat(3 * MAX_TICKET_BODY_BYTES) }, {}, 413, /exceeds/],
     ["/api/backlog/-rf/edit", { projectKey: "repo-1", body: READY }, {}, 400, /must not begin with "-"/],
     ["/api/backlog/FG%207/edit", { projectKey: "repo-1", body: READY }, {}, 400, /not a ticket id/],
-    ["/api/backlog/FG-7/edit", { projectKey: "nope", body: READY }, {}, 404, /no registered project/],
-    ["/api/backlog/FG-7/edit", { projectKey: "repo-md", body: READY }, {}, 409, /store of record/],
-    ["/api/backlog/FG-7/edit", { projectKey: "repo-none", body: READY }, {}, 404, /no ticket store/],
-    ["/api/backlog/FG-404/edit", { projectKey: "repo-1", body: READY }, {}, 404, /no ticket FG-404/],
+    ["/api/backlog/FG-7/edit", { projectKey: "nope", body: READY, baseRevision: current }, {}, 404, /no registered project/],
+    ["/api/backlog/FG-7/edit", { projectKey: "repo-md", body: READY, baseRevision: current }, {}, 409, /store of record/],
+    ["/api/backlog/FG-7/edit", { projectKey: "repo-none", body: READY, baseRevision: current }, {}, 404, /no ticket store/],
+    ["/api/backlog/FG-404/edit", { projectKey: "repo-1", body: READY, baseRevision: current }, {}, 404, /no ticket FG-404/],
+    ["/api/backlog/FG-7/edit", { projectKey: "repo-1", body: READY }, {}, 400, /baseRevision is required/],
+    ["/api/backlog/FG-7/edit", { projectKey: "repo-1", body: READY, baseRevision: "latest" }, {}, 400, /baseRevision is required/],
     ["/api/backlog/FG-7/edit", { projectKey: "repo-1", body: READY, baseRevision: current - 1 }, {}, 409, /someone edited it meanwhile/],
   ];
   for (const [path, body, headers, status, why] of refusals) {

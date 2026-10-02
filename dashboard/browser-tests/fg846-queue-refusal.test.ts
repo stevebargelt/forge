@@ -87,6 +87,9 @@ test("FG-846/847: scrolled refusal is focused, verbatim and resolvable in place"
   assert.match(await card(p, "FG-846").innerText(), /needs refinement/);
   await shot(p, "a-refused-mock-side-by-side");
   await outcome.press("Escape"); assert.equal(await p.evaluate(() => document.activeElement?.textContent), "enqueue");
+  await outcome.getByRole("button", { name: "Dismiss" }).focus(); await p.keyboard.press("Enter");
+  await outcome.waitFor({ state: "detached" });
+  assert.equal(await p.evaluate(() => document.activeElement?.textContent), "enqueue", "Dismiss returns focus to the triggering control");
   await button.click(); await outcome.getByRole("button", { name: "Refine…" }).click();
   const editor = p.getByLabel("Body of FG-846"); await editor.waitFor();
   assert.match(await editor.inputValue(), /## Problem/); assert.match(await editor.inputValue(), /## Goal/);

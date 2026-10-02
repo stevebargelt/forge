@@ -65,7 +65,9 @@ export function RefinePanel({ ticketId, readiness, projectKey, projectDir = null
           projectKey,
           ...(projectDir ? { projectDir } : {}),
           body: text,
-          ...(typeof readiness.revision === "number" ? { baseRevision: readiness.revision } : {}),
+          // The route requires it: the compare-and-set that refuses a retried or concurrent
+          // save. A never-revised ticket is r0 to the CLI.
+          baseRevision: typeof readiness.revision === "number" ? readiness.revision : 0,
         }),
       });
       const payload = await res.json().catch(() => null);

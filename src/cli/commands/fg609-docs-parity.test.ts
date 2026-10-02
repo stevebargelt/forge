@@ -143,3 +143,14 @@ test("FG-847: concepts.md states ONE readiness rule — evaluated whenever read,
   assert.match(concepts, /An assessment is \*\*persisted\*\* on exactly two paths — an enqueue attempt, and an explicit recheck/);
   assert.match(concepts, /refuses when that is not ready, so a stale or not-ready assessment can never admit a ticket/);
 });
+
+test("FG-847: the ticket-edit compare-and-set is documented on the backlog edit route only, never on projects classify", () => {
+  const contract = read("docs/SCHEMA-CONTRACT.md");
+  const classify = contract.split("\n").find((line) => line.includes("where `result` is `forge projects classify`'s own `--json` object"));
+  assert.ok(classify, "the classify Responses paragraph exists");
+  assert.equal(/revision_moved|revision/.test(classify!), false, "classify has no ticket revision to conflict on");
+  assert.match(classify!, /`409` the CLI's own refusal passed through verbatim \(`\{ok: false, error\}`\) — notably `WorkspacePurposeConflictError`/);
+  const edit = contract.split("\n").filter((line) => line.includes("revision_moved"));
+  assert.ok(edit.length > 0 && edit.every((line) => /backlog edit|baseRevision|backlog\/:id\/edit/.test(line)), "every revision_moved mention is the edit route's");
+  assert.match(contract, /`baseRevision` is \*\*required\*\*/);
+});

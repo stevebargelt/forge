@@ -7,13 +7,16 @@
 //    verdict describes (the Refine editor's seed). Pure over the stored row — no subprocess.
 //
 //  * POST /api/backlog/<id>/edit — one ACTION_ROUTES row (action-mutation.ts). Body
-//    { projectKey, projectDir?, body, baseRevision? }. Shells exactly
-//    `forge backlog edit <id> --body - [--base-revision <n>]` with the body on the child's
+//    { projectKey, projectDir?, body, baseRevision }. Shells exactly
+//    `forge backlog edit <id> --body - --base-revision <n>` with the body on the child's
 //    STDIN — never argv —
 //    in the registry's own checkout, the actor carried as FORGE_ACTOR=dashboard (the CLI
 //    records it on `backlog.ticket_edited`). A body edit is reversible and visible, so there
 //    is no preview; the response carries the new revision and the re-run verdict. DB-mode
 //    projects only: the DB is the store of record, and a markdown file edit is not this.
+//    baseRevision is REQUIRED here (the CLI keeps --base-revision optional for terminal
+//    use): every editor holds the revision it was seeded from, and a save without one would
+//    bypass the compare-and-set — a retried or concurrent save would land a second edit.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { runInReadOnlyDbScope } from "@forge/store-db";
@@ -63,7 +66,7 @@ export function ticketIdOperand(raw: string): string | MutationRefusal {
   return value;
 }
 
-export type BacklogEditRequest = { projectKey: string; projectDir: string | undefined; body: string; baseRevision: number | undefined };
+export type BacklogEditRequest = { projectKey: string; projectDir: string | undefined; body: string; baseRevision: number };
 
 /** PURE: the body checked against the one shape the route takes. */
 export function parseBacklogEditRequest(input: unknown): BacklogEditRequest | MutationRefusal {
@@ -82,19 +85,17 @@ export function parseBacklogEditRequest(input: unknown): BacklogEditRequest | Mu
   if (bytes > MAX_TICKET_BODY_BYTES) return refuse(413, `body is ${bytes} bytes; a ticket body edited here is at most ${MAX_TICKET_BODY_BYTES} bytes (MAX_TICKET_BODY_BYTES).`);
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)) return refuse(400, "body must not contain control characters other than tab and newline.");
   const baseRevision = fields["baseRevision"];
-  if (baseRevision !== undefined && baseRevision !== null && !(typeof baseRevision === "number" && Number.isInteger(baseRevision) && baseRevision >= 0)) {
-    return refuse(400, "baseRevision must be a non-negative integer: the revision the editor was seeded from.");
+  if (!(typeof baseRevision === "number" && Number.isInteger(baseRevision) && baseRevision >= 0)) {
+    return refuse(400, "baseRevision is required and must be a non-negative integer: the revision the editor was seeded from.");
   }
-  return { projectKey, projectDir: projectDir ?? undefined, body, baseRevision: baseRevision ?? undefined };
+  return { projectKey, projectDir: projectDir ?? undefined, body, baseRevision };
 }
 
-/** THE ARGV. Exactly one shape; the body is never in it. The base revision, when the editor
- *  was seeded from one, is the CLI's compare-and-set operand — checked inside its write
- *  transaction, not just here before the spawn. */
-export function backlogEditArgv(ticketId: string, baseRevision?: number): string[] {
-  const argv = ["backlog", "edit", ticketId, "--body", "-"];
-  if (baseRevision !== undefined) argv.push("--base-revision", String(baseRevision));
-  return argv;
+/** THE ARGV. Exactly one shape; the body is never in it. The base revision is the CLI's
+ *  compare-and-set operand — checked inside its write transaction, not just here before the
+ *  spawn. */
+export function backlogEditArgv(ticketId: string, baseRevision: number): string[] {
+  return ["backlog", "edit", ticketId, "--body", "-", "--base-revision", String(baseRevision)];
 }
 
 // ─── the read ────────────────────────────────────────────────────────────────
@@ -197,13 +198,14 @@ export async function handleBacklogEditMutation(req: IncomingMessage, res: Serve
     return;
   }
   const previousRevision = before.report.revision;
-  // The fast path. The authoritative check is the CLI's compare-and-set (--base-revision).
-  if (request.baseRevision !== undefined && previousRevision !== null && request.baseRevision !== previousRevision) {
+  // The fast path. The authoritative check is the CLI's compare-and-set (--base-revision),
+  // which reads a never-revised row as r0.
+  if (request.baseRevision !== (previousRevision ?? 0)) {
     send(res, 409, {
       ok: false,
       action: ACTION,
       revision: previousRevision,
-      error: `${ticketId} is at revision r${previousRevision}, not r${request.baseRevision} the editor was seeded from — someone edited it meanwhile. Reload it and re-apply your change; nothing was written.`,
+      error: `${ticketId} is at revision r${previousRevision ?? 0}, not r${request.baseRevision} the editor was seeded from — someone edited it meanwhile. Reload it and re-apply your change; nothing was written.`,
     });
     return;
   }

@@ -645,7 +645,10 @@ test("integ FG-847: malformed edits and every shared POST guard refuse before a 
   const path = "/api/backlog/FG-847-EDIT/edit";
   assert.equal((await post(path, { body: { projectKey: PROJECT_KEY, body: "x".repeat(64 * 1024 + 1) } })).status, 413);
   assert.equal((await post(path, { body: { projectKey: PROJECT_KEY, body: 42 } })).status, 400);
-  assert.equal((await post("/api/backlog/FG-847-NOT-FOUND/edit", { body: { projectKey: PROJECT_KEY, body: FG847_READY } })).status, 404);
+  assert.equal((await post("/api/backlog/FG-847-NOT-FOUND/edit", { body: { projectKey: PROJECT_KEY, body: FG847_READY, baseRevision: 0 } })).status, 404);
+  const missing = await post(path, { body: { projectKey: PROJECT_KEY, body: FG847_READY } });
+  assert.equal(missing.status, 400, "the dashboard route requires the compare-and-set operand");
+  assert.match(String(missing.body["error"]), /baseRevision is required/);
   for (const [headers, expected] of [
     [{ Origin: "http://evil.example" }, 403],
     [{ "Sec-Fetch-Site": "cross-site" }, 403],
