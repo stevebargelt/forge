@@ -121,6 +121,18 @@ Use `forge doctor` any time you want to recheck readiness without touching files
 
 ---
 
+## Troubleshooting
+
+### A task fails with "detected dubious ownership in repository at '/project'", or `verification_environment_unavailable` / exit 122, on Docker Desktop
+
+Cause: Docker Desktop can present the bind-mounted project root (step 2's agent container mounts your project at `/project`) as owned by uid 0 while its contents — `.git` included — stay uid 1000, and Git refuses to operate in a repository it doesn't trust the ownership of. This is an ownership mismatch, not a broken mount or a corrupt checkout. See [Root-owned project mounts and exact-path git trust](concepts.md#worktree-git-access) for the full trust contract.
+
+Remedy: update to a Forge carrying FG-856 and rebuild the agent image (`./bin/forge-dev upgrade --skip-git --rebuild-image`, or `./docker/build.sh` directly) so the image itself trusts `/project`. If you only update Forge and haven't rebuilt yet, dispatch is still covered: the launcher injects the same exact-path trust exception into every container it starts, so an updated Forge works against an un-rebuilt image too.
+
+What not to do: don't `chown` files on the host to work around it, don't bypass or patch out the FG-559 git probe, and don't set `safe.directory *` (or a parent/recursive form) by hand — Forge grants trust for the exact project mount path only, never a blanket exception.
+
+---
+
 ## Final release check
 
 Run these to confirm the host is a clean, portable forge-on-forge release candidate. All commands are **read-only** — no agent dispatch, no DB mutation, no live provider spend.
