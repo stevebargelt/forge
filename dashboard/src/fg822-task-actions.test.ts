@@ -101,13 +101,13 @@ test("FG-822: awaiting_gate offers the three gate decisions, each labeled with i
   }
 });
 
-test("FG-822: the registry is closed — three task rows, FG-823's three attention rows, FG-834's two RACI rows and FG-835's two model-policy rows and FG-845's two attribution rows, seven verbs, none of the CLI-only capabilities", () => {
+test("FG-822: the registry is closed — three task rows, FG-823's three attention rows, FG-834's two RACI rows and FG-835's two model-policy rows, FG-845's two attribution rows and FG-847's ticket-body edit, eight verbs, none of the CLI-only capabilities", () => {
   assert.deepEqual(Object.keys(ACTION_ROUTES).sort(), [
-    "ai-attribution-host", "ai-attribution-project", "attention-dismiss", "attention-snooze", "attention-undismiss", "gate", "model-policy-apply", "model-policy-propose", "raci-apply", "raci-propose", "recover-re-drive", "retry",
+    "ai-attribution-host", "ai-attribution-project", "attention-dismiss", "attention-snooze", "attention-undismiss", "backlog-edit", "gate", "model-policy-apply", "model-policy-propose", "raci-apply", "raci-propose", "recover-re-drive", "retry",
   ]);
-  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "config", "gate", "model", "raci", "recover", "retry"]);
+  assert.deepEqual([...ACTION_FORGE_VERBS].sort(), ["attention", "backlog", "config", "gate", "model", "raci", "recover", "retry"]);
   assert.deepEqual([...new Set(Object.values(ACTION_ROUTES).map((r) => r.verb))].sort(), [...ACTION_FORGE_VERBS].sort());
-  const forbidden = ["dispatcher", "arm", "disarm", "max-active-runs", "cancel", "next", "route", "routing", "model-policy", "apply", "backlog", "--force"];
+  const forbidden = ["dispatcher", "arm", "disarm", "max-active-runs", "cancel", "next", "route", "routing", "model-policy", "apply", "--force"];
   for (const word of forbidden) {
     assert.ok(!(ACTION_FORGE_VERBS as readonly string[]).includes(word), `${word} is not an action verb`);
     assert.ok(!(QUEUE_MUTATION_FORGE_VERBS as readonly string[]).includes(word), `${word} is not a queue verb`);
@@ -115,7 +115,8 @@ test("FG-822: the registry is closed — three task rows, FG-823's three attenti
   }
   for (const path of ["/api/task/t/cancel", "/api/task/t/next", "/api/task/t/force", "/api/task/t/dispatcher-arm", "/api/task/t/actions", "/api/task/t",
     "/api/raci", "/api/raci/validate", "/api/raci/compile", "/api/route/compile", "/api/raci/apply/force",
-    "/api/model-policy", "/api/model-policy/apply/force", "/api/model-policy/migrate"]) {
+    "/api/model-policy", "/api/model-policy/apply/force", "/api/model-policy/migrate",
+    "/api/backlog/t/close", "/api/backlog/t/move", "/api/backlog/t/file", "/api/backlog/t/edit/force", "/api/backlog/t/readiness"]) {
     assert.equal(isActionMutationPath(path), false, `${path} is not a mutation route`);
   }
 });

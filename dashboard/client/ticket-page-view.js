@@ -4,9 +4,14 @@
 // Ticket ids are per project, so unlike the run and task pages this one reads WITH the
 // list scope in hand (?projectKey/?projectDir): unscoped, the runs list spans every
 // project's ticket of that id and the fields cannot be read at all.
+//
+// FG-847: the ticket's readiness (GET /api/backlog/:id/readiness) heads its fields, with the
+// Refine panel the Queue's inline refusal opens — here as the page's edit mode, restored by
+// `#backlog/<id>?mode=edit`. A Save's outcome renders beside the Refine control (FG-846's
+// placement), offering Enqueue now once the verdict permits it.
 
 import { h } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
 import { formatTimestamp } from "./format.js";
 import { badgeClass, statusClass, statusLabel } from "./status-tokens.js";
@@ -16,6 +21,10 @@ import { ticketHeader } from "./screen-header-render.js";
 import { hashFor } from "./view-routing.js";
 import { checkoutLabelForDir } from "./checkout-label.js";
 import { ObjectHead, useEscapeTo } from "./object-page-view.js";
+import { emptyOutcomes, outcomeFor, placeOutcome, recordOutcome } from "./action-outcome.js";
+import { RefinePanel, fetchReadiness } from "./refine-panel-view.js";
+import { isQueueable, savedOutcome } from "./refine-state.js";
+import { enqueueRequest, outcomePill, queueOutcomeEntry } from "./queue-board-state.js";
 
 const html = htm.bind(h);
 const TICKET_RUNS_POLL_MS = 30000;
@@ -54,7 +63,21 @@ function useTicketRuns(ticketId, scope) {
   return load.url === url ? load : { url, runs: null, error: null };
 }
 
-export function TicketPage({ ticketId, data, scope, projects }) {
+function useTicketReadiness(ticketId, scope) {
+  const projectKey = scope && scope.project ? scope.project : null;
+  const projectDir = projectKey && scope.checkout ? scope.checkout : null;
+  const [load, setLoad] = useState({ key: null, readiness: null, error: null });
+  const key = `${ticketId}\n${projectKey ?? ""}\n${projectDir ?? ""}`;
+  const read = useCallback(async () => {
+    if (!projectKey) return;
+    const got = await fetchReadiness(ticketId, { projectKey, projectDir });
+    setLoad({ key, readiness: got.ok ? got.readiness : null, error: got.ok ? null : got.error });
+  }, [key]);
+  useEffect(() => { void read(); }, [read]);
+  return { ...(load.key === key ? load : { readiness: null, error: null }), reload: read, projectKey, projectDir };
+}
+
+export function TicketPage({ ticketId, data, scope, projects, params = null, onReload = null }) {
   const runsLoad = useTicketRuns(ticketId, scope);
   const tickets = data && Array.isArray(data.tickets) ? data.tickets : [];
   const ticket = tickets.find((tk) => tk.id === ticketId) ?? null;
@@ -71,7 +94,8 @@ export function TicketPage({ ticketId, data, scope, projects }) {
         ? html`<div class="muted">loading ticket…</div>`
         : !ticket
         ? html`<div class="card muted" role="note">No ticket ${ticketId} in this project's backlog.</div>`
-        : html`<${TicketFields} ticket=${ticket} epic=${epic} projects=${projects} />`}
+        : html`<${TicketReadiness} ticketId=${ticketId} scope=${scope} editing=${params?.mode === "edit"} onReload=${onReload} />
+          <${TicketFields} ticket=${ticket} epic=${epic} projects=${projects} hideBody=${params?.mode === "edit"} />`}
       <section class="ticket-runs" aria-labelledby="ticket-runs-heading">
         <h2 id="ticket-runs-heading">Runs</h2>
         ${runsLoad.error
@@ -97,7 +121,92 @@ export function TicketPage({ ticketId, data, scope, projects }) {
   `;
 }
 
-function TicketFields({ ticket, epic, projects }) {
+/** The readiness line, the Refine control and its outcome, and — in edit mode — the panel. */
+function TicketReadiness({ ticketId, scope, editing, onReload }) {
+  const load = useTicketReadiness(ticketId, scope);
+  const [ledger, setLedger] = useState(emptyOutcomes);
+  const [pending, setPending] = useState(false);
+  const refineButton = useRef(null);
+  const wasEditing = useRef(editing);
+  const readiness = load.readiness;
+  const go = (mode) => {
+    window.location.hash = hashFor({ view: "backlog", id: ticketId, scope, params: mode ? { mode } : null });
+  };
+
+  // Leaving edit mode returns focus to the control that opened it.
+  useEffect(() => {
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (wasEditing.current && !editing && lost) refineButton.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
+
+  const enqueueNow = async () => {
+    const request = enqueueRequest(ticketId);
+    setPending(true);
+    try {
+      const q = new URLSearchParams({ projectKey: load.projectKey });
+      if (load.projectDir) q.set("projectDir", load.projectDir);
+      const res = await fetch(`${request.path}?${q.toString()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request.body) });
+      const payload = await res.json().catch(() => null);
+      const read = res.ok ? null : await fetchReadiness(ticketId, { projectKey: load.projectKey, projectDir: load.projectDir });
+      setLedger((l) => recordOutcome(l, "ticket", queueOutcomeEntry({ verb: "enqueue", ticketId, response: { status: res.status, payload }, readiness: read && read.ok ? read.readiness : null })));
+    } catch (err) {
+      setLedger((l) => recordOutcome(l, "ticket", queueOutcomeEntry({ verb: "enqueue", ticketId, response: { status: 0, payload: { error: String(err) } } })));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  if (!load.projectKey) return null;
+  if (load.error) return html`<div class="card ticket-readiness muted" role="note">Readiness unreadable: ${load.error}</div>`;
+  if (!readiness) return html`<div class="muted ticket-readiness">reading readiness…</div>`;
+
+  const outcome = outcomeFor(ledger, "ticket");
+  const label = isQueueable(readiness.outcome) ? "Edit body" : "Refine…";
+  const control = html`<button key="refine" type="button" ref=${refineButton} class="action-confirm ticket-refine" disabled=${editing} onClick=${() => go("edit")}>${label}</button>`;
+  return html`
+    <div class="ticket-readiness">
+      <div class="ticket-readiness-row">
+        <span class="muted">readiness</span>
+        <span class=${badgeClass("readiness", readiness.outcome)}>${statusLabel("readiness", readiness.outcome)}</span>
+        ${typeof readiness.revision === "number" ? html`<span class="mono faint">r${readiness.revision}</span>` : null}
+        ${readiness.stale ? html`<span class="faint" title="The assessment the queue board shows was recorded against an older revision.">recorded assessment is stale</span>` : null}
+        ${readiness.gaps.length > 0 && !editing ? html`<span class="muted ticket-readiness-gaps">${readiness.gaps.join("; ")}</span>` : null}
+        ${placeOutcome(control, outcome, (o) => {
+          const pill = outcomePill(o);
+          return html`
+            <div class="action-outcome-line">
+              <span class=${badgeClass(pill.vocab, pill.value)}>${pill.text}</span>${" "}
+              <span class="action-outcome-message">${o.message}</span>
+              ${o.kind === "saved" && o.ok
+                ? html`${" "}<button type="button" class="action-confirm queue-enqueue-now" disabled=${pending} onClick=${enqueueNow}>Enqueue now</button>`
+                : null}
+              <span class="faint action-outcome-hint">${" "}Esc returns focus to the ${label} control</span>
+            </div>
+          `;
+        })}
+      </div>
+      ${editing
+        ? html`<${RefinePanel}
+            key=${`${readiness.revision}`}
+            ticketId=${ticketId}
+            readiness=${readiness}
+            projectKey=${load.projectKey}
+            projectDir=${load.projectDir}
+            onSaved=${(payload) => {
+              setLedger((l) => recordOutcome(l, "ticket", savedOutcome(ticketId, payload)));
+              void load.reload();
+              if (onReload) onReload();
+              go(null);
+            }}
+            onCancel=${() => go(null)}
+          />`
+        : null}
+    </div>
+  `;
+}
+
+function TicketFields({ ticket, epic, projects, hideBody = false }) {
   return html`
     <div class="ticket-fields">
       <div class="row" style="gap: 8px; flex-wrap: wrap; margin: 12px 0; align-items: baseline;">
@@ -114,7 +223,9 @@ function TicketFields({ ticket, epic, projects }) {
           ${ticket.related && ticket.related.length ? html`<span><span class="muted">related:</span> ${ticket.related.join(", ")}</span>` : null}
         </div>
       </div>` : null}
-      ${ticket.body && ticket.body.trim()
+      ${hideBody
+        ? null
+        : ticket.body && ticket.body.trim()
         ? html`<div class="md ticket-body" dangerouslySetInnerHTML=${{ __html: md(ticket.body) }}></div>`
         : html`<div class="muted faint">No body content.</div>`}
     </div>

@@ -9,7 +9,23 @@
 import type { Command } from "commander";
 import { resolve } from "node:path";
 import { readTicket } from "../../backlog/structured.js";
+import { resolveBacklogStore } from "../../backlog/storage-mode.js";
 import { evaluateReadiness } from "../../readiness/readiness.js";
+import { readinessReport, type ReadinessReport } from "../../store/queue.js";
+
+/** FG-847: a DB-mode ticket answers through readinessReport — the derivation the
+ *  dashboard's GET /api/backlog/<id>/readiness serves. A markdown-mode ticket has no
+ *  revision and no recorded assessment, so those read null/false. */
+function reportFor(projectDir: string, ticketId: string): ReadinessReport {
+  const store = resolveBacklogStore(projectDir);
+  if (store.mode === "db") {
+    const report = readinessReport(store.projectKey, ticketId);
+    if (!report) throw new Error(`Ticket ${ticketId} not found`);
+    return report;
+  }
+  const result = evaluateReadiness(readTicket(projectDir, ticketId));
+  return { ticketId, ...result, revision: null, evaluatedAt: null, stale: false };
+}
 
 export function registerReadiness(program: Command): void {
   program
@@ -19,25 +35,13 @@ export function registerReadiness(program: Command): void {
       "Evaluate a ticket's structural readiness for implementation. Mechanical check only — does not assess semantic quality or operator-instruction reconciliation (orchestrator's job). Read-only.",
     )
     .option("--project <dir>", "project directory (default: cwd)")
-    .option("--json", "emit { ticketId, outcome, gaps, refinementProposal } as JSON")
+    .option("--json", "emit { ticketId, outcome, gaps, refinementProposal, revision, evaluatedAt, stale } as JSON")
     .action((ticketId: string, opts: { project?: string; json?: boolean }) => {
       const projectDir = resolve(opts.project ?? process.cwd());
-      const ticket = readTicket(projectDir, ticketId);
-      const result = evaluateReadiness(ticket);
+      const result = reportFor(projectDir, ticketId);
 
       if (opts.json) {
-        console.log(
-          JSON.stringify(
-            {
-              ticketId,
-              outcome: result.outcome,
-              gaps: result.gaps,
-              refinementProposal: result.refinementProposal,
-            },
-            null,
-            2,
-          ),
-        );
+        console.log(JSON.stringify(result, null, 2));
         return;
       }
 

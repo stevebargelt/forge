@@ -774,7 +774,7 @@ function App() {
           : html`<${RolesIndexView} params=${route.params} scope=${scope} />`
         : view === "backlog"
         ? route.id
-          ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} />`
+          ? html`<${TicketPage} key=${route.id} ticketId=${route.id} data=${backlog} scope=${scope} projects=${projects} params=${route.params} onReload=${pollBacklog} />`
           : html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} scope=${scope} projects=${projects} params=${route.params} />`
         : view === "notes"
         ? route.id

@@ -30,6 +30,8 @@
  *  ticket names, plus the sixth state the projection had no name for: an operator
  *  dequeue never releases a live claim (D4), so "not a queue member AND executing"
  *  is real and reachable. Rendering it as a gap makes a live container a phantom. */
+import { statusLabel } from "./status-tokens.js";
+
 export const BOARD_COLUMNS = [
   {
     view: "backlog",
@@ -513,4 +515,46 @@ export function mutationOutcome(response) {
     blocking: true,
     hint: null,
   };
+}
+
+// ─── FG-846: the outcome at the point of action ─────────────────────────────
+
+const APPLIED_PILLS = { enqueue: "enqueued", dequeue: "dequeued", rank: "moved", reorder: "moved" };
+
+/** The readiness outcomes that permit an enqueue (QUEUEABLE_OUTCOMES in src/store/queue.ts). */
+const QUEUEABLE_VERDICTS = new Set(["ready", "exploratory"]);
+
+/**
+ * The inline outcome of one queue mutation, for the ledger in action-outcome.js: the
+ * applied result (the CLI's own message) or the refusal text verbatim. A refused enqueue
+ * carries the ticket's readiness (GET /api/backlog/<id>/readiness) when the caller read it;
+ * `verdict` is that readiness outcome only when it is what refused the enqueue.
+ *
+ * @param {{verb: string, ticketId: string|null, response: {status: number, payload: any}, readiness?: any}} input
+ */
+export function queueOutcomeEntry({ verb, ticketId, response, readiness = null }) {
+  const result = mutationOutcome(response);
+  const cli = response?.payload?.result;
+  const message = result.ok
+    ? (cli && typeof cli.message === "string" && cli.message) || `${verb} applied`
+    : result.message;
+  const verdict = !result.ok && readiness && typeof readiness.outcome === "string" && !QUEUEABLE_VERDICTS.has(readiness.outcome) ? readiness.outcome : null;
+  return { ...result, verb, ticketId: ticketId ?? null, message, readiness: result.ok ? null : readiness, verdict };
+}
+
+/** The pill an outcome leads with: which token vocabulary paints it, the value, the text. */
+export function outcomePill(outcome) {
+  if (outcome.kind === "saved") {
+    const rev = typeof outcome.revision === "number" ? ` · r${outcome.revision}` : "";
+    return { vocab: "readiness", value: outcome.verdict, text: `${statusLabel("readiness", outcome.verdict)}${rev}` };
+  }
+  if (outcome.ok) return { vocab: "outcome", value: "applied", text: APPLIED_PILLS[outcome.verb] ?? "applied" };
+  if (outcome.verdict) return { vocab: "readiness", value: outcome.verdict, text: `refused · ${statusLabel("readiness", outcome.verdict)}` };
+  if (outcome.kind === "stale_version") return { vocab: "outcome", value: "refused", text: "refused · queue moved" };
+  return { vocab: "outcome", value: "refused", text: outcome.kind === "error" ? "failed" : "refused" };
+}
+
+/** Whether an outcome offers Refine…: a refusal whose readiness verdict is needs_refinement. */
+export function offersRefine(outcome) {
+  return Boolean(outcome && outcome.readiness && outcome.readiness.outcome === "needs_refinement" && typeof outcome.readiness.body === "string");
 }

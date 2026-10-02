@@ -11,6 +11,8 @@ export interface Route {
   tabAliases?: Record<string, string>;
   params?: string[];
   paramValues?: Record<string, string[]>;
+  objectParams?: string[];
+  objectParamValues?: Record<string, string[]>;
   aliases: string[];
 }
 export interface HashScope {

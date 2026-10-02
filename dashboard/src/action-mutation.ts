@@ -45,9 +45,14 @@
 // the host default, each shelling `forge config set|unset ai-attribution … --actor
 // dashboard`, `--project` from the registry. ai-attribution-mutation.ts carries the rest.
 //
+// ─── THE TICKET-BODY EDIT ROW (FG-847) ────────────────────────────────────────
+// Replace a DB-mode ticket's body, shelling exactly `forge backlog edit <id> --body -`
+// with the body on the child's stdin (never argv), the actor as FORGE_ACTOR=dashboard.
+// No preview: a body edit is reversible and visible. backlog-edit-mutation.ts carries it.
+//
 // ─── WHAT IS NOT HERE, AND CANNOT BE REACHED FROM HERE ───────────────────────
 // Arming or disarming the dispatcher, max_active_runs, cancel, next, route compile/
-// validate, `--allow-undispatchable`, backlog edits, and any `--force`. The verb set is a closed
+// validate, `--allow-undispatchable`, any other backlog verb, and any `--force`. The verb set is a closed
 // exported constant, the argv builder can emit nothing outside it, and a test asserts
 // both over the table rather than trusting this comment.
 
@@ -61,6 +66,7 @@ import type { ProjectRecord, TaskActionFacts } from "./queries.js";
 import { RACI_PATH, handleRaciMutation } from "./raci-mutation.js";
 import { MODEL_POLICY_PATH, handleModelPolicyMutation } from "./model-policy-mutation.js";
 import { AI_ATTRIBUTION_PATH, handleAiAttributionMutation } from "./ai-attribution-mutation.js";
+import { BACKLOG_EDIT_PATH, handleBacklogEditMutation, type TicketIdentity } from "./backlog-edit-mutation.js";
 import {
   CHILD_TIMEOUT_MS,
   MAX_CONCURRENT_MUTATIONS,
@@ -81,7 +87,8 @@ import {
 
 /** The action routes, as a CLOSED table: one row per action, each naming the ONE `forge`
  *  verb it shells — the three task actions, the three attention-row actions, the two
- *  RACI rows, the two model-policy rows, then the two attribution rows. */
+ *  RACI rows, the two model-policy rows, the two attribution rows, then the ticket-body
+ *  edit. */
 export const ACTION_ROUTES = {
   gate: { path: "/api/task/:id/gate", verb: "gate" },
   retry: { path: "/api/task/:id/retry", verb: "retry" },
@@ -95,6 +102,7 @@ export const ACTION_ROUTES = {
   "model-policy-apply": { path: "/api/model-policy/apply", verb: "model" },
   "ai-attribution-project": { path: "/api/ai-attribution/project", verb: "config" },
   "ai-attribution-host": { path: "/api/ai-attribution/host", verb: "config" },
+  "backlog-edit": { path: "/api/backlog/:id/edit", verb: "backlog" },
 } as const;
 
 export type ActionRoute = keyof typeof ACTION_ROUTES;
@@ -102,7 +110,7 @@ export type TaskAction = Extract<ActionRoute, "gate" | "retry" | "recover-re-dri
 export type AttentionAction = Extract<ActionRoute, "attention-dismiss" | "attention-snooze" | "attention-undismiss">;
 
 /** The ONLY `forge` verbs this registry can ever spawn. */
-export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention", "raci", "model", "config"] as const;
+export const ACTION_FORGE_VERBS = ["gate", "retry", "recover", "attention", "raci", "model", "config", "backlog"] as const;
 
 export type ActionForgeVerb = (typeof ACTION_FORGE_VERBS)[number];
 
@@ -126,7 +134,7 @@ const MAX_RATIONALE_CHARS = 4000;
 const MAX_ACTION_BODY_BYTES = 16 * 1024;
 
 export function isActionMutationPath(path: string): boolean {
-  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path) || RACI_PATH.test(path) || MODEL_POLICY_PATH.test(path) || AI_ATTRIBUTION_PATH.test(path);
+  return ACTION_PATH.test(path) || ATTENTION_PATH.test(path) || RACI_PATH.test(path) || MODEL_POLICY_PATH.test(path) || AI_ATTRIBUTION_PATH.test(path) || BACKLOG_EDIT_PATH.test(path);
 }
 
 /** The raw task-id segment of a preview path, or null. */
@@ -398,8 +406,10 @@ const DASHBOARD_DIR = resolve(HERE, "..");
 export type ActionMutationContext = {
   /** Resolved only after every header guard has passed. */
   lookupTask: (taskId: string) => TaskActionFacts | null;
-  /** The RACI, model-policy and attribution rows' project, by registry key — resolved only after every guard. */
+  /** The RACI, model-policy, attribution and ticket-edit rows' project, by registry key — resolved only after every guard. */
   resolveProject: (projectKey: string) => ProjectRecord | undefined;
+  /** The ticket-edit row's store identity for a resolved project. */
+  ticketIdentity: (project: ProjectRecord) => TicketIdentity;
 };
 
 /** Handle one POST to a task-action route. The ORDER is the security property: every
@@ -424,6 +434,10 @@ export async function handleActionMutation(
   }
   if (AI_ATTRIBUTION_PATH.test(path)) {
     await handleAiAttributionMutation(req, res, path, { resolveProject: context.resolveProject, actor: ACTION_ACTOR });
+    return;
+  }
+  if (BACKLOG_EDIT_PATH.test(path)) {
+    await handleBacklogEditMutation(req, res, path, { resolveProject: context.resolveProject, ticketIdentity: context.ticketIdentity, actor: ACTION_ACTOR });
     return;
   }
   const m = path.match(ACTION_PATH);

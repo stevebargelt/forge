@@ -43,6 +43,7 @@ import {
   getIdSequence,
   getStorageMode,
   getStorageModeRecord,
+  getTicket,
   liveBacklogSources,
   recordModeFlip,
   setStorageMode,
@@ -74,6 +75,7 @@ import {
   ContainerMutationRefused,
 } from "../../backlog/container-authority.js";
 import { listCampaigns } from "../../store/campaigns.js";
+import { logEvent } from "../../store/events.js";
 import { listRuns } from "../../store/runs.js";
 import {
   closeTicket as closeStructuredTicket,
@@ -304,8 +306,30 @@ export function registerBacklog(program: Command): void {
       const bodyRaw = readBodyArg(opts.body);
       const ticket = readTicket(dir, idArg);
       const updated = { ...ticket, body: bodyRaw };
+      const store = resolveBacklogStore(dir);
+      const previousRevision = store.mode === "db" ? getTicket(store.projectKey, idArg)?.revision ?? null : null;
       writeTicket(dir, updated);
-      console.log(`Updated body of ${idArg}`);
+      if (store.mode !== "db") {
+        console.log(`Updated body of ${idArg}`);
+        return;
+      }
+      const revision = getTicket(store.projectKey, idArg)?.revision ?? null;
+      // FG-847: the audit record of a body edit. The actor is FORGE_ACTOR when the caller
+      // set it (the dashboard's edit route does), else $USER.
+      const actor = process.env["FORGE_ACTOR"]?.trim() || process.env["USER"] || "operator";
+      try {
+        logEvent("backlog.ticket_edited", {
+          payload: { projectKey: store.projectKey, ticketId: idArg, previousRevision, revision, actor, bodyBytes: Buffer.byteLength(bodyRaw, "utf8") },
+        });
+      } catch (err) {
+        console.error(
+          `forge: the body of ${idArg} was updated (revision ${revision}), but the backlog.ticket_edited event could not be recorded: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Updated body of ${idArg} (revision ${revision})`);
     });
 
   // ----- retitle -----

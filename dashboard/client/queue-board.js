@@ -10,16 +10,24 @@
 // so "the board groups by the server's partition" is a pinned claim rather than a
 // property of JSX nobody can assert.
 //
+// FG-846: every mutation's outcome ALSO renders where the operator acted — the next
+// sibling of the enqueue control, or of the card's action button — focused on arrival and
+// announced (action-outcome.js); the top-of-page alert stays as the page-level record. A
+// needs_refinement refusal opens FG-847's Refine panel in place (refine-panel-view.js).
+//
 // ACCESSIBILITY: reordering is not drag-only. Every queued card is a listitem with
 // keyboard grab (Enter/Space) and Arrow-key movement, because a mouse-only reorder is
 // a mouse-only queue. Both paths funnel through the same planRelativeMove.
 
 import { h } from "preact";
-import { useState, useCallback, useRef } from "preact/hooks";
+import { useState, useCallback, useEffect, useRef } from "preact/hooks";
 import htm from "htm";
 import { formatDuration } from "./format.js";
 import { badgeClass, statusLabel } from "./status-tokens.js";
 import { hashFor } from "./view-routing.js";
+import { dismissOutcome, emptyOutcomes, outcomeFor, pillFor, placeOutcome, recordOutcome, updateOutcome } from "./action-outcome.js";
+import { RefinePanel, fetchReadiness } from "./refine-panel-view.js";
+import { savedOutcome } from "./refine-state.js";
 import {
   BOARD_COLUMNS,
   laneIsCompact,
@@ -34,6 +42,9 @@ import {
   enqueueRequest,
   dequeueRequest,
   mutationOutcome,
+  queueOutcomeEntry,
+  outcomePill,
+  offersRefine,
 } from "./queue-board-state.js";
 
 const html = htm.bind(h);
@@ -57,13 +68,23 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
   const [outcome, setOutcome] = useState(null);
   const [enqueueId, setEnqueueId] = useState("");
   const [grabbed, setGrabbed] = useState(null);
+  const [ledger, setLedger] = useState(emptyOutcomes);
   const dragging = useRef(null);
+  const projectKey = projectFilter?.key ?? null;
+
+  // A board for another project is another board: its outcomes do not carry over.
+  useEffect(() => setLedger(emptyOutcomes()), [projectKey, checkoutFilter]);
 
   const state = queueBoardState(data, { projectSelected: Boolean(projectFilter) });
+  const readinessScope = { projectKey, projectDir: checkoutFilter ?? null };
+
+  const record = (key, entry) => setLedger((current) => recordOutcome(current, key, entry));
 
   const submit = useCallback(
-    async (request, describe) => {
+    async (request, describe, key = null) => {
       if (!request) return;
+      const verb = request.path.slice(request.path.lastIndexOf("/") + 1);
+      const ticketId = typeof request.body?.ticketId === "string" ? request.body.ticketId : null;
       setPending(describe);
       try {
         const res = await fetch(`${request.path}${scopeQuery(projectFilter, checkoutFilter)}`, {
@@ -81,6 +102,13 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
         }
         const result = mutationOutcome({ status: res.status, payload });
         setOutcome(result);
+        if (key) {
+          // A refused enqueue reads the ticket's readiness so the outcome can show the gaps
+          // and the proposal, and offer Refine (FG-847).
+          const read = !result.ok && verb === "enqueue" && ticketId ? await fetchReadiness(ticketId, { projectKey, projectDir: checkoutFilter ?? null }) : null;
+          record(key, queueOutcomeEntry({ verb, ticketId, response: { status: res.status, payload }, readiness: read && read.ok ? read.readiness : null }));
+          if (result.ok && key === "controls") setEnqueueId("");
+        }
         // A REFUSAL IS NEVER SWALLOWED INTO A RELOAD. Only an applied mutation
         // re-reads the board; a stale-version refusal keeps its message on screen and
         // makes the operator reload deliberately, because the order they composed the
@@ -88,11 +116,12 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
         if (result.ok && onReload) onReload();
       } catch (err) {
         setOutcome(mutationOutcome({ status: 0, payload: { error: String(err) } }));
+        if (key) record(key, queueOutcomeEntry({ verb, ticketId, response: { status: 0, payload: { error: String(err) } } }));
       } finally {
         setPending(null);
       }
     },
-    [projectFilter, checkoutFilter, onReload],
+    [projectFilter, checkoutFilter, onReload, projectKey],
   );
 
   const move = useCallback(
@@ -101,20 +130,43 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
       if (!planned) return;
       const request = rankRequest(planned, state.version);
       if (!request) {
-        setOutcome({
+        const refusal = {
           ok: false,
           kind: "refused",
           verb: null,
           blocking: true,
           needsReload: true,
           message: "This board has no queue version loaded, so a reorder cannot be submitted safely. Reload the board.",
-        });
+        };
+        setOutcome(refusal);
+        record(`card:${ticketId}`, { ...refusal, verb: "rank", ticketId: null });
         return;
       }
-      void submit(request, `${planned.placement === "before" ? "moving" : "moving"} ${ticketId} ${planned.placement} ${planned.reference}`);
+      void submit(request, `${planned.placement === "before" ? "moving" : "moving"} ${ticketId} ${planned.placement} ${planned.reference}`, `card:${ticketId}`);
     },
     [state.queuedIds, state.version, submit],
   );
+
+  // The handlers every inline outcome shares — the controls block's and each card's.
+  const outcomeHandlers = {
+    scope: readinessScope,
+    onDismiss: (key) => {
+      setLedger((current) => dismissOutcome(current, key));
+      focusControlOf(key);
+    },
+    onRefine: (key, entry) => {
+      setLedger((current) => (outcomeFor(current, key) ? updateOutcome(current, key, { refineOpen: true }) : recordOutcome(current, key, { ...entry, refineOpen: true })));
+    },
+    onRefineClose: (key) => {
+      setLedger((current) => updateOutcome(current, key, { refineOpen: false }));
+      focusOutcome(key);
+    },
+    onSaved: (key, ticketId, payload) => {
+      record(key, savedOutcome(ticketId, payload));
+      if (onReload) onReload();
+    },
+    onEnqueueNow: (key, ticketId) => void submit(enqueueRequest(ticketId), `enqueueing ${ticketId}`, key),
+  };
 
   if (state.kind === "no-project") {
     return html`<div class="muted queue-empty">Select a project to see its work queue.</div>`;
@@ -147,7 +199,7 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
             ${outcome.hint ? html`<div class="muted queue-alert-detail">${outcome.hint}</div>` : null}
             <div class="queue-alert-actions">
               ${outcome.needsReload && onReload
-                ? html`<button class="usage-dim-btn" onClick=${() => { setOutcome(null); onReload(); }}>reload board</button>`
+                ? html`<button class="usage-dim-btn" onClick=${() => { setOutcome(null); setLedger(emptyOutcomes()); onReload(); }}>reload board</button>`
                 : null}
               <button class="usage-dim-btn" onClick=${() => setOutcome(null)}>dismiss</button>
             </div>
@@ -166,10 +218,11 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
               onEnqueue=${() => {
                 const id = enqueueId.trim();
                 if (!id) return;
-                setEnqueueId("");
-                void submit(enqueueRequest(id), `enqueueing ${id}`);
+                void submit(enqueueRequest(id), `enqueueing ${id}`, "controls");
               }}
               pending=${pending}
+              outcome=${outcomeFor(ledger, "controls")}
+              handlers=${outcomeHandlers}
             />
 
             ${state.kind === "empty"
@@ -188,8 +241,10 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
                         pending=${pending}
                         onGrab=${setGrabbed}
                         onMove=${move}
-                        onDequeue=${(id) => void submit(dequeueRequest(id), `dequeueing ${id}`)}
-                        onEnqueue=${(id) => void submit(enqueueRequest(id), `enqueueing ${id}`)}
+                        onDequeue=${(id) => void submit(dequeueRequest(id), `dequeueing ${id}`, `card:${id}`)}
+                        onEnqueue=${(id) => void submit(enqueueRequest(id), `enqueueing ${id}`, `card:${id}`)}
+                        ledger=${ledger}
+                        handlers=${outcomeHandlers}
                         dragging=${dragging}
                       />`;
                     })}
@@ -200,7 +255,10 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
   `;
 }
 
-function QueueControls({ state, enqueueId, onEnqueueIdChange, onEnqueue, pending }) {
+function QueueControls({ state, enqueueId, onEnqueueIdChange, onEnqueue, pending, outcome, handlers }) {
+  const enqueueButton = html`<button key="enqueue" class="usage-dim-btn queue-enqueue-btn" onClick=${onEnqueue} disabled=${Boolean(pending) || enqueueId.trim() === ""}>
+          enqueue
+        </button>`;
   return html`
     <section class="queue-controls card" aria-label="Queue planning controls">
       <div class="queue-controls-row">
@@ -214,9 +272,7 @@ function QueueControls({ state, enqueueId, onEnqueueIdChange, onEnqueue, pending
           onInput=${(e) => onEnqueueIdChange(e.target.value)}
           onKeyDown=${(e) => { if (e.key === "Enter") onEnqueue(); }}
         />
-        <button class="usage-dim-btn" onClick=${onEnqueue} disabled=${Boolean(pending) || enqueueId.trim() === ""}>
-          enqueue
-        </button>
+        ${placeOutcome(enqueueButton, outcome, (o) => html`<${QueueOutcome} outcome=${o} outcomeKey="controls" control="the enqueue control" handlers=${handlers} />`)}
         <span class="muted queue-version" title="The order-affecting queue event this board loaded. Every reorder carries it, so a queue that moved underneath the page refuses instead of being clobbered.">
           queue version <span class="mono">${state.version}</span>
         </span>
@@ -262,7 +318,7 @@ function LaneStrip({ columns, selected, scope }) {
   `;
 }
 
-function BoardColumn({ column, selected, state, grabbed, pending, onGrab, onMove, onDequeue, onEnqueue, dragging }) {
+function BoardColumn({ column, selected, state, grabbed, pending, onGrab, onMove, onDequeue, onEnqueue, ledger, handlers, dragging }) {
   if (!column) return null;
   const reorderable = column.view === "queued";
   const compact = laneIsCompact(column.rows.length);
@@ -313,6 +369,9 @@ function BoardColumn({ column, selected, state, grabbed, pending, onGrab, onMove
                 onMove=${onMove}
                 onDequeue=${onDequeue}
                 onEnqueue=${onEnqueue}
+                outcome=${outcomeFor(ledger, `card:${row.ticketId}`)}
+                pill=${pillFor(ledger, row.ticketId)}
+                handlers=${handlers}
                 onDragStartId=${(id) => { dragging.current = id; }}
                 onDropAt=${onDrop}
               />
@@ -335,10 +394,17 @@ function QueueCard({
   onMove,
   onDequeue,
   onEnqueue,
+  outcome,
+  pill,
+  handlers,
   onDragStartId,
   onDropAt,
 }) {
   const badge = waitBadge(row);
+  const cardKey = `card:${row.ticketId}`;
+  const actionButton = row.queued
+    ? html`<button key="action" class="usage-dim-btn queue-card-action" disabled=${disabled} onClick=${() => onDequeue(row.ticketId)} title=${DEQUEUE_NOTE}>dequeue</button>`
+    : html`<button key="action" class="usage-dim-btn queue-card-action" disabled=${disabled} onClick=${() => onEnqueue(row.ticketId)}>enqueue</button>`;
   const [expanded, setExpanded] = useState(false);
 
   // KEYBOARD REORDER. Same plan, same submission, same version as the drag path —
@@ -445,15 +511,89 @@ function QueueCard({
         : null}
 
       <div class="queue-card-actions">
-        ${row.queued
-          ? html`<button class="usage-dim-btn" disabled=${disabled} onClick=${() => onDequeue(row.ticketId)} title=${DEQUEUE_NOTE}>dequeue</button>`
-          : html`<button class="usage-dim-btn" disabled=${disabled} onClick=${() => onEnqueue(row.ticketId)}>enqueue</button>`}
+        ${placeOutcome(
+          actionButton,
+          outcome,
+          (o) => html`<${QueueOutcome} outcome=${o} outcomeKey=${cardKey} control=${o.verb === "rank" ? "the card" : `the ${row.queued ? "dequeue" : "enqueue"} control`} handlers=${handlers} />`,
+          // A reorder is triggered by the card itself (drag, or Enter then an arrow).
+          { returnFocus: outcome && outcome.verb === "rank" ? (el) => el.closest("li") : null },
+        )}
+        ${pill
+          ? html`<span key="pill" class="queue-refusal-pill">
+              <span class=${badgeClass(pill.verdict ? "readiness" : "outcome", pill.verdict ?? "refused")}>${pill.verdict ? statusLabel("readiness", pill.verdict) : "refused"}</span>
+              <span class="faint">${` · refused ${elapsed(Date.now() - pill.at)} ago`}</span>
+              ${offersRefine(pill.outcome) && !outcome
+                ? html`${" — "}<button type="button" class="link-btn queue-pill-refine" onClick=${() => handlers.onRefine(cardKey, pill.outcome)}>Refine…</button>`
+                : null}
+            </span>`
+          : null}
         ${reorderable
           ? html`<span class="faint queue-card-reorder-hint">drag, or focus and press Enter then ↑/↓</span>`
           : null}
       </div>
       </div>
     </li>
+  `;
+}
+
+function outcomeElement(key) {
+  return typeof document === "undefined" ? null : document.querySelector(`[data-outcome-key="${CSS.escape(key)}"]`);
+}
+
+/** After the panel closes, focus returns to the outcome it opened from. */
+function focusOutcome(key) {
+  setTimeout(() => outcomeElement(key)?.focus(), 0);
+}
+
+/** After Dismiss, focus returns to the control (the outcome's previous sibling). */
+function focusControlOf(key) {
+  const control = outcomeElement(key)?.previousElementSibling;
+  setTimeout(() => control?.focus(), 0);
+}
+
+/** The content of one queue outcome: the pill, the CLI's text verbatim, and — for a
+ *  needs_refinement refusal — the gaps, the proposal and Refine (FG-847). */
+function QueueOutcome({ outcome, outcomeKey, control, handlers }) {
+  const pill = outcomePill(outcome);
+  const readiness = outcome.readiness;
+  const ticketId = outcome.ticketId;
+  const ticketHash = ticketId && handlers.scope.projectKey ? hashFor({ view: "backlog", id: ticketId, scope: { project: handlers.scope.projectKey } }) : null;
+  const canEnqueueNow = outcome.kind === "saved" && outcome.ok && ticketId;
+  return html`
+    <div class="action-outcome-line">
+      <span class=${badgeClass(pill.vocab, pill.value)}>${pill.text}</span>${" "}
+      <span class="action-outcome-message">${outcome.message}</span>
+      ${canEnqueueNow
+        ? html`${" "}<button type="button" class="action-confirm queue-enqueue-now" onClick=${() => handlers.onEnqueueNow(outcomeKey, ticketId)}>Enqueue now</button>`
+        : null}
+    </div>
+    ${outcome.refineOpen && offersRefine(outcome)
+      ? html`<${RefinePanel}
+          ticketId=${ticketId}
+          readiness=${readiness}
+          projectKey=${handlers.scope.projectKey}
+          projectDir=${handlers.scope.projectDir}
+          onSaved=${(payload) => handlers.onSaved(outcomeKey, ticketId, payload)}
+          onCancel=${() => handlers.onRefineClose(outcomeKey)}
+        />`
+      : html`
+          ${!outcome.ok && readiness && Array.isArray(readiness.gaps) && readiness.gaps.length > 0
+            ? html`<ul class="action-outcome-gaps" aria-label="Readiness gaps">
+                ${readiness.gaps.map((gap) => html`<li key=${gap}>${gap}</li>`)}
+              </ul>`
+            : null}
+          ${!outcome.ok && readiness && readiness.refinementProposal
+            ? html`<div class="muted action-outcome-proposal">Proposal: ${readiness.refinementProposal}</div>`
+            : null}
+          <div class="action-outcome-actions">
+            ${offersRefine(outcome)
+              ? html`<button type="button" class="action-confirm queue-refine" onClick=${() => handlers.onRefine(outcomeKey, outcome)}>Refine…</button>`
+              : null}
+            ${ticketHash && !outcome.ok ? html`<a class="action-cancel queue-open-ticket" href=${ticketHash}>Open ticket</a>` : null}
+            <button type="button" class="action-cancel queue-outcome-dismiss" onClick=${() => handlers.onDismiss(outcomeKey)}>Dismiss</button>
+            <span class="faint action-outcome-hint">Esc returns focus to ${control}</span>
+          </div>
+        `}
   `;
 }
 

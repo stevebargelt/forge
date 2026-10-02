@@ -27,6 +27,9 @@
 // that is unique and stable across label changes.
 // FG-835: `#models?mode=edit&target=host|project` is the model-policy editor; `target`
 // omitted means the scoped project's override when it has one, else the host file.
+// FG-847: `objectParams` are the parameters an OBJECT page owns (a route's `params` belong
+// to its list and are dropped once an id is present): `#backlog/<id>?mode=edit` restores
+// the ticket page's Refine panel.
 // FG-844: `#queue?lane=<view>` names the lane the under-900px strip shows (the values are
 // queue-board-state.js's BOARD_VIEWS); an unknown lane is dropped, and the board then shows
 // its first lane with cards.
@@ -50,7 +53,7 @@ export const GROUPS = Object.freeze([
 export const ROUTES = Object.freeze({
   home: { group: "now", label: "Home", path: "#home", scope: "optional", object: "none", aliases: [] },
   activity: { group: "now", label: "Activity", path: "#activity", scope: "optional", object: "none", aliases: [] },
-  backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", params: ["type", "status"], paramValues: { type: ["epic", "story", "idea"], status: ["all", "blocked", "deferred", "done"] }, aliases: [] },
+  backlog: { group: "plan", label: "Backlog", path: "#backlog[/<ticketId>]", scope: "optional", object: "optional", params: ["type", "status"], paramValues: { type: ["epic", "story", "idea"], status: ["all", "blocked", "deferred", "done"] }, objectParams: ["mode"], objectParamValues: { mode: ["edit"] }, aliases: [] },
   notes: { group: "plan", label: "Notes", path: "#notes[/<checkout>]", scope: "optional", checkout: true, object: "optional", aliases: [] },
   queue: { group: "plan", label: "Queue", path: "#queue", scope: "project", object: "none", params: ["lane"], paramValues: { lane: ["backlog", "queued", "in_progress", "blocked", "done", "executing_not_queued"] }, aliases: [] },
   campaigns: { group: "plan", label: "Campaigns", path: "#campaigns[/<campaignId>]", scope: "optional", object: "optional", aliases: [] },
@@ -123,11 +126,20 @@ function safeDecode(segment) {
   }
 }
 
+/** The parameter names a location owns, and their closed value sets: the object page's
+ *  `objectParams` when an id is present, else the route's own `params`. */
+function ownedParams(route, id) {
+  return route.object !== "none" && id
+    ? { keys: route.objectParams ?? [], values: route.objectParamValues }
+    : { keys: route.params ?? [], values: route.paramValues };
+}
+
 function routeParams(route, params, id) {
-  if (!route.params || !params || (route.object !== "none" && id)) return [];
-  return route.params
+  const { keys, values } = ownedParams(route, id);
+  if (!params) return [];
+  return keys
     .filter((key) => typeof params[key] === "string" && params[key] !== "")
-    .filter((key) => !route.paramValues?.[key] || route.paramValues[key].includes(params[key]))
+    .filter((key) => !values?.[key] || values[key].includes(params[key]))
     .map((key) => `${key}=${encodeURIComponent(params[key])}`);
 }
 
@@ -200,12 +212,10 @@ export function parseHash(hash) {
 
   if (!carriesScope(view, id)) scope = NO_SCOPE;
   else scope = normalizeScope(scope, view, id);
-  const owner = ROUTES[view];
-  if (!(owner.object !== "none" && id)) {
-    for (const key of owner.params ?? []) {
-      const value = params.get(key);
-      if (value && (!owner.paramValues?.[key] || owner.paramValues[key].includes(value))) routeParamsIn[key] = value;
-    }
+  const owned = ownedParams(ROUTES[view], id);
+  for (const key of owned.keys) {
+    const value = params.get(key);
+    if (value && (!owned.values?.[key] || owned.values[key].includes(value))) routeParamsIn[key] = value;
   }
   const canonical = hashFor({ view, id, tab, scope, params: routeParamsIn });
   const rewrite = raw !== "" && `#${raw}` !== canonical;

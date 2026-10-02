@@ -7,7 +7,9 @@
 
 import type { StructuredTicket } from "../backlog/structured.js";
 
-export type ReadinessOutcome = "ready" | "needs_refinement" | "blocked" | "exploratory";
+export const READINESS_OUTCOMES = ["ready", "needs_refinement", "blocked", "exploratory"] as const;
+
+export type ReadinessOutcome = (typeof READINESS_OUTCOMES)[number];
 
 export type ReadinessResult = {
   outcome: ReadinessOutcome;

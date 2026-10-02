@@ -476,7 +476,11 @@ export type EventType =
   // { level: "project" | "host", file, before, after (that level's own value, null when
   // unset), resolved (the checkout's effective { mode, source } after; project level
   // only), projectDir?, actor }. Additive to the TS union alone — event_type has no CHECK.
-  | "config.ai_attribution_changed";
+  | "config.ai_attribution_changed"
+  // FG-847: `forge backlog edit` replaced a DB-mode ticket's body. Payload: { projectKey,
+  // ticketId, previousRevision, revision, actor (FORGE_ACTOR, else $USER), bodyBytes }.
+  // Additive to the TS union alone — event_type has no CHECK.
+  | "backlog.ticket_edited";
 
 export type Event = {
   id: number;

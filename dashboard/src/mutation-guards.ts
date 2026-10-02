@@ -255,15 +255,18 @@ export type ForgeRunResult = { code: number; stdout: string; stderr: string; tim
 
 /** Spawn the CLI. ARGV ARRAY, NO SHELL, cwd pinned to the resolved checkout, bounded
  *  time and bounded output. Never rejects: a failed child is a RESULT, because the
- *  CLI's non-zero exit and its stderr ARE the refusal this surface has to report. */
+ *  CLI's non-zero exit and its stderr ARE the refusal this surface has to report.
+ *  `stdin`, when given, is written to the child's standard input and closed — the
+ *  channel for caller text that must never become argv (FG-847's ticket body). */
 export function runForgeVerb(
   binary: string,
   argv: readonly string[],
   cwd: string,
   env: NodeJS.ProcessEnv = process.env,
+  stdin?: string,
 ): Promise<ForgeRunResult> {
   return new Promise((resolvePromise) => {
-    execFile(
+    const child = execFile(
       binary,
       [...argv],
       { cwd, env, timeout: CHILD_TIMEOUT_MS, maxBuffer: MAX_CHILD_OUTPUT_BYTES, windowsHide: true },
@@ -283,6 +286,12 @@ export function runForgeVerb(
         });
       },
     );
+    if (stdin !== undefined) {
+      // A child that exits before reading all of it surfaces as EPIPE here; its exit
+      // status is the result that matters.
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(stdin, "utf8");
+    }
   });
 }
 
