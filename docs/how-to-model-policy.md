@@ -506,10 +506,12 @@ and target checks above clear:
    `outcome: "applied"`; a failure at either step appends `outcome: "failed"`
    with an `error` message instead and leaves the target unchanged. Either way
    every attempt the command completes is recorded, but the recording follows
-   the write rather than preceding it — the pair isn't crash-atomic, so a
-   process crash between the rename and the append is the same accepted window
-   as `ai_attribution`'s (FG-855): the target can land durably before its audit
-   line does.
+   the write rather than preceding it, and the pair isn't crash-atomic: if the
+   `applied` line can't be written after the rename, or the process crashes
+   between the rename and that line, the new policy stays in place with no
+   audit line — nothing restores the target. That is the same accepted window,
+   in the same direction, as `ai_attribution`'s (FG-855): the target can land
+   durably before its audit line does.
 
 To restore a backup, run `propose`/`apply` with the backup file as the
 candidate.

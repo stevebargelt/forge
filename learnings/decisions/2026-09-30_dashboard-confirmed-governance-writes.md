@@ -198,34 +198,55 @@ shell, or on a multi-user host: then a real boundary exists for a binding to res
 
 ## Addendum (2026-10-02, FG-855): the crash window between a write and its audit event is accepted
 
-A registry apply that pairs a file write with an event — `ai_attribution` (`forge config
-set ai-attribution`, FG-845 part 2's dashboard route), model policy (`forge model policy
-apply --confirm`), and RACI (`forge raci apply --confirm`, this decision's own subject) —
-is **not crash-atomic across the two halves**. The file write is the mutation; the event
-(a `config.ai_attribution_changed` store event, or the appended `model-policy-audit.log` /
-`raci-audit.log` line) is its record, and the two are separate operations with no shared
-transaction. Each surface's own in-process exception handling differs — `ai_attribution`
-detects the audit insert failing and restores the file before refusing the apply
-(`audit_unrecorded`; see `docs/how-to-ai-attribution.md`), while model policy opens its
-audit log for append before the file is touched at all, so an already-unwritable log
-refuses closed before any write, and a failed backup-and-rename is itself recorded as
-`outcome: "failed"` with nothing to restore (see `docs/how-to-model-policy.md`) — but none
-of the three can catch a **crash**, as opposed to an exception either step raises. A
-process crash inside the narrow window between the file write landing and the audit event
-being recorded is accepted on a single-user host for all three: the file wins, and the
-change can be durable with no audit row. This is option (a) of
-FG-855's three (accept the window / reorder to event-first / a write-ahead journal with
-startup reconciliation) — attribution was already established above as a claim bounded by
-filesystem trust (FG-840), and a claim that is merely *missing* for one write, rather than
-present and wrong, doesn't need a stronger guarantee than the filesystem already gives the
-rest of this decision's writes.
+Three registry applies pair a file write with an audit record — `ai_attribution` (`forge
+config set ai-attribution`, FG-845 part 2's dashboard route), model policy (`forge model
+policy apply --confirm`), and RACI (`forge raci apply --confirm`, this decision's own
+subject). None is crash-atomic across the two halves: the file write and the record (a
+`config.ai_attribution_changed` store event, or an appended `model-policy-audit.log` /
+`raci-audit.log` line) are separate operations with no shared transaction. They do **not**
+share one ordering, so the window each leaves open differs:
 
-The same rule applies to every registry apply that pairs a file write with an event, not
-only `ai_attribution`: model policy and RACI applies carry the identical shape (write the
-file, then append the audit line) and inherit the identical accepted window, with no
-per-surface decision needed. A write-ahead journal — record intent, rename, mark recorded,
-reconcile at next start — was considered and declined for now: nothing today needs
-cross-process atomicity between a governance file and its audit record, and a journal
-shared across three unrelated writers is more mechanism than a ~ms single-user crash window
-currently justifies. Revisit if the same shape recurs again elsewhere and a shared journal
-becomes worth building once, rather than argued over per-surface each time.
+- **`ai_attribution`** (`writeAiAttribution` / `writeHostAiAttribution` /
+  `unsetAiAttribution` in `src/v2/ai-attribution.ts`, then `auditOrUndo` in
+  `src/cli/commands/config.ts`): the file is written into place first, then the store event
+  is logged. If the event insert throws, the file is restored and the apply refuses
+  (`audit_unrecorded`; see `docs/how-to-ai-attribution.md`). A **crash** between the
+  rename and the insert leaves the change durable with no audit row.
+- **Model policy** (`applyModelPolicy` in `src/v2/model-policy-gate.ts`): the audit log is
+  opened for append before anything is touched, so an already-unwritable log refuses
+  closed; then the backup is copied, the target is atomically replaced, and only then is
+  the `outcome: "applied"` line written. A failed backup-or-replace writes an
+  `outcome: "failed"` line, target unchanged. Nothing restores the target if the
+  post-replace line write itself throws, and a **crash** between the replace and that
+  line likewise leaves the new policy durable with no audit line — the same direction as
+  `ai_attribution`.
+- **RACI** (`applyRaciChange` in `src/cli/commands/raci.ts`) is the opposite order —
+  audit-first, write-ahead: the `raci-audit.log` line is appended *before* either file is
+  written, then the project RACI and then the compiled `routing-policy.yml` are each
+  written in place with `writeFileSync` (not a temp-file rename). An unwritable audit log
+  therefore refuses before any write, and a RACI change can never land unaudited. Its
+  window runs the other way: a crash (or a thrown write) after the append leaves an audit
+  line for a change that did not land, or landed only partly — the RACI written but the
+  compiled policy not, or a file truncated mid-write — and no `failed` line follows.
+
+The decision, option (a) of FG-855's three (accept the window / reorder to event-first / a
+write-ahead journal with startup reconciliation): for the two write-then-record applies —
+`ai_attribution` and model policy — a process crash inside the narrow window between the
+file landing and its record is accepted on a single-user host. The file wins; the change
+can be durable with no audit row. Attribution was already established above as a claim
+bounded by filesystem trust (FG-840), and a claim that is merely *missing* for one write,
+rather than present and wrong, doesn't need a stronger guarantee than the filesystem
+already gives the rest of this decision's writes. Model policy has the identical shape and
+inherits the identical accepted window with no separate decision needed.
+
+RACI does not have that shape, so this decision does not cover it: RACI apply already has
+no unaudited-write window, and its own window — an audit line with no, or a partial, change
+behind it — is a different failure (a record present and wrong, not missing) that FG-855
+did not weigh. It is noted here so the difference isn't generalized away, not decided.
+
+A write-ahead journal — record intent, rename, mark recorded, reconcile at next start —
+was considered and declined for now: nothing today needs cross-process atomicity between a
+governance file and its audit record, and a journal shared across unrelated writers is
+more mechanism than a ~ms single-user crash window currently justifies. Revisit if the same
+shape recurs again elsewhere and a shared journal becomes worth building once, rather than
+argued over per-surface each time.
