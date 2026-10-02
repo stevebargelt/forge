@@ -4,8 +4,9 @@
 # WHAT IT DOES, LITERALLY: builds the agent image with docker/build.sh, copies this
 # working tree (minus node_modules) into a container of THAT image, runs `npm ci`
 # there, and executes the FG-535 launch tier plus the FG-551 image guard INSIDE the
-# container with node:test's TAP reporter. It prints the full per-test inventory and
-# the TAP totals.
+# container with node:test's TAP reporter — under the FG-728 build-once CLI preload,
+# exactly as scripts/run-integration-tests.sh runs CLI-spawning files (FG-858). It
+# prints the full per-test inventory and the TAP totals.
 #
 # TWO MODES — the fix, and its falsification:
 #
@@ -177,9 +178,16 @@ run_tier_in_image() {
   # from cwd looking for a repo.
   echo "==> copying the working tree into $DEST (excluding node_modules)"
   docker exec -u agent "$cid" mkdir -p "$DEST" || { echo "FAIL: could not create $DEST in $image." >&2; return 1; }
-  tar -cf - -C "$REPO_ROOT" \
+  # The host's .forge-integration-build trees are excluded too: they are host build
+  # output, and the preload below rebuilds the tree inside the container regardless.
+  # macOS bsdtar adds AppleDouble `._<name>` entries per file, which the preload would feed esbuild as .ts entry points.
+  COPYFILE_DISABLE=1 tar -cf - -C "$REPO_ROOT" \
+    --exclude='._*' \
+    --exclude='.DS_Store' \
     --exclude='*/node_modules' \
     --exclude='*/node_modules/*' \
+    --exclude='./.forge-integration-build' \
+    --exclude='./.forge-integration-build.*' \
     . | docker exec -i -u agent "$cid" tar -xf - -C "$DEST" \
     || { echo "FAIL: could not copy the working tree into $image." >&2; return 1; }
 
@@ -200,25 +208,39 @@ run_tier_in_image() {
   echo "==> npm ci inside the container"
   docker exec -u agent -w "$DEST" "$cid" npm ci || { echo "FAIL: npm ci failed inside $image." >&2; return 1; }
 
-  echo "==> running the FG-535 launch tier + FG-551 guard INSIDE $image"
+  # FG-858: the launch tier's CLI-spawning cases (FG-535 CLI, FG-569 provenance) spawn
+  # the BUILT CLI at $DEST/.forge-integration-build/cli/index.js, which only the FG-728
+  # preload produces. The tier's files are integration files (*.integration.test.ts) —
+  # not worktree files, and `npm run test:worktree` carries no preload — so this is the
+  # bulk-lane line of scripts/run-integration-tests.sh verbatim: tsx, then the build
+  # preload, then test-setup, then --test (the reporter flag is the only addition).
+  # The preload builds ONCE per `node --test` process, keyed on that process's PID and
+  # start time, so it must stay an --import of THIS single node invocation — not a
+  # separate pre-build step, which a fresh invocation would wipe and rebuild anyway.
+  # The build lands in the copied tree, so prove the agent user can write there first:
+  # an unwritable build dir would surface as 14 opaque "Cannot find module" failures.
+  docker exec -u agent -w "$DEST" "$cid" sh -c 'mkdir -p .forge-integration-build && test -w .forge-integration-build' \
+    || { echo "FAIL: $DEST/.forge-integration-build is not writable by the agent user inside $image." >&2; return 1; }
+
+  echo "==> running the FG-535 launch tier + FG-551 guard INSIDE $image (with the FG-728 build preload)"
   set +e
   docker exec -u agent -w "$DEST" "$cid" \
-    node --import tsx --import ./src/test-setup.ts --test --test-reporter=tap "${TESTS[@]}" \
+    node --import tsx --import ./src/integration-build-preload.ts --import ./src/test-setup.ts --test --test-reporter=tap "${TESTS[@]}" \
     | tee "$tap_log"
   RUNNER_STATUS=${PIPESTATUS[0]}
   set -e
 
   echo
   echo "=== per-test inventory (name + outcome, as reported by TAP inside $image) ==="
-  grep -E '^[[:space:]]*(not )?ok [0-9]+' "$tap_log" || echo "(no test result lines — the runner produced no tests)"
+  grep -aE '^[[:space:]]*(not )?ok [0-9]+' "$tap_log" || echo "(no test result lines — the runner produced no tests)"
 
   echo
   echo "=== TAP totals ($image) ==="
-  grep -E '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ' "$tap_log" || echo "(no TAP totals emitted)"
+  grep -aE '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ' "$tap_log" || echo "(no TAP totals emitted)"
 
   _total() {
     local n
-    n=$(grep -E "^# $1 [0-9]+$" "$tap_log" | tail -1 | awk '{print $3}')
+    n=$(grep -aE "^# $1 [0-9]+$" "$tap_log" | tail -1 | awk '{print $3}')
     echo "${n:-}"
   }
 
@@ -320,7 +342,7 @@ verify_pre_fix() {
     fi
     echo >&2
     echo "      Full failing inventory from the tmux-less image:" >&2
-    grep -E '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" >&2 || echo "      (no failing test lines at all)" >&2
+    grep -aE '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" >&2 || echo "      (no failing test lines at all)" >&2
     echo >&2
     echo "      Do NOT edit EXPECTED_TMUX_FAILURES to match this run. Re-derive the inventory from" >&2
     echo "      src/v2/launch-cli.integration.test.ts and have a human accept the new baseline (the unit-tier" >&2
@@ -333,7 +355,7 @@ verify_pre_fix() {
   if [[ "$FAIL_N" -gt "$tmux_fail_n" ]]; then
     echo "WARNING: $((FAIL_N - tmux_fail_n)) failing test(s) were NOT caused by the missing tmux."
     echo "         The falsification still holds, but the tier is red for an unrelated reason too — investigate:"
-    grep -E '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" | grep -vxF "$tmux_fails" || true
+    grep -aE '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" | grep -vxF "$tmux_fails" || true
     echo
   fi
 
