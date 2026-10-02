@@ -4942,7 +4942,7 @@ async function runContainer(args: {
           logEvent("container.git_unavailable", {
             runId: args.runId,
             taskId: args.taskId,
-            payload: { containerName, exitCode },
+            payload: { containerName, exitCode, ...(stderrTail ? { cause: stderrTail } : {}) },
           });
         } else {
           logEvent("container.dependency_provisioning_failed", {
@@ -5192,7 +5192,7 @@ async function runContainer(args: {
   // Same footing as the provisioning sentinel above — an environment failure.
   if (exitCode === GIT_UNAVAILABLE_EXIT_CODE) {
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
-    logEvent("container.git_unavailable", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
+    logEvent("container.git_unavailable", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(stderrTail ? { cause: stderrTail } : {}), ...(containerEvidence ? { containerEvidence } : {}) } });
     const msg = `verification_environment_unavailable: git is unusable in the project mount${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     finalizeContainerRetention(containerName, false);

@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Runtime } from "./schema.js";
 import {
+  appendProjectGitTrust,
+  buildDependencyLoadDockerArgs,
+  buildDependencyProbeDockerArgs,
   buildDockerArgs,
   buildProvisionerDockerArgs,
   prepareDependencyEnvironmentForDispatch,
@@ -1176,4 +1179,101 @@ test("buildDockerArgs: FG-853 carries the host ai_attribution resolution of the 
     if (prevCarried !== undefined) process.env.FORGE_AI_ATTRIBUTION_CARRIED = prevCarried;
     else delete process.env.FORGE_AI_ATTRIBUTION_CARRIED;
   }
+});
+
+// ─── FG-856: Git's exact-path trust for the project mount ────────────────────
+
+/** Every `-e` key in argv order — duplicates included, which pickEnv's map hides. */
+function envKeys(args: string[]): string[] {
+  return args.flatMap((a, i) => (args[i - 1] === "-e" ? [a.split("=")[0]!] : []));
+}
+
+const FG856_PLAN = {
+  lockfileHash: "fg856hash",
+  volumes: [{ name: "forge-deps-fg856hash", relPath: "", containerPath: "/project/node_modules" }],
+  installRoot: "/project",
+};
+
+/** Every docker-args builder Forge starts a project-mounting container with. */
+function everyFg856Builder(rt: Runtime): Array<[string, string[]]> {
+  const plan = { ...FG856_PLAN, volumes: [{ ...FG856_PLAN.volumes[0]!, containerPath: `${resolveProjectContainerPath(rt)}/node_modules` }] };
+  const depCtx = { TASK_ID: "task-x", PROJECT_DIR: "/tmp/project" };
+  return [
+    ["agent (rw)", buildDockerArgs(rt, BASE_CTX).args],
+    ["reviewer/red (ro)", buildDockerArgs(rt, { ...BASE_CTX, PROJECT_MODE: "ro" }).args],
+    ["provisioner", buildProvisionerDockerArgs(rt, depCtx, plan)],
+    ["dependency probe", buildDependencyProbeDockerArgs(rt, depCtx, plan, "nonce-1")],
+    ["dependency load", buildDependencyLoadDockerArgs(rt, depCtx, plan, "/project/node_modules/x/x.node", 0)],
+  ];
+}
+
+test("FG-856: every docker-args builder injects safe.directory for exactly the RESOLVED project mount path", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  const alternate: Runtime = {
+    ...BASE_RUNTIME,
+    mounts: BASE_RUNTIME.mounts.map((m) => (m.host === "${PROJECT_DIR}" ? { ...m, container: "/workspace/app" } : m)),
+  };
+  for (const [rt, mountPath] of [
+    [BASE_RUNTIME, "/project"],
+    [alternate, "/workspace/app"],
+  ] as const) {
+    for (const [label, args] of everyFg856Builder(rt)) {
+      const env = pickEnv(args);
+      assert.equal(env["GIT_CONFIG_COUNT"], "1", `${label} @ ${mountPath}`);
+      assert.equal(env["GIT_CONFIG_KEY_0"], "safe.directory", `${label} @ ${mountPath}`);
+      assert.equal(env["GIT_CONFIG_VALUE_0"], mountPath, `${label} must trust the path it mounts, exactly`);
+      assert.equal(envKeys(args).filter((k) => k.startsWith("GIT_CONFIG_")).length, 3, `${label}: one entry, no duplicates`);
+      assert.ok(args.indexOf("GIT_CONFIG_COUNT=1") < args.indexOf(rt.image), `${label}: env must precede the image`);
+    }
+  }
+});
+
+test("FG-856: reviewer/red and Forge's dependency containers keep their read-only project mount", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  for (const [label, args] of everyFg856Builder(BASE_RUNTIME)) {
+    if (label === "agent (rw)") continue;
+    assert.match(pickMount(args, "/project")!, /:ro$/, `${label} must still mount the project read-only`);
+  }
+});
+
+test("FG-856: existing GIT_CONFIG_* entries from the runtime are preserved — the exception is appended and the count bumped", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    env: {
+      ...BASE_RUNTIME.env,
+      // The compatibility boundary: a launcher may already supply exactly one
+      // entry. FG-856 must append at index 1, not replace it or start over.
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.pager",
+      GIT_CONFIG_VALUE_0: "cat",
+    },
+  };
+  // The provisioner forwards no runtime env; every other builder does.
+  for (const [label, args] of everyFg856Builder(rt).filter(([l]) => l !== "provisioner")) {
+    const env = pickEnv(args);
+    assert.equal(env["GIT_CONFIG_COUNT"], "2", label);
+    assert.equal(env["GIT_CONFIG_KEY_0"], "core.pager", label);
+    assert.equal(env["GIT_CONFIG_VALUE_0"], "cat", label);
+    assert.equal(env["GIT_CONFIG_KEY_1"], "safe.directory", label);
+    assert.equal(env["GIT_CONFIG_VALUE_1"], "/project", label);
+    assert.equal(envKeys(args).filter((k) => k === "GIT_CONFIG_COUNT").length, 1, `${label}: the count is bumped in place`);
+  }
+});
+
+test("FG-856: no project mount, no trust entry", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  const rt: Runtime = { ...BASE_RUNTIME, mounts: [{ host: "${TASK_DIR}", container: "/task", mode: "rw", optional: false }] };
+  assert.ok(!envKeys(buildDockerArgs(rt, BASE_CTX).args).some((k) => k.startsWith("GIT_CONFIG_")));
+});
+
+test("FG-856: appendProjectGitTrust refuses a bogus count or an entry it would overwrite", () => {
+  assert.throws(() => appendProjectGitTrust(["-e", "GIT_CONFIG_COUNT=two"], "/project"), /not a count/);
+  assert.throws(
+    () => appendProjectGitTrust(["-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=a.b", "-e", "GIT_CONFIG_VALUE_0=c", "-e", "GIT_CONFIG_KEY_1=x.y"], "/project"),
+    /GIT_CONFIG_KEY_1.*refusing to overwrite/,
+  );
+  const args = ["-e", "OTHER=1"];
+  appendProjectGitTrust(args, "/project");
+  assert.deepEqual(args, ["-e", "OTHER=1", "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=/project"]);
 });

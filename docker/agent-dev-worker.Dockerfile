@@ -23,6 +23,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && tmux -V
 
+# FG-856: Docker Desktop can present the bind-mounted project ROOT as uid 0 while
+# its contents (including .git) stay uid 1000, and Git then refuses the checkout
+# as "dubious ownership" — which the entrypoint's FG-559 probe turns into exit 122
+# before any agent starts. Trust exactly the default project mount path, nothing
+# broader: never "*", a parent, or a recursive form. A runtime that mounts the
+# project elsewhere is covered by the launcher's GIT_CONFIG_* entry for the
+# resolved mount path (src/v2/spawn.ts appendProjectGitTrust), not by this line.
+RUN git config --system --add safe.directory /project
+
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \

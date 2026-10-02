@@ -1326,6 +1326,7 @@ export function buildDockerArgs(
   // already targets /project) and with every agent seed's /project contract,
   // so cwd-relative writes persist to the host instead of vanishing on exit.
   if (projectContainerPath) {
+    appendProjectGitTrust(args, projectContainerPath);
     args.push("-w", projectContainerPath);
   }
 
@@ -1387,6 +1388,51 @@ export function resolveProjectContainerPath(runtime: Runtime): string | undefine
   return runtime.mounts.find((m) => m.host === "${PROJECT_DIR}")?.container;
 }
 
+/** FG-856: Git's exact-path ownership exception for the project mount, as
+ *  command-scope (protected) configuration in the container's environment.
+ *  Docker Desktop can present the bind-mounted project ROOT as uid 0 while its
+ *  contents stay uid 1000; the agent user's Git then refuses the checkout as
+ *  "dubious ownership" and the entrypoint's FG-559 probe exits 122. Because it
+ *  is container environment, it covers every later Git command in the
+ *  container, not only the probe.
+ *
+ *  THE MOUNT-PATH CONTRACT: trust is granted for exactly `projectContainerPath`
+ *  — the path this dispatch actually mounts the project at, resolved from the
+ *  runtime's mounts — and for nothing else: never "*", a parent, or a recursive
+ *  form. The image's own `safe.directory /project` (agent-dev-worker.Dockerfile)
+ *  covers only the default path and only once the image is rebuilt; this entry
+ *  is what covers an alternate mount path and an image built before FG-856.
+ *  Linked worktrees and borrowed object stores need no entry of their own: Git
+ *  keys a non-bare repository's exception on its worktree path.
+ *
+ *  Any GIT_CONFIG_COUNT/KEY/VALUE entries already in `args` (a runtime's env)
+ *  are preserved: the exception goes at the next index and the count is bumped
+ *  in place, so nothing is overwritten and no duplicate `-e` key is emitted. */
+export function appendProjectGitTrust(args: string[], projectContainerPath: string): void {
+  const envIndex = (key: string): number =>
+    args.findIndex((a, i) => args[i - 1] === "-e" && a.startsWith(`${key}=`));
+  const countAt = envIndex("GIT_CONFIG_COUNT");
+  let n = 0;
+  if (countAt >= 0) {
+    const raw = args[countAt]!.slice("GIT_CONFIG_COUNT=".length);
+    if (!/^\d+$/.test(raw)) {
+      throw new Error(`FG-856: the runtime passes GIT_CONFIG_COUNT=${raw}, which is not a count — fix the runtime env`);
+    }
+    n = Number(raw);
+  }
+  for (const key of [`GIT_CONFIG_KEY_${n}`, `GIT_CONFIG_VALUE_${n}`]) {
+    if (envIndex(key) >= 0) {
+      throw new Error(
+        `FG-856: the runtime already passes ${key} beyond its GIT_CONFIG_COUNT=${n}; refusing to overwrite it — fix the runtime env`,
+      );
+    }
+  }
+  if (countAt >= 0) args[countAt] = `GIT_CONFIG_COUNT=${n + 1}`;
+  else args.push("-e", "GIT_CONFIG_COUNT=1");
+  args.push("-e", `GIT_CONFIG_KEY_${n}=safe.directory`);
+  args.push("-e", `GIT_CONFIG_VALUE_${n}=${projectContainerPath}`);
+}
+
 /** Docker args for the FG-376 short-lived dependency-cache provisioner: a
  *  DEDICATED install container, not the agent. Mounts the repo READ-ONLY
  *  (npm ci never writes to project source — planDependencyVolumes only
@@ -1433,6 +1479,7 @@ export function buildProvisionerDockerArgs(
   }
   args.push("-e", `FORGE_NM_SHADOW_PATHS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
   args.push("-e", `FORGE_NM_INSTALL_ROOT=${plan.installRoot}`);
+  appendProjectGitTrust(args, projectContainerPath);
   args.push("-w", projectContainerPath);
   args.push(runtime.image);
   args.push("true"); // entrypoint installs, then execs this trivial no-op and exits 0
@@ -1681,6 +1728,7 @@ function dependencyContainerArgs(
   for (const v of plan.volumes) {
     args.push("-v", `${v.name}:${v.containerPath}:ro`);
   }
+  appendProjectGitTrust(args, projectContainerPath);
   return { args, projectContainerPath };
 }
 

@@ -318,6 +318,28 @@ function resultFileState(runId: string, taskId: string): "absent" | "empty" | "m
   return "malformed"; // non-empty but readResult() above already returned undefined for this branch
 }
 
+/** FG-856: Git's ORIGINAL cause for an exit-122 landing — the entrypoint
+ *  probe's stderr, as the live watcher recorded it on container.git_unavailable,
+ *  else as the container's stderr log still holds it. Undefined when neither
+ *  survived; reconcile then says so rather than guessing a cause. */
+function gitUnavailableCause(
+  runId: string,
+  taskId: string,
+  taskEvents: { eventType: string; payload: unknown }[],
+): string | undefined {
+  for (const e of [...taskEvents].reverse()) {
+    if (e.eventType !== "container.git_unavailable") continue;
+    const cause = (e.payload as { cause?: unknown } | null)?.cause;
+    if (typeof cause === "string" && cause.trim()) return cause.trim();
+  }
+  try {
+    const raw = readFileSync(join(taskDir(runId, taskId), "container.stderr.log"), "utf8").trim();
+    return raw || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function readStdoutLog(runId: string, taskId: string): string {
   const p = join(taskDir(runId, taskId), "container.stdout.log");
   if (!existsSync(p)) return "";
@@ -1040,12 +1062,18 @@ function reconcileRunCore(
         // Below the recovery arms above (nothing persisted may ever be discarded)
         // and above the generic ones below: with no work to account for, the
         // sentinel is the most specific cause on record, and the only one that
-        // names a mount the operator has to fix before any retry can help.
+        // names an environment the operator has to fix before any retry can help.
+        // FG-856: carry Git's own cause; the probe fails for more than one reason
+        // (a dubious-ownership refusal is not a missing parent .git), so a
+        // synthesized diagnosis would send the operator after the wrong fix.
+        const cause = gitUnavailableCause(t.runId, t.id, taskEvents);
         const error =
           "verification_environment_unavailable: git is unusable in the project mount — the container's git probe exited " +
-          `${GIT_UNAVAILABLE_EXIT_CODE} before the agent ran, so no work was lost. Retrying is pointless until the mount is fixed: ` +
-          "dispatch against the parent repo instead of the worktree, or restore the parent repo the worktree points at, then " +
-          `\`forge retry ${t.id}\`.`;
+          `${GIT_UNAVAILABLE_EXIT_CODE} before the agent ran, so no work was lost. ` +
+          (cause
+            ? `Cause: ${cause} — `
+            : "Git's cause was not captured (the container's stderr did not survive) — ") +
+          `retrying is pointless until that is fixed; then \`forge retry ${t.id}\`.`;
         const containerEvidence = toContainerCausalEvidence(evidence);
         crashPoint("reconcile:before-fail-git-unavailable");
         writeTransaction(() => { // FG-463: fail write + its events atomic

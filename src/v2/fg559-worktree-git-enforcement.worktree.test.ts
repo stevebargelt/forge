@@ -770,3 +770,22 @@ test("fg559e: a RELATIVE gitdir: pointer is resolved against the HOST path — a
   // support ever lands, this test is the one that should be revisited.
   assert.equal(GIT_UNAVAILABLE_EXIT_CODE, 122, "the container probe remains the backstop for this case");
 });
+
+test("FG-856: a reviewer/red argv keeps both its project and linked-worktree backing Git mounts read-only", () => {
+  const f = makeWorktreeFixture();
+  materializeCommonGit(f);
+  const { args } = buildDockerArgs(RUNTIME, {
+    ...ctxFor(f.projectPath, "ro"),
+    CANONICAL_PROJECT_DIR: dirname(f.parentGitDir),
+  });
+  assert.ok(
+    mountSpecs(args).includes(`${f.projectPath}:/project:ro`),
+    "reviewer keeps the project mount read-only",
+  );
+  assert.ok(
+    mountSpecs(args).includes(`${f.parentGitDir}:${f.parentGitDir}:ro`),
+    "reviewer retains the read-only backing Git mount",
+  );
+  const trustAt = args.indexOf("GIT_CONFIG_VALUE_0=/project");
+  assert.ok(trustAt >= 0, "trust remains the exact project mount path, not backing Git");
+});

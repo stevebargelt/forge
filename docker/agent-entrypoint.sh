@@ -115,9 +115,27 @@ fi
 # exactly the silent history-blind dispatch this probe exists to prevent.
 if [ -e .git ]; then
   if ! _forge_git_probe=$(git rev-parse --git-dir 2>&1); then
+    # Git's own message first; advice only for a cause this probe can name.
     echo "forge: git is unusable in $(pwd): ${_forge_git_probe}" >&2
-    echo "forge: if this project is a linked git worktree, its parent .git is not mounted (FG-559)." >&2
-    echo "forge: fix the mount (dispatch against the parent repo, or restore the repo the worktree points at)." >&2
+    case "${_forge_git_probe}" in
+      *"dubious ownership"*)
+        # FG-856: a container trust problem, not a host-file problem.
+        echo "forge: the container sees the project mount root as owned by another uid (Docker Desktop can present a bind-mount root as uid 0), so Git refuses it (FG-856)." >&2
+        echo "forge: Forge grants Git an exact-path safe.directory exception for the project mount: update Forge and rebuild the agent image (docker/build.sh), or dispatch with a Forge launcher that injects the exception." >&2
+        echo "forge: do not chown the host files, bypass this probe, or trust every repository (safe.directory=*)." >&2
+        ;;
+      *)
+        _forge_gitdir_target=""
+        if [ -f .git ]; then
+          _forge_gitdir_target=$(sed -n 's/^gitdir: *//p' .git | head -n 1)
+        fi
+        if [ -n "${_forge_gitdir_target}" ] && [ ! -e "${_forge_gitdir_target}" ]; then
+          echo "forge: .git points at ${_forge_gitdir_target}, which does not exist here: this linked git worktree's parent .git is not mounted (FG-559)." >&2
+          echo "forge: fix the mount (dispatch against the parent repo, or restore the repo the worktree points at)." >&2
+        fi
+        unset _forge_gitdir_target
+        ;;
+    esac
     exit 122
   fi
   unset _forge_git_probe

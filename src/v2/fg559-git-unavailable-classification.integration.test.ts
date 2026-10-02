@@ -21,6 +21,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { taskDir } from "../util/paths.js";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { runNext } from "./runNext.js";
@@ -282,7 +283,11 @@ test("fg559: reconcile — a container gone at exit 122 lands verification_envir
   assert.equal(t.status, "failed");
   assert.equal(failureKindForTask(t.id), "verification_environment_unavailable");
   assert.match(t.error ?? "", /git is unusable in the project mount/);
-  assert.match(t.error ?? "", /parent repo/, "the landing must carry the git-specific operator fix, not just the kind");
+  // FG-856: with no surviving evidence of Git's cause, reconcile says so — it
+  // must not synthesize the parent-worktree diagnosis, which is wrong for an
+  // ownership refusal.
+  assert.match(t.error ?? "", /cause was not captured/);
+  assert.doesNotMatch(t.error ?? "", /parent repo/);
   assert.doesNotMatch(t.error ?? "", /^orphaned/);
   assert.ok(
     r.taskChanges.some((c) => c.taskId === t.id && c.to === "failed" && c.reason === "container_git_unavailable"),
@@ -312,4 +317,74 @@ test("fg559: reconcile — the event alone is enough: the watcher logged contain
   // disappeared with no terminal evidence".
   const evidence = getContainerCausalEvidenceFromEvents(eventsForTask(t.id));
   assert.equal(evidence?.containerExitedEventObserved, true, "container.git_unavailable is a terminal exit event forge observed");
+});
+
+// ─── FG-856: Git's ORIGINAL cause survives every classification path ─────────
+
+const OWNERSHIP_STDERR = [
+  "forge: git is unusable in /project: fatal: detected dubious ownership in repository at '/project'",
+  "forge: the container sees the project mount root as owned by another uid (Docker Desktop can present a bind-mount root as uid 0), so Git refuses it (FG-856).",
+].join("\n");
+
+function causeOf(taskId: string): unknown {
+  const ev = eventsForTask(taskId).find((e) => e.eventType === "container.git_unavailable");
+  return (ev?.payload as { cause?: unknown } | undefined)?.cause;
+}
+
+test("fg856: invoke — the live classification and its event carry Git's dubious-ownership cause, not a worktree diagnosis", async () => {
+  ensureRuntime();
+  process.env["ANTHROPIC_API_KEY"] = "sk-stub";
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do thing",
+    projectDir: "/tmp/x",
+    dockerExec: sentinelExec(GIT_UNAVAILABLE_EXIT_CODE, OWNERSHIP_STDERR),
+  });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "verification_environment_unavailable");
+  assert.match(r.error ?? "", /detected dubious ownership/);
+  assert.doesNotMatch(r.error ?? "", /parent \.git|parent repo/);
+  assert.equal(causeOf(r.taskId), OWNERSHIP_STDERR, "the event records Git's cause so reconcile can recover it");
+});
+
+test("fg856: runNext — the live classification and its event carry Git's dubious-ownership cause", async () => {
+  ensureRuntime();
+  process.env["ANTHROPIC_API_KEY"] = "sk-stub";
+  const { runId } = startRun({ workflow: LINEAR_WORKFLOW, title: "fg856 runNext ownership", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+  await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: sentinelExec(GIT_UNAVAILABLE_EXIT_CODE, OWNERSHIP_STDERR) });
+  const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+  assert.equal(first.status, "failed");
+  assert.equal(failureKindForTask(first.id), "verification_environment_unavailable");
+  assert.match(first.error ?? "", /detected dubious ownership/);
+  assert.equal(causeOf(first.id), OWNERSHIP_STDERR);
+});
+
+test("fg856: reconcile — the cause the watcher recorded on container.git_unavailable reaches the reconciled landing", () => {
+  const runId = strandedRun("fg856 reconcile event cause");
+  strandRunning(runId, "task-fg856-event");
+  logEvent("container.git_unavailable", {
+    runId,
+    taskId: "task-fg856-event",
+    payload: { containerName: "forge-task-fg856-event", exitCode: GIT_UNAVAILABLE_EXIT_CODE, cause: OWNERSHIP_STDERR },
+  });
+  reconcileRun(runId, GONE, NO_REAP, () => ({}));
+  const t = getTask("task-fg856-event")!;
+  assert.equal(t.status, "failed");
+  assert.equal(failureKindForTask(t.id), "verification_environment_unavailable");
+  assert.match(t.error ?? "", /Cause: forge: git is unusable in \/project: fatal: detected dubious ownership/);
+  assert.doesNotMatch(t.error ?? "", /parent repo/);
+});
+
+test("fg856: reconcile — with no event, Git's cause is recovered from the container's stderr log", () => {
+  const runId = strandedRun("fg856 reconcile stderr cause");
+  strandRunning(runId, "task-fg856-stderr");
+  const dir = taskDir(runId, "task-fg856-stderr");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "container.stderr.log"), `${PROBE_STDERR}\n`);
+  const r = reconcileRun(runId, GONE, NO_REAP, () => ({ exitCode: GIT_UNAVAILABLE_EXIT_CODE }));
+  const t = getTask("task-fg856-stderr")!;
+  assert.equal(t.status, "failed");
+  assert.equal(failureKindForTask(t.id), "verification_environment_unavailable");
+  assert.ok(t.error?.includes(`Cause: ${PROBE_STDERR}`), `got: ${t.error}`);
+  assert.ok(r.taskChanges.some((c) => c.taskId === t.id && c.reason === "container_git_unavailable"));
 });

@@ -1262,7 +1262,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // above: an environment failure, not a crash and not a task failure.
   if (exitCode === GIT_UNAVAILABLE_EXIT_CODE) {
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
-    logEvent("container.git_unavailable", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
+    logEvent("container.git_unavailable", { runId, taskId, payload: { containerName, exitCode, ...(stderrTail ? { cause: stderrTail } : {}), ...(containerEvidence ? { containerEvidence } : {}) } });
     const error = `verification_environment_unavailable: git is unusable in the project mount${stderrTail ? ` — ${stderrTail}` : ""}`;
     const kind = classify({ source: "verification_environment_unavailable" });
     failTask(taskId, { runId, kind, error });
