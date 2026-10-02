@@ -91,7 +91,9 @@ verify_post_fix() {
 
   echo "==> copying the working tree into $DEST (excluding node_modules)"
   docker exec -u agent "$cid" mkdir -p "$DEST" || return 1
-  tar -cf - -C "$REPO_ROOT" --exclude='*/node_modules' --exclude='*/node_modules/*' . \
+  # macOS bsdtar adds AppleDouble `._<name>` entries per file, which esbuild/tsx would treat as .ts sources.
+  COPYFILE_DISABLE=1 tar -cf - -C "$REPO_ROOT" --exclude='._*' --exclude='.DS_Store' \
+    --exclude='*/node_modules' --exclude='*/node_modules/*' . \
     | docker exec -i -u agent "$cid" tar -xf - -C "$DEST" \
     || { echo "FAIL: could not copy the working tree into $IMAGE." >&2; return 1; }
   local branch
@@ -111,15 +113,22 @@ verify_post_fix() {
   set -e
   echo
   echo "=== TAP totals ($IMAGE) ==="
-  grep -E '^# (tests|pass|fail|cancelled|skipped|todo) ' "$tap_log" || true
-  local tests fail skip todo
-  tests=$(grep -E '^# tests [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
-  fail=$(grep -E '^# fail [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
-  skip=$(grep -E '^# skipped [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
-  todo=$(grep -E '^# todo [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
+  grep -aE '^# (tests|pass|fail|cancelled|skipped|todo) ' "$tap_log" || true
+  local tests pass fail skip todo cancelled
+  tests=$(grep -aE '^# tests [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
+  pass=$(grep -aE '^# pass [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
+  fail=$(grep -aE '^# fail [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
+  skip=$(grep -aE '^# skipped [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
+  todo=$(grep -aE '^# todo [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
+  cancelled=$(grep -aE '^# cancelled [0-9]+$' "$tap_log" | tail -1 | awk '{print $3}')
   rm -f "$tap_log"
-  if [[ -z "$tests" || "$tests" -eq 0 || "${fail:-1}" -ne 0 || "${skip:-1}" -ne 0 || "${todo:-0}" -ne 0 || "$rc" -ne 0 ]]; then
-    echo "FAIL (post-fix): suites not clean in $IMAGE — ${tests:-?} tests, ${fail:-?} failed, ${skip:-?} skipped, ${todo:-?} todo (runner exit $rc)." >&2
+  # Every total must parse; a missing one is never read as zero.
+  if [[ -z "$tests" || -z "$pass" || -z "$fail" || -z "$skip" || -z "$todo" || -z "$cancelled" ]]; then
+    echo "FAIL (post-fix): no parseable TAP totals from $IMAGE — tests=${tests:-?} pass=${pass:-?} fail=${fail:-?} skipped=${skip:-?} todo=${todo:-?} cancelled=${cancelled:-?} (runner exit $rc)." >&2
+    return 1
+  fi
+  if [[ "$tests" -eq 0 || "$fail" -ne 0 || "$skip" -ne 0 || "$todo" -ne 0 || "$cancelled" -ne 0 || "$rc" -ne 0 ]]; then
+    echo "FAIL (post-fix): suites not clean in $IMAGE — $tests tests, $pass passed, $fail failed, $skip skipped, $todo todo, $cancelled cancelled (runner exit $rc)." >&2
     return 1
   fi
   echo "PASS (post-fix): FG-857 check clean and $tests suite tests passed inside $IMAGE, none skipped."

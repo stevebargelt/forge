@@ -4,8 +4,9 @@
 # WHAT IT DOES, LITERALLY: builds the agent image with docker/build.sh, copies this
 # working tree (minus node_modules) into a container of THAT image, runs `npm ci`
 # there, and executes the FG-535 launch tier plus the FG-551 image guard INSIDE the
-# container with node:test's TAP reporter. It prints the full per-test inventory and
-# the TAP totals.
+# container with node:test's TAP reporter — under the FG-728 build-once CLI preload,
+# exactly as scripts/run-integration-tests.sh runs CLI-spawning files (FG-858). It
+# prints the full per-test inventory and the TAP totals.
 #
 # TWO MODES — the fix, and its falsification:
 #
@@ -146,7 +147,7 @@ USER agent
 EOF
 }
 
-# Runs the tier inside $1 and sets TESTS_N / FAIL_N / SKIP_N / TODO_N / CANCELLED_N /
+# Runs the tier inside $1 and sets TESTS_N / PASS_N / FAIL_N / SKIP_N / TODO_N / CANCELLED_N /
 # RUNNER_STATUS. Prints the per-test inventory and TAP totals. Asserts nothing — the
 # mode-specific pass condition is the caller's job, because pre-fix INVERTS it.
 #
@@ -177,9 +178,16 @@ run_tier_in_image() {
   # from cwd looking for a repo.
   echo "==> copying the working tree into $DEST (excluding node_modules)"
   docker exec -u agent "$cid" mkdir -p "$DEST" || { echo "FAIL: could not create $DEST in $image." >&2; return 1; }
-  tar -cf - -C "$REPO_ROOT" \
+  # The host's .forge-integration-build trees are excluded too: they are host build
+  # output, and the preload below rebuilds the tree inside the container regardless.
+  # macOS bsdtar adds AppleDouble `._<name>` entries per file, which the preload would feed esbuild as .ts entry points.
+  COPYFILE_DISABLE=1 tar -cf - -C "$REPO_ROOT" \
+    --exclude='._*' \
+    --exclude='.DS_Store' \
     --exclude='*/node_modules' \
     --exclude='*/node_modules/*' \
+    --exclude='./.forge-integration-build' \
+    --exclude='./.forge-integration-build.*' \
     . | docker exec -i -u agent "$cid" tar -xf - -C "$DEST" \
     || { echo "FAIL: could not copy the working tree into $image." >&2; return 1; }
 
@@ -200,35 +208,51 @@ run_tier_in_image() {
   echo "==> npm ci inside the container"
   docker exec -u agent -w "$DEST" "$cid" npm ci || { echo "FAIL: npm ci failed inside $image." >&2; return 1; }
 
-  echo "==> running the FG-535 launch tier + FG-551 guard INSIDE $image"
+  # FG-858: the launch tier's CLI-spawning cases (FG-535 CLI, FG-569 provenance) spawn
+  # the BUILT CLI at $DEST/.forge-integration-build/cli/index.js, which only the FG-728
+  # preload produces. The tier's files are integration files (*.integration.test.ts) —
+  # not worktree files, and `npm run test:worktree` carries no preload — so this is the
+  # bulk-lane line of scripts/run-integration-tests.sh verbatim: tsx, then the build
+  # preload, then test-setup, then --test (the reporter flag is the only addition).
+  # The preload builds ONCE per `node --test` process, keyed on that process's PID and
+  # start time, so it must stay an --import of THIS single node invocation — not a
+  # separate pre-build step, which a fresh invocation would wipe and rebuild anyway.
+  # The build lands in the copied tree, so prove the agent user can write there first:
+  # an unwritable build dir would surface as 14 opaque "Cannot find module" failures.
+  docker exec -u agent -w "$DEST" "$cid" sh -c 'mkdir -p .forge-integration-build && test -w .forge-integration-build' \
+    || { echo "FAIL: $DEST/.forge-integration-build is not writable by the agent user inside $image." >&2; return 1; }
+
+  echo "==> running the FG-535 launch tier + FG-551 guard INSIDE $image (with the FG-728 build preload)"
   set +e
   docker exec -u agent -w "$DEST" "$cid" \
-    node --import tsx --import ./src/test-setup.ts --test --test-reporter=tap "${TESTS[@]}" \
+    node --import tsx --import ./src/integration-build-preload.ts --import ./src/test-setup.ts --test --test-reporter=tap "${TESTS[@]}" \
     | tee "$tap_log"
   RUNNER_STATUS=${PIPESTATUS[0]}
   set -e
 
   echo
   echo "=== per-test inventory (name + outcome, as reported by TAP inside $image) ==="
-  grep -E '^[[:space:]]*(not )?ok [0-9]+' "$tap_log" || echo "(no test result lines — the runner produced no tests)"
+  grep -aE '^[[:space:]]*(not )?ok [0-9]+' "$tap_log" || echo "(no test result lines — the runner produced no tests)"
 
   echo
   echo "=== TAP totals ($image) ==="
-  grep -E '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ' "$tap_log" || echo "(no TAP totals emitted)"
+  grep -aE '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ' "$tap_log" || echo "(no TAP totals emitted)"
 
   _total() {
     local n
-    n=$(grep -E "^# $1 [0-9]+$" "$tap_log" | tail -1 | awk '{print $3}')
+    n=$(grep -aE "^# $1 [0-9]+$" "$tap_log" | tail -1 | awk '{print $3}')
     echo "${n:-}"
   }
 
   TESTS_N=$(_total tests)
+  PASS_N=$(_total pass)
   FAIL_N=$(_total fail)
   SKIP_N=$(_total skipped)
   TODO_N=$(_total todo)
   CANCELLED_N=$(_total cancelled)
 
-  if [[ -z "$TESTS_N" || -z "$FAIL_N" || -z "$SKIP_N" ]]; then
+  # Every total must parse; a missing one is never read as zero.
+  if [[ -z "$TESTS_N" || -z "$PASS_N" || -z "$FAIL_N" || -z "$SKIP_N" || -z "$TODO_N" || -z "$CANCELLED_N" ]]; then
     echo "FAIL: the run produced no parseable TAP totals — treat this as a failed verification, not a pass." >&2
     echo "      runner exit status: $RUNNER_STATUS" >&2
     return 1
@@ -246,8 +270,8 @@ verify_post_fix() {
   run_tier_in_image "$IMAGE" || return 1
 
   echo
-  if [[ "$FAIL_N" -ne 0 || "$SKIP_N" -ne 0 || "${TODO_N:-0}" -ne 0 || "${CANCELLED_N:-0}" -ne 0 || "$RUNNER_STATUS" -ne 0 ]]; then
-    echo "FAIL: in-image launch tier is not clean — $TESTS_N tests, $FAIL_N failed, $SKIP_N skipped, ${TODO_N:-0} todo, ${CANCELLED_N:-0} cancelled (runner exit $RUNNER_STATUS)." >&2
+  if [[ "$FAIL_N" -ne 0 || "$SKIP_N" -ne 0 || "$TODO_N" -ne 0 || "$CANCELLED_N" -ne 0 || "$RUNNER_STATUS" -ne 0 ]]; then
+    echo "FAIL: in-image launch tier is not clean — $TESTS_N tests, $PASS_N passed, $FAIL_N failed, $SKIP_N skipped, $TODO_N todo, $CANCELLED_N cancelled (runner exit $RUNNER_STATUS)." >&2
     echo "      A SKIP counts as a failure here: FG-551 requires that a tmux-less image stay red rather than go quietly green." >&2
     return 1
   fi
@@ -283,8 +307,8 @@ verify_pre_fix() {
   run_tier_in_image "$PREFIX_IMAGE" || return 1
 
   echo
-  if [[ "$SKIP_N" -ne 0 || "${TODO_N:-0}" -ne 0 ]]; then
-    echo "FAILED FALSIFICATION: the tmux-less image produced $SKIP_N skipped / ${TODO_N:-0} todo tests." >&2
+  if [[ "$SKIP_N" -ne 0 || "$TODO_N" -ne 0 || "$CANCELLED_N" -ne 0 ]]; then
+    echo "FAILED FALSIFICATION: the tmux-less image produced $SKIP_N skipped / $TODO_N todo / $CANCELLED_N cancelled tests." >&2
     echo "      A tmux-less image must HARD-FAIL, never skip. A skip route is how a missing tmux goes quietly green." >&2
     return 1
   fi
@@ -320,7 +344,7 @@ verify_pre_fix() {
     fi
     echo >&2
     echo "      Full failing inventory from the tmux-less image:" >&2
-    grep -E '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" >&2 || echo "      (no failing test lines at all)" >&2
+    grep -aE '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" >&2 || echo "      (no failing test lines at all)" >&2
     echo >&2
     echo "      Do NOT edit EXPECTED_TMUX_FAILURES to match this run. Re-derive the inventory from" >&2
     echo "      src/v2/launch-cli.integration.test.ts and have a human accept the new baseline (the unit-tier" >&2
@@ -328,17 +352,19 @@ verify_pre_fix() {
     return 1
   fi
 
-  # Extra failures don't sink the falsification — the tmux path still demonstrably went red —
-  # but they mean something ELSE is broken in the tier, and that must not hide inside a PASS.
-  if [[ "$FAIL_N" -gt "$tmux_fail_n" ]]; then
-    echo "WARNING: $((FAIL_N - tmux_fail_n)) failing test(s) were NOT caused by the missing tmux."
-    echo "         The falsification still holds, but the tier is red for an unrelated reason too — investigate:"
-    grep -E '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" | grep -vxF "$tmux_fails" || true
-    echo
+  # Any failure NOT attributed to the missing tmux fails the falsification: an unrelated red
+  # test means the run cannot show that the tmux path alone is what went red.
+  local unattributed
+  unattributed="$(grep -aE '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" | grep -vxF "$tmux_fails" || true)"
+  if [[ -n "$unattributed" || "$FAIL_N" -ne "$tmux_fail_n" ]]; then
+    echo "FAILED FALSIFICATION: $FAIL_N failing test(s), only $tmux_fail_n attributed to the missing tmux." >&2
+    echo "      The tmux-less image must fail ONLY the tmux-gated tests. Unattributed failures:" >&2
+    if [[ -n "$unattributed" ]]; then printf '%s\n' "$unattributed" >&2; else echo "      (no unattributed not-ok line; the fail total disagrees with the tmux inventory)" >&2; fi
+    return 1
   fi
 
   echo "PASS (pre-fix falsification): the tmux-less $PREFIX_IMAGE ran $TESTS_N tests — $FAIL_N FAILED, $SKIP_N skipped (runner exit $RUNNER_STATUS)."
-  echo "      All $tmux_fail_n expected tmux-gated tests failed, each citing \"$TMUX_PRECONDITION_MSG\" — no skips, no deletions."
+  echo "      All $tmux_fail_n expected tmux-gated tests failed, each citing \"$TMUX_PRECONDITION_MSG\", and nothing else failed — no skips, no deletions."
   echo "      The tmux path itself went red. The guard catches a tmux-less image."
 }
 
