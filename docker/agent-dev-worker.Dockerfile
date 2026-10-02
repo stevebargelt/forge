@@ -1,4 +1,8 @@
-FROM ubuntu:22.04
+# FG-857: Ubuntu 24.04 (glibc 2.39). 22.04's glibc 2.35 is below what modern
+# native prebuilds link against — better-sqlite3@13's linux prebuild needs
+# GLIBC_2.38 — so a project's provisioned deps failed to load in-container.
+# docker/verify-native-prebuild-in-image.sh is the executed regression.
+FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Corporate TLS proxy support (Zscaler, etc.). Inject the root CA bundle BEFORE any
@@ -12,6 +16,8 @@ RUN update-ca-certificates
 # sudo: the agent user gets NOPASSWD sudo (DEC-009) and the entrypoint uses it
 # to chown the #245 node_modules shadow volume — but Ubuntu's base image has no
 # sudo binary, so the sudoers line below was previously inert. Install it here.
+# python3-pip: nothing below pip-installs; noble's pip refuses system-wide
+# installs (PEP 668), so any future pip install needs a venv.
 # tmux (FG-551): `forge launch` owns long host-side commands under tmux (FG-535),
 # and its launch tier exercises that real tmux-owned path. Without tmux in the
 # image those tests hard-fail in every agent container, so a real tmux regression
@@ -98,9 +104,11 @@ RUN npm install -g tsx@${TSX_VERSION} && tsx --version
 # identically, so the entrypoint drives it on :9222 unchanged. These libs are what
 # Chromium needs under --headless=new (Playwright's --with-deps also covers them;
 # kept explicit as belt-and-suspenders).
+# FG-857: noble renamed several of these for the 64-bit time_t transition (`t64`);
+# the bare names are virtual there and apt refuses an ambiguous one (libasound2).
 RUN apt-get update && apt-get install -y \
-    fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
-    libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libnspr4 \
+    fonts-liberation libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
+    libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 \
     libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
     libxext6 libxfixes3 libxkbcommon0 libxrandr2 xdg-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -179,7 +187,11 @@ COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint
 RUN chmod +x /usr/local/bin/agent-entrypoint
 
 # Non-root agent user (DEC-009): UID 1000, NOPASSWD sudo, ~/.claude pre-created.
-RUN useradd -m -s /bin/bash -u 1000 agent \
+# FG-857: ubuntu:24.04 ships a default `ubuntu` user at uid/gid 1000; remove it
+# first so `agent` gets exactly 1000:1000, and fail the build if it does not.
+RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
+    && useradd -m -s /bin/bash -u 1000 agent \
+    && test "$(id -u agent):$(id -g agent)" = "1000:1000" \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
     && mkdir -p /home/agent/.claude/skills \
     && chown -R agent:agent /home/agent

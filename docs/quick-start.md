@@ -11,7 +11,7 @@ npm install
 ./docker/build.sh           # one-time, ~5–10 min
 ```
 
-`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`, and installs the Forge host/orchestrator skills — including `/status` — into the user-global Claude skills dir (`~/.claude/skills` by default), so they're available to any Claude Code session on the machine. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000).
+`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`, and installs the Forge host/orchestrator skills — including `/status` — into the user-global Claude skills dir (`~/.claude/skills` by default), so they're available to any Claude Code session on the machine. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 24.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000).
 
 Now build a release and select it as the machine-wide `forge`. There's no stable `forge` yet on a fresh machine, so this bootstrap runs through `forge-dev`, the live-source entry:
 
