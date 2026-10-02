@@ -626,7 +626,7 @@ test("integ FG-847: dashboard edit streams the body only to the registry checkou
   assert.equal(response.body["ok"], true);
   assert.equal(response.body["previousRevision"], before.body["revision"]);
   assert.equal(response.body["revision"], Number(before.body["revision"]) + 1);
-  assert.deepEqual(recordedCalls(), [{ cwd: checkoutDir, argv: ["backlog", "edit", "FG-847-EDIT", "--body", "-"] }]);
+  assert.deepEqual(recordedCalls(), [{ cwd: checkoutDir, argv: ["backlog", "edit", "FG-847-EDIT", "--body", "-", "--base-revision", String(before.body["revision"])] }]);
   assert.equal(readFileSync(EDIT_STDIN, "utf8"), replacement, "the child, not argv, received the replacement body");
   assert.ok(!recordedCalls()[0]!.argv.includes(replacement), "the body never reaches argv");
   const eventRows = getDb().prepare("SELECT payload FROM events WHERE event_type = 'backlog.ticket_edited'").all() as Array<{ payload: string }>;
