@@ -210,7 +210,9 @@ share one ordering, so the window each leaves open differs:
   `unsetAiAttribution` in `src/v2/ai-attribution.ts`, then `auditOrUndo` in
   `src/cli/commands/config.ts`): the file is written into place first, then the store event
   is logged. If the event insert throws, the file is restored and the apply refuses
-  (`audit_unrecorded`; see `docs/how-to-ai-attribution.md`). A **crash** between the
+  (`audit_unrecorded`; see `docs/how-to-ai-attribution.md`). If that restore write itself
+  then fails, the edit is left in place unaudited and the command says so; `forge doctor`
+  then shows the file's actual unaudited value. A **crash** between the
   rename and the insert leaves the change durable with no audit row.
 - **Model policy** (`applyModelPolicy` in `src/v2/model-policy-gate.ts`): the audit log is
   opened for append before anything is touched, so an already-unwritable log refuses
