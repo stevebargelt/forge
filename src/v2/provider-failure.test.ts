@@ -103,6 +103,35 @@ test("FG-787 detectEndedTurnWhileWaiting: a later tool_result after the ack (the
   assert.equal(detectEndedTurnWhileWaiting(s), undefined);
 });
 
+test("FG-787 detectEndedTurnWhileWaiting: a second tool_result reusing the wait's id → does not fire", () => {
+  const s = [
+    sInit(),
+    sToolUse("toolu_mon", "Monitor", { file: "/tmp/x" }),
+    sToolResult("toolu_mon", "Monitor armed."),
+    sToolResult("toolu_mon", "suite finished: 12 passed"),
+    sText("done"), sStop("end_turn"), sResult(),
+  ].join("\n");
+  assert.equal(detectEndedTurnWhileWaiting(s), undefined);
+});
+
+test("FG-787 detectEndedTurnWhileWaiting: two same-id tool_results in one user event → does not fire", () => {
+  const twoBlocks = JSON.stringify({
+    type: "user",
+    message: { role: "user", content: [
+      { tool_use_id: "toolu_mon", type: "tool_result", content: "Monitor armed." },
+      { tool_use_id: "toolu_mon", type: "tool_result", content: "suite finished" },
+    ] },
+    parent_tool_use_id: null,
+  });
+  const s = [sInit(), sToolUse("toolu_mon", "Monitor", {}), twoBlocks, sStop("end_turn"), sResult()].join("\n");
+  assert.equal(detectEndedTurnWhileWaiting(s), undefined);
+});
+
+test("FG-787 detectEndedTurnWhileWaiting: exactly one ack then end_turn → still fires", () => {
+  const s = [sInit(), sToolUse("toolu_mon", "Monitor", {}), sToolResult("toolu_mon", "Monitor armed."), sText("waiting"), sStop("end_turn"), sResult()].join("\n");
+  assert.deepEqual(detectEndedTurnWhileWaiting(s), { tool: "Monitor", toolUseId: "toolu_mon" });
+});
+
 test("FG-787 detectEndedTurnWhileWaiting: a later tool_use after the Monitor → does not fire", () => {
   const s = [
     sInit(),

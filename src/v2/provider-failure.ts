@@ -116,14 +116,16 @@ function waitToolLabel(block: Record<string, unknown>): string | undefined {
  *  parent_tool_use_id and are ignored):
  *   - the LAST tool_use block is Monitor, ScheduleWakeup, or any tool called with
  *     input.run_in_background === true;
- *   - nothing reached the agent after it other than that tool's own immediate
- *     tool_result (the "armed"/"started in background" ack) — any other user
- *     event (another tool's result, a delivered monitor event / notification)
- *     means the agent consumed further input, and it does not fire;
+ *   - nothing reached the agent after it other than that tool's own single
+ *     immediate tool_result (the "armed"/"started in background" ack) — any
+ *     other user event (a second tool_result, even one reusing the wait's id,
+ *     another tool's result, a delivered monitor event / notification) means
+ *     the agent consumed further input, and it does not fire;
  *   - the last stop_reason observed (result event, message_delta, or a complete
  *     assistant message) is end_turn. */
 export function detectEndedTurnWhileWaiting(stdoutRaw: string): EndedTurnWhileWaiting | undefined {
   let pending: EndedTurnWhileWaiting | undefined;
+  let acked = false;
   let stopReason: string | undefined;
   for (const ev of eachJsonl(stdoutRaw)) {
     if (ev["parent_tool_use_id"] != null) continue;
@@ -145,13 +147,15 @@ export function detectEndedTurnWhileWaiting(stdoutRaw: string): EndedTurnWhileWa
         if (!isObj(block) || block["type"] !== "tool_use") continue;
         const label = waitToolLabel(block);
         pending = label && typeof block["id"] === "string" ? { tool: label, toolUseId: block["id"] } : undefined;
+        acked = false;
       }
     } else if (type === "user" && pending) {
       const msg = ev["message"];
       const content = isObj(msg) ? msg["content"] : undefined;
-      const onlyAck = Array.isArray(content) && content.length > 0 &&
-        content.every((b) => isObj(b) && b["type"] === "tool_result" && b["tool_use_id"] === pending?.toolUseId);
-      if (!onlyAck) pending = undefined;
+      const isAck = !acked && Array.isArray(content) && content.length === 1 &&
+        isObj(content[0]) && content[0]["type"] === "tool_result" && content[0]["tool_use_id"] === pending.toolUseId;
+      if (isAck) acked = true;
+      else pending = undefined;
     }
   }
   return pending && stopReason === "end_turn" ? pending : undefined;
