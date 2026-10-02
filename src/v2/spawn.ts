@@ -1408,7 +1408,9 @@ export function resolveProjectContainerPath(runtime: Runtime): string | undefine
  *  Fails closed on the path: it must be absolute, already normalized (no ".",
  *  "..", trailing or doubled slash), never the root, and must be the container
  *  side of a `-v` already in `args`. Anything else refuses the dispatch — a
- *  misconfigured runtime mount must not become a broad exception.
+ *  misconfigured runtime mount must not become a broad exception. Glob
+ *  characters ("*", "?", "[") are refused too: Git reads a value ending in "/*"
+ *  as RECURSIVE, trusting every repository beneath it.
  *
  *  Any GIT_CONFIG_COUNT/KEY/VALUE entries already in `args` (a runtime's env)
  *  are preserved: the exception goes at the next index and the count is bumped
@@ -1418,6 +1420,11 @@ export function appendProjectGitTrust(args: string[], projectContainerPath: stri
   if (!p.startsWith("/") || p.startsWith("//") || p.endsWith("/") || posix.normalize(p) !== p) {
     throw new Error(
       `FG-856: refusing Git trust for project mount path "${p}" — it must be an absolute, normalized path below the root; fix the runtime's \${PROJECT_DIR} mount`,
+    );
+  }
+  if (/[*?[]/.test(p)) {
+    throw new Error(
+      `FG-856: refusing Git trust for project mount path "${p}" — it contains a glob character, and Git reads a trailing "/*" as a recursive exception; fix the runtime's \${PROJECT_DIR} mount`,
     );
   }
   const mounted = args.some((a, i) => {

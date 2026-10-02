@@ -1313,6 +1313,30 @@ test("FG-856: appendProjectGitTrust refuses a project path that is not exact, no
   assert.equal(pickEnv(bare)["GIT_CONFIG_VALUE_0"], "/project");
 });
 
+test("FG-856: appendProjectGitTrust refuses a glob mount path (Git reads a trailing \"/*\" as recursive)", () => {
+  for (const bad of ["/project/*", "/*", "/proj*", "/project?", "/pro[j]ect"]) {
+    assert.throws(() => appendProjectGitTrust(["-v", `/host:${bad}:rw`], bad), /FG-856: refusing Git trust.*glob character/, bad);
+  }
+  for (const ok of ["/project", "/workspace/app"]) {
+    const args = ["-v", `/host:${ok}:rw`];
+    appendProjectGitTrust(args, ok);
+    assert.equal(pickEnv(args)["GIT_CONFIG_VALUE_0"], ok);
+  }
+});
+
+// A plain safe.directory value is an exact match, never recursive (git-config
+// safe.directory: only a trailing "/*" widens it), so a legitimate ancestor mount
+// leaves nested repositories untrusted. The real-git proof (an ancestor entry does
+// not cover a root-owned repo beneath it) is the fg856 worktree-tier suite.
+test("FG-856: an ancestor mount path yields an exact-match entry only", () => {
+  const args = ["-v", "/host:/home:rw"];
+  appendProjectGitTrust(args, "/home");
+  const env = pickEnv(args);
+  assert.equal(env["GIT_CONFIG_KEY_0"], "safe.directory");
+  assert.equal(env["GIT_CONFIG_VALUE_0"], "/home");
+  assert.ok(!Object.values(env).some((v) => v.endsWith("/*") || v === "*"));
+});
+
 test("FG-856: a runtime that mounts the project at the root refuses every builder", () => {
   process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
   const rt: Runtime = {
