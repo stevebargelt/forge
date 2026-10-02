@@ -50,12 +50,14 @@ rename (another writer got there first — retry) or when the resulting
 `config.ai_attribution_changed` audit event can't be recorded: the file edit is undone
 and the command exits non-zero naming the audit gap (`forge: refused — the
 config.ai_attribution_changed audit event could not be recorded (…); <file> is
-unchanged`; `--json` reports `{ ok: false, reason: "audit_unrecorded", error }`) — the
-change is never left applied without its audit record, except the one case where
-restoring the file *also* fails (another writer moved it in the narrow window between
-the audit failure and the undo): then the command still exits non-zero naming both
-failures, but the edit is left in place unaudited and the message says to check the
-file by hand.
+unchanged`; `--json` reports `{ ok: false, reason: "audit_unrecorded", error }`). If that
+undo itself then fails too — for any reason the restore write can raise, not only a
+concurrent writer — the command still exits non-zero naming both failures, but the edit is
+left in place unaudited and the message says to check the file by hand; `forge doctor`
+then shows the file's actual (unaudited) value rather than guessing. A process crash in
+the window between the rename and the audit insert, rather than an exception either step
+raises, is accepted on a single-user host: the file wins, and the change can be durable
+with no audit row (FG-855).
 
 `forge config show` and `forge doctor` both print the same two lines:
 
