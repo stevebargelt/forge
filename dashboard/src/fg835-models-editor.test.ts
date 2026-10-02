@@ -159,8 +159,8 @@ test("FG-835 quick edit: the outline reads profiles, their map entries and overr
   const sub = o.profiles[0]!;
   assert.deepEqual([sub.provider, sub.auth, sub.runtime], ["anthropic", "subscription", null]);
   assert.deepEqual(sub.entries.map((e) => [e.alias, e.model]), [
-    ["reasoning", "claude-opus-5"], ["review", "claude-opus-5-5"], ["fast", "claude-haiku-4-5"],
-    ["default", "claude-sonnet-5"], ["spec-writer", "claude-opus-5"], ["fast-orchestrator", "claude-haiku-4-5"],
+    ["reasoning", "claude-opus-5-5"], ["review", "claude-opus-5-5"], ["fast", "claude-haiku-4-5"],
+    ["default", "claude-sonnet-5"], ["spec-writer", "claude-opus-5-5"], ["fast-orchestrator", "claude-haiku-4-5"],
   ]);
   assert.equal(o.profiles[4]!.runtime, "pi-apikey");
   assert.equal(o.profiles[1]!.entries[2]!.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0", "a model id with a colon is read whole");
