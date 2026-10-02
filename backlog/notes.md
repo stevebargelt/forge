@@ -985,3 +985,37 @@ Lanes opened: FG-808 clone ~/code/forge-fg808 (fix/fg808; npm ci launch-fg808-np
 Engineers launched: FG-808 launch-fg808-engineer-8n1sgy, FG-803 launch-fg803-engineer-g5joiv (both route implementation_quick; TE follow-up mandatory). FG-787 CI at b84edefd still pending.
 
 FG-787 SHIPPED: PR 391 squash-merged as dbf93fb7; review-b0a5ca42ea01 settled (RF-1/RF-3 fixed, RF-2 rejected); grid appended; FG-787 CLOSED --commit dbf93fb7; clone removed; forge-dev upgrade run on main (reported an EDITED host seed architecture-advisor — verify host seeds match main); dashboard restarted at dbf93fb7 (launch-dashboard-21640d). FG-858 shipped earlier (0dd5995b). In flight: FG-808 engineer, FG-803 engineer.
+
+FG-808: engineer complete (17 files; classifier in model-calls.ts, served-model.ts recorder, both dispatch paths incl. crash arms, codex/pi 'unverifiable', show/status/ops/review provenance surfaces; AC 6 stream-signature finding appended to the ticket body). TE launch-fg808-test-engineer-vwff19. Next: docs maintainer (operator_behavior_changed: forge show model line, status modelMismatch, ops signal, task.model_mismatch event, SCHEMA-CONTRACT event vocabulary), commit, PR, ci-wait, review.
+
+FG-803: engineer complete (claude-oauth spec-writer + example policy Opus ids → claude-opus-5-5; fg795 guard + regex self-test; resolution/catalog tests). TE launch-fg803-test-engineer-7uqzpu + docs launch-fg803-docs-lulhjy running (run bda1b6). Contract/docs-closeout at scratchpad/fg803. FG-808: TE launch-fg808-test-engineer-vwff19 + docs launch-fg808-docs-36fcba running (run 949096).
+
+FG-803: TE done (upgrade-installs-seed + choice-derives-from-seed + project-pin cases); committed + PR #393 (fix/fg803), ciwait-a55013be95df + Monitor; acceptance/contract/docs-closeout at scratchpad/fg803. On green: review start --evaluated-no-drift. FG-808: TE done (acceptance.json written); docs launch-fg808-docs-36fcba still running.
+
+FG-808: docs done (SCHEMA-CONTRACT, concepts, how-to-orchestrator-launcher); committed + PR #394 (fix/fg808), ciwait-8e6e8015fe9c + Monitor; acceptance/contract/docs-closeout at scratchpad/fg808. On green: review start --evaluated-no-drift --project ~/code/forge-fg808 --run 949096. FG-803 PR #393 CI pending (ciwait-a55013be95df).
+
+FG-767 CLOSED (tracker): FG-773–FG-778 all done; grid cites the six merges + today's live always-upgrade observation; closed --commit 4e017c16. Clone ~/code/forge-fg767 is unneeded — remove once launch-fg767-npm-ci-c3rbyb exits. FG-826 clone ~/code/forge-fg826 (npm ci launch-fg826-npm-ci-5fkjns); engineer brief at scratchpad/fg826/engineer.md. PRs in CI: #393 (FG-803), #394 (FG-808).
+
+FG-803 PR #393 CI red: dashboard/src/fg835-models-editor.test.ts reads the real example seed and expected claude-opus-5 (root npm test missed the dashboard tier). Engineer fix pass launch-fg803-engineer-fix (sweep dashboard; run test:all). Then hand commit + push + re-register ci-wait #393.
+
+FG-808: CI 15/15 at f686aca1 (PR #394). Review start launch-fg808-review-start-imvum2 (contract scratchpad/fg808; lenses wide/backend/security). FG-803 fix pass launch-fg803-engineer-fix-tq616x and FG-826 engineer launch-fg826-engineer-5clg1l in flight.
+
+FG-808 review-9d8cdfd608be at f686aca1: RF-1 (message_delta binds tokens to process-wide lastSeenModel → false switched/mixed on interleaved streams) fix_now; RF-2 (missing assistant model falls back to lastSeenModel instead of unverifiable) fix_now; RF-3 wide scope-bound rejected. Fix batch launch-fg808-review-fix-qqmfh3. FG-803: fix a2f53f70 pushed; the earlier ci-wait record was reused (stale completion) → advanced + re-registered ciwait-6f195cf8a531 with Monitor. FG-826 engineer still running.
+
+FG-808: fix batch committed by the coordinator as 9e90d26a (model-calls.ts per-request delta model + unverifiable on missing model; +2 unit cases). Pushed; ciwait-c639981adb1a + Monitor; docs stage launch-fg808-review-docs-qlk52f. On CI green: continue --all --acceptance scratchpad/fg808/acceptance.json --docs-closeout scratchpad/fg808/docs-closeout.json.
+
+FG-808: CI 15/15 at 9e90d26a; docs stage no-op; shipping run launch-fg808-review-ship-n2u0gw (close grid pre-written). FG-803 review-d30dd4ac15f8 at a2f53f70: RF-1 (guard only covers 4-8 and bare 5; make it generic non-5-5) fix_now, RF-2 wide scope-bound rejected; fix batch launch-fg803-review-fix-5mdgzf (close grid pre-written). FG-826 engineer launch-fg826-engineer-5clg1l still running.
+
+FG-803: fix batch committed by the coordinator as a5c3b256 (generic non-5-5 Opus guard). Pushed; ciwait-0e3c1ea1ac6f + Monitor; docs stage launch-fg803-review-docs-wv7q6p. On CI green: continue --all --acceptance scratchpad/fg803/acceptance.json --docs-closeout scratchpad/fg803/docs-closeout.json; close grid at scratchpad/fg803/close-grid.md (fill MERGE_SHA, REVIEWED_TIP=a5c3b256).
+
+FG-808 review-9d8cdfd608be: verify green + recheck resolved RF-1/RF-2 at 9e90d26a, but recheck raised RF-4 (model-less later assistant event for a known request keeps the earlier model). Window spent → RF-4 fix_now recorded; bounded engineer pass launch-fg808-engineer-rf4-hmlm8x; then hand commit, push, ci-wait #394, FRESH review start (supersedes 9d8cdfd608be), continue --all, merge. FG-803: docs no-op at a5c3b256; CI pending (ciwait-0e3c1ea1ac6f).
+
+FG-808: RF-4 hand-fixed 77381b9c (pushed; ciwait-b554a49bc603 + Monitor); FRESH review start launched (fg808-review2-start) — review-9d8cdfd608be superseded. Close grid updated for the new tip (REVIEW2_ID placeholder).
+
+FG-803: CI 15/15 at a5c3b256; shipping run launch-fg803-review-ship-9gmb51 (acceptance + docs-closeout at scratchpad/fg803; close grid pre-written, REVIEWED_TIP=a5c3b256). FG-808: fresh review discovery launch-fg808-review2-start-e13uf3 + CI at 77381b9c (ciwait-b554a49bc603). FG-826 engineer launch-fg826-engineer-5clg1l still running.
+
+FG-808 CI at 77381b9c: dashboard_browser flaked on 'FG-819: keyboard focus tabbing into the inbox from outside it resets the idle window' (focus still inside the list) — unrelated to FG-808 (no dashboard change); rerun --failed issued. Second browser focus flake today (FG-845's flaked earlier); if it recurs, file a flake ticket for the browser focus cases.
+
+FG-803 shipping refused once: AC 3's cited test was renamed by the fix batch to 'non-current-Opus pattern spares claude-opus-5-5 but catches every other Opus id'; acceptance + grid updated; shipping relaunched (fg803-review-ship2).
+
+FG-803 SHIPPED: PR 393 squash-merged as ed845c83; review-d30dd4ac15f8 settled; grid appended; FG-803 CLOSED --commit ed845c83; clone removed; forge-dev upgrade installed the Opus 5.5 runtime seed on this host; shipped milestone. Remaining: FG-808 (fresh review-72e6a34a721e: RF-1 idempotent event fix batch launch-fg808-review2-fix-i3mp0c; RF-2 rejected; CI rerun ciwait-e4fa620ccda8 after an FG-819 browser focus flake) and FG-826 (engineer launch-fg826-engineer-5clg1l running since 23:11).
