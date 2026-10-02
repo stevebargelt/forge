@@ -34,7 +34,14 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *  default container_crash / result_missing message).
  *  FG-337: `finalAssistantText` is set (pi only) on a clean completion so the
  *  caller can synthesize an inferred result for narrative roles. */
-export type ProviderFailureAnalysis = { modelError: boolean; error?: string; finalAssistantText?: string };
+export type ProviderFailureAnalysis = {
+  modelError: boolean;
+  error?: string;
+  finalAssistantText?: string;
+  /** FG-787: set (claude only) when the session ended its turn while waiting on
+   *  a background wait it armed — see detectEndedTurnWhileWaiting. */
+  endedTurnWhileWaiting?: EndedTurnWhileWaiting;
+};
 
 function eachJsonl(stdoutRaw: string): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
@@ -88,6 +95,68 @@ export function analyzeClaudeFailure(stdoutRaw: string): ProviderFailureAnalysis
   return cause ? { modelError: true, error: `claude run failed: ${truncate(cause)}` } : { modelError: false };
 }
 
+/** FG-787: the background wait a session armed before it ended its turn. `tool`
+ *  is the operator-facing label (e.g. "Monitor", "Bash run_in_background"). */
+export type EndedTurnWhileWaiting = { tool: string; toolUseId: string };
+
+function waitToolLabel(block: Record<string, unknown>): string | undefined {
+  const name = block["name"];
+  if (typeof name !== "string") return undefined;
+  if (name === "Monitor" || name === "ScheduleWakeup") return name;
+  const input = block["input"];
+  if (isObj(input) && input["run_in_background"] === true) return `${name} run_in_background`;
+  return undefined;
+}
+
+/** FG-787: did a claude-code stream-json session end its turn while waiting on a
+ *  background wait it had just armed? In -p mode ending the turn ends the session,
+ *  so the wait's events never arrive and result.json is never written.
+ *
+ *  Fires when, in the top-level conversation (sub-agent events carry a non-null
+ *  parent_tool_use_id and are ignored):
+ *   - the LAST tool_use block is Monitor, ScheduleWakeup, or any tool called with
+ *     input.run_in_background === true;
+ *   - nothing reached the agent after it other than that tool's own immediate
+ *     tool_result (the "armed"/"started in background" ack) — any other user
+ *     event (another tool's result, a delivered monitor event / notification)
+ *     means the agent consumed further input, and it does not fire;
+ *   - the last stop_reason observed (result event, message_delta, or a complete
+ *     assistant message) is end_turn. */
+export function detectEndedTurnWhileWaiting(stdoutRaw: string): EndedTurnWhileWaiting | undefined {
+  let pending: EndedTurnWhileWaiting | undefined;
+  let stopReason: string | undefined;
+  for (const ev of eachJsonl(stdoutRaw)) {
+    if (ev["parent_tool_use_id"] != null) continue;
+    const type = ev["type"];
+    if (type === "result") {
+      if (typeof ev["stop_reason"] === "string") stopReason = ev["stop_reason"];
+    } else if (type === "stream_event") {
+      const inner = ev["event"];
+      if (isObj(inner) && inner["type"] === "message_delta" && isObj(inner["delta"]) && typeof inner["delta"]["stop_reason"] === "string") {
+        stopReason = inner["delta"]["stop_reason"];
+      }
+    } else if (type === "assistant") {
+      const msg = ev["message"];
+      if (!isObj(msg)) continue;
+      if (typeof msg["stop_reason"] === "string") stopReason = msg["stop_reason"];
+      const content = msg["content"];
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (!isObj(block) || block["type"] !== "tool_use") continue;
+        const label = waitToolLabel(block);
+        pending = label && typeof block["id"] === "string" ? { tool: label, toolUseId: block["id"] } : undefined;
+      }
+    } else if (type === "user" && pending) {
+      const msg = ev["message"];
+      const content = isObj(msg) ? msg["content"] : undefined;
+      const onlyAck = Array.isArray(content) && content.length > 0 &&
+        content.every((b) => isObj(b) && b["type"] === "tool_result" && b["tool_use_id"] === pending?.toolUseId);
+      if (!onlyAck) pending = undefined;
+    }
+  }
+  return pending && stopReason === "end_turn" ? pending : undefined;
+}
+
 /** Dispatch by log_format (preferred) or runtime_kind, mirroring the usage
  *  parser's selection — never keyed on the upstream provider. Unknown format →
  *  no attribution (caller keeps its default). */
@@ -105,8 +174,11 @@ export function analyzeProviderFailure(opts: {
       return analyzeCodexFailure(opts.stdoutRaw);
     case "claude-stream-json":
     case "claude":
-    case "claude-code":
-      return analyzeClaudeFailure(opts.stdoutRaw);
+    case "claude-code": {
+      const a = analyzeClaudeFailure(opts.stdoutRaw);
+      const waiting = detectEndedTurnWhileWaiting(opts.stdoutRaw);
+      return waiting ? { ...a, endedTurnWhileWaiting: waiting } : a;
+    }
     default:
       return { modelError: false };
   }

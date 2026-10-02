@@ -131,6 +131,7 @@ export type FailureKind =
   | "container_crash"
   | "idle_timeout"
   | "result_missing"
+  | "ended_turn_while_waiting" // FG-787: a result_missing sub-cause — the agent armed a background wait (Monitor / ScheduleWakeup / run_in_background) and ended its turn, which in non-interactive mode ends the session before result.json is written. Same retry / re-drive posture as result_missing; only the operator-facing cause is sharper
   | "result_malformed"
   | "work_not_persisted"  // result claims files_modified but none landed on the host project mount (#254)
   | "merge_conflict"      // FG-352: worktree branch could not be fast-forwarded into run.projectDir
@@ -165,7 +166,11 @@ export type FailureContext = {
   error?: unknown;
   exitCode?: number;
   resultState?: "missing" | "malformed";
-  source?: Exclude<FailureKind, "auth_missing" | "auth_expired" | "idle_timeout" | "container_crash" | "result_missing" | "result_malformed" | "unknown">;
+  // FG-787: the runtime stream shows the session ended its turn on a background
+  // wait it armed (provider-failure.ts detectEndedTurnWhileWaiting). Only
+  // meaningful alongside resultState "missing".
+  endedTurnWhileWaiting?: boolean;
+  source?: Exclude<FailureKind, "auth_missing" | "auth_expired" | "idle_timeout" | "container_crash" | "result_missing" | "ended_turn_while_waiting" | "result_malformed" | "unknown">;
   // FG-424: raw evidence off the post-merge integration gate's process exit —
   // a disjoint shape from the exitCode-based evidence below (the gate runs on
   // the host, not attached to a container exit).
@@ -201,9 +206,16 @@ export function classify(ctx: FailureContext): FailureKind {
   if (ctx.exitCode !== undefined && ctx.exitCode !== 0 && ctx.resultState === "missing") {
     return "container_crash";
   }
+  if (ctx.resultState === "missing" && ctx.endedTurnWhileWaiting) return "ended_turn_while_waiting";
   if (ctx.resultState === "missing") return "result_missing";
   if (ctx.resultState === "malformed") return "result_malformed";
   return "unknown";
+}
+
+/** FG-787: the one operator-facing wording for ended_turn_while_waiting — the
+ *  task error every surface (forge show / status / dashboard) renders. */
+export function endedTurnWhileWaitingMessage(tool: string): string {
+  return `ended_turn_while_waiting: the agent armed a background wait (${tool}) and ended its turn; in non-interactive mode that ends the session before result.json is written`;
 }
 
 export function failTask(
@@ -349,6 +361,8 @@ export const ORPHAN_EVIDENCE_KINDS = new Set([
   // still leaves a worktree diff worth surfacing, same as container_crash /
   // idle_timeout above.
   "result_missing",
+  // FG-787: a result_missing sub-cause, recorded on the same path.
+  "ended_turn_while_waiting",
 ]);
 
 /** Recover the orphaned_work_may_persist / oom_killed evidence from a task's

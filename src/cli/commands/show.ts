@@ -813,6 +813,7 @@ export function deriveNextCommandForTask(
       failureKind === "idle_timeout" ||
       failureKind === "container_crash" ||
       failureKind === "result_missing" ||
+      failureKind === "ended_turn_while_waiting" ||
       failureKind === "result_malformed" ||
       failureKind === "model_error" ||
       failureKind === "tool_error" ||

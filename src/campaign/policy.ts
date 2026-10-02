@@ -37,6 +37,7 @@ const BLOCKER_BY_FAILURE_KIND: Record<FailureKind, BlockerKind> = {
   orphaned: "infrastructure",
   idle_timeout: "infrastructure",
   result_missing: "infrastructure",
+  ended_turn_while_waiting: "infrastructure",
   result_malformed: "infrastructure",
   work_not_persisted: "infrastructure",
   // FG-424: unlike a clean-merge-but-broken-code failure (integration_failed,

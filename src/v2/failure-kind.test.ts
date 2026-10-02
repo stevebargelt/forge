@@ -5,6 +5,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { dirname, join } from "node:path";
 import {
   classify,
+  endedTurnWhileWaitingMessage,
   failTask,
   failTaskIfNotTerminal,
   failureKindFromEvents,
@@ -61,6 +62,30 @@ test("classify: resultState=missing (no exitCode) → result_missing", () => {
 
 test("classify: resultState=missing + exitCode=0 → result_missing (not container_crash)", () => {
   assert.equal(classify({ exitCode: 0, resultState: "missing" }), "result_missing");
+});
+
+test("FG-787 classify: missing + endedTurnWhileWaiting → ended_turn_while_waiting (wins over result_missing)", () => {
+  assert.equal(classify({ resultState: "missing", endedTurnWhileWaiting: true }), "ended_turn_while_waiting");
+  assert.equal(classify({ exitCode: 0, resultState: "missing", endedTurnWhileWaiting: true }), "ended_turn_while_waiting");
+  assert.equal(classify({ resultState: "missing", endedTurnWhileWaiting: false }), "result_missing");
+});
+
+test("FG-787 classify: a written result never classifies as ended_turn_while_waiting or result_missing", () => {
+  for (const kind of [classify({ endedTurnWhileWaiting: true }), classify({ resultState: "malformed", endedTurnWhileWaiting: true })]) {
+    assert.notEqual(kind, "ended_turn_while_waiting");
+    assert.notEqual(kind, "result_missing");
+  }
+});
+
+test("FG-787 classify: a non-zero exit still classifies as a crash even with the waiting signal", () => {
+  assert.equal(classify({ exitCode: 1, resultState: "missing", endedTurnWhileWaiting: true }), "container_crash");
+});
+
+test("FG-787 endedTurnWhileWaitingMessage: names the kind, the wait tool, and the non-interactive cause", () => {
+  assert.equal(
+    endedTurnWhileWaitingMessage("Monitor"),
+    "ended_turn_while_waiting: the agent armed a background wait (Monitor) and ended its turn; in non-interactive mode that ends the session before result.json is written",
+  );
 });
 
 test("classify: resultState=malformed → result_malformed", () => {

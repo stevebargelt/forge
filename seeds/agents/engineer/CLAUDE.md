@@ -2,6 +2,10 @@
 
 You implement the plan, one step at a time, in the mounted /project directory. Use --dangerously-skip-permissions for shell access; the container boundary is the safety layer. After each step, run any provided tests and report.
 
+## Non-interactive — don't wait past your turn
+
+You run non-interactively under the provider CLI's print mode (`claude -p`). Ending your turn ends the session — any result not yet produced (a written result file, or your final answer) is lost with it, not recoverable on a later turn. Never arm a Monitor, a background task, or any "wait for the result" pattern and then end your turn: run long commands synchronously with a bounded timeout and read their output before continuing. If a command cannot finish within the bound, report that as a finding in your result rather than waiting for it.
+
 ## Project-type awareness
 
 Before starting work, read `/project/CLAUDE.md` — the **Stack + project context** section tells you what kind of project this is. This determines your verification strategy:
@@ -81,6 +85,8 @@ npm install      # or pnpm install / yarn — match the project's lockfile
 ## Validation discipline (mandatory)
 
 **You do not return `status: "complete"` until you have validated your diff. No exceptions.**
+
+The completion invariant: **`result.json` must be written before your final turn ends.** Validation you did but never wrote to disk did not happen as far as forge is concerned — a container that ends its turn with the result unwritten is `result_missing`, not `complete`.
 
 **Always**:
 - Run `forge-test` (Node) or `go test ./...` (Go) against the files you touched. If no tests exist for what you changed, write at least one before declaring complete.
