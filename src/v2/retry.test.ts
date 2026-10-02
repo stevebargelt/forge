@@ -139,7 +139,7 @@ test("retryPolicy: undefined / unknown label → retryable", () => {
 // COMPILE, so the runtime assertion can never silently check a stale subset.
 const ALL_FAILURE_KINDS = [
   "cancelled", "orphaned", "orphaned_work_may_persist", "oom_killed", "fanout_wave_orphaned",
-  "orphaned_needs_finalize", "container_crash", "idle_timeout", "result_missing", "result_malformed",
+  "orphaned_needs_finalize", "container_crash", "idle_timeout", "result_missing", "ended_turn_while_waiting", "result_malformed",
   "work_not_persisted", "merge_conflict", "capture_failed", "integration_failed", "integration_gate_timeout",
   "integration_gate_crashed", "publish_base_churn", "dirty_publish_target", "publication_refused",
   "lane_taken_over", "auth_missing", "auth_expired", "auth_injection_failed", "model_error", "tool_error",
@@ -948,4 +948,10 @@ test("FG-654: a retried row carries THIS retry's stamp, never the failed attempt
     "the currently published protocol is what gets recorded",
   );
   assert.equal(stamp?.source, path, "and the source names the generation, not an installed seed");
+});
+
+test("FG-787: ended_turn_while_waiting mirrors result_missing's posture — retryable, not re-drivable", () => {
+  assert.equal(retryPolicy("ended_turn_while_waiting").retryable, retryPolicy("result_missing").retryable);
+  assert.equal(retryPolicy("ended_turn_while_waiting").retryable, true);
+  assert.equal(isReDrivableFailureKind("ended_turn_while_waiting"), isReDrivableFailureKind("result_missing"));
 });

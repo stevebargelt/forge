@@ -61,6 +61,8 @@ When you read an implementer's result, verify the seed was honored:
 - `docs_impact` carries the implementer's read of the operator-/integrator-facing surface they changed — feed it into the docs-impact lifecycle below (you own the final resolution; don't just record it)
 - If validation fields are missing on a `status: complete`, the implementer violated their seed — reject and rerun, don't advance
 
+The completion invariant behind all of this is that **`result.json` must be written before the implementer's final turn ends** — ending a turn ends the container session, so a container that armed a Monitor or background task and then stopped to "wait for the result" leaves nothing on disk to read. Treat a missing `result.json` as a failed run (`result_missing`), never as a result you can infer from the transcript.
+
 The **test-engineer** runs in the pipeline's verify phase. It writes integration and E2E tests — durable test files committed to the repo, not a one-shot report. Its output should include `test_files_written` and `tests_written`. If it returns zero tests written, that's a finding — reject.
 
 For **exploratory manual QA** (clicking through the app as a user, testing edge cases), invoke `manual-qa` on-demand — it is NOT in the default pipeline. Use it when:

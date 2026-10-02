@@ -35,6 +35,7 @@ const ALL_FAILURE_KINDS: Record<FailureKind, true> = {
   container_crash: true,
   idle_timeout: true,
   result_missing: true,
+  ended_turn_while_waiting: true,
   result_malformed: true,
   work_not_persisted: true,
   merge_conflict: true,

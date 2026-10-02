@@ -36,7 +36,7 @@ import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, reopenFailedTaskForRecovery, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
-import { failTask, failTaskIfNotTerminal, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
+import { failTask, failTaskIfNotTerminal, classify, endedTurnWhileWaitingMessage, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
@@ -1961,7 +1961,7 @@ async function runOneRed(args: {
       // the earlier, narrower version of this rule fail open.
       failureKind: result.failureKind,
       containerStarted: result.containerStarted,
-      ...(result.failureKind === "result_malformed" || result.failureKind === "result_missing"
+      ...(result.failureKind === "result_malformed" || result.failureKind === "result_missing" || result.failureKind === "ended_turn_while_waiting"
         ? { resultUnreadable: true }
         : {}),
     };
@@ -5270,6 +5270,10 @@ async function runContainer(args: {
     });
     if (a.error) msg = a.error;
     if (a.modelError) kind = classify({ source: "model_error" });
+    else if (a.endedTurnWhileWaiting) {
+      kind = classify({ resultState: "missing", endedTurnWhileWaiting: true });
+      msg = endedTurnWhileWaitingMessage(a.endedTurnWhileWaiting.tool);
+    }
     // FG-540: provider-adapter recovery — same shared extraction rule as
     // invoke.ts/reconcile.ts. A recovered object is returned exactly like a
     // file-written result: the caller still runs persistence, merge,

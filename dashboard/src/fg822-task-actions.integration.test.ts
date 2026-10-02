@@ -40,7 +40,7 @@ const canonicalProjectDir = realpathSync(projectDir);
 const WORKFLOW_STEP = JSON.stringify({ dispatchSource: "workflow" });
 const POLICY_KINDS: FailureKind[] = [
   "cancelled", "orphaned", "orphaned_work_may_persist", "oom_killed", "fanout_wave_orphaned", "orphaned_needs_finalize",
-  "container_crash", "idle_timeout", "result_missing", "result_malformed", "work_not_persisted", "merge_conflict", "capture_failed",
+  "container_crash", "idle_timeout", "result_missing", "ended_turn_while_waiting", "result_malformed", "work_not_persisted", "merge_conflict", "capture_failed",
   "integration_failed", "integration_gate_timeout", "integration_gate_crashed", "publish_base_churn", "dirty_publish_target",
   "publication_refused", "lane_taken_over", "auth_missing", "auth_expired", "auth_injection_failed", "model_error", "tool_error",
   "red_blocked", "gate_rejected", "verification_environment_unavailable", "agent_reported_failure", "pre_container_crash",

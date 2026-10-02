@@ -242,13 +242,14 @@ const WORK_MAY_PERSIST_KINDS = new Set([
   "orphaned_needs_finalize",
   "fanout_wave_orphaned",
   "result_missing",
+  "ended_turn_while_waiting",
 ]);
 // FG-461 / FG-492: the attached-exit kinds only carry recovery evidence when it
 // was actually recorded. A crash with no evidence payload is common and would be
 // retroactive noise, so these kinds only present as an incident once evidence is
 // attached. fanout_wave_orphaned is deliberately NOT here — its evidence lives
 // under a different payload key and it must always raise an incident.
-const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing"]);
+const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout", "result_missing", "ended_turn_while_waiting"]);
 
 /** Does a failed task with this failure_kind + evidence raise ANY orphaned-work-
  *  family incident in detectOrphanedWorkMayPersist? Covers all three incident
@@ -260,7 +261,7 @@ export function raisesWorkMayPersistIncident(failureKind: string, evidence: Orph
   // A clean worktree means no persisted work at risk — skip, EXCEPT for the two
   // kinds whose at-risk artifact is not the worktree diff (an unfinalized result
   // for orphaned_needs_finalize; a clean-exit-no-result for result_missing).
-  if (evidence && evidence.changedFiles.length === 0 && failureKind !== "orphaned_needs_finalize" && failureKind !== "result_missing") return false;
+  if (evidence && evidence.changedFiles.length === 0 && failureKind !== "orphaned_needs_finalize" && failureKind !== "result_missing" && failureKind !== "ended_turn_while_waiting") return false;
   // The attached-exit kinds only rise to an incident once evidence was recorded.
   if (ATTACHED_EXIT_EVIDENCE_KINDS.has(failureKind) && !evidence) return false;
   return true;

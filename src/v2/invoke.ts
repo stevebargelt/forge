@@ -25,7 +25,7 @@ import type { Workflow, Step, Runtime } from "./schema.js";
 import { effortRecord, resolveRuntimeEffort, resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
-import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
+import { failTask, classify, endedTurnWhileWaitingMessage, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
@@ -1330,6 +1330,10 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     });
     if (a.error) error = a.error;
     if (a.modelError) kind = classify({ source: "model_error" });
+    else if (a.endedTurnWhileWaiting) {
+      kind = classify({ resultState: "missing", endedTurnWhileWaiting: true });
+      error = endedTurnWhileWaitingMessage(a.endedTurnWhileWaiting.tool);
+    }
     // FG-540: provider-adapter recovery — a cleanly-exited run whose stream
     // carries an unambiguous terminal JSON-object agent_message supplies the
     // structured result the agent failed to write. The recovered object then

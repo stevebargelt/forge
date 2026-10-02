@@ -343,7 +343,9 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
                 // container ran to a clean exit and simply never produced a result.
                 : failureKind === "result_missing"
                   ? `task ${row.taskId} (${row.phase}) — container exited cleanly but no result.json was ever produced (result missing after a clean exit, not a killed agent)`
-                  : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
+                  : failureKind === "ended_turn_while_waiting"
+                    ? `task ${row.taskId} (${row.phase}) — the agent armed a background wait and ended its turn; the container exited cleanly before result.json was written`
+                    : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
     // The ONE shared mapping (adjudication.ts) both this detector and the
     // adjudication write read, so "which failure kind presents as an
     // orphaned_work_may_persist incident" cannot drift between the two sides.
@@ -421,7 +423,7 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
           command: `forge show ${row.taskId} --json`,
           reason: isFanoutParent
             ? `this is a fanout wave's parent — it never had its own container, so there's no worktree diff to inspect here. Re-drive the whole wave coherently with \`forge recover ${row.taskId} --re-drive\` (a blind \`forge retry\` would strand a duplicate, uncoordinated primary).`
-            : failureKind === "result_missing"
+            : failureKind === "result_missing" || failureKind === "ended_turn_while_waiting"
               ? `the container exited cleanly but produced no result — usually transient; \`forge retry ${row.taskId}\` re-dispatches without needing --force. Investigate first if this recurs for the same task/role.`
               : `the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with \`forge retry ${row.taskId} --force\`.`,
         },
