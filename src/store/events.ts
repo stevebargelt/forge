@@ -53,6 +53,11 @@ export type EventType =
   // that sees the pair — never once per wave.
   | "task.published_after_cancel"
   | "task.retried"
+  // FG-808: the provider reported serving this task on a model other than the one
+  // it requested — `switched` (the primary share ran elsewhere) or `mixed` (a
+  // minority of requests did). Informational: it never fails or holds a gate.
+  // Payload: ServedModelCheck { requested, classification, servedModels[] }.
+  | "task.model_mismatch"
   | "task.reconciled"
   // FG-540: a missing result.json was recovered as the exact structured JSON
   // object from the runtime's cleanly-completed stream (codex-jsonl terminal

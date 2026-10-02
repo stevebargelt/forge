@@ -39,6 +39,7 @@ import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitin
 import { failTask, failTaskIfNotTerminal, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
+import { recordServedModelCheck } from "./served-model.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
 import { getDb, writeTransaction } from "../store/db.js";
 import { crashPoint } from "./crash-points.js";
@@ -5121,6 +5122,7 @@ async function runContainer(args: {
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
     captureUsageForTask(stdoutPath, { taskId: args.taskId, ...usageMeta });
+    recordServedModelCheck({ runId: args.runId, taskId: args.taskId, taskDir: dir, requestedModel: args.resolution.model });
     // WALK-3: ingest progress on the crash path too — last decision/progress
     // records are most valuable in failure cases.
     emitAgentProgressEvents(dir, args.runId, args.taskId);
@@ -5131,6 +5133,8 @@ async function runContainer(args: {
   }
   // #155: capture token usage from the stream-json log. Best-effort.
   captureUsageForTask(stdoutPath, { taskId: args.taskId, ...usageMeta });
+  // FG-808: requested vs served, per request — after capture, so it reads the rows just written.
+  recordServedModelCheck({ runId: args.runId, taskId: args.taskId, taskDir: dir, requestedModel: args.resolution.model });
   // WALK-3: ingest progress as soon as exec returns — BEFORE the idle-timeout /
   // crash / normal branches — so a hung or crashed agent's records still land on
   // the timeline. The events precede the terminal event, matching when written.

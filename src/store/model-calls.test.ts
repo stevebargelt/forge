@@ -237,7 +237,7 @@ test("extractUsageFromCodexLog: maps turn.completed usage (input is total; cache
   assert.equal(r.cacheReadTokens, 20224, "cached subset → cache_read");
   assert.equal(r.outputTokens, 81);
   assert.equal(r.cacheCreationTokens, 0, "codex exposes no cache-creation counter");
-  assert.equal(r.model, "gpt-5.5");
+  assert.equal(r.model, "unverifiable", "FG-808 AC4: codex reports no served model — never echo the requested id");
   assert.equal(r.alias, "review");
   assert.equal(r.requestId, "019e835b-220d-7f91#0");
 });
@@ -273,7 +273,7 @@ test("extractUsageFromCodexLog: cached > input never produces negative input (cl
   const rows = extractUsageFromCodexLog(path, {});
   assert.equal(rows[0]!.inputTokens, 0);
   assert.equal(rows[0]!.cacheReadTokens, 50);
-  assert.equal(rows[0]!.model, "codex", "model falls back when not provided");
+  assert.equal(rows[0]!.model, "unverifiable", "FG-808 AC4: no served model reported → unverifiable");
 });
 
 // ---- #292: usage parser is selected by log_format, not provider ----

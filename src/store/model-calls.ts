@@ -172,6 +172,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
 // request_id is `${thread_id}#${turnIndex}` so a multi-turn run yields one row
 // per turn (matching claude's one-row-per-request model) instead of the last
 // turn overwriting the first under insertUsageRows' (task_id, request_id) key.
+// FG-808 AC4: the served-model value a row carries when the provider's stream did
+// not report one. Never the requested id: a row echoing the request would read as
+// "served what was asked" and hide exactly the switch FG-808 exists to surface.
+export const UNVERIFIABLE_SERVED_MODEL = "unverifiable";
+
 export function extractUsageFromCodexLog(
   logPath: string,
   opts?: { taskId?: string; alias?: string; model?: string },
@@ -203,7 +208,10 @@ export function extractUsageFromCodexLog(
       rows.push({
         taskId: opts?.taskId ?? null,
         requestId: `${threadId ?? "codex"}#${turnIndex++}`,
-        model: opts?.model ?? "codex",
+        // FG-808 AC4: codex's stream names no model, so the requested id is NOT
+        // evidence of what served the turn — recording it would make a mismatch
+        // structurally impossible to see.
+        model: UNVERIFIABLE_SERVED_MODEL,
         alias: opts?.alias ?? null,
         inputTokens: Math.max(0, totalInput - cached),
         outputTokens: numField(u, "output_tokens"),
@@ -272,7 +280,7 @@ export function extractUsageFromPiLog(
     return {
       taskId: opts?.taskId ?? null,
       requestId: typeof responseId === "string" && responseId.length > 0 ? responseId : `${sessionId ?? "pi"}#${i}`,
-      model: typeof m["model"] === "string" ? m["model"] : (opts?.model ?? "pi"),
+      model: typeof m["model"] === "string" && m["model"].length > 0 ? m["model"] : UNVERIFIABLE_SERVED_MODEL,
       alias: opts?.alias ?? null,
       inputTokens: numField(usage, "input"),
       outputTokens: numField(usage, "output"),
@@ -457,10 +465,84 @@ export function usageModelMismatches(rows: readonly UsageRow[], receiptModel: st
   const expected = normalizeModelId(receiptModel);
   const out: UsageModelMismatch[] = [];
   for (const row of rows) {
+    if (row.model === UNVERIFIABLE_SERVED_MODEL) continue;
     if (normalizeModelId(row.model) === expected) continue;
     out.push({ requestId: row.requestId, providerModel: row.model, receiptModel });
   }
   return out;
+}
+
+// FG-808: REQUESTED VS SERVED, PER REQUEST, FOR A CONTAINER DISPATCH.
+//
+// usageModelMismatches above answers "did any row disagree" for the orchestrator
+// session. A container task needs a coarser answer, because a claude -p session
+// legitimately serves a minority of its requests on another model (subagents and
+// other side-calls on a Haiku-class model) and alarming on those would teach
+// operators to ignore the signal:
+//   same         — every request was served by the requested model.
+//   switched     — the requested model did NOT serve the primary share: the work
+//                  itself ran elsewhere (a safeguard-routed downgrade lands here).
+//   mixed        — the requested model served the primary share; a minority of
+//                  requests ran on another model.
+//   unverifiable — the provider's stream reports no served model (codex; pi when
+//                  a message omits it), so nothing can be compared.
+export type ServedModelClassification = "same" | "switched" | "mixed" | "unverifiable";
+
+export type ServedModelShare = {
+  model: string;
+  requestIds: string[];
+  count: number;
+  outputTokens: number;
+  /** Fraction of the task's output tokens this model produced (of the request
+   *  count when no request reported output tokens). */
+  share: number;
+};
+
+export type ServedModelCheck = {
+  requested: string;
+  classification: ServedModelClassification;
+  servedModels: ServedModelShare[];
+};
+
+// The share is measured in OUTPUT tokens, not request count: a burst of short
+// side-calls can outnumber the main turns, but they never out-write them. The
+// requested model must produce STRICTLY MORE than this fraction for the task to be
+// `mixed` rather than `switched` — an even split names no primary, and the
+// ambiguous case is reported as the alarm, not the benign one.
+export const PRIMARY_SERVED_SHARE = 0.5;
+
+/** Pure classification over a task's usage rows. Undefined when there is nothing
+ *  to compare: no requested model was recorded (legacy resolution with no model),
+ *  or no request was captured at all. */
+export function classifyServedModelRows(rows: readonly UsageRow[], requestedModel: string | null | undefined): ServedModelCheck | undefined {
+  if (!requestedModel || rows.length === 0) return undefined;
+  const groups = new Map<string, ServedModelShare>();
+  for (const row of rows) {
+    const key = row.model === UNVERIFIABLE_SERVED_MODEL ? row.model : normalizeModelId(row.model);
+    const g = groups.get(key) ?? { model: row.model, requestIds: [], count: 0, outputTokens: 0, share: 0 };
+    g.requestIds.push(row.requestId);
+    g.count += 1;
+    g.outputTokens += row.outputTokens;
+    groups.set(key, g);
+  }
+  const totalOutput = [...groups.values()].reduce((n, g) => n + g.outputTokens, 0);
+  for (const g of groups.values()) {
+    g.share = totalOutput > 0 ? g.outputTokens / totalOutput : g.count / rows.length;
+  }
+  const servedModels = [...groups.values()].sort((a, b) => b.share - a.share || a.model.localeCompare(b.model));
+  const requested = groups.get(normalizeModelId(requestedModel));
+
+  let classification: ServedModelClassification;
+  if (groups.has(UNVERIFIABLE_SERVED_MODEL)) classification = "unverifiable";
+  else if (requested !== undefined && groups.size === 1) classification = "same";
+  else if (requested !== undefined && requested.share > PRIMARY_SERVED_SHARE) classification = "mixed";
+  else classification = "switched";
+  return { requested: requestedModel, classification, servedModels };
+}
+
+/** The same classification over the task's persisted model_calls rows. */
+export function classifyServedModels(taskId: string, requestedModel: string | null | undefined): ServedModelCheck | undefined {
+  return classifyServedModelRows(usageForTask(taskId), requestedModel);
 }
 
 // Insert a batch of usage rows. Idempotent via (task_id, request_id) — re-running
