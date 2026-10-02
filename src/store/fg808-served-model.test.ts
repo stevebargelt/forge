@@ -229,6 +229,16 @@ test("FG-808: recordServedModelCheck — switched writes the manifest block and 
   assert.match(incidents[0]?.evidence.join(" ") ?? "", /claude-opus-4-1 \(1 request\(s\): req_1\)/);
 });
 
+test("FG-808 RF-1: recordServedModelCheck re-entered on the same task appends NO second task.model_mismatch event", () => {
+  const tdir = seedTask("t-re", "r-re", [{ model: REQUESTED, out: 10 }, { model: "claude-opus-4-1", out: 90 }]);
+  assert.equal(recordServedModelCheck({ runId: "r-re", taskId: "t-re", taskDir: tdir, requestedModel: REQUESTED })?.classification, "switched");
+  assert.equal(recordServedModelCheck({ runId: "r-re", taskId: "t-re", taskDir: tdir, requestedModel: REQUESTED })?.classification, "switched");
+  writeTaskManifest(tdir, { taskId: "t-re", runId: "r-re" } as TaskManifest);
+  assert.equal(recordServedModelCheck({ runId: "r-re", taskId: "t-re", taskDir: tdir, requestedModel: REQUESTED })?.classification, "switched");
+  assert.equal(readTaskManifest(tdir)?.servedModel?.classification, "switched", "the manifest block is still refreshed on re-entry");
+  assert.equal(eventsForTask("t-re").filter((e) => e.eventType === "task.model_mismatch").length, 1);
+});
+
 test("FG-808: same records the manifest block and NO event; mixed records an event but is NOT an ops incident", () => {
   const sameDir = seedTask("t-same", "r-same", [{ model: REQUESTED, out: 10 }]);
   assert.equal(recordServedModelCheck({ runId: "r-same", taskId: "t-same", taskDir: sameDir, requestedModel: REQUESTED })?.classification, "same");

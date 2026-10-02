@@ -24,7 +24,8 @@ export function recordServedModelCheck(args: {
     if (check === undefined) return undefined;
     const manifest = readTaskManifest(args.taskDir);
     if (manifest !== undefined) writeTaskManifest(args.taskDir, { ...manifest, servedModel: check } as TaskManifest);
-    if (isServedModelMismatch(check)) {
+    // Exactly one mismatch event per task: a completion-path retry or re-entry re-records the manifest only.
+    if (isServedModelMismatch(check) && modelMismatchForTask(args.taskId) === undefined) {
       logEvent("task.model_mismatch", { runId: args.runId, taskId: args.taskId, payload: check });
     }
     return check;
