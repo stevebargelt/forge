@@ -20,7 +20,7 @@ forge backlog list  [--status active|done|blocked|deferred] [--type idea|epic|st
 forge backlog show  <id> [--json]
 forge backlog file  "<title>" [--body <text>|-] [--type idea|epic|story]
 forge backlog close <id> [--commit <sha>]
-forge backlog edit  <id> [--body <text>|-]
+forge backlog edit  <id> [--body <text>|-] [--base-revision <n>]
 forge backlog retitle <id> "<new title>"
 forge backlog move  <id> <type>
 forge backlog rank    <id> [--position <n>] [--clear]
@@ -41,7 +41,7 @@ forge backlog notes replace [text|-]
 - `list`/`show` are read-only; use `--json` for machine-readable output when scripting or piping into another step.
 - `file` creates a new ticket; `--body -` reads the body from stdin (useful for multi-line bodies piped in).
 - `close` marks a ticket done and records the close date; `--commit <sha>` attaches the shipping commit.
-- `edit` replaces a ticket's body wholesale — it is not a patch/append operation.
+- `edit` replaces a ticket's body wholesale — it is not a patch/append operation. `--base-revision <n>` is optional, db-mode-only optimistic concurrency: the edit refuses `revision_moved` (nothing written) unless the ticket is still at that revision when the write commits — the dashboard's Refine panel uses it to keep two concurrent saves from clobbering each other; a terminal operator usually has no reason to pass it.
 - `retitle` changes a ticket's title (frontmatter + heading) in place — in markdown mode without moving or renaming its file.
 - `move` moves a ticket between the idea/epic/story types (in markdown mode, between the type directories).
 - `rank`, `enqueue`, `dequeue`, `reorder` are **the operator queue** — see **The operator queue** below. All four are **db-mode only** and refuse by name on a markdown-mode project.
