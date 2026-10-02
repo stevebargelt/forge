@@ -147,7 +147,7 @@ USER agent
 EOF
 }
 
-# Runs the tier inside $1 and sets TESTS_N / FAIL_N / SKIP_N / TODO_N / CANCELLED_N /
+# Runs the tier inside $1 and sets TESTS_N / PASS_N / FAIL_N / SKIP_N / TODO_N / CANCELLED_N /
 # RUNNER_STATUS. Prints the per-test inventory and TAP totals. Asserts nothing — the
 # mode-specific pass condition is the caller's job, because pre-fix INVERTS it.
 #
@@ -245,12 +245,14 @@ run_tier_in_image() {
   }
 
   TESTS_N=$(_total tests)
+  PASS_N=$(_total pass)
   FAIL_N=$(_total fail)
   SKIP_N=$(_total skipped)
   TODO_N=$(_total todo)
   CANCELLED_N=$(_total cancelled)
 
-  if [[ -z "$TESTS_N" || -z "$FAIL_N" || -z "$SKIP_N" ]]; then
+  # Every total must parse; a missing one is never read as zero.
+  if [[ -z "$TESTS_N" || -z "$PASS_N" || -z "$FAIL_N" || -z "$SKIP_N" || -z "$TODO_N" || -z "$CANCELLED_N" ]]; then
     echo "FAIL: the run produced no parseable TAP totals — treat this as a failed verification, not a pass." >&2
     echo "      runner exit status: $RUNNER_STATUS" >&2
     return 1
@@ -268,8 +270,8 @@ verify_post_fix() {
   run_tier_in_image "$IMAGE" || return 1
 
   echo
-  if [[ "$FAIL_N" -ne 0 || "$SKIP_N" -ne 0 || "${TODO_N:-0}" -ne 0 || "${CANCELLED_N:-0}" -ne 0 || "$RUNNER_STATUS" -ne 0 ]]; then
-    echo "FAIL: in-image launch tier is not clean — $TESTS_N tests, $FAIL_N failed, $SKIP_N skipped, ${TODO_N:-0} todo, ${CANCELLED_N:-0} cancelled (runner exit $RUNNER_STATUS)." >&2
+  if [[ "$FAIL_N" -ne 0 || "$SKIP_N" -ne 0 || "$TODO_N" -ne 0 || "$CANCELLED_N" -ne 0 || "$RUNNER_STATUS" -ne 0 ]]; then
+    echo "FAIL: in-image launch tier is not clean — $TESTS_N tests, $PASS_N passed, $FAIL_N failed, $SKIP_N skipped, $TODO_N todo, $CANCELLED_N cancelled (runner exit $RUNNER_STATUS)." >&2
     echo "      A SKIP counts as a failure here: FG-551 requires that a tmux-less image stay red rather than go quietly green." >&2
     return 1
   fi
@@ -305,8 +307,8 @@ verify_pre_fix() {
   run_tier_in_image "$PREFIX_IMAGE" || return 1
 
   echo
-  if [[ "$SKIP_N" -ne 0 || "${TODO_N:-0}" -ne 0 ]]; then
-    echo "FAILED FALSIFICATION: the tmux-less image produced $SKIP_N skipped / ${TODO_N:-0} todo tests." >&2
+  if [[ "$SKIP_N" -ne 0 || "$TODO_N" -ne 0 || "$CANCELLED_N" -ne 0 ]]; then
+    echo "FAILED FALSIFICATION: the tmux-less image produced $SKIP_N skipped / $TODO_N todo / $CANCELLED_N cancelled tests." >&2
     echo "      A tmux-less image must HARD-FAIL, never skip. A skip route is how a missing tmux goes quietly green." >&2
     return 1
   fi
@@ -350,17 +352,19 @@ verify_pre_fix() {
     return 1
   fi
 
-  # Extra failures don't sink the falsification — the tmux path still demonstrably went red —
-  # but they mean something ELSE is broken in the tier, and that must not hide inside a PASS.
-  if [[ "$FAIL_N" -gt "$tmux_fail_n" ]]; then
-    echo "WARNING: $((FAIL_N - tmux_fail_n)) failing test(s) were NOT caused by the missing tmux."
-    echo "         The falsification still holds, but the tier is red for an unrelated reason too — investigate:"
-    grep -aE '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" | grep -vxF "$tmux_fails" || true
-    echo
+  # Any failure NOT attributed to the missing tmux fails the falsification: an unrelated red
+  # test means the run cannot show that the tmux path alone is what went red.
+  local unattributed
+  unattributed="$(grep -aE '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" | grep -vxF "$tmux_fails" || true)"
+  if [[ -n "$unattributed" || "$FAIL_N" -ne "$tmux_fail_n" ]]; then
+    echo "FAILED FALSIFICATION: $FAIL_N failing test(s), only $tmux_fail_n attributed to the missing tmux." >&2
+    echo "      The tmux-less image must fail ONLY the tmux-gated tests. Unattributed failures:" >&2
+    if [[ -n "$unattributed" ]]; then printf '%s\n' "$unattributed" >&2; else echo "      (no unattributed not-ok line; the fail total disagrees with the tmux inventory)" >&2; fi
+    return 1
   fi
 
   echo "PASS (pre-fix falsification): the tmux-less $PREFIX_IMAGE ran $TESTS_N tests — $FAIL_N FAILED, $SKIP_N skipped (runner exit $RUNNER_STATUS)."
-  echo "      All $tmux_fail_n expected tmux-gated tests failed, each citing \"$TMUX_PRECONDITION_MSG\" — no skips, no deletions."
+  echo "      All $tmux_fail_n expected tmux-gated tests failed, each citing \"$TMUX_PRECONDITION_MSG\", and nothing else failed — no skips, no deletions."
   echo "      The tmux path itself went red. The guard catches a tmux-less image."
 }
 

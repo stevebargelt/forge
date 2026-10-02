@@ -81,3 +81,24 @@ test("FG-858: TAP-log parsing treats logs as binary-safe in both image harnesses
     }
   }
 });
+
+test("FG-858: both image harnesses require all six TAP totals and never default one to zero", () => {
+  for (const [name, source] of [
+    ["launch tier", launchHarness],
+    ["native prebuild", nativeHarness],
+  ] as const) {
+    const lines = executableLines(source);
+    for (const total of ["tests", "pass", "fail", "skipped", "todo", "cancelled"]) {
+      assert.ok(
+        lines.some((line) => line.includes(`$(_total ${total})`) || line.includes(`grep -aE '^# ${total} [0-9]+$'`)),
+        `${name} harness must parse the '# ${total}' TAP total`
+      );
+    }
+    const required = lines.find((line) => /^if \[\[ -z "\$\w+" \|\|/.test(line));
+    assert.ok(required, `${name} harness must reject a run with a missing TAP total`);
+    assert.equal((required.match(/-z "\$\w+"/g) ?? []).length, 6, `${name} harness must require all six totals: ${required}`);
+    for (const line of lines) {
+      assert.doesNotMatch(line, /\$\{(?:tests|pass|fail|skip|todo|cancelled|[A-Z]+_N):-[0-9]/, `${name} harness must not default a TAP total: ${line}`);
+    }
+  }
+});
