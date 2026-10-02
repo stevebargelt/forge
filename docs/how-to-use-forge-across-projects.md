@@ -112,7 +112,7 @@ The loader logs which YAML it picked, so you can confirm the override is taking 
 
 ## Per-project RACI overrides
 
-A project may specialize its routing with `<project>/.forge/forge-raci.md` (it may add or retarget routes; it can never weaken a host force rule). There are two ways to author one, and both go through the same CLI gate, write the same override, recompile `<project>/.forge/routing-policy.yml` and append the same `<project>/.forge/raci-audit.log` line:
+A project may specialize its routing with `<project>/.forge/forge-raci.md` (it may add or retarget routes; it can never weaken a host force rule). There are two ways to author one, and both go through the same CLI gate, then write audit-first (FG-855): append the same `<project>/.forge/raci-audit.log` line before writing the override and recompiling `<project>/.forge/routing-policy.yml`:
 
 - **From a terminal.** Copy the effective source, edit it, then gate and apply it:
 
