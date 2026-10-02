@@ -131,6 +131,12 @@ Remedy: update to a Forge carrying FG-856 and rebuild the agent image (`./bin/fo
 
 What not to do: don't `chown` files on the host to work around it, don't bypass or patch out the FG-559 git probe, and don't set `safe.directory *` (or a parent/recursive form) by hand — Forge grants trust for the exact project mount path only, never a blanket exception.
 
+### A project's native dependency fails in the agent container with "version `GLIBC_2.38' not found"
+
+Cause: your agent image predates FG-857 and is still built on Ubuntu 22.04 (glibc 2.35). Modern native prebuilds such as better-sqlite3@13's link against glibc 2.38, so they cannot load in it. The `darwin-arm64 … invalid ELF header` line printed after it is only the loader's last fallback. Pruning Docker caches, restarting Docker, or reinstalling the project's dependencies won't fix it, because the problem is the image's glibc.
+
+Remedy: rebuild the agent image from a Forge carrying FG-857 (`./bin/forge-dev upgrade --skip-git --rebuild-image`, or `./docker/build.sh` directly). The image is now based on Ubuntu 24.04 (glibc 2.39). To confirm on a host with Docker, run `./docker/verify-native-prebuild-in-image.sh`.
+
 ---
 
 ## Final release check
