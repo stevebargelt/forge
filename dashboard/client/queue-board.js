@@ -25,7 +25,7 @@ import htm from "htm";
 import { formatDuration } from "./format.js";
 import { badgeClass, statusLabel } from "./status-tokens.js";
 import { hashFor } from "./view-routing.js";
-import { dismissOutcome, emptyOutcomes, outcomeFor, pillFor, placeOutcome, recordOutcome, updateOutcome } from "./action-outcome.js";
+import { dismissOutcome, emptyOutcomes, outcomeFor, pillFor, placeOutcome, recordOutcome, recordOutcomeInScope, updateOutcome } from "./action-outcome.js";
 import { RefinePanel, fetchReadiness } from "./refine-panel-view.js";
 import { savedOutcome } from "./refine-state.js";
 import {
@@ -68,12 +68,13 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
   const [outcome, setOutcome] = useState(null);
   const [enqueueId, setEnqueueId] = useState("");
   const [grabbed, setGrabbed] = useState(null);
-  const [ledger, setLedger] = useState(emptyOutcomes);
-  const dragging = useRef(null);
   const projectKey = projectFilter?.key ?? null;
+  const ledgerScope = JSON.stringify([projectKey, checkoutFilter ?? null]);
+  const [ledger, setLedger] = useState(() => emptyOutcomes(ledgerScope));
+  const dragging = useRef(null);
 
   // A board for another project is another board: its outcomes do not carry over.
-  useEffect(() => setLedger(emptyOutcomes()), [projectKey, checkoutFilter]);
+  useEffect(() => setLedger(emptyOutcomes(ledgerScope)), [ledgerScope]);
 
   const state = queueBoardState(data, { projectSelected: Boolean(projectFilter) });
   const readinessScope = { projectKey, projectDir: checkoutFilter ?? null };
@@ -85,6 +86,9 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
       if (!request) return;
       const verb = request.path.slice(request.path.lastIndexOf("/") + 1);
       const ticketId = typeof request.body?.ticketId === "string" ? request.body.ticketId : null;
+      // Every await below can outlive the scope this request was made in.
+      const scopeAtCall = ledgerScope;
+      const recordLate = (entry) => setLedger((current) => recordOutcomeInScope(current, scopeAtCall, key, entry));
       setPending(describe);
       try {
         const res = await fetch(`${request.path}${scopeQuery(projectFilter, checkoutFilter)}`, {
@@ -106,7 +110,7 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
           // A refused enqueue reads the ticket's readiness so the outcome can show the gaps
           // and the proposal, and offer Refine (FG-847).
           const read = !result.ok && verb === "enqueue" && ticketId ? await fetchReadiness(ticketId, { projectKey, projectDir: checkoutFilter ?? null }) : null;
-          record(key, queueOutcomeEntry({ verb, ticketId, response: { status: res.status, payload }, readiness: read && read.ok ? read.readiness : null }));
+          recordLate(queueOutcomeEntry({ verb, ticketId, response: { status: res.status, payload }, readiness: read && read.ok ? read.readiness : null }));
           if (result.ok && key === "controls") setEnqueueId("");
         }
         // A REFUSAL IS NEVER SWALLOWED INTO A RELOAD. Only an applied mutation
@@ -116,12 +120,12 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
         if (result.ok && onReload) onReload();
       } catch (err) {
         setOutcome(mutationOutcome({ status: 0, payload: { error: String(err) } }));
-        if (key) record(key, queueOutcomeEntry({ verb, ticketId, response: { status: 0, payload: { error: String(err) } } }));
+        if (key) recordLate(queueOutcomeEntry({ verb, ticketId, response: { status: 0, payload: { error: String(err) } } }));
       } finally {
         setPending(null);
       }
     },
-    [projectFilter, checkoutFilter, onReload, projectKey],
+    [projectFilter, checkoutFilter, onReload, projectKey, ledgerScope],
   );
 
   const move = useCallback(
@@ -199,7 +203,7 @@ export function QueueBoardView({ data, projectFilter, checkoutFilter, onReload, 
             ${outcome.hint ? html`<div class="muted queue-alert-detail">${outcome.hint}</div>` : null}
             <div class="queue-alert-actions">
               ${outcome.needsReload && onReload
-                ? html`<button class="usage-dim-btn" onClick=${() => { setOutcome(null); setLedger(emptyOutcomes()); onReload(); }}>reload board</button>`
+                ? html`<button class="usage-dim-btn" onClick=${() => { setOutcome(null); setLedger(emptyOutcomes(ledgerScope)); onReload(); }}>reload board</button>`
                 : null}
               <button class="usage-dim-btn" onClick=${() => setOutcome(null)}>dismiss</button>
             </div>

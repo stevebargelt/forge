@@ -31,9 +31,13 @@ export function outcomeRole(outcome) {
 
 let nextId = 0;
 
-/** A fresh ledger — what a board reload resets to. */
-export function emptyOutcomes() {
-  return { byKey: {}, pills: {} };
+/** A fresh ledger — what a board reload resets to. `scope` names the board it belongs to
+ *  (recordOutcomeInScope), so a response that outlives a scope change cannot land in the
+ *  next board.
+ * @param {string | null} [scope]
+ */
+export function emptyOutcomes(scope = null) {
+  return { byKey: {}, pills: {}, scope };
 }
 
 /** Record an outcome against the key of the control that produced it. It REPLACES
@@ -56,7 +60,20 @@ export function recordOutcome(ledger, key, outcome) {
     }
   }
   byKey[key] = entry;
-  return { byKey, pills };
+  return { ...ledger, byKey, pills };
+}
+
+/** recordOutcome for an ASYNC result: applied only if the ledger still belongs to the scope
+ *  the request was made in. A response that arrives after the operator switched project or
+ *  checkout is discarded — the ledger it would land in describes another board.
+ * @param {any} ledger
+ * @param {string | null} scope
+ * @param {string} key
+ * @param {any} outcome
+ */
+export function recordOutcomeInScope(ledger, scope, key, outcome) {
+  if ((ledger.scope ?? null) !== scope) return ledger;
+  return recordOutcome(ledger, key, outcome);
 }
 
 /** Patch the outcome a key holds (e.g. open its Refine panel) without re-announcing it. */

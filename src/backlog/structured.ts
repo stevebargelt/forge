@@ -688,6 +688,45 @@ export function writeTicket(projectDir: string, ticket: StructuredTicket): void 
   writeTicketMarkdown(projectDir, ticket);
 }
 
+export class TicketRevisionMoved extends Error {
+  constructor(
+    readonly ticketId: string,
+    readonly baseRevision: number,
+    readonly currentRevision: number,
+  ) {
+    super(
+      `revision_moved: ${ticketId} is at revision r${currentRevision}, not r${baseRevision} the edit was based on — someone edited it meanwhile. Nothing was written.`,
+    );
+    this.name = "TicketRevisionMoved";
+  }
+}
+
+export type TicketBodyEdit = { projectKey: string; previousRevision: number; revision: number };
+
+// FG-847: a db-mode body edit as ONE writeTransaction — the compare-and-set against
+// `baseRevision`, the row write, and `record` (the caller's audit event insert) commit
+// together or not at all. BEGIN IMMEDIATE serializes two editors seeded from the same
+// revision: the second reads the first's committed revision and refuses.
+export function editTicketBodyDb(
+  projectKey: string,
+  id: string,
+  body: string,
+  opts: { baseRevision?: number; record: (edit: TicketBodyEdit) => void },
+): TicketBodyEdit {
+  return writeTransaction(() => {
+    const row = getTicket(projectKey, id);
+    if (!row) throw new Error(`Ticket ${id} not found`);
+    const previousRevision = row.revision ?? 0;
+    if (opts.baseRevision !== undefined && opts.baseRevision !== previousRevision) {
+      throw new TicketRevisionMoved(id, opts.baseRevision, previousRevision);
+    }
+    writeTicketRow(projectKey, { ...hydrate(row), body }, nowIso());
+    const edit = { projectKey, previousRevision, revision: getTicket(projectKey, id)!.revision ?? 0 };
+    opts.record(edit);
+    return edit;
+  });
+}
+
 export function listTickets(projectDir: string, filters: ListFilter = {}): StructuredTicket[] {
   const store = resolveBacklogStore(projectDir);
   if (store.mode === "db") return listTicketsDb(store.projectKey, filters);

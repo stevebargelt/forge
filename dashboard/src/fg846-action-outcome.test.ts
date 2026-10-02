@@ -15,6 +15,7 @@ import {
   pillFor,
   placeOutcome,
   recordOutcome,
+  recordOutcomeInScope,
   returnFocusToControl,
   shouldTakeFocus,
   updateOutcome,
@@ -153,6 +154,27 @@ test("ledger: an outcome persists per key until replaced; a later success on the
   assert.ok(pillFor(fromControls, "FG-1"));
   assert.equal(outcomeFor(emptyOutcomes(), "controls"), null);
   assert.equal(pillFor(emptyOutcomes(), "FG-1"), null);
+});
+
+test("ledger scope: a refused enqueue whose readiness arrives after a project/checkout change is discarded, never recorded into the new board", () => {
+  const scopeA = JSON.stringify(["repo-a", null]);
+  const scopeB = JSON.stringify(["repo-b", null]);
+  // The request is made on board A; the operator switches to board B (the ledger resets to
+  // B's scope) while the enqueue + readiness reads are outstanding; then the late response lands.
+  const atCall = scopeA;
+  let ledger = emptyOutcomes(scopeA);
+  ledger = emptyOutcomes(scopeB);
+  const late = queueOutcomeEntry({ verb: "enqueue", ticketId: "FG-9", response: { status: 409, payload: { ok: false, error: REFUSAL } }, readiness: NOT_READY });
+  const after = recordOutcomeInScope(ledger, atCall, "card:FG-9", late);
+  assert.equal(after, ledger, "the late response is discarded whole");
+  assert.equal(outcomeFor(after, "card:FG-9"), null, "no outcome on a same-id card in the new board");
+  assert.equal(pillFor(after, "FG-9"), null, "and no pill");
+
+  // In the scope it was made in, the same response records; recording keeps the scope.
+  const same = recordOutcomeInScope(emptyOutcomes(scopeA), atCall, "card:FG-9", late);
+  assert.equal(outcomeFor(same, "card:FG-9")!.ok, false);
+  assert.equal(same.scope, scopeA);
+  assert.equal(recordOutcome(same, "controls", { ok: true, kind: "applied", message: "ok" }).scope, scopeA);
 });
 
 // ─── the queue's entries and pills ───────────────────────────────────────────

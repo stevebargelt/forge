@@ -8,7 +8,8 @@
 //
 //  * POST /api/backlog/<id>/edit — one ACTION_ROUTES row (action-mutation.ts). Body
 //    { projectKey, projectDir?, body, baseRevision? }. Shells exactly
-//    `forge backlog edit <id> --body -` with the body on the child's STDIN — never argv —
+//    `forge backlog edit <id> --body - [--base-revision <n>]` with the body on the child's
+//    STDIN — never argv —
 //    in the registry's own checkout, the actor carried as FORGE_ACTOR=dashboard (the CLI
 //    records it on `backlog.ticket_edited`). A body edit is reversible and visible, so there
 //    is no preview; the response carries the new revision and the re-run verdict. DB-mode
@@ -87,9 +88,13 @@ export function parseBacklogEditRequest(input: unknown): BacklogEditRequest | Mu
   return { projectKey, projectDir: projectDir ?? undefined, body, baseRevision: baseRevision ?? undefined };
 }
 
-/** THE ARGV. Exactly one shape; the body is never in it. */
-export function backlogEditArgv(ticketId: string): string[] {
-  return ["backlog", "edit", ticketId, "--body", "-"];
+/** THE ARGV. Exactly one shape; the body is never in it. The base revision, when the editor
+ *  was seeded from one, is the CLI's compare-and-set operand — checked inside its write
+ *  transaction, not just here before the spawn. */
+export function backlogEditArgv(ticketId: string, baseRevision?: number): string[] {
+  const argv = ["backlog", "edit", ticketId, "--body", "-"];
+  if (baseRevision !== undefined) argv.push("--base-revision", String(baseRevision));
+  return argv;
 }
 
 // ─── the read ────────────────────────────────────────────────────────────────
@@ -192,6 +197,7 @@ export async function handleBacklogEditMutation(req: IncomingMessage, res: Serve
     return;
   }
   const previousRevision = before.report.revision;
+  // The fast path. The authoritative check is the CLI's compare-and-set (--base-revision).
   if (request.baseRevision !== undefined && previousRevision !== null && request.baseRevision !== previousRevision) {
     send(res, 409, {
       ok: false,
@@ -202,8 +208,8 @@ export async function handleBacklogEditMutation(req: IncomingMessage, res: Serve
     return;
   }
 
-  const argv = backlogEditArgv(ticketId);
-  const command = `forge backlog edit ${ticketId} --body -`;
+  const argv = backlogEditArgv(ticketId, request.baseRevision);
+  const command = `forge ${argv.join(" ")}`;
   const binary = resolveForgeBinary();
   if (isRefusal(binary)) {
     send(res, binary.status, { ok: false, action: ACTION, error: binary.error });
@@ -221,7 +227,13 @@ export async function handleBacklogEditMutation(req: IncomingMessage, res: Serve
     return;
   }
   if (result.code !== 0) {
-    send(res, 409, { ok: false, ...summary, error: cliRefusal(result, `backlog edit ${ticketId}`).slice(-MAX_REPORTED_STDERR) });
+    const error = cliRefusal(result, `backlog edit ${ticketId}`).slice(-MAX_REPORTED_STDERR);
+    if (/\brevision_moved\b/.test(error)) {
+      const current = readTicketReadiness(identity, ticketId);
+      send(res, 409, { ok: false, ...summary, refusal: "revision_moved", revision: current.kind === "ok" ? current.report.revision : null, error });
+      return;
+    }
+    send(res, 409, { ok: false, ...summary, error });
     return;
   }
   const after = readTicketReadiness(identity, ticketId);

@@ -78,8 +78,22 @@ fs.writeFileSync(${JSON.stringify(LOG)}, [process.cwd(), process.env.FORGE_ACTOR
 fs.writeFileSync(${JSON.stringify(STDIN_LOG)}, body);
 const Database = require(${JSON.stringify(SQLITE)});
 const db = new Database(${JSON.stringify(join(HOME, "forge.db"))});
-db.prepare("UPDATE tickets SET body = ?, revision = revision + 1, body_hash = NULL WHERE project_key = ? AND ticket_id = ?").run(body, ${JSON.stringify(PK)}, process.argv[4]);
-console.log("Updated body of " + process.argv[4]);
+db.pragma("busy_timeout = 5000");
+const id = process.argv[4];
+const at = process.argv.indexOf("--base-revision");
+const base = at === -1 ? null : Number(process.argv[at + 1]);
+// The CLI's compare-and-set, as one IMMEDIATE transaction, with its refusal text.
+const moved = db.transaction(() => {
+  const current = db.prepare("SELECT revision FROM tickets WHERE project_key = ? AND ticket_id = ?").get(${JSON.stringify(PK)}, id).revision;
+  if (base !== null && current !== base) return current;
+  db.prepare("UPDATE tickets SET body = ?, revision = revision + 1, body_hash = NULL WHERE project_key = ? AND ticket_id = ?").run(body, ${JSON.stringify(PK)}, id);
+  return null;
+}).immediate();
+if (moved !== null) {
+  console.error("forge: backlog edit refuses — revision_moved: " + id + " is at revision r" + moved + ", not r" + base + " the edit was based on — someone edited it meanwhile. Nothing was written.");
+  process.exit(1);
+}
+console.log("Updated body of " + id);
 `,
 );
 chmodSync(FAKE_FORGE, 0o755);
@@ -131,8 +145,9 @@ test("the registry: one row shelling the `backlog` verb; nothing else under /api
   }
 });
 
-test("the argv: exactly `backlog edit <id> --body -` — the body is never an argv element", () => {
+test("the argv: exactly `backlog edit <id> --body - [--base-revision <n>]` — the body is never an argv element", () => {
   assert.deepEqual(backlogEditArgv("FG-7"), ["backlog", "edit", "FG-7", "--body", "-"]);
+  assert.deepEqual(backlogEditArgv("FG-7", 3), ["backlog", "edit", "FG-7", "--body", "-", "--base-revision", "3"]);
 });
 
 test("parseBacklogEditRequest: the one shape, the size bound (MAX_TICKET_BODY_BYTES, in UTF-8 bytes), no control characters", () => {
@@ -172,12 +187,12 @@ test("handler: a body that still lacks sections is written and stays needs_refin
   const out = await post("/api/backlog/FG-7/edit", { projectKey: "repo-1", body, baseRevision: before });
   assert.equal(out.status, 200, JSON.stringify(out.body));
   const child = spawned()!;
-  assert.deepEqual(child.argv, ["backlog", "edit", "FG-7", "--body", "-"], "exactly this argv");
+  assert.deepEqual(child.argv, ["backlog", "edit", "FG-7", "--body", "-", "--base-revision", String(before)], "exactly this argv — the base revision is the CLI's compare-and-set operand");
   assert.equal(child.stdin, body, "the body arrives on stdin");
   assert.ok(!child.argv.some((a) => a.includes("description")), "and never in argv");
   assert.equal(child.actor, "dashboard", "the actor is the dashboard, set server-side");
   assert.equal(provenPhysical(child.cwd), provenPhysical(CHECKOUT), "runs in the registry's checkout");
-  assert.equal(out.body["verb"], "forge backlog edit FG-7 --body -");
+  assert.equal(out.body["verb"], `forge backlog edit FG-7 --body - --base-revision ${before}`);
   assert.equal(out.body["previousRevision"], before);
   assert.equal(out.body["revision"], before + 1);
   const readiness = out.body["readiness"] as Record<string, unknown>;
@@ -193,6 +208,27 @@ test("handler: a body with the sections flips the verdict to ready at the new re
   assert.equal(spawned()!.stdin, READY);
   assert.equal(out.body["revision"], before + 1);
   assert.equal((out.body["readiness"] as Record<string, unknown>)["outcome"], "ready");
+});
+
+test("handler: two concurrent saves from one base revision — exactly one applies, the other is refused revision_moved with the current revision", async () => {
+  spawned();
+  const base = getTicket(PK, "FG-7")!.revision!;
+  const bodies = [`${READY}\nFirst editor.\n`, `${READY}\nSecond editor.\n`];
+  // Both requests pass the route's pre-spawn check (neither child has run yet); only the
+  // CLI's compare-and-set, inside its write transaction, can tell them apart.
+  const outs = await Promise.all(bodies.map((body) => post("/api/backlog/FG-7/edit", { projectKey: "repo-1", body, baseRevision: base })));
+  spawned();
+  const applied = outs.filter((o) => o.status === 200);
+  const refused = outs.filter((o) => o.status === 409);
+  assert.equal(applied.length, 1, JSON.stringify(outs.map((o) => o.body)));
+  assert.equal(refused.length, 1, JSON.stringify(outs.map((o) => o.body)));
+  assert.equal(refused[0]!.body["refusal"], "revision_moved");
+  assert.equal(refused[0]!.body["revision"], base + 1, "the refusal carries the current revision");
+  assert.match(String(refused[0]!.body["error"]), /revision_moved: FG-7 is at revision r\d+, not r\d+/);
+  assert.equal(applied[0]!.body["revision"], base + 1);
+  const row = getTicket(PK, "FG-7")!;
+  assert.equal(row.revision, base + 1, "exactly one write");
+  assert.equal(row.body, bodies[outs.indexOf(applied[0]!)], "the applied save's body is the one stored — not overwritten by the refused one");
 });
 
 test("handler: the CLI's refusal passes through verbatim as a 409", async () => {
@@ -249,6 +285,65 @@ test("handler: every refusal happens before a spawn — guards, bad JSON, size, 
 });
 
 // ─── the verb the route shells, run in-process: the write and its event ──────
+
+async function runEdit(args: string[], actor = "dashboard"): Promise<{ out: string[]; err: string[]; exitCode: number }> {
+  const program = new Command();
+  program.exitOverride();
+  registerBacklog(program);
+  const out: string[] = [];
+  const err: string[] = [];
+  const [log, error] = [console.log, console.error];
+  console.log = (line: string) => out.push(line);
+  console.error = (line: string) => err.push(line);
+  process.env["FORGE_ACTOR"] = actor;
+  process.exitCode = 0;
+  try {
+    await program.parseAsync(["backlog", "edit", "FG-7", ...args, "--project", CHECKOUT], { from: "user" });
+    return { out, err, exitCode: Number(process.exitCode ?? 0) };
+  } finally {
+    [console.log, console.error] = [log, error];
+    delete process.env["FORGE_ACTOR"];
+    process.exitCode = 0;
+  }
+}
+
+const editedEvents = () => (getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE event_type = 'backlog.ticket_edited'").get() as { n: number }).n;
+
+test("`forge backlog edit --base-revision`: two writers seeded from one revision — the first applies, the second refuses revision_moved inside the write transaction and writes nothing", async () => {
+  const base = getTicket(PK, "FG-7")!.revision!;
+  const events = editedEvents();
+  const first = await runEdit(["--body", `${READY}\nwriter one\n`, "--base-revision", String(base)]);
+  assert.equal(first.exitCode, 0, first.err.join("\n"));
+  const second = await runEdit(["--body", `${READY}\nwriter two\n`, "--base-revision", String(base)]);
+  assert.equal(second.exitCode, 1);
+  assert.match(second.err.join("\n"), new RegExp(`revision_moved: FG-7 is at revision r${base + 1}, not r${base}`));
+  const row = getTicket(PK, "FG-7")!;
+  assert.equal(row.revision, base + 1);
+  assert.equal(row.body, `${READY}\nwriter one\n`, "the second writer did not overwrite the first");
+  assert.equal(editedEvents(), events + 1, "one edit, one event");
+  const bad = await runEdit(["--body", READY, "--base-revision", "r3"]);
+  assert.equal(bad.exitCode, 1);
+  assert.match(bad.err.join("\n"), /--base-revision must be a non-negative integer/);
+});
+
+test("`forge backlog edit`: an injected backlog.ticket_edited insert failure leaves the ticket row and revision unchanged and refuses by name", async () => {
+  const before = getTicket(PK, "FG-7")!;
+  const events = editedEvents();
+  getDb().exec("CREATE TEMP TRIGGER fg847_fail_edit_event BEFORE INSERT ON events WHEN NEW.event_type = 'backlog.ticket_edited' BEGIN SELECT RAISE(ABORT, 'injected event failure'); END;");
+  let result;
+  try {
+    result = await runEdit(["--body", `${READY}\nnever lands\n`, "--base-revision", String(before.revision)]);
+  } finally {
+    getDb().exec("DROP TRIGGER fg847_fail_edit_event");
+  }
+  assert.equal(result.exitCode, 1);
+  assert.match(result.err.join("\n"), /backlog edit refuses — FG-7 was not edited; nothing was written: injected event failure/);
+  assert.deepEqual(result.out, [], "no success line");
+  const after = getTicket(PK, "FG-7")!;
+  assert.equal(after.revision, before.revision, "the revision did not move");
+  assert.equal(after.body, before.body, "the body did not change");
+  assert.equal(editedEvents(), events);
+});
 
 test("`forge backlog edit` records backlog.ticket_edited with the revisions and the actor from FORGE_ACTOR", async () => {
   const program = new Command();

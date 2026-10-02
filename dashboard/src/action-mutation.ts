@@ -46,7 +46,7 @@
 // dashboard`, `--project` from the registry. ai-attribution-mutation.ts carries the rest.
 //
 // ─── THE TICKET-BODY EDIT ROW (FG-847) ────────────────────────────────────────
-// Replace a DB-mode ticket's body, shelling exactly `forge backlog edit <id> --body -`
+// Replace a DB-mode ticket's body, shelling exactly `forge backlog edit <id> --body - [--base-revision <n>]`
 // with the body on the child's stdin (never argv), the actor as FORGE_ACTOR=dashboard.
 // No preview: a body edit is reversible and visible. backlog-edit-mutation.ts carries it.
 //
