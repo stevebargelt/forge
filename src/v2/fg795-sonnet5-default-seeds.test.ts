@@ -51,6 +51,28 @@ test("seed model-policy.example.yml free of sonnet-4-6", () => {
   );
 });
 
+// FG-803: no shipped seed names a legacy Opus id. The bare-Opus-5 pattern must
+// not match claude-opus-5-5 (the current default) — hence the lookahead.
+const OPUS_4_8 = /claude-opus-4-8\b/;
+const BARE_OPUS_5 = /claude-opus-5(?![-.\d])/;
+const LEGACY_OPUS = [OPUS_4_8, BARE_OPUS_5];
+
+test("legacy-Opus patterns spare claude-opus-5-5 but catch the legacy ids", () => {
+  for (const re of LEGACY_OPUS) assert.ok(!re.test("spec-writer: claude-opus-5-5"), `${re} matched claude-opus-5-5`);
+  assert.ok(OPUS_4_8.test("spec-writer: claude-opus-4-8"));
+  assert.ok(BARE_OPUS_5.test("{ model: claude-opus-5, cost_tier: premium }"));
+  assert.ok(BARE_OPUS_5.test("spec-writer: claude-opus-5\n"));
+});
+
+for (const file of [...ymlFiles(runtimesDir).map((f) => join("runtimes", f)), "model-policy.example.yml"]) {
+  test(`seed free of legacy Opus ids: ${file}`, () => {
+    const raw = readFileSync(join(seedsDir, file), "utf8");
+    for (const re of LEGACY_OPUS) {
+      assert.ok(!re.test(raw), `${file} matches ${re} — Opus 5.5 default regressed`);
+    }
+  });
+}
+
 // (b) the runtime seeds still load + validate through the existing schema.
 for (const file of ymlFiles(runtimesDir)) {
   test(`seed runtime still validates under RuntimeSchema: ${file}`, () => {

@@ -27,7 +27,7 @@ model_profiles:
     provider: anthropic
     auth: subscription          # subscription | api | bedrock | auto
     map:
-      reasoning: { model: claude-opus-4-8,   cost_tier: premium }
+      reasoning: { model: claude-opus-5-5,   cost_tier: premium }
       review:    { model: claude-opus-5-5, cost_tier: premium, effort: low }   # optional effort — see below
       default:   { model: claude-sonnet-5, cost_tier: standard }
       # spec-writer/fast-orchestrator are the orchestrator-facing activity names
@@ -35,7 +35,7 @@ model_profiles:
       # those EXPLICIT activities hit the map directly instead of falling through
       # to map.default — an explicit activity that hits default is refused
       # `activity_unmapped` (see below). `forge upgrade` seeds these same aliases.
-      spec-writer:       { model: claude-opus-4-8,  cost_tier: premium }
+      spec-writer:       { model: claude-opus-5-5,  cost_tier: premium }
       fast-orchestrator: { model: claude-haiku-4-5, cost_tier: cheap }
   claude-bedrock:
     provider: anthropic

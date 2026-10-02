@@ -41,7 +41,7 @@ After installing, run `forge setup` to author the active model policy — it ask
 
 Three modes (FORGE-DEC-007). Forge auto-selects based on environment:
 
-### Personal Mac (Anthropic Pro, includes Opus 4.7)
+### Personal Mac (Anthropic Pro, includes Opus 5.5)
 
 ```bash
 forge auth login
