@@ -28,7 +28,7 @@ The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Win
 Three modes, auto-selected by env at run time (`src/util/creds.ts`):
 - **bedrock**: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_PROFILE` set. Containers mount `~/.aws` read-only and read SSO cache directly; STS env vars are NOT snapshotted. A detached host-side watchdog (`scripts/run-sso-watchdog.sh`) keeps the SSO cache fresh. Source `. ./scripts/use-bedrock.sh` to arm. See FORGE-DEC-013.
 - **anthropic-apikey**: `ANTHROPIC_API_KEY` set. Escape hatch.
-- **anthropic-oauth** (default): credentials live in docker volume `forge-claude-oauth-v2`, populated by `forge auth login`. Personal-Mac default; supports Opus 4.7 via Claude Pro.
+- **anthropic-oauth** (default): credentials live in docker volume `forge-claude-oauth-v2`, populated by `forge auth login`. Personal-Mac default; supports Opus 5.5 via Claude Pro.
 
 The vault's DEC-006 (host file mount) does NOT work on macOS — Claude Code stores OAuth in the keychain there. The named-volume approach replaces it for forge.
 

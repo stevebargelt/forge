@@ -51,6 +51,28 @@ test("seed model-policy.example.yml free of sonnet-4-6", () => {
   );
 });
 
+// FG-803: every Opus id in a shipped seed is claude-opus-5-5. Any other
+// claude-opus-<digit>… id (4-7, 4-8, a bare 5, …) is a regression.
+const NON_CURRENT_OPUS = /claude-opus-(?!5-5\b)[0-9][\w.-]*/;
+
+test("non-current-Opus pattern spares claude-opus-5-5 but catches every other Opus id", () => {
+  assert.ok(!NON_CURRENT_OPUS.test("spec-writer: claude-opus-5-5"));
+  assert.ok(!NON_CURRENT_OPUS.test("{ model: us.anthropic.claude-opus-5-5, cost_tier: premium }"));
+  assert.ok(NON_CURRENT_OPUS.test("spec-writer: claude-opus-4-7"));
+  assert.ok(NON_CURRENT_OPUS.test("spec-writer: claude-opus-4-8"));
+  assert.ok(NON_CURRENT_OPUS.test("{ model: claude-opus-5, cost_tier: premium }"));
+  assert.ok(NON_CURRENT_OPUS.test("spec-writer: claude-opus-5\n"));
+  assert.ok(NON_CURRENT_OPUS.test("model: us.anthropic.claude-opus-4-1"));
+});
+
+for (const file of [...ymlFiles(runtimesDir).map((f) => join("runtimes", f)), "model-policy.example.yml"]) {
+  test(`seed free of non-current Opus ids: ${file}`, () => {
+    const raw = readFileSync(join(seedsDir, file), "utf8");
+    const hit = raw.match(NON_CURRENT_OPUS);
+    assert.ok(!hit, `${file} names ${hit?.[0]} — every shipped Opus id must be claude-opus-5-5`);
+  });
+}
+
 // (b) the runtime seeds still load + validate through the existing schema.
 for (const file of ymlFiles(runtimesDir)) {
   test(`seed runtime still validates under RuntimeSchema: ${file}`, () => {

@@ -10,7 +10,7 @@
 name: claude-oauth
 description: |
   Claude via Anthropic OAuth (Claude Pro / Max). Personal-Mac default.
-  Supports Opus 4.7 via Claude Pro subscription.
+  Supports Opus 5.5 via Claude Pro subscription.
 
 # #292: runtime EXECUTION metadata — what behavior this runtime implies, declared
 # explicitly so the runner chooses parser/prompt/auth wiring from here, not from
@@ -31,9 +31,9 @@ detect:
 image: agent-dev-worker:latest
 
 models:
-  # Personal Claude Pro: Opus 4.8 is available; use it for thinking work.
+  # Personal Claude Pro: Opus 5.5 is available; use it for thinking work.
   # Reds + ambient work use Haiku. Default lands on Sonnet as the middle ground.
-  spec-writer: claude-opus-4-8
+  spec-writer: claude-opus-5-5
   fast-orchestrator: claude-haiku-4-5
   default: claude-sonnet-5
 
