@@ -2540,6 +2540,44 @@ section.in-flight .item.ca-wait-row:hover { background: none; }
 .queue-card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .queue-card-reorder-hint { font-size: 10px; }
 
+/* FG-846: an action's outcome at the point of action (client/action-outcome.js). It is the
+   control's next DOM sibling; inside a wrapping flex row it takes a line of its own at the
+   row's end (order + full basis), so the row's other items keep their places. */
+.action-outcome { order: 99; flex: 1 0 100%; box-sizing: border-box; border-left: 3px solid var(--err); background: rgba(248, 113, 113, 0.07); border-radius: 6px; padding: 8px 10px; font-size: 12px; overflow-wrap: anywhere; cursor: default; }
+.action-outcome-applied { border-left-color: var(--ok); background: rgba(74, 222, 128, 0.07); }
+.action-outcome:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.action-outcome:focus:not(:focus-visible) { outline-style: dotted; }
+.action-outcome-line { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; }
+.action-outcome-message { white-space: pre-wrap; }
+.action-outcome-gaps { margin: 6px 0 4px; padding-left: 0; list-style: none; }
+.action-outcome-gaps li::before { content: "☐ "; color: var(--fg-dim); }
+.action-outcome-proposal { font-size: 12px; }
+.action-outcome-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.action-outcome-actions a { text-decoration: none; display: inline-flex; align-items: center; }
+.action-outcome-hint { font-size: 11px; }
+.queue-refusal-pill { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px; font-size: 11px; }
+.link-btn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.link-btn:hover { text-decoration: underline; }
+
+/* FG-847: the Refine panel (client/refine-panel-view.js) — the Queue's inline refusal and
+   the ticket page's edit mode. */
+.refine-panel { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev-2); padding: 10px 12px; margin-top: 8px; }
+.refine-title { margin: 0 0 6px; font-size: 13px; }
+.refine-via { font-weight: 400; font-size: 12px; }
+.refine-gaps { margin: 6px 0; padding-left: 0; list-style: none; }
+.refine-gaps li { margin: 3px 0; }
+.refine-gap-open::before { content: "☐ "; color: var(--fg-dim); }
+.refine-gap-done::before { content: "☑ "; color: var(--ok); }
+.refine-proposal { font-size: 12px; margin: 4px 0 8px; }
+.refine-body { width: 100%; box-sizing: border-box; min-height: 160px; resize: vertical; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; padding: 8px 10px; }
+.refine-body:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.refine-error { color: var(--err); font-size: 12px; margin-top: 6px; }
+.refine-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.refine-hint { font-size: 12px; }
+.ticket-readiness { margin: 12px 0; }
+.ticket-readiness-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.ticket-readiness-gaps { overflow-wrap: anywhere; }
+
 .queue-dispatcher { margin-top: 16px; cursor: default; }
 .queue-alert, .queue-controls { cursor: default; }
 .queue-dispatcher-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

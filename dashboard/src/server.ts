@@ -34,6 +34,8 @@
 // - GET  /api/model-policy[?project=<key>][&projectDir=]  the model-policy editor's read: effective source, resolution table, audit tail, backups (FG-835)
 // - POST /api/model-policy/propose|apply            a host or project model-policy change through `forge model policy propose|apply` (FG-835)
 // - POST /api/ai-attribution/project|host           a project's or the host's git attribution through `forge config set|unset ai-attribution` (FG-845)
+// - GET  /api/backlog/:id/readiness                 a ticket's readiness at its current revision — `forge readiness --json`'s derivation (?projectKey|?projectDir, FG-847)
+// - POST /api/backlog/:id/edit                      a DB-mode ticket's body through `forge backlog edit <id> --body -`, body on stdin (FG-847)
 //
 // Every GET is a read. The POSTs above — four queue verbs, classify, three task actions,
 // the RACI and model-policy propose/apply pairs, the FG-845 attribution pair, and the FG-823 attention rows in the same registry — are
@@ -53,8 +55,9 @@ import {
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, completedRunTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
   currentActivity, launchDetail, launchLogTail, queueBoard, scopedOrchestratorView, shippingAudit, effectiveConfigGraph,
   runMap, taskExplain, verificationEvidenceForTask, attentionInboxFor, taskActionFacts,
-  reviewById, runsForTicket, runEvidence,
+  reviewById, runsForTicket, runEvidence, ticketIdentityForProject,
 } from "./queries.js";
+import { BACKLOG_READINESS_PATH, readTicketReadiness, readinessPayload, readinessRefusal, ticketIdOperand } from "./backlog-edit-mutation.js";
 import { runIndex, RunIndexRequestError } from "./run-index.js";
 import { roleDetail, rolesIndex } from "./roles.js";
 import { readCheckoutNotes } from "./checkout-notes.js";
@@ -148,6 +151,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     await handleActionMutation(req, res, path, {
       lookupTask: taskActionFacts,
       resolveProject: (projectKey) => resolveOwnerProject(projectsForDashboard(), projectKey, undefined),
+      ticketIdentity: ticketIdentityForProject,
     });
     return;
   }
@@ -922,6 +926,37 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     sendJson(res, 200, review);
+    return;
+  }
+
+  // FG-847: a ticket's readiness — readinessReportForRow, the derivation `forge readiness
+  // <id> --json` prints, read from the store (no subprocess), plus the title and body the
+  // verdict describes. Scoped like /api/backlog: the ticket id is per project.
+  const readinessMatch = path.match(BACKLOG_READINESS_PATH);
+  if (readinessMatch) {
+    const ticketId = ticketIdOperand(readinessMatch[1]!);
+    if (isRefusal(ticketId)) {
+      sendJson(res, ticketId.status, { error: ticketId.error });
+      return;
+    }
+    try {
+      const owner = resolveOwnerProject(projectsForDashboard(), url.searchParams.get("projectKey") ?? undefined, url.searchParams.get("projectDir") ?? undefined);
+      if (!owner) {
+        sendJson(res, 404, { ticketId, error: "no registered project matches this request. Pass ?projectKey= or ?projectDir=." });
+        return;
+      }
+      const lookup = readTicketReadiness(ticketIdentityForProject(owner), ticketId);
+      if (lookup.kind !== "ok") {
+        const refusal = readinessRefusal(lookup, ticketId, owner.label);
+        sendJson(res, refusal.status, { ticketId, error: refusal.error });
+        return;
+      }
+      sendJson(res, 200, readinessPayload(lookup));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`/api/backlog/${ticketId}/readiness: reading the ticket's readiness failed:`, err);
+      sendJson(res, 503, { ticketId, error: message });
+    }
     return;
   }
 

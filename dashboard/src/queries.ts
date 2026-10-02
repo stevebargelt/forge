@@ -2545,18 +2545,25 @@ const NO_TICKET_TRUTH: BacklogTruth = { projectKey: null, storageMode: null, tic
 // src/store/tickets.ts instead was not an option — that module imports getDb, which
 // would drag better-sqlite3 and the whole store handle into this typecheck.
 
-/** Host-wide ticket truth for one resolved project. Throws if the store cannot
- *  be read — the caller decides what a failed read means to its payload. */
-export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
+/** The project_key a resolved project's tickets live under, and which store is
+ *  authoritative for them; null when the repository was never imported. */
+export function ticketIdentityForProject(project: ProjectRecord): { projectKey: string; storageMode: "db" | "markdown" } | null {
   const identity = db()
     .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
     .get(project.key) as { project_key: string } | undefined;
-  if (!identity) return NO_TICKET_TRUTH;
-  const projectKey = identity.project_key;
-
+  if (!identity) return null;
   const mode = db()
     .prepare(`SELECT mode FROM ticket_storage_mode WHERE project_key = ?`)
-    .get(projectKey) as { mode: string } | undefined;
+    .get(identity.project_key) as { mode: string } | undefined;
+  return { projectKey: identity.project_key, storageMode: mode?.mode === "db" ? "db" : "markdown" };
+}
+
+/** Host-wide ticket truth for one resolved project. Throws if the store cannot
+ *  be read — the caller decides what a failed read means to its payload. */
+export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
+  const identity = ticketIdentityForProject(project);
+  if (!identity) return NO_TICKET_TRUTH;
+  const { projectKey } = identity;
 
   const rows = db().prepare(`
     SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic, revision
@@ -2609,7 +2616,7 @@ export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
   });
   tickets.sort((a, b) => compareTicketIds(a.id, b.id));
 
-  return { projectKey, storageMode: mode?.mode === "db" ? "db" : "markdown", tickets };
+  return { projectKey, storageMode: identity.storageMode, tickets };
 }
 
 /** Mirrors compareTicketIds in src/backlog/structured.ts:628 — FG-100 sorts

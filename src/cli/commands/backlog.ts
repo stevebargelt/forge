@@ -74,9 +74,11 @@ import {
   ContainerMutationRefused,
 } from "../../backlog/container-authority.js";
 import { listCampaigns } from "../../store/campaigns.js";
+import { logEvent } from "../../store/events.js";
 import { listRuns } from "../../store/runs.js";
 import {
   closeTicket as closeStructuredTicket,
+  editTicketBodyDb,
   fileNewTicket,
   generateSlug,
   listMarkdownTickets,
@@ -85,6 +87,7 @@ import {
   readTicket,
   retitleTicket,
   writeTicket,
+  TicketRevisionMoved,
   TYPE_DIRS,
   type TicketType,
   type TicketStatus,
@@ -298,14 +301,60 @@ export function registerBacklog(program: Command): void {
     .argument("<id>", "ticket id (e.g. FG-123)")
     .description("Edit an existing ticket's body")
     .option("--body <text>", "replacement body — use '-' to read from stdin")
+    .option(
+      "--base-revision <n>",
+      "refuse (revision_moved) unless the ticket is still at this revision when the edit commits (db mode)",
+    )
     .option("--project <dir>", "project directory (default: cwd)")
-    .action((idArg: string, opts: { body?: string; project?: string }) => {
+    .action((idArg: string, opts: { body?: string; baseRevision?: string; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      let baseRevision: number | undefined;
+      if (opts.baseRevision !== undefined) {
+        if (!/^\d+$/.test(opts.baseRevision)) {
+          console.error(`forge: --base-revision must be a non-negative integer, not ${JSON.stringify(opts.baseRevision)}.`);
+          process.exitCode = 1;
+          return;
+        }
+        baseRevision = Number(opts.baseRevision);
+      }
       const bodyRaw = readBodyArg(opts.body);
-      const ticket = readTicket(dir, idArg);
-      const updated = { ...ticket, body: bodyRaw };
-      writeTicket(dir, updated);
-      console.log(`Updated body of ${idArg}`);
+      const store = resolveBacklogStore(dir);
+      if (store.mode !== "db") {
+        if (baseRevision !== undefined) {
+          console.error(`forge: --base-revision needs a db-mode backlog; a markdown ticket has no revision to compare. Nothing was written.`);
+          process.exitCode = 1;
+          return;
+        }
+        writeTicket(dir, { ...readTicket(dir, idArg), body: bodyRaw });
+        console.log(`Updated body of ${idArg}`);
+        return;
+      }
+      // FG-847: the actor is FORGE_ACTOR when the caller set it (the dashboard's edit route
+      // does), else $USER. The backlog.ticket_edited event is inserted in the SAME transaction
+      // as the write, so an edit never commits without its audit record.
+      const actor = process.env["FORGE_ACTOR"]?.trim() || process.env["USER"] || "operator";
+      let revision: number;
+      try {
+        ({ revision } = editTicketBodyDb(store.projectKey, idArg, bodyRaw, {
+          ...(baseRevision !== undefined ? { baseRevision } : {}),
+          record: (edit) =>
+            logEvent("backlog.ticket_edited", {
+              payload: { ...edit, ticketId: idArg, actor, bodyBytes: Buffer.byteLength(bodyRaw, "utf8") },
+            }),
+        }));
+      } catch (err) {
+        if (err instanceof TicketRevisionMoved) {
+          console.error(`forge: backlog edit refuses — ${err.message}`);
+        } else {
+          console.error(
+            `forge: backlog edit refuses — ${idArg} was not edited; nothing was written: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Updated body of ${idArg} (revision ${revision})`);
     });
 
   // ----- retitle -----

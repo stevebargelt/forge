@@ -20,6 +20,7 @@ const TEST_PORT = 19004;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 process.env.FORGE_DASHBOARD_REMOTE = "0";
 const { awaitDashboardReady } = await import("./test-support/await-dashboard-ready.js");
+const { fixtureFetch } = await import("./test-support/fixture-fetch.js");
 const SAME_ORIGIN = BASE;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -102,6 +103,9 @@ const hostPolicy = () => readFileSync(HOST_POLICY, "utf8");
 const { getDb, writeTransaction } = await import("../../src/store/db.js");
 const { repositoryCheckoutIdentity } = await import("../../src/util/repository-identity.js");
 const { modelPolicyScratchRoot } = await import("./model-policy-mutation.js");
+const { upsertTicket, setStorageMode } = await import("../../src/store/tickets.js");
+const { recheckReadiness } = await import("../../src/store/queue.js");
+const { authorityTestkitBinEnv } = await import("../../src/backlog/container-authority.testkit-spawn.js");
 
 const projectDir = mkdtempSync(join(tmpdir(), "fg835-proj-"));
 execFileSync("git", ["init", "-b", "main"], { cwd: projectDir, stdio: "ignore" });
@@ -109,15 +113,43 @@ execFileSync("git", ["remote", "add", "origin", "git@github.com:stevebargelt/fg8
 const checkoutDir = realpathSync(projectDir);
 const PROJECT_KEY = repositoryCheckoutIdentity(projectDir).key;
 const PROJECT_POLICY = join(checkoutDir, ".forge", "model-policy.yml");
+const FG847_READY = ["## Problem", "The refusal is hidden.", "", "## Goal", "Keep it visible.", "", "## Acceptance Criteria", "- it is actionable"].join("\n");
+const FG847_NEEDS_REFINEMENT = "The ticket has no required headings.\n";
+const FG847_STALE_BEFORE = ["## Problem", "Old problem.", "", "## Goal", "Old goal.", "", "## Acceptance Criteria", "- old criterion"].join("\n");
+const FG847_STALE_AFTER = "The assessment below now describes an older body.\n";
+const FG847_TICKETS = [
+  ["FG-847-EDIT", FG847_NEEDS_REFINEMENT],
+  ["FG-847-READY", FG847_READY],
+  ["FG-847-REFINE", FG847_NEEDS_REFINEMENT],
+  ["FG-847-STALE", FG847_STALE_BEFORE],
+] as const;
+
+function seedFg847Ticket(ticketId: string, body: string): void {
+  upsertTicket({
+    projectKey: PROJECT_KEY, ticketId, type: "story", status: "active", title: `title ${ticketId}`, body,
+    created: "2026-10-01", closed: null, closedCommit: null, epic: null, frontmatter: null,
+    importedAt: "2026-10-01", importedFrom: null,
+  } as never);
+}
+
 writeTransaction(() => {
   getDb()
     .prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?,?,?,?,?,?)`)
     .run("run-835", "feature", "model policy fixture", "complete", "2026-09-30T09:00:00Z", projectDir);
+  getDb()
+    .prepare(`INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at) VALUES (?,?,?,?)`)
+    .run(PROJECT_KEY, repositoryCheckoutIdentity(projectDir).key, "remote", "2026-10-01T00:00:00Z");
 });
+setStorageMode(PROJECT_KEY, "db", "2026-10-01T00:00:00Z");
+for (const [ticketId, body] of FG847_TICKETS) seedFg847Ticket(ticketId, body);
+recheckReadiness(PROJECT_KEY, "FG-847-STALE", "2026-10-01T00:00:00Z");
+seedFg847Ticket("FG-847-STALE", FG847_STALE_AFTER);
 
 const RIG = mkdtempSync(join(tmpdir(), "fg835-rig-"));
 const CALL_LOG = join(RIG, "calls.log");
 const STUB = join(RIG, "forge-stub");
+const EDIT_STDIN = join(RIG, "edit-stdin.txt");
+const EDIT_WRAPPER = join(RIG, "forge-edit-wrapper");
 writeFileSync(CALL_LOG, "");
 writeFileSync(
   STUB,
@@ -130,6 +162,19 @@ writeFileSync(
   ].join("\n"),
 );
 chmodSync(STUB, 0o755);
+writeFileSync(
+  EDIT_WRAPPER,
+  [
+    "#!/bin/sh",
+    `body_file="${join(RIG, "edit-body.txt")}"`,
+    'cat > "$body_file"',
+    `printf 'CALL\\t%s\\n' "$PWD" >> "${CALL_LOG}"`,
+    `for a in "$@"; do printf 'ARG\\t%s\\n' "$a" >> "${CALL_LOG}"; done`,
+    `cp "$body_file" "${EDIT_STDIN}"`,
+    `cat "$body_file" | "${REAL_FORGE}" "$@"`,
+  ].join("\n"),
+);
+chmodSync(EDIT_WRAPPER, 0o755);
 const SLOW_STUB = join(RIG, "forge-stub-slow");
 writeFileSync(SLOW_STUB, ["#!/bin/sh", 'if [ "$3" = "apply" ]; then sleep 1; fi', `exec "${STUB}" "$@"`].join("\n"));
 chmodSync(SLOW_STUB, 0o755);
@@ -158,6 +203,10 @@ function recordedCalls(): RecordedCall[] {
   return calls;
 }
 
+function clearRecordedCalls(): void {
+  writeFileSync(CALL_LOG, "");
+}
+
 function scratchLeftovers(): string[] {
   return existsSync(modelPolicyScratchRoot()) ? readdirSync(modelPolicyScratchRoot()) : [];
 }
@@ -183,7 +232,7 @@ after(() => {
 
 type PostOptions = { headers?: Record<string, string>; body?: unknown; raw?: string };
 async function post(path: string, options: PostOptions = {}): Promise<{ status: number; body: Record<string, any> }> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fixtureFetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: SAME_ORIGIN, ...options.headers },
     body: options.raw ?? JSON.stringify(options.body ?? {}),
@@ -197,8 +246,17 @@ async function post(path: string, options: PostOptions = {}): Promise<{ status: 
 }
 
 async function getPolicy(query: string): Promise<{ status: number; body: Record<string, any> }> {
-  const res = await fetch(`${BASE}/api/model-policy${query}`);
+  const res = await fixtureFetch(`${BASE}/api/model-policy${query}`);
   return { status: res.status, body: (await res.json()) as Record<string, any> };
+}
+
+async function getReadiness(ticketId: string): Promise<{ status: number; body: Record<string, any> }> {
+  const res = await fixtureFetch(`${BASE}/api/backlog/${ticketId}/readiness?projectKey=${encodeURIComponent(PROJECT_KEY)}`);
+  return { status: res.status, body: (await res.json()) as Record<string, any> };
+}
+
+function cliReadiness(ticketId: string): Record<string, unknown> {
+  return JSON.parse(execFileSync(REAL_FORGE, ["readiness", ticketId, "--json"], { cwd: checkoutDir, encoding: "utf8" })) as Record<string, unknown>;
 }
 
 const HOST = { target: "host" };
@@ -547,4 +605,82 @@ test("integ FG-845: bad choices and every shared POST guard refuse before the at
     process.env.HOST = "127.0.0.1";
   }
   assert.equal(recordedCalls().length, before, "every refusal is before spawn");
+});
+
+// FG-847 stays in this existing server-fixture suite (FG-704): it joins the same
+// registry resolution, common POST guards, real server, and child-process seam as
+// FG-835/845 rather than creating a one-ticket integration-file island.
+test("integ FG-847: dashboard edit streams the body only to the registry checkout child, records dashboard as actor, and returns the CLI's new-revision verdict", async () => {
+  // The test process is an agent container with a read-only snapshot pointer; the
+  // dashboard child is a HOST/operator verb, so point its testkit at no authority.
+  Object.assign(process.env, authorityTestkitBinEnv());
+  process.env.FORGE_BIN = EDIT_WRAPPER;
+  clearRecordedCalls();
+  const replacement = ["## Problem", "The outcome was off screen.", "", "## Goal", "Keep it beside the action.", "", "## Acceptance Criteria", "- focus the refusal"].join("\n");
+  const before = await getReadiness("FG-847-EDIT");
+  assert.equal(before.status, 200, JSON.stringify(before.body));
+  const response = await post("/api/backlog/FG-847-EDIT/edit", {
+    body: { projectKey: PROJECT_KEY, projectDir: "/attacker/checkout", body: replacement, baseRevision: before.body["revision"] },
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body["ok"], true);
+  assert.equal(response.body["previousRevision"], before.body["revision"]);
+  assert.equal(response.body["revision"], Number(before.body["revision"]) + 1);
+  assert.deepEqual(recordedCalls(), [{ cwd: checkoutDir, argv: ["backlog", "edit", "FG-847-EDIT", "--body", "-", "--base-revision", String(before.body["revision"])] }]);
+  assert.equal(readFileSync(EDIT_STDIN, "utf8"), replacement, "the child, not argv, received the replacement body");
+  assert.ok(!recordedCalls()[0]!.argv.includes(replacement), "the body never reaches argv");
+  const eventRows = getDb().prepare("SELECT payload FROM events WHERE event_type = 'backlog.ticket_edited'").all() as Array<{ payload: string }>;
+  assert.equal(eventRows.length, 1, "the edit creates exactly one durable event");
+  assert.deepEqual(JSON.parse(eventRows[0]!.payload), {
+    projectKey: PROJECT_KEY, ticketId: "FG-847-EDIT", previousRevision: before.body["revision"],
+    revision: response.body["revision"], actor: "dashboard", bodyBytes: Buffer.byteLength(replacement, "utf8"),
+  });
+  const expected = cliReadiness("FG-847-EDIT");
+  assert.deepEqual(response.body["readiness"], { ...expected, projectKey: PROJECT_KEY, title: "title FG-847-EDIT", body: replacement });
+});
+
+test("integ FG-847: malformed edits and every shared POST guard refuse before a child is spawned", async () => {
+  process.env.FORGE_BIN = EDIT_WRAPPER;
+  clearRecordedCalls();
+  const path = "/api/backlog/FG-847-EDIT/edit";
+  assert.equal((await post(path, { body: { projectKey: PROJECT_KEY, body: "x".repeat(64 * 1024 + 1) } })).status, 413);
+  assert.equal((await post(path, { body: { projectKey: PROJECT_KEY, body: 42 } })).status, 400);
+  assert.equal((await post("/api/backlog/FG-847-NOT-FOUND/edit", { body: { projectKey: PROJECT_KEY, body: FG847_READY, baseRevision: 0 } })).status, 404);
+  const missing = await post(path, { body: { projectKey: PROJECT_KEY, body: FG847_READY } });
+  assert.equal(missing.status, 400, "the dashboard route requires the compare-and-set operand");
+  assert.match(String(missing.body["error"]), /baseRevision is required/);
+  for (const [headers, expected] of [
+    [{ Origin: "http://evil.example" }, 403],
+    [{ "Sec-Fetch-Site": "cross-site" }, 403],
+    [{ "Content-Type": "text/plain" }, 415],
+  ] as const) {
+    assert.equal((await post(path, { headers, body: { projectKey: PROJECT_KEY, body: FG847_READY } })).status, expected);
+  }
+  process.env.HOST = "0.0.0.0";
+  try {
+    assert.equal((await post(path, { body: { projectKey: PROJECT_KEY, body: FG847_READY } })).status, 403);
+  } finally {
+    process.env.HOST = "127.0.0.1";
+  }
+  assert.deepEqual(recordedCalls(), [], "every refusal occurs before the edit child is spawned");
+});
+
+test("integ FG-847: readiness GET is the CLI report for ready, needs-refinement, and stale assessments", async () => {
+  for (const ticketId of ["FG-847-READY", "FG-847-REFINE", "FG-847-STALE"]) {
+    const response = await getReadiness(ticketId);
+    const expected = cliReadiness(ticketId);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.deepEqual(response.body, {
+      ...expected,
+      projectKey: PROJECT_KEY,
+      title: `title ${ticketId}`,
+      body: ticketId === "FG-847-STALE" ? FG847_STALE_AFTER : ticketId === "FG-847-READY" ? FG847_READY : FG847_NEEDS_REFINEMENT,
+    });
+  }
+  const ready = await getReadiness("FG-847-READY");
+  const refinement = await getReadiness("FG-847-REFINE");
+  const stale = await getReadiness("FG-847-STALE");
+  assert.equal(ready.body["outcome"], "ready");
+  assert.equal(refinement.body["outcome"], "needs_refinement");
+  assert.equal(stale.body["stale"], true);
 });

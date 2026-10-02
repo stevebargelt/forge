@@ -12,6 +12,7 @@ import { ATTENTION_ITEM_KINDS } from "./attention-inbox.js";
 import { ORCHESTRATOR_PRESENTATIONS } from "./queries.js";
 import { LAUNCH_STATES } from "../../src/v2/launch.js";
 import { QUEUE_CLAIM_STATES } from "../../src/store/queue-claims.js";
+import { READINESS_OUTCOMES } from "../../src/readiness/readiness.js";
 import { renderShell } from "./shell.js";
 import {
   TONES, badgeClass, runMapStatusClass, statusToken, toneAccentClass, vocabularyValues,
@@ -29,6 +30,7 @@ const STORE_VOCABULARIES: Array<{ vocab: Vocabulary; source: string; members: re
   { vocab: "launch", source: "LAUNCH_STATES (launch outcomes)", members: LAUNCH_STATES, extra: ["unobserved"] },
   { vocab: "claim", source: "QUEUE_CLAIM_STATES", members: QUEUE_CLAIM_STATES },
   { vocab: "receipt", source: "ORCHESTRATOR_PRESENTATIONS", members: ORCHESTRATOR_PRESENTATIONS },
+  { vocab: "readiness", source: "READINESS_OUTCOMES (readiness verdicts)", members: READINESS_OUTCOMES },
 ];
 
 function hasBadgeRule(cls: string): boolean {

@@ -448,6 +448,42 @@ export function readinessView(projectKey: string, ticketId: string): ReadinessVi
   return { ...stored, stale: currentHash === null || currentHash !== stored.bodyHash };
 }
 
+/** FG-847: THE ONE READINESS READ — `forge readiness <id> --json` and the dashboard's
+ *  `GET /api/backlog/<id>/readiness` both answer with this. The verdict (outcome, gaps,
+ *  proposal) is evaluateReadiness over the CURRENT revision: pure over the row, so no
+ *  write and no subprocess. `evaluatedAt`/`stale` describe the RECORDED assessment (the
+ *  one the queue board shows): null/false when none was ever recorded, `stale` when it
+ *  describes an older revision. */
+export type ReadinessReport = {
+  ticketId: string;
+  outcome: ReadinessResult["outcome"];
+  gaps: string[];
+  refinementProposal: string | null;
+  revision: number | null;
+  evaluatedAt: string | null;
+  stale: boolean;
+};
+
+export function readinessReportForRow(row: TicketRow): ReadinessReport {
+  const result = evaluateReadiness(hydrateForReadiness(row));
+  const stored = storedReadiness(row.projectKey, row.ticketId);
+  return {
+    ticketId: row.ticketId,
+    outcome: result.outcome,
+    gaps: result.gaps,
+    refinementProposal: result.refinementProposal,
+    revision: row.revision ?? null,
+    evaluatedAt: stored?.evaluatedAt ?? null,
+    stale: stored !== undefined && stored.bodyHash !== ticketBodyHash(row),
+  };
+}
+
+/** Null when the project has no such ticket. */
+export function readinessReport(projectKey: string, ticketId: string): ReadinessReport | null {
+  const row = getTicket(projectKey, ticketId);
+  return row ? readinessReportForRow(row) : null;
+}
+
 /** Persist an assessment and append a queue event WHEN THE OUTCOME OR THE BOUND
  *  REVISION MOVED — that is a readiness TRANSITION. Re-running the same evaluation
  *  against unchanged content appends nothing, so the history stays a record of

@@ -10,6 +10,8 @@
 //   claim   — queue claim states (QUEUE_CLAIM_STATES, src/store/queue-claims.ts)
 //   receipt — the orchestrator liveness presentation (ORCHESTRATOR_PRESENTATIONS)
 //   ticket  — backlog ticket status
+//   readiness — readiness outcomes (READINESS_OUTCOMES, src/readiness/readiness.ts)
+//   outcome — an action's inline outcome (FG-846): applied or refused, never stored
 //   marker  — the two annotations that are not store states but borrow a status badge
 //
 // A value no vocabulary knows renders the vocabulary's neutral fallback, labeled with the
@@ -109,6 +111,18 @@ const VOCABULARIES = {
     absent: t("no rendered block", "neutral", "status-pending"),
     fail_closed: t("fail-closed", "warn", "status-awaiting_gate"),
   },
+  // FG-846/FG-847: the readiness verdict a refused enqueue carries in its pill.
+  readiness: {
+    ready: t("ready", "ok", "status-complete"),
+    needs_refinement: t("needs refinement", "err", "status-failed"),
+    blocked: t("blocked", "err", "status-failed"),
+    exploratory: t("exploratory", "info", "status-running"),
+  },
+  // FG-846: an action's outcome at the point of action — not stored anywhere.
+  outcome: {
+    applied: t("applied", "ok", "status-complete"),
+    refused: t("refused", "err", "status-failed"),
+  },
   marker: {
     reconcile_candidate: t("reconcile candidate", "warn", "status-reconcile_candidate"),
     environment_unavailable: t("environment unavailable", "warn", "status-environment_unavailable"),
@@ -125,6 +139,8 @@ const FALLBACK_CLASS = {
   ticket: "status-pending",
   raci: "status-pending",
   attribution: "status-pending",
+  readiness: "status-pending",
+  outcome: "status-pending",
   marker: "status-unknown",
 };
 

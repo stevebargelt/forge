@@ -198,6 +198,11 @@ export const TIER_TESTS: Readonly<Record<string, number>> = {
   // FG-692 keyboard focus and Enter reach both task-header and inbox-row actions.
   // Fixture port 18826.
   "fg822-task-actions.test.ts": 5,
+  // FG-846/847 adds the refusal-at-the-point-of-action loop: real Chrome verifies the
+  // focused inline refusal, Escape, in-place refinement through the CLI and re-enqueue,
+  // plus the ready outcome, ticket-page edit hash, keyboard controls and 400px layout.
+  // Fixture port 18860.
+  "fg846-queue-refusal.test.ts": 2,
   // FG-823 adds `fg823-attention-dismiss` (8 tests): the Home inbox's Dismiss and Snooze
   // against the real core `composeInbox` — Dismiss hides the row and the Home badge drops on
   // the next read; new activity resurfaces it; a preset snooze holds, then returns once it

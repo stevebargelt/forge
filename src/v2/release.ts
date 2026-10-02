@@ -238,12 +238,14 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/src/action-mutation.ts",
   "dashboard/src/mutation-guards.ts",
   "dashboard/src/ai-attribution-mutation.ts",
+  "dashboard/src/backlog-edit-mutation.ts",
   "dashboard/package.json",
   "dashboard/tsconfig.json",
   // Client ES-module graph — main.js and everything it (transitively) imports. A missing
   // module makes the browser's module loader fail and the app never mounts.
   // Kept complete by release.test.ts, which walks main.js's static import graph.
   "dashboard/client/main.js",
+  "dashboard/client/action-outcome.js",
   "dashboard/client/attention-dismiss-render.js",
   "dashboard/client/attention-dismiss-view.js",
   "dashboard/client/attention-inbox-render.js",
@@ -280,6 +282,8 @@ export const REQUIRED_DASHBOARD_FILES = [
   "dashboard/client/queue-board.js",
   "dashboard/client/raci-editor-state.js",
   "dashboard/client/raci-editor-view.js",
+  "dashboard/client/refine-panel-view.js",
+  "dashboard/client/refine-state.js",
   "dashboard/client/renderers.js",
   "dashboard/client/review-ledger-render.js",
   "dashboard/client/reviews.js",

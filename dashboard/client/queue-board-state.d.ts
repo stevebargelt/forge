@@ -156,3 +156,15 @@ export declare function rankRequest(move: RelativeMove | null, version: number):
 export declare function enqueueRequest(ticketId: string, note?: string): MutationRequest;
 export declare function dequeueRequest(ticketId: string): MutationRequest;
 export declare function mutationOutcome(response: { status: number; payload: any }): MutationOutcome;
+
+// FG-846: the outcome at the point of action.
+export type QueueOutcomeEntry = MutationOutcome & {
+  verb: string;
+  ticketId: string | null;
+  message: string | null;
+  readiness: any;
+  verdict: string | null;
+};
+export declare function queueOutcomeEntry(input: { verb: string; ticketId: string | null; response: { status: number; payload: any }; readiness?: any }): QueueOutcomeEntry;
+export declare function outcomePill(outcome: { ok: boolean; kind: string; verb?: string | null; verdict?: string | null; revision?: number | null }): { vocab: "readiness" | "outcome"; value: string | null | undefined; text: string };
+export declare function offersRefine(outcome: any): boolean;
