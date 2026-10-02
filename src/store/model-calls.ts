@@ -58,7 +58,10 @@ export function extractUsageFromStdoutLog(
   // events (which only carry session_id, not request_id) back to the right
   // request. Function-scope so different log files don't contaminate each other.
   const sessionToActiveRequest = new Map<string, string>();
-  let lastSeenModel: string | undefined;
+  // FG-808: request_id → the served model that request's own assistant events
+  // reported. Never borrowed across requests: a request whose stream names no
+  // model is unverifiable, and its message_delta inherits only its own entry.
+  const requestModel = new Map<string, string>();
   let lastSeenTimestamp: string | undefined;
 
   for (const line of raw.split("\n")) {
@@ -80,12 +83,13 @@ export function extractUsageFromStdoutLog(
         typeof msg["id"] === "string" ? msg["id"] :
         undefined;
       const sessionId = typeof event["session_id"] === "string" ? event["session_id"] : undefined;
-      if (reqId && sessionId) sessionToActiveRequest.set(sessionId, reqId);
-      const model = typeof msg["model"] === "string" ? msg["model"] : lastSeenModel;
-      if (model) lastSeenModel = model;
+      if (!reqId) continue;
+      if (sessionId) sessionToActiveRequest.set(sessionId, reqId);
+      if (typeof msg["model"] === "string" && msg["model"].length > 0) requestModel.set(reqId, msg["model"]);
+      else if (!requestModel.has(reqId)) requestModel.set(reqId, UNVERIFIABLE_SERVED_MODEL);
       const usage = isObject(msg["usage"]) ? msg["usage"] : undefined;
-      if (reqId && model && usage) {
-        mergeUsage(byRequest, reqId, model, usage, lastSeenTimestamp, opts);
+      if (usage) {
+        mergeUsage(byRequest, reqId, requestModel.get(reqId)!, usage, lastSeenTimestamp, opts);
       }
       continue;
     }
@@ -103,8 +107,7 @@ export function extractUsageFromStdoutLog(
       const sessionId = typeof event["session_id"] === "string" ? event["session_id"] : undefined;
       const reqId = sessionId ? sessionToActiveRequest.get(sessionId) : undefined;
       if (!reqId) continue;
-      const model = lastSeenModel;
-      if (!model) continue;
+      const model = requestModel.get(reqId) ?? UNVERIFIABLE_SERVED_MODEL;
       mergeUsage(byRequest, reqId, model, usage, lastSeenTimestamp, opts, /* preferThis = */ true);
     }
   }
@@ -139,6 +142,7 @@ function mergeUsage(
   // take the max across observations — early events show 0 for output_tokens
   // while the stream is still building up.
   if (preferThis) { byRequest.set(reqId, candidate); return; }
+  existing.model = model;
   existing.inputTokens         = Math.max(existing.inputTokens,         candidate.inputTokens);
   existing.outputTokens        = Math.max(existing.outputTokens,        candidate.outputTokens);
   existing.cacheReadTokens     = Math.max(existing.cacheReadTokens,     candidate.cacheReadTokens);

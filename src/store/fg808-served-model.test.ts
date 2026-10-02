@@ -122,6 +122,40 @@ test("FG-808 AC4 (pi): a message with no model is unverifiable; a reported model
   assert.deepEqual(rows.map((r) => r.model), [UNVERIFIABLE_SERVED_MODEL, "claude-sonnet-4-6"]);
 });
 
+function writeStream(name: string, lines: unknown[]): string {
+  const path = join(dir, name);
+  writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return path;
+}
+
+test("FG-808 RF-1: an interleaved request's message_delta keeps ITS OWN served model, not the last one seen", () => {
+  const rows = extractUsageFromStdoutLog(writeStream("interleaved.jsonl", [
+    { type: "assistant", session_id: "sA", request_id: "req_A", message: { id: "msg_A", model: REQUESTED, usage: { input_tokens: 5, output_tokens: 1 } } },
+    { type: "assistant", session_id: "sB", request_id: "req_B", message: { id: "msg_B", model: "claude-haiku-4-5-20251001", usage: { input_tokens: 5, output_tokens: 1 } } },
+    { type: "stream_event", session_id: "sA", event: { type: "message_delta", usage: { input_tokens: 5, output_tokens: 900 } } },
+    { type: "stream_event", session_id: "sB", event: { type: "message_delta", usage: { input_tokens: 5, output_tokens: 10 } } },
+  ]), { taskId: "t" });
+  const byId = new Map(rows.map((r) => [r.requestId, r]));
+  assert.equal(byId.get("req_A")?.model, REQUESTED);
+  assert.equal(byId.get("req_A")?.outputTokens, 900);
+  assert.equal(byId.get("req_B")?.model, "claude-haiku-4-5-20251001");
+  assert.equal(classifyServedModelRows(rows, REQUESTED)?.classification, "mixed");
+});
+
+test("FG-808 RF-2: an assistant event with no message.model is unverifiable, never a previously observed model", () => {
+  const rows = extractUsageFromStdoutLog(writeStream("no-model.jsonl", [
+    { type: "assistant", session_id: "s", request_id: "req_0", message: { id: "msg_0", model: REQUESTED, usage: { input_tokens: 5, output_tokens: 1 } } },
+    { type: "stream_event", session_id: "s", event: { type: "message_delta", usage: { input_tokens: 5, output_tokens: 10 } } },
+    { type: "assistant", session_id: "s", request_id: "req_1", message: { id: "msg_1", usage: { input_tokens: 5, output_tokens: 1 } } },
+    { type: "stream_event", session_id: "s", event: { type: "message_delta", usage: { input_tokens: 5, output_tokens: 500 } } },
+  ]), { taskId: "t" });
+  const byId = new Map(rows.map((r) => [r.requestId, r]));
+  assert.equal(byId.get("req_0")?.model, REQUESTED);
+  assert.equal(byId.get("req_1")?.model, UNVERIFIABLE_SERVED_MODEL);
+  assert.equal(classifyServedModelRows(rows, REQUESTED)?.classification, "unverifiable");
+  assert.deepEqual(usageModelMismatches(rows, REQUESTED), [], "an unverifiable row raises no mismatch");
+});
+
 test("FG-808: nothing to compare (no requested model, or no rows) → undefined", () => {
   const rows = extractUsageFromStdoutLog(claudeStream("none.jsonl", [{ model: REQUESTED, out: 1 }]));
   assert.equal(classifyServedModelRows(rows, ""), undefined);
