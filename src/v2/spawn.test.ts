@@ -1249,8 +1249,10 @@ test("FG-856: existing GIT_CONFIG_* entries from the runtime are preserved — t
       GIT_CONFIG_VALUE_0: "cat",
     },
   };
-  // The provisioner forwards no runtime env; every other builder does.
-  for (const [label, args] of everyFg856Builder(rt).filter(([l]) => l !== "provisioner")) {
+  // The provisioner forwards only the runtime's GIT_CONFIG_* entries; every other builder forwards all runtime env.
+  const builders = everyFg856Builder(rt);
+  assert.ok(builders.some(([l]) => l === "provisioner"), "the provisioner must be exercised");
+  for (const [label, args] of builders) {
     const env = pickEnv(args);
     assert.equal(env["GIT_CONFIG_COUNT"], "2", label);
     assert.equal(env["GIT_CONFIG_KEY_0"], "core.pager", label);
@@ -1268,12 +1270,55 @@ test("FG-856: no project mount, no trust entry", () => {
 });
 
 test("FG-856: appendProjectGitTrust refuses a bogus count or an entry it would overwrite", () => {
-  assert.throws(() => appendProjectGitTrust(["-e", "GIT_CONFIG_COUNT=two"], "/project"), /not a count/);
+  assert.throws(() => appendProjectGitTrust(["-v", "/host/p:/project:ro", "-e", "GIT_CONFIG_COUNT=two"], "/project"), /not a count/);
   assert.throws(
-    () => appendProjectGitTrust(["-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=a.b", "-e", "GIT_CONFIG_VALUE_0=c", "-e", "GIT_CONFIG_KEY_1=x.y"], "/project"),
+    () => appendProjectGitTrust(["-v", "/host/p:/project:ro", "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=a.b", "-e", "GIT_CONFIG_VALUE_0=c", "-e", "GIT_CONFIG_KEY_1=x.y"], "/project"),
     /GIT_CONFIG_KEY_1.*refusing to overwrite/,
   );
-  const args = ["-e", "OTHER=1"];
+  const args = ["-v", "/host/p:/project:ro", "-e", "OTHER=1"];
   appendProjectGitTrust(args, "/project");
-  assert.deepEqual(args, ["-e", "OTHER=1", "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=/project"]);
+  assert.deepEqual(args, [
+    "-v", "/host/p:/project:ro", "-e", "OTHER=1",
+    "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=/project",
+  ]);
+});
+
+test("FG-856: the provisioner forwards the runtime's Git config, but no other runtime env", () => {
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    env: { ...BASE_RUNTIME.env, SECRET_FOR_AGENT: "s3cret", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.pager", GIT_CONFIG_VALUE_0: "cat" },
+  };
+  const args = buildProvisionerDockerArgs(rt, { TASK_ID: "task-x", PROJECT_DIR: "/tmp/project" }, FG856_PLAN);
+  const env = pickEnv(args);
+  assert.equal(env["SECRET_FOR_AGENT"], undefined);
+  assert.equal(env["GIT_CONFIG_COUNT"], "2");
+  assert.equal(env["GIT_CONFIG_KEY_0"], "core.pager");
+  assert.equal(env["GIT_CONFIG_VALUE_1"], "/project");
+});
+
+test("FG-856: appendProjectGitTrust refuses a project path that is not exact, normalized and mounted", () => {
+  for (const bad of ["/", "//", "/project/", "/project/..", "/project/./x", "//project", "project", ""]) {
+    assert.throws(() => appendProjectGitTrust(["-v", `/host:${bad}:rw`], bad), /FG-856: refusing Git trust/, JSON.stringify(bad));
+  }
+  assert.throws(() => appendProjectGitTrust(["-v", "/host:/project:rw"], "/workspace/app"), /not the container path of any mount/);
+  assert.throws(() => appendProjectGitTrust(["-v", "/host:/project/sub:rw"], "/project"), /not the container path of any mount/);
+  assert.throws(() => appendProjectGitTrust(["-e", "X=/host:/project"], "/project"), /not the container path of any mount/);
+  for (const ok of ["/project", "/workspace/app/deeper"]) {
+    const args = ["-v", `/host:${ok}:ro`];
+    appendProjectGitTrust(args, ok);
+    assert.equal(pickEnv(args)["GIT_CONFIG_VALUE_0"], ok);
+  }
+  const bare = ["-v", "/host:/project"];
+  appendProjectGitTrust(bare, "/project");
+  assert.equal(pickEnv(bare)["GIT_CONFIG_VALUE_0"], "/project");
+});
+
+test("FG-856: a runtime that mounts the project at the root refuses every builder", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    mounts: BASE_RUNTIME.mounts.map((m) => (m.host === "${PROJECT_DIR}" ? { ...m, container: "/" } : m)),
+  };
+  assert.throws(() => buildDockerArgs(rt, BASE_CTX), /FG-856: refusing Git trust/);
+  assert.throws(() => buildProvisionerDockerArgs(rt, { TASK_ID: "t", PROJECT_DIR: "/tmp/project" }, FG856_PLAN), /FG-856: refusing Git trust/);
 });

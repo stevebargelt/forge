@@ -161,10 +161,14 @@ test("fg856: a root-owned checkout root fails git without the exception, passes 
   assert.equal(log.code, 0, `later git commands are covered too, not only the probe: ${log.stderr}`);
   assert.match(log.stdout, /commit 1/);
 
-  for (const other of [`${repo}-other`, base, `${base}/`, "/"]) {
+  for (const other of [`${repo}-other`, base]) {
     const r = run("git", ["rev-parse", "--git-dir"], repo, launcherTrustEnv(other));
     assert.notEqual(r.code, 0, `trusting ${other} must NOT cover ${repo}`);
     assert.match(r.stderr, /dubious ownership/);
+  }
+  // A root or non-normalized mount path never reaches git: the launcher refuses it.
+  for (const broad of [`${base}/`, "/"]) {
+    assert.throws(() => launcherTrustEnv(broad), /FG-856: refusing Git trust/, broad);
   }
 });
 
