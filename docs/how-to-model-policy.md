@@ -505,8 +505,11 @@ and target checks above clear:
    itself is appended only after: a successful backup-and-rename appends
    `outcome: "applied"`; a failure at either step appends `outcome: "failed"`
    with an `error` message instead and leaves the target unchanged. Either way
-   every attempt is recorded, but the recording follows the write rather than
-   preceding it.
+   every attempt the command completes is recorded, but the recording follows
+   the write rather than preceding it — the pair isn't crash-atomic, so a
+   process crash between the rename and the append is the same accepted window
+   as `ai_attribution`'s (FG-855): the target can land durably before its audit
+   line does.
 
 To restore a backup, run `propose`/`apply` with the backup file as the
 candidate.
