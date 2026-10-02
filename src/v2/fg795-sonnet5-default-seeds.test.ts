@@ -51,25 +51,25 @@ test("seed model-policy.example.yml free of sonnet-4-6", () => {
   );
 });
 
-// FG-803: no shipped seed names a legacy Opus id. The bare-Opus-5 pattern must
-// not match claude-opus-5-5 (the current default) — hence the lookahead.
-const OPUS_4_8 = /claude-opus-4-8\b/;
-const BARE_OPUS_5 = /claude-opus-5(?![-.\d])/;
-const LEGACY_OPUS = [OPUS_4_8, BARE_OPUS_5];
+// FG-803: every Opus id in a shipped seed is claude-opus-5-5. Any other
+// claude-opus-<digit>… id (4-7, 4-8, a bare 5, …) is a regression.
+const NON_CURRENT_OPUS = /claude-opus-(?!5-5\b)[0-9][\w.-]*/;
 
-test("legacy-Opus patterns spare claude-opus-5-5 but catch the legacy ids", () => {
-  for (const re of LEGACY_OPUS) assert.ok(!re.test("spec-writer: claude-opus-5-5"), `${re} matched claude-opus-5-5`);
-  assert.ok(OPUS_4_8.test("spec-writer: claude-opus-4-8"));
-  assert.ok(BARE_OPUS_5.test("{ model: claude-opus-5, cost_tier: premium }"));
-  assert.ok(BARE_OPUS_5.test("spec-writer: claude-opus-5\n"));
+test("non-current-Opus pattern spares claude-opus-5-5 but catches every other Opus id", () => {
+  assert.ok(!NON_CURRENT_OPUS.test("spec-writer: claude-opus-5-5"));
+  assert.ok(!NON_CURRENT_OPUS.test("{ model: us.anthropic.claude-opus-5-5, cost_tier: premium }"));
+  assert.ok(NON_CURRENT_OPUS.test("spec-writer: claude-opus-4-7"));
+  assert.ok(NON_CURRENT_OPUS.test("spec-writer: claude-opus-4-8"));
+  assert.ok(NON_CURRENT_OPUS.test("{ model: claude-opus-5, cost_tier: premium }"));
+  assert.ok(NON_CURRENT_OPUS.test("spec-writer: claude-opus-5\n"));
+  assert.ok(NON_CURRENT_OPUS.test("model: us.anthropic.claude-opus-4-1"));
 });
 
 for (const file of [...ymlFiles(runtimesDir).map((f) => join("runtimes", f)), "model-policy.example.yml"]) {
-  test(`seed free of legacy Opus ids: ${file}`, () => {
+  test(`seed free of non-current Opus ids: ${file}`, () => {
     const raw = readFileSync(join(seedsDir, file), "utf8");
-    for (const re of LEGACY_OPUS) {
-      assert.ok(!re.test(raw), `${file} matches ${re} — Opus 5.5 default regressed`);
-    }
+    const hit = raw.match(NON_CURRENT_OPUS);
+    assert.ok(!hit, `${file} names ${hit?.[0]} — every shipped Opus id must be claude-opus-5-5`);
   });
 }
 
