@@ -1019,3 +1019,9 @@ FG-808 CI at 77381b9c: dashboard_browser flaked on 'FG-819: keyboard focus tabbi
 FG-803 shipping refused once: AC 3's cited test was renamed by the fix batch to 'non-current-Opus pattern spares claude-opus-5-5 but catches every other Opus id'; acceptance + grid updated; shipping relaunched (fg803-review-ship2).
 
 FG-803 SHIPPED: PR 393 squash-merged as ed845c83; review-d30dd4ac15f8 settled; grid appended; FG-803 CLOSED --commit ed845c83; clone removed; forge-dev upgrade installed the Opus 5.5 runtime seed on this host; shipped milestone. Remaining: FG-808 (fresh review-72e6a34a721e: RF-1 idempotent event fix batch launch-fg808-review2-fix-i3mp0c; RF-2 rejected; CI rerun ciwait-e4fa620ccda8 after an FG-819 browser focus flake) and FG-826 (engineer launch-fg826-engineer-5clg1l running since 23:11).
+
+FG-808: second fix batch committed by the coordinator as f5625d06 (idempotent task.model_mismatch event). Pushed; ci-wait record ciwait-e4fa620ccda8 still live for PR 394 + Monitor; docs stage launch-fg808-review2-docs-phyrs9. On CI green: continue --all --acceptance --docs-closeout; merge; grid (tip f5625d06); close; rm clone; dashboard restart; notify.
+
+FG-808: docs cycle moved the candidate to 816944ee (2 docs paths); pushed. The live ci-wait (ciwait-e4fa620ccda8) Monitor may fire for f5625d06's checks first — on wake, verify the PR head's checks are 15/15 at 816944ee before continue --all.
+
+FG-808 SHIPPED: PR 394 squash-merged as 783b5571; review-72e6a34a721e settled (first review 9d8cdfd608be: RF-1/RF-2 batch-fixed, RF-3 rejected, RF-4 hand-fixed 77381b9c; second: RF-1 idempotent event batch-fixed, RF-2 rejected; docs cycle 816944ee); grid appended; FG-808 CLOSED --commit 783b5571; clone removed; dashboard restarted at 783b5571 (launch-dashboard-ub4idv); shipped milestone. Only FG-826 remains in flight (engineer since 23:11 UTC).
