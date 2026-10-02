@@ -19,7 +19,7 @@ import { retryPolicy } from "./retry-policy.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { monitorThenEndTurnStream, sInit, sResult, sStop, sText, sToolResult, sToolUse } from "./fg787-stream.testkit.js";
-import { NODE_EXEC as node, BUILT_CLI_ENTRY as cli } from "../integration-cli-spawn.js";
+import { NODE_EXEC as node, BUILT_CLI_ENTRY as cli, REPO_ROOT } from "../integration-cli-spawn.js";
 
 function makeNoResultExec(stdout: string): DockerExecFn {
   return async ({ stdoutPath, stderrPath }) => {
@@ -42,13 +42,16 @@ function makeResultExec(stdout: string): DockerExecFn {
   };
 }
 
-function forge(args: string[]): { status: number | null; stdout: string; stderr: string } {
+// No hard-coded cwd: "/project" exists only inside the agent container, and a missing
+// cwd makes spawnSync fail with ENOENT — status null, no signal, empty stderr.
+function forge(args: string[]): { status: number | null; stdout: string; stderr: string; why: string } {
   const r = spawnSync(node, [cli, ...args], {
-    cwd: "/project",
+    cwd: REPO_ROOT,
     encoding: "utf8",
-    env: { ...process.env, NO_NOTIFY: "true" },
+    env: { ...process.env, FORGE_HOME: process.env.FORGE_HOME!, NO_NOTIFY: "true" },
   });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  const why = `forge ${args.join(" ")} exited status=${r.status} signal=${r.signal} error=${r.error?.message ?? "none"}: ${r.stderr ?? ""}`;
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", why };
 }
 
 function ensureClaudeRuntime(): void {
@@ -99,12 +102,12 @@ test("FG-787 int: invoke — Monitor armed then end_turn, no result.json → end
   // Real command registration and a separate dashboard DB reader must surface
   // the same durable cause, not a renderer-local paraphrase.
   const show = forge(["show", r.taskId]);
-  assert.equal(show.status, 0, show.stderr);
+  assert.equal(show.status, 0, show.why);
   assert.match(show.stdout, /failure:\s+ended_turn_while_waiting/);
   assert.ok(show.stdout.includes(EXPECTED_ERROR), "forge show renders the canonical task error verbatim");
 
   const status = forge(["status", getTask(r.taskId)!.runId, "--json"]);
-  assert.equal(status.status, 0, status.stderr);
+  assert.equal(status.status, 0, status.why);
   const statusTask = (JSON.parse(status.stdout) as { tasks: Array<{ id: string; failureKind: string | null; error: string | null }> })
     .tasks.find((task) => task.id === r.taskId);
   assert.equal(statusTask?.failureKind, "ended_turn_while_waiting");

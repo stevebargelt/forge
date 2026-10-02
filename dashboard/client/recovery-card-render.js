@@ -18,6 +18,7 @@ export const ORPHAN_FAILURE_KINDS = Object.freeze([
   "container_crash",
   "idle_timeout",
   "result_missing",
+  "ended_turn_while_waiting",
 ]);
 
 const RECOVERY_ACTIONS = ["recover-re-drive", "retry"];

@@ -177,6 +177,7 @@ test("every administrative failure kind with no exit event is excluded; every ot
     "idle_timeout",
     "container_crash",
     "result_missing",
+    "ended_turn_while_waiting",
     "result_malformed",
     "work_not_persisted",
     "model_error",
