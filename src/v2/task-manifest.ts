@@ -1,6 +1,7 @@
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
+import type { ServedModelCheck } from "../store/model-calls.js";
 
 // FG-350: RECORDED dispatch-time control-plane provenance. Written once at task
 // dispatch and never recomputed — Explain views read RECORDED truth, not current
@@ -193,6 +194,11 @@ export type TaskManifest = {
   // to a role-prefix guess that re-dispatches a refused reviewer READ-WRITE.
   // Present only on that refusal; a manifest without it dispatched.
   dispatchRefused?: { stage: "dependency_environment"; reason: string; detail: string };
+
+  // FG-808: the requested-vs-served model comparison over this task's captured usage,
+  // written once after the container exits (the only block not written at dispatch,
+  // because it is an observation OF the dispatch). Absent when nothing was comparable.
+  servedModel?: ServedModelCheck;
 };
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {

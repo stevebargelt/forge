@@ -240,7 +240,9 @@ export type RecommendedAction = {
 // contradicts its own history: a human decided the task, and a later write moved
 // it back to a state no agent runs for and no gate decision resolves. Repaired by
 // `forge ops repair <taskId>` (operator-invoked; nothing self-heals it).
-export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate" | "orphaned_work_may_persist" | "oom_killed" | "orphaned_needs_finalize" | "stuck_run" | "container_reap_failed" | "resurrected_gate_decision";
+// FG-808: `model_mismatch` — informational. The provider served a task's primary
+// requests on a model other than the one it requested. Never gate-failing; no repair.
+export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate" | "orphaned_work_may_persist" | "oom_killed" | "orphaned_needs_finalize" | "stuck_run" | "container_reap_failed" | "resurrected_gate_decision" | "model_mismatch";
 
 export type VerificationCommand = {
   command: string;

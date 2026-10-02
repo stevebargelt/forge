@@ -30,6 +30,7 @@ import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./fai
 import { attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { captureUsageForTask } from "../store/model-calls.js";
+import { recordServedModelCheck } from "./served-model.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { classifyRunTerminalState } from "./ready-queue.js";
@@ -1178,6 +1179,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // #155: capture usage even on docker failure — the task may have streamed
     // tokens before crashing, and we want to account for them.
     captureUsageForTask(stdoutPath, { taskId, ...usageMeta });
+    recordServedModelCheck({ runId, taskId, taskDir: dir, requestedModel: resolution.model });
     // WALK-3: ingest progress on the crash path too — the agent's last
     // decision/progress records are most valuable in failure cases.
     emitAgentProgressEvents(dir, runId, taskId);
@@ -1190,6 +1192,8 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // #155: capture token usage from the stream-json log. Best-effort; never
   // throws or affects task status.
   captureUsageForTask(stdoutPath, { taskId, ...usageMeta });
+  // FG-808: requested vs served, per request — after capture, so it reads the rows just written.
+  recordServedModelCheck({ runId, taskId, taskDir: dir, requestedModel: resolution.model });
   // WALK-3: ingest any agent-written progress.jsonl as soon as exec returns —
   // BEFORE the idle-timeout / crash / normal branches below — so a hung or
   // crashed agent's progress records still land on the timeline (these are the

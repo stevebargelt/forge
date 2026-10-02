@@ -26,6 +26,7 @@
 import { z } from "zod";
 import { RISK_LENSES, type RiskLens } from "./review-contract.js";
 import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
+import type { ServedModelCheck } from "../store/model-calls.js";
 import type {
   FindingSource,
   LensAcceptance,
@@ -144,6 +145,9 @@ export type LensDispatch = {
    *  manifest. It is what makes "validated against <runtime>" an observation rather than a
    *  constant somebody wrote down. Absent when nothing was dispatched. */
   runtime?: string;
+  /** FG-808: requested vs served model for this dispatch, read back off its task
+   *  manifest. Provenance only — it never changes the outcome or clears/fails a gate. */
+  servedModel?: ServedModelCheck;
 };
 
 /** FG-689 RF-1: the dispatch seam MEASURED the input it assembled and it did not fit.
@@ -206,6 +210,9 @@ export type LensOutcome =
        *  much as an authored outcome needs to say which shard it covers. */
       shard?: ShardIdentity;
       derivationDigest?: string;
+      /** FG-808: requested vs served model, so a disposition sees a lens a different
+       *  model reviewed. Carried on both branches; absent when nothing was comparable. */
+      servedModel?: ServedModelCheck;
     }
   | {
       lens: RiskLens;
@@ -217,6 +224,7 @@ export type LensOutcome =
       protocol?: LensProtocolRecord;
       shard?: ShardIdentity;
       derivationDigest?: string;
+      servedModel?: ServedModelCheck;
     };
 
 function classifyFailure(failureKind: string | undefined): LensIncompleteReason {
@@ -247,6 +255,7 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
     // only successful outcomes keep.
     ...(dispatch.shard !== undefined ? { shard: dispatch.shard } : {}),
     ...(dispatch.derivationDigest !== undefined ? { derivationDigest: dispatch.derivationDigest } : {}),
+    ...(dispatch.servedModel !== undefined ? { servedModel: dispatch.servedModel } : {}),
   };
 
   if (dispatch.synthesized === true) {

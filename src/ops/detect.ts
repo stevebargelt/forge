@@ -23,6 +23,7 @@ import { adjudicatedIdentitiesForTask, computeAdjudicationIdentity, incidentKind
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
 import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { taskDir } from "../util/paths.js";
+import type { ServedModelCheck } from "../store/model-calls.js";
 
 // FG-492 finding 4: render the container-evidence portion of an OrphanEvidence
 // tuple with the same code/signal/OOM detail `forge show`'s describeContainerEvidence
@@ -647,6 +648,62 @@ export function detectResurrectedGateDecision(db: DatabaseInstance, opts: OpsChe
   return incidents;
 }
 
+type ModelMismatchRow = { taskId: string; runId: string; phase: string; agentRole: string; payload: string | null };
+
+/** FG-808: a task whose provider reported serving its PRIMARY requests on a model
+ *  other than the one it requested (`task.model_mismatch`, classification
+ *  `switched`). INFORMATIONAL: low severity, investigate-only, no repair — it never
+ *  holds or fails anything, it makes the switch visible. `mixed` (a minority of
+ *  side-call requests on another model) is deliberately NOT listed: it is the normal
+ *  shape of a claude -p session that used a subagent, and `forge show` / `status`
+ *  already carry it. Reads the latest such event per task. */
+export function detectModelMismatch(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
+  const rows = db
+    .prepare(
+      `SELECT t.id AS taskId, t.run_id AS runId, t.phase AS phase, t.agent_role AS agentRole, e.payload AS payload
+       FROM tasks t
+       JOIN runs r ON r.id = t.run_id
+       JOIN events e ON e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = t.id AND e2.event_type = 'task.model_mismatch'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )
+       WHERE (? IS NULL OR r.project_dir = ?)`
+    )
+    .all(opts.projectDir ?? null, opts.projectDir ?? null) as ModelMismatchRow[];
+
+  const incidents: Incident[] = [];
+  for (const row of rows) {
+    const payload = row.payload ? (JSON.parse(row.payload) as Partial<ServedModelCheck>) : null;
+    if (payload?.classification !== "switched" || typeof payload.requested !== "string") continue;
+    const served = (payload.servedModels ?? [])
+      .map((m) => `${m.model} (${m.count} request(s): ${m.requestIds.join(", ")})`)
+      .join("; ");
+    incidents.push(
+      makeIncident({
+        kind: "model_mismatch",
+        severity: "low",
+        confidence: "db-confirmed",
+        runId: row.runId,
+        taskId: row.taskId,
+        evidence: [
+          `task ${row.taskId} (${row.phase}, ${row.agentRole}) requested ${payload.requested}`,
+          `the provider reported serving its primary requests on another model: ${served}`,
+        ],
+        recommendedAction: {
+          type: "investigate",
+          autonomy: "manual-only",
+          command: `forge show ${row.taskId}`,
+          reason:
+            "informational — the task's output came from a model other than the one requested (e.g. a safeguard-routed downgrade). Nothing is held or failed; weigh the task's output knowing which model produced it.",
+        },
+      })
+    );
+  }
+  return incidents;
+}
+
 const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident[]> = [
   detectRetryOrphan,
   detectInconsistentRunState,
@@ -655,6 +712,7 @@ const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident
   detectStuckRun,
   detectContainerReapFailed,
   detectResurrectedGateDecision,
+  detectModelMismatch,
 ];
 
 /** Run every detector over a read-only handle and return the flat incident list.

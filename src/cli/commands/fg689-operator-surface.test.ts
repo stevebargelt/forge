@@ -449,3 +449,33 @@ test("FG-689: a review with no recorded shard plan renders no shard section and 
   ]);
   assert.match(named.err, /--shard 1 names a shard that does not exist: review review-fg689-unplanned has no recorded shard plan/);
 });
+
+// ─── FG-808: the served-model classification rides the lens's provenance ─────
+
+test("FG-808: `forge review show` prints a switched served model beside the lens shard it reviewed", async () => {
+  mergeLensOutcomesByShard(REVIEW, [
+    {
+      lens: "wide",
+      role: "red-wide",
+      complete: true,
+      authored: true,
+      outcome: "pass",
+      findings: [],
+      shard: { index: 1, of: 2 },
+      derivationDigest: DIGEST,
+      taskId: "task-wide-1",
+      servedModel: {
+        requested: "claude-opus-5-5",
+        classification: "switched",
+        servedModels: [{ model: "claude-opus-4-1", requestIds: ["req_1"], count: 1, outputTokens: 90, share: 0.9 },
+          { model: "claude-opus-5-5", requestIds: ["req_0"], count: 1, outputTokens: 10, share: 0.1 }],
+      },
+    },
+  ]);
+  const { out } = await runCli(["review", "show", REVIEW]);
+  assert.match(
+    out,
+    /shard 1 of 2 — delivered pass \(.*\) — model: requested claude-opus-5-5, served claude-opus-4-1 ×1 \(90%\), claude-opus-5-5 ×1 \(10%\) \(switched\)/,
+  );
+  assert.doesNotMatch(out, /shard 2 of 2 — .*model:/, "a lens with no recorded mismatch prints no model note");
+});

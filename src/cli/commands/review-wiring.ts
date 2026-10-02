@@ -20,6 +20,7 @@ import { resolveCommitRange } from "../../v2/review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
 import { readTaskManifest } from "../../v2/task-manifest.js";
+import type { ServedModelCheck } from "../../store/model-calls.js";
 import { COMPOSED_INPUT_OVER_BUDGET_FAILURE_KIND, type LensProtocolRecord } from "../../v2/review-discovery.js";
 import { renderReviewDiff, type ReviewDiffResult } from "../../v2/review-diff.js";
 import { DEFAULT_SHARD_BUDGET, SHARD_BUDGET_UNIT } from "../../v2/review-shards.js";
@@ -928,6 +929,14 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     return readTaskManifest(taskDir(res.runId, res.taskId))?.runtime?.name;
   };
 
+  // FG-808: the requested-vs-served model comparison recorded on the task manifest after
+  // the container exited. Undefined when nothing was comparable or nothing dispatched.
+  const dispatchedServedModel = (res: InvokeResult): { servedModel: ServedModelCheck } | undefined => {
+    if (!res.taskId || !res.runId) return undefined;
+    const servedModel = readTaskManifest(taskDir(res.runId, res.taskId))?.servedModel;
+    return servedModel ? { servedModel } : undefined;
+  };
+
   // FG-664: the same read, for the dependency-environment receipt the host recorded
   // before this task's container started — cache key plus the node/ABI/native-package
   // identity a FORGE-OWNED probe container attested in the reviewer's exact mount
@@ -1165,6 +1174,8 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         // the dispatched task's manifest — the ledger INDEXES the manifest, it does not
         // restate it. Per DISPATCH, so two lenses on two generations record two shas.
         ...(dispatchedProtocol(res) ?? {}),
+        // FG-808: requested vs served, off the same manifest — provenance beside the lens.
+        ...(dispatchedServedModel(res) ?? {}),
       };
     },
 

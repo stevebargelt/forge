@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { resolve } from "node:path";
 import { listRuns, listRunsForWorkspace, getRun } from "../../store/runs.js";
 import { tasksForRun } from "../../store/tasks.js";
+import { describeServedModelCheck, modelMismatchForTask, modelMismatchFromEvents } from "../../v2/served-model.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { renderedEmptyStore } from "../no-store.js";
@@ -182,6 +183,8 @@ export function registerStatus(program: Command): void {
               ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(t.id, fanoutWaveEvidence) }
               : null,
             idleCountdown: liveIdleCountdownForTask(t) ?? null,
+            // FG-808: requested vs served model, when the provider served something else.
+            modelMismatch: modelMismatchFromEvents(events) ?? null,
             verdicts: verdictsForTask(t.id).map((v) => ({
               redRole: v.redRole,
               verdict: v.verdict,
@@ -242,6 +245,8 @@ export function registerStatus(program: Command): void {
             line += `  — ${summary}`;
           }
           console.log(line);
+          const mismatch = modelMismatchForTask(t.id);
+          if (mismatch) console.log(`      model: ${describeServedModelCheck(mismatch)}`);
           // FG-455: a generic ☠ icon doesn't distinguish "safe to retry" from
           // "the worktree may hold real work" — print the recovery message.
           if (t.status === "failed") {

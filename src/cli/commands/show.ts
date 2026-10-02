@@ -9,6 +9,7 @@ import { getDb } from "../../store/db.js";
 import { publicationAttemptsForTask, type PublicationAttempt } from "../../store/publications.js";
 import { ensureForgeDirs, taskDir } from "../../util/paths.js";
 import { eventsForTask, eventsForRun } from "../../store/events.js";
+import { describeServedModelCheck, modelMismatchFromEvents } from "../../v2/served-model.js";
 import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
@@ -1285,6 +1286,7 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
         // FG-523: named hold reason for a task parked at a gate (validation
         // contract). Null for an ordinary human/verdict gate.
         const holdReason = task.status === "awaiting_gate" ? gateHoldReason(events) : null;
+        const modelMismatch = modelMismatchFromEvents(events);
         // FG-425 (AC5): the unsettled publication behind an awaiting_recovery task.
         const recoveringAttempt = task.status === "awaiting_recovery"
           ? publicationAttemptsForTask(task.id).find((a) => a.state === "publishing")
@@ -1415,6 +1417,8 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
                   // than actually was.
                   containerEvidence: containerCausalEvidence ?? null,
                   containerEvidenceSummary,
+                  // FG-808: the latest task.model_mismatch payload, null when none was recorded.
+                  modelMismatch: modelMismatch ?? null,
                   missingContainerEvidence: missingEvidence,
                   // FG-576: null unless an interactive orchestrator receipt is
                   // bound to this task. `liveness.running` is the joined answer —
@@ -1477,6 +1481,8 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
             }
           }
         }
+        // FG-808: what the provider reported actually serving, when it differed.
+        if (modelMismatch) console.log(`  model:     ${describeServedModelCheck(modelMismatch)}`);
         // #292: runtime EXECUTION facts, distinct from the model SELECTION above.
         if (runtimeMeta) {
           console.log(

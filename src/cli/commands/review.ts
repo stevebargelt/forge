@@ -53,6 +53,7 @@ import {
 } from "../../v2/review-run.js";
 import { validateReviewContract } from "../../v2/review-contract.js";
 import { assessShardCompleteness, type LensOutcome } from "../../v2/review-discovery.js";
+import { describeServedModelCheck, isServedModelMismatch } from "../../v2/served-model.js";
 import { DEFAULT_SHARD_BUDGET, SHARD_BUDGET_UNIT } from "../../v2/review-shards.js";
 import {
   buildCoordinatorDeps,
@@ -164,8 +165,13 @@ export function renderShardPlan(review: Review): string[] {
       const acceptance = state.accepted.find((a) => a.lens === planned.lens && a.shard === shard.index);
       const miss = state.missing.find((m) => m.lens === planned.lens && m.shard === shard.index);
 
+      // FG-808: a lens a different model reviewed says so, beside the lens.
+      const served =
+        last?.servedModel !== undefined && isServedModelMismatch(last.servedModel)
+          ? ` — model: ${describeServedModelCheck(last.servedModel)}`
+          : "";
       if (last?.complete) {
-        lines.push(`      ${label} — delivered ${last.outcome} (${facts})`);
+        lines.push(`      ${label} — delivered ${last.outcome} (${facts})${served}`);
       } else if (acceptance !== undefined) {
         lines.push(
           `      ${label} — accepted missing evidence: ${acceptance.missingEvidence} ` +
@@ -173,7 +179,7 @@ export function renderShardPlan(review: Review): string[] {
         );
       } else {
         const why = miss !== undefined ? `${miss.reason}: ${miss.detail}` : "no reviewer-authored outcome";
-        lines.push(`      ${label} — no outcome (${why}) (${facts})`);
+        lines.push(`      ${label} — no outcome (${why}) (${facts})${served}`);
       }
       for (const p of shard.paths) lines.push(`          ${p}`);
     }
