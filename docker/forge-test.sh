@@ -25,6 +25,9 @@
 #   forge-test --worktree             # npm run test:worktree
 #   forge-test --extended             # npm run test:extended (integration + worktree, slow, CI tier — FG-495)
 #   forge-test --all                  # npm run test:all (canonical CI gate: unit + dashboard, fast — FG-495)
+#   forge-test --dashboard-integration                 # the dashboard workspace's integration tier
+#   forge-test --dashboard-integration dashboard/src/x.integration.test.ts
+#                                     # NARROW it to those files (run from the dashboard workspace)
 #   forge-test --unit src/a.test.ts   # NARROW the unit tier to those files (same for
 #                                     # --integration / --worktree)
 #   forge-test src/spine/foo.test.ts  # run a single test file directly with tsx
@@ -41,6 +44,13 @@
 # as evidence for the narrow run it thought it made.
 # `--extended` and `--all` chain other tiers (and the dashboard workspace), so they
 # have no single file set to narrow: a path after either is refused, never widened.
+#
+# FG-826: in an agent container whose real-boot prerequisites are absent, the WHOLE
+# dashboard integration tier (`--dashboard-integration` with no paths, and `--extended`,
+# which chains it) is REFUSED by name with exit 2 and `blocked_environment`: its real-boot
+# suites (DASHBOARD_REAL_BOOT_SUITES below) are CI's to run, and a whole-tier run here used
+# to hang on their children until an operator killed them. The refusal prints the per-file
+# command that does run here. FORGE_TEST_IN_CONTAINER=1|0 overrides the /.dockerenv probe.
 #
 # With NO tier flag, --test and file paths are passthroughs to the underlying runner
 # (tsx/jest/vitest) and are unaffected.
@@ -86,7 +96,7 @@ _pkg_has_script() {
 # to one graded a code path the other did not take (FG-695).
 _is_tier_flag() {
   case "$1" in
-    --unit|--integration|--worktree|--extended|--all) return 0 ;;
+    --unit|--integration|--worktree|--extended|--all|--dashboard-integration) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -148,18 +158,72 @@ _tier_rel() {
   printf '%s' "$arg"
 }
 
+# ── DASHBOARD REAL-BOOT SUITES (FG-826) ─────────────────────────────────────
+# Every dashboard integration suite that boots a real process (`tsx src/server.ts`).
+# dashboard/src/test-support/real-boot.ts carries the same list as REAL_BOOT_SUITES;
+# dashboard/src/test-support/real-boot.test.ts fails if the two drift apart.
+DASHBOARD_REAL_BOOT_SUITES=(
+  dashboard/src/fg836-ops-queries-concurrency.integration.test.ts
+  dashboard/src/remote/remote-board.e2e.integration.test.ts
+  dashboard/src/remote/tailscale/serve-process.integration.test.ts
+)
+
+_in_agent_container() {
+  case "${FORGE_TEST_IN_CONTAINER:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+    *) [[ -f /.dockerenv ]] ;;
+  esac
+}
+
+# The prerequisites the real-boot suites are known to be refused for, one per line.
+_real_boot_missing_prereqs() {
+  command -v tailscale >/dev/null 2>&1 || echo "tailscale binary not on PATH"
+}
+
+# Returns 1 (after printing the refusal) when the whole dashboard integration tier must
+# not run here; 0 when it may.
+_dashboard_tier_allowed() {
+  local how="$1" hint="${2:-}" missing suite
+  _in_agent_container || return 0
+  missing=$(_real_boot_missing_prereqs)
+  [[ -n "$missing" ]] || return 0
+  {
+    echo "forge-test: blocked_environment — refusing $how in this agent container (FG-826)."
+    while IFS= read -r line; do echo "forge-test: missing prerequisite: $line"; done <<<"$missing"
+    echo "forge-test: these dashboard integration suites boot a real dashboard process and need CI — CI (dashboard_integration) is the authority for them:"
+    for suite in "${DASHBOARD_REAL_BOOT_SUITES[@]}"; do echo "forge-test:   $suite"; done
+    echo "forge-test: report this lane as blocked_environment and do not retry it. What IS runnable here is one file per run:"
+    echo "forge-test:   forge-test --dashboard-integration dashboard/src/<file>.integration.test.ts"
+    echo "forge-test: (a real-boot suite run that way fails fast with a named FG-826 reason instead of hanging.)"
+    [[ -z "$hint" ]] || echo "forge-test: $hint"
+  } >&2
+  return 1
+}
+
 # Resolve a tier flag plus its (optional) path arguments into _TIER_CMD. Returns 1
 # with a diagnostic on stderr for any combination that cannot be honoured exactly
 # as asked.
 _resolve_tier_cmd() {
   local root="$1" flag="$2"; shift 2
   local tier="${flag#--}" name="test:${flag#--}" script files rel arg
+  _TIER_CWD=""
+  if [[ "$flag" == "--dashboard-integration" ]]; then
+    root="$root/dashboard"
+    name="test:integration"
+    _TIER_CWD="dashboard"
+  fi
   script=$(_pkg_script "$root/package.json" "$name") || {
     echo "forge-test: no \"$name\" script in $root/package.json" >&2
     return 1
   }
 
   if [[ $# -eq 0 ]]; then
+    if [[ "$flag" == "--dashboard-integration" ]]; then
+      _dashboard_tier_allowed "the whole dashboard integration tier" || return 2
+    elif [[ "$flag" == "--extended" && "$script" == *"test:integration -w dashboard"* ]]; then
+      _dashboard_tier_allowed "$flag (\"$name\" chains the dashboard integration tier)" "the other legs of $flag still run here: \`forge-test --integration\` and \`forge-test --worktree\`." || return 2
+    fi
     _TIER_CMD=(npm run "$name")
     return 0
   fi
@@ -187,6 +251,7 @@ _resolve_tier_cmd() {
   local narrowed=()
   for arg in "$@"; do
     rel=$(_tier_rel "$arg")
+    [[ -z "$_TIER_CWD" ]] || rel="${rel#"$_TIER_CWD"/}"
     if ! grep -Fxq -- "$rel" <<<"$files"; then
       echo "forge-test: $arg is not part of the $tier tier (\"$name\" does not select it), so $flag cannot run it." >&2
       echo "forge-test: paths resolve against the source checkout ($SRC_DIR) and the scratch ($WORK_DIR)." >&2
@@ -211,7 +276,7 @@ if [[ "${FORGE_TEST_PRINT_CMD:-}" == "1" ]]; then
     fi
   elif _is_tier_flag "$1"; then
     _resolve_tier_cmd "$SRC_DIR" "$@" || exit 2
-    echo "${_TIER_CMD[*]}"
+    if [[ -n "$_TIER_CWD" ]]; then echo "cd $_TIER_CWD && ${_TIER_CMD[*]}"; else echo "${_TIER_CMD[*]}"; fi
   else
     echo "tsx --test $*"
   fi
@@ -515,6 +580,7 @@ _has_script() {
 # ── TIER FLAGS (first arg only) ─────────────────────────────────────────────
 if [[ $# -ge 1 ]] && _is_tier_flag "$1"; then
   _resolve_tier_cmd "$WORK_DIR" "$@" || exit 2
+  [[ -z "$_TIER_CWD" ]] || cd "$_TIER_CWD"
   exec "${_TIER_CMD[@]}"
 fi
 

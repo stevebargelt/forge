@@ -4,15 +4,13 @@
 import "../../../src/test-setup.js";
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { connect, createServer } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { networkInterfaces } from "node:os";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AddressInfo } from "node:net";
 
 const root = mkdtempSync(join(tmpdir(), "fg781-http-seam-"));
 const dashboardRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -28,6 +26,9 @@ const { createCampaign, addCampaignItem, updateCampaignStatus } = await import("
 const { repositoryCheckoutIdentity } = await import("../../../src/util/repository-identity.js");
 const { projectsForDashboard } = await import("../queries.js");
 const { createRemoteBoardServer } = await import("./server.js");
+const { DASHBOARD_READY_MARKER, REAL_BOOT_TEST_TIMEOUT_MS, awaitBootOrFail, freeLoopbackPort, httpReady, probeRealBootPreconditions, spawnRealBoot, stopAllRealBoots, stopRealBoot } = await import("../test-support/real-boot.js");
+type RealBoot = import("../test-support/real-boot.js").RealBoot;
+after(stopAllRealBoots);
 
 const AT = "2026-09-01T10:00:00Z";
 const trees = join(root, "trees");
@@ -137,31 +138,20 @@ test("AC3/AC4/AC5: a verified adapter grant traverses the real listener without 
   } finally { await close(remote); }
 });
 
-async function boot(port: number, remotePort: number, enabled: string | undefined): Promise<{ child: ChildProcess; base: string; remote: string }> {
-  const child = spawn(process.execPath, [resolve(dashboardRoot, "..", "node_modules", "tsx", "dist", "cli.mjs"), "src/server.ts"], {
+async function boot(port: number, remotePort: number, enabled: string | undefined): Promise<{ child: RealBoot; base: string; remote: string }> {
+  const tsxCli = resolve(dashboardRoot, "..", "node_modules", "tsx", "dist", "cli.mjs");
+  await probeRealBootPreconditions({ files: [tsxCli, join(dashboardRoot, "src", "server.ts")] });
+  const child = spawnRealBoot(`remote-board entry child (FORGE_DASHBOARD_REMOTE=${enabled ?? "unset"})`, process.execPath, [tsxCli, "src/server.ts"], {
     // Run from the dashboard workspace: its package boundary supplies the @forge/* aliases
     // used by the actual production entrypoint.
     cwd: dashboardRoot,
     env: { ...process.env, FORGE_HOME: forgeHome, PORT: String(port), HOST: "127.0.0.1", FORGE_DASHBOARD_REMOTE_PORT: String(remotePort), ...(enabled ? { FORGE_DASHBOARD_REMOTE: enabled } : {}) },
-    stdio: ["ignore", "pipe", "pipe"],
   });
-  let output = "";
-  child.stdout?.on("data", (chunk) => { output += String(chunk); });
-  child.stderr?.on("data", (chunk) => { output += String(chunk); });
   const base = `http://127.0.0.1:${port}`;
-  // tsx's cold loader plus the dashboard's production import graph can take several seconds
-  // in a fresh integration worker.  This is a bounded readiness wait, not a background task.
-  for (let i = 0; i < 400; i++) { try { if ((await fetch(`${base}/`)).ok) return { child, base, remote: `http://127.0.0.1:${remotePort}` }; } catch {} await new Promise((r) => setTimeout(r, 25)); }
-  child.kill(); throw new Error(`dashboard child did not boot: ${output}`);
+  await awaitBootOrFail(child, { readyMarker: DASHBOARD_READY_MARKER, probe: httpReady(`${base}/`) });
+  return { child, base, remote: `http://127.0.0.1:${remotePort}` };
 }
-async function stop(child: ChildProcess): Promise<void> { child.kill("SIGTERM"); await new Promise((resolve) => child.once("exit", resolve)); }
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const port = (probe.address() as AddressInfo).port;
-  await new Promise<void>((resolve) => probe.close(() => resolve()));
-  return port;
-}
+const stop = stopRealBoot;
 async function cannotConnect(host: string, port: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const socket = connect({ host, port });
@@ -171,8 +161,8 @@ async function cannotConnect(host: string, port: number): Promise<void> {
   });
 }
 
-test("AC1/AC2/AC6: actual server-entry children preserve local responses and expose only loopback fail-closed remote mode", async () => {
-  const [localOff, remoteOff, localDisabled, remoteDisabled, localEnabled, remoteEnabled] = await Promise.all(Array.from({ length: 6 }, freePort));
+test("AC1/AC2/AC6: actual server-entry children preserve local responses and expose only loopback fail-closed remote mode", { timeout: REAL_BOOT_TEST_TIMEOUT_MS }, async () => {
+  const [localOff, remoteOff, localDisabled, remoteDisabled, localEnabled, remoteEnabled] = await Promise.all(Array.from({ length: 6 }, freeLoopbackPort));
   const off = await boot(localOff!, remoteOff!, undefined);
   const disabled = await boot(localDisabled!, remoteDisabled!, "0");
   const enabled = await boot(localEnabled!, remoteEnabled!, "1");

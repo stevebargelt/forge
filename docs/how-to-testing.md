@@ -251,6 +251,7 @@ Within an agent's in-loop validation, use `forge-test` at the right tier:
 - **`forge-test --worktree`** — when the change touches git-worktree operations, dispatch-fanout, or orchestration paths.
 - **`forge-test --extended`** — when the change plausibly affects both slow tiers at once, or you want the full non-canonical coverage locally before pushing (mirrors CI's `test-extended` job).
 - **`forge-test --all`** — the canonical deterministic gate (unit tier + dashboard workspace); fast enough (~2.5s) to run routinely, not just before claiming shipped.
+- **`forge-test --dashboard-integration <dashboard/src/…integration.test.ts>`** — one dashboard integration suite, run from the dashboard workspace. The whole dashboard tier (no paths, or `--extended`, which chains it) is refused in an agent container — see [Dashboard real-boot suites in agent containers](#dashboard-real-boot-suites-in-agent-containers-fg-826).
 - **`forge-test <file.test.ts>`** or **`forge-test --test <pattern>`** — run a specific file or pattern directly, with no tier flag.
 
 **A tier flag plus paths narrows that tier, it never runs it broader than asked (FG-695).** `forge-test --unit|--integration|--worktree <path>...` runs exactly those files through the named tier's own runner (its preloads included) — but only after confirming every path is a member of that tier's own file set, derived from the tier's own selection so the two cannot drift. A path may be given relative to the project root or absolute under either the source checkout or the scratch. A non-member path, a missing or directory path, any other flag mixed in, or a tier whose file set the wrapper cannot reproduce **refuses the whole invocation** (exit 2, diagnostic on stderr) rather than silently falling back to the whole tier — before FG-695 the tier flag matched as the first argument only and every path after it was dropped without a word, so `forge-test --integration src/foo.integration.test.ts` ran the entire integration tier while the caller believed it ran one file. `--extended` and `--all` do not accept paths: they chain multiple tiers (and, for `--all`, the dashboard workspace), so there is no single file set to narrow — either refuses with a diagnostic naming what to run instead.
@@ -275,6 +276,34 @@ forge-test: this is an ENVIRONMENT failure, not a test failure — do not report
 ```
 
 Read that as **infra broken, tests unknown** — no test result was produced. Report it as an infra/environment problem (agents: surface it in `evidence`, not as `tests_failed`); do not report red tests, and do not treat it as a regression in your diff. The failure modes it forecloses are exactly the two that used to look like red tests: a suite silently run against a stale snapshot of the source, and an empty scratch `node_modules` failing every test with `ERR_MODULE_NOT_FOUND: 'tsx'`.
+
+## Dashboard real-boot suites in agent containers (FG-826)
+
+Three dashboard integration suites boot a **real** dashboard process (`tsx src/server.ts`, and through it the remote-board listener) rather than importing the server in-process:
+
+- `dashboard/src/fg836-ops-queries-concurrency.integration.test.ts`
+- `dashboard/src/remote/remote-board.e2e.integration.test.ts`
+- `dashboard/src/remote/tailscale/serve-process.integration.test.ts`
+
+**CI (`dashboard_integration`) is the authority for them.** In an agent container a whole-tier `npm run test:integration -w dashboard` starves their cold `tsx` boots — measured on a 14-CPU agent container, no child printed a byte within 30s while the rest of the tier ran — and before FG-826 a boot that missed its readiness poll leaked the children it had already spawned, which held the runner open until an operator killed them from the host.
+
+**Every real boot goes through `dashboard/src/test-support/real-boot.ts`** — no raw `spawn()` (`real-boot.test.ts`, unit tier, enforces it and keeps the inventory in step with the suites and with `docker/forge-test.sh`):
+
+- `probeRealBootPreconditions()` runs **before** the spawn: the boot entry and tsx CLI exist, any binary the boot needs resolves on the child's PATH (the fake `tailscale` for serve-process), and a loopback port can be bound. A missing one fails the test at once with `FG-826 precondition missing: <what> — CI (dashboard_integration) is the authority for this suite`. It never skips (the FG-551/FG-642 rule).
+- `spawnRealBoot()` starts the child in its own process group and registers it; `awaitBootOrFail()` waits for the `forge-dashboard listening at` marker (plus an HTTP readiness probe) for at most `REAL_BOOT_STARTUP_TIMEOUT_MS` (30s). On timeout, or if the child exits first, it kills the whole group and fails with the named reason and the child's last output lines.
+- Every real-boot suite registers `after(stopAllRealBoots)` (SIGTERM to the group, SIGKILL after `REAL_BOOT_KILL_GRACE_MS`), and every real-boot test carries `{ timeout: REAL_BOOT_TEST_TIMEOUT_MS }` (120s).
+
+**Wall-clock bound.** A real-boot test cannot run past `REAL_BOOT_TEST_TIMEOUT_MS`, so the real-boot share of the tier is bounded by 120s × 4 tests = **8 minutes** even run serially (in practice the files run in parallel, and a starved boot fails at 30s). No child outlives its test file. CI additionally caps the job at `timeout-minutes: 6`. The rest of the tier is not bounded this way, and under container load it is slow on its own (the same measurement ran past 10 minutes and was interrupted), which is why the wrapper refuses the whole tier.
+
+**`forge-test` refuses the whole tier in a container.** `forge-test --dashboard-integration` with no paths, and `forge-test --extended` (whose script chains the dashboard tier), exit **2** in an agent container that lacks the real-boot prerequisites (today: the `tailscale` CLI on PATH), print `blocked_environment`, name the three suites, and print the command that does run here:
+
+```
+forge-test --dashboard-integration dashboard/src/<file>.integration.test.ts
+```
+
+Agents report that lane as `blocked_environment` and do not retry it. A real-boot suite run that way, one file at a time, passes in a container or fails fast with its FG-826 reason. `FORGE_TEST_IN_CONTAINER=1|0` overrides the `/.dockerenv` detection. A direct `npm run test:integration -w dashboard` does not go through the wrapper, so it is not refused; it is bounded only by the per-test limits above.
+
+**Regression coverage.** `dashboard/src/test-support/real-boot.integration.test.ts` runs each real-boot suite as its own `node --test` process with one prerequisite knocked out through the helper's test-only `FORGE_REAL_BOOT_FAULT` seam (`hide-binary:tailscale`, `missing-entry`, `never-ready`, with `FORGE_REAL_BOOT_STARTUP_TIMEOUT_MS=3000`). Each run must fail with its named reason within the bound and leave no child alive. The wrapper's refusal is covered in `src/cli/commands/forge-test-default-tier.integration.test.ts`.
 
 ## Naming a new test file
 

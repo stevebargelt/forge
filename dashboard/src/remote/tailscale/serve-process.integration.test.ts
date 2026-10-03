@@ -3,9 +3,9 @@
 import "../../../../src/test-setup.js";
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { connect, createServer, type AddressInfo } from "node:net";
+import { connect } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,9 @@ const dashboardRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..
 const { getDb } = await import("../../../../src/store/db.js");
 const { insertRun } = await import("../../../../src/store/runs.js");
 const { repositoryCheckoutIdentity } = await import("../../../../src/util/repository-identity.js");
+const { DASHBOARD_READY_MARKER, REAL_BOOT_TEST_TIMEOUT_MS, awaitBootOrFail, freeLoopbackPort, httpReady, probeRealBootPreconditions, spawnRealBoot, stopAllRealBoots, stopRealBoot } = await import("../../test-support/real-boot.js");
+type RealBoot = import("../../test-support/real-boot.js").RealBoot;
+after(stopAllRealBoots);
 
 function checkout(name: string): string {
   const dir = join(trees, name);
@@ -55,20 +58,6 @@ exit 1
 `);
 chmodSync(join(fakeBin, "tailscale"), 0o755);
 
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((done) => probe.listen(0, "127.0.0.1", done));
-  const port = (probe.address() as AddressInfo).port;
-  await new Promise<void>((done) => probe.close(() => done()));
-  return port;
-}
-async function waitFor(url: string): Promise<void> {
-  for (let i = 0; i < 240; i++) {
-    try { if ((await fetch(url)).ok) return; } catch { /* booting */ }
-    await new Promise((done) => setTimeout(done, 25));
-  }
-  throw new Error(`timed out waiting for ${url}`);
-}
 async function cannotConnect(host: string, port: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const socket = connect({ host, port });
@@ -77,23 +66,22 @@ async function cannotConnect(host: string, port: number): Promise<void> {
     socket.once("error", () => { clearTimeout(timer); resolve(); });
   });
 }
-async function boot(extra: Record<string, string> = {}): Promise<{ child: ChildProcess; local: string; remote: string; remotePort: number }> {
-  const [localPort, remotePort] = await Promise.all([freePort(), freePort()]);
-  const child = spawn(process.execPath, [resolve(dashboardRoot, "..", "node_modules", "tsx", "dist", "cli.mjs"), "src/server.ts"], {
+async function boot(extra: Record<string, string> = {}): Promise<{ child: RealBoot; local: string; remote: string; remotePort: number }> {
+  const tsxCli = resolve(dashboardRoot, "..", "node_modules", "tsx", "dist", "cli.mjs");
+  const path = `${fakeBin}:${process.env.PATH}`;
+  await probeRealBootPreconditions({ files: [tsxCli, join(dashboardRoot, "src", "server.ts")], binaries: ["tailscale", "git"], path });
+  const [localPort, remotePort] = await Promise.all([freeLoopbackPort(), freeLoopbackPort()]);
+  const child = spawnRealBoot("tailscale serve-process dashboard", process.execPath, [tsxCli, "src/server.ts"], {
     cwd: dashboardRoot,
-    env: { ...process.env, ...extra, PATH: `${fakeBin}:${process.env.PATH}`, FORGE_HOME: forgeHome, FORGE_PROJECT_SCAN_ROOTS: trees, PORT: String(localPort), HOST: "127.0.0.1", FORGE_DASHBOARD_REMOTE: "1", FORGE_DASHBOARD_REMOTE_TRANSPORT: "tailscale", FORGE_DASHBOARD_REMOTE_PORT: String(remotePort) },
-    stdio: "ignore",
+    env: { ...process.env, ...extra, PATH: path, FORGE_HOME: forgeHome, FORGE_PROJECT_SCAN_ROOTS: trees, PORT: String(localPort), HOST: "127.0.0.1", FORGE_DASHBOARD_REMOTE: "1", FORGE_DASHBOARD_REMOTE_TRANSPORT: "tailscale", FORGE_DASHBOARD_REMOTE_PORT: String(remotePort) },
   });
   const local = `http://127.0.0.1:${localPort}`;
-  await waitFor(`${local}/`);
+  await awaitBootOrFail(child, { readyMarker: DASHBOARD_READY_MARKER, probe: httpReady(`${local}/`) });
   return { child, local, remote: `http://127.0.0.1:${remotePort}`, remotePort };
 }
-async function stop(child: ChildProcess): Promise<void> {
-  child.kill("SIGTERM");
-  await new Promise<void>((done) => child.once("exit", () => done()));
-}
+const stop = stopRealBoot;
 
-test("FG-782 AC2-AC4: real boot uses fake whois, limits the board to its mapped project, and honors revocation", async () => {
+test("FG-782 AC2-AC4: real boot uses fake whois, limits the board to its mapped project, and honors revocation", { timeout: REAL_BOOT_TEST_TIMEOUT_MS }, async () => {
   const run = await boot();
   try {
     const publicAddress = Object.values(networkInterfaces()).flat().find((entry) => entry?.family === "IPv4" && !entry.internal)?.address;
@@ -129,7 +117,7 @@ test("FG-782 AC2-AC4: real boot uses fake whois, limits the board to its mapped 
   } finally { await stop(run.child); }
 });
 
-test("FG-782 AC3: a daemon-unreachable fake causes a closed remote response, never a fallback", async () => {
+test("FG-782 AC3: a daemon-unreachable fake causes a closed remote response, never a fallback", { timeout: REAL_BOOT_TEST_TIMEOUT_MS }, async () => {
   writeFileSync(join(forgeHome, "remote-board-identity.yml"), `version: 1\nidentities:\n  - login: alice@example.com\n    project: ${alphaKey}\n    capabilities: [read]\n`);
   const run = await boot({ TS_FAKE_DOWN: "1" });
   try {

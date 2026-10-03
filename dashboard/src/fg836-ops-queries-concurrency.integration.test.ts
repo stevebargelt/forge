@@ -9,10 +9,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, type ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 import { applyMigrations } from "../../src/store/db.js";
+import {
+  DASHBOARD_READY_MARKER,
+  REAL_BOOT_TEST_TIMEOUT_MS,
+  awaitBootOrFail,
+  httpReady,
+  probeRealBootPreconditions,
+  spawnRealBoot,
+  stopAllRealBoots,
+} from "./test-support/real-boot.js";
 
 const PORT = 19018;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -66,45 +74,22 @@ function seedProductionSizedStore(): { tasks: number; events: number } {
 const seeded = seedProductionSizedStore();
 const dashboardDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const tsxCli = resolve(dashboardDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
-let child: ChildProcess | undefined;
-let childStderr = "";
-
-async function waitForServer(): Promise<void> {
-  // The cold tsx loader imports the complete production dashboard graph before
-  // binding; give readiness room without weakening the per-request 2 s budget.
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`${BASE}/api/agent-runtime?window=7d`);
-      if (response.status === 200) return;
-    } catch {
-      // The child is still binding its loopback listener.
-    }
-    if (child?.exitCode !== null && child?.exitCode !== undefined) {
-      throw new Error(`FG-836 dashboard subprocess exited ${child.exitCode}: ${childStderr}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`FG-836 dashboard subprocess did not start: ${childStderr}`);
-}
 
 after(async () => {
-  if (child && child.exitCode === null) {
-    child.kill("SIGTERM");
-    await new Promise<void>((resolve) => child!.once("exit", () => resolve()));
-  }
+  await stopAllRealBoots();
   rmSync(home, { recursive: true, force: true });
 });
 
-test("FG-836: ten parallel /api/agent-runtime requests each finish within 2 s on a 7k/65k store", async () => {
+test("FG-836: ten parallel /api/agent-runtime requests each finish within 2 s on a 7k/65k store", { timeout: REAL_BOOT_TEST_TIMEOUT_MS }, async () => {
   assert.ok(seeded.tasks >= TASKS && seeded.events >= EVENTS, `${seeded.tasks} tasks, ${seeded.events} events`);
-  child = spawn(process.execPath, [tsxCli, "src/server.ts"], {
+  await probeRealBootPreconditions({ files: [tsxCli, join(dashboardDir, "src", "server.ts")] });
+  const child = spawnRealBoot("FG-836 dashboard subprocess", process.execPath, [tsxCli, "src/server.ts"], {
     cwd: dashboardDir,
     env: { ...process.env, FORGE_HOME: home, PORT: String(PORT), HOST: "127.0.0.1" },
-    stdio: ["ignore", "ignore", "pipe"],
   });
-  child.stderr?.on("data", (chunk: Buffer) => { childStderr += chunk.toString(); });
-  await waitForServer();
+  // The cold tsx loader imports the complete production dashboard graph before binding;
+  // the shared startup bound gives readiness room without weakening the per-request 2 s budget.
+  await awaitBootOrFail(child, { readyMarker: DASHBOARD_READY_MARKER, probe: httpReady(`${BASE}/api/agent-runtime?window=7d`, (status) => status === 200) });
   const results = await Promise.all(Array.from({ length: 10 }, async () => {
     const started = performance.now();
     const response = await fetch(`${BASE}/api/agent-runtime?window=90d`);

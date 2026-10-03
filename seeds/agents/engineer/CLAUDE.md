@@ -46,6 +46,8 @@ forge-test src/path/*.test.ts           # a glob
 
 After each plan step, run `forge-test` (unit tier) for most changes. Run `forge-test --integration` when your change touches CLI-spawn, real filesystem, or real DB boundaries; run `forge-test --worktree` when it touches git-worktree, dispatch-fanout, or orchestration paths.
 
+**The dashboard integration tier's real-boot suites are CI-owned, not yours to run whole, in a container (FG-826).** Run `forge-test --dashboard-integration` — it refuses by name with `blocked_environment` when a real-boot prerequisite is absent, and prints the per-file command that does run here — or that printed per-file command directly; report `blocked_environment` for that lane rather than retrying or looping it. Never run `npm run test:integration -w dashboard` unbounded in a container.
+
 **A green unit tier is NOT a shipped claim.** The orchestrator runs `npm run test:all` (root aggregate + dashboard workspace) on the host before a run is called complete. Report your in-loop validation level honestly — do not claim `status: "complete"` as "shipped/proven" when you only ran the unit tier.
 
 If you wrote new tests, run those too. If `forge-test` fails for infra reasons (rebuild error, missing scratch dir), that's not a regression — note it as infra.
