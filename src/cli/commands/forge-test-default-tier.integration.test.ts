@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -327,4 +327,88 @@ test("FG-695: a tier whose file set cannot be reproduced refuses rather than run
   assert.equal(out.stdout, "");
   // ...and the bare flag is unaffected.
   assert.equal(run(["--unit"], dir), "npm run test:unit");
+});
+
+// ── FG-826: the dashboard integration lane refuses by name in an agent container ──
+// The whole dashboard integration tier (and --extended, which chains it) used to hang in
+// agent containers on its real-boot suites until an operator killed their children. In a
+// container without the real-boot prerequisites the wrapper now refuses it with exit 2 and
+// `blocked_environment`, names the suites CI owns, and prints the per-file command that runs.
+// PATH is a dir of just the tools the wrapper needs, so an operator host's own tailscale
+// cannot make the "absent" case vacuous.
+
+const REAL_BOOT_SUITES = [
+  "dashboard/src/fg836-ops-queries-concurrency.integration.test.ts",
+  "dashboard/src/remote/remote-board.e2e.integration.test.ts",
+  "dashboard/src/remote/tailscale/serve-process.integration.test.ts",
+];
+
+function toolsOnlyPath(withTailscale: boolean): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-test-fg826-path-"));
+  tmpDirs.push(dir);
+  for (const tool of ["node", "find", "grep", "cat"]) {
+    const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+    assert.ok(found, `${tool} must be resolvable to build the fixture PATH`);
+    symlinkSync(found, join(dir, tool));
+  }
+  if (withTailscale) {
+    writeFileSync(join(dir, "tailscale"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "tailscale"), 0o755);
+  }
+  return dir;
+}
+
+const BASH = spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
+
+function runDashboardLane(args: string[], opts: { inContainer: "1" | "0"; tailscale: boolean; srcDir?: string }) {
+  const r = spawnSync(BASH, [SCRIPT, ...args], {
+    env: { ...process.env, FORGE_TEST_PRINT_CMD: "1", FORGE_SRC_DIR: opts.srcDir ?? REPO_ROOT, FORGE_TEST_IN_CONTAINER: opts.inContainer, PATH: toolsOnlyPath(opts.tailscale) },
+    encoding: "utf8",
+  });
+  return { status: r.status, stdout: r.stdout.trim(), stderr: r.stderr };
+}
+
+function assertRefusedByName(out: { status: number | null; stdout: string; stderr: string }) {
+  assert.equal(out.status, 2, `must exit 2, got ${out.status}: ${out.stderr}`);
+  assert.equal(out.stdout, "", "a refusal resolves no command");
+  assert.match(out.stderr, /blocked_environment/);
+  assert.match(out.stderr, /missing prerequisite: tailscale binary not on PATH/);
+  assert.match(out.stderr, /CI \(dashboard_integration\) is the authority for them/);
+  for (const suite of REAL_BOOT_SUITES) assert.ok(out.stderr.includes(suite), `the refusal must name ${suite}`);
+  assert.match(out.stderr, /forge-test --dashboard-integration dashboard\/src\/<file>\.integration\.test\.ts/, "must print the runnable per-file command");
+}
+
+test("FG-826: the whole dashboard integration tier is refused by name in a container without tailscale", () => {
+  assertRefusedByName(runDashboardLane(["--dashboard-integration"], { inContainer: "1", tailscale: false }));
+});
+
+test("FG-826: --extended, which chains the dashboard integration tier, is refused the same way", () => {
+  const out = runDashboardLane(["--extended"], { inContainer: "1", tailscale: false });
+  assertRefusedByName(out);
+  assert.match(out.stderr, /forge-test --integration` and `forge-test --worktree/, "names the legs that still run");
+});
+
+test("FG-826: --extended without a dashboard leg is not refused", () => {
+  const dir = mkFixture(ALL_SCRIPTS);
+  assert.equal(runDashboardLane(["--extended"], { inContainer: "1", tailscale: false, srcDir: dir }).stdout, "npm run test:extended");
+});
+
+test("FG-826: the per-file dashboard command the refusal prints IS runnable in the container", () => {
+  for (const path of [REAL_BOOT_SUITES[2]!, join(REPO_ROOT, REAL_BOOT_SUITES[0]!), "dashboard/src/fg830-notes.integration.test.ts"]) {
+    const out = runDashboardLane(["--dashboard-integration", path], { inContainer: "1", tailscale: false });
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(out.stdout, `cd dashboard && tsx --test ${path.replace(`${REPO_ROOT}/`, "").replace(/^dashboard\//, "")}`);
+  }
+});
+
+test("FG-826: a non-member path is refused for the dashboard lane, never widened", () => {
+  const out = runDashboardLane(["--dashboard-integration", "src/v2/release.integration.test.ts"], { inContainer: "1", tailscale: false });
+  assert.equal(out.status, 2);
+  assert.match(out.stderr, /is not part of the dashboard-integration tier/);
+});
+
+test("FG-826: outside a container, or with the prerequisites present, the whole tier resolves", () => {
+  assert.equal(runDashboardLane(["--dashboard-integration"], { inContainer: "0", tailscale: false }).stdout, "cd dashboard && npm run test:integration");
+  assert.equal(runDashboardLane(["--dashboard-integration"], { inContainer: "1", tailscale: true }).stdout, "cd dashboard && npm run test:integration");
+  assert.equal(runDashboardLane(["--extended"], { inContainer: "0", tailscale: false }).stdout, "npm run test:extended");
 });

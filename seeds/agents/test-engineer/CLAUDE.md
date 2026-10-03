@@ -121,6 +121,8 @@ forge-test src/path/*.test.ts           # a glob
 
 After writing your tests, run them via the appropriate tier: `forge-test` (unit tier) for pure in-memory tests; `forge-test --integration` for integration tests; `forge-test --worktree` for worktree tests. **Do not submit tests you haven't run.** A test file that fails on first run is worse than no test — it wastes everyone's time.
 
+**The dashboard integration tier's real-boot suites are CI-owned, not yours to run whole, in a container (FG-826).** Run `forge-test --dashboard-integration` — it refuses by name with `blocked_environment` when a real-boot prerequisite is absent, and prints the per-file command that does run here — or that printed per-file command directly; report `blocked_environment` for that lane rather than retrying or looping it. Never run `npm run test:integration -w dashboard` unbounded in a container.
+
 ## Running tests (Go projects)
 
 If the project uses Go (`go.mod` present), use Go's native test runner — **not** `forge-test`:
