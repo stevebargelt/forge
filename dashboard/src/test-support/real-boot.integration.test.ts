@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  REAL_BOOT_KILL_GRACE_MS,
   REAL_BOOT_SUITES,
   REAL_BOOT_TEST_TIMEOUT_MS,
   awaitBootOrFail,
@@ -139,6 +140,46 @@ test("FG-826: a child that exits before its marker fails at once with the exit n
     /FG-826 real boot failed: crashing fixture exited \(code 7, signal null\) before it was ready[\s\S]*boom: native module/,
   );
   assert.ok(Date.now() - started < 10_000, "an exited child is not waited out to the bound");
+});
+
+test("FG-826 AC2: a grandchild that outlives its exited leader still gets SIGTERM and the grace before SIGKILL", async () => {
+  const signals = join(scratch, "orphaned-grandchild.signals");
+  const grandchild =
+    `const fs=require('node:fs');process.on('SIGTERM',()=>fs.appendFileSync(${JSON.stringify(signals)},'SIGTERM\\n'));` +
+    `fs.appendFileSync(${JSON.stringify(signals)},'armed '+process.pid+'\\n');setInterval(()=>{},1e9)`;
+  const boot = spawnRealBoot("early-exit leader fixture", process.execPath, [
+    "-e",
+    `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:'ignore'}).unref()`,
+  ], { cwd: scratch, env: process.env });
+  const deadline = Date.now() + 10_000;
+  const armed = () => (existsSync(signals) ? readFileSync(signals, "utf8").match(/armed (\d+)/) : null);
+  while ((!armed() || boot.child.exitCode === null) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+  const pid = Number(armed()?.[1]);
+  assert.equal(boot.child.exitCode, 0, "non-vacuous: the group leader has already exited");
+  assert.ok(pid && alive(pid), "non-vacuous: its grandchild survives it");
+  const started = Date.now();
+  await stopRealBoot(boot);
+  const elapsed = Date.now() - started;
+  assert.match(readFileSync(signals, "utf8"), /SIGTERM/, "the surviving grandchild was sent SIGTERM");
+  assert.ok(elapsed >= REAL_BOOT_KILL_GRACE_MS - 100, `SIGKILL came after ${elapsed}ms, inside the ${REAL_BOOT_KILL_GRACE_MS}ms grace`);
+  assert.ok(await eventuallyDead(pid), "the SIGTERM-ignoring grandchild was SIGKILLed after the grace");
+});
+
+test("FG-826 AC2: a grandchild that honours SIGTERM after its leader exited exits on it, without waiting out the grace", async () => {
+  const pidFile = join(scratch, "graceful-grandchild.pid");
+  const grandchild = `process.on('SIGTERM',()=>process.exit(0));require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1e9)`;
+  const boot = spawnRealBoot("graceful grandchild fixture", process.execPath, [
+    "-e",
+    `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:'ignore'}).unref()`,
+  ], { cwd: scratch, env: process.env });
+  const deadline = Date.now() + 10_000;
+  while ((!existsSync(pidFile) || boot.child.exitCode === null) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  assert.ok(boot.child.exitCode === 0 && alive(pid), "non-vacuous: leader exited, grandchild alive");
+  const started = Date.now();
+  await stopRealBoot(boot);
+  assert.ok(await eventuallyDead(pid), "the grandchild exited on SIGTERM");
+  assert.ok(Date.now() - started < REAL_BOOT_KILL_GRACE_MS, "a group that is gone is not waited out to the grace");
 });
 
 test("FG-826 AC2: interrupting a real-boot suite mid-boot (as `timeout` or Ctrl-C does) leaves no child behind", { timeout: REAL_BOOT_TEST_TIMEOUT_MS }, async () => {

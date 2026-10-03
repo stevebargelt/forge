@@ -7,7 +7,7 @@
 // process group on timeout, and an after() sweep that reaps any child a test left behind.
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { delimiter, join } from "node:path";
 
@@ -134,18 +134,48 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
-/** SIGTERM the child's process group, then SIGKILL it if it outlives the grace. Never hangs on an
- *  already-exited child (the old `child.once("exit")` waited forever for one). */
-export async function stopRealBoot(boot: RealBoot): Promise<void> {
-  if (!exited(boot.child)) {
-    signalGroup(boot.child, "SIGTERM");
-    if (!(await waitExit(boot.child, REAL_BOOT_KILL_GRACE_MS))) {
-      signalGroup(boot.child, "SIGKILL");
-      await waitExit(boot.child, REAL_BOOT_KILL_GRACE_MS);
-    }
+// A killed member is reparented to the container's PID 1, which may never reap it: a zombie still
+// answers kill(-pgid, 0), so on Linux the group is read from /proc and zombies are not counted.
+function groupAlive(child: ChildProcess): boolean {
+  if (child.pid === undefined) return false;
+  try {
+    process.kill(-child.pid, 0);
+  } catch {
+    return false;
   }
-  // The group leader's exit does not prove its forked node child is gone.
-  signalGroup(boot.child, "SIGKILL");
+  if (!existsSync("/proc/self/stat")) return true;
+  for (const pid of readdirSync("/proc")) {
+    if (!/^\d+$/.test(pid)) continue;
+    let fields: string[];
+    try {
+      fields = readFileSync(`/proc/${pid}/stat`, "utf8").replace(/^.*\) /s, "").split(" ");
+    } catch {
+      continue;
+    }
+    if (Number(fields[2]) === child.pid && fields[0] !== "Z") return true;
+  }
+  return false;
+}
+
+async function waitGroupGone(child: ChildProcess, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (!exited(child) || groupAlive(child)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+/** SIGTERM the child's process group, then SIGKILL it if anything in it outlives the grace. The
+ *  SIGTERM goes to the group even when the leader has already exited: the leader's exit does not
+ *  prove its forked node child is gone, and a surviving grandchild gets the same grace. Never
+ *  hangs on an already-exited child (the old `child.once("exit")` waited forever for one). */
+export async function stopRealBoot(boot: RealBoot): Promise<void> {
+  signalGroup(boot.child, "SIGTERM");
+  if (!(await waitGroupGone(boot.child, REAL_BOOT_KILL_GRACE_MS))) {
+    signalGroup(boot.child, "SIGKILL");
+    await waitExit(boot.child, REAL_BOOT_KILL_GRACE_MS);
+  }
   live.delete(boot);
 }
 
